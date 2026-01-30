@@ -1,0 +1,429 @@
+/**
+ * Settings Panel Component
+ * Provides settings for the application including BYOK (Bring Your Own Key) API key management
+ */
+
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+
+// Declare settings API type
+declare global {
+  interface Window {
+    settings?: {
+      getApiKey: () => Promise<string | null>;
+      setApiKey: (key: string) => Promise<void>;
+      removeApiKey: () => Promise<void>;
+      hasApiKey: () => Promise<boolean>;
+      getOllamaSettings: () => Promise<{ enabled: boolean; url: string; model: string }>;
+      setOllamaSettings: (settings: { enabled?: boolean; url?: string; model?: string }) => Promise<void>;
+    };
+  }
+}
+
+interface SettingsPanelProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
+  // API Key state
+  const [apiKey, setApiKey] = useState('');
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [hasExistingKey, setHasExistingKey] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const initialLoadRef = useRef(true);
+  
+  // Ollama fallback state
+  const [ollamaEnabled, setOllamaEnabled] = useState(true);
+  const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
+  const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
+  const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Check if API key exists on mount
+  useEffect(() => {
+    const checkExistingKey = async () => {
+      if (!window.settings) return;
+      
+      try {
+        const exists = await window.settings.hasApiKey();
+        setHasExistingKey(exists);
+        
+        if (exists) {
+          const key = await window.settings.getApiKey();
+          if (key) {
+            setApiKey(key);
+          }
+        }
+        
+        // Load Ollama settings
+        const ollamaSettings = await window.settings.getOllamaSettings();
+        setOllamaEnabled(ollamaSettings.enabled);
+        setOllamaUrl(ollamaSettings.url);
+        setOllamaModel(ollamaSettings.model);
+        
+        // Mark initial load complete after fetching
+        initialLoadRef.current = false;
+      } catch (err) {
+        console.error('Failed to check API key:', err);
+        initialLoadRef.current = false;
+      }
+    };
+
+    if (isOpen) {
+      initialLoadRef.current = true;
+      checkExistingKey();
+    }
+    
+    return () => {
+      if (debounceTimeoutRef.current) {
+        clearTimeout(debounceTimeoutRef.current);
+      }
+      if (ollamaDebounceRef.current) {
+        clearTimeout(ollamaDebounceRef.current);
+      }
+    };
+  }, [isOpen]);
+
+  // Auto-save Ollama settings
+  useEffect(() => {
+    if (initialLoadRef.current || !window.settings) return;
+    
+    if (ollamaDebounceRef.current) {
+      clearTimeout(ollamaDebounceRef.current);
+    }
+    
+    setOllamaSaveStatus('saving');
+    ollamaDebounceRef.current = setTimeout(async () => {
+      try {
+        await window.settings!.setOllamaSettings({
+          enabled: ollamaEnabled,
+          url: ollamaUrl,
+          model: ollamaModel,
+        });
+        setOllamaSaveStatus('saved');
+        setTimeout(() => setOllamaSaveStatus('idle'), 2000);
+      } catch (err) {
+        console.error('Failed to save Ollama settings:', err);
+      }
+    }, 800);
+  }, [ollamaEnabled, ollamaUrl, ollamaModel]);
+
+  // Auto-save API key with debounce
+  useEffect(() => {
+    // Skip auto-save during initial load
+    if (initialLoadRef.current) return;
+    if (!window.settings) return;
+    
+    // Clear existing timeout
+    if (debounceTimeoutRef.current) {
+      clearTimeout(debounceTimeoutRef.current);
+    }
+
+    // If key is empty and we had an existing key, don't auto-save (require explicit remove)
+    if (!apiKey.trim()) {
+      setSaveStatus('idle');
+      return;
+    }
+
+    // Debounce the save
+    setSaveStatus('saving');
+    debounceTimeoutRef.current = setTimeout(async () => {
+      try {
+        await window.settings!.setApiKey(apiKey.trim());
+        setSaveStatus('saved');
+        setHasExistingKey(true);
+        setError(null);
+        
+        // Reset status after 2 seconds
+        setTimeout(() => setSaveStatus('idle'), 2000);
+      } catch (err) {
+        console.error('Failed to save API key:', err);
+        setSaveStatus('error');
+        setError('Failed to save API key');
+      }
+    }, 800); // 800ms debounce
+
+    return () => {
+      if (debounceTimeoutRef.current) {
+        clearTimeout(debounceTimeoutRef.current);
+      }
+    };
+  }, [apiKey]);
+
+  // Remove API key
+  const handleRemoveApiKey = useCallback(async () => {
+    if (!window.settings) return;
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      await window.settings.removeApiKey();
+      setApiKey('');
+      setHasExistingKey(false);
+      setSaveStatus('idle');
+    } catch (err) {
+      console.error('Failed to remove API key:', err);
+      setError('Failed to remove API key');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Mask API key for display
+  const getMaskedKey = (key: string) => {
+    if (!key || key.length < 10) return key;
+    return key.substring(0, 8) + '•'.repeat(20) + key.substring(key.length - 4);
+  };
+
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <motion.aside
+          initial={{ width: 0, opacity: 0 }}
+          animate={{ width: 400, opacity: 1 }}
+          exit={{ width: 0, opacity: 0 }}
+          transition={{ duration: 0.3, ease: 'easeInOut' }}
+          className="fixed right-0 top-0 bottom-0 bg-zinc-950 border-l border-zinc-800 z-50 overflow-hidden shadow-2xl"
+        >
+          <div className="w-[400px] h-full flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-lg flex items-center justify-center">
+                  <Settings className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Settings</h2>
+                  <p className="text-xs text-white/40">Configure your preferences</p>
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onClose}
+                className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+              >
+                <X className="h-4 w-4 pointer-events-none" />
+              </Button>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
+              {/* API Keys Section */}
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <Key className="h-4 w-4 text-fuchsia-400" />
+                  <h3 className="text-sm font-semibold text-white">API Keys</h3>
+                </div>
+
+                {/* Google AI API Key */}
+                <div className="bg-white/5 rounded-lg p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-white">Google AI API Key</p>
+                      <p className="text-xs text-white/40 mt-0.5">
+                        Required for AI Assistant features (Gemini)
+                      </p>
+                    </div>
+                    {hasExistingKey && (
+                      <span className="flex items-center gap-1 text-xs text-green-400 bg-green-400/10 px-2 py-1 rounded">
+                        <Check className="h-3 w-3" />
+                        Configured
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="relative">
+                    <Input
+                      type={showApiKey ? 'text' : 'password'}
+                      placeholder="Enter your Google AI API key..."
+                      value={showApiKey ? apiKey : (hasExistingKey && apiKey ? getMaskedKey(apiKey) : apiKey)}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      className="pr-10 bg-white/5 border-white/10 focus:border-fuchsia-500/50"
+                      disabled={isLoading}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
+                    >
+                      {showApiKey ? (
+                        <EyeOff className="h-4 w-4 pointer-events-none" />
+                      ) : (
+                        <Eye className="h-4 w-4 pointer-events-none" />
+                      )}
+                    </button>
+                  </div>
+
+                  {error && (
+                    <div className="flex items-center gap-2 text-red-400 text-xs">
+                      <AlertCircle className="h-3 w-3" />
+                      {error}
+                    </div>
+                  )}
+
+                  {/* Auto-save status and remove button */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-xs">
+                      {saveStatus === 'saving' && (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin text-fuchsia-400" />
+                          <span className="text-fuchsia-400">Saving...</span>
+                        </>
+                      )}
+                      {saveStatus === 'saved' && (
+                        <>
+                          <Check className="h-3 w-3 text-green-400" />
+                          <span className="text-green-400">Saved automatically</span>
+                        </>
+                      )}
+                      {saveStatus === 'idle' && hasExistingKey && (
+                        <>
+                          <Check className="h-3 w-3 text-green-400" />
+                          <span className="text-white/40">Key configured</span>
+                        </>
+                      )}
+                      {saveStatus === 'idle' && !hasExistingKey && (
+                        <span className="text-white/40">Changes save automatically</span>
+                      )}
+                    </div>
+                    
+                    {hasExistingKey && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleRemoveApiKey}
+                        disabled={isLoading}
+                        className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                      >
+                        <Trash2 className="h-3 w-3 mr-1" />
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+
+                  <p className="text-xs text-white/30">
+                    Get your API key from{' '}
+                    <a
+                      href="https://aistudio.google.com/apikey"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-fuchsia-400 hover:text-fuchsia-300 underline"
+                    >
+                      Google AI Studio
+                    </a>
+                  </p>
+                </div>
+              </div>
+
+              {/* Ollama Fallback Section */}
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <Bot className="h-4 w-4 text-purple-400" />
+                  <h3 className="text-sm font-semibold text-white">Ollama Fallback</h3>
+                </div>
+                
+                <div className="bg-white/5 rounded-lg p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-white">Enable Ollama Fallback</p>
+                      <p className="text-xs text-white/40 mt-0.5">
+                        Use local Ollama when Gemini quota is exceeded
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setOllamaEnabled(!ollamaEnabled)}
+                      className={cn(
+                        "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
+                        ollamaEnabled ? "bg-fuchsia-600" : "bg-zinc-700"
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                          ollamaEnabled ? "translate-x-6" : "translate-x-1"
+                        )}
+                      />
+                    </button>
+                  </div>
+                  
+                  {ollamaEnabled && (
+                    <>
+                      <div>
+                        <label className="text-xs text-white/60 mb-1 block">Ollama URL</label>
+                        <Input
+                          type="text"
+                          value={ollamaUrl}
+                          onChange={(e) => setOllamaUrl(e.target.value)}
+                          placeholder="http://localhost:11434"
+                          className="bg-white/5 border-white/10 focus:border-fuchsia-500/50"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="text-xs text-white/60 mb-1 block">Model Name</label>
+                        <Input
+                          type="text"
+                          value={ollamaModel}
+                          onChange={(e) => setOllamaModel(e.target.value)}
+                          placeholder="gemma3:12b"
+                          className="bg-white/5 border-white/10 focus:border-fuchsia-500/50"
+                        />
+                      </div>
+                      
+                      <div className="flex items-center gap-2 text-xs">
+                        {ollamaSaveStatus === 'saving' && (
+                          <>
+                            <Loader2 className="h-3 w-3 animate-spin text-fuchsia-400" />
+                            <span className="text-fuchsia-400">Saving...</span>
+                          </>
+                        )}
+                        {ollamaSaveStatus === 'saved' && (
+                          <>
+                            <Check className="h-3 w-3 text-green-400" />
+                            <span className="text-green-400">Saved</span>
+                          </>
+                        )}
+                        {ollamaSaveStatus === 'idle' && (
+                          <span className="text-white/40">Changes save automatically</span>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Info Section */}
+              <div className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-4">
+                <h4 className="text-sm font-medium text-purple-300 mb-2">About API Keys</h4>
+                <ul className="text-xs text-white/50 space-y-1">
+                  <li>• Your API key is stored securely on your device</li>
+                  <li>• Keys are never sent to any server except Google AI</li>
+                  <li>• You can remove or replace your key at any time</li>
+                  <li>• When Gemini quota is exceeded, Ollama is used as fallback</li>
+                </ul>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-4 py-3 border-t border-white/10 text-center">
+              <p className="text-xs text-white/30">
+                Ark v1.0 • Made with ❤️
+              </p>
+            </div>
+          </div>
+        </motion.aside>
+      )}
+    </AnimatePresence>
+  );
+}
+
