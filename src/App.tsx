@@ -6,6 +6,7 @@ import { GameDetailsPage } from '@/pages/game-details';
 import { LoadingScreen } from '@/components/loading-screen';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { ToastProvider } from '@/components/ui/toast';
+import { UpdateSnackbar } from '@/components/update-snackbar';
 
 type AppState = 'loading' | 'ready';
 
@@ -64,6 +65,7 @@ export default function App() {
       <Router>
         <AppContent />
       </Router>
+      <UpdateSnackbar />
     </ToastProvider>
   );
 }

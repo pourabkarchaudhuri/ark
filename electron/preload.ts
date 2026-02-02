@@ -29,5 +29,55 @@ contextBridge.exposeInMainWorld('igdb', {
   },
 });
 
-console.log('Preload script loaded - window.igdb and window.electron exposed');
+// Expose auto-updater API to renderer
+contextBridge.exposeInMainWorld('updater', {
+  // Check for updates manually
+  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  
+  // Download the available update
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  
+  // Quit and install the downloaded update
+  installUpdate: () => ipcRenderer.invoke('updater:install'),
+  
+  // Get current app version
+  getVersion: () => ipcRenderer.invoke('updater:getVersion'),
+  
+  // Event listeners for update status
+  onChecking: (callback: () => void) => {
+    ipcRenderer.on('updater:checking', () => callback());
+  },
+  
+  onUpdateAvailable: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => {
+    ipcRenderer.on('updater:update-available', (_event, info) => callback(info));
+  },
+  
+  onUpdateNotAvailable: (callback: (info: { version: string }) => void) => {
+    ipcRenderer.on('updater:update-not-available', (_event, info) => callback(info));
+  },
+  
+  onDownloadProgress: (callback: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => {
+    ipcRenderer.on('updater:download-progress', (_event, progress) => callback(progress));
+  },
+  
+  onUpdateDownloaded: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => {
+    ipcRenderer.on('updater:update-downloaded', (_event, info) => callback(info));
+  },
+  
+  onError: (callback: (error: { message: string }) => void) => {
+    ipcRenderer.on('updater:error', (_event, error) => callback(error));
+  },
+  
+  // Remove all listeners (for cleanup)
+  removeAllListeners: () => {
+    ipcRenderer.removeAllListeners('updater:checking');
+    ipcRenderer.removeAllListeners('updater:update-available');
+    ipcRenderer.removeAllListeners('updater:update-not-available');
+    ipcRenderer.removeAllListeners('updater:download-progress');
+    ipcRenderer.removeAllListeners('updater:update-downloaded');
+    ipcRenderer.removeAllListeners('updater:error');
+  },
+});
+
+console.log('Preload script loaded - window.igdb, window.electron, and window.updater exposed');
 

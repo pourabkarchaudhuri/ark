@@ -1,10 +1,21 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+
+// Handle EPIPE errors globally to prevent crashes when stdout/stderr is closed
+process.stdout.on('error', (err) => {
+  if (err.code === 'EPIPE') return;
+  throw err;
+});
+process.stderr.on('error', (err) => {
+  if (err.code === 'EPIPE') return;
+  throw err;
+});
 import { steamAPI, getSteamCoverUrl, getSteamHeaderUrl } from './steam-api.js';
 import { fetchMetacriticReviews, clearMetacriticCache } from './metacritic-api.js';
 import { processMessage, searchGamesForContext, chatStore } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
+import { initAutoUpdater } from './auto-updater.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -49,6 +60,11 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    
+    // Initialize auto-updater in production mode
+    if (app.isPackaged && mainWindow) {
+      initAutoUpdater(mainWindow);
+    }
   });
 
   mainWindow.on('closed', () => {

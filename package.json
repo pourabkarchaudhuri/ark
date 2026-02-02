@@ -1,8 +1,9 @@
 {
   "name": "game-tracker",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
+  "author": "Pourab Karchaudhuri, Sanket Aley",
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "vite",
@@ -21,7 +22,10 @@
     "test:electron": "npm run build:app && playwright test --config=playwright.electron.config.ts",
     "test:electron:headed": "npm run build:app && playwright test --config=playwright.electron.config.ts --headed",
     "test:electron:debug": "npm run build:app && playwright test --config=playwright.electron.config.ts --debug",
-    "test:all": "npm run test -- --run && npm run test:e2e && npm run test:electron"
+    "test:all": "npm run test -- --run && npm run test:e2e && npm run test:electron",
+    "release": "npm run build:app && electron-builder --publish always",
+    "release:draft": "npm run build:app && electron-builder --publish onTagOrDraft",
+    "release:local": "npm run build:app && electron-builder --publish never"
   },
   "dependencies": {
     "@emoji-mart/data": "^1.2.1",
@@ -49,7 +53,8 @@
     "tailwind-merge": "^2.2.0",
     "three": "^0.160.0",
     "uuid": "^9.0.1",
-    "wouter": "^3.9.0"
+    "wouter": "^3.9.0",
+    "electron-updater": "^6.1.7"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",
@@ -89,14 +94,30 @@
       "dist/**/*",
       "dist-electron/**/*"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "pourabkarchaudhuri",
+      "repo": "ark",
+      "releaseType": "release"
+    },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     },
     "mac": {
-      "target": "dmg"
+      "target": "dmg",
+      "artifactName": "${productName}-${version}.${ext}"
     },
     "linux": {
-      "target": "AppImage"
+      "target": "AppImage",
+      "artifactName": "${productName}-${version}.${ext}"
     }
   }
 }
