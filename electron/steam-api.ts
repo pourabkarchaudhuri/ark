@@ -1,9 +1,9 @@
 /**
  * Steam Web API Client
  * Handles all Steam API requests with rate limiting and caching
+ * 
+ * Note: Uses native fetch available in Node.js 18+ (Electron 28+)
  */
-
-import fetch from 'node-fetch';
 
 // Steam API Configuration
 const STEAM_API_KEY = 'C6DCACDE5866D149A7E3A9B59646164A';

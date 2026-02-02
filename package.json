@@ -1,6 +1,6 @@
 {
   "name": "game-tracker",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -54,8 +54,7 @@
     "three": "^0.160.0",
     "uuid": "^9.0.1",
     "wouter": "^3.9.0",
-    "electron-updater": "^6.1.7",
-    "node-fetch": "^2.7.0"
+    "electron-updater": "^6.1.7"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",
