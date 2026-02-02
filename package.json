@@ -1,6 +1,6 @@
 {
   "name": "game-tracker",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
