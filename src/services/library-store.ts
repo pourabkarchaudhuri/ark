@@ -241,7 +241,7 @@ class LibraryStore {
     );
   }
 
-  // Import library data
+  // Import library data (replaces existing)
   importData(jsonData: string): { success: boolean; count: number; error?: string } {
     try {
       const parsed = JSON.parse(jsonData);
@@ -270,6 +270,77 @@ class LibraryStore {
       return { success: true, count: importCount };
     } catch (error) {
       return { success: false, count: 0, error: 'Failed to parse import data' };
+    }
+  }
+
+  // Compare two entries for equality (excluding timestamps)
+  private areEntriesEqual(a: LibraryGameEntry, b: LibraryGameEntry): boolean {
+    return (
+      a.status === b.status &&
+      a.priority === b.priority &&
+      a.publicReviews === b.publicReviews &&
+      a.recommendationSource === b.recommendationSource
+    );
+  }
+
+  // Import library data with delta logic (add new, update changed, skip identical)
+  importDataWithDelta(jsonData: string): { 
+    success: boolean; 
+    added: number; 
+    updated: number; 
+    skipped: number; 
+    error?: string 
+  } {
+    try {
+      const parsed = JSON.parse(jsonData);
+      const entries = parsed.entries as LibraryGameEntry[];
+
+      if (!Array.isArray(entries)) {
+        return { success: false, added: 0, updated: 0, skipped: 0, error: 'Invalid data format' };
+      }
+
+      let added = 0;
+      let updated = 0;
+      let skipped = 0;
+
+      entries.forEach((entry) => {
+        const id = entry.gameId || entry.igdbId || entry.steamAppId;
+        if (!id) return;
+
+        const existing = this.entries.get(id);
+        const normalizedEntry: LibraryGameEntry = {
+          ...entry,
+          gameId: id,
+          addedAt: new Date(entry.addedAt || new Date()),
+          updatedAt: new Date(entry.updatedAt || new Date()),
+        };
+
+        if (!existing) {
+          // New entry - add it
+          this.entries.set(id, normalizedEntry);
+          added++;
+        } else if (!this.areEntriesEqual(existing, normalizedEntry)) {
+          // Entry exists but is different - update it
+          this.entries.set(id, {
+            ...normalizedEntry,
+            addedAt: existing.addedAt, // Preserve original addedAt
+            updatedAt: new Date(), // Update the updatedAt timestamp
+          });
+          updated++;
+        } else {
+          // Entry exists and is identical - skip
+          skipped++;
+        }
+      });
+
+      if (added > 0 || updated > 0) {
+        this.saveToStorage();
+        this.notifyListeners();
+      }
+
+      return { success: true, added, updated, skipped };
+    } catch (error) {
+      return { success: false, added: 0, updated: 0, skipped: 0, error: 'Failed to parse import data' };
     }
   }
 }

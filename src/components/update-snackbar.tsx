@@ -47,46 +47,86 @@ export function UpdateSnackbar() {
   // Check if we're in Electron with updater available
   const hasUpdater = typeof window !== 'undefined' && window.updater;
 
+  // Log on mount for debugging
   useEffect(() => {
-    if (!hasUpdater) return;
+    console.log('[UpdateSnackbar] Component mounted');
+    console.log('[UpdateSnackbar] window.updater exists:', !!window.updater);
+    
+    if (window.updater) {
+      // Get current version for logging
+      window.updater.getVersion().then(version => {
+        console.log('[UpdateSnackbar] Current app version:', version);
+      }).catch(err => {
+        console.error('[UpdateSnackbar] Failed to get version:', err);
+      });
+      
+      // Perform a manual update check on mount and log the result
+      console.log('[UpdateSnackbar] Performing manual update check...');
+      window.updater.checkForUpdates().then(result => {
+        console.log('[UpdateSnackbar] Manual check result:', result);
+        if (result.updateAvailable) {
+          console.log('[UpdateSnackbar] Update IS available:', result.latestVersion);
+          // Manually trigger the available state if IPC events didn't fire
+          setUpdateInfo({ version: result.latestVersion });
+          setState('available');
+          setDismissed(false);
+        } else {
+          console.log('[UpdateSnackbar] No update available. Current:', result.currentVersion, 'Latest:', result.latestVersion);
+        }
+      }).catch(err => {
+        console.error('[UpdateSnackbar] Manual check failed:', err);
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hasUpdater) {
+      console.log('[UpdateSnackbar] No updater available, skipping event listeners');
+      return;
+    }
 
     const updater = window.updater!;
+    console.log('[UpdateSnackbar] Setting up event listeners');
 
     // Set up event listeners
     updater.onChecking(() => {
+      console.log('[UpdateSnackbar] Event: checking');
       setState('checking');
     });
 
     updater.onUpdateAvailable((info) => {
-      console.log('[UpdateSnackbar] Update available:', info.version);
+      console.log('[UpdateSnackbar] Event: update-available:', info.version);
       setUpdateInfo(info);
       setState('available');
       setDismissed(false);
     });
 
-    updater.onUpdateNotAvailable(() => {
+    updater.onUpdateNotAvailable((info) => {
+      console.log('[UpdateSnackbar] Event: update-not-available:', info.version);
       setState('idle');
     });
 
     updater.onDownloadProgress((prog) => {
+      console.log('[UpdateSnackbar] Event: download-progress:', prog.percent.toFixed(1) + '%');
       setProgress(prog);
       setState('downloading');
     });
 
     updater.onUpdateDownloaded((info) => {
-      console.log('[UpdateSnackbar] Update downloaded:', info.version);
+      console.log('[UpdateSnackbar] Event: update-downloaded:', info.version);
       setUpdateInfo(info);
       setState('ready');
     });
 
     updater.onError((error) => {
-      console.error('[UpdateSnackbar] Update error:', error.message);
+      console.error('[UpdateSnackbar] Event: error:', error.message);
       setErrorMessage(error.message);
       setState('error');
     });
 
     // Cleanup listeners on unmount
     return () => {
+      console.log('[UpdateSnackbar] Cleaning up event listeners');
       updater.removeAllListeners();
     };
   }, [hasUpdater]);

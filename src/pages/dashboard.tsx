@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
-import { useSteamGames, useGameSearch, useLibrary, useSteamFilters, useFilteredGames, useRateLimitWarning } from '@/hooks/useGameStore';
+import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useSteamFilters, useFilteredGames, useRateLimitWarning } from '@/hooks/useGameStore';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { Game } from '@/types/game';
 import { Button } from '@/components/ui/button';
@@ -32,7 +32,9 @@ import {
   PlusCircle,
   Sparkles,
   Settings,
+  Trash2,
 } from 'lucide-react';
+import { libraryStore } from '@/services/library-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
 import { SettingsPanel } from '@/components/settings-panel';
 
@@ -74,6 +76,9 @@ export function Dashboard() {
   // Library management
   const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, customGames } = useLibrary();
   
+  // Library games with full details (fetched independently from Steam games)
+  const { games: libraryGames, loading: libraryLoading } = useLibraryGames();
+  
   // Custom game dialog state
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
   
@@ -114,14 +119,15 @@ export function Dashboard() {
   // Determine which games, loading, and hasMore to use based on viewMode
   const currentGames = useMemo(() => {
     if (viewMode === 'library') {
-      // Combine Steam library games with custom games
-      const steamLibraryGames = steamGames.filter(g => g.isInLibrary);
-      return [...customGames, ...steamLibraryGames];
+      // Use libraryGames (fetched with full details) + custom games
+      // Mark all library games as isInLibrary
+      const markedLibraryGames = libraryGames.map(g => ({ ...g, isInLibrary: true }));
+      return [...customGames, ...markedLibraryGames];
     }
     return steamGames;
-  }, [viewMode, steamGames, customGames]);
+  }, [viewMode, steamGames, customGames, libraryGames]);
   
-  const currentLoading = steamLoading;
+  const currentLoading = viewMode === 'library' ? libraryLoading : steamLoading;
   const currentError = steamError;
   const hasMore = viewMode === 'browse' ? browseHasMore : false;
   const loadMore = viewMode === 'browse' ? browseLoadMore : () => {};
@@ -172,6 +178,9 @@ export function Dashboard() {
     open: false,
     game: null,
   });
+  
+  // Clear library confirmation state
+  const [clearLibraryConfirm, setClearLibraryConfirm] = useState(false);
 
   // Determine which games to show based on mode and search
   const displayedGames = useMemo(() => {
@@ -358,6 +367,18 @@ export function Dashboard() {
     setDeleteConfirm({ open: false, game: null });
   }, [deleteConfirm.game, removeFromLibrary, success, showError]);
 
+  // Handle clearing entire library
+  const handleClearLibraryConfirm = useCallback(() => {
+    try {
+      const count = libraryStore.getSize();
+      libraryStore.clear();
+      success(`Cleared ${count} games from your library`);
+    } catch (err) {
+      showError('Failed to clear library. Please try again.');
+    }
+    setClearLibraryConfirm(false);
+  }, [success, showError]);
+
   const toggleSortDirection = useCallback(() => {
     setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
   }, []);
@@ -425,7 +446,10 @@ export function Dashboard() {
               <div className="h-8 w-8 bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-fuchsia-500/20">
                 <Gamepad2 className="h-4 w-4 text-white" />
               </div>
-              <h1 className="text-lg font-bold text-white">Ark</h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-bold text-white">Ark</h1>
+                <span className="text-xs text-white/50">v1.0.12</span>
+              </div>
             </div>
             
             {/* macOS Window Controls */}
@@ -487,7 +511,10 @@ export function Dashboard() {
                 Browse
               </button>
               <button
-                onClick={() => setViewMode('library')}
+                onClick={() => {
+                  setViewMode('library');
+                  setSearchQuery(''); // Clear search when switching to Library
+                }}
                 className={cn(
                   "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'library' 
@@ -499,6 +526,19 @@ export function Dashboard() {
                 Library ({librarySize})
               </button>
             </div>
+
+            {/* Clear Library Button - only visible in library mode */}
+            {viewMode === 'library' && librarySize > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setClearLibraryConfirm(true)}
+                className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/20"
+              >
+                <Trash2 className="h-3 w-3 mr-1" />
+                Clear All
+              </Button>
+            )}
 
             <p className="text-sm text-white/60">
               Showing <span className="text-white font-medium">{sortedGames.length}{viewMode === 'browse' && hasMore ? '+' : ''}</span> games
@@ -632,6 +672,8 @@ export function Dashboard() {
               className="h-9 w-9 text-white/60 hover:text-amber-400 hover:bg-white/10"
               onClick={openSettings}
               title="Settings"
+              aria-label="Settings"
+              data-testid="settings-button"
             >
               <Settings className="h-4 w-4 pointer-events-none" />
             </Button>
@@ -754,6 +796,18 @@ export function Dashboard() {
         cancelText="Cancel"
         variant="danger"
         onConfirm={handleDeleteConfirm}
+      />
+
+      {/* Clear Library Confirmation Dialog */}
+      <ConfirmDialog
+        open={clearLibraryConfirm}
+        onOpenChange={setClearLibraryConfirm}
+        title="Clear Entire Library"
+        description={`Are you sure you want to remove all ${librarySize} games from your library? This action cannot be undone. Consider exporting your library first from Settings.`}
+        confirmText="Clear All"
+        cancelText="Cancel"
+        variant="danger"
+        onConfirm={handleClearLibraryConfirm}
       />
 
       {/* Scroll to Top FAB - z-60 to stay above filter sidebar (z-50) */}

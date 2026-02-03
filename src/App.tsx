@@ -1,12 +1,14 @@
 import { useState, useCallback } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Router, Route, Switch } from 'wouter';
+import { useHashLocation } from 'wouter/use-hash-location';
 import { Dashboard } from '@/pages/dashboard';
 import { GameDetailsPage } from '@/pages/game-details';
 import { LoadingScreen } from '@/components/loading-screen';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { ToastProvider } from '@/components/ui/toast';
 import { UpdateSnackbar } from '@/components/update-snackbar';
+import { ChangelogModal } from '@/components/changelog-modal';
 
 type AppState = 'loading' | 'ready';
 
@@ -51,6 +53,7 @@ function AppContent() {
               transition={{ duration: 0.4 }}
             >
               <AppRoutes />
+              <ChangelogModal />
             </motion.div>
           )}
         </AnimatePresence>
@@ -62,7 +65,7 @@ function AppContent() {
 export default function App() {
   return (
     <ToastProvider>
-      <Router>
+      <Router hook={useHashLocation}>
         <AppContent />
       </Router>
       <UpdateSnackbar />

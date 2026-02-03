@@ -1,0 +1,35 @@
+{
+  "entries": [
+    {
+      "gameId": 730,
+      "steamAppId": 730,
+      "status": "Completed",
+      "priority": "High",
+      "publicReviews": "Competitive FPS, great with friends - Finished!",
+      "recommendationSource": "Steam",
+      "addedAt": "2024-01-15T10:30:00.000Z",
+      "updatedAt": "2024-04-01T14:45:00.000Z"
+    },
+    {
+      "gameId": 570,
+      "steamAppId": 570,
+      "status": "Want to Play",
+      "priority": "Medium",
+      "publicReviews": "Popular MOBA",
+      "recommendationSource": "Friend",
+      "addedAt": "2024-01-10T08:00:00.000Z",
+      "updatedAt": "2024-01-10T08:00:00.000Z"
+    },
+    {
+      "gameId": 1086940,
+      "steamAppId": 1086940,
+      "status": "Playing",
+      "priority": "High",
+      "publicReviews": "Best RPG of 2023",
+      "recommendationSource": "Awards",
+      "addedAt": "2024-04-01T09:00:00.000Z",
+      "updatedAt": "2024-04-01T09:00:00.000Z"
+    }
+  ],
+  "exportedAt": "2024-04-01T15:00:00.000Z"
+}

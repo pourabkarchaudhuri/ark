@@ -106,7 +106,7 @@ export function LoadingScreen({ onComplete, duration = 6000 }: LoadingScreenProp
               className="w-full max-w-2xl"
             >
               <Terminal className="border border-white/10 backdrop-blur-md">
-                <AnimatedSpan delay={0}>$ gametracker init --database</AnimatedSpan>
+                <AnimatedSpan delay={0}>$ ark init --database</AnimatedSpan>
                 <TypingAnimation delay={400} duration={30}>
                   Initializing game database...
                 </TypingAnimation>
@@ -123,7 +123,7 @@ export function LoadingScreen({ onComplete, duration = 6000 }: LoadingScreenProp
                   Building dashboard...
                 </TypingAnimation>
                 <AnimatedSpan delay={3600} className="text-fuchsia-400">
-                  🎮 Game Tracker ready
+                  🎮 Ark ready
                 </AnimatedSpan>
               </Terminal>
             </motion.div>

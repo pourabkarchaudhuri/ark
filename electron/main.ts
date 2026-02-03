@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import * as fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -492,6 +493,67 @@ ipcMain.handle('settings:setOllamaSettings', async (_event, settings: { enabled?
   } catch (error) {
     console.error('[Settings] Error setting Ollama settings:', error);
     throw error;
+  }
+});
+
+// ============================================================================
+// FILE DIALOG IPC HANDLERS
+// ============================================================================
+
+/**
+ * Show save file dialog and write content to file
+ */
+ipcMain.handle('dialog:saveFile', async (_event, options: { 
+  content: string; 
+  defaultName?: string;
+  filters?: Array<{ name: string; extensions: string[] }>;
+}) => {
+  try {
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      defaultPath: options.defaultName || 'export.json',
+      filters: options.filters || [
+        { name: 'JSON Files', extensions: ['json'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+    
+    if (result.canceled || !result.filePath) {
+      return { success: false, canceled: true };
+    }
+    
+    fs.writeFileSync(result.filePath, options.content, 'utf-8');
+    return { success: true, filePath: result.filePath };
+  } catch (error) {
+    console.error('[Dialog] Error saving file:', error);
+    return { success: false, error: String(error) };
+  }
+});
+
+/**
+ * Show open file dialog and read content from file
+ */
+ipcMain.handle('dialog:openFile', async (_event, options?: { 
+  filters?: Array<{ name: string; extensions: string[] }>;
+}) => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      properties: ['openFile'],
+      filters: options?.filters || [
+        { name: 'JSON Files', extensions: ['json'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+    
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true };
+    }
+    
+    const filePath = result.filePaths[0];
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return { success: true, filePath, content };
+  } catch (error) {
+    console.error('[Dialog] Error opening file:', error);
+    return { success: false, error: String(error) };
   }
 });
 

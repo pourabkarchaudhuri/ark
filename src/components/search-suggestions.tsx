@@ -26,7 +26,7 @@ function SearchResultImage({ game }: { game: Game }) {
   }, [game.id]);
 
   const handleError = useCallback(() => {
-    if (game.steamAppId && fallbackAttempt < 3) {
+    if (game.steamAppId && fallbackAttempt < 5) {
       setFallbackAttempt(prev => prev + 1);
       setImageLoaded(false);
     } else {
@@ -35,6 +35,7 @@ function SearchResultImage({ game }: { game: Game }) {
   }, [game.steamAppId, fallbackAttempt]);
 
   // Build image URL based on fallback attempt
+  // Matches game-card.tsx fallback order for consistency
   const imageUrl = (() => {
     if (!game.steamAppId) return game.coverUrl || '';
     const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
@@ -45,6 +46,13 @@ function SearchResultImage({ game }: { game: Game }) {
         return `${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`;
       case 2:
         return `${cdnBase}/${game.steamAppId}/capsule_616x353.jpg`;
+      case 3:
+        return `${cdnBase}/${game.steamAppId}/library_600x900.jpg`;
+      case 4:
+        return `${cdnBase}/${game.steamAppId}/logo.png`;
+      case 5:
+        // Use the header_image from screenshots as final fallback (works for unreleased games)
+        return game.screenshots?.[0] || '';
       default:
         return '';
     }

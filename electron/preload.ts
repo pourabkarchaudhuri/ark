@@ -79,5 +79,20 @@ contextBridge.exposeInMainWorld('updater', {
   },
 });
 
-console.log('Preload script loaded - window.igdb, window.electron, and window.updater exposed');
+// Expose File Dialog API to renderer
+contextBridge.exposeInMainWorld('fileDialog', {
+  // Save content to file with native dialog
+  saveFile: (options: { 
+    content: string; 
+    defaultName?: string;
+    filters?: Array<{ name: string; extensions: string[] }>;
+  }) => ipcRenderer.invoke('dialog:saveFile', options),
+  
+  // Open and read file with native dialog
+  openFile: (options?: { 
+    filters?: Array<{ name: string; extensions: string[] }>;
+  }) => ipcRenderer.invoke('dialog:openFile', options),
+});
+
+console.log('Preload script loaded - window.igdb, window.electron, window.updater and window.fileDialog exposed');
 

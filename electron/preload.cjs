@@ -159,4 +159,50 @@ contextBridge.exposeInMainWorld('settings', {
     ipcRenderer.invoke('settings:setOllamaSettings', settings),
 });
 
-console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings and window.electron exposed');
+// Expose auto-updater API to renderer
+contextBridge.exposeInMainWorld('updater', {
+  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  installUpdate: () => ipcRenderer.invoke('updater:install'),
+  getVersion: () => ipcRenderer.invoke('updater:getVersion'),
+  
+  onChecking: (callback) => {
+    ipcRenderer.on('updater:checking', () => callback());
+  },
+  onUpdateAvailable: (callback) => {
+    ipcRenderer.on('updater:update-available', (_event, info) => callback(info));
+  },
+  onUpdateNotAvailable: (callback) => {
+    ipcRenderer.on('updater:update-not-available', (_event, info) => callback(info));
+  },
+  onDownloadProgress: (callback) => {
+    ipcRenderer.on('updater:download-progress', (_event, progress) => callback(progress));
+  },
+  onUpdateDownloaded: (callback) => {
+    ipcRenderer.on('updater:update-downloaded', (_event, info) => callback(info));
+  },
+  onError: (callback) => {
+    ipcRenderer.on('updater:error', (_event, error) => callback(error));
+  },
+  removeAllListeners: () => {
+    ipcRenderer.removeAllListeners('updater:checking');
+    ipcRenderer.removeAllListeners('updater:update-available');
+    ipcRenderer.removeAllListeners('updater:update-not-available');
+    ipcRenderer.removeAllListeners('updater:download-progress');
+    ipcRenderer.removeAllListeners('updater:update-downloaded');
+    ipcRenderer.removeAllListeners('updater:error');
+  },
+});
+
+// Expose File Dialog API to renderer
+contextBridge.exposeInMainWorld('fileDialog', {
+  // Save content to file with native dialog
+  saveFile: (options) => 
+    ipcRenderer.invoke('dialog:saveFile', options),
+  
+  // Open and read file with native dialog
+  openFile: (options) => 
+    ipcRenderer.invoke('dialog:openFile', options),
+});
+
+console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings, window.electron, window.updater and window.fileDialog exposed');

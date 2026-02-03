@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#d946ef;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#9333ea;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Rounded rectangle background -->
+  <rect x="16" y="16" width="224" height="224" rx="40" ry="40" fill="url(#gradient)"/>
+  <!-- Gamepad icon (simplified) -->
+  <g transform="translate(128, 128)" fill="white">
+    <!-- Main body -->
+    <rect x="-64" y="-32" width="128" height="64" rx="20" ry="20"/>
+    <!-- Left grip -->
+    <ellipse cx="-48" cy="24" rx="24" ry="32"/>
+    <!-- Right grip -->
+    <ellipse cx="48" cy="24" rx="24" ry="32"/>
+    <!-- D-pad (left side) -->
+    <rect x="-56" y="-12" width="8" height="24" rx="2" fill="#9333ea"/>
+    <rect x="-64" y="-4" width="24" height="8" rx="2" fill="#9333ea"/>
+    <!-- Buttons (right side) -->
+    <circle cx="36" cy="-8" r="8" fill="#9333ea"/>
+    <circle cx="52" cy="0" r="8" fill="#9333ea"/>
+    <circle cx="44" cy="8" r="8" fill="#9333ea"/>
+    <circle cx="28" cy="0" r="8" fill="#9333ea"/>
+  </g>
+</svg>

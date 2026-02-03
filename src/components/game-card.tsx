@@ -137,8 +137,11 @@ function GameCardComponent({
 
   const handleCardClick = () => {
     // Navigate to game details page if we have a Steam App ID
-    if (game.steamAppId) {
-      navigate(`/game/${game.steamAppId}`);
+    // Use steamAppId directly, or extract from id if available (e.g., "steam-12345")
+    const gameId = game.steamAppId || (game.id?.startsWith('steam-') ? parseInt(game.id.split('-')[1]) : null);
+    
+    if (gameId) {
+      navigate(`/game/${gameId}`);
     } else if (onClick) {
       // Fallback to onClick handler for custom games
       onClick();
@@ -163,8 +166,8 @@ function GameCardComponent({
   // Handle image error - try multiple fallback URLs
   const handleImageError = useCallback(() => {
     if (game.steamAppId) {
-      // Fallback order: library_600x900 -> header -> capsule_616x353 -> capsule_231x87 -> logo
-      if (fallbackAttempt < 4) {
+      // Fallback order: library_600x900 -> header -> capsule_616x353 -> capsule_231x87 -> logo -> screenshots[0] (header_image from API)
+      if (fallbackAttempt < 5) {
         console.log(`[GameCard] Image ${fallbackAttempt} failed for ${game.title}, trying next fallback`);
         setFallbackAttempt(prev => prev + 1);
         setImageLoaded(false);
@@ -193,10 +196,13 @@ function GameCardComponent({
         return `${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`;
       case 4:
         return `${cdnBase}/${game.steamAppId}/logo.png`;
+      case 5:
+        // Use the header_image from screenshots as final fallback (works for unreleased games)
+        return game.screenshots?.[0] || '';
       default:
         return '';
     }
-  }, [game.steamAppId, game.coverUrl, fallbackAttempt]);
+  }, [game.steamAppId, game.coverUrl, game.screenshots, fallbackAttempt]);
   
   const fallbackGradient = getGameFallbackGradient(game.title);
   const initials = getGameInitials(game.title);

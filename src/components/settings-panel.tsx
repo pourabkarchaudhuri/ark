@@ -5,10 +5,11 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { libraryStore } from '@/services/library-store';
 
 // Declare settings API type
 declare global {
@@ -46,6 +47,11 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Library import/export state
+  const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [importMessage, setImportMessage] = useState<string | null>(null);
+  const [exportStatus, setExportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   // Check if API key exists on mount
   useEffect(() => {
@@ -183,6 +189,151 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     if (!key || key.length < 10) return key;
     return key.substring(0, 8) + '•'.repeat(20) + key.substring(key.length - 4);
   };
+
+  // Export library data
+  const handleExportLibrary = useCallback(async () => {
+    setExportStatus('loading');
+    try {
+      const data = libraryStore.exportData();
+      const librarySize = libraryStore.getSize();
+      
+      if (window.fileDialog) {
+        // Use native file dialog in Electron
+        const result = await window.fileDialog.saveFile({
+          content: data,
+          defaultName: `ark-library-${new Date().toISOString().split('T')[0]}.json`,
+          filters: [{ name: 'JSON Files', extensions: ['json'] }]
+        });
+        
+        if (result.success) {
+          setExportStatus('success');
+          setImportMessage(`Exported ${librarySize} games successfully`);
+        } else if (result.canceled) {
+          setExportStatus('idle');
+        } else {
+          setExportStatus('error');
+          setImportMessage(result.error || 'Failed to export library');
+        }
+      } else {
+        // Fallback for browser: download via blob
+        const blob = new Blob([data], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `ark-library-${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setExportStatus('success');
+        setImportMessage(`Exported ${librarySize} games successfully`);
+      }
+      
+      setTimeout(() => {
+        setExportStatus('idle');
+        setImportMessage(null);
+      }, 3000);
+    } catch (err) {
+      console.error('Failed to export library:', err);
+      setExportStatus('error');
+      setImportMessage('Failed to export library');
+      setTimeout(() => {
+        setExportStatus('idle');
+        setImportMessage(null);
+      }, 3000);
+    }
+  }, []);
+
+  // Import library data
+  const handleImportLibrary = useCallback(async () => {
+    setImportStatus('loading');
+    setImportMessage(null);
+    
+    try {
+      if (window.fileDialog) {
+        // Use native file dialog in Electron
+        const result = await window.fileDialog.openFile({
+          filters: [{ name: 'JSON Files', extensions: ['json'] }]
+        });
+        
+        if (result.canceled) {
+          setImportStatus('idle');
+          return;
+        }
+        
+        if (!result.success || !result.content) {
+          setImportStatus('error');
+          setImportMessage(result.error || 'Failed to read file');
+          setTimeout(() => {
+            setImportStatus('idle');
+            setImportMessage(null);
+          }, 3000);
+          return;
+        }
+        
+        // Use delta import
+        const importResult = libraryStore.importDataWithDelta(result.content);
+        
+        if (importResult.success) {
+          setImportStatus('success');
+          const parts = [];
+          if (importResult.added > 0) parts.push(`${importResult.added} added`);
+          if (importResult.updated > 0) parts.push(`${importResult.updated} updated`);
+          if (importResult.skipped > 0) parts.push(`${importResult.skipped} unchanged`);
+          setImportMessage(parts.length > 0 ? parts.join(', ') : 'No changes');
+        } else {
+          setImportStatus('error');
+          setImportMessage(importResult.error || 'Failed to import library');
+        }
+      } else {
+        // Fallback for browser: use file input
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = async (e) => {
+          const file = (e.target as HTMLInputElement).files?.[0];
+          if (!file) {
+            setImportStatus('idle');
+            return;
+          }
+          
+          try {
+            const content = await file.text();
+            const importResult = libraryStore.importDataWithDelta(content);
+            
+            if (importResult.success) {
+              setImportStatus('success');
+              const parts = [];
+              if (importResult.added > 0) parts.push(`${importResult.added} added`);
+              if (importResult.updated > 0) parts.push(`${importResult.updated} updated`);
+              if (importResult.skipped > 0) parts.push(`${importResult.skipped} unchanged`);
+              setImportMessage(parts.length > 0 ? parts.join(', ') : 'No changes');
+            } else {
+              setImportStatus('error');
+              setImportMessage(importResult.error || 'Failed to import library');
+            }
+          } catch (err) {
+            setImportStatus('error');
+            setImportMessage('Failed to read file');
+          }
+        };
+        input.click();
+      }
+      
+      setTimeout(() => {
+        setImportStatus('idle');
+        setImportMessage(null);
+      }, 3000);
+    } catch (err) {
+      console.error('Failed to import library:', err);
+      setImportStatus('error');
+      setImportMessage('Failed to import library');
+      setTimeout(() => {
+        setImportStatus('idle');
+        setImportMessage(null);
+      }, 3000);
+    }
+  }, []);
 
   return (
     <AnimatePresence>
@@ -399,6 +550,74 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                       </div>
                     </>
                   )}
+                </div>
+              </div>
+
+              {/* Library Data Section */}
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <Database className="h-4 w-4 text-cyan-400" />
+                  <h3 className="text-sm font-semibold text-white">Library Data</h3>
+                </div>
+                
+                <div className="bg-white/5 rounded-lg p-4 space-y-3">
+                  <div>
+                    <p className="text-sm font-medium text-white">Export & Import</p>
+                    <p className="text-xs text-white/40 mt-0.5">
+                      Backup or restore your library data as JSON
+                    </p>
+                  </div>
+                  
+                  <div className="flex gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleExportLibrary}
+                      disabled={exportStatus === 'loading'}
+                      className="flex-1 h-9 bg-white/5 hover:bg-white/10 border border-white/10"
+                    >
+                      {exportStatus === 'loading' ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <Download className="h-4 w-4 mr-2" />
+                      )}
+                      Export Library
+                    </Button>
+                    
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleImportLibrary}
+                      disabled={importStatus === 'loading'}
+                      className="flex-1 h-9 bg-white/5 hover:bg-white/10 border border-white/10"
+                    >
+                      {importStatus === 'loading' ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <Upload className="h-4 w-4 mr-2" />
+                      )}
+                      Import Library
+                    </Button>
+                  </div>
+                  
+                  {/* Status message */}
+                  {importMessage && (
+                    <div className={cn(
+                      "flex items-center gap-2 text-xs",
+                      importStatus === 'success' || exportStatus === 'success' ? "text-green-400" : "text-red-400"
+                    )}>
+                      {(importStatus === 'success' || exportStatus === 'success') ? (
+                        <Check className="h-3 w-3" />
+                      ) : (
+                        <AlertCircle className="h-3 w-3" />
+                      )}
+                      {importMessage}
+                    </div>
+                  )}
+                  
+                  <p className="text-xs text-white/30">
+                    Import merges with existing data: new games are added, changed games are updated, unchanged games are skipped.
+                  </p>
                 </div>
               </div>
 
