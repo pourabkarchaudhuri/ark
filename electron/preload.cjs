@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('electron', {
   maximize: () => ipcRenderer.invoke('window-maximize'),
   close: () => ipcRenderer.invoke('window-close'),
   isMaximized: () => ipcRenderer.invoke('window-is-maximized'),
+  // Open URL in default OS browser
+  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
 });
 
 // Steam CDN base URL for constructing image URLs client-side
@@ -205,4 +207,19 @@ contextBridge.exposeInMainWorld('fileDialog', {
     ipcRenderer.invoke('dialog:openFile', options),
 });
 
-console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings, window.electron, window.updater and window.fileDialog exposed');
+// Expose Installed Games API to renderer
+contextBridge.exposeInMainWorld('installedGames', {
+  // Get all installed games from the system
+  getInstalled: (forceRefresh) => 
+    ipcRenderer.invoke('games:getInstalled', forceRefresh),
+  
+  // Get array of installed Steam AppIDs for quick lookup
+  getInstalledAppIds: () => 
+    ipcRenderer.invoke('games:getInstalledAppIds'),
+  
+  // Clear the installed games cache
+  clearCache: () => 
+    ipcRenderer.invoke('games:clearInstalledCache'),
+});
+
+console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog and window.installedGames exposed');

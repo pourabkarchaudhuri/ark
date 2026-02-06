@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent } from 'react';
 import { useRoute, useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
@@ -28,10 +28,34 @@ import { MetacriticGameResponse } from '@/types/metacritic';
 import { Game } from '@/types/game';
 import { useLibrary } from '@/hooks/useGameStore';
 import { getRepackLinkForGame } from '@/services/fitgirl-service';
+import { WindowControls } from '@/components/window-controls';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { MyProgressTab } from '@/components/my-progress-tab';
+import { Gamepad2, BarChart3 } from 'lucide-react';
 
 // Check if running in Electron
 function isElectron(): boolean {
   return typeof window !== 'undefined' && typeof window.steam !== 'undefined';
+}
+
+// Open URL in default OS browser (uses Electron shell.openExternal)
+function openExternalUrl(url: string): void {
+  if (window.electron?.openExternal) {
+    window.electron.openExternal(url);
+  } else {
+    // Fallback for browser development
+    window.open(url, '_blank');
+  }
+}
+
+// Intercept link clicks in HTML content (description, requirements, etc.) so they open in system browser
+function handleContentLinkClick(e: MouseEvent<HTMLDivElement>): void {
+  const target = e.target as HTMLElement;
+  const anchor = target.closest('a');
+  if (anchor?.href && (anchor.href.startsWith('http:') || anchor.href.startsWith('https:'))) {
+    e.preventDefault();
+    openExternalUrl(anchor.href);
+  }
 }
 
 // Format minutes to hours and minutes
@@ -493,9 +517,13 @@ export function GameDetailsPage() {
           <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
           <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-transparent" />
 
-          {/* Back Button Skeleton */}
-          <div className="absolute top-4 left-4 z-20">
-            <div className="h-10 w-24 rounded-lg bg-white/10 animate-pulse" />
+          {/* Top Navigation Bar */}
+          <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-3 app-drag-region">
+            {/* Back Button Skeleton */}
+            <div className="h-10 w-24 rounded-lg bg-white/10 animate-pulse no-drag" />
+            
+            {/* Window Controls */}
+            <WindowControls />
           </div>
 
           {/* Title and Info Skeleton */}
@@ -636,13 +664,21 @@ export function GameDetailsPage() {
 
   if (error || !details) {
     return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4 text-center">
-          <p className="text-red-400 text-xl">{error || 'Game not found'}</p>
-          <Button onClick={() => navigate('/')} variant="outline">
-            <ArrowLeft className="w-4 h-4 mr-2 pointer-events-none" />
-            Back to Dashboard
-          </Button>
+      <div className="min-h-screen bg-black flex flex-col">
+        {/* Top Navigation Bar */}
+        <div className="flex items-center justify-between px-4 py-3 app-drag-region">
+          <div /> {/* Spacer */}
+          <WindowControls />
+        </div>
+        
+        <div className="flex-1 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-4 text-center">
+            <p className="text-red-400 text-xl">{error || 'Game not found'}</p>
+            <Button onClick={() => navigate('/')} variant="outline">
+              <ArrowLeft className="w-4 h-4 mr-2 pointer-events-none" />
+              Back to Dashboard
+            </Button>
+          </div>
         </div>
       </div>
     );
@@ -663,15 +699,21 @@ export function GameDetailsPage() {
         <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
         <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-transparent" />
 
-        {/* Back Button */}
-        <Button
-          onClick={() => navigate('/')}
-          variant="ghost"
-          className="absolute top-4 left-4 z-20 bg-black/50 hover:bg-black/70 backdrop-blur-sm"
-        >
-          <ArrowLeft className="w-5 h-5 mr-2 pointer-events-none" />
-          Back
-        </Button>
+        {/* Top Navigation Bar */}
+        <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-3 app-drag-region">
+          {/* Back Button */}
+          <Button
+            onClick={() => navigate('/')}
+            variant="ghost"
+            className="bg-black/50 hover:bg-black/70 backdrop-blur-sm no-drag"
+          >
+            <ArrowLeft className="w-5 h-5 mr-2 pointer-events-none" />
+            Back
+          </Button>
+
+          {/* Window Controls */}
+          <WindowControls />
+        </div>
 
         {/* Title and Basic Info */}
         <div className="absolute bottom-0 left-0 right-0 p-6 z-10">
@@ -727,7 +769,187 @@ export function GameDetailsPage() {
 
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Tabbed view for library games */}
+        {gameInLibrary && appId ? (
+          <Tabs defaultValue="progress" className="w-full">
+            <TabsList className="mb-6 bg-white/5">
+              <TabsTrigger value="progress" className="flex items-center gap-2">
+                <BarChart3 className="w-4 h-4" />
+                My Progress
+              </TabsTrigger>
+              <TabsTrigger value="details" className="flex items-center gap-2">
+                <Gamepad2 className="w-4 h-4" />
+                Game Details
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="progress">
+              <div className="p-6 rounded-lg bg-white/5 border border-white/10">
+                <MyProgressTab gameId={appId} gameName={details.name} />
+              </div>
+            </TabsContent>
+
+            <TabsContent value="details">
+              <GameDetailsContent
+                details={details}
+                reviews={reviews}
+                metacriticReviews={metacriticReviews}
+                metacriticLoading={metacriticLoading}
+                mediaItems={mediaItems}
+                currentMediaIndex={currentMediaIndex}
+                mediaLoading={mediaLoading}
+                thumbnailsLoaded={thumbnailsLoaded}
+                handleManualNav={handleManualNav}
+                handleThumbnailClick={handleThumbnailClick}
+                setMediaLoading={setMediaLoading}
+                setThumbnailsLoaded={setThumbnailsLoaded}
+                positivePercentage={positivePercentage}
+                showFullDescription={showFullDescription}
+                setShowFullDescription={setShowFullDescription}
+                headerImageError={headerImageError}
+                setHeaderImageError={setHeaderImageError}
+                headerImageLoaded={headerImageLoaded}
+                setHeaderImageLoaded={setHeaderImageLoaded}
+                recommendations={recommendations}
+                recommendationsLoading={recommendationsLoading}
+                fitgirlRepack={fitgirlRepack}
+                fitgirlLoading={fitgirlLoading}
+                isRecommendationsPaused={isRecommendationsPaused}
+                setIsRecommendationsPaused={setIsRecommendationsPaused}
+                recommendationsScrollRef={recommendationsScrollRef}
+                gameInLibrary={gameInLibrary}
+                handleOpenLibraryDialog={handleOpenLibraryDialog}
+                removeFromLibrary={removeFromLibrary}
+                appId={appId}
+                navigate={navigate}
+              />
+            </TabsContent>
+          </Tabs>
+        ) : (
+          <GameDetailsContent
+            details={details}
+            reviews={reviews}
+            metacriticReviews={metacriticReviews}
+            metacriticLoading={metacriticLoading}
+            mediaItems={mediaItems}
+            currentMediaIndex={currentMediaIndex}
+            mediaLoading={mediaLoading}
+            thumbnailsLoaded={thumbnailsLoaded}
+            handleManualNav={handleManualNav}
+            handleThumbnailClick={handleThumbnailClick}
+            setMediaLoading={setMediaLoading}
+            setThumbnailsLoaded={setThumbnailsLoaded}
+            positivePercentage={positivePercentage}
+            showFullDescription={showFullDescription}
+            setShowFullDescription={setShowFullDescription}
+            headerImageError={headerImageError}
+            setHeaderImageError={setHeaderImageError}
+            headerImageLoaded={headerImageLoaded}
+            setHeaderImageLoaded={setHeaderImageLoaded}
+            recommendations={recommendations}
+            recommendationsLoading={recommendationsLoading}
+            fitgirlRepack={fitgirlRepack}
+            fitgirlLoading={fitgirlLoading}
+            isRecommendationsPaused={isRecommendationsPaused}
+            setIsRecommendationsPaused={setIsRecommendationsPaused}
+            recommendationsScrollRef={recommendationsScrollRef}
+            gameInLibrary={gameInLibrary}
+            handleOpenLibraryDialog={handleOpenLibraryDialog}
+            removeFromLibrary={removeFromLibrary}
+            appId={appId}
+            navigate={navigate}
+          />
+        )}
+      </div>
+      
+      {/* Library Dialog */}
+      <GameDialog
+        open={isDialogOpen}
+        onOpenChange={setIsDialogOpen}
+        game={dialogGame}
+        onSave={handleSaveLibraryEntry}
+        genres={details?.genres?.map(g => g.description) || []}
+        platforms={[
+          ...(details?.platforms?.windows ? ['Windows'] : []),
+          ...(details?.platforms?.mac ? ['Mac'] : []),
+          ...(details?.platforms?.linux ? ['Linux'] : []),
+        ]}
+      />
+    </div>
+  );
+}
+
+// Extracted Game Details Content Component
+interface GameDetailsContentProps {
+  details: SteamAppDetails;
+  reviews: SteamReviewsResponse | null;
+  metacriticReviews: MetacriticGameResponse | null;
+  metacriticLoading: boolean;
+  mediaItems: { type: 'image' | 'video'; url: string; thumbnail?: string; name?: string }[];
+  currentMediaIndex: number;
+  mediaLoading: boolean;
+  thumbnailsLoaded: Set<number>;
+  handleManualNav: (direction: 'next' | 'prev') => void;
+  handleThumbnailClick: (index: number) => void;
+  setMediaLoading: (loading: boolean) => void;
+  setThumbnailsLoaded: React.Dispatch<React.SetStateAction<Set<number>>>;
+  positivePercentage: number | null;
+  showFullDescription: boolean;
+  setShowFullDescription: (show: boolean) => void;
+  headerImageError: boolean;
+  setHeaderImageError: (error: boolean) => void;
+  headerImageLoaded: boolean;
+  setHeaderImageLoaded: (loaded: boolean) => void;
+  recommendations: GameRecommendation[];
+  recommendationsLoading: boolean;
+  fitgirlRepack: { url: string; downloadLink: string | null } | null;
+  fitgirlLoading: boolean;
+  isRecommendationsPaused: boolean;
+  setIsRecommendationsPaused: (paused: boolean) => void;
+  recommendationsScrollRef: React.RefObject<HTMLDivElement>;
+  gameInLibrary: boolean;
+  handleOpenLibraryDialog: () => void;
+  removeFromLibrary: (gameId: number) => void;
+  appId: number | null;
+  navigate: (path: string) => void;
+}
+
+function GameDetailsContent({
+  details,
+  reviews,
+  metacriticReviews,
+  metacriticLoading,
+  mediaItems,
+  currentMediaIndex,
+  mediaLoading,
+  thumbnailsLoaded,
+  handleManualNav,
+  handleThumbnailClick,
+  setMediaLoading,
+  setThumbnailsLoaded,
+  positivePercentage,
+  showFullDescription,
+  setShowFullDescription,
+  headerImageError,
+  setHeaderImageError,
+  headerImageLoaded,
+  setHeaderImageLoaded,
+  recommendations,
+  recommendationsLoading,
+  fitgirlRepack,
+  fitgirlLoading,
+  isRecommendationsPaused: _isRecommendationsPaused, // Used for scrolling pause state
+  setIsRecommendationsPaused,
+  recommendationsScrollRef,
+  gameInLibrary,
+  handleOpenLibraryDialog,
+  removeFromLibrary,
+  appId,
+  navigate,
+}: GameDetailsContentProps) {
+  return (
+    <>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left Column - Media & Description */}
           <div className="lg:col-span-2 space-y-6">
             {/* Media Gallery */}
@@ -889,6 +1111,7 @@ export function GameDetailsPage() {
                   !showFullDescription && "line-clamp-6"
                 )}
                 dangerouslySetInnerHTML={{ __html: details.detailed_description || details.about_the_game }}
+                onClick={handleContentLinkClick}
               />
               {(details.detailed_description || details.about_the_game)?.length > 500 && (
                 <Button
@@ -915,6 +1138,7 @@ export function GameDetailsPage() {
                       <div 
                         className="prose prose-invert prose-sm text-white/70"
                         dangerouslySetInnerHTML={{ __html: details.pc_requirements.minimum }}
+                        onClick={handleContentLinkClick}
                       />
                     </div>
                   )}
@@ -927,6 +1151,7 @@ export function GameDetailsPage() {
                       <div 
                         className="prose prose-invert prose-sm text-white/70"
                         dangerouslySetInnerHTML={{ __html: details.pc_requirements.recommended }}
+                        onClick={handleContentLinkClick}
                       />
                     </div>
                   )}
@@ -1084,7 +1309,7 @@ export function GameDetailsPage() {
               <Button
                 variant="outline"
                 className="w-full"
-                onClick={() => window.open(`https://store.steampowered.com/app/${details.steam_appid}`, '_blank')}
+                onClick={() => openExternalUrl(`https://store.steampowered.com/app/${details.steam_appid}`)}
               >
                 <FaSteam className="w-4 h-4 mr-2" />
                 View on Steam
@@ -1096,7 +1321,7 @@ export function GameDetailsPage() {
                 <Button
                   variant="ghost"
                   className="w-full text-sm"
-                  onClick={() => window.open(details.website!, '_blank')}
+                  onClick={() => openExternalUrl(details.website!)}
                 >
                   <ExternalLink className="w-3 h-3 mr-2" />
                   Official Website
@@ -1117,12 +1342,7 @@ export function GameDetailsPage() {
                       className="w-full border-green-500/50 hover:bg-green-500/10 text-green-400"
                       onClick={() => {
                         if (fitgirlRepack.downloadLink) {
-                          if (fitgirlRepack.downloadLink.startsWith('magnet:')) {
-                            // For magnet links, try to open with default torrent client
-                            window.open(fitgirlRepack.downloadLink, '_blank');
-                          } else {
-                            window.open(fitgirlRepack.downloadLink, '_blank');
-                          }
+                          openExternalUrl(fitgirlRepack.downloadLink);
                         }
                       }}
                     >
@@ -1133,7 +1353,7 @@ export function GameDetailsPage() {
                   <Button
                     variant="ghost"
                     className="w-full text-sm text-white/70 hover:text-white"
-                    onClick={() => window.open(fitgirlRepack.url, '_blank')}
+                    onClick={() => openExternalUrl(fitgirlRepack.url)}
                   >
                     <ExternalLink className="w-3 h-3 mr-2" />
                     View on FitGirl
@@ -1239,6 +1459,7 @@ export function GameDetailsPage() {
                 <div 
                   className="text-sm text-white/70 prose prose-invert prose-sm"
                   dangerouslySetInnerHTML={{ __html: details.supported_languages }}
+                  onClick={handleContentLinkClick}
                 />
               </div>
             )}
@@ -1319,7 +1540,7 @@ export function GameDetailsPage() {
                     <Button
                       variant="ghost"
                       className="w-full mt-3 text-xs"
-                      onClick={() => window.open(`https://www.metacritic.com/search/${encodeURIComponent(details.name)}/`, '_blank')}
+                      onClick={() => openExternalUrl(`https://www.metacritic.com/search/${encodeURIComponent(details.name)}/`)}
                     >
                       View all {metacriticReviews.reviews.length} reviews on Metacritic
                       <ExternalLink className="w-3 h-3 ml-1" />
@@ -1334,7 +1555,6 @@ export function GameDetailsPage() {
             </div>
           </div>
         </div>
-      </div>
 
       {/* Similar Games / Recommendations Section */}
       {(recommendations.length > 0 || recommendationsLoading) && (
@@ -1450,21 +1670,6 @@ export function GameDetailsPage() {
           </div>
         </div>
       )}
-      
-      {/* Library Dialog */}
-      <GameDialog
-        open={isDialogOpen}
-        onOpenChange={setIsDialogOpen}
-        game={dialogGame}
-        onSave={handleSaveLibraryEntry}
-        genres={details?.genres?.map(g => g.description) || []}
-        platforms={[
-          ...(details?.platforms?.windows ? ['Windows'] : []),
-          ...(details?.platforms?.mac ? ['Mac'] : []),
-          ...(details?.platforms?.linux ? ['Linux'] : []),
-        ]}
-      />
-    </div>
+    </>
   );
 }
-

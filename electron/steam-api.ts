@@ -255,7 +255,10 @@ class RateLimiter {
 // Persistent Cache with Stale-While-Revalidate Strategy
 import * as fs from 'fs';
 import * as path from 'path';
-import { app } from 'electron';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const electron = require('electron');
+const { app } = electron;
 
 interface CacheEntry<T> {
   data: T;
@@ -528,7 +531,7 @@ class SteamAPIClient {
    */
   private async refreshAppDetails(appId: number): Promise<SteamAppDetails['data'] | null> {
     const cacheKey = `app-details-${appId}`;
-    const url = `${STEAM_STORE_API_BASE}/appdetails?appids=${appId}&cc=us&l=english`;
+    const url = `${STEAM_STORE_API_BASE}/appdetails?appids=${appId}&cc=in&l=english`;
     
     try {
       const response = await this.rateLimiter.execute(async () => {
@@ -589,13 +592,14 @@ class SteamAPIClient {
 
   /**
    * Search games on Steam Store
+   * Filters out DLCs, Season Passes, and other non-base-game items
    */
   async searchGames(query: string, limit: number = 20): Promise<SteamSearchResult['items']> {
     const cacheKey = `search-${query}-${limit}`;
     const cached = this.cache.get<SteamSearchResult['items']>(cacheKey);
     if (cached) return cached;
 
-    const url = `${STEAM_STORE_API_BASE}/storesearch?term=${encodeURIComponent(query)}&cc=us&l=english`;
+    const url = `${STEAM_STORE_API_BASE}/storesearch?term=${encodeURIComponent(query)}&cc=in&l=english`;
     
     try {
       const response = await this.rateLimiter.execute(async () => {
@@ -605,8 +609,64 @@ class SteamAPIClient {
         return res.json() as Promise<SteamSearchResult>;
       });
 
-      const items = response.items?.slice(0, limit) || [];
-      console.log(`[Steam] Found ${items.length} results for: ${query}`);
+      // Filter out non-game items (DLCs, Season Passes, etc.)
+      const allItems = response.items || [];
+      const filteredItems = allItems.filter(item => {
+        // Filter by type - only include 'game' type
+        // Steam types: 'game', 'dlc', 'demo', 'advertising', 'mod', 'video'
+        if (item.type && item.type.toLowerCase() !== 'game') {
+          return false;
+        }
+        
+        // Additional name-based filtering for items that might slip through
+        const nameLower = item.name.toLowerCase();
+        const excludePatterns = [
+          ' dlc',
+          ' - dlc',
+          'season pass',
+          'year pass',
+          'yearly pass',
+          'annual pass',
+          'battle pass',
+          'expansion pack',
+          'expansion pass',
+          'starter pack',
+          'booster pack',
+          'content pack',
+          'character pack',
+          'skin pack',
+          'costume pack',
+          'weapon pack',
+          'map pack',
+          'soundtrack',
+          ' ost',
+          'artbook',
+          'art book',
+          'digital deluxe upgrade',
+          'upgrade pack',
+          'vip pack',
+          'premium pack',
+          'gold upgrade',
+          'ultimate upgrade',
+          'deluxe upgrade',
+          'supporter pack',
+          'bonus content',
+          'pre-order bonus',
+          'preorder bonus',
+        ];
+        
+        // Check if name contains any exclude patterns
+        for (const pattern of excludePatterns) {
+          if (nameLower.includes(pattern)) {
+            return false;
+          }
+        }
+        
+        return true;
+      });
+      
+      const items = filteredItems.slice(0, limit);
+      console.log(`[Steam] Found ${allItems.length} results, filtered to ${items.length} games for: ${query}`);
       this.cache.set(cacheKey, items);
       return items;
     } catch (error) {
@@ -623,7 +683,7 @@ class SteamAPIClient {
     const cached = this.cache.get<SteamFeaturedCategories>(cacheKey);
     if (cached) return cached;
 
-    const url = `${STEAM_STORE_API_BASE}/featuredcategories?cc=us&l=english`;
+    const url = `${STEAM_STORE_API_BASE}/featuredcategories?cc=in&l=english`;
     
     try {
       const response = await this.rateLimiter.execute(async () => {

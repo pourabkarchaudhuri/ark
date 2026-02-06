@@ -4,10 +4,20 @@ import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Current app version - update this with each release
-const APP_VERSION = '1.0.13';
+export const APP_VERSION = '1.0.14';
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.14': {
+    title: "What's New in Ark 1.0.14",
+    changes: [
+      'Pricing in INR - Game details and Steam data now show Indian Rupee (₹) from the Steam API',
+      'Links open in your browser - Steam, Metacritic, FitGirl, and in-page links open in your default OS browser so your logins stay intact',
+      'Cleaner game lists - Games without developer or publisher (e.g. FiveM) are no longer shown in Browse or Library',
+      'Library view - Heart and Library badge are hidden in Library view (use menu or right-click to remove)',
+      'Performance - Fewer unnecessary re-renders on game cards for smoother scrolling',
+    ],
+  },
   '1.0.13': {
     title: "What's New in Ark 1.0.13",
     changes: [

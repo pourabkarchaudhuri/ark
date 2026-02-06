@@ -2,17 +2,6 @@ import { useEffect, useState } from 'react';
 import { Minus, Square, X, Maximize2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-declare global {
-  interface Window {
-    electron?: {
-      minimize: () => Promise<void>;
-      maximize: () => Promise<void>;
-      close: () => Promise<void>;
-      isMaximized: () => Promise<boolean>;
-    };
-  }
-}
-
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
 

@@ -92,6 +92,10 @@ test.describe('Electron App', () => {
   });
 
   test('can switch to Library mode', async () => {
+    // Dismiss any open modals (like changelog)
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(200);
+    
     // Switch to Library view
     await page.click('button:has-text("Library")');
     await page.waitForTimeout(500);

@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useSteamFilters, useFilteredGames, useRateLimitWarning } from '@/hooks/useGameStore';
+import { useInstalledGames } from '@/hooks/useInstalledGames';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { Game } from '@/types/game';
 import { Button } from '@/components/ui/button';
@@ -14,6 +15,8 @@ import { SkeletonGrid } from '@/components/game-card-skeleton';
 import { FilterSidebar } from '@/components/filter-sidebar';
 import { SearchSuggestions } from '@/components/search-suggestions';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { APP_VERSION } from '@/components/changelog-modal';
+import { WindowControls } from '@/components/window-controls';
 import { EmptyState } from '@/components/empty-state';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
@@ -21,9 +24,6 @@ import {
   Gamepad2,
   Search,
   X,
-  Minus,
-  Maximize2,
-  Square,
   Library,
   Filter,
   ArrowUp,
@@ -37,18 +37,6 @@ import {
 import { libraryStore } from '@/services/library-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
 import { SettingsPanel } from '@/components/settings-panel';
-
-// Declare window.electron type
-declare global {
-  interface Window {
-    electron?: {
-      minimize: () => Promise<void>;
-      maximize: () => Promise<void>;
-      close: () => Promise<void>;
-      isMaximized: () => Promise<boolean>;
-    };
-  }
-}
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
@@ -78,6 +66,9 @@ export function Dashboard() {
   
   // Library games with full details (fetched independently from Steam games)
   const { games: libraryGames, loading: libraryLoading } = useLibraryGames();
+  
+  // Installed games detection
+  const { isInstalled } = useInstalledGames();
   
   // Custom game dialog state
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
@@ -383,41 +374,6 @@ export function Dashboard() {
     setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
   }, []);
 
-  // Window controls state and handlers
-  const [isMaximized, setIsMaximized] = useState(false);
-
-  useEffect(() => {
-    const checkMaximized = async () => {
-      if (window.electron) {
-        const maximized = await window.electron.isMaximized();
-        setIsMaximized(maximized);
-      }
-    };
-    checkMaximized();
-    const interval = setInterval(checkMaximized, 500);
-    return () => clearInterval(interval);
-  }, []);
-
-  const handleMinimize = async () => {
-    if (window.electron) {
-      await window.electron.minimize();
-    }
-  };
-
-  const handleMaximize = async () => {
-    if (window.electron) {
-      await window.electron.maximize();
-      const maximized = await window.electron.isMaximized();
-      setIsMaximized(maximized);
-    }
-  };
-
-  const handleClose = async () => {
-    if (window.electron) {
-      await window.electron.close();
-    }
-  };
-
   const hasActiveFilters = 
     searchQuery || 
     filters.status !== 'All' || 
@@ -448,44 +404,12 @@ export function Dashboard() {
               </div>
               <div className="flex items-center gap-2">
                 <h1 className="text-lg font-bold text-white">Ark</h1>
-                <span className="text-xs text-white/50">v1.0.12</span>
+                <span className="text-xs text-white/50">v{APP_VERSION}</span>
               </div>
             </div>
             
-            {/* macOS Window Controls */}
-            <div className="flex items-center gap-2 no-drag">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 rounded-full bg-gray-700/80 hover:bg-gray-600 p-0 transition-colors"
-                onClick={handleClose}
-                aria-label="Close window"
-              >
-                <X className="h-3 w-3 text-white pointer-events-none" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 rounded-full bg-gray-700/80 hover:bg-gray-600 p-0 transition-colors"
-                onClick={handleMinimize}
-                aria-label="Minimize window"
-              >
-                <Minus className="h-3 w-3 text-white pointer-events-none" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 rounded-full bg-gray-700/80 hover:bg-gray-600 p-0 transition-colors"
-                onClick={handleMaximize}
-                aria-label={isMaximized ? 'Restore window' : 'Maximize window'}
-              >
-                {isMaximized ? (
-                  <Maximize2 className="h-2.5 w-2.5 text-white pointer-events-none" />
-                ) : (
-                  <Square className="h-3 w-3 text-white pointer-events-none" />
-                )}
-              </Button>
-            </div>
+            {/* Window Controls */}
+            <WindowControls />
           </div>
         </div>
       </header>
@@ -748,8 +672,10 @@ export function Dashboard() {
                       onEdit={() => handleEdit(game)}
                       onDelete={() => handleDeleteClick(game)}
                       isInLibrary={game.isInLibrary}
+                      isInstalled={game.steamAppId ? isInstalled(game.steamAppId) : false}
                       onAddToLibrary={() => handleAddToLibrary(game)}
                       onRemoveFromLibrary={() => handleDeleteClick(game)}
+                      hideLibraryBadge={viewMode === 'library'}
                     />
                   </div>
                 );

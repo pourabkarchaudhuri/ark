@@ -436,10 +436,10 @@ If the response needs improvement, reply with: IMPROVE: [your improved version]`
 }
 
 /**
- * Call Ollama as a fallback when Gemini quota is exceeded
+ * Process a message using Ollama (main provider)
  * Supports streaming for real-time response updates
  */
-async function callOllamaFallback(
+async function processWithOllama(
   userMessage: string,
   gameContext?: GameContext,
   libraryData?: LibraryEntry[],
@@ -447,11 +447,7 @@ async function callOllamaFallback(
 ): Promise<{ content: string; model: string }> {
   const ollamaSettings = settingsStore.getOllamaSettings();
   
-  if (!ollamaSettings.enabled) {
-    throw new Error('Ollama fallback is disabled');
-  }
-  
-  console.log(`[AI Chat] Falling back to Ollama at ${ollamaSettings.url}`);
+  console.log(`[AI Chat] Using Ollama at ${ollamaSettings.url}`);
   
   // Build a simple prompt for Ollama (without tool support)
   let systemPrompt = `You are a helpful gaming assistant. Be concise and helpful.`;
@@ -576,7 +572,11 @@ async function callOllamaFallback(
     
     req.on('error', (e) => {
       console.error('[AI Chat] Ollama request error:', e);
-      reject(new Error(`Ollama connection failed: ${e.message}. Make sure Ollama is running.`));
+      const ollamaSettings = settingsStore.getOllamaSettings();
+      reject(new Error(
+        `Could not connect to Ollama at ${ollamaSettings.url}. ` +
+        `Please ensure Ollama is running, or enable "Use Gemini Instead" in Settings if you have a Google AI API key.`
+      ));
     });
     
     // Set socket timeout after request is created (3 minutes for streaming LLM response)
@@ -591,7 +591,196 @@ async function callOllamaFallback(
 }
 
 /**
+ * Process a message using Gemini (when enabled via toggle)
+ * Full tool support with iterative tool calling
+ */
+async function processWithGemini(
+  userMessage: string,
+  gameContext?: GameContext,
+  libraryData?: LibraryEntry[],
+  _onStreamChunk?: (chunk: string, fullContent: string) => void // Gemini doesn't use streaming currently
+): Promise<{ content: string; toolsUsed: string[]; actions: LibraryAction[]; model: string }> {
+  console.log('[AI Chat] Using Gemini with full tool support');
+  
+  // Get conversation history
+  const conversation = chatStore.getActiveConversation();
+  const historyMessages = conversation?.messages || [];
+  
+  // Build messages array
+  const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
+    new SystemMessage(SYSTEM_PROMPT),
+  ];
+  
+  // Add game context if provided
+  if (gameContext) {
+    messages.push(new SystemMessage(
+      `The user is currently viewing the game: "${gameContext.name}" (Steam App ID: ${gameContext.appId}). ` +
+      `When they ask questions without specifying a game, they're likely asking about this game.`
+    ));
+    
+    chainOfThought.push({
+      type: 'thinking',
+      content: `Game context provided: ${gameContext.name} (ID: ${gameContext.appId})`,
+      timestamp: new Date(),
+    });
+  }
+  
+  if (libraryData && libraryData.length > 0) {
+    chainOfThought.push({
+      type: 'thinking',
+      content: `User library contains ${libraryData.length} games`,
+      timestamp: new Date(),
+    });
+  }
+  
+  // Add conversation history (last 10 messages for context)
+  const recentHistory = historyMessages.slice(-10);
+  for (const msg of recentHistory) {
+    if (msg.role === 'user') {
+      messages.push(new HumanMessage(msg.content));
+    } else if (msg.role === 'assistant') {
+      messages.push(new AIMessage(msg.content));
+    }
+  }
+  
+  // Add the current user message
+  messages.push(new HumanMessage(userMessage));
+  
+  const toolsUsed: string[] = [];
+  
+  // First call - may include tool calls
+  const modelWithTools = getModelWithTools();
+  let response = await modelWithTools.invoke(messages);
+  
+  // Handle tool calls iteratively
+  let iterations = 0;
+  const maxIterations = 5;
+  
+  while (response.tool_calls && response.tool_calls.length > 0 && iterations < maxIterations) {
+    iterations++;
+    console.log(`[AI Chat] Tool calls iteration ${iterations}:`, response.tool_calls.map(tc => tc.name));
+    
+    // Add AI response to messages
+    messages.push(response);
+    
+    // Execute each tool call
+    for (const toolCall of response.tool_calls) {
+      const toolName = toolCall.name;
+      const args = toolCall.args as Record<string, unknown>;
+      toolsUsed.push(toolName);
+      
+      // Log tool call to chain of thought
+      chainOfThought.push({
+        type: 'tool_call',
+        content: `Calling tool: ${toolName}`,
+        toolName,
+        toolArgs: args,
+        timestamp: new Date(),
+      });
+      
+      try {
+        let result: string = '';
+        
+        // Execute the appropriate tool based on name
+        switch (toolName) {
+          case 'searchSteamGames':
+            result = await searchGamesTool.invoke(args as { query: string; limit?: number });
+            break;
+          case 'getGameDetails':
+            result = await getGameDetailsTool.invoke(args as { appId: number });
+            break;
+          case 'getLibraryGames':
+            result = await getLibraryGamesTool.invoke({});
+            break;
+          case 'addGameToLibrary':
+            result = await addToLibraryTool.invoke(args as { appId: number; status?: string });
+            break;
+          case 'removeGameFromLibrary':
+            result = await removeFromLibraryTool.invoke(args as { appId: number });
+            break;
+          case 'getGameRecommendations':
+            result = await getRecommendationsTool.invoke(args as { limit?: number });
+            break;
+          default:
+            result = `Unknown tool: ${toolName}`;
+        }
+        
+        console.log(`[AI Chat] Tool ${toolName} result:`, result.substring(0, 100));
+        
+        // Log tool result to chain of thought
+        chainOfThought.push({
+          type: 'tool_result',
+          content: `Tool ${toolName} completed successfully`,
+          toolName,
+          toolResult: result.length > 500 ? result.substring(0, 500) + '...' : result,
+          timestamp: new Date(),
+        });
+        
+        // Add tool result message
+        messages.push(new ToolMessage({
+          content: result,
+          tool_call_id: toolCall.id || '',
+        }));
+      } catch (error) {
+        console.error(`[AI Chat] Tool ${toolName} error:`, error);
+        
+        // Log error to chain of thought
+        chainOfThought.push({
+          type: 'tool_result',
+          content: `Tool ${toolName} failed: ${error}`,
+          toolName,
+          toolResult: `Error: ${error}`,
+          timestamp: new Date(),
+        });
+        
+        messages.push(new ToolMessage({
+          content: `Error executing tool: ${error}`,
+          tool_call_id: toolCall.id || '',
+        }));
+      }
+    }
+    
+    // Get next response
+    response = await modelWithTools.invoke(messages);
+  }
+  
+  // Extract the final text content
+  let content = typeof response.content === 'string' 
+    ? response.content 
+    : Array.isArray(response.content)
+      ? response.content.map(c => typeof c === 'string' ? c : (c as { text?: string }).text || '').join('')
+      : '';
+  
+  // Run validation agent
+  chainOfThought.push({
+    type: 'validation',
+    content: 'Running validation agent to check response quality...',
+    timestamp: new Date(),
+  });
+  
+  const validation = await validateResponse(userMessage, content);
+  if (!validation.isValid && validation.improvedResponse) {
+    console.log('[AI Chat] Response improved by validation agent');
+    chainOfThought.push({
+      type: 'validation',
+      content: 'Response was improved by validation agent',
+      timestamp: new Date(),
+    });
+    content = validation.improvedResponse;
+  } else {
+    chainOfThought.push({
+      type: 'validation',
+      content: 'Response passed validation',
+      timestamp: new Date(),
+    });
+  }
+  
+  return { content, toolsUsed, actions: pendingActions, model: 'Gemini 2.5 Flash' };
+}
+
+/**
  * Process a chat message and return the AI response
+ * Uses Ollama by default, or Gemini if explicitly enabled in settings
  */
 export async function processMessage(
   userMessage: string,
@@ -613,232 +802,51 @@ export async function processMessage(
     timestamp: new Date(),
   });
   
-  if (gameContext) {
-    chainOfThought.push({
-      type: 'thinking',
-      content: `Game context provided: ${gameContext.name} (ID: ${gameContext.appId})`,
-      timestamp: new Date(),
-    });
-  }
+  // Check which provider to use
+  const useGemini = settingsStore.shouldUseGemini();
   
-  if (libraryData && libraryData.length > 0) {
-    chainOfThought.push({
-      type: 'thinking',
-      content: `User library contains ${libraryData.length} games`,
-      timestamp: new Date(),
-    });
-  }
-  
-  // Get conversation history
-  const conversation = chatStore.getActiveConversation();
-  const historyMessages = conversation?.messages || [];
-  
-  // Build messages array
-  const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
-    new SystemMessage(SYSTEM_PROMPT),
-  ];
-  
-  // Add game context if provided
-  if (gameContext) {
-    messages.push(new SystemMessage(
-      `The user is currently viewing the game: "${gameContext.name}" (Steam App ID: ${gameContext.appId}). ` +
-      `When they ask questions without specifying a game, they're likely asking about this game.`
-    ));
-  }
-  
-  // Add conversation history (last 10 messages for context)
-  const recentHistory = historyMessages.slice(-10);
-  for (const msg of recentHistory) {
-    if (msg.role === 'user') {
-      messages.push(new HumanMessage(msg.content));
-    } else if (msg.role === 'assistant') {
-      messages.push(new AIMessage(msg.content));
-    }
-  }
-  
-  // Add the current user message
-  messages.push(new HumanMessage(userMessage));
-  
-  const toolsUsed: string[] = [];
+  chainOfThought.push({
+    type: 'thinking',
+    content: useGemini ? 'Using Gemini API (enabled in settings)' : 'Using Ollama (default provider)',
+    timestamp: new Date(),
+  });
   
   try {
-    // First call - may include tool calls
-    const modelWithTools = getModelWithTools();
-    let response = await modelWithTools.invoke(messages);
-    
-    // Handle tool calls iteratively
-    let iterations = 0;
-    const maxIterations = 5;
-    
-    while (response.tool_calls && response.tool_calls.length > 0 && iterations < maxIterations) {
-      iterations++;
-      console.log(`[AI Chat] Tool calls iteration ${iterations}:`, response.tool_calls.map(tc => tc.name));
-      
-      // Add AI response to messages
-      messages.push(response);
-      
-      // Execute each tool call
-      for (const toolCall of response.tool_calls) {
-        const toolName = toolCall.name;
-        const args = toolCall.args as Record<string, unknown>;
-        toolsUsed.push(toolName);
-        
-        // Log tool call to chain of thought
-        chainOfThought.push({
-          type: 'tool_call',
-          content: `Calling tool: ${toolName}`,
-          toolName,
-          toolArgs: args,
-          timestamp: new Date(),
-        });
-        
-        try {
-          let result: string = '';
-          
-          // Execute the appropriate tool based on name
-          switch (toolName) {
-            case 'searchSteamGames':
-              result = await searchGamesTool.invoke(args as { query: string; limit?: number });
-              break;
-            case 'getGameDetails':
-              result = await getGameDetailsTool.invoke(args as { appId: number });
-              break;
-            case 'getLibraryGames':
-              result = await getLibraryGamesTool.invoke({});
-              break;
-            case 'addGameToLibrary':
-              result = await addToLibraryTool.invoke(args as { appId: number; status?: string });
-              break;
-            case 'removeGameFromLibrary':
-              result = await removeFromLibraryTool.invoke(args as { appId: number });
-              break;
-            default:
-              result = `Unknown tool: ${toolName}`;
-          }
-          
-          console.log(`[AI Chat] Tool ${toolName} result:`, result.substring(0, 100));
-          
-          // Log tool result to chain of thought
-          chainOfThought.push({
-            type: 'tool_result',
-            content: `Tool ${toolName} completed successfully`,
-            toolName,
-            toolResult: result.length > 500 ? result.substring(0, 500) + '...' : result,
-            timestamp: new Date(),
-          });
-          
-          // Add tool result message
-          messages.push(new ToolMessage({
-            content: result,
-            tool_call_id: toolCall.id || '',
-          }));
-        } catch (error) {
-          console.error(`[AI Chat] Tool ${toolName} error:`, error);
-          
-          // Log error to chain of thought
-          chainOfThought.push({
-            type: 'tool_result',
-            content: `Tool ${toolName} failed: ${error}`,
-            toolName,
-            toolResult: `Error: ${error}`,
-            timestamp: new Date(),
-          });
-          
-          messages.push(new ToolMessage({
-            content: `Error executing tool: ${error}`,
-            tool_call_id: toolCall.id || '',
-          }));
-        }
-      }
-      
-      // Get next response
-      response = await modelWithTools.invoke(messages);
-    }
-    
-    // Extract the final text content
-    let content = typeof response.content === 'string' 
-      ? response.content 
-      : Array.isArray(response.content)
-        ? response.content.map(c => typeof c === 'string' ? c : (c as { text?: string }).text || '').join('')
-        : '';
-    
-    // Run validation agent
-    chainOfThought.push({
-      type: 'validation',
-      content: 'Running validation agent to check response quality...',
-      timestamp: new Date(),
-    });
-    
-    const validation = await validateResponse(userMessage, content);
-    if (!validation.isValid && validation.improvedResponse) {
-      console.log('[AI Chat] Response improved by validation agent');
-      chainOfThought.push({
-        type: 'validation',
-        content: 'Response was improved by validation agent',
-        timestamp: new Date(),
-      });
-      content = validation.improvedResponse;
-    } else {
-      chainOfThought.push({
-        type: 'validation',
-        content: 'Response passed validation',
-        timestamp: new Date(),
-      });
-    }
-    
-    // Add final thinking step
-    chainOfThought.push({
-      type: 'thinking',
-      content: `Generated response with ${content.length} characters, used ${toolsUsed.length} tools, ${pendingActions.length} library actions queued`,
-      timestamp: new Date(),
-    });
-    
-    console.log(`[AI Chat] Response generated (${content.length} chars, ${toolsUsed.length} tools used, ${pendingActions.length} actions)`);
-    
-    return { content, toolsUsed, actions: pendingActions, chainOfThought, model: 'Gemini 2.5 Flash' };
-  } catch (error) {
-    console.error('[AI Chat] Error processing message:', error);
-    
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    
-    // Check if this is a quota exceeded error - try Ollama fallback
-    if (errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('Too Many Requests')) {
-      console.log('[AI Chat] Quota exceeded, trying Ollama fallback...');
+    if (useGemini) {
+      // Use Gemini with full tool support
+      const result = await processWithGemini(userMessage, gameContext, libraryData, onStreamChunk);
       
       chainOfThought.push({
         type: 'thinking',
-        content: 'Gemini quota exceeded, falling back to Ollama...',
+        content: `Generated response with ${result.content.length} characters, used ${result.toolsUsed.length} tools, ${result.actions.length} library actions queued`,
         timestamp: new Date(),
       });
       
-      try {
-        const ollamaResponse = await callOllamaFallback(userMessage, gameContext, libraryData, onStreamChunk);
-        
-        chainOfThought.push({
-          type: 'thinking',
-          content: `Ollama responded with ${ollamaResponse.content.length} characters`,
-          timestamp: new Date(),
-        });
-        
-        return {
-          content: ollamaResponse.content,
-          toolsUsed: [],
-          actions: [],
-          chainOfThought,
-          model: ollamaResponse.model,
-        };
-      } catch (ollamaError) {
-        console.error('[AI Chat] Ollama fallback also failed:', ollamaError);
-        
-        chainOfThought.push({
-          type: 'thinking',
-          content: `Ollama fallback also failed: ${ollamaError}`,
-          timestamp: new Date(),
-        });
-        
-        throw new Error(`Gemini quota exceeded and Ollama fallback failed. Please try again later or check your Ollama configuration.`);
-      }
+      console.log(`[AI Chat] Response generated (${result.content.length} chars, ${result.toolsUsed.length} tools used, ${result.actions.length} actions)`);
+      
+      return { ...result, chainOfThought };
+    } else {
+      // Use Ollama as main provider
+      const ollamaResponse = await processWithOllama(userMessage, gameContext, libraryData, onStreamChunk);
+      
+      chainOfThought.push({
+        type: 'thinking',
+        content: `Ollama responded with ${ollamaResponse.content.length} characters`,
+        timestamp: new Date(),
+      });
+      
+      console.log(`[AI Chat] Response generated (${ollamaResponse.content.length} chars) using ${ollamaResponse.model}`);
+      
+      return {
+        content: ollamaResponse.content,
+        toolsUsed: [],
+        actions: [],
+        chainOfThought,
+        model: ollamaResponse.model,
+      };
     }
+  } catch (error) {
+    console.error('[AI Chat] Error processing message:', error);
     
     // Add error to chain of thought
     chainOfThought.push({

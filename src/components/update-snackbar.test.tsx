@@ -4,10 +4,10 @@ import { UpdateSnackbar } from './update-snackbar';
 
 // Mock the window.updater API
 const mockUpdater = {
-  checkForUpdates: vi.fn(),
-  downloadUpdate: vi.fn(),
-  installUpdate: vi.fn(),
-  getVersion: vi.fn(),
+  checkForUpdates: vi.fn().mockResolvedValue({ updateAvailable: false }),
+  downloadUpdate: vi.fn().mockResolvedValue(undefined),
+  installUpdate: vi.fn().mockResolvedValue(undefined),
+  getVersion: vi.fn().mockResolvedValue('1.0.0'),
   onChecking: vi.fn(),
   onUpdateAvailable: vi.fn(),
   onUpdateNotAvailable: vi.fn(),

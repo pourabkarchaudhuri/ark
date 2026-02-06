@@ -1,4 +1,4 @@
-import { memo, useState, useCallback, useMemo } from 'react';
+import { memo, useState, useCallback, useMemo, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { Game } from '@/types/game';
 import { Badge } from '@/components/ui/badge';
@@ -16,6 +16,8 @@ import {
   Heart,
   MoreVertical,
   Library,
+  Plus,
+  HardDrive,
 } from 'lucide-react';
 import { FaWindows, FaApple, FaLinux } from 'react-icons/fa';
 import { cn } from '@/lib/utils';
@@ -26,8 +28,10 @@ interface GameCardProps {
   onDelete: () => void;
   onClick?: () => void;
   isInLibrary?: boolean;
+  isInstalled?: boolean;
   onAddToLibrary?: () => void;
   onRemoveFromLibrary?: () => void;
+  hideLibraryBadge?: boolean; // Hide heart button and library badge (e.g., when already in library view)
 }
 
 // Steam platforms (Steam is primarily PC)
@@ -123,17 +127,41 @@ function GameCardComponent({
   onDelete, 
   onClick, 
   isInLibrary,
+  isInstalled,
   onAddToLibrary,
   onRemoveFromLibrary,
+  hideLibraryBadge,
 }: GameCardProps) {
   const [, navigate] = useLocation();
   const [imageError, setImageError] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const [fallbackAttempt, setFallbackAttempt] = useState(0); // 0 = cover, 1 = header, 2 = capsule
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
 
   // Check library status from game prop or explicit prop
   const inLibrary = isInLibrary !== undefined ? isInLibrary : game.isInLibrary;
+  
+  // Compute whether library badge should be shown (memoized for performance)
+  const showLibraryBadge = useMemo(() => inLibrary && !hideLibraryBadge, [inLibrary, hideLibraryBadge]);
+  
+  // Compute rating badge position based on visible badges (memoized for performance)
+  const ratingBadgePosition = useMemo(() => {
+    if (showLibraryBadge && isInstalled) return "top-[4.5rem]";
+    if (showLibraryBadge || isInstalled) return "top-9";
+    return "top-2";
+  }, [showLibraryBadge, isInstalled]);
+
+  // Handle right-click context menu
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Store the position for the menu
+    setMenuPosition({ x: e.clientX, y: e.clientY });
+    setMenuOpen(true);
+  }, []);
 
   const handleCardClick = () => {
     // Navigate to game details page if we have a Steam App ID
@@ -209,10 +237,12 @@ function GameCardComponent({
 
   return (
     <div 
+      ref={cardRef}
       className="group relative flex flex-col rounded-xl overflow-hidden bg-card/30 hover:bg-card/50 border border-transparent hover:border-white/10 transition-all duration-300 w-full cursor-pointer"
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       onClick={handleCardClick}
+      onContextMenu={handleContextMenu}
     >
       {/* Cover Image Container - 3:4 aspect ratio like game covers */}
       <div 
@@ -259,26 +289,30 @@ function GameCardComponent({
         )}
         
         {/* Library Heart Button - Top Left (visible on hover or if in library) - shifted right if rank badge is present */}
-        <button 
-          onClick={handleHeartClick}
-          className={cn(
-            "absolute top-2 p-1.5 rounded-full bg-black/50 backdrop-blur-sm transition-all duration-200 hover:bg-black/70 z-10",
-            game.rank ? "left-12" : "left-2",
-            inLibrary ? "opacity-100" : isHovered ? "opacity-100" : "opacity-0"
-          )}
-          aria-label={inLibrary ? "Remove from library" : "Add to library"}
-        >
-          <Heart 
+        {/* Hidden when hideLibraryBadge is true (e.g., in Library view where all games are already in library) */}
+        {!hideLibraryBadge && (
+          <button 
+            onClick={handleHeartClick}
             className={cn(
-              "h-4 w-4 transition-colors",
-              inLibrary ? "fill-white text-white" : "text-white/70"
-            )} 
-          />
-        </button>
+              "absolute top-2 p-1.5 rounded-full bg-black/50 backdrop-blur-sm transition-all duration-200 hover:bg-black/70 z-10",
+              game.rank ? "left-12" : "left-2",
+              inLibrary ? "opacity-100" : isHovered ? "opacity-100" : "opacity-0"
+            )}
+            aria-label={inLibrary ? "Remove from library" : "Add to library"}
+          >
+            <Heart 
+              className={cn(
+                "h-4 w-4 transition-colors",
+                inLibrary ? "fill-white text-white" : "text-white/70"
+              )} 
+            />
+          </button>
+        )}
 
-        {/* In Library / Custom Badge */}
-        {inLibrary && (
-          <div className="absolute top-2 right-2 z-10">
+        {/* Top Right Badges (Library, Installed) */}
+        <div className="absolute top-2 right-2 z-10 flex flex-col gap-1 items-end">
+          {/* In Library / Custom Badge - Hidden when hideLibraryBadge is true */}
+          {showLibraryBadge && (
             <Badge className={cn(
               "text-white border-none text-[10px] gap-1",
               game.isCustom ? "bg-amber-500/80" : "bg-fuchsia-500/80"
@@ -286,15 +320,23 @@ function GameCardComponent({
               <Library className="h-3 w-3" />
               {game.isCustom ? 'Custom' : 'Library'}
             </Badge>
-          </div>
-        )}
+          )}
+          
+          {/* Installed Badge */}
+          {isInstalled && (
+            <Badge className="text-white border-none text-[10px] gap-1 bg-green-600/80">
+              <HardDrive className="h-3 w-3" />
+              Installed
+            </Badge>
+          )}
+        </div>
         
-        {/* Rating Badge (visible on hover only, positioned below library badge) */}
+        {/* Rating Badge (visible on hover only, positioned below other badges) */}
         {game.metacriticScore !== null && game.metacriticScore !== undefined && game.metacriticScore > 0 && (
           <div 
             className={cn(
-              "absolute px-2 py-1 rounded bg-black/70 backdrop-blur-sm text-xs font-bold shadow-lg transition-opacity duration-200",
-              inLibrary ? "top-9 right-2" : "top-2 right-2",
+              "absolute px-2 py-1 rounded bg-black/70 backdrop-blur-sm text-xs font-bold shadow-lg transition-opacity duration-200 right-2",
+              ratingBadgePosition,
               isHovered ? "opacity-100" : "opacity-0"
             )}
             aria-label={`Rating: ${game.metacriticScore}`}
@@ -328,37 +370,66 @@ function GameCardComponent({
               </p>
             )}
           </div>
-          {/* Ellipsis Menu - Only show for library games */}
-          {inLibrary && (
-            <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-8 w-8 hover:bg-transparent"
-                    aria-label={`More options for ${game.title}`}
-                  >
-                    <MoreVertical className="h-4 w-4 pointer-events-none" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="bg-card border-white/10">
-                  <DropdownMenuItem onClick={onEdit} className="cursor-pointer">
-                    <Edit className="h-4 w-4 mr-2" />
-                    Edit Entry
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
+          {/* Ellipsis Menu - Always available via right-click, button only for library games */}
+          <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+            <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className={cn(
+                    "h-8 w-8 hover:bg-transparent",
+                    !inLibrary && "hidden" // Hide button for non-library games (right-click still works)
+                  )}
+                  aria-label={`More options for ${game.title}`}
+                >
+                  <MoreVertical className="h-4 w-4 pointer-events-none" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent 
+                align="end" 
+                className="bg-card border-white/10"
+                style={menuPosition ? {
+                  position: 'fixed',
+                  left: menuPosition.x,
+                  top: menuPosition.y,
+                } : undefined}
+                onCloseAutoFocus={() => setMenuPosition(null)}
+              >
+                {inLibrary ? (
+                  // Library game options
+                  <>
+                    <DropdownMenuItem onClick={onEdit} className="cursor-pointer">
+                      <Edit className="h-4 w-4 mr-2" />
+                      Edit Entry
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem 
+                      onClick={onDelete} 
+                      className="cursor-pointer text-red-400 focus:text-red-300 focus:bg-red-500/10"
+                    >
+                      <Trash2 className="h-4 w-4 mr-2" />
+                      Remove from Library
+                    </DropdownMenuItem>
+                  </>
+                ) : (
+                  // Non-library game options
                   <DropdownMenuItem 
-                    onClick={onDelete} 
-                    className="cursor-pointer text-red-400 focus:text-red-300 focus:bg-red-500/10"
+                    onClick={() => {
+                      if (onAddToLibrary) {
+                        onAddToLibrary();
+                      }
+                      setMenuOpen(false);
+                    }} 
+                    className="cursor-pointer"
                   >
-                    <Trash2 className="h-4 w-4 mr-2" />
-                    Remove from Library
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add to Library
                   </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          )}
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
         
         {/* Platform Icons and Status Badge Row */}
@@ -399,6 +470,9 @@ function GameCardComponent({
 }
 
 // Memoize to prevent re-renders when parent re-renders but props haven't changed
+// Note: We don't compare callback functions (onEdit, onDelete, etc.) since they are
+// inline arrow functions that capture the game object - comparing them would always fail.
+// The game data and boolean props are sufficient for determining if re-render is needed.
 export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
   return (
     prevProps.game.id === nextProps.game.id &&
@@ -406,11 +480,9 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.game.releaseDate === nextProps.game.releaseDate &&
     prevProps.game.rank === nextProps.game.rank &&
     prevProps.game.isInLibrary === nextProps.game.isInLibrary &&
-    prevProps.onEdit === nextProps.onEdit &&
-    prevProps.onDelete === nextProps.onDelete &&
-    prevProps.onClick === nextProps.onClick &&
+    prevProps.game.status === nextProps.game.status &&
     prevProps.isInLibrary === nextProps.isInLibrary &&
-    prevProps.onAddToLibrary === nextProps.onAddToLibrary &&
-    prevProps.onRemoveFromLibrary === nextProps.onRemoveFromLibrary
+    prevProps.isInstalled === nextProps.isInstalled &&
+    prevProps.hideLibraryBadge === nextProps.hideLibraryBadge
   );
 });

@@ -26,8 +26,8 @@ export default defineConfig({
     ['list'],
   ],
   
-  /* Global timeout for each test - longer for Electron */
-  timeout: 60 * 1000,
+  /* Global timeout for each test - longer for Electron (includes beforeAll window wait) */
+  timeout: 90 * 1000,
   
   /* Expect timeout */
   expect: {

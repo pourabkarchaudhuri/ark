@@ -1,14 +1,18 @@
 import pkg from 'electron-updater';
 const { autoUpdater } = pkg;
 import type { UpdateInfo, ProgressInfo } from 'electron-updater';
-import { BrowserWindow, ipcMain } from 'electron';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const electron = require('electron');
+import type { BrowserWindow as BrowserWindowType } from 'electron';
+const { BrowserWindow, ipcMain } = electron;
 
-let mainWindow: BrowserWindow | null = null;
+let mainWindow: BrowserWindowType | null = null;
 
 /**
  * Initialize the auto-updater with a reference to the main window
  */
-export function initAutoUpdater(window: BrowserWindow) {
+export function initAutoUpdater(window: BrowserWindowType) {
   mainWindow = window;
 
   // Configure auto-updater

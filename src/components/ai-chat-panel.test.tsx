@@ -47,7 +47,7 @@ describe('AIChatPanel', () => {
     render(<AIChatPanel isOpen={true} onClose={() => {}} />);
     
     expect(screen.getByText('AI Assistant')).toBeInTheDocument();
-    expect(screen.getByText('Gemini 2.5 Flash')).toBeInTheDocument();
+    // Model indicator is shown per-message, not in header
   });
 
   it('does not render when closed', () => {

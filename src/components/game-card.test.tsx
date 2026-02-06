@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { GameCard } from './game-card';
 import { Game } from '@/types/game';
 
@@ -193,7 +193,7 @@ describe('GameCard', () => {
       expect(screen.getByLabelText('More options for Test Game')).toBeInTheDocument();
     });
 
-    it('does not render more options button for non-library games', () => {
+    it('hides more options button for non-library games (but context menu works)', () => {
       const nonLibraryGame = { ...mockGame, isInLibrary: false };
       render(
         <GameCard
@@ -203,7 +203,37 @@ describe('GameCard', () => {
           isInLibrary={false}
         />
       );
-      expect(screen.queryByLabelText('More options for Test Game')).not.toBeInTheDocument();
+      // Button exists but is hidden (right-click context menu still available)
+      const button = screen.queryByLabelText('More options for Test Game');
+      expect(button).toBeInTheDocument();
+      expect(button).toHaveClass('hidden');
+    });
+
+    it('opens context menu with "Add to Library" on right-click for non-library games', async () => {
+      const nonLibraryGame = { ...mockGame, isInLibrary: false };
+      const onAddToLibrary = vi.fn();
+      render(
+        <GameCard
+          game={nonLibraryGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          isInLibrary={false}
+          onAddToLibrary={onAddToLibrary}
+        />
+      );
+      
+      // Find the card and right-click
+      const card = screen.getByText('Test Game').closest('.group');
+      expect(card).toBeInTheDocument();
+      
+      if (card) {
+        fireEvent.contextMenu(card);
+        
+        // Menu should appear with "Add to Library" option
+        await waitFor(() => {
+          expect(screen.getByText('Add to Library')).toBeInTheDocument();
+        });
+      }
     });
   });
 
@@ -246,6 +276,115 @@ describe('GameCard', () => {
         />
       );
       expect(screen.getByRole('button', { name: /remove from library/i })).toBeInTheDocument();
+    });
+  });
+
+  describe('hideLibraryBadge prop', () => {
+    it('hides library badge when hideLibraryBadge is true', () => {
+      render(
+        <GameCard
+          game={mockGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          isInLibrary={true}
+          hideLibraryBadge={true}
+        />
+      );
+      expect(screen.queryByText('Library')).not.toBeInTheDocument();
+    });
+
+    it('hides heart button when hideLibraryBadge is true', () => {
+      render(
+        <GameCard
+          game={mockGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          isInLibrary={true}
+          hideLibraryBadge={true}
+        />
+      );
+      expect(screen.queryByLabelText('Remove from library')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Add to library')).not.toBeInTheDocument();
+    });
+
+    it('shows library badge when hideLibraryBadge is false', () => {
+      render(
+        <GameCard
+          game={mockGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          isInLibrary={true}
+          hideLibraryBadge={false}
+        />
+      );
+      expect(screen.getByText('Library')).toBeInTheDocument();
+    });
+
+    it('shows heart button when hideLibraryBadge is false', () => {
+      render(
+        <GameCard
+          game={mockGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          isInLibrary={true}
+          hideLibraryBadge={false}
+        />
+      );
+      expect(screen.getByLabelText('Remove from library')).toBeInTheDocument();
+    });
+
+    it('still shows Installed badge when hideLibraryBadge is true', () => {
+      render(
+        <GameCard
+          game={mockGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          isInLibrary={true}
+          isInstalled={true}
+          hideLibraryBadge={true}
+        />
+      );
+      expect(screen.queryByText('Library')).not.toBeInTheDocument();
+      expect(screen.getByText('Installed')).toBeInTheDocument();
+    });
+
+    it('still shows status badge when hideLibraryBadge is true', () => {
+      render(
+        <GameCard
+          game={mockGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          isInLibrary={true}
+          hideLibraryBadge={true}
+        />
+      );
+      // Status badge should still be visible (Backlog for Want to Play)
+      expect(screen.getByText('Backlog')).toBeInTheDocument();
+    });
+
+    it('still allows context menu (right-click) when hideLibraryBadge is true', async () => {
+      const onEdit = vi.fn();
+      render(
+        <GameCard
+          game={mockGame}
+          onEdit={onEdit}
+          onDelete={() => {}}
+          isInLibrary={true}
+          hideLibraryBadge={true}
+        />
+      );
+      
+      const card = screen.getByText('Test Game').closest('.group');
+      expect(card).toBeInTheDocument();
+      
+      if (card) {
+        fireEvent.contextMenu(card);
+        
+        // Menu should still appear with Edit Entry option (library game)
+        await waitFor(() => {
+          expect(screen.getByText('Edit Entry')).toBeInTheDocument();
+        });
+      }
     });
   });
 

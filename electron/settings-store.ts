@@ -3,7 +3,10 @@
  * Handles persistent storage for application settings including API keys
  */
 
-import { app } from 'electron';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const electron = require('electron');
+const { app } = electron;
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -20,6 +23,7 @@ interface Settings {
     enabled: boolean;
     url: string;
     model: string;
+    useGeminiInstead: boolean; // When true, use Gemini API instead of Ollama
   };
 }
 
@@ -63,6 +67,7 @@ class SettingsStore {
         enabled: true,
         url: 'http://localhost:11434',
         model: 'gemma3:12b',
+        useGeminiInstead: false, // Default: use Ollama as main provider
       },
     };
   }
@@ -127,15 +132,20 @@ class SettingsStore {
   }
 
   // Ollama settings
-  getOllamaSettings(): { enabled: boolean; url: string; model: string } {
-    return this.settings.ollama || {
+  getOllamaSettings(): { enabled: boolean; url: string; model: string; useGeminiInstead: boolean } {
+    const defaults = {
       enabled: true,
       url: 'http://localhost:11434',
       model: 'gemma3:12b',
+      useGeminiInstead: false,
+    };
+    return {
+      ...defaults,
+      ...this.settings.ollama,
     };
   }
 
-  setOllamaSettings(settings: { enabled?: boolean; url?: string; model?: string }): void {
+  setOllamaSettings(settings: { enabled?: boolean; url?: string; model?: string; useGeminiInstead?: boolean }): void {
     this.settings.ollama = {
       ...this.settings.ollama,
       ...settings,
@@ -146,6 +156,11 @@ class SettingsStore {
 
   isOllamaEnabled(): boolean {
     return this.settings.ollama?.enabled ?? true;
+  }
+
+  // Check if Gemini should be used instead of Ollama
+  shouldUseGemini(): boolean {
+    return this.hasGoogleAIKey() && (this.settings.ollama?.useGeminiInstead ?? false);
   }
 }
 

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { steamService } from '@/services/steam-service';
+import { steamService, hasValidDeveloperInfo } from '@/services/steam-service';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { Game, GameFilters, UpdateLibraryEntry, CreateCustomGameEntry, GameStatus } from '@/types/game';
@@ -31,7 +31,8 @@ export function useSteamGames(category: GameCategory = 'all') {
       switch (cat) {
         case 'most-played':
           // Most played games sorted by player count (rank order)
-          fetchedGames = await steamService.getMostPlayedGames(100);
+          // Fetch up to 500 games (Steam Charts typically provides 100-300)
+          fetchedGames = await steamService.getMostPlayedGames(500);
           // Keep original rank order - don't sort by date
           console.log(`[useSteamGames] Fetched ${fetchedGames.length} most-played games (rank order)`);
           if (isMountedRef.current) {
@@ -52,7 +53,8 @@ export function useSteamGames(category: GameCategory = 'all') {
         case 'all':
         default:
           // Fetch most played games and sort by release date for "All Games"
-          fetchedGames = await steamService.getMostPlayedGames(100);
+          // Fetch up to 500 games (Steam Charts typically provides 100-300)
+          fetchedGames = await steamService.getMostPlayedGames(500);
           break;
       }
       
@@ -393,7 +395,9 @@ export function useLibraryGames() {
 
         const results = await Promise.all(gamePromises);
         if (isMounted) {
-          const validGames = results.filter((g): g is Game => g !== null);
+          const withDetails = results.filter((g): g is Game => g !== null);
+          // Do not show cards for games without developer/publisher (e.g. FiveM)
+          const validGames = withDetails.filter(hasValidDeveloperInfo);
           setGames(validGames);
         }
       } catch (err) {

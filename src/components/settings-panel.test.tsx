@@ -12,12 +12,22 @@ const mockSettings = {
   setApiKey: vi.fn(),
   removeApiKey: vi.fn(),
   hasApiKey: vi.fn(),
+  getOllamaSettings: vi.fn(),
+  setOllamaSettings: vi.fn(),
 };
 
 // Setup window mock before each test
 beforeEach(() => {
   vi.clearAllMocks();
   window.settings = mockSettings;
+  
+  // Default Ollama settings
+  mockSettings.getOllamaSettings.mockResolvedValue({
+    enabled: true,
+    url: 'http://localhost:11434',
+    model: 'gemma3:12b',
+    useGeminiInstead: false,
+  });
 });
 
 describe('SettingsPanel', () => {
@@ -71,7 +81,7 @@ describe('SettingsPanel', () => {
     render(<SettingsPanel isOpen={true} onClose={() => {}} />);
 
     await waitFor(() => {
-      expect(screen.getByText('Google AI API Key')).toBeInTheDocument();
+      expect(screen.getByText('Gemini API Key')).toBeInTheDocument();
       expect(screen.getByPlaceholderText(/enter your google ai api key/i)).toBeInTheDocument();
     });
   });
@@ -183,7 +193,9 @@ describe('SettingsPanel', () => {
     render(<SettingsPanel isOpen={true} onClose={() => {}} />);
 
     await waitFor(() => {
-      expect(screen.getByText(/changes save automatically/i)).toBeInTheDocument();
+      // Multiple sections now have auto-save status (API key + Ollama)
+      const statusMessages = screen.getAllByText(/changes save automatically/i);
+      expect(statusMessages.length).toBeGreaterThan(0);
     });
   });
 

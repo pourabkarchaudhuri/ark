@@ -83,11 +83,17 @@ export interface LibraryGameEntry {
   priority: GamePriority;
   publicReviews: string;
   recommendationSource: string;
+  // Progress tracking fields
+  hoursPlayed: number; // Total hours played
+  rating: number; // User rating 1-5 stars (0 = not rated)
   addedAt: Date;
   updatedAt: Date;
 }
 
-export type CreateLibraryEntry = Omit<LibraryGameEntry, 'addedAt' | 'updatedAt'>;
+export type CreateLibraryEntry = Omit<LibraryGameEntry, 'addedAt' | 'updatedAt' | 'hoursPlayed' | 'rating'> & {
+  hoursPlayed?: number;
+  rating?: number;
+};
 export type UpdateLibraryEntry = Partial<Omit<LibraryGameEntry, 'igdbId' | 'addedAt'>>;
 
 // Custom game entry (user-added games not from IGDB)

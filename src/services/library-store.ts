@@ -7,7 +7,7 @@ import {
 } from '@/types/game';
 
 const STORAGE_KEY = 'ark-library-data';
-const STORAGE_VERSION = 3; // Bumped version for Steam migration
+const STORAGE_VERSION = 4; // Bumped version for progress tracking fields
 
 interface StoredData {
   version: number;
@@ -41,6 +41,8 @@ class LibraryStore {
             this.entries.set(id, {
               ...entry,
               gameId: id,
+              hoursPlayed: entry.hoursPlayed ?? 0,
+              rating: entry.rating ?? 0,
               addedAt: new Date(entry.addedAt),
               updatedAt: new Date(entry.updatedAt),
             });
@@ -64,6 +66,16 @@ class LibraryStore {
       if (parsed.version < 2) {
         console.log('Library storage version too old, resetting data');
         return null;
+      }
+
+      // Migrate entries from v3 to v4 (add progress tracking fields)
+      if (parsed.version < 4 && parsed.entries) {
+        parsed.entries = parsed.entries.map(entry => ({
+          ...entry,
+          hoursPlayed: entry.hoursPlayed ?? 0,
+          rating: entry.rating ?? 0,
+        }));
+        parsed.version = 4;
       }
 
       return parsed;
@@ -111,6 +123,8 @@ class LibraryStore {
     const entry: LibraryGameEntry = {
       ...input,
       gameId,
+      hoursPlayed: input.hoursPlayed ?? 0,
+      rating: input.rating ?? 0,
       addedAt: now,
       updatedAt: now,
     };
@@ -258,6 +272,8 @@ class LibraryStore {
           this.entries.set(id, {
             ...entry,
             gameId: id,
+            hoursPlayed: entry.hoursPlayed ?? 0,
+            rating: entry.rating ?? 0,
             addedAt: new Date(entry.addedAt || new Date()),
             updatedAt: new Date(entry.updatedAt || new Date()),
           });
@@ -279,7 +295,9 @@ class LibraryStore {
       a.status === b.status &&
       a.priority === b.priority &&
       a.publicReviews === b.publicReviews &&
-      a.recommendationSource === b.recommendationSource
+      a.recommendationSource === b.recommendationSource &&
+      a.hoursPlayed === b.hoursPlayed &&
+      a.rating === b.rating
     );
   }
 
@@ -311,6 +329,8 @@ class LibraryStore {
         const normalizedEntry: LibraryGameEntry = {
           ...entry,
           gameId: id,
+          hoursPlayed: entry.hoursPlayed ?? 0,
+          rating: entry.rating ?? 0,
           addedAt: new Date(entry.addedAt || new Date()),
           updatedAt: new Date(entry.updatedAt || new Date()),
         };

@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
+import { APP_VERSION } from '@/components/changelog-modal';
 
 // Declare settings API type
 declare global {
@@ -19,8 +20,8 @@ declare global {
       setApiKey: (key: string) => Promise<void>;
       removeApiKey: () => Promise<void>;
       hasApiKey: () => Promise<boolean>;
-      getOllamaSettings: () => Promise<{ enabled: boolean; url: string; model: string }>;
-      setOllamaSettings: (settings: { enabled?: boolean; url?: string; model?: string }) => Promise<void>;
+      getOllamaSettings: () => Promise<{ enabled: boolean; url: string; model: string; useGeminiInstead: boolean }>;
+      setOllamaSettings: (settings: { enabled?: boolean; url?: string; model?: string; useGeminiInstead?: boolean }) => Promise<void>;
     };
   }
 }
@@ -41,10 +42,11 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const initialLoadRef = useRef(true);
   
-  // Ollama fallback state
+  // Ollama settings state (Ollama is main provider)
   const [ollamaEnabled, setOllamaEnabled] = useState(true);
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
+  const [useGeminiInstead, setUseGeminiInstead] = useState(false);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
   
@@ -74,6 +76,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         setOllamaEnabled(ollamaSettings.enabled);
         setOllamaUrl(ollamaSettings.url);
         setOllamaModel(ollamaSettings.model);
+        setUseGeminiInstead(ollamaSettings.useGeminiInstead ?? false);
         
         // Mark initial load complete after fetching
         initialLoadRef.current = false;
@@ -113,6 +116,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
           enabled: ollamaEnabled,
           url: ollamaUrl,
           model: ollamaModel,
+          useGeminiInstead,
         });
         setOllamaSaveStatus('saved');
         setTimeout(() => setOllamaSaveStatus('idle'), 2000);
@@ -120,7 +124,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         console.error('Failed to save Ollama settings:', err);
       }
     }, 800);
-  }, [ollamaEnabled, ollamaUrl, ollamaModel]);
+  }, [ollamaEnabled, ollamaUrl, ollamaModel, useGeminiInstead]);
 
   // Auto-save API key with debounce
   useEffect(() => {
@@ -373,16 +377,17 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <Key className="h-4 w-4 text-fuchsia-400" />
-                  <h3 className="text-sm font-semibold text-white">API Keys</h3>
+                  <h3 className="text-sm font-semibold text-white">Google AI API Key</h3>
+                  <span className="text-xs text-white/40">(Optional)</span>
                 </div>
 
                 {/* Google AI API Key */}
                 <div className="bg-white/5 rounded-lg p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="text-sm font-medium text-white">Google AI API Key</p>
+                      <p className="text-sm font-medium text-white">Gemini API Key</p>
                       <p className="text-xs text-white/40 mt-0.5">
-                        Required for AI Assistant features (Gemini)
+                        Add a key to enable Gemini cloud AI with advanced features
                       </p>
                     </div>
                     {hasExistingKey && (
@@ -476,82 +481,111 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 </div>
               </div>
 
-              {/* Ollama Fallback Section */}
+              {/* Ollama Settings Section (Main AI Provider) */}
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <Bot className="h-4 w-4 text-purple-400" />
-                  <h3 className="text-sm font-semibold text-white">Ollama Fallback</h3>
+                  <h3 className="text-sm font-semibold text-white">AI Assistant (Ollama)</h3>
+                  <span className="text-xs text-purple-400 bg-purple-500/20 px-2 py-0.5 rounded">Main</span>
                 </div>
                 
                 <div className="bg-white/5 rounded-lg p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-white">Enable Ollama Fallback</p>
-                      <p className="text-xs text-white/40 mt-0.5">
-                        Use local Ollama when Gemini quota is exceeded
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => setOllamaEnabled(!ollamaEnabled)}
-                      className={cn(
-                        "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
-                        ollamaEnabled ? "bg-fuchsia-600" : "bg-zinc-700"
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
-                          ollamaEnabled ? "translate-x-6" : "translate-x-1"
-                        )}
-                      />
-                    </button>
+                  <div>
+                    <p className="text-sm font-medium text-white">Local AI with Ollama</p>
+                    <p className="text-xs text-white/40 mt-0.5">
+                      Runs on your computer for privacy. Make sure Ollama is running.
+                    </p>
                   </div>
                   
-                  {ollamaEnabled && (
-                    <>
-                      <div>
-                        <label className="text-xs text-white/60 mb-1 block">Ollama URL</label>
-                        <Input
-                          type="text"
-                          value={ollamaUrl}
-                          onChange={(e) => setOllamaUrl(e.target.value)}
-                          placeholder="http://localhost:11434"
-                          className="bg-white/5 border-white/10 focus:border-fuchsia-500/50"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="text-xs text-white/60 mb-1 block">Model Name</label>
-                        <Input
-                          type="text"
-                          value={ollamaModel}
-                          onChange={(e) => setOllamaModel(e.target.value)}
-                          placeholder="gemma3:12b"
-                          className="bg-white/5 border-white/10 focus:border-fuchsia-500/50"
-                        />
-                      </div>
-                      
-                      <div className="flex items-center gap-2 text-xs">
-                        {ollamaSaveStatus === 'saving' && (
-                          <>
-                            <Loader2 className="h-3 w-3 animate-spin text-fuchsia-400" />
-                            <span className="text-fuchsia-400">Saving...</span>
-                          </>
-                        )}
-                        {ollamaSaveStatus === 'saved' && (
-                          <>
-                            <Check className="h-3 w-3 text-green-400" />
-                            <span className="text-green-400">Saved</span>
-                          </>
-                        )}
-                        {ollamaSaveStatus === 'idle' && (
-                          <span className="text-white/40">Changes save automatically</span>
-                        )}
-                      </div>
-                    </>
-                  )}
+                  <div>
+                    <label className="text-xs text-white/60 mb-1 block">Ollama URL</label>
+                    <Input
+                      type="text"
+                      value={ollamaUrl}
+                      onChange={(e) => setOllamaUrl(e.target.value)}
+                      placeholder="http://localhost:11434"
+                      className="bg-white/5 border-white/10 focus:border-fuchsia-500/50"
+                      disabled={useGeminiInstead}
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="text-xs text-white/60 mb-1 block">Model Name</label>
+                    <Input
+                      type="text"
+                      value={ollamaModel}
+                      onChange={(e) => setOllamaModel(e.target.value)}
+                      placeholder="gemma3:12b"
+                      className="bg-white/5 border-white/10 focus:border-fuchsia-500/50"
+                      disabled={useGeminiInstead}
+                    />
+                  </div>
+                  
+                  <div className="flex items-center gap-2 text-xs">
+                    {ollamaSaveStatus === 'saving' && (
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin text-fuchsia-400" />
+                        <span className="text-fuchsia-400">Saving...</span>
+                      </>
+                    )}
+                    {ollamaSaveStatus === 'saved' && (
+                      <>
+                        <Check className="h-3 w-3 text-green-400" />
+                        <span className="text-green-400">Saved</span>
+                      </>
+                    )}
+                    {ollamaSaveStatus === 'idle' && (
+                      <span className="text-white/40">Changes save automatically</span>
+                    )}
+                  </div>
                 </div>
               </div>
+
+              {/* Use Gemini Instead Toggle - Only show when API key is configured */}
+              {hasExistingKey && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2">
+                    <Key className="h-4 w-4 text-fuchsia-400" />
+                    <h3 className="text-sm font-semibold text-white">Gemini Cloud AI</h3>
+                    {useGeminiInstead && (
+                      <span className="text-xs text-green-400 bg-green-500/20 px-2 py-0.5 rounded">Active</span>
+                    )}
+                  </div>
+                  
+                  <div className="bg-white/5 rounded-lg p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-white">Use Gemini Instead</p>
+                        <p className="text-xs text-white/40 mt-0.5">
+                          Switch to Google Gemini for enhanced features (tools, search)
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => setUseGeminiInstead(!useGeminiInstead)}
+                        className={cn(
+                          "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
+                          useGeminiInstead ? "bg-fuchsia-600" : "bg-zinc-700"
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                            useGeminiInstead ? "translate-x-6" : "translate-x-1"
+                          )}
+                        />
+                      </button>
+                    </div>
+                    
+                    {useGeminiInstead && (
+                      <div className="bg-fuchsia-500/10 border border-fuchsia-500/20 rounded p-2">
+                        <p className="text-xs text-fuchsia-300">
+                          Gemini mode enabled. AI can now search Steam, get game details, and manage your library directly.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Library Data Section */}
               <div className="space-y-4">
@@ -623,12 +657,12 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
               {/* Info Section */}
               <div className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-4">
-                <h4 className="text-sm font-medium text-purple-300 mb-2">About API Keys</h4>
+                <h4 className="text-sm font-medium text-purple-300 mb-2">About AI Providers</h4>
                 <ul className="text-xs text-white/50 space-y-1">
-                  <li>• Your API key is stored securely on your device</li>
-                  <li>• Keys are never sent to any server except Google AI</li>
-                  <li>• You can remove or replace your key at any time</li>
-                  <li>• When Gemini quota is exceeded, Ollama is used as fallback</li>
+                  <li>• <strong>Ollama</strong> runs locally on your computer (default)</li>
+                  <li>• <strong>Gemini</strong> is optional cloud AI with enhanced features</li>
+                  <li>• Gemini can search games, get details, and manage your library</li>
+                  <li>• Your API key is stored securely and encrypted on your device</li>
                 </ul>
               </div>
             </div>
@@ -636,7 +670,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             {/* Footer */}
             <div className="px-4 py-3 border-t border-white/10 text-center">
               <p className="text-xs text-white/30">
-                Ark v1.0 • Made with ❤️
+                Ark v{APP_VERSION} • Made with ❤️
               </p>
             </div>
           </div>

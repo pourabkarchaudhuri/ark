@@ -1,7 +1,10 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const electron = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = electron;
+import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 
 // Handle EPIPE errors globally to prevent crashes when stdout/stderr is closed
 process.stdout.on('error', (err) => {
@@ -17,11 +20,9 @@ import { fetchMetacriticReviews, clearMetacriticCache } from './metacritic-api.j
 import { processMessage, searchGamesForContext, chatStore } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
 import { initAutoUpdater } from './auto-updater.js';
+import { getInstalledGames, getInstalledAppIds, clearInstalledGamesCache } from './installed-games.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-let mainWindow: BrowserWindow | null = null;
+let mainWindow: BrowserWindowType | null = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -98,6 +99,26 @@ ipcMain.handle('window-close', () => {
 
 ipcMain.handle('window-is-maximized', () => {
   return mainWindow ? mainWindow.isMaximized() : false;
+});
+
+// Open external URL in default browser
+ipcMain.handle('shell:openExternal', async (_event, url: string) => {
+  try {
+    // Validate URL to prevent security issues
+    const parsedUrl = new URL(url);
+    const allowedProtocols = ['http:', 'https:', 'mailto:', 'magnet:'];
+    if (!allowedProtocols.includes(parsedUrl.protocol)) {
+      console.warn(`[Shell] Blocked attempt to open URL with disallowed protocol: ${parsedUrl.protocol}`);
+      return { success: false, error: 'Protocol not allowed' };
+    }
+    
+    await shell.openExternal(url);
+    console.log(`[Shell] Opened external URL: ${url}`);
+    return { success: true };
+  } catch (error) {
+    console.error('[Shell] Error opening external URL:', error);
+    return { success: false, error: String(error) };
+  }
 });
 
 // ============================================================================
@@ -554,6 +575,52 @@ ipcMain.handle('dialog:openFile', async (_event, options?: {
   } catch (error) {
     console.error('[Dialog] Error opening file:', error);
     return { success: false, error: String(error) };
+  }
+});
+
+// ============================================================================
+// INSTALLED GAMES IPC HANDLERS
+// ============================================================================
+
+/**
+ * Get all installed games from the system
+ */
+ipcMain.handle('games:getInstalled', async (_event, forceRefresh: boolean = false) => {
+  try {
+    console.log('[InstalledGames] Handler: getInstalled (forceRefresh:', forceRefresh, ')');
+    const games = await getInstalledGames(forceRefresh);
+    return games;
+  } catch (error) {
+    console.error('[InstalledGames] Error getting installed games:', error);
+    return [];
+  }
+});
+
+/**
+ * Get set of installed Steam AppIDs for quick lookup
+ */
+ipcMain.handle('games:getInstalledAppIds', async () => {
+  try {
+    console.log('[InstalledGames] Handler: getInstalledAppIds');
+    const appIds = await getInstalledAppIds();
+    // Convert Set to Array for IPC serialization
+    return Array.from(appIds);
+  } catch (error) {
+    console.error('[InstalledGames] Error getting installed app IDs:', error);
+    return [];
+  }
+});
+
+/**
+ * Clear the installed games cache
+ */
+ipcMain.handle('games:clearInstalledCache', async () => {
+  try {
+    clearInstalledGamesCache();
+    return true;
+  } catch (error) {
+    console.error('[InstalledGames] Error clearing cache:', error);
+    return false;
   }
 });
 

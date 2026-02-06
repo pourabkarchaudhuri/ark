@@ -134,6 +134,19 @@ export function transformSearchResult(item: SteamSearchItem): Partial<Game> {
 }
 
 /**
+ * Check if a game has valid developer and publisher information.
+ * Games without this info (like FiveM, mods, etc.) should be filtered out of lists/cards.
+ */
+export function hasValidDeveloperInfo(game: Game): boolean {
+  const invalidValues = ['Unknown Developer', 'Unknown Publisher', '', undefined, null];
+  
+  const hasValidDev = !invalidValues.includes(game.developer);
+  const hasValidPub = !invalidValues.includes(game.publisher);
+  
+  return hasValidDev && hasValidPub;
+}
+
+/**
  * Steam Service Class
  */
 class SteamService {
@@ -205,13 +218,15 @@ class SteamService {
         }
       }
 
-      console.log(`[Steam Service] Successfully transformed ${games.length} games`);
-      if (games.length > 0) {
-        console.log(`[Steam Service] First game: ${games[0].title}, developer: ${games[0].developer}, coverUrl: ${games[0].coverUrl}`);
+      // Filter out games without valid developer/publisher info
+      const validGames = games.filter(hasValidDeveloperInfo);
+      console.log(`[Steam Service] Successfully transformed ${games.length} games, ${validGames.length} after filtering`);
+      if (validGames.length > 0) {
+        console.log(`[Steam Service] First game: ${validGames[0].title}, developer: ${validGames[0].developer}, coverUrl: ${validGames[0].coverUrl}`);
       }
       
       this.onGamesLoaded();
-      return games;
+      return validGames;
     } catch (error) {
       console.error('[Steam Service] Error getting most played games:', error);
       throw error;
@@ -240,7 +255,8 @@ class SteamService {
         }
       }
       
-      return games;
+      // Filter out games without valid developer/publisher info
+      return games.filter(hasValidDeveloperInfo);
     } catch (error) {
       console.error('[Steam Service] Error getting new releases:', error);
       throw error;
@@ -269,7 +285,8 @@ class SteamService {
         }
       }
       
-      return games;
+      // Filter out games without valid developer/publisher info
+      return games.filter(hasValidDeveloperInfo);
     } catch (error) {
       console.error('[Steam Service] Error getting top sellers:', error);
       throw error;
@@ -298,7 +315,8 @@ class SteamService {
         }
       }
       
-      return games;
+      // Filter out games without valid developer/publisher info
+      return games.filter(hasValidDeveloperInfo);
     } catch (error) {
       console.error('[Steam Service] Error getting coming soon games:', error);
       throw error;
@@ -348,8 +366,10 @@ class SteamService {
         }
       }
       
-      console.log(`[Steam Service] Transformed ${games.length} search result games`);
-      return games;
+      // Filter out games without valid developer/publisher info
+      const validGames = games.filter(hasValidDeveloperInfo);
+      console.log(`[Steam Service] Transformed ${games.length} search results, ${validGames.length} after filtering`);
+      return validGames;
     } catch (error) {
       console.error('[Steam Service] Search error:', error);
       throw error;
