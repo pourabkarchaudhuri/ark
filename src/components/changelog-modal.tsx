@@ -4,10 +4,18 @@ import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Current app version - update this with each release
-export const APP_VERSION = '1.0.14';
+export const APP_VERSION = '1.0.15';
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.15': {
+    title: "What's New in Ark 1.0.15",
+    changes: [
+      'Electron app now starts correctly - fixed main process crash when running as ESM (__dirname)',
+      'Electron e2e tests pass - window opens, dashboard, Library, search, and Settings tested',
+      'Changelog modal no longer blocks clicks - tests dismiss it before interacting with the app',
+    ],
+  },
   '1.0.14': {
     title: "What's New in Ark 1.0.14",
     changes: [

@@ -1,10 +1,14 @@
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { app, BrowserWindow, ipcMain, dialog, shell } = electron;
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
 import path from 'path';
+
+// ESM has no __dirname; required for loadFile/preload paths when run as module
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Handle EPIPE errors globally to prevent crashes when stdout/stderr is closed
 process.stdout.on('error', (err) => {

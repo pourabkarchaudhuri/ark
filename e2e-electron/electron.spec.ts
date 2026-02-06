@@ -30,18 +30,21 @@ async function getMainWindow(app: ElectronApplication): Promise<Page> {
 }
 
 test.describe('Electron App', () => {
+  test.setTimeout(120000); // 2 min for beforeAll + tests (firstWindow can take time on cold start)
+
   test.beforeAll(async () => {
-    // Launch Electron app
+    // Launch Electron app (headed so the window is visible)
     electronApp = await electron.launch({
       args: [path.join(__dirname, '../dist-electron/electron/main.js')],
       env: {
         ...process.env,
         NODE_ENV: 'production',
       },
+      timeout: 60000, // allow up to 60s for Electron to start
     });
 
-    // Wait for the main window (not DevTools)
-    page = await electronApp.firstWindow();
+    // Wait for the main window (not DevTools) - needs time for app.whenReady() + createWindow + loadFile
+    page = await electronApp.firstWindow({ timeout: 60000 });
     
     // Wait a moment for the page to initialize
     await page.waitForLoadState('domcontentloaded');
@@ -74,12 +77,12 @@ test.describe('Electron App', () => {
   });
 
   test('transitions to dashboard after loading', async () => {
-    // Wait for dashboard to load (auto-transitions after ~6s)
-    await expect(page.getByText('Browse')).toBeVisible({ timeout: 25000 });
+    // Wait for dashboard to load (auto-transitions after ~6s) - use role to avoid matching changelog text
+    await expect(page.getByRole('button', { name: 'Browse' })).toBeVisible({ timeout: 25000 });
   });
 
   test('dashboard displays Browse button', async () => {
-    await expect(page.getByText('Browse')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole('button', { name: 'Browse' })).toBeVisible({ timeout: 15000 });
   });
 
   test('dashboard displays game cards', async () => {
@@ -92,20 +95,22 @@ test.describe('Electron App', () => {
   });
 
   test('can switch to Library mode', async () => {
-    // Dismiss any open modals (like changelog)
-    await page.keyboard.press('Escape');
-    await page.waitForTimeout(200);
+    // Dismiss changelog modal if open (so we can click Library tab)
+    const gotIt = page.getByRole('button', { name: /Got it|Close changelog/i });
+    if (await gotIt.isVisible()) {
+      await gotIt.click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(300);
+    }
     
-    // Switch to Library view
-    await page.click('button:has-text("Library")');
+    // Switch to Library view (tab shows "Library (N)" - avoid "Add to Library" which has no parens)
+    await page.getByRole('button', { name: /^Library\s*\(\d*\)$/ }).click({ timeout: 10000 });
     await page.waitForTimeout(500);
     
-    // Library button should be active
-    const libraryButton = page.locator('button:has-text("Library")');
-    await expect(libraryButton).toBeVisible();
+    // Library tab should be visible/active
+    await expect(page.getByRole('button', { name: /^Library\s*\(\d*\)$/ })).toBeVisible();
     
     // Switch back to Browse
-    await page.click('button:has-text("Browse")');
+    await page.getByRole('button', { name: 'Browse' }).click({ timeout: 5000 });
     await page.waitForTimeout(500);
   });
 
@@ -126,6 +131,8 @@ test.describe('Electron App', () => {
 });
 
 test.describe('Electron Window Properties', () => {
+  test.setTimeout(120000);
+
   test.beforeAll(async () => {
     // Launch fresh Electron app for window tests
     electronApp = await electron.launch({
@@ -134,8 +141,9 @@ test.describe('Electron Window Properties', () => {
         ...process.env,
         NODE_ENV: 'production',
       },
+      timeout: 60000,
     });
-    page = await electronApp.firstWindow();
+    page = await electronApp.firstWindow({ timeout: 60000 });
     await page.waitForLoadState('domcontentloaded');
   });
 

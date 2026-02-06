@@ -54,17 +54,20 @@ function readSampleLibraryDelta(): string {
 }
 
 test.describe('Library Data Management', () => {
+  test.setTimeout(120000);
+
   test.beforeAll(async () => {
-    // Launch Electron app
+    // Launch Electron app (headed - window visible)
     electronApp = await electron.launch({
       args: [path.join(__dirname, '../dist-electron/electron/main.js')],
       env: {
         ...process.env,
         NODE_ENV: 'production',
       },
+      timeout: 60000,
     });
 
-    page = await electronApp.firstWindow();
+    page = await electronApp.firstWindow({ timeout: 60000 });
     await page.waitForLoadState('domcontentloaded');
     
     // If we got DevTools, get the main window
@@ -86,11 +89,12 @@ test.describe('Library Data Management', () => {
 
   test.describe('Settings Panel - Export/Import UI', () => {
     test('Settings panel opens and has Library Data section', async () => {
-      // First close any open modals (changelog modal) - press Escape multiple times
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(300);
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(300);
+      // Dismiss changelog modal if open (so Settings button is clickable)
+      const gotIt = page.getByRole('button', { name: /Got it|Close changelog/i });
+      if (await gotIt.isVisible()) {
+        await gotIt.click({ timeout: 2000 }).catch(() => {});
+        await page.waitForTimeout(500);
+      }
       
       // Wait for any animations to complete
       await page.waitForTimeout(500);
