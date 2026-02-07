@@ -54,9 +54,9 @@ describe('Game Types', () => {
       const validStatuses: GameStatus[] = [
         'Want to Play',
         'Playing',
+        'Playing Now',
         'Completed',
         'On Hold',
-        'Dropped',
       ];
 
       validStatuses.forEach((status) => {

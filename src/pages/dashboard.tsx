@@ -39,6 +39,7 @@ import {
 import { libraryStore } from '@/services/library-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
 import { SettingsPanel } from '@/components/settings-panel';
+import { useSessionTracker } from '@/hooks/useSessionTracker';
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
@@ -72,6 +73,9 @@ export function Dashboard() {
   // Journey history (persists even after library removal)
   const journeyEntries = useJourneyHistory();
   
+  // Session tracking (live "Playing Now" status)
+  const { isPlayingNow } = useSessionTracker();
+
   // Custom game dialog state
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
   
@@ -329,7 +333,7 @@ export function Dashboard() {
   }, [isInLibrary, updateEntry]);
 
   // Handle saving library entry
-  const handleSave = useCallback((gameData: Partial<Game>) => {
+  const handleSave = useCallback((gameData: Partial<Game> & { executablePath?: string }) => {
     try {
       if (editingGame) {
         const gameId = editingGame.steamAppId || editingGame.igdbId;
@@ -345,11 +349,21 @@ export function Dashboard() {
             priority: gameData.priority,
             publicReviews: gameData.publicReviews,
             recommendationSource: gameData.recommendationSource,
+            executablePath: gameData.executablePath,
           });
           success(`"${editingGame.title}" updated successfully`);
         } else {
           // Add to library
           addToLibrary(gameId, gameData.status || 'Want to Play');
+          // Update with additional fields including executablePath
+          if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath) {
+            updateEntry(gameId, {
+              priority: gameData.priority,
+              publicReviews: gameData.publicReviews,
+              recommendationSource: gameData.recommendationSource,
+              executablePath: gameData.executablePath,
+            });
+          }
           success(`"${editingGame.title}" added to your library`);
         }
       }
@@ -735,6 +749,7 @@ export function Dashboard() {
                           onEdit={() => handleEdit(game)}
                           onDelete={() => handleDeleteClick(game)}
                           isInLibrary={game.isInLibrary}
+                          isPlayingNow={game.steamAppId ? isPlayingNow(game.steamAppId) : false}
                           onAddToLibrary={() => handleAddToLibrary(game)}
                           onRemoveFromLibrary={() => handleDeleteClick(game)}
                           onStatusChange={(status) => handleStatusChange(game, status)}
@@ -765,6 +780,7 @@ export function Dashboard() {
         onSave={handleSave}
         genres={genres}
         platforms={platforms}
+        currentExecutablePath={editingGame?.steamAppId ? libraryStore.getEntry(editingGame.steamAppId)?.executablePath : undefined}
       />
 
       {/* Custom Game Dialog */}

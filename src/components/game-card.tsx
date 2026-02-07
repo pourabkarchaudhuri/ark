@@ -28,6 +28,7 @@ interface GameCardProps {
   onDelete: () => void;
   onClick?: () => void;
   isInLibrary?: boolean;
+  isPlayingNow?: boolean; // Live indicator: game's exe is currently running
   onAddToLibrary?: () => void;
   onRemoveFromLibrary?: () => void;
   onStatusChange?: (status: GameStatus) => void;
@@ -121,13 +122,14 @@ function formatPlayerCount(count: number): string {
   return count.toString();
 }
 
-const ALL_STATUSES: GameStatus[] = ['Want to Play', 'Playing', 'Completed', 'On Hold', 'Dropped'];
+// Manual statuses the user can pick (excludes 'Playing Now' which is system-managed)
+const ALL_STATUSES: GameStatus[] = ['Want to Play', 'Playing', 'Completed', 'On Hold'];
 
 const statusColors: Record<GameStatus, string> = {
   'Completed': 'bg-green-500/20 text-white',
   'Playing': 'bg-blue-500/20 text-blue-300',
+  'Playing Now': 'bg-emerald-500/20 text-emerald-300',
   'On Hold': 'bg-yellow-500/20 text-yellow-300',
-  'Dropped': 'bg-red-500/20 text-red-300',
   'Want to Play': 'bg-white/10 text-white/80',
 };
 
@@ -137,6 +139,7 @@ function GameCardComponent({
   onDelete, 
   onClick, 
   isInLibrary,
+  isPlayingNow,
   onAddToLibrary,
   onRemoveFromLibrary,
   onStatusChange,
@@ -461,19 +464,23 @@ function GameCardComponent({
           </div>
           
           {/* Status Badge - Clickable dropdown for library games */}
-          {inLibrary && (
+          {inLibrary && (() => {
+            // Override displayed status when the game's exe is running
+            const displayStatus: GameStatus = isPlayingNow ? 'Playing Now' : (game.status as GameStatus);
+            return (
             <div onClick={(e) => e.stopPropagation()}>
               <DropdownMenu open={statusMenuOpen} onOpenChange={setStatusMenuOpen}>
                 <DropdownMenuTrigger asChild>
                   <button
                     className={cn(
                       "text-[10px] h-6 px-2 flex items-center justify-center rounded-md font-medium border-none cursor-pointer transition-colors",
-                      statusColors[game.status as GameStatus] || 'bg-white/10 text-white/80',
-                      "hover:ring-1 hover:ring-white/20"
+                      statusColors[displayStatus] || 'bg-white/10 text-white/80',
+                      "hover:ring-1 hover:ring-white/20",
+                      isPlayingNow && "animate-pulse"
                     )}
-                    aria-label={`Status: ${game.status}. Click to change.`}
+                    aria-label={`Status: ${displayStatus}. Click to change.`}
                   >
-                    {game.status}
+                    {displayStatus}
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="bg-card border-white/10 min-w-[140px]">
@@ -494,8 +501,8 @@ function GameCardComponent({
                         "w-2 h-2 rounded-full flex-shrink-0",
                         status === 'Completed' ? 'bg-green-500' :
                         status === 'Playing' ? 'bg-blue-500' :
+                        status === 'Playing Now' ? 'bg-emerald-500' :
                         status === 'On Hold' ? 'bg-yellow-500' :
-                        status === 'Dropped' ? 'bg-red-500' :
                         'bg-white/40'
                       )} />
                       {status}
@@ -504,7 +511,8 @@ function GameCardComponent({
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
-          )}
+            );
+          })()}
         </div>
       </div>
 
@@ -566,6 +574,7 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.game.isInLibrary === nextProps.game.isInLibrary &&
     prevProps.game.status === nextProps.game.status &&
     prevProps.isInLibrary === nextProps.isInLibrary &&
+    prevProps.isPlayingNow === nextProps.isPlayingNow &&
     prevProps.hideLibraryBadge === nextProps.hideLibraryBadge
   );
 });

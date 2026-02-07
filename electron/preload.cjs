@@ -217,6 +217,49 @@ contextBridge.exposeInMainWorld('fileDialog', {
   // Open and read file with native dialog
   openFile: (options) => 
     ipcRenderer.invoke('dialog:openFile', options),
+
+  // Open native file explorer to select a game executable (returns path only)
+  selectExecutable: () =>
+    ipcRenderer.invoke('dialog:selectExecutable'),
 });
 
-console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog exposed');
+// Expose Session Tracker API to renderer
+contextBridge.exposeInMainWorld('sessionTracker', {
+  // Send the list of games with executable paths to track
+  setTrackedGames: (games) =>
+    ipcRenderer.invoke('session:setTrackedGames', games),
+
+  // Get currently active sessions
+  getActiveSessions: () =>
+    ipcRenderer.invoke('session:getActive'),
+
+  // Subscribe to live status changes (Playing Now / Playing)
+  onStatusChange: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('session:statusChange', handler);
+    return () => ipcRenderer.removeListener('session:statusChange', handler);
+  },
+
+  // Subscribe to session start events
+  onSessionStarted: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('session:started', handler);
+    return () => ipcRenderer.removeListener('session:started', handler);
+  },
+
+  // Subscribe to completed session events
+  onSessionEnded: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('session:ended', handler);
+    return () => ipcRenderer.removeListener('session:ended', handler);
+  },
+
+  // Cleanup all listeners
+  removeAllListeners: () => {
+    ipcRenderer.removeAllListeners('session:statusChange');
+    ipcRenderer.removeAllListeners('session:started');
+    ipcRenderer.removeAllListeners('session:ended');
+  },
+});
+
+console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker exposed');

@@ -7,6 +7,7 @@ import {
 } from '@/types/game';
 import { journeyStore } from './journey-store';
 import { statusHistoryStore } from './status-history-store';
+import { sessionStore } from './session-store';
 
 const STORAGE_KEY = 'ark-library-data';
 const STORAGE_VERSION = 4; // Bumped version for progress tracking fields
@@ -35,14 +36,22 @@ class LibraryStore {
 
     try {
       const stored = this.loadFromStorage();
+      let needsResave = false;
       if (stored && stored.entries.length > 0) {
         stored.entries.forEach((entry) => {
           // Support both new gameId and legacy igdbId
           const id = entry.gameId || entry.igdbId || entry.steamAppId;
           if (id) {
+            // Migrate removed 'Dropped' status → 'On Hold'
+            let status = entry.status;
+            if ((status as string) === 'Dropped') {
+              status = 'On Hold';
+              needsResave = true;
+            }
             this.entries.set(id, {
               ...entry,
               gameId: id,
+              status,
               hoursPlayed: entry.hoursPlayed ?? 0,
               rating: entry.rating ?? 0,
               addedAt: new Date(entry.addedAt),
@@ -50,6 +59,11 @@ class LibraryStore {
             });
           }
         });
+      }
+      // Persist migrated entries so the migration only runs once
+      if (needsResave) {
+        this.saveToStorage();
+        console.log('[LibraryStore] Migrated "Dropped" entries to "On Hold"');
       }
     } catch (error) {
       console.error('Failed to load library data:', error);
@@ -229,9 +243,9 @@ class LibraryStore {
     const byStatus: Record<GameStatus, number> = {
       'Want to Play': 0,
       Playing: 0,
+      'Playing Now': 0,
       Completed: 0,
       'On Hold': 0,
-      Dropped: 0,
     };
 
     const byPriority: Record<GamePriority, number> = {
@@ -264,6 +278,27 @@ class LibraryStore {
     return this.getAllEntries().filter((entry) => entry.priority === priority);
   }
 
+  // Update hoursPlayed from session tracking totals
+  updateHoursFromSessions(gameId: number, totalHours: number) {
+    const existing = this.entries.get(gameId);
+    if (!existing) return;
+
+    existing.hoursPlayed = totalHours;
+    existing.updatedAt = new Date();
+    this.saveToStorage();
+    this.notifyListeners();
+
+    // Sync to journey store
+    journeyStore.syncProgress(gameId, { hoursPlayed: totalHours });
+  }
+
+  // Get all entries that have an executablePath set
+  getTrackableEntries(): Array<{ gameId: number; executablePath: string }> {
+    return Array.from(this.entries.values())
+      .filter((e) => e.executablePath)
+      .map((e) => ({ gameId: e.gameId, executablePath: e.executablePath! }));
+  }
+
   // Clear all library data
   clear() {
     this.entries.clear();
@@ -271,13 +306,14 @@ class LibraryStore {
     this.notifyListeners();
   }
 
-  // Export library data (includes journey history and status history)
+  // Export library data (includes journey history, status history, and session history)
   exportData(): string {
     return JSON.stringify(
       {
         entries: Array.from(this.entries.values()),
         journeyHistory: journeyStore.exportData(),
         statusHistory: statusHistoryStore.exportData(),
+        sessionHistory: sessionStore.exportData(),
         exportedAt: new Date().toISOString(),
       },
       null,
@@ -324,6 +360,11 @@ class LibraryStore {
         statusHistoryStore.importData(parsed.statusHistory);
       }
 
+      // Import session history if present
+      if (Array.isArray(parsed.sessionHistory)) {
+        sessionStore.importData(parsed.sessionHistory);
+      }
+
       return { success: true, count: importCount };
     } catch (error) {
       return { success: false, count: 0, error: 'Failed to parse import data' };
@@ -338,7 +379,8 @@ class LibraryStore {
       a.publicReviews === b.publicReviews &&
       a.recommendationSource === b.recommendationSource &&
       a.hoursPlayed === b.hoursPlayed &&
-      a.rating === b.rating
+      a.rating === b.rating &&
+      a.executablePath === b.executablePath
     );
   }
 
@@ -407,6 +449,11 @@ class LibraryStore {
       // Import status history if present
       if (Array.isArray(parsed.statusHistory)) {
         statusHistoryStore.importData(parsed.statusHistory);
+      }
+
+      // Import session history if present
+      if (Array.isArray(parsed.sessionHistory)) {
+        sessionStore.importData(parsed.sessionHistory);
       }
 
       return { success: true, added, updated, skipped };

@@ -50,7 +50,7 @@ export interface Game {
   isCustom?: boolean; // True for user-added games not from Steam/IGDB
 }
 
-export type GameStatus = 'Want to Play' | 'Playing' | 'Completed' | 'On Hold' | 'Dropped';
+export type GameStatus = 'Want to Play' | 'Playing' | 'Playing Now' | 'Completed' | 'On Hold';
 export type GamePriority = 'High' | 'Medium' | 'Low';
 
 export type GameCategory = 'all' | 'most-played' | 'trending' | 'recent' | 'award-winning';
@@ -88,6 +88,7 @@ export interface LibraryGameEntry {
   // Progress tracking fields
   hoursPlayed: number; // Total hours played
   rating: number; // User rating 1-5 stars (0 = not rated)
+  executablePath?: string; // Path to game executable for session tracking
   addedAt: Date;
   updatedAt: Date;
 }
@@ -110,6 +111,17 @@ export interface CustomGameEntry {
 
 export type CreateCustomGameEntry = Omit<CustomGameEntry, 'id' | 'addedAt' | 'updatedAt'>;
 export type UpdateCustomGameEntry = Partial<Omit<CustomGameEntry, 'id' | 'addedAt'>>;
+
+// Session tracking entry — records a play session detected via executable monitoring.
+export interface GameSession {
+  id: string;              // UUID
+  gameId: number;          // Library gameId
+  executablePath: string;  // The exe that was tracked
+  startTime: string;       // ISO timestamp
+  endTime: string;         // ISO timestamp
+  durationMinutes: number; // Active play time (raw - idle)
+  idleMinutes: number;     // Total idle detected
+}
 
 // Status change log entry — records every status transition for tracking/analytics.
 export interface StatusChangeEntry {

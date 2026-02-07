@@ -4,10 +4,22 @@ import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Current app version - update this with each release
-export const APP_VERSION = '1.0.18';
+export const APP_VERSION = '1.0.19';
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.19': {
+    title: "What's New in Ark 1.0.19",
+    changes: [
+      'Session Tracking — Automatic play-time tracking by monitoring game executables; detects launches, exits, and accumulates active play hours',
+      'Idle Detection — System idle time (5-minute threshold) is subtracted from sessions using Electron powerMonitor for accurate play-time reporting',
+      'Playing Now Status — Live "Playing Now" badge with pulse animation appears on game cards when a tracked game\'s executable is running',
+      'Executable Path Picker — Native OS file explorer dialog (Browse button) in Edit Entry to select game executables for tracking — no copy-pasting paths',
+      'Cost Per Hour Analysis — Dynamic badge on game details page shows $/hr based on Steam price and tracked play hours, color-coded green/yellow/red',
+      'Session History Store — Persistent session log with import/export support, integrated with library data backup',
+      'Removed "Dropped" Status — Replaced with "On Hold"; existing Dropped entries are auto-migrated on startup',
+    ],
+  },
   '1.0.18': {
     title: "What's New in Ark 1.0.18",
     changes: [

@@ -31,7 +31,6 @@ const statusOptions: GameStatus[] = [
   'Playing',
   'Completed',
   'On Hold',
-  'Dropped',
 ];
 
 const priorityOptions: GamePriority[] = ['High', 'Medium', 'Low'];
@@ -58,8 +57,8 @@ function getStatusColor(status: GameStatus): string {
       return 'bg-fuchsia-500/20 text-fuchsia-400 border-fuchsia-500/30';
     case 'On Hold':
       return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
-    case 'Dropped':
-      return 'bg-red-500/20 text-red-400 border-red-500/30';
+    case 'Playing Now':
+      return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
     default:
       return 'bg-white/10 text-white/60';
   }

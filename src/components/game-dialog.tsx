@@ -19,15 +19,21 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { Library, Plus, ChevronDown, ChevronUp } from 'lucide-react';
+import { Library, Plus, ChevronDown, ChevronUp, FolderOpen, X } from 'lucide-react';
+
+interface GameDialogSaveData extends Partial<Game> {
+  executablePath?: string;
+}
 
 interface GameDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   game: Game | null;
-  onSave: (game: Partial<Game>) => void;
+  onSave: (game: GameDialogSaveData) => void;
   genres: string[];
   platforms: string[];
+  /** Current executablePath from library entry (only set when editing) */
+  currentExecutablePath?: string;
 }
 
 const statusOptions: GameStatus[] = [
@@ -35,7 +41,6 @@ const statusOptions: GameStatus[] = [
   'Playing',
   'Completed',
   'On Hold',
-  'Dropped',
 ];
 
 const priorityOptions: GamePriority[] = ['High', 'Medium', 'Low'];
@@ -157,6 +162,7 @@ export function GameDialog({
   onOpenChange,
   game,
   onSave,
+  currentExecutablePath,
 }: GameDialogProps) {
   const [formData, setFormData] = useState({
     status: 'Want to Play' as GameStatus,
@@ -164,6 +170,7 @@ export function GameDialog({
     publicReviews: '',
     recommendationSource: 'Personal Discovery',
   });
+  const [executablePath, setExecutablePath] = useState<string | undefined>(undefined);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const isEditing = game?.isInLibrary ?? false;
@@ -177,11 +184,13 @@ export function GameDialog({
         publicReviews: game.publicReviews || '',
         recommendationSource: game.recommendationSource || 'Personal Discovery',
       });
+      setExecutablePath(currentExecutablePath);
       // Show advanced options if editing and any advanced field has data
       const hasAdvancedData = Boolean(
         (game.priority && game.priority !== 'Medium') ||
         game.publicReviews ||
-        (game.recommendationSource && game.recommendationSource !== 'Personal Discovery')
+        (game.recommendationSource && game.recommendationSource !== 'Personal Discovery') ||
+        currentExecutablePath
       );
       setShowAdvanced(isEditing && hasAdvancedData);
     } else if (open) {
@@ -191,16 +200,26 @@ export function GameDialog({
         publicReviews: '',
         recommendationSource: 'Personal Discovery',
       });
+      setExecutablePath(undefined);
       setShowAdvanced(false);
     }
-  }, [game, open, isEditing]);
+  }, [game, open, isEditing, currentExecutablePath]);
 
   const handleSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     onSave({
       ...formData,
+      executablePath,
     });
-  }, [formData, onSave]);
+  }, [formData, executablePath, onSave]);
+
+  const handleBrowseExecutable = useCallback(async () => {
+    if (!window.fileDialog?.selectExecutable) return;
+    const result = await window.fileDialog.selectExecutable();
+    if (result.success && result.filePath) {
+      setExecutablePath(result.filePath);
+    }
+  }, []);
 
   const updateField = <K extends keyof typeof formData>(
     key: K,
@@ -340,6 +359,46 @@ export function GameDialog({
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+
+              {/* Executable Path (for session tracking) */}
+              <div className="space-y-2">
+                <Label className="text-white/70">Game Executable</Label>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0 px-3 py-2 rounded-md bg-white/5 border border-white/10 text-sm truncate">
+                    {executablePath ? (
+                      <span className="text-white/80" title={executablePath}>{executablePath.split(/[\\/]/).pop()}</span>
+                    ) : (
+                      <span className="text-white/40">No executable selected</span>
+                    )}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleBrowseExecutable}
+                    className="border-white/10 gap-1.5 flex-shrink-0"
+                  >
+                    <FolderOpen className="h-3.5 w-3.5" />
+                    Browse
+                  </Button>
+                  {executablePath && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setExecutablePath(undefined)}
+                      className="h-8 w-8 p-0 text-white/40 hover:text-white/80 flex-shrink-0"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                </div>
+                {executablePath && (
+                  <p className="text-[11px] text-white/40 truncate" title={executablePath}>
+                    {executablePath}
+                  </p>
+                )}
               </div>
 
               {/* Notes */}

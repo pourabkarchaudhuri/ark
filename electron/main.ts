@@ -46,6 +46,7 @@ import { fetchMetacriticReviews, clearMetacriticCache } from './metacritic-api.j
 import { processMessage, searchGamesForContext, chatStore } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
 import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
+import { startSessionTracker, stopSessionTracker, setTrackedGames, getActiveSessions } from './session-tracker.js';
 let mainWindow: BrowserWindowType | null = null;
 
 // ---------- Data migration: game-tracker → ark ----------
@@ -174,6 +175,11 @@ function createWindow() {
     // Initialize auto-updater in production mode
     if (app.isPackaged && mainWindow) {
       initAutoUpdater(mainWindow);
+    }
+
+    // Start session tracker for game process monitoring
+    if (mainWindow) {
+      startSessionTracker(mainWindow);
     }
   });
 
@@ -715,6 +721,54 @@ ipcMain.handle('dialog:openFile', async (_event, options?: {
 });
 
 // ============================================================================
+// SESSION TRACKER IPC HANDLERS
+// ============================================================================
+
+/**
+ * Receive the list of games to track from the renderer
+ */
+ipcMain.handle('session:setTrackedGames', async (_event, games: Array<{ gameId: number; executablePath: string }>) => {
+  setTrackedGames(games);
+  return { success: true };
+});
+
+/**
+ * Get currently active sessions
+ */
+ipcMain.handle('session:getActive', async () => {
+  return getActiveSessions();
+});
+
+// ============================================================================
+// FILE DIALOG IPC HANDLERS (continued)
+// ============================================================================
+
+/**
+ * Show open file dialog to select a game executable (returns path only, no content)
+ */
+ipcMain.handle('dialog:selectExecutable', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Select Game Executable',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Executables', extensions: ['exe', 'lnk', 'bat', 'cmd'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true };
+    }
+
+    return { success: true, filePath: result.filePaths[0] };
+  } catch (error) {
+    console.error('[Dialog] Error selecting executable:', error);
+    return { success: false, error: String(error) };
+  }
+});
+
+// ============================================================================
 // APP LIFECYCLE
 // ============================================================================
 
@@ -728,6 +782,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  stopSessionTracker();
   if (process.platform !== 'darwin') {
     app.quit();
   }

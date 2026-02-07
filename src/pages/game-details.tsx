@@ -27,6 +27,7 @@ import { cn } from '@/lib/utils';
 import { SteamAppDetails, SteamReviewsResponse, GameRecommendation, SteamNewsItem } from '@/types/steam';
 import { MetacriticGameResponse } from '@/types/metacritic';
 import { Game } from '@/types/game';
+import { libraryStore } from '@/services/library-store';
 import { useLibrary } from '@/hooks/useGameStore';
 import { useToast } from '@/components/ui/toast';
 import { getRepackLinkForGame } from '@/services/fitgirl-service';
@@ -336,7 +337,7 @@ export function GameDetailsPage() {
   }, [createGameFromDetails]);
   
   // Handle saving library entry from dialog
-  const handleSaveLibraryEntry = useCallback((gameData: Partial<Game>) => {
+  const handleSaveLibraryEntry = useCallback((gameData: Partial<Game> & { executablePath?: string }) => {
     if (!appId) return;
     
     const isNewAdd = !gameInLibrary;
@@ -348,16 +349,18 @@ export function GameDetailsPage() {
         priority: gameData.priority,
         publicReviews: gameData.publicReviews,
         recommendationSource: gameData.recommendationSource,
+        executablePath: gameData.executablePath,
       });
     } else {
       // Add to library
       addToLibrary(appId, gameData.status || 'Want to Play');
       // Then update with additional fields if provided
-      if (gameData.priority || gameData.publicReviews || gameData.recommendationSource) {
+      if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath) {
         updateEntry(appId, {
           priority: gameData.priority,
           publicReviews: gameData.publicReviews,
           recommendationSource: gameData.recommendationSource,
+          executablePath: gameData.executablePath,
         });
       }
     }
@@ -1099,6 +1102,7 @@ export function GameDetailsPage() {
         onOpenChange={setIsDialogOpen}
         game={dialogGame}
         onSave={handleSaveLibraryEntry}
+        currentExecutablePath={appId ? libraryStore.getEntry(appId)?.executablePath : undefined}
         genres={details?.genres?.map(g => g.description) || []}
         platforms={[
           ...(details?.platforms?.windows ? ['Windows'] : []),
@@ -1536,6 +1540,42 @@ function GameDetailsContent({
                   </div>
                 </div>
               )}
+
+              {/* Cost Per Hour — only shown when game is in library with hoursPlayed > 0 */}
+              {gameInLibrary && appId && (() => {
+                const libEntry = libraryStore.getEntry(appId);
+                const hours = libEntry?.hoursPlayed ?? 0;
+                if (hours <= 0) return null;
+
+                const isFree = details.is_free;
+                const priceInCents = details.price_overview?.final;
+
+                if (isFree) {
+                  return (
+                    <div className="flex items-center justify-between p-3 rounded-lg bg-green-500/10 border border-green-500/20">
+                      <span className="text-sm text-white/60">Cost / Hour</span>
+                      <Badge className="bg-green-600 hover:bg-green-700">Free</Badge>
+                    </div>
+                  );
+                }
+
+                if (priceInCents && priceInCents > 0) {
+                  const costPerHour = (priceInCents / 100) / hours;
+                  const formatted = `$${costPerHour.toFixed(2)}/hr`;
+                  const colorClass =
+                    costPerHour < 1 ? 'bg-green-600' :
+                    costPerHour < 5 ? 'bg-yellow-600' :
+                    'bg-red-600';
+                  return (
+                    <div className="flex items-center justify-between p-3 rounded-lg bg-white/5 border border-white/10">
+                      <span className="text-sm text-white/60">Cost / Hour</span>
+                      <Badge className={cn(colorClass, 'hover:opacity-80')}>{formatted}</Badge>
+                    </div>
+                  );
+                }
+
+                return null;
+              })()}
 
               {/* Add to Library / Edit Library Entry */}
               <Button

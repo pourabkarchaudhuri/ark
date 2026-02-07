@@ -26,7 +26,7 @@ const statusOptions: (GameStatus | 'All')[] = [
   'Playing',
   'Completed',
   'On Hold',
-  'Dropped',
+  'Playing Now',
 ];
 
 const priorityOptions: (GamePriority | 'All')[] = [

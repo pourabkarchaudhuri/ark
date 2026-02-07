@@ -95,7 +95,7 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
         addToLibrary({
           gameId: action.appId,
           steamAppId: action.appId,
-          status: (action.status as 'Want to Play' | 'Playing' | 'Completed' | 'On Hold' | 'Dropped') || 'Want to Play',
+          status: (action.status as 'Want to Play' | 'Playing' | 'Playing Now' | 'Completed' | 'On Hold') || 'Want to Play',
           priority: 'Medium',
         });
       } else if (action.type === 'remove') {

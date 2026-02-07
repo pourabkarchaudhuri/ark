@@ -32,7 +32,6 @@ const statusOptions: GameStatus[] = [
   'Playing',
   'Completed',
   'On Hold',
-  'Dropped',
 ];
 
 const platformOptions = ['Windows', 'PlayStation', 'Xbox', 'Nintendo', 'Mobile', 'Other'];

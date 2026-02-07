@@ -222,10 +222,10 @@ const addToLibraryTool = tool(
   },
   {
     name: 'addGameToLibrary',
-    description: 'Add a game to the user\'s library. Optionally specify the status (Want to Play, Playing, Completed, On Hold, Dropped).',
+    description: 'Add a game to the user\'s library. Optionally specify the status (Want to Play, Playing, Completed, On Hold). Playing Now is system-managed and should not be set manually.',
     schema: z.object({
       appId: z.number().describe('The Steam App ID of the game to add'),
-      status: z.string().optional().describe('Game status: Want to Play, Playing, Completed, On Hold, or Dropped'),
+      status: z.string().optional().describe('Game status: Want to Play, Playing, Completed, or On Hold'),
     }),
   }
 );
