@@ -287,6 +287,25 @@ function SimilarGamesSection({ similarGames }: { similarGames: { id: number; nam
                   src={sg.coverUrl} 
                   alt={sg.name}
                   className="w-full h-full object-cover"
+                  onLoad={(e) => {
+                    // Detect tiny placeholder images from old CDN (newer games)
+                    const img = e.currentTarget;
+                    if (img.naturalWidth < 50 || img.naturalHeight < 50) {
+                      img.dispatchEvent(new Event('error'));
+                    }
+                  }}
+                  onError={(e) => {
+                    const img = e.target as HTMLImageElement;
+                    img.style.display = 'none';
+                    // Show fallback initials
+                    const parent = img.parentElement;
+                    if (parent && !parent.querySelector('.fallback-initials')) {
+                      const div = document.createElement('div');
+                      div.className = 'fallback-initials w-full h-full flex items-center justify-center text-white/30 text-xs font-bold';
+                      div.textContent = sg.name.substring(0, 2).toUpperCase();
+                      parent.appendChild(div);
+                    }
+                  }}
                 />
               ) : (
                 <div className="w-full h-full flex items-center justify-center text-white/30 text-xs font-bold">

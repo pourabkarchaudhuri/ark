@@ -10,7 +10,7 @@ import {
   SteamReviewAuthor,
   SteamReviewsResponse,
   QueueStatus,
-} from './steam';
+} from '@/types/steam';
 
 describe('Steam URL Helpers', () => {
   it('getSteamCoverUrl returns correct URL format', () => {

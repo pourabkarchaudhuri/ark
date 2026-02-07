@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { Game, GameStatus, GamePriority, GameFilters, CreateGameInput } from './game';
+import { Game, GameStatus, GamePriority, GameFilters, CreateGameInput } from '@/types/game';
 
 describe('Game Types', () => {
   describe('Game interface', () => {

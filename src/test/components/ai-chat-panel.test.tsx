@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { AIChatPanel } from './ai-chat-panel';
+import { AIChatPanel } from '@/components/ai-chat-panel';
 import type { ChatConversation, AIResponse, GameContext } from '@/types/chat';
 
 // Mock scrollIntoView for JSDOM

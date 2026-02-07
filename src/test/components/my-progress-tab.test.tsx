@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { MyProgressTab } from './my-progress-tab';
+import { MyProgressTab } from '@/components/my-progress-tab';
 import { libraryStore } from '@/services/library-store';
 
 // Mock ResizeObserver
@@ -46,12 +46,15 @@ describe('MyProgressTab', () => {
     vi.resetAllMocks();
   });
 
-  it('renders loading state when entry is not found', () => {
+  it('renders skeleton loader when entry is not found', () => {
     (libraryStore.getEntry as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
     
-    render(<MyProgressTab gameId={999} />);
+    const { container } = render(<MyProgressTab gameId={999} />);
     
-    expect(screen.getByText('Loading progress data...')).toBeInTheDocument();
+    // Should show the pulsing skeleton, not the actual form
+    expect(container.querySelector('.animate-pulse')).toBeInTheDocument();
+    // Should not render any interactive form elements
+    expect(screen.queryByText('Save Changes')).not.toBeInTheDocument();
   });
 
   it('renders progress data when entry is found', async () => {

@@ -13,6 +13,7 @@ import {
   Heart,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Play,
   Monitor,
   Cpu,
@@ -23,15 +24,18 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { GameDialog } from '@/components/game-dialog';
 import { cn } from '@/lib/utils';
-import { SteamAppDetails, SteamReviewsResponse, GameRecommendation } from '@/types/steam';
+import { SteamAppDetails, SteamReviewsResponse, GameRecommendation, SteamNewsItem } from '@/types/steam';
 import { MetacriticGameResponse } from '@/types/metacritic';
 import { Game } from '@/types/game';
 import { useLibrary } from '@/hooks/useGameStore';
+import { useToast } from '@/components/ui/toast';
 import { getRepackLinkForGame } from '@/services/fitgirl-service';
+import { steamService } from '@/services/steam-service';
 import { WindowControls } from '@/components/window-controls';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { MyProgressTab } from '@/components/my-progress-tab';
-import { Gamepad2, BarChart3 } from 'lucide-react';
+import { MyProgressTab, MyProgressSkeleton } from '@/components/my-progress-tab';
+import { Gamepad2, BarChart3, Newspaper } from 'lucide-react';
+import { Carousel, BlurImage, type CardType } from '@/components/ui/apple-cards-carousel';
 
 // Check if running in Electron
 function isElectron(): boolean {
@@ -58,12 +62,58 @@ function handleContentLinkClick(e: MouseEvent<HTMLDivElement>): void {
   }
 }
 
+// Extract the first image URL from Steam news BBCode/HTML contents.
+// Supports [img]url[/img], {STEAM_CLAN_IMAGE}/path, and <img src="url"> patterns.
+const STEAM_CLAN_IMAGE_BASE = 'https://clan.akamai.steamstatic.com/images/';
+
+function extractNewsThumbnail(contents?: string): string | null {
+  if (!contents) return null;
+
+  // 1. BBCode [img] tags — may contain {STEAM_CLAN_IMAGE}
+  const bbcodeMatch = contents.match(/\[img\](.*?)\[\/img\]/i);
+  if (bbcodeMatch) {
+    let src = bbcodeMatch[1].trim();
+    if (src.startsWith('{STEAM_CLAN_IMAGE}')) {
+      src = src.replace('{STEAM_CLAN_IMAGE}', STEAM_CLAN_IMAGE_BASE);
+    }
+    if (src.startsWith('http')) return src;
+  }
+
+  // 2. Inline {STEAM_CLAN_IMAGE} references outside of [img] tags
+  const clanMatch = contents.match(/\{STEAM_CLAN_IMAGE\}\/([\w/.-]+)/);
+  if (clanMatch) {
+    return `${STEAM_CLAN_IMAGE_BASE}${clanMatch[1]}`;
+  }
+
+  // 3. HTML <img> tags
+  const htmlImgMatch = contents.match(/<img[^>]+src=["']([^"']+)["']/i);
+  if (htmlImgMatch) {
+    const src = htmlImgMatch[1];
+    if (src.startsWith('http')) return src;
+  }
+
+  return null;
+}
+
 // Format minutes to hours and minutes
 function formatPlaytime(minutes: number): string {
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
   return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+// Format player count with K/M suffixes
+function formatPlayerCount(count: number): string {
+  if (count >= 1_000_000) {
+    const m = count / 1_000_000;
+    return m >= 10 ? `${Math.round(m)}M` : `${m.toFixed(1).replace(/\.0$/, '')}M`;
+  }
+  if (count >= 1_000) {
+    const k = count / 1_000;
+    return k >= 10 ? `${Math.round(k)}K` : `${k.toFixed(1).replace(/\.0$/, '')}K`;
+  }
+  return count.toLocaleString();
 }
 
 // Format Unix timestamp to readable date
@@ -73,6 +123,115 @@ function formatDate(timestamp: number): string {
     month: 'short',
     day: 'numeric',
   });
+}
+
+/**
+ * Recommendation image with React-controlled fallback chain.
+ * Uses state instead of direct DOM mutation so parent re-renders don't reset the chain.
+ */
+function RecommendationImage({ appId, name }: { appId: number; name: string }) {
+  const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
+  const urls = useMemo(() => [
+    `${cdnBase}/${appId}/header.jpg`,
+    `${cdnBase}/${appId}/capsule_616x353.jpg`,
+    `${cdnBase}/${appId}/library_hero.jpg`,
+  ], [appId]);
+
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+
+  const advance = useCallback(() => {
+    if (attempt < urls.length - 1) {
+      setAttempt(prev => prev + 1);
+    } else {
+      setFailed(true);
+    }
+  }, [attempt, urls.length]);
+
+  if (failed) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-white/5 text-white/30 text-xs">
+        {name}
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={urls[attempt]}
+      alt={name}
+      className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+      onLoad={(e) => {
+        const img = e.currentTarget;
+        if (img.naturalWidth < 50 || img.naturalHeight < 50) advance();
+      }}
+      onError={advance}
+    />
+  );
+}
+
+/**
+ * News Card — clean image card with a bottom gradient overlay.
+ * Shows title, date published, and news source for readability.
+ * Clicking opens the article URL externally.
+ * Uses BlurImage for smooth lazy loading with a blur-up effect.
+ */
+function NewsCard({
+  card,
+  newsItem,
+  fallbackImage,
+}: {
+  card: CardType;
+  index: number;
+  newsItem: SteamNewsItem;
+  fallbackImage: string;
+}) {
+  const [imgSrc, setImgSrc] = useState(card.src);
+
+  const handleClick = () => {
+    openExternalUrl(newsItem.url);
+  };
+
+  return (
+    <motion.button
+      onClick={handleClick}
+      className="relative z-10 flex h-52 w-40 flex-col items-start justify-end overflow-hidden rounded-2xl bg-neutral-900 md:h-72 md:w-52 group flex-shrink-0"
+    >
+      {/* Bottom gradient overlay — dark fade for text readability */}
+      <div className="pointer-events-none absolute inset-0 z-20 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
+
+      {/* Title + date at the bottom */}
+      <div className="relative z-30 p-3 md:p-4 w-full">
+        <p className="text-left text-xs font-semibold leading-snug text-white line-clamp-2 md:text-sm">
+          {card.title}
+        </p>
+        <p className="text-left text-[10px] text-white/50 mt-1 md:text-xs">
+          {new Date(newsItem.date * 1000).toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+          })}
+        </p>
+        {newsItem.feedlabel && (
+          <p className="text-left text-[9px] text-white/30 mt-0.5 md:text-[10px] truncate">
+            {newsItem.feedlabel}
+          </p>
+        )}
+      </div>
+
+      {/* Background image with blur-up lazy loading */}
+      <BlurImage
+        src={imgSrc}
+        alt={card.title}
+        className="absolute inset-0 z-10 object-cover group-hover:scale-105 transition-transform duration-500"
+        onError={() => {
+          if (imgSrc !== fallbackImage) {
+            setImgSrc(fallbackImage);
+          }
+        }}
+      />
+    </motion.button>
+  );
 }
 
 export function GameDetailsPage() {
@@ -98,10 +257,15 @@ export function GameDetailsPage() {
   const [fitgirlRepack, setFitgirlRepack] = useState<{ url: string; downloadLink: string | null } | null>(null);
   const [fitgirlLoading, setFitgirlLoading] = useState(false);
   const [isRecommendationsPaused, setIsRecommendationsPaused] = useState(false);
+  const [steamNews, setSteamNews] = useState<SteamNewsItem[]>([]);
+  const [steamNewsLoading, setSteamNewsLoading] = useState(false);
+  const [playerCount, setPlayerCount] = useState<number | null>(null);
+  
   const autoplayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const resumeAutoplayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const recommendationsScrollRef = useRef<HTMLDivElement>(null);
   const recommendationsAutoScrollRef = useRef<NodeJS.Timeout | null>(null);
+  
   
   // Scroll to top when page loads or appId changes
   useEffect(() => {
@@ -111,6 +275,21 @@ export function GameDetailsPage() {
   // Library management
   const { addToLibrary, removeFromLibrary, isInLibrary, updateEntry, getAllGameIds } = useLibrary();
   const gameInLibrary = appId ? isInLibrary(appId) : false;
+  const { success: toastSuccess } = useToast();
+
+  // Track whether the game was already in the library when this page loaded.
+  // If the user adds it during this session, we keep showing the details view
+  // instead of immediately switching to the My Progress tab.
+  const wasInLibraryOnLoad = useRef<boolean | null>(null);
+  if (wasInLibraryOnLoad.current === null && appId) {
+    wasInLibraryOnLoad.current = gameInLibrary;
+  }
+  // Reset when navigating to a different game
+  useEffect(() => {
+    wasInLibraryOnLoad.current = null;
+  }, [appId]);
+
+  const showProgressTabs = gameInLibrary && wasInLibraryOnLoad.current === true;
   
   // Dialog state for add to library
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -160,6 +339,8 @@ export function GameDetailsPage() {
   const handleSaveLibraryEntry = useCallback((gameData: Partial<Game>) => {
     if (!appId) return;
     
+    const isNewAdd = !gameInLibrary;
+    
     if (gameInLibrary) {
       // Update existing entry
       updateEntry(appId, {
@@ -183,7 +364,11 @@ export function GameDetailsPage() {
     
     setIsDialogOpen(false);
     setDialogGame(null);
-  }, [appId, gameInLibrary, addToLibrary, updateEntry]);
+
+    if (isNewAdd) {
+      toastSuccess(`${details?.name || 'Game'} added to your library!`);
+    }
+  }, [appId, gameInLibrary, addToLibrary, updateEntry, details, toastSuccess]);
 
   // Fetch game details and reviews - PARALLELIZED for faster loading
   useEffect(() => {
@@ -347,6 +532,42 @@ export function GameDetailsPage() {
     };
   }, [details?.name]);
 
+  // Fetch Steam news for this game (IPC with fetch fallback)
+  useEffect(() => {
+    if (!appId) return;
+
+    let isMounted = true;
+    setSteamNewsLoading(true);
+
+    console.log('[GameDetails] Fetching Steam news for appId:', appId);
+    steamService.getNewsForApp(appId, 15).then((news) => {
+      console.log('[GameDetails] Got Steam news:', news.length, 'items');
+      if (isMounted) setSteamNews(news);
+    }).catch((err) => {
+      console.warn('[GameDetails] Failed to fetch Steam news:', err);
+    }).finally(() => {
+      if (isMounted) setSteamNewsLoading(false);
+    });
+
+    return () => { isMounted = false; };
+  }, [appId]);
+
+  // Fetch current player count
+  useEffect(() => {
+    if (!appId) return;
+    let isMounted = true;
+
+    steamService.getMultiplePlayerCounts([appId]).then((counts) => {
+      if (isMounted && counts[appId]) {
+        setPlayerCount(counts[appId]);
+      }
+    }).catch(() => {
+      // Silently ignore — player count is a nice-to-have
+    });
+
+    return () => { isMounted = false; };
+  }, [appId]);
+
   // Media items (screenshots + movies)
   const mediaItems = useMemo(() => {
     if (!details) return [];
@@ -492,6 +713,7 @@ export function GameDetailsPage() {
     };
   }, [recommendations, isRecommendationsPaused]);
 
+
   // Review score color
   const getScoreColor = (score?: number) => {
     if (!score) return 'text-white/60';
@@ -511,36 +733,27 @@ export function GameDetailsPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-black text-white">
-        {/* Hero Section Skeleton */}
+        {/* Hero Section Skeleton — shared by both views */}
         <div className="relative h-[30vh] min-h-[240px] w-full bg-gradient-to-b from-white/5 to-black">
-          {/* Gradient Overlay */}
           <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
           <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-transparent" />
 
           {/* Top Navigation Bar */}
           <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-3 app-drag-region">
-            {/* Back Button Skeleton */}
             <div className="h-10 w-24 rounded-lg bg-white/10 animate-pulse no-drag" />
-            
-            {/* Window Controls */}
             <WindowControls />
           </div>
 
           {/* Title and Info Skeleton */}
           <div className="absolute bottom-0 left-0 right-0 p-6 z-10">
             <div className="max-w-7xl mx-auto space-y-3">
-              {/* Title */}
               <div className="h-10 w-2/3 max-w-md rounded-lg bg-white/10 animate-pulse" />
-              
-              {/* Meta info row */}
               <div className="flex flex-wrap items-center gap-4">
                 <div className="h-6 w-32 rounded bg-white/10 animate-pulse" />
                 <div className="h-6 w-28 rounded bg-white/10 animate-pulse" />
                 <div className="h-6 w-16 rounded-full bg-white/10 animate-pulse" />
                 <div className="h-6 w-24 rounded-full bg-white/10 animate-pulse" />
               </div>
-
-              {/* Genre badges */}
               <div className="flex flex-wrap gap-2">
                 <div className="h-6 w-20 rounded-full bg-white/10 animate-pulse" />
                 <div className="h-6 w-24 rounded-full bg-white/10 animate-pulse" />
@@ -550,114 +763,120 @@ export function GameDetailsPage() {
           </div>
         </div>
 
-        {/* Main Content Skeleton */}
-        <div className="max-w-7xl mx-auto px-4 py-6">
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left Column */}
-            <div className="lg:col-span-2 space-y-6">
-              {/* Media Gallery Skeleton */}
-              <section>
-                <div className="h-7 w-24 rounded bg-white/10 animate-pulse mb-4" />
-                <div className="rounded-lg overflow-hidden bg-white/5">
-                  <div className="aspect-video bg-white/10 animate-pulse relative">
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="w-12 h-12 border-2 border-white/20 border-t-fuchsia-500 rounded-full animate-spin" />
+        {/* Content Skeleton — conditional based on whether user will see My Progress */}
+        {showProgressTabs ? (
+          <div className="max-w-7xl mx-auto px-4 py-6">
+            {/* Tab bar skeleton */}
+            <div className="mb-6 flex gap-1 p-1 rounded-lg bg-white/5 w-fit">
+              <div className="h-9 w-36 rounded-md bg-white/10 animate-pulse" />
+              <div className="h-9 w-36 rounded-md bg-white/5 animate-pulse" />
+            </div>
+            {/* My Progress skeleton content */}
+            <div className="p-6 rounded-lg bg-white/5 border border-white/10">
+              <MyProgressSkeleton />
+            </div>
+          </div>
+        ) : (
+          <div className="max-w-7xl mx-auto px-4 py-6">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Left Column */}
+              <div className="lg:col-span-2 space-y-6">
+                {/* Media Gallery Skeleton */}
+                <section>
+                  <div className="h-7 w-24 rounded bg-white/10 animate-pulse mb-4" />
+                  <div className="rounded-lg overflow-hidden bg-white/5">
+                    <div className="aspect-video bg-white/10 animate-pulse relative">
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="w-12 h-12 border-2 border-white/20 border-t-fuchsia-500 rounded-full animate-spin" />
+                      </div>
+                    </div>
+                    <div className="flex gap-2 p-3">
+                      {[...Array(6)].map((_, i) => (
+                        <div key={i} className="flex-shrink-0 w-24 h-14 rounded-lg bg-white/10 animate-pulse" />
+                      ))}
                     </div>
                   </div>
-                  {/* Thumbnails skeleton */}
-                  <div className="flex gap-2 p-3">
-                    {[...Array(6)].map((_, i) => (
-                      <div key={i} className="flex-shrink-0 w-24 h-14 rounded-lg bg-white/10 animate-pulse" />
-                    ))}
+                </section>
+
+                {/* Description Skeleton */}
+                <section>
+                  <div className="h-7 w-32 rounded bg-white/10 animate-pulse mb-4" />
+                  <div className="p-6 rounded-lg bg-white/5 border border-white/10 space-y-3">
+                    <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
+                    <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
+                    <div className="h-4 w-3/4 rounded bg-white/10 animate-pulse" />
+                    <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
+                    <div className="h-4 w-5/6 rounded bg-white/10 animate-pulse" />
+                  </div>
+                </section>
+
+                {/* System Requirements Skeleton */}
+                <section>
+                  <div className="h-7 w-48 rounded bg-white/10 animate-pulse mb-4" />
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="p-4 rounded-lg bg-white/5 border border-white/10 space-y-3">
+                      <div className="h-5 w-24 rounded bg-white/10 animate-pulse" />
+                      <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
+                      <div className="h-4 w-3/4 rounded bg-white/10 animate-pulse" />
+                      <div className="h-4 w-5/6 rounded bg-white/10 animate-pulse" />
+                    </div>
+                    <div className="p-4 rounded-lg bg-white/5 border border-white/10 space-y-3">
+                      <div className="h-5 w-32 rounded bg-white/10 animate-pulse" />
+                      <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
+                      <div className="h-4 w-3/4 rounded bg-white/10 animate-pulse" />
+                      <div className="h-4 w-5/6 rounded bg-white/10 animate-pulse" />
+                    </div>
+                  </div>
+                </section>
+              </div>
+
+              {/* Right Column */}
+              <div className="space-y-6">
+                <div className="p-6 rounded-lg bg-white/5 border border-white/10 space-y-4">
+                  <div className="aspect-video rounded bg-white/10 animate-pulse" />
+                  <div className="h-10 w-full rounded bg-white/10 animate-pulse" />
+                  <div className="h-10 w-full rounded bg-white/10 animate-pulse" />
+                </div>
+                <div className="p-6 rounded-lg bg-white/5 border border-white/10 space-y-4">
+                  <div className="flex justify-between">
+                    <div className="h-4 w-20 rounded bg-white/10 animate-pulse" />
+                    <div className="h-4 w-28 rounded bg-white/10 animate-pulse" />
+                  </div>
+                  <div className="flex justify-between">
+                    <div className="h-4 w-20 rounded bg-white/10 animate-pulse" />
+                    <div className="h-4 w-24 rounded bg-white/10 animate-pulse" />
+                  </div>
+                  <div className="flex justify-between">
+                    <div className="h-4 w-24 rounded bg-white/10 animate-pulse" />
+                    <div className="h-4 w-28 rounded bg-white/10 animate-pulse" />
+                  </div>
+                  <div className="pt-4 border-t border-white/10">
+                    <div className="h-4 w-20 rounded bg-white/10 animate-pulse mb-2" />
+                    <div className="flex gap-2">
+                      <div className="h-8 w-20 rounded bg-white/10 animate-pulse" />
+                      <div className="h-8 w-16 rounded bg-white/10 animate-pulse" />
+                    </div>
                   </div>
                 </div>
-              </section>
-
-              {/* Description Skeleton */}
-              <section>
-                <div className="h-7 w-32 rounded bg-white/10 animate-pulse mb-4" />
                 <div className="p-6 rounded-lg bg-white/5 border border-white/10 space-y-3">
-                  <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
+                  <div className="h-5 w-24 rounded bg-white/10 animate-pulse" />
                   <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
                   <div className="h-4 w-3/4 rounded bg-white/10 animate-pulse" />
-                  <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
-                  <div className="h-4 w-5/6 rounded bg-white/10 animate-pulse" />
                 </div>
-              </section>
-
-              {/* System Requirements Skeleton */}
-              <section>
-                <div className="h-7 w-48 rounded bg-white/10 animate-pulse mb-4" />
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="p-4 rounded-lg bg-white/5 border border-white/10 space-y-3">
-                    <div className="h-5 w-24 rounded bg-white/10 animate-pulse" />
-                    <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
-                    <div className="h-4 w-3/4 rounded bg-white/10 animate-pulse" />
-                    <div className="h-4 w-5/6 rounded bg-white/10 animate-pulse" />
-                  </div>
-                  <div className="p-4 rounded-lg bg-white/5 border border-white/10 space-y-3">
-                    <div className="h-5 w-32 rounded bg-white/10 animate-pulse" />
-                    <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
-                    <div className="h-4 w-3/4 rounded bg-white/10 animate-pulse" />
-                    <div className="h-4 w-5/6 rounded bg-white/10 animate-pulse" />
-                  </div>
-                </div>
-              </section>
-            </div>
-
-            {/* Right Column */}
-            <div className="space-y-6">
-              {/* Quick Info Card Skeleton */}
-              <div className="p-6 rounded-lg bg-white/5 border border-white/10 space-y-4">
-                <div className="aspect-video rounded bg-white/10 animate-pulse" />
-                <div className="h-10 w-full rounded bg-white/10 animate-pulse" />
-                <div className="h-10 w-full rounded bg-white/10 animate-pulse" />
-              </div>
-
-              {/* Details Card Skeleton */}
-              <div className="p-6 rounded-lg bg-white/5 border border-white/10 space-y-4">
-                <div className="flex justify-between">
-                  <div className="h-4 w-20 rounded bg-white/10 animate-pulse" />
-                  <div className="h-4 w-28 rounded bg-white/10 animate-pulse" />
-                </div>
-                <div className="flex justify-between">
-                  <div className="h-4 w-20 rounded bg-white/10 animate-pulse" />
-                  <div className="h-4 w-24 rounded bg-white/10 animate-pulse" />
-                </div>
-                <div className="flex justify-between">
-                  <div className="h-4 w-24 rounded bg-white/10 animate-pulse" />
-                  <div className="h-4 w-28 rounded bg-white/10 animate-pulse" />
-                </div>
-                <div className="pt-4 border-t border-white/10">
-                  <div className="h-4 w-20 rounded bg-white/10 animate-pulse mb-2" />
-                  <div className="flex gap-2">
-                    <div className="h-8 w-20 rounded bg-white/10 animate-pulse" />
-                    <div className="h-8 w-16 rounded bg-white/10 animate-pulse" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Languages Skeleton */}
-              <div className="p-6 rounded-lg bg-white/5 border border-white/10 space-y-3">
-                <div className="h-5 w-24 rounded bg-white/10 animate-pulse" />
-                <div className="h-4 w-full rounded bg-white/10 animate-pulse" />
-                <div className="h-4 w-3/4 rounded bg-white/10 animate-pulse" />
-              </div>
-
-              {/* Reviews Skeleton */}
-              <div className="p-6 rounded-lg bg-white/5 border border-white/10 space-y-4">
-                <div className="h-5 w-32 rounded bg-white/10 animate-pulse" />
-                <div className="flex items-center gap-4">
-                  <div className="h-12 w-12 rounded bg-white/10 animate-pulse" />
-                  <div className="space-y-2 flex-1">
-                    <div className="h-4 w-24 rounded bg-white/10 animate-pulse" />
-                    <div className="h-3 w-20 rounded bg-white/10 animate-pulse" />
+                <div className="p-6 rounded-lg bg-white/5 border border-white/10 space-y-4">
+                  <div className="h-5 w-32 rounded bg-white/10 animate-pulse" />
+                  <div className="flex items-center gap-4">
+                    <div className="h-12 w-12 rounded bg-white/10 animate-pulse" />
+                    <div className="space-y-2 flex-1">
+                      <div className="h-4 w-24 rounded bg-white/10 animate-pulse" />
+                      <div className="h-3 w-20 rounded bg-white/10 animate-pulse" />
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }
@@ -753,6 +972,14 @@ export function GameDetailsPage() {
                   {positivePercentage}% Positive
                 </Badge>
               )}
+
+              {/* Player Count */}
+              {playerCount !== null && playerCount > 0 && (
+                <Badge variant="outline" className="border-cyan-500/30 text-cyan-400 bg-cyan-500/10">
+                  <Users className="w-3 h-3 mr-1" />
+                  {formatPlayerCount(playerCount)} playing now
+                </Badge>
+              )}
             </div>
 
             {/* Genres */}
@@ -769,8 +996,8 @@ export function GameDetailsPage() {
 
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 py-6">
-        {/* Tabbed view for library games */}
-        {gameInLibrary && appId ? (
+        {/* Tabbed view — only when game was already in library on page load */}
+        {showProgressTabs && appId ? (
           <Tabs defaultValue="progress" className="w-full">
             <TabsList className="mb-6 bg-white/5">
               <TabsTrigger value="progress" className="flex items-center gap-2">
@@ -817,6 +1044,8 @@ export function GameDetailsPage() {
                 isRecommendationsPaused={isRecommendationsPaused}
                 setIsRecommendationsPaused={setIsRecommendationsPaused}
                 recommendationsScrollRef={recommendationsScrollRef}
+                steamNews={steamNews}
+                steamNewsLoading={steamNewsLoading}
                 gameInLibrary={gameInLibrary}
                 handleOpenLibraryDialog={handleOpenLibraryDialog}
                 removeFromLibrary={removeFromLibrary}
@@ -853,6 +1082,8 @@ export function GameDetailsPage() {
             isRecommendationsPaused={isRecommendationsPaused}
             setIsRecommendationsPaused={setIsRecommendationsPaused}
             recommendationsScrollRef={recommendationsScrollRef}
+            steamNews={steamNews}
+            steamNewsLoading={steamNewsLoading}
             gameInLibrary={gameInLibrary}
             handleOpenLibraryDialog={handleOpenLibraryDialog}
             removeFromLibrary={removeFromLibrary}
@@ -907,6 +1138,8 @@ interface GameDetailsContentProps {
   isRecommendationsPaused: boolean;
   setIsRecommendationsPaused: (paused: boolean) => void;
   recommendationsScrollRef: React.RefObject<HTMLDivElement>;
+  steamNews: SteamNewsItem[];
+  steamNewsLoading: boolean;
   gameInLibrary: boolean;
   handleOpenLibraryDialog: () => void;
   removeFromLibrary: (gameId: number) => void;
@@ -941,12 +1174,16 @@ function GameDetailsContent({
   isRecommendationsPaused: _isRecommendationsPaused, // Used for scrolling pause state
   setIsRecommendationsPaused,
   recommendationsScrollRef,
+  steamNews,
+  steamNewsLoading,
   gameInLibrary,
   handleOpenLibraryDialog,
   removeFromLibrary,
   appId,
   navigate,
 }: GameDetailsContentProps) {
+  const [reviewsExpanded, setReviewsExpanded] = useState(false);
+
   return (
     <>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1164,8 +1401,12 @@ function GameDetailsContent({
               <section>
                 <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">Steam Reviews</h2>
                 
-                {/* Review Summary */}
-                <div className="flex items-center gap-6 mb-6 p-4 rounded-lg bg-white/5 border border-white/10">
+                {/* Review Summary — always visible, clickable to expand */}
+                <button
+                  type="button"
+                  onClick={() => setReviewsExpanded(prev => !prev)}
+                  className="w-full flex items-center gap-6 p-4 rounded-lg bg-white/5 border border-white/10 hover:bg-white/[0.07] transition-colors cursor-pointer text-left"
+                >
                   <div className="text-center">
                     <div className="text-3xl font-bold text-green-400">
                       {positivePercentage}%
@@ -1190,47 +1431,63 @@ function GameDetailsContent({
                       {reviews.query_summary.total_negative.toLocaleString()}
                     </div>
                   </div>
-                </div>
+                  <ChevronDown className={cn(
+                    "w-5 h-5 text-white/40 transition-transform duration-200 flex-shrink-0",
+                    reviewsExpanded && "rotate-180"
+                  )} />
+                </button>
 
-                {/* Individual Reviews */}
-                <div className="space-y-4">
-                  {reviews.reviews.slice(0, 5).map((review) => (
-                    <div
-                      key={review.recommendationid}
-                      className="p-4 rounded-lg bg-white/5 border border-white/10"
+                {/* Individual Reviews — collapsed by default */}
+                <AnimatePresence>
+                  {reviewsExpanded && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.25, ease: 'easeInOut' }}
+                      className="overflow-hidden"
                     >
-                      <div className="flex items-start gap-3 mb-3">
-                        <div className={cn(
-                          "p-2 rounded",
-                          review.voted_up ? "bg-green-500/20" : "bg-red-500/20"
-                        )}>
-                          {review.voted_up ? (
-                            <ThumbsUp className="w-4 h-4 text-green-400" />
-                          ) : (
-                            <ThumbsDown className="w-4 h-4 text-red-400" />
-                          )}
-                        </div>
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 text-sm text-white/60">
-                            <Clock className="w-3 h-3" />
-                            {formatPlaytime(review.author.playtime_forever)} on record
-                            <span className="text-white/40">•</span>
-                            {formatDate(review.timestamp_created)}
+                      <div className="space-y-4 mt-4">
+                        {reviews.reviews.slice(0, 5).map((review) => (
+                          <div
+                            key={review.recommendationid}
+                            className="p-4 rounded-lg bg-white/5 border border-white/10"
+                          >
+                            <div className="flex items-start gap-3 mb-3">
+                              <div className={cn(
+                                "p-2 rounded",
+                                review.voted_up ? "bg-green-500/20" : "bg-red-500/20"
+                              )}>
+                                {review.voted_up ? (
+                                  <ThumbsUp className="w-4 h-4 text-green-400" />
+                                ) : (
+                                  <ThumbsDown className="w-4 h-4 text-red-400" />
+                                )}
+                              </div>
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2 text-sm text-white/60">
+                                  <Clock className="w-3 h-3" />
+                                  {formatPlaytime(review.author.playtime_forever)} on record
+                                  <span className="text-white/40">•</span>
+                                  {formatDate(review.timestamp_created)}
+                                </div>
+                              </div>
+                            </div>
+                            <p className="text-white/80 text-sm line-clamp-4">
+                              {review.review}
+                            </p>
+                            <div className="flex items-center gap-4 mt-3 text-xs text-white/40">
+                              <span>{review.votes_up} found helpful</span>
+                              {review.votes_funny > 0 && (
+                                <span>{review.votes_funny} found funny</span>
+                              )}
+                            </div>
                           </div>
-                        </div>
+                        ))}
                       </div>
-                      <p className="text-white/80 text-sm line-clamp-4">
-                        {review.review}
-                      </p>
-                      <div className="flex items-center gap-4 mt-3 text-xs text-white/40">
-                        <span>{review.votes_up} found helpful</span>
-                        {review.votes_funny > 0 && (
-                          <span>{review.votes_funny} found funny</span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </section>
             )}
           </div>
@@ -1556,13 +1813,58 @@ function GameDetailsContent({
           </div>
         </div>
 
-      {/* Similar Games / Recommendations Section */}
+      {/* News & Updates Section — Apple Cards Carousel */}
+      <div className="bg-black/50 py-8 px-6">
+        <div className="max-w-7xl mx-auto">
+          <h2 className="text-xl font-bold mb-0 font-['Orbitron'] flex items-center gap-2">
+            <Newspaper className="w-5 h-5 text-fuchsia-400" />
+            News & Updates
+          </h2>
+
+          {steamNewsLoading ? (
+            <div className="flex gap-4 overflow-x-auto py-6 pl-4">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="flex-shrink-0 w-40 md:w-52">
+                  <div className="h-52 md:h-72 bg-white/10 rounded-2xl animate-pulse" />
+                </div>
+              ))}
+            </div>
+          ) : steamNews.length > 0 ? (
+            <Carousel
+              items={steamNews.map((item, index) => {
+                const thumbnail = extractNewsThumbnail(item.contents);
+                const cardData: CardType = {
+                  src: thumbnail || details.header_image,
+                  title: item.title,
+                  category: item.feedlabel || 'News',
+                  href: item.url,
+                };
+                return (
+                  <NewsCard
+                    key={item.gid}
+                    card={cardData}
+                    index={index}
+                    newsItem={item}
+                    fallbackImage={details.header_image}
+                  />
+                );
+              })}
+            />
+          ) : (
+            <div className="text-center py-6 text-white/40 text-sm">
+              No news available for this game.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Recommended by Steam Section */}
       {(recommendations.length > 0 || recommendationsLoading) && (
         <div className="bg-black/50 py-8 px-6">
           <div className="max-w-7xl mx-auto">
             <h2 className="text-xl font-bold mb-4 font-['Orbitron'] flex items-center gap-2">
               <Star className="w-5 h-5 text-fuchsia-400" />
-              Similar Games You Might Like
+              Recommended by Steam
             </h2>
             
             {recommendationsLoading ? (
@@ -1610,9 +1912,11 @@ function GameDetailsContent({
                   onMouseLeave={() => setIsRecommendationsPaused(false)}
                   className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin scrollbar-thumb-white/20 scrollbar-track-transparent scroll-smooth"
                 >
-                  {recommendations.map((rec) => {
-                    // Score is already 0-1, multiply by 100 for percentage
-                    const matchPercentage = Math.round(rec.score * 100);
+                  {(() => {
+                    // Normalize scores relative to the top recommendation (max ≈ 95%)
+                    const maxScore = Math.max(...recommendations.map(r => r.score), 1);
+                    return recommendations.map((rec) => {
+                    const matchPercentage = Math.min(Math.round((rec.score / maxScore) * 95), 99);
                     return (
                       <motion.div
                         key={rec.appId}
@@ -1622,15 +1926,7 @@ function GameDetailsContent({
                         transition={{ duration: 0.2 }}
                       >
                         <div className="relative aspect-[460/215] rounded-lg overflow-hidden bg-white/5">
-                          <img
-                            src={`https://cdn.akamai.steamstatic.com/steam/apps/${rec.appId}/header.jpg`}
-                            alt={rec.name}
-                            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                            onError={(e) => {
-                              const img = e.target as HTMLImageElement;
-                              img.src = `https://cdn.akamai.steamstatic.com/steam/apps/${rec.appId}/capsule_616x353.jpg`;
-                            }}
-                          />
+                          <RecommendationImage appId={rec.appId} name={rec.name} />
                           <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
                         </div>
                         
@@ -1663,7 +1959,8 @@ function GameDetailsContent({
                         </div>
                       </motion.div>
                     );
-                  })}
+                  });
+                  })()}
                 </div>
               </div>
             )}

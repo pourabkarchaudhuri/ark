@@ -79,21 +79,105 @@ function getPriorityColor(priority: GamePriority): string {
   }
 }
 
+// Format date as "3rd Jan, 2025" for My Progress view
+function formatProgressDate(date: Date | string): string {
+  const d = typeof date === 'string' ? new Date(date) : date;
+  if (isNaN(d.getTime())) return '';
+  const day = d.getDate();
+  const ord =
+    day === 1 || day === 21 || day === 31
+      ? 'st'
+      : day === 2 || day === 22
+        ? 'nd'
+        : day === 3 || day === 23
+          ? 'rd'
+          : 'th';
+  const month = d.toLocaleDateString('en-GB', { month: 'short' });
+  const year = d.getFullYear();
+  return `${day}${ord} ${month}, ${year}`;
+}
+
+// Skeleton loader for My Progress tab
+export function MyProgressSkeleton() {
+  return (
+    <div className="space-y-6 animate-pulse">
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-2">
+          <div className="h-6 w-24 rounded-md bg-white/10" />
+          <div className="h-6 w-20 rounded-md bg-white/10" />
+        </div>
+        <div className="h-4 w-28 rounded bg-white/10" />
+      </div>
+      {/* Two columns */}
+      <div className="grid gap-6 md:grid-cols-2">
+        <div className="space-y-6">
+          <div className="space-y-3">
+            <div className="h-4 w-24 rounded bg-white/10" />
+            <div className="h-2 w-full rounded-full bg-white/10" />
+            <div className="flex justify-between gap-2">
+              {[1, 2, 3, 4, 5, 6].map((i) => (
+                <div key={i} className="h-3 flex-1 rounded bg-white/10" />
+              ))}
+            </div>
+          </div>
+          <div className="space-y-3">
+            <div className="h-4 w-20 rounded bg-white/10" />
+            <div className="flex gap-1">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="h-7 w-7 rounded bg-white/10" />
+              ))}
+            </div>
+          </div>
+          <div className="space-y-2">
+            <div className="h-4 w-20 rounded bg-white/10" />
+            <div className="h-10 w-full rounded-md bg-white/10" />
+          </div>
+          <div className="space-y-2">
+            <div className="h-4 w-16 rounded bg-white/10" />
+            <div className="h-10 w-full rounded-md bg-white/10" />
+          </div>
+        </div>
+        <div className="space-y-6">
+          <div className="space-y-2">
+            <div className="h-4 w-40 rounded bg-white/10" />
+            <div className="h-10 w-full rounded-md bg-white/10" />
+          </div>
+          <div className="space-y-2">
+            <div className="h-4 w-24 rounded bg-white/10" />
+            <div className="h-[180px] w-full rounded-md bg-white/10" />
+          </div>
+        </div>
+      </div>
+      {/* Save button row */}
+      <div className="flex justify-end pt-4 border-t border-white/10">
+        <div className="h-10 w-32 rounded-md bg-white/10" />
+      </div>
+    </div>
+  );
+}
+
 export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProps) {
   // gameName is available for future use (e.g., display in the header)
   void _gameName;
-  const [entry, setEntry] = useState<LibraryGameEntry | null>(null);
-  const [hoursPlayed, setHoursPlayed] = useState(0);
-  const [rating, setRating] = useState(0);
-  const [status, setStatus] = useState<GameStatus>('Want to Play');
-  const [priority, setPriority] = useState<GamePriority>('Medium');
-  const [notes, setNotes] = useState('');
-  const [recommendationSource, setRecommendationSource] = useState('Personal Discovery');
+
+  // Initialise state eagerly from the synchronous store so the first render
+  // already has data and the skeleton never flickers.
+  const initialEntry = libraryStore.getEntry(gameId) ?? null;
+  const [entry, setEntry] = useState<LibraryGameEntry | null>(initialEntry);
+  const [hoursPlayed, setHoursPlayed] = useState(initialEntry?.hoursPlayed || 0);
+  const [rating, setRating] = useState(initialEntry?.rating || 0);
+  const [status, setStatus] = useState<GameStatus>(initialEntry?.status || 'Want to Play');
+  const [priority, setPriority] = useState<GamePriority>(initialEntry?.priority || 'Medium');
+  const [notes, setNotes] = useState(initialEntry?.publicReviews || '');
+  const [recommendationSource, setRecommendationSource] = useState(
+    initialEntry?.recommendationSource || 'Personal Discovery'
+  );
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
 
-  // Load entry data
+  // Re-sync when navigating to a different game
   useEffect(() => {
     const loadedEntry = libraryStore.getEntry(gameId);
     if (loadedEntry) {
@@ -190,8 +274,8 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
 
   if (!entry) {
     return (
-      <div className="p-6 text-center text-white/60">
-        Loading progress data...
+      <div className="p-6">
+        <MyProgressSkeleton />
       </div>
     );
   }
@@ -209,7 +293,7 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
           </Badge>
         </div>
         <div className="text-sm text-white/50">
-          Added {new Date(entry.addedAt).toLocaleDateString()}
+          Added {formatProgressDate(entry.addedAt)}
         </div>
       </div>
 

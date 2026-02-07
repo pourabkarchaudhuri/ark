@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Game, GameStatus, GamePriority } from '@/types/game';
 import {
   Dialog,
@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { Library, Plus, Gamepad2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Library, Plus, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface GameDialogProps {
   open: boolean;
@@ -50,6 +50,107 @@ const recommendationSources = [
   'Streaming',
   'Other',
 ];
+
+const STEAM_CDN = 'https://cdn.akamai.steamstatic.com/steam/apps';
+
+/** Generate a deterministic gradient from a game title for visual fallback */
+function getDialogFallbackGradient(title: string): string {
+  const hash = title.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+  const hue = hash % 360;
+  return `linear-gradient(135deg, hsl(${hue}, 50%, 20%) 0%, hsl(${(hue + 60) % 360}, 50%, 10%) 100%)`;
+}
+
+/** Get up to 2 initials from a title */
+function getDialogInitials(title: string): string {
+  return title
+    .split(' ')
+    .slice(0, 2)
+    .map(word => word[0])
+    .join('')
+    .toUpperCase();
+}
+
+/**
+ * Cover image for the dialog with a deduplicated multi-step fallback chain.
+ * Also detects tiny placeholder images that newer Steam games return from
+ * the old CDN (200 status but < 50px dimensions) and advances the fallback.
+ */
+function DialogCoverImage({ game }: { game: Game }) {
+  const [fallbackAttempt, setFallbackAttempt] = useState(0);
+  const [imageError, setImageError] = useState(false);
+
+  // Build a deduplicated fallback URL list so consecutive duplicates never stall the chain
+  const fallbackUrls = useMemo(() => {
+    const id = game.steamAppId;
+    if (!id) return [game.coverUrl || ''];
+
+    const candidates = [
+      game.coverUrl || `${STEAM_CDN}/${id}/library_600x900.jpg`,
+      game.headerImage || `${STEAM_CDN}/${id}/header.jpg`,
+      `${STEAM_CDN}/${id}/header.jpg`,
+      `${STEAM_CDN}/${id}/capsule_616x353.jpg`,
+      `${STEAM_CDN}/${id}/capsule_231x87.jpg`,
+      `${STEAM_CDN}/${id}/logo.png`,
+      game.screenshots?.[0] || '',
+    ];
+
+    const seen = new Set<string>();
+    return candidates.filter(url => {
+      if (!url || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+  }, [game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
+
+  // Reset state when the game changes
+  useEffect(() => {
+    setFallbackAttempt(0);
+    setImageError(false);
+  }, [game.id, game.steamAppId]);
+
+  const imageUrl = fallbackUrls[fallbackAttempt] || '';
+
+  const advanceFallback = useCallback(() => {
+    if (fallbackAttempt < fallbackUrls.length - 1) {
+      setFallbackAttempt(prev => prev + 1);
+    } else {
+      setImageError(true);
+    }
+  }, [fallbackAttempt, fallbackUrls.length]);
+
+  // Detect placeholder images (tiny dimensions) that newer Steam games return
+  const handleLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    if (img.naturalWidth < 50 || img.naturalHeight < 50) {
+      advanceFallback();
+    }
+  }, [advanceFallback]);
+
+  if (imageError || !imageUrl) {
+    return (
+      <div
+        className="flex-shrink-0 w-20 h-28 rounded-lg overflow-hidden flex items-center justify-center"
+        style={{ background: getDialogFallbackGradient(game.title) }}
+      >
+        <span className="text-white/60 font-bold text-lg">
+          {getDialogInitials(game.title)}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-shrink-0 w-20 h-28 rounded-lg overflow-hidden bg-white/10">
+      <img
+        src={imageUrl}
+        alt={game.title}
+        className="w-full h-full object-cover"
+        onLoad={handleLoad}
+        onError={advanceFallback}
+      />
+    </div>
+  );
+}
 
 export function GameDialog({
   open,
@@ -133,20 +234,8 @@ export function GameDialog({
 
         {/* Game Info Header (Read-only from IGDB) */}
         <div className="flex gap-4 p-4 bg-white/5 rounded-lg border border-white/10">
-          {/* Cover Image */}
-          <div className="flex-shrink-0 w-20 h-28 rounded-lg overflow-hidden bg-white/10">
-            {game.coverUrl ? (
-              <img 
-                src={game.coverUrl} 
-                alt={game.title}
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center text-white/40">
-                <Gamepad2 className="h-8 w-8" />
-              </div>
-            )}
-          </div>
+          {/* Cover Image with fallback chain */}
+          <DialogCoverImage game={game} />
 
           {/* Game Details */}
           <div className="flex-1 min-w-0">

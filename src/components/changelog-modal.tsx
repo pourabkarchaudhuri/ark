@@ -4,10 +4,35 @@ import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Current app version - update this with each release
-export const APP_VERSION = '1.0.15';
+export const APP_VERSION = '1.0.17';
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.17': {
+    title: "What's New in Ark 1.0.17",
+    changes: [
+      'Steam News & Updates — Game details page now shows a carousel of the latest news articles from Steam with thumbnails, auto-scroll, and source labels',
+      'Recommended by Steam — Similar games section redesigned with content-based recommendations specific to each game',
+      'Journey View — New timeline view that persists your entire gaming history, even after removing games from the library',
+      'AI Chat with Web Search — Ollama-powered chat now uses DuckDuckGo grounding for real-time answers about awards, releases, and current events',
+      'Live Player Counts — Real-time "playing now" counts shown on dashboard cards, game details, and journey cards, consistent across all views',
+      'My Progress Skeleton — Dedicated skeleton loader for the progress tab eliminates flicker when navigating to game details',
+      'Status Change History — Every status transition is now persisted with game, previous/new state, and timestamp for future tracking features',
+      'Image Fallback Overhaul — Robust multi-step fallback chains with placeholder detection for game thumbnails across all views',
+      'Performance Audit — Reduced re-renders in game cards, journey view, and game store; optimized memo comparators and batch state updates',
+      'Test Suite Reorganization — All 18 test files consolidated into src/test/ with consistent folder structure mirroring source',
+    ],
+  },
+  '1.0.16': {
+    title: "What's New in Ark 1.0.16",
+    changes: [
+      'Hyperlinks now open in your default OS browser - Steam, Metacritic, FitGirl, and all in-page links no longer open inside the Electron window, keeping your site logins intact',
+      'Pricing displayed in INR - Game details show Indian Rupee pricing directly from the Steam API (cc=in)',
+      'Library view cleanup - Heart icon removed from Library cards since you already have the ellipsis menu and right-click to manage games',
+      'Cleaner game lists - Games without developer or publisher info (e.g. FiveM) are filtered out from Browse and Library',
+      'Navigation guards - Added will-navigate and window-open handlers to prevent Electron from ever navigating away from the app',
+    ],
+  },
   '1.0.15': {
     title: "What's New in Ark 1.0.15",
     changes: [

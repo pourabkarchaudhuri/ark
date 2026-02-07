@@ -13,6 +13,7 @@ export interface Game {
   releaseDate: string;
   summary?: string;
   coverUrl?: string;
+  headerImage?: string; // API-provided header image URL (uses current CDN format)
   screenshots?: string[];
   videos?: string[]; // YouTube video IDs or Steam movie URLs
   websites?: { url: string; category: number }[]; // Store links
@@ -57,6 +58,7 @@ export type GameCategory = 'all' | 'most-played' | 'trending' | 'recent' | 'awar
 export interface GameFilters {
   search: string;
   status: GameStatus | 'All';
+  priority: GamePriority | 'All';
   genre: string | 'All';
   platform: string | 'All';
   category: GameCategory;
@@ -108,3 +110,28 @@ export interface CustomGameEntry {
 
 export type CreateCustomGameEntry = Omit<CustomGameEntry, 'id' | 'addedAt' | 'updatedAt'>;
 export type UpdateCustomGameEntry = Partial<Omit<CustomGameEntry, 'id' | 'addedAt'>>;
+
+// Status change log entry — records every status transition for tracking/analytics.
+export interface StatusChangeEntry {
+  gameId: number;               // Steam appId (or IGDB ID)
+  title: string;                // Game title for readability
+  previousStatus: GameStatus | null; // null when game is first added
+  newStatus: GameStatus;
+  timestamp: string;            // ISO date string
+}
+
+// Journey history entry — a snapshot persisted when a game is added to the library.
+// Survives library removal so the Journey timeline always reflects the user's full history.
+export interface JourneyEntry {
+  gameId: number;             // Steam appId (or IGDB ID)
+  title: string;
+  coverUrl?: string;
+  genre: string[];
+  platform: string[];
+  releaseDate?: string;
+  status: GameStatus;         // Status at time of capture (updated on library changes)
+  hoursPlayed: number;        // Synced while in library
+  rating: number;             // Synced while in library
+  addedAt: string;            // ISO date — when the game was first added to the library
+  removedAt?: string;         // ISO date — set when the game is removed from the library
+}

@@ -1,4 +1,4 @@
-import { memo, useRef, useEffect, useState, useCallback } from 'react';
+import { memo, useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { Game } from '@/types/game';
 import { cn } from '@/lib/utils';
 import { Search, Gamepad2 } from 'lucide-react';
@@ -25,38 +25,47 @@ function SearchResultImage({ game }: { game: Game }) {
     setFallbackAttempt(0);
   }, [game.id]);
 
+  // Deduplicated fallback URL list — prevents chain stalling on duplicate URLs
+  const fallbackUrls = useMemo(() => {
+    if (!game.steamAppId) return [game.coverUrl || ''];
+    const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
+    const candidates = [
+      game.coverUrl || `${cdnBase}/${game.steamAppId}/header.jpg`,
+      game.headerImage || `${cdnBase}/${game.steamAppId}/header.jpg`,
+      `${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`,
+      `${cdnBase}/${game.steamAppId}/capsule_616x353.jpg`,
+      `${cdnBase}/${game.steamAppId}/library_600x900.jpg`,
+      `${cdnBase}/${game.steamAppId}/logo.png`,
+      game.screenshots?.[0] || '',
+    ];
+    const seen = new Set<string>();
+    return candidates.filter(url => {
+      if (!url || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+  }, [game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
+
   const handleError = useCallback(() => {
-    if (game.steamAppId && fallbackAttempt < 5) {
+    if (game.steamAppId && fallbackAttempt < fallbackUrls.length - 1) {
       setFallbackAttempt(prev => prev + 1);
       setImageLoaded(false);
     } else {
       setImageError(true);
     }
-  }, [game.steamAppId, fallbackAttempt]);
+  }, [game.steamAppId, fallbackAttempt, fallbackUrls.length]);
 
-  // Build image URL based on fallback attempt
-  // Matches game-card.tsx fallback order for consistency
-  const imageUrl = (() => {
-    if (!game.steamAppId) return game.coverUrl || '';
-    const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
-    switch (fallbackAttempt) {
-      case 0:
-        return game.coverUrl || `${cdnBase}/${game.steamAppId}/header.jpg`;
-      case 1:
-        return `${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`;
-      case 2:
-        return `${cdnBase}/${game.steamAppId}/capsule_616x353.jpg`;
-      case 3:
-        return `${cdnBase}/${game.steamAppId}/library_600x900.jpg`;
-      case 4:
-        return `${cdnBase}/${game.steamAppId}/logo.png`;
-      case 5:
-        // Use the header_image from screenshots as final fallback (works for unreleased games)
-        return game.screenshots?.[0] || '';
-      default:
-        return '';
+  // Detect placeholder images (tiny dimensions) from old CDN
+  const handleLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    if (img.naturalWidth < 50 || img.naturalHeight < 50) {
+      handleError();
+      return;
     }
-  })();
+    setImageLoaded(true);
+  }, [handleError]);
+
+  const imageUrl = fallbackUrls[fallbackAttempt] || '';
 
   if (imageError || !imageUrl) {
     return (
@@ -78,7 +87,7 @@ function SearchResultImage({ game }: { game: Game }) {
           "w-full h-full object-cover transition-opacity duration-200",
           imageLoaded ? "opacity-100" : "opacity-0"
         )}
-        onLoad={() => setImageLoaded(true)}
+        onLoad={handleLoad}
         onError={handleError}
       />
     </div>

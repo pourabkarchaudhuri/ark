@@ -19,16 +19,95 @@ process.stderr.on('error', (err) => {
   if (err.code === 'EPIPE') return;
   throw err;
 });
+
+// Log startup errors to a file when packaged (app doesn't show console)
+function logStartupError(err: unknown) {
+  const msg = err instanceof Error ? err.message + '\n' + err.stack : String(err);
+  try {
+    const userData = app?.getPath?.('userData');
+    if (userData) fs.writeFileSync(path.join(userData, 'ark-startup-error.log'), msg, 'utf-8');
+  } catch {
+    // ignore
+  }
+  console.error('[Ark] Startup error:', msg);
+}
+
+process.on('uncaughtException', (err) => {
+  logStartupError(err);
+  try {
+    if (app.isPackaged) app.quit();
+  } catch {
+    process.exit(1);
+  }
+});
+
 import { steamAPI, getSteamCoverUrl, getSteamHeaderUrl } from './steam-api.js';
 import { fetchMetacriticReviews, clearMetacriticCache } from './metacritic-api.js';
 import { processMessage, searchGamesForContext, chatStore } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
-import { initAutoUpdater } from './auto-updater.js';
+import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
 import { getInstalledGames, getInstalledAppIds, clearInstalledGamesCache } from './installed-games.js';
 
 let mainWindow: BrowserWindowType | null = null;
 
+// ---------- Data migration: game-tracker → ark ----------
+// When we renamed the package from "game-tracker" to "ark", the userData
+// directory changed from %APPDATA%/game-tracker to %APPDATA%/ark.
+// Copy existing data so users don't lose their library, cache, or settings.
+(function migrateUserData() {
+  try {
+    const newUserData = app.getPath('userData'); // …/ark
+    const oldUserData = path.join(path.dirname(newUserData), 'game-tracker');
+
+    if (fs.existsSync(oldUserData) && !fs.existsSync(path.join(newUserData, '.migrated'))) {
+      console.log(`[Migration] Migrating user data from ${oldUserData} → ${newUserData}`);
+      if (!fs.existsSync(newUserData)) {
+        fs.mkdirSync(newUserData, { recursive: true });
+      }
+
+      // Copy every file from the old directory (shallow — no subdirs needed)
+      const files = fs.readdirSync(oldUserData);
+      for (const file of files) {
+        const src = path.join(oldUserData, file);
+        const dest = path.join(newUserData, file);
+        if (fs.statSync(src).isFile() && !fs.existsSync(dest)) {
+          fs.copyFileSync(src, dest);
+          console.log(`[Migration] Copied ${file}`);
+        }
+      }
+
+      // Write a marker so we only migrate once
+      fs.writeFileSync(path.join(newUserData, '.migrated'), 'migrated from game-tracker', 'utf-8');
+      console.log('[Migration] Done');
+    }
+  } catch (err) {
+    console.warn('[Migration] Non-fatal error during data migration:', err);
+  }
+})();
+
+// Register updater IPC handlers early so the renderer never hits
+// "No handler registered" errors — even in dev mode.
+registerUpdaterIpcHandlers();
+
 function createWindow() {
+  // Resolve paths: when packaged, use app path so loadFile/preload work from installed location
+  let preloadPath: string;
+  let indexPath: string;
+  if (app.isPackaged) {
+    const appPath = app.getAppPath();
+    indexPath = path.join(appPath, 'dist', 'index.html');
+    // Preload is unpacked (asarUnpack) so load from app.asar.unpacked to avoid Windows asar issues
+    const resourcesPath = process.resourcesPath;
+    preloadPath = path.join(resourcesPath, 'app.asar.unpacked', 'dist-electron', 'electron', 'preload.cjs');
+    // Fallback if unpacked path doesn't exist (e.g. older build)
+    if (!fs.existsSync(preloadPath)) {
+      preloadPath = path.join(appPath, 'dist-electron', 'electron', 'preload.cjs');
+    }
+  } else {
+    preloadPath = path.join(__dirname, 'preload.cjs');
+    indexPath = path.join(__dirname, '../../dist/index.html');
+  }
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -39,7 +118,7 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false,
-      preload: path.join(__dirname, 'preload.cjs'),
+      preload: preloadPath,
     },
     frame: false,
     titleBarStyle: 'hidden',
@@ -60,9 +139,36 @@ function createWindow() {
     mainWindow.loadURL(devUrl);
     mainWindow.webContents.openDevTools();
   } else {
-    // In production or test, load the built files
-    mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
+    mainWindow.loadFile(indexPath);
   }
+
+  // ---- Navigation guards ----
+  // Redirect any link that tries to open a NEW window (target="_blank", window.open, etc.)
+  // to the default OS browser instead of spawning an Electron BrowserWindow.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http:') || url.startsWith('https:') || url.startsWith('mailto:')) {
+      shell.openExternal(url);
+      console.log(`[Navigation] Redirected new-window request to OS browser: ${url}`);
+    }
+    return { action: 'deny' }; // Never open a child Electron window
+  });
+
+  // Prevent the main window from navigating away from the app.
+  // Any external http(s) URL is opened in the OS browser instead.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    // Allow navigation to the Vite dev server or the local file in production
+    const currentUrl = mainWindow?.webContents.getURL() || '';
+    const isInternalNav =
+      url.startsWith('file://') ||
+      url.startsWith('http://localhost') ||
+      url.startsWith(currentUrl.split('#')[0]); // hash-based routing
+
+    if (!isInternalNav) {
+      event.preventDefault();
+      shell.openExternal(url);
+      console.log(`[Navigation] Blocked in-window navigation, opened in OS browser: ${url}`);
+    }
+  });
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
@@ -283,6 +389,34 @@ ipcMain.handle('steam:getGameReviews', async (_event, appId: number, limit: numb
     console.error('Error fetching game reviews:', error);
     throw error;
   }
+});
+
+/**
+ * Get news for a specific game
+ */
+ipcMain.handle('steam:getNewsForApp', async (_event, appId: number, count: number = 15) => {
+  try {
+    console.log(`[Steam] Handler: getNewsForApp for appId ${appId}`);
+    const news = await steamAPI.getNewsForApp(appId, count);
+    return news;
+  } catch (error) {
+    console.error(`Error fetching news for appId ${appId}:`, error);
+    throw error;
+  }
+});
+
+/**
+ * Get current player count for a single game
+ */
+ipcMain.handle('steam:getPlayerCount', async (_event, appId: number) => {
+  return steamAPI.getPlayerCount(appId);
+});
+
+/**
+ * Get current player counts for multiple games (batched)
+ */
+ipcMain.handle('steam:getMultiplePlayerCounts', async (_event, appIds: number[]) => {
+  return steamAPI.getMultiplePlayerCounts(appIds);
 });
 
 /**
@@ -632,7 +766,14 @@ ipcMain.handle('games:clearInstalledCache', async () => {
 // APP LIFECYCLE
 // ============================================================================
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  try {
+    createWindow();
+  } catch (err) {
+    logStartupError(err);
+    app.quit();
+  }
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

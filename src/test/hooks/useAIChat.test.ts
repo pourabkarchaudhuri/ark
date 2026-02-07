@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useAIChat } from './useAIChat';
+import { useAIChat } from '@/hooks/useAIChat';
 import type { ChatConversation, AIResponse } from '@/types/chat';
 
 // Mock useLibrary hook

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { GameCard } from './game-card';
+import { GameCard } from '@/components/game-card';
 import { Game } from '@/types/game';
 
 const mockGame: Game = {
@@ -75,7 +75,7 @@ describe('GameCard', () => {
       expect(screen.getByText('Completed')).toBeInTheDocument();
     });
 
-    it('renders Backlog status for want-to-play library games', () => {
+    it('renders status badge for want-to-play library games', () => {
       render(
         <GameCard
           game={mockGame}
@@ -84,7 +84,7 @@ describe('GameCard', () => {
           isInLibrary={true}
         />
       );
-      expect(screen.getByText('Backlog')).toBeInTheDocument();
+      expect(screen.getByText('Want to Play')).toBeInTheDocument();
     });
 
     it('does not render status badge for non-library games', () => {
@@ -193,7 +193,7 @@ describe('GameCard', () => {
       expect(screen.getByLabelText('More options for Test Game')).toBeInTheDocument();
     });
 
-    it('hides more options button for non-library games (but context menu works)', () => {
+    it('does not render more options button for non-library games (context menu still works)', () => {
       const nonLibraryGame = { ...mockGame, isInLibrary: false };
       render(
         <GameCard
@@ -203,10 +203,9 @@ describe('GameCard', () => {
           isInLibrary={false}
         />
       );
-      // Button exists but is hidden (right-click context menu still available)
+      // Button is not rendered for non-library games (right-click context menu still available)
       const button = screen.queryByLabelText('More options for Test Game');
-      expect(button).toBeInTheDocument();
-      expect(button).toHaveClass('hidden');
+      expect(button).not.toBeInTheDocument();
     });
 
     it('opens context menu with "Add to Library" on right-click for non-library games', async () => {
@@ -358,8 +357,8 @@ describe('GameCard', () => {
           hideLibraryBadge={true}
         />
       );
-      // Status badge should still be visible (Backlog for Want to Play)
-      expect(screen.getByText('Backlog')).toBeInTheDocument();
+      // Status badge should still be visible
+      expect(screen.getByText('Want to Play')).toBeInTheDocument();
     });
 
     it('still allows context menu (right-click) when hideLibraryBadge is true', async () => {

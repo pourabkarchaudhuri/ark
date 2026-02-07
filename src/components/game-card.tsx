@@ -1,6 +1,7 @@
-import { memo, useState, useCallback, useMemo, useRef } from 'react';
+import { memo, useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useLocation } from 'wouter';
-import { Game } from '@/types/game';
+import { Game, GameStatus } from '@/types/game';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -31,6 +32,7 @@ interface GameCardProps {
   isInstalled?: boolean;
   onAddToLibrary?: () => void;
   onRemoveFromLibrary?: () => void;
+  onStatusChange?: (status: GameStatus) => void;
   hideLibraryBadge?: boolean; // Hide heart button and library badge (e.g., when already in library view)
 }
 
@@ -121,6 +123,16 @@ function formatPlayerCount(count: number): string {
   return count.toString();
 }
 
+const ALL_STATUSES: GameStatus[] = ['Want to Play', 'Playing', 'Completed', 'On Hold', 'Dropped'];
+
+const statusColors: Record<GameStatus, string> = {
+  'Completed': 'bg-green-500/20 text-white',
+  'Playing': 'bg-blue-500/20 text-blue-300',
+  'On Hold': 'bg-yellow-500/20 text-yellow-300',
+  'Dropped': 'bg-red-500/20 text-red-300',
+  'Want to Play': 'bg-white/10 text-white/80',
+};
+
 function GameCardComponent({ 
   game, 
   onEdit, 
@@ -130,6 +142,7 @@ function GameCardComponent({
   isInstalled,
   onAddToLibrary,
   onRemoveFromLibrary,
+  onStatusChange,
   hideLibraryBadge,
 }: GameCardProps) {
   const [, navigate] = useLocation();
@@ -137,9 +150,11 @@ function GameCardComponent({
   const [imageLoaded, setImageLoaded] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const [fallbackAttempt, setFallbackAttempt] = useState(0); // 0 = cover, 1 = header, 2 = capsule
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false); // ellipsis button dropdown
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false); // status badge dropdown
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null); // right-click menu
   const cardRef = useRef<HTMLDivElement>(null);
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
 
   // Check library status from game prop or explicit prop
   const inLibrary = isInLibrary !== undefined ? isInLibrary : game.isInLibrary;
@@ -154,14 +169,39 @@ function GameCardComponent({
     return "top-2";
   }, [showLibraryBadge, isInstalled]);
 
-  // Handle right-click context menu
+  // Notify other cards to close their context menus when this card opens one
+  const CONTEXT_MENU_CLOSE_EVENT = 'gamecard:closeContextMenu';
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    // Store the position for the menu
-    setMenuPosition({ x: e.clientX, y: e.clientY });
-    setMenuOpen(true);
-  }, []);
+    window.dispatchEvent(new CustomEvent(CONTEXT_MENU_CLOSE_EVENT, { detail: { gameId: game.id } }));
+    setCtxMenu({ x: e.clientX, y: e.clientY });
+  }, [game.id]);
+
+  // Close this card's menu when another card opens its context menu
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ev = e as CustomEvent<{ gameId: string }>;
+      if (ev.detail?.gameId !== game.id) setCtxMenu(null);
+    };
+    window.addEventListener(CONTEXT_MENU_CLOSE_EVENT, handler);
+    return () => window.removeEventListener(CONTEXT_MENU_CLOSE_EVENT, handler);
+  }, [game.id]);
+
+  // Close context menu on outside click or scroll
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('contextmenu', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('contextmenu', close);
+    };
+  }, [ctxMenu]);
 
   const handleCardClick = () => {
     // Navigate to game details page if we have a Steam App ID
@@ -191,46 +231,59 @@ function GameCardComponent({
     }
   };
   
-  // Handle image error - try multiple fallback URLs
+  // Build a deduplicated list of fallback URLs.
+  // Consecutive duplicates (e.g. headerImage == old CDN header.jpg) are removed
+  // so the chain never stalls on an identical src that won't fire a new load event.
+  const fallbackUrls = useMemo(() => {
+    if (!game.steamAppId) return [game.coverUrl || ''];
+
+    const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
+    const candidates = [
+      game.coverUrl || `${cdnBase}/${game.steamAppId}/library_600x900.jpg`,
+      game.headerImage || `${cdnBase}/${game.steamAppId}/header.jpg`,
+      `${cdnBase}/${game.steamAppId}/header.jpg`,
+      `${cdnBase}/${game.steamAppId}/capsule_616x353.jpg`,
+      `${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`,
+      `${cdnBase}/${game.steamAppId}/logo.png`,
+      game.screenshots?.[0] || '',
+    ];
+
+    // Deduplicate while preserving order
+    const seen = new Set<string>();
+    return candidates.filter(url => {
+      if (!url || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+  }, [game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
+
+  // Handle image error - try next fallback URL
   const handleImageError = useCallback(() => {
-    if (game.steamAppId) {
-      // Fallback order: library_600x900 -> header -> capsule_616x353 -> capsule_231x87 -> logo -> screenshots[0] (header_image from API)
-      if (fallbackAttempt < 5) {
-        console.log(`[GameCard] Image ${fallbackAttempt} failed for ${game.title}, trying next fallback`);
-        setFallbackAttempt(prev => prev + 1);
-        setImageLoaded(false);
-      } else {
-        // All fallbacks exhausted - show gradient with initials
-        setImageError(true);
-      }
+    if (game.steamAppId && fallbackAttempt < fallbackUrls.length - 1) {
+      console.log(`[GameCard] Image ${fallbackAttempt} failed for ${game.title}, trying next fallback`);
+      setFallbackAttempt(prev => prev + 1);
+      setImageLoaded(false);
     } else {
+      // All fallbacks exhausted - show gradient with initials
       setImageError(true);
     }
-  }, [fallbackAttempt, game.steamAppId, game.title]);
-  
-  // Build cover URL based on fallback attempt
-  const coverUrl = useMemo(() => {
-    if (!game.steamAppId) return game.coverUrl || '';
-    
-    const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
-    switch (fallbackAttempt) {
-      case 0:
-        return game.coverUrl || `${cdnBase}/${game.steamAppId}/library_600x900.jpg`;
-      case 1:
-        return `${cdnBase}/${game.steamAppId}/header.jpg`;
-      case 2:
-        return `${cdnBase}/${game.steamAppId}/capsule_616x353.jpg`;
-      case 3:
-        return `${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`;
-      case 4:
-        return `${cdnBase}/${game.steamAppId}/logo.png`;
-      case 5:
-        // Use the header_image from screenshots as final fallback (works for unreleased games)
-        return game.screenshots?.[0] || '';
-      default:
-        return '';
+  }, [fallbackAttempt, fallbackUrls.length, game.steamAppId, game.title]);
+
+  // Detect placeholder images: newer Steam games return 200 from the old CDN
+  // but with tiny (< 5KB) transparent placeholder images instead of real art.
+  // If the loaded image has very small natural dimensions, advance the fallback.
+  const handleImageLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    if (img.naturalWidth < 50 || img.naturalHeight < 50) {
+      console.log(`[GameCard] Placeholder detected for ${game.title} (${img.naturalWidth}x${img.naturalHeight}), trying next fallback`);
+      handleImageError();
+      return;
     }
-  }, [game.steamAppId, game.coverUrl, game.screenshots, fallbackAttempt]);
+    setImageLoaded(true);
+  }, [game.title, handleImageError]);
+  
+  // Current cover URL from the deduplicated fallback list
+  const coverUrl = fallbackUrls[fallbackAttempt] || '';
   
   const fallbackGradient = getGameFallbackGradient(game.title);
   const initials = getGameInitials(game.title);
@@ -259,7 +312,7 @@ function GameCardComponent({
               imageLoaded ? "opacity-100" : "opacity-0",
               isHovered ? "scale-105" : "scale-100"
             )}
-            onLoad={() => setImageLoaded(true)}
+            onLoad={handleImageLoad}
             onError={handleImageError}
           />
         )}
@@ -370,65 +423,36 @@ function GameCardComponent({
               </p>
             )}
           </div>
-          {/* Ellipsis Menu - Always available via right-click, button only for library games */}
+          {/* Ellipsis Menu - button only for library games (right-click uses custom context menu below) */}
           <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
-            <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className={cn(
-                    "h-8 w-8 hover:bg-transparent",
-                    !inLibrary && "hidden" // Hide button for non-library games (right-click still works)
-                  )}
-                  aria-label={`More options for ${game.title}`}
-                >
-                  <MoreVertical className="h-4 w-4 pointer-events-none" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent 
-                align="end" 
-                className="bg-card border-white/10"
-                style={menuPosition ? {
-                  position: 'fixed',
-                  left: menuPosition.x,
-                  top: menuPosition.y,
-                } : undefined}
-                onCloseAutoFocus={() => setMenuPosition(null)}
-              >
-                {inLibrary ? (
-                  // Library game options
-                  <>
-                    <DropdownMenuItem onClick={onEdit} className="cursor-pointer">
-                      <Edit className="h-4 w-4 mr-2" />
-                      Edit Entry
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem 
-                      onClick={onDelete} 
-                      className="cursor-pointer text-red-400 focus:text-red-300 focus:bg-red-500/10"
-                    >
-                      <Trash2 className="h-4 w-4 mr-2" />
-                      Remove from Library
-                    </DropdownMenuItem>
-                  </>
-                ) : (
-                  // Non-library game options
-                  <DropdownMenuItem 
-                    onClick={() => {
-                      if (onAddToLibrary) {
-                        onAddToLibrary();
-                      }
-                      setMenuOpen(false);
-                    }} 
-                    className="cursor-pointer"
+            {inLibrary && (
+              <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 hover:bg-transparent"
+                    aria-label={`More options for ${game.title}`}
                   >
-                    <Plus className="h-4 w-4 mr-2" />
-                    Add to Library
+                    <MoreVertical className="h-4 w-4 pointer-events-none" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="bg-card border-white/10 whitespace-nowrap">
+                  <DropdownMenuItem onClick={onEdit} className="cursor-pointer">
+                    <Edit className="h-4 w-4 mr-2" />
+                    Edit Entry
                   </DropdownMenuItem>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem 
+                    onClick={onDelete} 
+                    className="cursor-pointer text-red-400 focus:text-red-300 focus:bg-red-500/10"
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Remove from Library
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </div>
         
@@ -447,24 +471,92 @@ function GameCardComponent({
             ))}
           </div>
           
-          {/* Status Badge - Only show for library games */}
+          {/* Status Badge - Clickable dropdown for library games */}
           {inLibrary && (
-            <Badge 
-              className={cn(
-                "text-[10px] h-6 px-2 flex items-center justify-center border-none hover:bg-white/10",
-                game.status === 'Completed' || game.status === 'Playing'
-                  ? 'bg-green-500/20 text-white hover:bg-green-500/20'
-                  : 'bg-white/10 text-white/80'
-              )}
-            >
-              {game.status === 'Completed' ? 'Completed' : 
-               game.status === 'Playing' ? 'Playing' : 
-               game.status === 'Dropped' ? 'Dropped' :
-               game.status === 'On Hold' ? 'On Hold' : 'Backlog'}
-            </Badge>
+            <div onClick={(e) => e.stopPropagation()}>
+              <DropdownMenu open={statusMenuOpen} onOpenChange={setStatusMenuOpen}>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    className={cn(
+                      "text-[10px] h-6 px-2 flex items-center justify-center rounded-md font-medium border-none cursor-pointer transition-colors",
+                      statusColors[game.status as GameStatus] || 'bg-white/10 text-white/80',
+                      "hover:ring-1 hover:ring-white/20"
+                    )}
+                    aria-label={`Status: ${game.status}. Click to change.`}
+                  >
+                    {game.status}
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="bg-card border-white/10 min-w-[140px]">
+                  {ALL_STATUSES.map((status) => (
+                    <DropdownMenuItem
+                      key={status}
+                      className={cn(
+                        "cursor-pointer text-xs gap-2",
+                        game.status === status && "bg-white/10"
+                      )}
+                      onClick={() => {
+                        if (status !== game.status && onStatusChange) {
+                          onStatusChange(status);
+                        }
+                      }}
+                    >
+                      <span className={cn(
+                        "w-2 h-2 rounded-full flex-shrink-0",
+                        status === 'Completed' ? 'bg-green-500' :
+                        status === 'Playing' ? 'bg-blue-500' :
+                        status === 'On Hold' ? 'bg-yellow-500' :
+                        status === 'Dropped' ? 'bg-red-500' :
+                        'bg-white/40'
+                      )} />
+                      {status}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           )}
         </div>
       </div>
+
+      {/* Right-click context menu — rendered via portal at exact cursor position */}
+      {ctxMenu && createPortal(
+        <div
+          ref={ctxMenuRef}
+          className="fixed z-[200] min-w-[10rem] rounded-md border border-white/10 bg-card p-1 shadow-xl animate-in fade-in-0 zoom-in-95 whitespace-nowrap"
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {inLibrary ? (
+            <>
+              <button
+                className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-white/10 cursor-pointer"
+                onClick={() => { setCtxMenu(null); onEdit(); }}
+              >
+                <Edit className="h-4 w-4 mr-2" />
+                Edit Entry
+              </button>
+              <div className="my-1 h-px bg-white/10" />
+              <button
+                className="flex w-full items-center rounded-sm px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 cursor-pointer"
+                onClick={() => { setCtxMenu(null); onDelete(); }}
+              >
+                <Trash2 className="h-4 w-4 mr-2" />
+                Remove from Library
+              </button>
+            </>
+          ) : (
+            <button
+              className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-white/10 cursor-pointer"
+              onClick={() => { setCtxMenu(null); if (onAddToLibrary) onAddToLibrary(); }}
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Add to Library
+            </button>
+          )}
+        </div>,
+        document.body
+      )}
     </div>
   );
 }
@@ -479,6 +571,9 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.game.updatedAt === nextProps.game.updatedAt &&
     prevProps.game.releaseDate === nextProps.game.releaseDate &&
     prevProps.game.rank === nextProps.game.rank &&
+    prevProps.game.playerCount === nextProps.game.playerCount &&
+    prevProps.game.coverUrl === nextProps.game.coverUrl &&
+    prevProps.game.headerImage === nextProps.game.headerImage &&
     prevProps.game.isInLibrary === nextProps.game.isInLibrary &&
     prevProps.game.status === nextProps.game.status &&
     prevProps.isInLibrary === nextProps.isInLibrary &&

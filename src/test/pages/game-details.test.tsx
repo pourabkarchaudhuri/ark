@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { Router } from 'wouter';
-import { GameDetailsPage } from './game-details';
+import { GameDetailsPage } from '@/pages/game-details';
+import { ToastProvider } from '@/components/ui/toast';
 import { SteamAppDetails, SteamReviewsResponse } from '@/types/steam';
 
 // Mock wouter hooks
@@ -160,6 +161,16 @@ const mockMetacriticReviews = {
   ],
 };
 
+function renderGameDetails() {
+  return render(
+    <ToastProvider>
+      <Router>
+        <GameDetailsPage />
+      </Router>
+    </ToastProvider>
+  );
+}
+
 describe('GameDetailsPage', () => {
   beforeEach(() => {
     // Mock window.steam
@@ -177,6 +188,10 @@ describe('GameDetailsPage', () => {
         clearCache: vi.fn().mockResolvedValue(undefined),
         getCoverUrl: vi.fn((appId: number) => `https://cdn.steam.com/${appId}/cover.jpg`),
         getHeaderUrl: vi.fn((appId: number) => `https://cdn.steam.com/${appId}/header.jpg`),
+        getNewsForApp: vi.fn().mockResolvedValue([]),
+        getMultiplePlayerCounts: vi.fn().mockResolvedValue({}),
+        getGamesByGenre: vi.fn().mockResolvedValue([]),
+        getRecommendations: vi.fn().mockResolvedValue([]),
       },
       writable: true,
       configurable: true,
@@ -198,11 +213,7 @@ describe('GameDetailsPage', () => {
   });
 
   it('renders loading state initially', () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
     
     // Check for skeleton elements (animate-pulse class is used for skeleton loading)
     const skeletonElements = document.querySelectorAll('.animate-pulse');
@@ -210,11 +221,7 @@ describe('GameDetailsPage', () => {
   });
 
   it('renders game details after loading', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     await waitFor(() => {
       expect(screen.getByText('Counter-Strike 2')).toBeInTheDocument();
@@ -230,11 +237,7 @@ describe('GameDetailsPage', () => {
   });
 
   it('renders game genres', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     await waitFor(() => {
       expect(screen.getByText('Action')).toBeInTheDocument();
@@ -246,11 +249,7 @@ describe('GameDetailsPage', () => {
   });
 
   it('renders Steam reviews section', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     await waitFor(() => {
       // There are multiple Steam Reviews sections (main + compact sidebar)
@@ -264,11 +263,7 @@ describe('GameDetailsPage', () => {
   });
 
   it('renders individual review content', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     // Wait for the thumbs up/down icons in reviews (which indicate reviews are rendered)
     await waitFor(() => {
@@ -283,11 +278,7 @@ describe('GameDetailsPage', () => {
   });
 
   it('calls Steam API on mount', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     await waitFor(() => {
       expect(window.steam!.getAppDetails).toHaveBeenCalledWith(730);
@@ -300,11 +291,7 @@ describe('GameDetailsPage', () => {
     // Override to simulate error
     window.steam!.getAppDetails = vi.fn().mockResolvedValue(null);
 
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     await waitFor(() => {
       expect(screen.getByText('Game not found')).toBeInTheDocument();
@@ -315,11 +302,7 @@ describe('GameDetailsPage', () => {
     // Override to simulate reviews not available
     window.steam!.getGameReviews = vi.fn().mockRejectedValue(new Error('Reviews not available'));
 
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     // Page should still load with game details
     await waitFor(() => {
@@ -328,11 +311,7 @@ describe('GameDetailsPage', () => {
   });
 
   it('renders system requirements', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     await waitFor(() => {
       expect(screen.getByText('System Requirements')).toBeInTheDocument();
@@ -343,11 +322,7 @@ describe('GameDetailsPage', () => {
   });
 
   it('renders platform badges', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     await waitFor(() => {
       expect(screen.getByText('Windows')).toBeInTheDocument();
@@ -358,11 +333,7 @@ describe('GameDetailsPage', () => {
   });
 
   it('renders Steam store link', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     await waitFor(() => {
       expect(screen.getByText('View on Steam')).toBeInTheDocument();
@@ -426,11 +397,7 @@ describe('Metacritic Integration', () => {
   });
 
   it('calls Metacritic API with game name', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     // Wait for the game details to load first
     await waitFor(() => {
@@ -444,11 +411,7 @@ describe('Metacritic Integration', () => {
   });
 
   it('renders Critic Reviews section', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     await waitFor(() => {
       expect(screen.getByText('Critic Reviews')).toBeInTheDocument();
@@ -456,11 +419,7 @@ describe('Metacritic Integration', () => {
   });
 
   it('renders Metascore label', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     // Wait for Metacritic data to load
     await waitFor(() => {
@@ -469,11 +428,7 @@ describe('Metacritic Integration', () => {
   });
 
   it('renders critic publication names', async () => {
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     // Wait for Metacritic data to load
     await waitFor(() => {
@@ -485,11 +440,7 @@ describe('Metacritic Integration', () => {
     // Override to simulate error
     window.metacritic!.getGameReviews = vi.fn().mockRejectedValue(new Error('Metacritic unavailable'));
 
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     // Page should still load with game details
     await waitFor(() => {
@@ -510,11 +461,7 @@ describe('Metacritic Integration', () => {
       configurable: true,
     });
 
-    render(
-      <Router>
-        <GameDetailsPage />
-      </Router>
-    );
+    renderGameDetails();
 
     // Page should still load with game details
     await waitFor(() => {

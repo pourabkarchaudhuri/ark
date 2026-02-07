@@ -5,6 +5,8 @@ import {
   CreateLibraryEntry,
   UpdateLibraryEntry,
 } from '@/types/game';
+import { journeyStore } from './journey-store';
+import { statusHistoryStore } from './status-history-store';
 
 const STORAGE_KEY = 'ark-library-data';
 const STORAGE_VERSION = 4; // Bumped version for progress tracking fields
@@ -132,6 +134,12 @@ class LibraryStore {
     this.entries.set(gameId, entry);
     this.saveToStorage();
     this.notifyListeners();
+
+    // Record initial status in status history
+    const journeyEntry = journeyStore.getEntry(gameId);
+    const title = journeyEntry?.title || `Game ${gameId}`;
+    statusHistoryStore.record(gameId, title, null, entry.status);
+
     return entry;
   }
 
@@ -141,6 +149,8 @@ class LibraryStore {
     if (deleted) {
       this.saveToStorage();
       this.notifyListeners();
+      // Mark in journey history (entry persists, just flagged as removed)
+      journeyStore.markRemoved(gameId);
     }
     return deleted;
   }
@@ -149,6 +159,9 @@ class LibraryStore {
   updateEntry(gameId: number, input: UpdateLibraryEntry): LibraryGameEntry | undefined {
     const existing = this.entries.get(gameId);
     if (!existing) return undefined;
+
+    // Detect status change before merging
+    const statusChanged = input.status !== undefined && input.status !== existing.status;
 
     const updated: LibraryGameEntry = {
       ...existing,
@@ -159,6 +172,21 @@ class LibraryStore {
     this.entries.set(gameId, updated);
     this.saveToStorage();
     this.notifyListeners();
+
+    // Sync progress to journey history
+    journeyStore.syncProgress(gameId, {
+      status: updated.status,
+      hoursPlayed: updated.hoursPlayed,
+      rating: updated.rating,
+    });
+
+    // Record status transition in status history
+    if (statusChanged) {
+      const journeyEntry = journeyStore.getEntry(gameId);
+      const title = journeyEntry?.title || `Game ${gameId}`;
+      statusHistoryStore.record(gameId, title, existing.status, updated.status);
+    }
+
     return updated;
   }
 
@@ -243,11 +271,13 @@ class LibraryStore {
     this.notifyListeners();
   }
 
-  // Export library data
+  // Export library data (includes journey history and status history)
   exportData(): string {
     return JSON.stringify(
       {
         entries: Array.from(this.entries.values()),
+        journeyHistory: journeyStore.exportData(),
+        statusHistory: statusHistoryStore.exportData(),
         exportedAt: new Date().toISOString(),
       },
       null,
@@ -255,7 +285,7 @@ class LibraryStore {
     );
   }
 
-  // Import library data (replaces existing)
+  // Import library data (replaces existing), also imports journey history if present
   importData(jsonData: string): { success: boolean; count: number; error?: string } {
     try {
       const parsed = JSON.parse(jsonData);
@@ -283,6 +313,17 @@ class LibraryStore {
 
       this.saveToStorage();
       this.notifyListeners();
+
+      // Import journey history if present
+      if (Array.isArray(parsed.journeyHistory)) {
+        journeyStore.importData(parsed.journeyHistory);
+      }
+
+      // Import status history if present
+      if (Array.isArray(parsed.statusHistory)) {
+        statusHistoryStore.importData(parsed.statusHistory);
+      }
+
       return { success: true, count: importCount };
     } catch (error) {
       return { success: false, count: 0, error: 'Failed to parse import data' };
@@ -356,6 +397,16 @@ class LibraryStore {
       if (added > 0 || updated > 0) {
         this.saveToStorage();
         this.notifyListeners();
+      }
+
+      // Import journey history if present
+      if (Array.isArray(parsed.journeyHistory)) {
+        journeyStore.importData(parsed.journeyHistory);
+      }
+
+      // Import status history if present
+      if (Array.isArray(parsed.statusHistory)) {
+        statusHistoryStore.importData(parsed.statusHistory);
       }
 
       return { success: true, added, updated, skipped };

@@ -75,6 +75,18 @@ contextBridge.exposeInMainWorld('steam', {
   getCachedGameNames: (appIds) => 
     ipcRenderer.invoke('steam:getCachedGameNames', appIds),
   
+  // Get news for a specific game
+  getNewsForApp: (appId, count) =>
+    ipcRenderer.invoke('steam:getNewsForApp', appId, count),
+
+  // Get current player count for a single game
+  getPlayerCount: (appId) =>
+    ipcRenderer.invoke('steam:getPlayerCount', appId),
+
+  // Get current player counts for multiple games (batched)
+  getMultiplePlayerCounts: (appIds) =>
+    ipcRenderer.invoke('steam:getMultiplePlayerCounts', appIds),
+
   // Get game recommendations based on current game and library
   getRecommendations: (currentAppId, libraryAppIds, limit) => 
     ipcRenderer.invoke('steam:getRecommendations', currentAppId, libraryAppIds, limit),

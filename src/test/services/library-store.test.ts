@@ -1,6 +1,29 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GameStatus, GamePriority } from '@/types/game';
 
+// Mock journey-store before importing library-store (which depends on it)
+vi.mock('@/services/journey-store', () => ({
+  journeyStore: {
+    record: vi.fn(),
+    markRemoved: vi.fn(),
+    syncProgress: vi.fn(),
+    getEntry: vi.fn(),
+    exportData: vi.fn().mockReturnValue([]),
+    importData: vi.fn().mockReturnValue({ added: 0, updated: 0, skipped: 0 }),
+    clear: vi.fn(),
+  },
+}));
+
+// Mock status-history-store before importing library-store (which depends on it)
+vi.mock('@/services/status-history-store', () => ({
+  statusHistoryStore: {
+    record: vi.fn(),
+    exportData: vi.fn().mockReturnValue([]),
+    importData: vi.fn().mockReturnValue({ added: 0, skipped: 0 }),
+    clear: vi.fn(),
+  },
+}));
+
 // Mock localStorage
 const localStorageMock = (() => {
   let store: Record<string, string> = {};
@@ -23,7 +46,7 @@ Object.defineProperty(window, 'localStorage', {
 });
 
 // Import after mocking
-import { libraryStore } from './library-store';
+import { libraryStore } from '@/services/library-store';
 
 describe('LibraryStore', () => {
   beforeEach(() => {

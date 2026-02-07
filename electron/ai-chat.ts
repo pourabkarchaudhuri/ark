@@ -11,6 +11,7 @@ import http from 'http';
 import { steamAPI } from './steam-api.js';
 import { chatStore } from './chat-store.js';
 import { settingsStore } from './settings-store.js';
+import { needsWebSearch, webSearch, formatSearchContext } from './web-search.js';
 
 /**
  * Get the current API key from settings
@@ -464,7 +465,47 @@ async function processWithOllama(
       return `"${name}" (Status: ${status})`;
     }).join(', ');
     systemPrompt += `\n\nThe user's game library contains the following games: ${libraryInfo}${libraryData.length > 15 ? `. They also have ${libraryData.length - 15} more games not listed here` : ''}.`;
-    systemPrompt += `\n\nIMPORTANT: Only mention games that are actually listed above. Do not invent or guess game names based on IDs.`;
+    systemPrompt += `\n\nWhen the user asks about their library, only mention games that are actually listed above. Do not invent or guess game names based on IDs.`;
+  }
+
+  // Web search grounding: if the question benefits from current data,
+  // search DuckDuckGo and inject results into the system prompt
+  const shouldSearch = needsWebSearch(userMessage);
+  if (shouldSearch) {
+    const searchQuery = gameContext
+      ? `${gameContext.name} ${userMessage}`
+      : userMessage;
+
+    console.log(`[AI Chat] Grounding with web search: "${searchQuery}"`);
+    chainOfThought.push({
+      type: 'tool_call',
+      content: `Searching the web for current information: "${searchQuery}"`,
+      toolName: 'webSearch',
+      toolArgs: { query: searchQuery },
+      timestamp: new Date(),
+    });
+
+    const searchResults = await webSearch(searchQuery, 5);
+
+    if (searchResults.length > 0) {
+      systemPrompt += formatSearchContext(searchQuery, searchResults);
+
+      chainOfThought.push({
+        type: 'tool_result',
+        content: `Web search returned ${searchResults.length} results`,
+        toolName: 'webSearch',
+        toolResult: searchResults.map(r => r.title).join(', '),
+        timestamp: new Date(),
+      });
+    } else {
+      chainOfThought.push({
+        type: 'tool_result',
+        content: 'Web search returned no results — answering from model knowledge only',
+        toolName: 'webSearch',
+        toolResult: 'No results',
+        timestamp: new Date(),
+      });
+    }
   }
   
   // Parse the Ollama URL to get host and port

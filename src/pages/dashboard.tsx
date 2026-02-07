@@ -1,9 +1,9 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
-import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useSteamFilters, useFilteredGames, useRateLimitWarning } from '@/hooks/useGameStore';
+import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames, useRateLimitWarning } from '@/hooks/useGameStore';
 import { useInstalledGames } from '@/hooks/useInstalledGames';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
-import { Game } from '@/types/game';
+import { Game, GameStatus } from '@/types/game';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -18,6 +18,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { WindowControls } from '@/components/window-controls';
 import { EmptyState } from '@/components/empty-state';
+import { JourneyView } from '@/components/journey-view';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 import {
@@ -33,6 +34,7 @@ import {
   Sparkles,
   Settings,
   Trash2,
+  Clock,
 } from 'lucide-react';
 import { libraryStore } from '@/services/library-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
@@ -40,7 +42,7 @@ import { SettingsPanel } from '@/components/settings-panel';
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library';
+type ViewMode = 'browse' | 'library' | 'journey';
 
 // Track if cache has been cleared this session
 export function Dashboard() {
@@ -53,7 +55,7 @@ export function Dashboard() {
   const [viewMode, setViewMode] = useState<ViewMode>('browse');
   
   // Steam Games (games for browsing) - pass category filter
-  const { games: steamGames, loading: steamLoading, hasMore: browseHasMore, loadMore: browseLoadMore, error: steamError } = useSteamGames(filters.category);
+  const { games: steamGames, loading: steamLoading, hasMore: browseHasMore, loadMore: browseLoadMore, error: steamError, loadingMore } = useSteamGames(filters.category);
   
   // Note: Cache clearing removed - useSteamGames handles data fetching on mount
   
@@ -62,13 +64,16 @@ export function Dashboard() {
   const { results: searchResults, loading: searchLoading, isSearching } = useGameSearch(searchQuery);
   
   // Library management
-  const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, customGames } = useLibrary();
+  const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, customGames, getAllGameIds } = useLibrary();
   
   // Library games with full details (fetched independently from Steam games)
   const { games: libraryGames, loading: libraryLoading } = useLibraryGames();
+
+  // Journey history (persists even after library removal)
+  const journeyEntries = useJourneyHistory();
   
-  // Installed games detection
-  const { isInstalled } = useInstalledGames();
+  // Installed games detection (also auto-adds installed games to library)
+  const { isInstalled, installedAppIds } = useInstalledGames();
   
   // Custom game dialog state
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
@@ -118,7 +123,7 @@ export function Dashboard() {
     return steamGames;
   }, [viewMode, steamGames, customGames, libraryGames]);
   
-  const currentLoading = viewMode === 'library' ? libraryLoading : steamLoading;
+  const currentLoading = viewMode === 'browse' ? steamLoading : libraryLoading;
   const currentError = steamError;
   const hasMore = viewMode === 'browse' ? browseHasMore : false;
   const loadMore = viewMode === 'browse' ? browseLoadMore : () => {};
@@ -176,6 +181,9 @@ export function Dashboard() {
   // Determine which games to show based on mode and search
   const displayedGames = useMemo(() => {
     let games: Game[];
+    // When actively searching in browse mode, skip sidebar filters —
+    // the user expects search to cover all of Steam, not just the filtered set.
+    let skipBrowseFilters = false;
     
     if (viewMode === 'library') {
       // Library mode: filter library games locally
@@ -192,38 +200,47 @@ export function Dashboard() {
         );
       }
       games = libraryGames;
-    } else if (viewMode === 'browse' && isSearching && searchResults.length > 0) {
-      // Browse mode with active Steam search
+    } else if (viewMode === 'browse' && isSearching) {
+      // Browse mode with active Steam search — show results (even if empty, handled below)
       games = searchResults;
+      skipBrowseFilters = true;
     } else {
       // Any other mode showing current games (browse)
       games = currentGames;
     }
 
-    // Apply genre filter
-    if (filters.genre !== 'All') {
-      games = games.filter(game => game.genre.includes(filters.genre));
-    }
+    // Apply sidebar filters only to non-search browse results and library
+    if (!skipBrowseFilters) {
+      // Apply genre filter
+      if (filters.genre !== 'All') {
+        games = games.filter(game => game.genre.includes(filters.genre));
+      }
 
-    // Apply platform filter
-    if (filters.platform !== 'All') {
-      games = games.filter(game => 
-        game.platform.some(p => p.toLowerCase().includes(filters.platform.toLowerCase()))
-      );
-    }
+      // Apply platform filter
+      if (filters.platform !== 'All') {
+        games = games.filter(game => 
+          game.platform.some(p => p.toLowerCase().includes(filters.platform.toLowerCase()))
+        );
+      }
 
-    // Apply status filter (only for library games)
-    if (filters.status !== 'All' && viewMode === 'library') {
-      games = games.filter(game => game.isInLibrary && game.status === filters.status);
-    }
+      // Apply status filter (only for library games)
+      if (filters.status !== 'All' && viewMode === 'library') {
+        games = games.filter(game => game.isInLibrary && game.status === filters.status);
+      }
 
-    // Apply release year filter
-    if (filters.releaseYear !== 'All') {
-      games = games.filter(game => {
-        if (!game.releaseDate) return false;
-        const gameYear = new Date(game.releaseDate).getFullYear().toString();
-        return gameYear === filters.releaseYear;
-      });
+      // Apply priority filter (only for library games)
+      if (filters.priority !== 'All' && viewMode === 'library') {
+        games = games.filter(game => game.isInLibrary && game.priority === filters.priority);
+      }
+
+      // Apply release year filter
+      if (filters.releaseYear !== 'All') {
+        games = games.filter(game => {
+          if (!game.releaseDate) return false;
+          const gameYear = new Date(game.releaseDate).getFullYear().toString();
+          return gameYear === filters.releaseYear;
+        });
+      }
     }
 
     return games;
@@ -265,7 +282,7 @@ export function Dashboard() {
 
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting && hasMore && !currentLoading) {
+        if (entries[0].isIntersecting && hasMore && !currentLoading && !loadingMore) {
           loadMore();
         }
       },
@@ -278,7 +295,7 @@ export function Dashboard() {
       observer.unobserve(currentRef);
       observer.disconnect();
     };
-  }, [hasMore, currentLoading, loadMore, viewMode, isSearching]);
+  }, [hasMore, currentLoading, loadingMore, loadMore, viewMode, isSearching]);
 
   // Scroll-to-top visibility
   useEffect(() => {
@@ -289,6 +306,14 @@ export function Dashboard() {
     window.addEventListener('scroll', handleScroll);
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
+
+  // Auto-add installed games to library (Steam app IDs only; status 'Playing')
+  useEffect(() => {
+    if (installedAppIds.size === 0) return;
+    const libraryIds = getAllGameIds();
+    const toAdd = [...installedAppIds].filter((id) => !libraryIds.includes(id));
+    toAdd.forEach((id) => addToLibrary(id, 'Playing'));
+  }, [installedAppIds, getAllGameIds, addToLibrary]);
 
   const scrollToTop = useCallback(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -305,6 +330,14 @@ export function Dashboard() {
     setEditingGame(game);
     setIsDialogOpen(true);
   }, []);
+
+  // Handle quick status change from card badge
+  const handleStatusChange = useCallback((game: Game, status: GameStatus) => {
+    const gameId = game.steamAppId || (game.id?.startsWith('steam-') ? parseInt(game.id.split('-')[1]) : null);
+    if (gameId && isInLibrary(gameId)) {
+      updateEntry(gameId, { status });
+    }
+  }, [isInLibrary, updateEntry]);
 
   // Handle saving library entry
   const handleSave = useCallback((gameData: Partial<Game>) => {
@@ -377,12 +410,14 @@ export function Dashboard() {
   const hasActiveFilters = 
     searchQuery || 
     filters.status !== 'All' || 
+    filters.priority !== 'All' ||
     filters.genre !== 'All' || 
     filters.platform !== 'All' ||
     filters.category !== 'all';
 
   const activeFilterCount = [
     filters.status !== 'All' && viewMode === 'library',
+    filters.priority !== 'All' && viewMode === 'library',
     filters.genre !== 'All',
     filters.platform !== 'All',
     filters.category !== 'all' && viewMode === 'browse',
@@ -449,6 +484,21 @@ export function Dashboard() {
                 <Library className="h-3 w-3" />
                 Library ({librarySize})
               </button>
+              <button
+                onClick={() => {
+                  setViewMode('journey');
+                  setSearchQuery('');
+                }}
+                className={cn(
+                  "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                  viewMode === 'journey' 
+                    ? "bg-fuchsia-500 text-white" 
+                    : "text-white/60 hover:text-white"
+                )}
+              >
+                <Clock className="h-3 w-3" />
+                Journey
+              </button>
             </div>
 
             {/* Clear Library Button - only visible in library mode */}
@@ -464,92 +514,98 @@ export function Dashboard() {
               </Button>
             )}
 
-            <p className="text-sm text-white/60">
-              Showing <span className="text-white font-medium">{sortedGames.length}{viewMode === 'browse' && hasMore ? '+' : ''}</span> games
-            </p>
-            {hasActiveFilters && (
-              <div className="flex items-center gap-2">
-                <Badge 
-                  variant="secondary" 
-                  className="gap-1 bg-fuchsia-500/20 text-fuchsia-400 border-fuchsia-500/30 hover:bg-fuchsia-500/30 cursor-pointer"
-                  onClick={openFilters}
-                >
-                  <Filter className="h-3 w-3 pointer-events-none" />
-                  {activeFilterCount} filter{activeFilterCount !== 1 ? 's' : ''} active
-                </Badge>
-                <button
-                  onClick={() => {
-                    resetFilters();
-                    setSearchQuery('');
-                  }}
-                  className="flex items-center gap-1 px-2 py-0.5 text-xs text-white/70 bg-black hover:bg-white/10 rounded border border-white/10 transition-colors"
-                  aria-label="Clear all filters"
-                >
-                  <X className="h-3 w-3" />
-                  Clear
-                </button>
-              </div>
+            {viewMode !== 'journey' && (
+              <>
+                <p className="text-sm text-white/60">
+                  Showing <span className="text-white font-medium">{sortedGames.length}{viewMode === 'browse' && hasMore ? '+' : ''}</span> games
+                </p>
+                {hasActiveFilters && (
+                  <div className="flex items-center gap-2">
+                    <Badge 
+                      variant="secondary" 
+                      className="gap-1 bg-fuchsia-500/20 text-fuchsia-400 border-fuchsia-500/30 hover:bg-fuchsia-500/30 cursor-pointer"
+                      onClick={openFilters}
+                    >
+                      <Filter className="h-3 w-3 pointer-events-none" />
+                      {activeFilterCount} filter{activeFilterCount !== 1 ? 's' : ''} active
+                    </Badge>
+                    <button
+                      onClick={() => {
+                        resetFilters();
+                        setSearchQuery('');
+                      }}
+                      className="flex items-center gap-1 px-2 py-0.5 text-xs text-white/70 bg-black hover:bg-white/10 rounded border border-white/10 transition-colors"
+                      aria-label="Clear all filters"
+                    >
+                      <X className="h-3 w-3" />
+                      Clear
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
           
           <div className="flex items-center gap-3">
-            {/* Search */}
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40 z-10" />
-              <Input
-                ref={searchInputRef}
-                placeholder={viewMode === 'library' ? "Search your library..." : "Search Steam games..."}
-                value={searchQuery}
-                onChange={(e) => {
-                  setSearchQuery(e.target.value);
-                  if (viewMode === 'browse' && e.target.value.trim()) {
-                    setShowSuggestions(true);
-                  }
-                }}
-                onFocus={() => {
-                  if (viewMode === 'browse' && searchQuery.trim()) {
-                    setShowSuggestions(true);
-                  }
-                }}
-                className="w-96 h-9 pl-10 pr-10 bg-white/5 border-white/10 text-white placeholder:text-white/40"
-                aria-label="Search games"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => {
-                    setSearchQuery('');
-                    setShowSuggestions(false);
-                  }}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-white/10 transition-colors z-10"
-                  aria-label="Clear search"
-                >
-                  <X className="h-3 w-3 text-white/40" />
-                </button>
-              )}
-              {searchLoading && viewMode !== 'library' && (
-                <div className="absolute right-10 top-1/2 -translate-y-1/2">
-                  <div className="w-4 h-4 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
-                </div>
-              )}
-              
-              {/* Search Suggestions Dropdown */}
-              {viewMode === 'browse' && (
-                <SearchSuggestions
-                  results={searchResults}
-                  loading={searchLoading}
-                  visible={showSuggestions && searchQuery.trim().length > 0}
-                  onSelect={(game) => {
-                    setShowSuggestions(false);
-                    // Navigate to game details page
-                    if (game.steamAppId) {
-                      navigate(`/game/${game.steamAppId}`);
+            {/* Search - hidden in journey mode */}
+            {viewMode !== 'journey' && (
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40 z-10" />
+                <Input
+                  ref={searchInputRef}
+                  placeholder={viewMode === 'library' ? "Search your library..." : "Search Steam games..."}
+                  value={searchQuery}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    if (viewMode === 'browse' && e.target.value.trim()) {
+                      setShowSuggestions(true);
                     }
                   }}
-                  onClose={() => setShowSuggestions(false)}
-                  searchQuery={searchQuery}
+                  onFocus={() => {
+                    if (viewMode === 'browse' && searchQuery.trim()) {
+                      setShowSuggestions(true);
+                    }
+                  }}
+                  className="w-96 h-9 pl-10 pr-10 bg-white/5 border-white/10 text-white placeholder:text-white/40"
+                  aria-label="Search games"
                 />
-              )}
-            </div>
+                {searchQuery && (
+                  <button
+                    onClick={() => {
+                      setSearchQuery('');
+                      setShowSuggestions(false);
+                    }}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-white/10 transition-colors z-10"
+                    aria-label="Clear search"
+                  >
+                    <X className="h-3 w-3 text-white/40" />
+                  </button>
+                )}
+                {searchLoading && viewMode !== 'library' && (
+                  <div className="absolute right-10 top-1/2 -translate-y-1/2">
+                    <div className="w-4 h-4 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
+                  </div>
+                )}
+                
+                {/* Search Suggestions Dropdown */}
+                {viewMode === 'browse' && (
+                  <SearchSuggestions
+                    results={searchResults}
+                    loading={searchLoading}
+                    visible={showSuggestions && searchQuery.trim().length > 0}
+                    onSelect={(game) => {
+                      setShowSuggestions(false);
+                      // Navigate to game details page
+                      if (game.steamAppId) {
+                        navigate(`/game/${game.steamAppId}`);
+                      }
+                    }}
+                    onClose={() => setShowSuggestions(false)}
+                    searchQuery={searchQuery}
+                  />
+                )}
+              </div>
+            )}
 
             {/* AI Chat Button */}
             <Button
@@ -573,21 +629,23 @@ export function Dashboard() {
               </Button>
             )}
 
-            {/* Filter Button */}
-            <FilterSidebar
-              open={isFilterOpen}
-              onOpenChange={handleFilterOpenChange}
-              filters={filters}
-              updateFilter={updateFilter}
-              resetFilters={resetFilters}
-              genres={genres}
-              platforms={platforms}
-              sortBy={sortBy}
-              setSortBy={setSortBy}
-              sortDirection={sortDirection}
-              toggleSortDirection={toggleSortDirection}
-              viewMode={viewMode}
-            />
+            {/* Filter Button - hidden in journey mode */}
+            {viewMode !== 'journey' && (
+              <FilterSidebar
+                open={isFilterOpen}
+                onOpenChange={handleFilterOpenChange}
+                filters={filters}
+                updateFilter={updateFilter}
+                resetFilters={resetFilters}
+                genres={genres}
+                platforms={platforms}
+                sortBy={sortBy}
+                setSortBy={setSortBy}
+                sortDirection={sortDirection}
+                toggleSortDirection={toggleSortDirection}
+                viewMode={viewMode}
+              />
+            )}
 
             {/* Settings Button */}
             <Button
@@ -604,88 +662,108 @@ export function Dashboard() {
           </div>
         </div>
 
-        {/* Loading State - Skeleton Grid */}
-        {currentLoading && currentGames.length === 0 && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 auto-rows-fr">
-            <SkeletonGrid count={12} />
-          </div>
-        )}
-
-        {/* Error State */}
-        {currentError && (
-          <div className="flex flex-col items-center justify-center py-20">
-            <p className="text-red-400 mb-4">{currentError}</p>
-            <Button onClick={() => window.location.reload()} variant="outline">
-              Retry
-            </Button>
-          </div>
-        )}
-
-        {/* Games Grid */}
-        {!currentLoading && !currentError && sortedGames.length === 0 ? (
-          (() => {
-            // Determine which empty state to show
-            if (isSearching) {
-              return (
-                <EmptyState 
-                  type="no-results" 
-                  onAction={() => setSearchQuery('')} 
-                />
-              );
-            }
-            if (hasActiveFilters) {
-              return (
-                <EmptyState 
-                  type="no-filter-results" 
-                  onAction={resetFilters} 
-                />
-              );
-            }
-            if (viewMode === 'library') {
-              return (
-                <EmptyState 
-                  type="no-games" 
-                  onAction={() => setViewMode('browse')} 
-                />
-              );
-            }
-            return (
-              <EmptyState 
-                type="no-games" 
-                onAction={() => {}} 
-              />
-            );
-          })()
+        {/* Journey View */}
+        {viewMode === 'journey' ? (
+          <JourneyView
+            entries={journeyEntries}
+            loading={libraryLoading}
+            onSwitchToBrowse={() => setViewMode('browse')}
+          />
         ) : (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 auto-rows-fr">
-              {sortedGames.map((game) => {
-                // Only show rank for 'trending' category (top sellers) or when explicitly ranked
-                // Hide ranks in 'all' view to avoid confusion since all games from Steam Charts have ranks
-                const showRank = filters.category === 'trending' && game.rank !== undefined;
-                const gameWithOptionalRank = showRank ? game : { ...game, rank: undefined };
-                
-                return (
-                  <div key={game.id} className="min-w-0">
-                    <GameCard
-                      game={gameWithOptionalRank}
-                      onEdit={() => handleEdit(game)}
-                      onDelete={() => handleDeleteClick(game)}
-                      isInLibrary={game.isInLibrary}
-                      isInstalled={game.steamAppId ? isInstalled(game.steamAppId) : false}
-                      onAddToLibrary={() => handleAddToLibrary(game)}
-                      onRemoveFromLibrary={() => handleDeleteClick(game)}
-                      hideLibraryBadge={viewMode === 'library'}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-            {/* Infinite scroll sentinel */}
-            {viewMode === 'browse' && !isSearching && hasMore && (
-              <div ref={loadMoreRef} className="flex justify-center py-8">
-                <div className="w-8 h-8 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
+            {/* Loading State - Skeleton Grid */}
+            {(currentLoading && currentGames.length === 0) && (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 auto-rows-fr">
+                <SkeletonGrid count={12} />
               </div>
+            )}
+
+            {/* Search Loading State */}
+            {searchLoading && isSearching && viewMode === 'browse' && sortedGames.length === 0 && (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 auto-rows-fr">
+                <SkeletonGrid count={6} />
+              </div>
+            )}
+
+            {/* Error State */}
+            {currentError && (
+              <div className="flex flex-col items-center justify-center py-20">
+                <p className="text-red-400 mb-4">{currentError}</p>
+                <Button onClick={() => window.location.reload()} variant="outline">
+                  Retry
+                </Button>
+              </div>
+            )}
+
+            {/* Games Grid */}
+            {!currentLoading && !searchLoading && !currentError && sortedGames.length === 0 ? (
+              (() => {
+                // Determine which empty state to show
+                if (isSearching) {
+                  return (
+                    <EmptyState 
+                      type="no-results" 
+                      onAction={() => setSearchQuery('')} 
+                    />
+                  );
+                }
+                if (hasActiveFilters) {
+                  return (
+                    <EmptyState 
+                      type="no-filter-results" 
+                      onAction={resetFilters} 
+                    />
+                  );
+                }
+                if (viewMode === 'library') {
+                  return (
+                    <EmptyState 
+                      type="no-games" 
+                      onAction={() => setViewMode('browse')} 
+                    />
+                  );
+                }
+                return (
+                  <EmptyState 
+                    type="no-games" 
+                    onAction={() => {}} 
+                  />
+                );
+              })()
+            ) : (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 auto-rows-fr">
+                  {sortedGames.map((game) => {
+                    // Only show rank for 'trending' category (top sellers) or when explicitly ranked
+                    // Hide ranks in 'all' view to avoid confusion since all games from Steam Charts have ranks
+                    const showRank = filters.category === 'trending' && game.rank !== undefined;
+                    const gameWithOptionalRank = showRank ? game : { ...game, rank: undefined };
+                    
+                    return (
+                      <div key={game.id} className="min-w-0">
+                        <GameCard
+                          game={gameWithOptionalRank}
+                          onEdit={() => handleEdit(game)}
+                          onDelete={() => handleDeleteClick(game)}
+                          isInLibrary={game.isInLibrary}
+                          isInstalled={game.steamAppId ? isInstalled(game.steamAppId) : false}
+                          onAddToLibrary={() => handleAddToLibrary(game)}
+                          onRemoveFromLibrary={() => handleDeleteClick(game)}
+                          onStatusChange={(status) => handleStatusChange(game, status)}
+                          hideLibraryBadge={viewMode === 'library'}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Infinite scroll sentinel - show while hasMore or while loading more (append) */}
+                {viewMode === 'browse' && !isSearching && (hasMore || loadingMore) && (
+                  <div ref={loadMoreRef} className="flex flex-col items-center justify-center gap-2 py-8">
+                    <div className="w-8 h-8 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
+                    {loadingMore && <span className="text-sm text-white/70">Loading more…</span>}
+                  </div>
+                )}
+              </>
             )}
           </>
         )}

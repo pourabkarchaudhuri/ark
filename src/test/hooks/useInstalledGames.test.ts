@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
-import { useInstalledGames, checkGameInstalled } from './useInstalledGames';
+import { useInstalledGames, checkGameInstalled } from '@/hooks/useInstalledGames';
 
 // Mock the window.installedGames API
 const mockInstalledGamesAPI = {

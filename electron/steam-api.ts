@@ -612,9 +612,10 @@ class SteamAPIClient {
       // Filter out non-game items (DLCs, Season Passes, etc.)
       const allItems = response.items || [];
       const filteredItems = allItems.filter(item => {
-        // Filter by type - only include 'game' type
-        // Steam types: 'game', 'dlc', 'demo', 'advertising', 'mod', 'video'
-        if (item.type && item.type.toLowerCase() !== 'game') {
+        // Filter by type - include 'game' and 'app' (Steam now returns 'app' for games)
+        // Steam types: 'app' (games), 'game' (legacy), 'dlc', 'demo', 'advertising', 'mod', 'video'
+        const type = typeof item.type === 'string' ? item.type.toLowerCase() : String(item.type || '').toLowerCase();
+        if (type && type !== 'game' && type !== 'app') {
           return false;
         }
         
@@ -774,6 +775,92 @@ class SteamAPIClient {
       console.error(`[Steam] Error fetching reviews for ${appId}:`, error);
       return { success: 0, query_summary: { total_reviews: 0, total_positive: 0, total_negative: 0, review_score: 0, review_score_desc: '' }, reviews: [] };
     }
+  }
+
+  /**
+   * Get news for a specific game from Steam (public API, no key required)
+   */
+  async getNewsForApp(appId: number, count: number = 15): Promise<Array<{ gid: string; title: string; url: string; author: string; feedlabel: string; date: number; contents: string }>> {
+    const cacheKey = `news-${appId}-${count}`;
+    const cached = this.cache.get<Array<{ gid: string; title: string; url: string; author: string; feedlabel: string; date: number; contents: string }>>(cacheKey);
+    if (cached) return cached;
+
+    const url = `https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=${appId}&count=${count}&format=json`;
+
+    try {
+      const response = await this.rateLimiter.execute(async () => {
+        console.log(`[Steam] Fetching news for appId: ${appId}`);
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Steam News API error: ${res.status}`);
+        return res.json();
+      });
+
+      const items = response?.appnews?.newsitems;
+      if (!Array.isArray(items)) return [];
+
+      const news = items.map((item: Record<string, unknown>) => ({
+        gid: String(item.gid ?? ''),
+        title: String(item.title ?? ''),
+        url: String(item.url ?? ''),
+        author: String(item.author ?? ''),
+        feedlabel: String(item.feedlabel ?? ''),
+        date: Number(item.date ?? 0),
+        contents: String(item.contents ?? ''),
+      }));
+
+      this.cache.set(cacheKey, news, DETAILS_CACHE_TTL);
+      console.log(`[Steam] Got ${news.length} news items for appId: ${appId}`);
+      return news;
+    } catch (error) {
+      console.error(`[Steam] Error fetching news for ${appId}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Get current player count for a single game (public API, no key required).
+   * Uses ISteamUserStats/GetNumberOfCurrentPlayers/v1
+   */
+  async getPlayerCount(appId: number): Promise<number> {
+    const cacheKey = `player-count-${appId}`;
+    const PLAYER_COUNT_TTL = 5 * 60 * 1000; // 5 minutes
+
+    const cached = this.cache.get<number>(cacheKey);
+    if (cached !== undefined && cached !== null) return cached;
+
+    try {
+      const url = `https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=${appId}&format=json`;
+      const result = await this.rateLimiter.execute(async () => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Player count API error: ${res.status}`);
+        return res.json();
+      });
+
+      const count = Number(result?.response?.player_count ?? 0);
+      this.cache.set(cacheKey, count, PLAYER_COUNT_TTL);
+      return count;
+    } catch (error) {
+      console.warn(`[Steam] Failed to get player count for ${appId}:`, error);
+      return 0;
+    }
+  }
+
+  /**
+   * Get current player counts for multiple games in parallel.
+   * Returns a Map of appId -> playerCount.
+   */
+  async getMultiplePlayerCounts(appIds: number[]): Promise<Record<number, number>> {
+    const results = await Promise.all(
+      appIds.map(async (id) => {
+        const count = await this.getPlayerCount(id);
+        return [id, count] as const;
+      })
+    );
+    const map: Record<number, number> = {};
+    for (const [id, count] of results) {
+      map[id] = count;
+    }
+    return map;
   }
 
   /**
@@ -952,14 +1039,14 @@ class SteamAPIClient {
     // Current game gets highest weight
     addGameToProfile(currentGame, 10);
 
-    // Add library games with lower weight (limit to avoid too many API calls)
-    const libraryToFetch = libraryAppIds.slice(0, 10);
+    // Add library games with low weight so the current game dominates the profile
+    const libraryToFetch = libraryAppIds.slice(0, 5);
     const libraryGames = await Promise.all(
       libraryToFetch.map(id => this.getAppDetails(id).catch(() => null))
     );
 
     libraryGames.forEach(game => {
-      if (game) addGameToProfile(game, 3);
+      if (game) addGameToProfile(game, 1);
     });
 
     // Sort by weight
@@ -975,7 +1062,8 @@ class SteamAPIClient {
   }
 
   /**
-   * Get candidate games from various Steam sources
+   * Get candidate games from various Steam sources.
+   * Prioritises game-specific signals: developer, publisher, and top genres.
    */
   private async getCandidateGames(
     tasteProfile: Awaited<ReturnType<typeof this.buildTasteProfile>>,
@@ -985,42 +1073,60 @@ class SteamAPIClient {
     const excludeSet = new Set([excludeAppId, ...excludeLibrary]);
     const candidateSet = new Set<number>();
 
-    // Get games from multiple sources in parallel
+    const addCandidates = (ids: number[]) => {
+      for (const id of ids) {
+        if (!excludeSet.has(id)) candidateSet.add(id);
+      }
+    };
+
+    // 1. Broad sources (top sellers, new releases, most played) — run in parallel
     const [topSellers, newReleases, mostPlayed] = await Promise.all([
       this.getTopSellers().catch(() => []),
       this.getNewReleases().catch(() => []),
       this.getMostPlayedGames().catch(() => [])
     ]);
 
-    // Add from all sources (different return types have different id properties)
-    topSellers.forEach(g => {
-      if (!excludeSet.has(g.id)) candidateSet.add(g.id);
-    });
-    newReleases.forEach(g => {
-      if (!excludeSet.has(g.id)) candidateSet.add(g.id);
-    });
-    mostPlayed.forEach(g => {
-      if (!excludeSet.has(g.appid)) candidateSet.add(g.appid);
-    });
+    addCandidates(topSellers.map(g => g.id));
+    addCandidates(newReleases.map(g => g.id));
+    addCandidates(mostPlayed.map(g => g.appid));
 
-    // If we have a top genre, try to get more games via search
-    if (tasteProfile.genres.length > 0) {
-      const topGenre = tasteProfile.genres[0].description;
-      try {
-        const searchResults = await this.searchGames(topGenre, 50);
-        searchResults.forEach(g => {
-          if (!excludeSet.has(g.id)) candidateSet.add(g.id);
-        });
-      } catch (e) {
-        console.log('[Steam] Genre search failed, continuing with other candidates');
+    // 2. Game-specific searches: developer names (up to 2), publisher, and top 2-3 genres
+    const searchTerms: string[] = [];
+
+    // Add developer names
+    for (const dev of tasteProfile.developers.slice(0, 2)) {
+      searchTerms.push(dev);
+    }
+
+    // Add publisher (if different from developers)
+    for (const pub of tasteProfile.publishers.slice(0, 1)) {
+      if (!tasteProfile.developers.includes(pub)) {
+        searchTerms.push(pub);
       }
     }
 
+    // Add top 2-3 genre descriptions
+    for (const genre of tasteProfile.genres.slice(0, 3)) {
+      searchTerms.push(genre.description);
+    }
+
+    // Run all game-specific searches in parallel
+    const searchPromises = searchTerms.map(term =>
+      this.searchGames(term, 50).catch(() => [])
+    );
+    const searchResults = await Promise.all(searchPromises);
+
+    for (const results of searchResults) {
+      addCandidates(results.map(g => g.id));
+    }
+
+    console.log(`[Steam] getCandidateGames: ${candidateSet.size} candidates from ${searchTerms.length} searches + broad sources`);
     return Array.from(candidateSet);
   }
 
   /**
-   * Score and rank candidate games based on similarity
+   * Score and rank candidate games based on similarity to the current game.
+   * Games that share genres/developer with the current game are strongly favoured.
    */
   private async scoreAndRankCandidates(
     candidateAppIds: number[],
@@ -1030,6 +1136,7 @@ class SteamAPIClient {
   ): Promise<Array<{ appId: number; name: string; score: number; reasons: string[] }>> {
     // Limit candidates to avoid too many API calls
     const toScore = candidateAppIds.slice(0, 50);
+    const librarySet = new Set(libraryAppIds);
     
     // Fetch details for candidates (many should be cached from getCandidateGames sources)
     const candidateDetails = await Promise.all(
@@ -1042,7 +1149,6 @@ class SteamAPIClient {
     const currentPubs = new Set(currentGame.publishers || []);
 
     const profileGenres = new Set(tasteProfile.genres.map(g => g.id));
-    const profileCategories = new Set(tasteProfile.categories.map(c => c.id));
 
     const scored: Array<{ appId: number; name: string; score: number; reasons: string[] }> = [];
 
@@ -1070,9 +1176,9 @@ class SteamAPIClient {
         }
       }
 
-      // Genre match with taste profile
+      // Genre match with taste profile (lower weight — profile is dominated by current game)
       const profileGenreOverlap = Array.from(profileGenres).filter(g => candidateGenres.has(g)).length;
-      score += profileGenreOverlap * 10;
+      score += profileGenreOverlap * 8;
 
       // Category overlap (multiplayer, co-op, etc.)
       const catOverlap = Array.from(currentCategories).filter(c => candidateCategories.has(c)).length;
@@ -1110,8 +1216,17 @@ class SteamAPIClient {
         }
       }
 
-      // Only include games with meaningful similarity
-      if (score >= 20) {
+      // De-prioritize games already in the user's library
+      if (librarySet.has(candidate.steam_appid)) {
+        score = Math.floor(score * 0.5);
+      }
+
+      // Require a higher bar: at least one shared genre with the current game,
+      // or a strong non-genre signal (same developer/publisher)
+      const hasGenreLink = genreOverlap > 0;
+      const minScore = hasGenreLink ? 20 : 25;
+
+      if (score >= minScore) {
         scored.push({
           appId: candidate.steam_appid,
           name: candidate.name,

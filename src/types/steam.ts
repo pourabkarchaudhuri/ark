@@ -155,6 +155,17 @@ export interface SteamGame {
   recommendations?: number;
 }
 
+// Steam News Item (from ISteamNews/GetNewsForApp)
+export interface SteamNewsItem {
+  gid: string;
+  title: string;
+  url: string;
+  author: string;
+  feedlabel: string;
+  date: number; // Unix timestamp
+  contents?: string; // BBCode article body — used to extract thumbnail images
+}
+
 // Queue Status
 export interface QueueStatus {
   queueSize: number;
@@ -221,6 +232,10 @@ declare global {
       getTopSellers: () => Promise<Array<{ id: number; name: string; image: string }>>;
       getComingSoon: () => Promise<Array<{ id: number; name: string; image: string }>>;
       getGameReviews: (appId: number, limit?: number) => Promise<SteamReviewsResponse>;
+      getNewsForApp: (appId: number, count?: number) => Promise<SteamNewsItem[]>;
+      // Player counts
+      getPlayerCount: (appId: number) => Promise<number>;
+      getMultiplePlayerCounts: (appIds: number[]) => Promise<Record<number, number>>;
       getQueueStatus: () => Promise<QueueStatus>;
       clearCache: () => Promise<void>;
       // Background prefetch for faster navigation

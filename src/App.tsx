@@ -42,7 +42,7 @@ function AppContent() {
       <ErrorBoundary onReset={handleReset}>
         <AnimatePresence mode="wait">
           {appState === 'loading' && (
-            <LoadingScreen onComplete={handleLoadingComplete} duration={5000} />
+            <LoadingScreen key="app-loading" onComplete={handleLoadingComplete} duration={5000} />
           )}
 
           {appState === 'ready' && (

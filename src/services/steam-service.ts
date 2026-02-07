@@ -4,7 +4,7 @@
  */
 
 import { Game, LibraryGameEntry } from '@/types/game';
-import { SteamMostPlayedGame, SteamAppDetails, SteamSearchItem, getSteamCoverUrl } from '@/types/steam';
+import { SteamMostPlayedGame, SteamAppDetails, SteamSearchItem, SteamNewsItem, getSteamCoverUrl } from '@/types/steam';
 import { libraryStore } from './library-store';
 
 // Check if running in Electron
@@ -79,6 +79,7 @@ export function transformSteamGame(
     releaseDate,
     summary: details.short_description || details.about_the_game || '',
     coverUrl, // Use vertical cover instead of header_image
+    headerImage: details.header_image || undefined, // API-provided header (uses current CDN)
     screenshots: allScreenshots,
     videos,
     
@@ -211,7 +212,10 @@ class SteamService {
         const details = detailsMap.get(mp.appid);
         if (details) {
           const libraryEntry = libraryStore.getEntry(mp.appid);
-          const game = transformSteamGame(details, libraryEntry, mp.rank, mp.peak_in_game);
+          // Don't pass peak_in_game as playerCount — it's a *peak* metric, not
+          // the current count.  The real-time count is fetched separately via
+          // getMultiplePlayerCounts so that dashboard and details page always agree.
+          const game = transformSteamGame(details, libraryEntry, mp.rank);
           games.push(game);
         } else {
           console.warn(`[Steam Service] No details for appId ${mp.appid}`);
@@ -434,6 +438,71 @@ class SteamService {
    */
   async getPlatforms(): Promise<string[]> {
     return ['Windows', 'Mac', 'Linux'];
+  }
+
+  /**
+   * Get current player counts for multiple games.
+   * Returns a Map-like record of appId -> playerCount.
+   */
+  async getMultiplePlayerCounts(appIds: number[]): Promise<Record<number, number>> {
+    if (!isElectron() || !window.steam?.getMultiplePlayerCounts) {
+      return {};
+    }
+    try {
+      return await window.steam.getMultiplePlayerCounts(appIds);
+    } catch (error) {
+      console.warn('[Steam Service] getMultiplePlayerCounts failed:', error);
+      return {};
+    }
+  }
+
+  /**
+   * Get news for a specific game from Steam.
+   * Tries Electron IPC first; falls back to Vite proxy (dev mode) or direct fetch.
+   */
+  async getNewsForApp(appId: number, count: number = 15): Promise<SteamNewsItem[]> {
+    // Try via Electron IPC first (avoids CORS in packaged app)
+    if (isElectron() && window.steam && typeof window.steam.getNewsForApp === 'function') {
+      try {
+        const news = await window.steam.getNewsForApp(appId, count);
+        if (Array.isArray(news) && news.length > 0) {
+          console.log(`[Steam Service] Got ${news.length} news via IPC for appId ${appId}`);
+          return news;
+        }
+      } catch (err) {
+        console.warn(`[Steam Service] IPC getNewsForApp failed for ${appId}, falling back to fetch:`, err);
+      }
+    }
+
+    // Fallback: use Vite dev proxy (/api/steam-news) to avoid CORS,
+    // or direct URL if the proxy isn't available (e.g. production build).
+    const proxyUrl = `/api/steam-news?appid=${appId}&count=${count}&format=json`;
+    const directUrl = `https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=${appId}&count=${count}&format=json`;
+
+    for (const url of [proxyUrl, directUrl]) {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) continue;
+        const data = await response.json();
+        const items = data?.appnews?.newsitems;
+        if (!Array.isArray(items) || items.length === 0) continue;
+        console.log(`[Steam Service] Got ${items.length} news via fetch for appId ${appId}`);
+        return items.map((item: Record<string, unknown>) => ({
+          gid: String(item.gid ?? ''),
+          title: String(item.title ?? ''),
+          url: String(item.url ?? ''),
+          author: String(item.author ?? ''),
+          feedlabel: String(item.feedlabel ?? ''),
+          date: Number(item.date ?? 0),
+          contents: String(item.contents ?? ''),
+        }));
+      } catch {
+        // Try next URL
+      }
+    }
+
+    console.warn(`[Steam Service] All news fetch methods failed for appId ${appId}`);
+    return [];
   }
 
   /**

@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import { SettingsPanel } from './settings-panel';
+import { SettingsPanel } from '@/components/settings-panel';
 
 // Mock window.settings
 const mockSettings = {
@@ -21,12 +21,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   window.settings = mockSettings;
   
-  // Default Ollama settings
+  // Default Ollama settings - useGeminiInstead: true so API key section is visible
   mockSettings.getOllamaSettings.mockResolvedValue({
     enabled: true,
     url: 'http://localhost:11434',
     model: 'gemma3:12b',
-    useGeminiInstead: false,
+    useGeminiInstead: true,
   });
 });
 

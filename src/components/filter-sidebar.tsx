@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { GameStatus } from '@/types/game';
+import { GameStatus, GamePriority } from '@/types/game';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
@@ -29,6 +29,13 @@ const statusOptions: (GameStatus | 'All')[] = [
   'Dropped',
 ];
 
+const priorityOptions: (GamePriority | 'All')[] = [
+  'All',
+  'High',
+  'Medium',
+  'Low',
+];
+
 export type GameCategory = 'all' | 'most-played' | 'trending' | 'recent' | 'award-winning';
 
 const categoryOptions: { value: GameCategory; label: string }[] = [
@@ -41,7 +48,7 @@ const categoryOptions: { value: GameCategory; label: string }[] = [
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library';
+type ViewMode = 'browse' | 'library' | 'journey';
 
 const sortOptions: { value: SortOption; label: string }[] = [
   { value: 'rating', label: 'Rating' },
@@ -52,6 +59,7 @@ const sortOptions: { value: SortOption; label: string }[] = [
 interface FilterState {
   search: string;
   status: GameStatus | 'All';
+  priority: GamePriority | 'All';
   genre: string;
   platform: string;
   category: GameCategory;
@@ -89,6 +97,7 @@ export function FilterSidebar({
 }: FilterSidebarProps) {
   const hasActiveFilters = 
     filters.status !== 'All' || 
+    filters.priority !== 'All' ||
     filters.genre !== 'All' || 
     filters.platform !== 'All' ||
     filters.category !== 'all' ||
@@ -96,6 +105,7 @@ export function FilterSidebar({
 
   const activeFilterCount = [
     filters.status !== 'All' && viewMode === 'library',
+    filters.priority !== 'All' && viewMode === 'library',
     filters.genre !== 'All',
     filters.platform !== 'All',
     filters.category !== 'all' && viewMode === 'browse',
@@ -252,6 +262,28 @@ export function FilterSidebar({
             </div>
           )}
 
+          {/* Priority Filter - Only in Library mode */}
+          {viewMode === 'library' && (
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Priority</Label>
+              <Select
+                value={filters.priority}
+                onValueChange={(value) => updateFilter('priority', value as GamePriority | 'All')}
+              >
+                <SelectTrigger className="w-full bg-background/50" aria-label="Filter by priority">
+                  <SelectValue placeholder="All Priorities" />
+                </SelectTrigger>
+                <SelectContent>
+                  {priorityOptions.map((priority) => (
+                    <SelectItem key={priority} value={priority}>
+                      {priority}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
           {/* Genre Filter - Searchable Combobox */}
           <div className="space-y-2">
             <Label className="text-sm font-medium">Genre</Label>
@@ -317,6 +349,18 @@ export function FilterSidebar({
                       onClick={() => updateFilter('status', 'All')} 
                       className="ml-1 hover:text-red-400"
                       aria-label={`Remove ${filters.status} filter`}
+                    >
+                      <X className="h-3 w-3 pointer-events-none" />
+                    </button>
+                  </Badge>
+                )}
+                {filters.priority !== 'All' && viewMode === 'library' && (
+                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 text-white border-fuchsia-500/30">
+                    {filters.priority} Priority
+                    <button 
+                      onClick={() => updateFilter('priority', 'All')} 
+                      className="ml-1 hover:text-red-400"
+                      aria-label={`Remove ${filters.priority} priority filter`}
                     >
                       <X className="h-3 w-3 pointer-events-none" />
                     </button>

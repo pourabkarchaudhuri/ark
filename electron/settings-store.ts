@@ -27,8 +27,11 @@ interface Settings {
   };
 }
 
-const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
 const SETTINGS_VERSION = 1;
+
+function getSettingsFilePath(): string {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
 
 // Simple encryption key based on machine ID (stored locally, not sent anywhere)
 const getEncryptionKey = (): Buffer => {
@@ -45,8 +48,9 @@ class SettingsStore {
 
   private loadSettings(): Settings {
     try {
-      if (fs.existsSync(SETTINGS_FILE)) {
-        const data = fs.readFileSync(SETTINGS_FILE, 'utf-8');
+      const settingsFile = getSettingsFilePath();
+      if (fs.existsSync(settingsFile)) {
+        const data = fs.readFileSync(settingsFile, 'utf-8');
         const parsed = JSON.parse(data) as Settings;
         
         if (parsed.version === SETTINGS_VERSION) {
@@ -74,7 +78,7 @@ class SettingsStore {
 
   private saveSettings(): void {
     try {
-      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(this.settings, null, 2), 'utf-8');
+      fs.writeFileSync(getSettingsFilePath(), JSON.stringify(this.settings, null, 2), 'utf-8');
     } catch (error) {
       console.error('[SettingsStore] Failed to save settings:', error);
       throw error;

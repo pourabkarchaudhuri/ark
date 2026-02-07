@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Hyperspeed from '@/components/Hyperspeed/Hyperspeed';
 import { Terminal, AnimatedSpan, TypingAnimation } from '@/components/ui/terminal';
 import { libraryStore } from '@/services/library-store';
+import { ErrorBoundary } from '@/components/error-boundary';
 
 interface LoadingScreenProps {
   onComplete: () => void;
@@ -12,7 +13,8 @@ interface LoadingScreenProps {
 export function LoadingScreen({ onComplete, duration = 6000 }: LoadingScreenProps) {
   const [isVisible, setIsVisible] = useState(true);
   const [libraryCount, setLibraryCount] = useState(0);
-  
+  const hasCompletedRef = useRef(false);
+
   // Use ref to store the callback to avoid timer reset when onComplete reference changes
   const onCompleteRef = useRef(onComplete);
   useEffect(() => {
@@ -31,11 +33,13 @@ export function LoadingScreen({ onComplete, duration = 6000 }: LoadingScreenProp
 
   const actualDuration = prefersReducedMotion ? 500 : duration;
 
-  // Auto-complete after duration - uses ref to avoid resetting timer
+  // Auto-complete after duration - use ref so we only call onComplete once (avoids Strict Mode double-mount)
   useEffect(() => {
     let fadeOutTimer: ReturnType<typeof setTimeout> | null = null;
-    
+
     const timer = setTimeout(() => {
+      if (hasCompletedRef.current) return;
+      hasCompletedRef.current = true;
       setIsVisible(false);
       fadeOutTimer = setTimeout(() => onCompleteRef.current(), 300);
     }, actualDuration);
@@ -54,47 +58,53 @@ export function LoadingScreen({ onComplete, duration = 6000 }: LoadingScreenProp
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: prefersReducedMotion ? 0.1 : 0.3 }}
-          className="fixed inset-0 z-50 bg-black"
+          className="fixed inset-0 z-[9999] bg-black"
         >
-          {/* Hyperspeed animated background */}
+          {/* Hyperspeed animated background - fallback to gradient if it throws (e.g. WebGL in Electron) */}
           {!prefersReducedMotion && (
-            <Hyperspeed
-              effectOptions={{
-                distortion: 'turbulentDistortion',
-                length: 400,
-                roadWidth: 10,
-                islandWidth: 2,
-                lanesPerRoad: 3,
-                fov: 90,
-                fovSpeedUp: 150,
-                speedUp: 2,
-                carLightsFade: 0.4,
-                totalSideLightSticks: 20,
-                lightPairsPerRoadWay: 40,
-                shoulderLinesWidthPercentage: 0.05,
-                brokenLinesWidthPercentage: 0.1,
-                brokenLinesLengthPercentage: 0.5,
-                lightStickWidth: [0.12, 0.5],
-                lightStickHeight: [1.3, 1.7],
-                movingAwaySpeed: [60, 80],
-                movingCloserSpeed: [-120, -160],
-                carLightsLength: [400 * 0.03, 400 * 0.2],
-                carLightsRadius: [0.05, 0.14],
-                carWidthPercentage: [0.3, 0.5],
-                carShiftX: [-0.8, 0.8],
-                carFloorSeparation: [0, 5],
-                colors: {
-                  roadColor: 0x080808,
-                  islandColor: 0x0a0a0a,
-                  background: 0x000000,
-                  shoulderLines: 0x131318,
-                  brokenLines: 0x131318,
-                  leftCars: [0xd856bf, 0x6750a2, 0xc247ac],
-                  rightCars: [0x03b3c3, 0x0e5ea5, 0x324555],
-                  sticks: 0x03b3c3
-                }
-              }}
-            />
+            <ErrorBoundary
+              fallback={
+                <div className="absolute inset-0 bg-gradient-to-b from-zinc-950 via-zinc-900 to-black" />
+              }
+            >
+              <Hyperspeed
+                effectOptions={{
+                  distortion: 'turbulentDistortion',
+                  length: 400,
+                  roadWidth: 10,
+                  islandWidth: 2,
+                  lanesPerRoad: 3,
+                  fov: 90,
+                  fovSpeedUp: 150,
+                  speedUp: 2,
+                  carLightsFade: 0.4,
+                  totalSideLightSticks: 20,
+                  lightPairsPerRoadWay: 40,
+                  shoulderLinesWidthPercentage: 0.05,
+                  brokenLinesWidthPercentage: 0.1,
+                  brokenLinesLengthPercentage: 0.5,
+                  lightStickWidth: [0.12, 0.5],
+                  lightStickHeight: [1.3, 1.7],
+                  movingAwaySpeed: [60, 80],
+                  movingCloserSpeed: [-120, -160],
+                  carLightsLength: [400 * 0.03, 400 * 0.2],
+                  carLightsRadius: [0.05, 0.14],
+                  carWidthPercentage: [0.3, 0.5],
+                  carShiftX: [-0.8, 0.8],
+                  carFloorSeparation: [0, 5],
+                  colors: {
+                    roadColor: 0x080808,
+                    islandColor: 0x0a0a0a,
+                    background: 0x000000,
+                    shoulderLines: 0x131318,
+                    brokenLines: 0x131318,
+                    leftCars: [0xd856bf, 0x6750a2, 0xc247ac],
+                    rightCars: [0x03b3c3, 0x0e5ea5, 0x324555],
+                    sticks: 0x03b3c3
+                  }
+                }}
+              />
+            </ErrorBoundary>
           )}
 
           {/* Centered Terminal - Fixed size */}

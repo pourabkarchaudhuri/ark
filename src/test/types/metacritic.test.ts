@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MetacriticReview, MetacriticGameResponse } from './metacritic';
+import { MetacriticReview, MetacriticGameResponse } from '@/types/metacritic';
 
 describe('Metacritic Types', () => {
   it('MetacriticReview has correct structure', () => {

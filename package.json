@@ -1,6 +1,6 @@
 {
-  "name": "game-tracker",
-  "version": "1.0.15",
+  "name": "ark",
+  "version": "1.0.17",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -44,6 +44,7 @@
     "@radix-ui/react-tabs": "^1.1.13",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
+    "duck-duck-scrape": "^2.2.7",
     "electron-updater": "^6.1.7",
     "framer-motion": "^10.18.0",
     "langchain": "^1.2.3",
@@ -97,6 +98,9 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*"
+    ],
+    "asarUnpack": [
+      "**/preload.cjs"
     ],
     "publish": {
       "provider": "github",
