@@ -18,7 +18,6 @@ import {
   MoreVertical,
   Library,
   Plus,
-  HardDrive,
 } from 'lucide-react';
 import { FaWindows, FaApple, FaLinux } from 'react-icons/fa';
 import { cn } from '@/lib/utils';
@@ -29,7 +28,6 @@ interface GameCardProps {
   onDelete: () => void;
   onClick?: () => void;
   isInLibrary?: boolean;
-  isInstalled?: boolean;
   onAddToLibrary?: () => void;
   onRemoveFromLibrary?: () => void;
   onStatusChange?: (status: GameStatus) => void;
@@ -139,7 +137,6 @@ function GameCardComponent({
   onDelete, 
   onClick, 
   isInLibrary,
-  isInstalled,
   onAddToLibrary,
   onRemoveFromLibrary,
   onStatusChange,
@@ -164,10 +161,9 @@ function GameCardComponent({
   
   // Compute rating badge position based on visible badges (memoized for performance)
   const ratingBadgePosition = useMemo(() => {
-    if (showLibraryBadge && isInstalled) return "top-[4.5rem]";
-    if (showLibraryBadge || isInstalled) return "top-9";
+    if (showLibraryBadge) return "top-9";
     return "top-2";
-  }, [showLibraryBadge, isInstalled]);
+  }, [showLibraryBadge]);
 
   // Notify other cards to close their context menus when this card opens one
   const CONTEXT_MENU_CLOSE_EVENT = 'gamecard:closeContextMenu';
@@ -375,13 +371,6 @@ function GameCardComponent({
             </Badge>
           )}
           
-          {/* Installed Badge */}
-          {isInstalled && (
-            <Badge className="text-white border-none text-[10px] gap-1 bg-green-600/80">
-              <HardDrive className="h-3 w-3" />
-              Installed
-            </Badge>
-          )}
         </div>
         
         {/* Rating Badge (visible on hover only, positioned below other badges) */}
@@ -577,7 +566,6 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.game.isInLibrary === nextProps.game.isInLibrary &&
     prevProps.game.status === nextProps.game.status &&
     prevProps.isInLibrary === nextProps.isInLibrary &&
-    prevProps.isInstalled === nextProps.isInstalled &&
     prevProps.hideLibraryBadge === nextProps.hideLibraryBadge
   );
 });

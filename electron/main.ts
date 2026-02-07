@@ -46,8 +46,6 @@ import { fetchMetacriticReviews, clearMetacriticCache } from './metacritic-api.j
 import { processMessage, searchGamesForContext, chatStore } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
 import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
-import { getInstalledGames, getInstalledAppIds, clearInstalledGamesCache } from './installed-games.js';
-
 let mainWindow: BrowserWindowType | null = null;
 
 // ---------- Data migration: game-tracker → ark ----------
@@ -713,52 +711,6 @@ ipcMain.handle('dialog:openFile', async (_event, options?: {
   } catch (error) {
     console.error('[Dialog] Error opening file:', error);
     return { success: false, error: String(error) };
-  }
-});
-
-// ============================================================================
-// INSTALLED GAMES IPC HANDLERS
-// ============================================================================
-
-/**
- * Get all installed games from the system
- */
-ipcMain.handle('games:getInstalled', async (_event, forceRefresh: boolean = false) => {
-  try {
-    console.log('[InstalledGames] Handler: getInstalled (forceRefresh:', forceRefresh, ')');
-    const games = await getInstalledGames(forceRefresh);
-    return games;
-  } catch (error) {
-    console.error('[InstalledGames] Error getting installed games:', error);
-    return [];
-  }
-});
-
-/**
- * Get set of installed Steam AppIDs for quick lookup
- */
-ipcMain.handle('games:getInstalledAppIds', async () => {
-  try {
-    console.log('[InstalledGames] Handler: getInstalledAppIds');
-    const appIds = await getInstalledAppIds();
-    // Convert Set to Array for IPC serialization
-    return Array.from(appIds);
-  } catch (error) {
-    console.error('[InstalledGames] Error getting installed app IDs:', error);
-    return [];
-  }
-});
-
-/**
- * Clear the installed games cache
- */
-ipcMain.handle('games:clearInstalledCache', async () => {
-  try {
-    clearInstalledGamesCache();
-    return true;
-  } catch (error) {
-    console.error('[InstalledGames] Error clearing cache:', error);
-    return false;
   }
 });
 

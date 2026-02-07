@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames, useRateLimitWarning } from '@/hooks/useGameStore';
-import { useInstalledGames } from '@/hooks/useInstalledGames';
+
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { Game, GameStatus } from '@/types/game';
 import { Button } from '@/components/ui/button';
@@ -64,16 +64,13 @@ export function Dashboard() {
   const { results: searchResults, loading: searchLoading, isSearching } = useGameSearch(searchQuery);
   
   // Library management
-  const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, customGames, getAllGameIds } = useLibrary();
+  const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, customGames } = useLibrary();
   
   // Library games with full details (fetched independently from Steam games)
   const { games: libraryGames, loading: libraryLoading } = useLibraryGames();
 
   // Journey history (persists even after library removal)
   const journeyEntries = useJourneyHistory();
-  
-  // Installed games detection (also auto-adds installed games to library)
-  const { isInstalled, installedAppIds } = useInstalledGames();
   
   // Custom game dialog state
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
@@ -306,14 +303,6 @@ export function Dashboard() {
     window.addEventListener('scroll', handleScroll);
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
-
-  // Auto-add installed games to library (Steam app IDs only; status 'Playing')
-  useEffect(() => {
-    if (installedAppIds.size === 0) return;
-    const libraryIds = getAllGameIds();
-    const toAdd = [...installedAppIds].filter((id) => !libraryIds.includes(id));
-    toAdd.forEach((id) => addToLibrary(id, 'Playing'));
-  }, [installedAppIds, getAllGameIds, addToLibrary]);
 
   const scrollToTop = useCallback(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -746,7 +735,6 @@ export function Dashboard() {
                           onEdit={() => handleEdit(game)}
                           onDelete={() => handleDeleteClick(game)}
                           isInLibrary={game.isInLibrary}
-                          isInstalled={game.steamAppId ? isInstalled(game.steamAppId) : false}
                           onAddToLibrary={() => handleAddToLibrary(game)}
                           onRemoveFromLibrary={() => handleDeleteClick(game)}
                           onStatusChange={(status) => handleStatusChange(game, status)}

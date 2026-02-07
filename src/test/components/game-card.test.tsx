@@ -332,21 +332,6 @@ describe('GameCard', () => {
       expect(screen.getByLabelText('Remove from library')).toBeInTheDocument();
     });
 
-    it('still shows Installed badge when hideLibraryBadge is true', () => {
-      render(
-        <GameCard
-          game={mockGame}
-          onEdit={() => {}}
-          onDelete={() => {}}
-          isInLibrary={true}
-          isInstalled={true}
-          hideLibraryBadge={true}
-        />
-      );
-      expect(screen.queryByText('Library')).not.toBeInTheDocument();
-      expect(screen.getByText('Installed')).toBeInTheDocument();
-    });
-
     it('still shows status badge when hideLibraryBadge is true', () => {
       render(
         <GameCard
