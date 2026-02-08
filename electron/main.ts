@@ -1237,28 +1237,25 @@ app.whenReady().then(async () => {
 
   // ---- System Tray ----
   try {
-    // Build a list of candidate paths to search for the tray icon.
-    // Prefer .ico on Windows, fall back to .png (any platform).
+    // Build candidate list for the tray icon.
+    // Prefer the pre-made 16×16 PNG (exact tray size, no resize needed).
+    // Avoid .ico — Electron's nativeImage.createFromPath + resize can produce
+    // a blank image from multi-size ICO files on Windows.
     const candidates: string[] = [];
     const projectRoot = path.join(__dirname, '../..');
 
     if (app.isPackaged) {
-      const unpacked = path.join(process.resourcesPath, 'app.asar.unpacked', 'build');
-      const resDir   = path.join(process.resourcesPath, 'build');
-      if (process.platform === 'win32') {
-        candidates.push(path.join(unpacked, 'icon.ico'), path.join(resDir, 'icon.ico'));
-      }
+      // extraResources copies icons to <resourcesPath>/icons/
+      const iconsDir = path.join(process.resourcesPath, 'icons');
       candidates.push(
-        path.join(unpacked, 'icon.png'),
-        path.join(unpacked, 'icon-256.png'),
-        path.join(resDir,   'icon.png'),
-        path.join(resDir,   'icon-256.png'),
+        path.join(iconsDir, 'icon-16.png'),   // exact tray size — no resize needed
+        path.join(iconsDir, 'icon-32.png'),
+        path.join(iconsDir, 'icon-256.png'),
       );
     } else {
-      if (process.platform === 'win32') {
-        candidates.push(path.join(projectRoot, 'build', 'icon.ico'));
-      }
       candidates.push(
+        path.join(projectRoot, 'build', 'icon-16.png'),
+        path.join(projectRoot, 'build', 'icon-32.png'),
         path.join(projectRoot, 'build', 'icon.png'),
         path.join(projectRoot, 'build', 'icon-256.png'),
       );
@@ -1269,7 +1266,11 @@ app.whenReady().then(async () => {
 
     let trayIcon;
     if (iconPath) {
-      trayIcon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+      const raw = nativeImage.createFromPath(iconPath);
+      const size = raw.getSize();
+      console.log('[Tray] Loaded icon:', iconPath, '| size:', size.width, 'x', size.height, '| empty:', raw.isEmpty());
+      // Only resize if the image isn't already 16×16
+      trayIcon = (size.width === 16 && size.height === 16) ? raw : raw.resize({ width: 16, height: 16 });
     } else {
       console.warn('[Tray] No icon file found in any candidate path - using empty icon');
       trayIcon = nativeImage.createEmpty();

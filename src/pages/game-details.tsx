@@ -98,10 +98,13 @@ function extractNewsThumbnail(contents?: string): string | null {
 
 // Format minutes to hours and minutes
 function formatPlaytime(minutes: number): string {
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return `${minutes} ${minutes === 1 ? 'Min' : 'Mins'}`;
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
-  return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  const hrLabel = hours === 1 ? 'Hr' : 'Hrs';
+  if (mins === 0) return `${hours} ${hrLabel}`;
+  const minLabel = mins === 1 ? 'Min' : 'Mins';
+  return `${hours} ${hrLabel} ${mins} ${minLabel}`;
 }
 
 // Format player count with K/M suffixes

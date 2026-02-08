@@ -69,7 +69,7 @@ describe('MyProgressTab', () => {
     expect(screen.getByText('High Priority')).toBeInTheDocument();
     
     // Check hours played display
-    expect(screen.getByText('50h')).toBeInTheDocument();
+    expect(screen.getByText('50 Hrs')).toBeInTheDocument();
     
     // Check rating display (4/5)
     expect(screen.getByText('4/5')).toBeInTheDocument();
@@ -84,7 +84,7 @@ describe('MyProgressTab', () => {
     render(<MyProgressTab gameId={730} />);
     
     expect(screen.getByText('Hours Played')).toBeInTheDocument();
-    expect(screen.getByText('50h')).toBeInTheDocument();
+    expect(screen.getByText('50 Hrs')).toBeInTheDocument();
   });
 
   it('renders star rating component', () => {
@@ -196,7 +196,7 @@ describe('MyProgressTab', () => {
     const hoursLabel = screen.getByText('Hours Played');
     expect(hoursLabel).toBeInTheDocument();
     // The hours value should be somewhere in the document
-    const hoursDisplay = screen.getAllByText('0h');
+    const hoursDisplay = screen.getAllByText('0 Mins');
     expect(hoursDisplay.length).toBeGreaterThan(0);
   });
 

@@ -203,14 +203,16 @@ function GameCardComponent({
   }, [ctxMenu]);
 
   const handleCardClick = () => {
-    // Custom games (negative IDs) don't have Steam details pages — use onClick callback
-    if (game.isCustom || (game.steamAppId && game.steamAppId < 0)) {
+    // Custom games use negative IDs and don't have Steam details pages.
+    // Detect them via the isCustom flag OR a negative steamAppId.
+    const isCustomGame = game.isCustom || (game.steamAppId !== undefined && game.steamAppId !== null && game.steamAppId < 0);
+
+    if (isCustomGame) {
       if (onClick) onClick();
       return;
     }
 
-    // Navigate to game details page if we have a Steam App ID
-    // Use steamAppId directly, or extract from id if available (e.g., "steam-12345")
+    // Navigate to game details page if we have a positive Steam App ID
     const gameId = game.steamAppId || (game.id?.startsWith('steam-') ? parseInt(game.id.split('-')[1]) : null);
     
     if (gameId && gameId > 0) {
@@ -580,6 +582,8 @@ function GameCardComponent({
 // Note: We don't compare callback functions (onEdit, onDelete, etc.) since they are
 // inline arrow functions that capture the game object - comparing them would always fail.
 // The game data and boolean props are sufficient for determining if re-render is needed.
+// IMPORTANT: onClick is compared by reference identity — a change from undefined → function
+// (or vice-versa) MUST trigger a re-render so custom game cards pick up the progress dialog.
 export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
   return (
     prevProps.game.id === nextProps.game.id &&
@@ -590,9 +594,12 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.game.coverUrl === nextProps.game.coverUrl &&
     prevProps.game.headerImage === nextProps.game.headerImage &&
     prevProps.game.isInLibrary === nextProps.game.isInLibrary &&
+    prevProps.game.isCustom === nextProps.game.isCustom &&
+    prevProps.game.steamAppId === nextProps.game.steamAppId &&
     prevProps.game.status === nextProps.game.status &&
     prevProps.isInLibrary === nextProps.isInLibrary &&
     prevProps.isPlayingNow === nextProps.isPlayingNow &&
-    prevProps.hideLibraryBadge === nextProps.hideLibraryBadge
+    prevProps.hideLibraryBadge === nextProps.hideLibraryBadge &&
+    prevProps.onClick === nextProps.onClick
   );
 });

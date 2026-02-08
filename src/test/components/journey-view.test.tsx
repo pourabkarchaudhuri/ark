@@ -178,7 +178,7 @@ describe('JourneyView', () => {
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    expect(screen.getByText('120h')).toBeInTheDocument();
+    expect(screen.getByText('120 Hrs')).toBeInTheDocument();
   });
 
   it('shows total stats in header', () => {

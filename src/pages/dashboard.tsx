@@ -321,15 +321,32 @@ export function Dashboard() {
     setIsDialogOpen(true);
   }, []);
 
-  // Handle editing library entry
+  // Handle editing library entry — custom games open their dedicated progress dialog
   const handleEdit = useCallback((game: Game) => {
+    if (game.isCustom || (game.steamAppId !== undefined && game.steamAppId < 0)) {
+      setCustomProgressGameId(game.steamAppId!);
+      return;
+    }
     setEditingGame(game);
     setIsDialogOpen(true);
   }, []);
 
-  // Handle clicking a custom game card — opens progress dialog
+  // Handle clicking a custom game card — opens progress dialog.
+  // Direct callback for components that receive (gameId) => void (e.g. JourneyView).
   const handleCustomGameClick = useCallback((gameId: number) => {
     setCustomProgressGameId(gameId);
+  }, []);
+
+  // Ref-backed map so each custom game gets a *stable* zero-arg callback reference
+  // that won't break React.memo comparisons on GameCard.
+  const customClickHandlersRef = useRef<Map<number, () => void>>(new Map());
+  const getCustomGameClickHandler = useCallback((gameId: number): () => void => {
+    let handler = customClickHandlersRef.current.get(gameId);
+    if (!handler) {
+      handler = () => setCustomProgressGameId(gameId);
+      customClickHandlersRef.current.set(gameId, handler);
+    }
+    return handler;
   }, []);
 
   // Handle quick status change from card badge
@@ -745,6 +762,7 @@ export function Dashboard() {
             entries={journeyEntries}
             loading={libraryLoading}
             onSwitchToBrowse={() => setViewMode('browse')}
+            onCustomGameClick={handleCustomGameClick}
           />
         ) : viewMode === 'buzz' ? (
           <BuzzView />
@@ -826,7 +844,11 @@ export function Dashboard() {
                           game={gameWithOptionalRank}
                           onEdit={() => handleEdit(game)}
                           onDelete={() => handleDeleteClick(game)}
-                          onClick={game.isCustom && game.steamAppId ? () => handleCustomGameClick(game.steamAppId!) : undefined}
+                          onClick={
+                            (game.isCustom || (game.steamAppId !== undefined && game.steamAppId < 0))
+                              ? getCustomGameClickHandler(game.steamAppId!)
+                              : undefined
+                          }
                           isInLibrary={game.isInLibrary}
                           isPlayingNow={game.steamAppId ? isPlayingNow(game.steamAppId) : false}
                           onAddToLibrary={() => handleAddToLibrary(game)}

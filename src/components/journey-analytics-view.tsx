@@ -920,7 +920,7 @@ export function JourneyAnalyticsView({
                   <p className="text-[10px] text-white/40 mt-0.5">total sessions</p>
                 </div>
                 <div>
-                  <AnimatedValue value={analytics.avgSessionLength} formatFn={(n) => { const h = Math.floor(n / 60); const m = n % 60; return h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : `${n}m`; }} className="text-xl font-bold text-cyan-400 font-['Orbitron']" delay={0.4} />
+                  <AnimatedValue value={analytics.avgSessionLength} formatFn={(n) => { const h = Math.floor(n / 60); const m = n % 60; const hrL = h === 1 ? 'Hr' : 'Hrs'; const minL = m === 1 ? 'Min' : 'Mins'; return h > 0 ? (m > 0 ? `${h} ${hrL} ${m} ${minL}` : `${h} ${hrL}`) : `${n} ${minL}`; }} className="text-xl font-bold text-cyan-400 font-['Orbitron']" delay={0.4} />
                   <p className="text-[10px] text-white/40 mt-0.5">avg length</p>
                 </div>
               </div>

@@ -4,10 +4,22 @@ import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Current app version - update this with each release
-export const APP_VERSION = '1.0.23';
+export const APP_VERSION = '1.0.24';
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.24': {
+    title: "What's New in Ark 1.0.24",
+    changes: [
+      'Improved Notifications — Native Windows notifications now show the Ark icon, fire regardless of window visibility (not only when minimised), de-duplicate per version so the same toast is not repeated every 30 minutes, and a second "Update Ready" notification appears once the download completes',
+      'Faster First Update Check — A 2-minute delayed first poll replaces the previous 30-minute wait, so users who minimise to tray still get an early update check',
+      'System Tray Icon Fix — Icons are now bundled via extraResources instead of asarUnpack (which was silently failing), and the tray prefers the pre-made 16×16 PNG to avoid blank icons from ICO resize issues',
+      'Human-Readable Playtime — Playtime now displays as "X Hrs Y Mins" with proper singular/plural labels across all views (Journey, Analytics, Gantt, Progress, Reviews, Sessions)',
+      'Custom Game Click Fix — Clicking a custom game card now correctly opens the progress dialog instead of navigating to a non-existent game details page; fixed React.memo comparator that was suppressing onClick updates',
+      'Custom Game Edit Fix — "Edit Entry" on a custom game now opens the dedicated progress dialog instead of the generic library dialog, so the executable path and all custom fields are properly shown',
+      'Journey View Custom Games — Custom game cards in the Journey timeline now open the progress dialog instead of navigating to a broken game details route',
+    ],
+  },
   '1.0.23': {
     title: "What's New in Ark 1.0.23",
     changes: [

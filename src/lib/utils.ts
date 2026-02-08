@@ -22,23 +22,25 @@ export function getHardcodedCover(title: string): string | undefined {
 
 /**
  * Format a decimal-hours value (e.g. 1.52) into a human-friendly
- * hours-and-minutes string.
+ * hours-and-minutes string using descriptive labels.
  *
  * Examples:
- *   0      → "0m"
- *   0.25   → "15m"
- *   1      → "1h"
- *   1.5    → "1h 30m"
- *   2.02   → "2h 1m"
- *   120.75 → "120h 45m"
+ *   0      → "0 Mins"
+ *   0.25   → "15 Mins"
+ *   1      → "1 Hr"
+ *   1.5    → "1 Hr 30 Mins"
+ *   2.02   → "2 Hrs 1 Min"
+ *   120.75 → "120 Hrs 45 Mins"
  */
 export function formatHours(decimalHours: number): string {
-  if (decimalHours <= 0) return '0m';
+  if (decimalHours <= 0) return '0 Mins';
   const totalMinutes = Math.round(decimalHours * 60);
   const h = Math.floor(totalMinutes / 60);
   const m = totalMinutes % 60;
-  if (h === 0) return `${m}m`;
-  if (m === 0) return `${h}h`;
-  return `${h}h ${m}m`;
+  const hrLabel = h === 1 ? 'Hr' : 'Hrs';
+  const minLabel = m === 1 ? 'Min' : 'Mins';
+  if (h === 0) return `${m} ${minLabel}`;
+  if (m === 0) return `${h} ${hrLabel}`;
+  return `${h} ${hrLabel} ${m} ${minLabel}`;
 }
 

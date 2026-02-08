@@ -5,7 +5,12 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
 import type { BrowserWindow as BrowserWindowType } from 'electron';
-const { BrowserWindow, ipcMain, Notification } = electron;
+const { BrowserWindow, ipcMain, Notification, nativeImage, app: electronApp } = electron;
+import * as fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let mainWindow: BrowserWindowType | null = null;
 let isInitialized = false;
@@ -16,8 +21,54 @@ let isCheckingForUpdate = false;
 let isDownloading = false;
 let updateAlreadyDownloaded = false;
 
+// Tracks which version we already showed a notification for so we don't
+// spam the user every 30 minutes with the same "update available" toast.
+let lastNotifiedVersion: string | null = null;
+
+// Cached native image for the notification icon (resolved once on first use)
+let notificationIcon: Electron.NativeImage | null = null;
+
 // Polling interval: 30 minutes
 const UPDATE_POLL_INTERVAL_MS = 30 * 60 * 1000;
+
+// First poll delay: 2 minutes (gives user time to minimise to tray)
+const FIRST_POLL_DELAY_MS = 2 * 60 * 1000;
+
+/**
+ * Resolve the app icon path for use in native notifications.
+ * Uses the same candidate-list approach as the system tray setup.
+ */
+function resolveNotificationIcon(): Electron.NativeImage | null {
+  if (notificationIcon) return notificationIcon;
+
+  const candidates: string[] = [];
+  const projectRoot = path.join(__dirname, '../..');
+
+  if (electronApp.isPackaged) {
+    // extraResources copies icons to <resourcesPath>/icons/
+    const iconsDir = path.join(process.resourcesPath, 'icons');
+    candidates.push(
+      path.join(iconsDir, 'icon-256.png'),
+      path.join(iconsDir, 'icon-32.png'),
+      path.join(iconsDir, 'icon-16.png'),
+    );
+  } else {
+    candidates.push(
+      path.join(projectRoot, 'build', 'icon.png'),
+      path.join(projectRoot, 'build', 'icon-256.png'),
+    );
+  }
+
+  const found = candidates.find((p) => fs.existsSync(p));
+  if (found) {
+    notificationIcon = nativeImage.createFromPath(found);
+    console.log('[AutoUpdater] Notification icon resolved:', found);
+  } else {
+    console.warn('[AutoUpdater] No icon found for notifications');
+  }
+
+  return notificationIcon;
+}
 
 /**
  * Register IPC handlers for the updater.
@@ -56,14 +107,22 @@ export function initAutoUpdater(window: BrowserWindowType) {
     };
     sendToRenderer('updater:update-available', updatePayload);
 
-    // Show native OS notification if the window is hidden (minimized to tray)
-    if (mainWindow && !mainWindow.isVisible() && Notification.isSupported()) {
+    // Show native OS notification — always, unless we already notified for this version.
+    // This ensures the user sees the toast even if the window is focused but they
+    // tabbed away, and avoids spamming the same toast on every 30-min poll.
+    if (Notification.isSupported() && lastNotifiedVersion !== info.version) {
       try {
-        const notification = new Notification({
+        const icon = resolveNotificationIcon();
+        const notifOptions: Electron.NotificationConstructorOptions = {
           title: 'Ark Update Available',
           body: `Version ${info.version} is ready to download. Click to update.`,
           silent: false,
-        });
+        };
+        if (icon && !icon.isEmpty()) {
+          notifOptions.icon = icon;
+        }
+
+        const notification = new Notification(notifOptions);
 
         notification.on('click', () => {
           // Show and focus the main window
@@ -78,6 +137,7 @@ export function initAutoUpdater(window: BrowserWindowType) {
         });
 
         notification.show();
+        lastNotifiedVersion = info.version;
         console.log('[AutoUpdater] Native notification shown for update', info.version);
       } catch (err) {
         console.warn('[AutoUpdater] Failed to show native notification:', err);
@@ -112,6 +172,38 @@ export function initAutoUpdater(window: BrowserWindowType) {
       releaseDate: info.releaseDate,
       releaseNotes: info.releaseNotes,
     });
+
+    // Show a native notification so the user knows the update is ready to install,
+    // especially useful when the app is minimised to the system tray.
+    if (Notification.isSupported()) {
+      try {
+        const icon = resolveNotificationIcon();
+        const notifOptions: Electron.NotificationConstructorOptions = {
+          title: 'Ark Update Ready',
+          body: `Version ${info.version} has been downloaded. Click to install and restart.`,
+          silent: false,
+        };
+        if (icon && !icon.isEmpty()) {
+          notifOptions.icon = icon;
+        }
+
+        const notification = new Notification(notifOptions);
+
+        notification.on('click', () => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.show();
+            mainWindow.focus();
+          }
+          // Trigger install
+          autoUpdater.quitAndInstall(false, true);
+        });
+
+        notification.show();
+        console.log('[AutoUpdater] "Update ready" notification shown for', info.version);
+      } catch (err) {
+        console.warn('[AutoUpdater] Failed to show "update ready" notification:', err);
+      }
+    }
   });
 
   autoUpdater.on('error', (error: Error) => {
@@ -126,14 +218,21 @@ export function initAutoUpdater(window: BrowserWindowType) {
   // performs a manual check on mount via the 'updater:check' IPC handler,
   // so a duplicate call here would cause overlapping checks and double events.
 
-  // Start periodic polling for updates (every 30 minutes)
+  // Schedule a delayed first poll (2 min) so users who minimise to tray
+  // still get an early check, then switch to the regular 30-min interval.
   if (pollingInterval) {
     clearInterval(pollingInterval);
   }
-  pollingInterval = setInterval(() => {
-    console.log('[AutoUpdater] Periodic update check...');
+  setTimeout(() => {
+    console.log('[AutoUpdater] Delayed first-poll update check...');
     checkForUpdates();
-  }, UPDATE_POLL_INTERVAL_MS);
+
+    // Start periodic polling for updates (every 30 minutes)
+    pollingInterval = setInterval(() => {
+      console.log('[AutoUpdater] Periodic update check...');
+      checkForUpdates();
+    }, UPDATE_POLL_INTERVAL_MS);
+  }, FIRST_POLL_DELAY_MS);
 }
 
 /**

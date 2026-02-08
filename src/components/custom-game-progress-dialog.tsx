@@ -64,10 +64,13 @@ function formatDate(d: Date | string): string {
 }
 
 function formatSessionDuration(minutes: number): string {
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return `${minutes} ${minutes === 1 ? 'Min' : 'Mins'}`;
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  const hrLabel = h === 1 ? 'Hr' : 'Hrs';
+  if (m === 0) return `${h} ${hrLabel}`;
+  const minLabel = m === 1 ? 'Min' : 'Mins';
+  return `${h} ${hrLabel} ${m} ${minLabel}`;
 }
 
 // ── Star rating component ──────────────────────────────────────────────────

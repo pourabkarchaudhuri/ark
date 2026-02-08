@@ -319,12 +319,12 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
               className="py-2"
             />
             <div className="flex justify-between text-xs text-white/40">
-              <span>0h</span>
-              <span>100h</span>
-              <span>200h</span>
-              <span>300h</span>
-              <span>400h</span>
-              <span>500h+</span>
+              <span>0 Hrs</span>
+              <span>100 Hrs</span>
+              <span>200 Hrs</span>
+              <span>300 Hrs</span>
+              <span>400 Hrs</span>
+              <span>500+ Hrs</span>
             </div>
           </div>
 

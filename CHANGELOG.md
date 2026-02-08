@@ -4,6 +4,25 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.24] - 2026-02-09
+
+### Added
+- **Improved Native Notifications** — Windows notifications now display the Ark icon, fire regardless of window visibility (not only when minimised to tray), de-duplicate per version to avoid repeated toasts on every 30-minute poll, and a second "Update Ready" notification appears once the download completes with click-to-install.
+- **Faster First Update Check** — A 2-minute delayed first poll replaces the previous 30-minute wait, ensuring users who minimise to tray shortly after launch still get an early update check.
+- **Journey View Custom Game Support** — Custom game cards in the Journey timeline now open the progress dialog instead of navigating to a broken game details route.
+
+### Changed
+- **Human-Readable Playtime Format** — Playtime labels changed from abbreviated (`2h 15m`) to descriptive (`2 Hrs 15 Mins`) with proper singular/plural handling across Journey, Analytics, Gantt, My Progress, Reviews, and Sessions.
+- **Custom Game Edit Flow** — "Edit Entry" on a custom game card now opens the dedicated progress dialog (with executable path, status, hours, sessions) instead of the generic library dialog that couldn't read custom game data.
+
+### Fixed
+- **System Tray Icon Blank** — Icons are now bundled via `extraResources` instead of `asarUnpack` (which was silently failing because `build/` was not in the `files` list); tray prefers the pre-made 16×16 PNG to avoid blank images from ICO resize issues on Windows.
+- **Custom Game Card Click** — Fixed React.memo comparator on GameCard that was suppressing `onClick` prop updates, causing custom game cards to navigate to a non-existent game details page instead of opening the progress dialog.
+- **Custom Game Executable Path Not Shown on Edit** — The generic library dialog was looking up the executable path from `libraryStore` instead of `customGameStore`; now routes to the correct dialog.
+
+### Performance
+- **Stable onClick Callbacks** — Custom game card click handlers use ref-backed maps for stable function references, preventing unnecessary React.memo invalidation.
+
 ## [1.0.23] - 2026-02-08
 
 ### Added

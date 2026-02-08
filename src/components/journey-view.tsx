@@ -45,6 +45,7 @@ interface JourneyViewProps {
   entries: JourneyEntry[];
   loading: boolean;
   onSwitchToBrowse?: () => void;
+  onCustomGameClick?: (gameId: number) => void;
 }
 
 // Status badge color mapping
@@ -74,7 +75,7 @@ const StarRating = memo(function StarRating({ rating }: { rating: number }) {
   );
 });
 
-const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCount?: number }) {
+const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, onCustomGameClick }: { entry: JourneyEntry; playerCount?: number; onCustomGameClick?: (gameId: number) => void }) {
   const [, navigate] = useLocation();
   const addedDate = entry.addedAt
     ? new Date(entry.addedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
@@ -82,7 +83,14 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
   const isRemoved = !!entry.removedAt;
   const inLibrary = libraryStore.isInLibrary(entry.gameId);
 
-  const handleClick = useCallback(() => navigate(`/game/${entry.gameId}`), [navigate, entry.gameId]);
+  const handleClick = useCallback(() => {
+    // Custom games have negative IDs — open progress dialog instead of game details page
+    if (entry.gameId < 0) {
+      if (onCustomGameClick) onCustomGameClick(entry.gameId);
+      return;
+    }
+    navigate(`/game/${entry.gameId}`);
+  }, [navigate, entry.gameId, onCustomGameClick]);
 
   return (
     <motion.div
@@ -158,7 +166,7 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
           <div className="flex items-center gap-3 mt-1.5 min-h-[1.25rem] flex-wrap">
             <div className="flex items-center gap-1 text-xs text-white/50">
               <Clock className="w-3 h-3" />
-              <span>{entry.hoursPlayed > 0 ? formatHours(entry.hoursPlayed) : '0m'}</span>
+              <span>{entry.hoursPlayed > 0 ? formatHours(entry.hoursPlayed) : '0 Mins'}</span>
             </div>
             {entry.rating > 0 && <StarRating rating={entry.rating} />}
             {addedDate && (
@@ -180,7 +188,7 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
   );
 });
 
-export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
+export function JourneyView({ entries, loading, onSwitchToBrowse, onCustomGameClick }: JourneyViewProps) {
   // View style toggle: "Noob" (vertical timeline) vs "OCD" (Gantt chart)
   const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('noob');
   // Data source for OCD view: live store data vs mock data for dev/demo
@@ -280,6 +288,7 @@ export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewP
                   key={entry.gameId}
                   entry={entry}
                   playerCount={playerCounts[entry.gameId]}
+                  onCustomGameClick={onCustomGameClick}
                 />
               ))}
             </div>
