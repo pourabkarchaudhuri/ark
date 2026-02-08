@@ -1,12 +1,18 @@
 /**
  * Journey Analytics View Component
  *
- * A dashboard of stat cards and visualisations derived from journey entries,
- * status-change history, play sessions, and library entries. Features animated
- * SVG charts (radar, donut, area, radial gauge, funnel, heatmap, histograms)
- * powered by framer-motion.
+ * A streamlined dashboard of contextually grouped analytics derived from
+ * journey entries, status-change history, play sessions, and library entries.
+ *
+ * 6 cohesive sections:
+ *  1. Overview — Total games, total hours, and status donut
+ *  2. Activity & Streaks — Monthly area chart with streak counters
+ *  3. Sessions — Session count, avg length, idle ratio, histogram
+ *  4. Library — Top games by hours + platform breakdown
+ *  5. Discovery — Genre radar + recommendation sources
+ *  6. Recent Activity — Status change feed
  */
-import { useMemo, useRef, useEffect } from 'react';
+import React, { useMemo, useRef, useEffect } from 'react';
 import {
   motion,
   useMotionValue,
@@ -18,22 +24,11 @@ import {
   Clock,
   Trophy,
   TrendingUp,
-  CalendarDays,
-  Timer,
-  Tag,
-  Star,
-  Monitor,
   Activity,
   History,
-  Award,
-  PieChart,
-  Target,
-  Hexagon,
-  Filter,
   Flame,
-  Flag,
   Share2,
-  Calendar,
+  Tag,
 } from 'lucide-react';
 import {
   JourneyEntry,
@@ -79,25 +74,6 @@ const statusBadgeColors: Record<GameStatus, string> = {
   'Want to Play': 'bg-white/10 text-white/50',
 };
 
-// ─── Priority colours ────────────────────────────────────────────────────────
-
-const priorityColors: Record<string, string> = {
-  High:   '#ef4444',
-  Medium: '#f59e0b',
-  Low:    '#6b7280',
-};
-
-// ─── Platform colours ────────────────────────────────────────────────────────
-
-const platformColorMap: Record<string, string> = {
-  Windows: '#3b82f6',
-  Mac:     '#a855f7',
-  Linux:   '#f97316',
-};
-
-function getPlatformColor(platform: string): string {
-  return platformColorMap[platform] ?? '#6b7280';
-}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -124,7 +100,7 @@ function timeAgo(dateStr: string): string {
 
 // ─── Animated Value (count-up) ──────────────────────────────────────────────
 
-function AnimatedValue({
+const AnimatedValue = React.memo(function AnimatedValue({
   value,
   formatFn,
   className,
@@ -165,98 +141,10 @@ function AnimatedValue({
       {formatFn(0)}
     </span>
   );
-}
+});
 
-// ─── SVG Helper Components ──────────────────────────────────────────────────
+// ─── SVG Donut Chart ────────────────────────────────────────────────────────
 
-/** Tiny sparkline with draw-on animation */
-function Sparkline({
-  data,
-  color,
-  width = 60,
-  height = 24,
-}: {
-  data: number[];
-  color: string;
-  width?: number;
-  height?: number;
-}) {
-  if (data.length < 2) return null;
-  const max = Math.max(...data, 1);
-  const min = Math.min(...data, 0);
-  const range = max - min || 1;
-
-  const pathD = data
-    .map((v, i) => {
-      const x = (i / (data.length - 1)) * width;
-      const y = height - ((v - min) / range) * (height - 4) - 2;
-      return `${i === 0 ? 'M' : 'L'} ${x},${y}`;
-    })
-    .join(' ');
-
-  const lastX = width;
-  const lastY = height - ((data[data.length - 1] - min) / range) * (height - 4) - 2;
-
-  return (
-    <svg width={width} height={height} className="overflow-visible opacity-60">
-      <motion.path
-        d={pathD}
-        fill="none"
-        stroke={color}
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 0.8, ease: 'easeOut', delay: 0.4 }}
-      />
-      <motion.circle
-        cx={lastX}
-        cy={lastY}
-        r="2"
-        fill={color}
-        initial={{ opacity: 0, scale: 0 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.3, delay: 1.2 }}
-      />
-    </svg>
-  );
-}
-
-/** "+3 this month" label */
-function DeltaLabel({ value, suffix = 'this month' }: { value: number; suffix?: string }) {
-  if (value === 0) return <p className="text-[10px] text-white/30 mt-0.5">none {suffix}</p>;
-  return (
-    <p
-      className={cn(
-        'text-[10px] font-medium mt-0.5',
-        value > 0 ? 'text-green-400' : 'text-red-400',
-      )}
-    >
-      {value > 0 ? '+' : ''}
-      {value} {suffix}
-    </p>
-  );
-}
-
-/** Star rating (small) */
-function MiniStars({ rating }: { rating: number }) {
-  return (
-    <div className="flex items-center gap-px">
-      {Array.from({ length: 5 }).map((_, i) => (
-        <Star
-          key={i}
-          className={cn(
-            'w-2.5 h-2.5',
-            i < rating ? 'text-yellow-400 fill-yellow-400' : 'text-white/10',
-          )}
-        />
-      ))}
-    </div>
-  );
-}
-
-/** SVG donut ring with sweep-in animation and tooltips */
 function DonutChart({
   segments,
   size = 140,
@@ -328,7 +216,7 @@ function DonutChart({
             textAnchor="middle"
             dominantBaseline="central"
             fill="white"
-            fontSize="22"
+            fontSize="20"
             fontWeight="bold"
             fontFamily="'Orbitron', sans-serif"
           >
@@ -341,7 +229,7 @@ function DonutChart({
               textAnchor="middle"
               dominantBaseline="central"
               fill="rgba(255,255,255,0.4)"
-              fontSize="9"
+              fontSize="10"
             >
               {centerSub}
             </text>
@@ -352,7 +240,8 @@ function DonutChart({
   );
 }
 
-/** SVG area chart with draw-on path animation and hover tooltips */
+// ─── SVG Area Chart ─────────────────────────────────────────────────────────
+
 function AreaChartSVG({
   data,
   data2,
@@ -361,12 +250,12 @@ function AreaChartSVG({
   data2?: { label: string; count: number }[];
 }) {
   const width = 400;
-  const height = 130;
-  const px = 8;
-  const pt = 12;
-  const pb = 18;
+  const height = 160;
+  const px = 10;
+  const ptop = 12;
+  const pb = 20;
   const chartW = width - px * 2;
-  const chartH = height - pt - pb;
+  const chartH = height - ptop - pb;
 
   const allValues = [...data.map((d) => d.count), ...(data2?.map((d) => d.count) ?? [])];
   const maxVal = Math.max(1, ...allValues);
@@ -374,7 +263,7 @@ function AreaChartSVG({
   function toPoints(values: number[]): { x: number; y: number }[] {
     return values.map((v, i) => ({
       x: px + (i / Math.max(values.length - 1, 1)) * chartW,
-      y: pt + chartH - (v / maxVal) * chartH,
+      y: ptop + chartH - (v / maxVal) * chartH,
     }));
   }
 
@@ -393,7 +282,7 @@ function AreaChartSVG({
     const pts = toPoints(values);
     if (pts.length === 0) return '';
     const line = smoothPath(pts);
-    const baseY = pt + chartH;
+    const baseY = ptop + chartH;
     return `${line} L ${pts[pts.length - 1].x},${baseY} L ${pts[0].x},${baseY} Z`;
   }
 
@@ -406,135 +295,123 @@ function AreaChartSVG({
     <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
       <defs>
         <linearGradient id="analytics-area-grad-1" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#d946ef" stopOpacity="0.3" />
-          <stop offset="100%" stopColor="#d946ef" stopOpacity="0.02" />
+          <stop offset="0%" stopColor="#d946ef" stopOpacity="0.5" />
+          <stop offset="100%" stopColor="#d946ef" stopOpacity="0.05" />
         </linearGradient>
         <linearGradient id="analytics-area-grad-2" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#22c55e" stopOpacity="0.25" />
-          <stop offset="100%" stopColor="#22c55e" stopOpacity="0.02" />
+          <stop offset="0%" stopColor="#22c55e" stopOpacity="0.4" />
+          <stop offset="100%" stopColor="#22c55e" stopOpacity="0.05" />
         </linearGradient>
       </defs>
 
+      {/* Horizontal grid lines */}
       {[0.25, 0.5, 0.75].map((pct) => (
         <line
           key={pct}
           x1={px}
-          y1={pt + chartH * (1 - pct)}
+          y1={ptop + chartH * (1 - pct)}
           x2={px + chartW}
-          y2={pt + chartH * (1 - pct)}
+          y2={ptop + chartH * (1 - pct)}
           stroke="rgba(255,255,255,0.04)"
-          strokeWidth="1"
+          strokeWidth="0.5"
         />
       ))}
 
-      {/* Series 1 area */}
-      <motion.path
-        d={areaPath(pts1)}
-        fill="url(#analytics-area-grad-1)"
-        initial={{ opacity: 0 }}
-        whileInView={{ opacity: 1 }}
-        viewport={{ once: true }}
-        transition={{ duration: 0.8, delay: 0.5 }}
-      />
-      {/* Series 1 line */}
-      <motion.path
-        d={smoothPath(pts1Points)}
-        fill="none"
-        stroke="#d946ef"
-        strokeWidth="2"
-        strokeLinecap="round"
-        initial={{ pathLength: 0 }}
-        whileInView={{ pathLength: 1 }}
-        viewport={{ once: true }}
-        transition={{ duration: 1.5, ease: 'easeInOut' }}
+      {/* Baseline */}
+      <line
+        x1={px}
+        y1={ptop + chartH}
+        x2={px + chartW}
+        y2={ptop + chartH}
+        stroke="rgba(255,255,255,0.06)"
+        strokeWidth="0.5"
       />
 
-      {/* Series 2 */}
-      {pts2 &&
-        (() => {
-          const pts2Points = toPoints(pts2);
-          const lastPt2 = pts2Points[pts2Points.length - 1];
-          return (
-            <>
-              <motion.path
-                d={areaPath(pts2)}
-                fill="url(#analytics-area-grad-2)"
-                initial={{ opacity: 0 }}
-                whileInView={{ opacity: 1 }}
-                viewport={{ once: true }}
-                transition={{ duration: 0.8, delay: 0.8 }}
-              />
-              <motion.path
-                d={smoothPath(pts2Points)}
-                fill="none"
-                stroke="#22c55e"
-                strokeWidth="1.5"
-                strokeDasharray="4 3"
-                strokeLinecap="round"
-                initial={{ pathLength: 0 }}
-                whileInView={{ pathLength: 1 }}
-                viewport={{ once: true }}
-                transition={{ duration: 1.5, ease: 'easeInOut', delay: 0.3 }}
-              />
-              {lastPt2 && (
-                <motion.circle
-                  cx={lastPt2.x}
-                  cy={lastPt2.y}
-                  r="2.5"
-                  fill="#22c55e"
-                  initial={{ opacity: 0, scale: 0 }}
-                  whileInView={{ opacity: 1, scale: 1 }}
-                  viewport={{ once: true }}
-                  transition={{ duration: 0.3, delay: 1.8 }}
-                />
-              )}
-            </>
-          );
-        })()}
+      {/* ── Added (primary): filled area + stroke + dots ── */}
+      <path d={areaPath(pts1)} fill="url(#analytics-area-grad-1)" />
+      <path d={smoothPath(pts1Points)} fill="none" stroke="#d946ef" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
 
-      {lastPt1 && (
-        <motion.circle
-          cx={lastPt1.x}
-          cy={lastPt1.y}
-          r="3"
-          fill="#d946ef"
-          initial={{ opacity: 0, scale: 0 }}
-          whileInView={{ opacity: 1, scale: 1 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.3, delay: 1.5 }}
-        />
-      )}
-
-      {/* Hover tooltip targets for series 1 */}
-      {data.map((d, i) => {
-        const pt2 = pts1Points[i];
+      {/* Vertical drop lines + data dots for "Added" */}
+      {pts1Points.map((p, i) => {
+        const baseY = ptop + chartH;
+        const val = pts1[i];
         return (
-          <circle key={`tip-${i}`} cx={pt2.x} cy={pt2.y} r="8" fill="transparent">
-            <title>{`${d.label}: ${d.count} added`}</title>
-          </circle>
+          <g key={`added-${i}`}>
+            {val > 0 && (
+              <line x1={p.x} y1={p.y} x2={p.x} y2={baseY} stroke="#d946ef" strokeWidth="0.5" strokeDasharray="2 2" opacity="0.25" />
+            )}
+            <circle cx={p.x} cy={p.y} r={val > 0 ? 2.5 : 1.5} fill={val > 0 ? '#d946ef' : 'rgba(255,255,255,0.15)'} stroke={val > 0 ? '#fff' : 'none'} strokeWidth="0.5" />
+            <circle cx={p.x} cy={p.y} r="6" fill="transparent">
+              <title>{`${data[i].label}: ${val} added`}</title>
+            </circle>
+          </g>
         );
       })}
 
+      {/* Glow on last point */}
+      {lastPt1 && pts1[pts1.length - 1] > 0 && (
+        <circle cx={lastPt1.x} cy={lastPt1.y} r="4" fill="#d946ef" opacity="0.3" />
+      )}
+
+      {/* ── Completed (secondary): filled area + dashed stroke + dots ── */}
+      {pts2 && (() => {
+        const pts2Points = toPoints(pts2);
+        return (
+          <>
+            <path d={areaPath(pts2)} fill="url(#analytics-area-grad-2)" />
+            <path d={smoothPath(pts2Points)} fill="none" stroke="#22c55e" strokeWidth="0.8" strokeDasharray="3 2" strokeLinecap="round" strokeLinejoin="round" />
+            {pts2Points.map((p, i) => {
+              const val = pts2[i];
+              return (
+                <g key={`comp-${i}`}>
+                  {val > 0 && (
+                    <circle cx={p.x} cy={p.y} r="2" fill="#22c55e" stroke="#fff" strokeWidth="0.5" />
+                  )}
+                  <circle cx={p.x} cy={p.y} r="6" fill="transparent">
+                    <title>{`${data[i].label}: ${val} completed`}</title>
+                  </circle>
+                </g>
+              );
+            })}
+          </>
+        );
+      })()}
+
+      {/* X-axis month labels */}
       {data.map((d, i) => {
         const showLabel = data.length <= 7 || i % 2 === 0;
         return showLabel ? (
           <text
             key={i}
             x={px + (i / Math.max(data.length - 1, 1)) * chartW}
-            y={height - 2}
+            y={height - 4}
             textAnchor="middle"
             fill="rgba(255,255,255,0.25)"
-            fontSize="8"
+            fontSize="4.5"
           >
             {d.label}
           </text>
         ) : null;
       })}
+
+      {/* Y-axis value labels (left side) */}
+      {maxVal > 1 && [0.5, 1].map((pct) => (
+        <text
+          key={pct}
+          x={px - 1}
+          y={ptop + chartH * (1 - pct) + 1.5}
+          textAnchor="end"
+          fill="rgba(255,255,255,0.15)"
+          fontSize="4.5"
+        >
+          {Math.round(maxVal * pct)}
+        </text>
+      ))}
     </svg>
   );
 }
 
-// ─── Radar / Spider Chart ───────────────────────────────────────────────────
+// ─── SVG Radar Chart ────────────────────────────────────────────────────────
 
 function RadarChart({
   data,
@@ -571,10 +448,6 @@ function RadarChart({
 
   const dataPoints = data.map((d, i) => getPoint(i, Math.max(d.value, 0.05) * radius));
   const dataPolygon = dataPoints.map((p) => `${p.x},${p.y}`).join(' ');
-  const centerPolygon = data
-    .map((_, i) => getPoint(i, 0))
-    .map((p) => `${p.x},${p.y}`)
-    .join(' ');
   const axisEndpoints = Array.from({ length: n }, (_, i) => getPoint(i, radius));
   const labelPositions = data.map((d, i) => {
     const angle = (i * 2 * Math.PI) / n - Math.PI / 2;
@@ -591,46 +464,40 @@ function RadarChart({
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
       <defs>
         <radialGradient id={`radar-glow-${color.replace('#', '')}`}>
-          <stop offset="0%" stopColor={color} stopOpacity="0.15" />
-          <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
+          <stop offset="100%" stopColor={color} stopOpacity="0.08" />
         </radialGradient>
       </defs>
 
       {gridRings.map((points, i) => (
-        <polygon key={i} points={points} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="1" />
+        <polygon key={i} points={points} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="0.5" />
       ))}
 
       {axisEndpoints.map((pt, i) => (
-        <line key={i} x1={cx} y1={cy} x2={pt.x} y2={pt.y} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />
+        <line key={i} x1={cx} y1={cy} x2={pt.x} y2={pt.y} stroke="rgba(255,255,255,0.06)" strokeWidth="0.5" />
       ))}
 
-      <motion.polygon
+      <polygon
+        points={dataPolygon}
         fill={`url(#radar-glow-${color.replace('#', '')})`}
         stroke={color}
-        strokeWidth="2"
+        strokeWidth="1.5"
         strokeLinejoin="round"
-        initial={{ points: centerPolygon, opacity: 0 }}
-        whileInView={{ points: dataPolygon, opacity: 1 }}
-        viewport={{ once: true }}
-        transition={{ duration: 1, ease: 'easeOut', delay: 0.2 }}
+        opacity="0.9"
       />
 
       {dataPoints.map((p, i) => (
-        <motion.circle
+        <circle
           key={i}
           cx={p.x}
           cy={p.y}
-          r="3.5"
+          r="3"
           fill={color}
           stroke="rgba(0,0,0,0.3)"
-          strokeWidth="1"
-          initial={{ opacity: 0, scale: 0 }}
-          whileInView={{ opacity: 1, scale: 1 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.3, delay: 0.8 + i * 0.08 }}
+          strokeWidth="0.6"
         >
           <title>{`${data[i].label}: ${Math.round(data[i].value * 100)}%`}</title>
-        </motion.circle>
+        </circle>
       ))}
 
       {labelPositions.map((lp, i) => (
@@ -697,126 +564,7 @@ function AnimatedRadialGauge({
   );
 }
 
-// ─── Completion Funnel ──────────────────────────────────────────────────────
-
-function CompletionFunnel({
-  stages,
-}: {
-  stages: { label: string; count: number; color: string; pct?: number }[];
-}) {
-  const maxCount = Math.max(1, ...stages.map((s) => s.count));
-
-  return (
-    <div className="space-y-1">
-      {stages.map((stage, i) => {
-        const widthPct = Math.max(20, (stage.count / maxCount) * 100);
-        return (
-          <div key={stage.label}>
-            {i > 0 && stage.pct !== undefined && (
-              <div className="flex justify-center my-0.5">
-                <span className="text-[9px] text-white/25">↓ {stage.pct}% conversion</span>
-              </div>
-            )}
-            <div className="flex flex-col items-center">
-              <motion.div
-                className="h-9 rounded-lg flex items-center justify-between px-3 overflow-hidden"
-                style={{ backgroundColor: `${stage.color}12`, border: `1px solid ${stage.color}30` }}
-                initial={{ width: '0%', opacity: 0 }}
-                whileInView={{ width: `${widthPct}%`, opacity: 1 }}
-                viewport={{ once: true }}
-                transition={{ duration: 0.7, delay: i * 0.2, ease: 'easeOut' }}
-              >
-                <span className="text-[10px] text-white/60 truncate whitespace-nowrap">{stage.label}</span>
-                <span className="text-[11px] font-bold ml-2 whitespace-nowrap" style={{ color: stage.color }}>
-                  {stage.count}
-                </span>
-              </motion.div>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ─── Play Schedule Heatmap (7 days x 24 hours) ─────────────────────────────
-
-function PlayScheduleHeatmap({
-  matrix,
-  maxVal,
-}: {
-  matrix: number[][];
-  maxVal: number;
-}) {
-  const cellSize = 13;
-  const gap = 2;
-  const labelW = 28;
-  const labelH = 16;
-  const width = labelW + 24 * (cellSize + gap);
-  const height = labelH + 7 * (cellSize + gap);
-  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
-  return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
-      {/* Hour labels */}
-      {Array.from({ length: 24 }, (_, h) =>
-        h % 3 === 0 ? (
-          <text
-            key={h}
-            x={labelW + h * (cellSize + gap) + cellSize / 2}
-            y={labelH - 4}
-            textAnchor="middle"
-            fill="rgba(255,255,255,0.2)"
-            fontSize="7"
-          >
-            {h}
-          </text>
-        ) : null,
-      )}
-      {/* Day rows */}
-      {days.map((day, d) => (
-        <g key={day}>
-          <text
-            x={labelW - 4}
-            y={labelH + d * (cellSize + gap) + cellSize / 2 + 3}
-            textAnchor="end"
-            fill="rgba(255,255,255,0.25)"
-            fontSize="8"
-          >
-            {day}
-          </text>
-          {Array.from({ length: 24 }, (_, h) => {
-            const val = matrix[d][h];
-            const intensity = maxVal > 0 ? val / maxVal : 0;
-            return (
-              <motion.rect
-                key={h}
-                x={labelW + h * (cellSize + gap)}
-                y={labelH + d * (cellSize + gap)}
-                width={cellSize}
-                height={cellSize}
-                rx="2"
-                fill={
-                  intensity === 0
-                    ? 'rgba(255,255,255,0.03)'
-                    : `rgba(139, 92, 246, ${Math.max(0.12, intensity * 0.85)})`
-                }
-                initial={{ opacity: 0 }}
-                whileInView={{ opacity: 1 }}
-                viewport={{ once: true }}
-                transition={{ duration: 0.15, delay: (d * 24 + h) * 0.002 }}
-              >
-                <title>{`${day} ${h}:00 — ${val} min`}</title>
-              </motion.rect>
-            );
-          })}
-        </g>
-      ))}
-    </svg>
-  );
-}
-
-// ─── Glassmorphic card wrapper (animated entry) ─────────────────────────────
+// ─── Glassmorphic card wrapper ──────────────────────────────────────────────
 
 function StatCard({
   icon: Icon,
@@ -853,6 +601,10 @@ function StatCard({
   );
 }
 
+// ─── All statuses for display ───────────────────────────────────────────────
+
+const ALL_STATUSES: GameStatus[] = ['Playing Now', 'Playing', 'Completed', 'On Hold', 'Want to Play'];
+
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export function JourneyAnalyticsView({
@@ -872,7 +624,6 @@ export function JourneyAnalyticsView({
       statusCounts[entry.status] = (statusCounts[entry.status] || 0) + 1;
     }
     const completedCount = statusCounts['Completed'] || 0;
-    const completionRate = totalGames > 0 ? Math.round((completedCount / totalGames) * 100) : 0;
 
     // ── Top games by hours ───────────────────────────────────────────────
     const topGames = [...journeyEntries].sort((a, b) => b.hoursPlayed - a.hoursPlayed).slice(0, 5);
@@ -892,32 +643,7 @@ export function JourneyAnalyticsView({
       monthlyActivity.push({ label, count });
     }
 
-    // ── Average time to complete ─────────────────────────────────────────
-    let avgDaysToComplete = 0;
-    const completedEntries = journeyEntries.filter((e) => e.status === 'Completed');
-    if (completedEntries.length > 0) {
-      const historyByGame = new Map<number, StatusChangeEntry[]>();
-      for (const h of statusHistory) {
-        if (!historyByGame.has(h.gameId)) historyByGame.set(h.gameId, []);
-        historyByGame.get(h.gameId)!.push(h);
-      }
-      let totalDays = 0;
-      let countWithData = 0;
-      for (const entry of completedEntries) {
-        const changes = historyByGame.get(entry.gameId) ?? [];
-        const completedChange = changes.find((c) => c.newStatus === 'Completed');
-        if (completedChange) {
-          const addedDate = new Date(entry.addedAt).getTime();
-          const completedDate = new Date(completedChange.timestamp).getTime();
-          const days = Math.max(1, Math.round((completedDate - addedDate) / 86_400_000));
-          totalDays += days;
-          countWithData++;
-        }
-      }
-      avgDaysToComplete = countWithData > 0 ? Math.round(totalDays / countWithData) : 0;
-    }
-
-    // ── Genre distribution ───────────────────────────────────────────────
+    // ── Genre distribution (needed for genre radar) ─────────────────────
     const genreCounts: Record<string, number> = {};
     for (const entry of journeyEntries) {
       for (const g of entry.genre) {
@@ -925,27 +651,6 @@ export function JourneyAnalyticsView({
       }
     }
     const topGenres = Object.entries(genreCounts).sort((a, b) => b[1] - a[1]).slice(0, 10);
-
-    // ── Rating distribution ──────────────────────────────────────────────
-    const ratingCounts = [0, 0, 0, 0, 0, 0];
-    for (const entry of journeyEntries) {
-      const r = entry.rating ?? 0;
-      ratingCounts[Math.min(Math.max(r, 0), 5)]++;
-    }
-    const ratedEntries = journeyEntries.filter((e) => e.rating > 0);
-    const avgRating =
-      ratedEntries.length > 0
-        ? Math.round((ratedEntries.reduce((s, e) => s + e.rating, 0) / ratedEntries.length) * 10) / 10
-        : 0;
-
-    // ── Platform breakdown ───────────────────────────────────────────────
-    const platformCounts: Record<string, number> = {};
-    for (const entry of journeyEntries) {
-      for (const p of entry.platform) {
-        platformCounts[p] = (platformCounts[p] || 0) + 1;
-      }
-    }
-    const topPlatforms = Object.entries(platformCounts).sort((a, b) => b[1] - a[1]);
 
     // ── Session stats ────────────────────────────────────────────────────
     const totalSessions = sessions.length;
@@ -972,44 +677,10 @@ export function JourneyAnalyticsView({
       monthlyCompletions.push({ label, count });
     }
 
-    // ── Top games by rating ──────────────────────────────────────────────
-    const topGamesByRating = [...journeyEntries]
-      .filter((e) => e.rating > 0)
-      .sort((a, b) => b.rating - a.rating || b.hoursPlayed - a.hoursPlayed)
-      .slice(0, 5);
-
-    // ── Sparkline / deltas ───────────────────────────────────────────────
-    const sparklineGamesAdded = monthlyActivity.slice(-6).map((m) => m.count);
-    const deltaGames = monthlyActivity[monthlyActivity.length - 1]?.count ?? 0;
-    const deltaCompletions = monthlyCompletions[monthlyCompletions.length - 1]?.count ?? 0;
-
     // ── Recent activity ──────────────────────────────────────────────────
     const recentActivity = [...statusHistory]
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
       .slice(0, 10);
-
-    // ── Gaming Profile (radar) ───────────────────────────────────────────
-    const avgHoursPerGame = totalGames > 0 ? totalHours / totalGames : 0;
-    const uniqueGenreCount = Object.keys(genreCounts).length;
-    const sessionsPerWeek =
-      totalSessions > 0
-        ? (() => {
-            const firstSession = sessions.reduce((min, s) => {
-              const t = new Date(s.startTime).getTime();
-              return t < min ? t : min;
-            }, Date.now());
-            return totalSessions / Math.max(1, (Date.now() - firstSession) / (7 * 86_400_000));
-          })()
-        : 0;
-
-    const gamingProfile = [
-      { label: 'Dedication', value: Math.min(avgHoursPerGame / 100, 1) },
-      { label: 'Variety', value: Math.min(uniqueGenreCount / 10, 1) },
-      { label: 'Commitment', value: completionRate / 100 },
-      { label: 'Speed', value: avgDaysToComplete > 0 ? Math.min(30 / avgDaysToComplete, 1) : 0 },
-      { label: 'Consistency', value: Math.min(sessionsPerWeek / 5, 1) },
-      { label: 'Quality', value: avgRating / 5 },
-    ];
 
     // ── Genre radar (top 6) ──────────────────────────────────────────────
     const genreRadarRaw = topGenres.slice(0, 6);
@@ -1019,43 +690,7 @@ export function JourneyAnalyticsView({
       value: count / maxGenreCount,
     }));
 
-    // ── Funnel ───────────────────────────────────────────────────────────
-    const startedCount =
-      (statusCounts['Playing'] || 0) +
-      (statusCounts['Playing Now'] || 0) +
-      (statusCounts['Completed'] || 0) +
-      (statusCounts['On Hold'] || 0);
-    const startedPct = totalGames > 0 ? Math.round((startedCount / totalGames) * 100) : 0;
-    const completedPct = totalGames > 0 ? Math.round((completedCount / totalGames) * 100) : 0;
-    const funnelStages = [
-      { label: 'In Library', count: totalGames, color: '#8b5cf6' },
-      { label: 'Started', count: startedCount, color: '#3b82f6', pct: startedPct },
-      { label: 'Completed', count: completedCount, color: '#22c55e', pct: completedPct },
-    ];
-
-    // ── Backlog insights ─────────────────────────────────────────────────
-    const backlogEntries = journeyEntries.filter((e) => e.status === 'Want to Play');
-    const backlogCount = backlogEntries.length;
-    const avgBacklogAge =
-      backlogCount > 0
-        ? Math.round(
-            backlogEntries.reduce((sum, e) => sum + (now.getTime() - new Date(e.addedAt).getTime()), 0) /
-              backlogCount /
-              86_400_000,
-          )
-        : 0;
-
-    // ── NEW: Play schedule heatmap (7 days x 24 hours) ───────────────────
-    const heatmapMatrix: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
-    for (const ses of sessions) {
-      const d = new Date(ses.startTime);
-      const dayIdx = d.getDay() === 0 ? 6 : d.getDay() - 1;
-      const hour = d.getHours();
-      heatmapMatrix[dayIdx][hour] += ses.durationMinutes;
-    }
-    const heatmapMax = Math.max(1, ...heatmapMatrix.flat());
-
-    // ── NEW: Streak tracking ─────────────────────────────────────────────
+    // ── Streak tracking ─────────────────────────────────────────────────
     const sessionDays = new Set<string>();
     for (const ses of sessions) {
       const d = new Date(ses.startTime);
@@ -1105,7 +740,7 @@ export function JourneyAnalyticsView({
       longestStreak = Math.max(longestStreak, streak);
     }
 
-    // ── NEW: Session length distribution ─────────────────────────────────
+    // ── Session length distribution ─────────────────────────────────────
     const sessionBuckets = [
       { label: '<15m', min: 0, max: 15, count: 0 },
       { label: '15-30m', min: 15, max: 30, count: 0 },
@@ -1119,17 +754,7 @@ export function JourneyAnalyticsView({
       if (b) b.count++;
     }
 
-    // ── NEW: Priority breakdown (from libraryEntries) ────────────────────
-    const priorityCounts: Record<string, number> = { High: 0, Medium: 0, Low: 0 };
-    const priorityCompletedCounts: Record<string, number> = { High: 0, Medium: 0, Low: 0 };
-    for (const le of libraryEntries) {
-      priorityCounts[le.priority] = (priorityCounts[le.priority] || 0) + 1;
-      if (le.status === 'Completed') {
-        priorityCompletedCounts[le.priority] = (priorityCompletedCounts[le.priority] || 0) + 1;
-      }
-    }
-
-    // ── NEW: Recommendation source analysis (from libraryEntries) ────────
+    // ── Recommendation source analysis ──────────────────────────────────
     const recSourceMap: Record<string, { count: number; totalRating: number; ratedCount: number }> = {};
     for (const le of libraryEntries) {
       const src = le.recommendationSource || 'Unknown';
@@ -1148,72 +773,24 @@ export function JourneyAnalyticsView({
       }))
       .sort((a, b) => b.count - a.count);
 
-    // ── NEW: Release year distribution ───────────────────────────────────
-    const releaseYearCounts: Record<number, number> = {};
-    for (const entry of journeyEntries) {
-      if (entry.releaseDate) {
-        const year = new Date(entry.releaseDate).getFullYear();
-        if (!isNaN(year) && year > 1970) {
-          releaseYearCounts[year] = (releaseYearCounts[year] || 0) + 1;
-        }
-      }
-    }
-    const releaseYearsRaw = Object.entries(releaseYearCounts)
-      .map(([y, c]) => ({ year: Number(y), count: c }))
-      .sort((a, b) => a.year - b.year);
-
-    // Group by decade if too many distinct years
-    let releaseYearDisplay: { label: string; count: number }[];
-    if (releaseYearsRaw.length > 15) {
-      const decadeCounts: Record<string, number> = {};
-      for (const ry of releaseYearsRaw) {
-        const decade = `${Math.floor(ry.year / 10) * 10}s`;
-        decadeCounts[decade] = (decadeCounts[decade] || 0) + ry.count;
-      }
-      releaseYearDisplay = Object.entries(decadeCounts)
-        .map(([label, count]) => ({ label, count }))
-        .sort((a, b) => a.label.localeCompare(b.label));
-    } else {
-      releaseYearDisplay = releaseYearsRaw.map((ry) => ({ label: String(ry.year), count: ry.count }));
-    }
-
     return {
       totalGames,
       totalHours,
       completedCount,
-      completionRate,
       statusCounts,
       topGames,
       maxHours,
       monthlyActivity,
-      avgDaysToComplete,
-      topGenres,
-      ratingCounts,
-      avgRating,
-      topPlatforms,
       totalSessions,
       avgSessionLength,
       idleRatio,
       monthlyCompletions,
-      topGamesByRating,
-      sparklineGamesAdded,
-      deltaGames,
-      deltaCompletions,
       recentActivity,
-      gamingProfile,
       genreRadar,
-      funnelStages,
-      backlogCount,
-      avgBacklogAge,
-      heatmapMatrix,
-      heatmapMax,
       currentStreak,
       longestStreak,
       sessionBuckets,
-      priorityCounts,
-      priorityCompletedCounts,
       recSources,
-      releaseYearDisplay,
     };
   }, [journeyEntries, statusHistory, sessions, libraryEntries]);
 
@@ -1231,281 +808,173 @@ export function JourneyAnalyticsView({
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-7xl mx-auto px-4 md:px-8 lg:px-10 pb-10 space-y-6">
-      {/* ─── Row 1: Key metrics ─────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard icon={Gamepad2} label="Total Games" delay={0}>
-          <div className="flex items-start justify-between">
+    <div className="max-w-7xl mx-auto px-4 md:px-8 lg:px-10 pb-10 space-y-5">
+
+      {/* ═══ Section 1: Overview ═══════════════════════════════════════════ */}
+      <StatCard icon={Gamepad2} label="Overview" delay={0}>
+        <div className="flex flex-col md:flex-row md:items-center gap-6">
+          {/* Big numbers */}
+          <div className="flex items-center gap-6 md:gap-8">
             <div>
               <AnimatedValue
                 value={analytics.totalGames}
                 formatFn={formatNumber}
                 className="text-3xl font-bold text-fuchsia-400 font-['Orbitron']"
-                delay={0.3}
+                delay={0.2}
               />
-              <DeltaLabel value={analytics.deltaGames} suffix="this month" />
+              <p className="text-[10px] text-white/40 mt-0.5">games tracked</p>
             </div>
-            <Sparkline data={analytics.sparklineGamesAdded} color="#d946ef" />
-          </div>
-        </StatCard>
-
-        <StatCard icon={Clock} label="Total Hours" delay={0.08}>
-          <AnimatedValue
-            value={Math.round(analytics.totalHours)}
-            formatFn={formatNumber}
-            className="text-3xl font-bold text-cyan-400 font-['Orbitron']"
-            delay={0.35}
-          />
-          <p className="text-xs text-white/40 mt-1">hours played</p>
-        </StatCard>
-
-        <StatCard icon={Trophy} label="Completion Rate" delay={0.16}>
-          <div className="flex items-start justify-between">
+            <div className="w-px h-10 bg-white/10" />
             <div>
-              <div className="flex items-end gap-2">
+              <div className="flex items-baseline gap-1.5">
                 <AnimatedValue
-                  value={analytics.completionRate}
-                  formatFn={(n) => `${n}%`}
-                  className="text-3xl font-bold text-green-400 font-['Orbitron']"
-                  delay={0.4}
+                  value={Math.round(analytics.totalHours)}
+                  formatFn={formatNumber}
+                  className="text-3xl font-bold text-cyan-400 font-['Orbitron']"
+                  delay={0.3}
                 />
-                <p className="text-xs text-white/40 mb-1">
-                  ({analytics.completedCount}/{analytics.totalGames})
-                </p>
+                <Clock className="w-3 h-3 text-cyan-400/50" />
               </div>
-              <DeltaLabel value={analytics.deltaCompletions} suffix="completed this month" />
+              <p className="text-[10px] text-white/40 mt-0.5">hours played</p>
             </div>
-            <AnimatedRadialGauge value={analytics.completionRate} color="#22c55e" label={`${analytics.completionRate}%`} />
           </div>
-        </StatCard>
 
-        <StatCard icon={Timer} label="Avg. Time to Complete" delay={0.24}>
-          {analytics.avgDaysToComplete > 0 ? (
-            <AnimatedValue
-              value={analytics.avgDaysToComplete}
-              formatFn={(n) => String(n)}
-              className="text-3xl font-bold text-amber-400 font-['Orbitron']"
-              delay={0.45}
-            />
-          ) : (
-            <p className="text-3xl font-bold text-amber-400 font-['Orbitron']">—</p>
-          )}
-          <p className="text-xs text-white/40 mt-1">
-            {analytics.avgDaysToComplete > 0 ? 'days on average' : 'no data yet'}
-          </p>
-        </StatCard>
-      </div>
+          {/* Divider */}
+          <div className="hidden md:block w-px h-24 bg-white/[0.06]" />
 
-      {/* ─── Row 1b: Streak accent bar ──────────────────────────────── */}
-      {analytics.totalSessions > 0 && (
-        <motion.div
-          className="flex items-center justify-center gap-8 py-2 rounded-xl bg-white/[0.02] border border-white/5"
-          initial={{ opacity: 0, y: 10 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.4 }}
-        >
-          <div className="flex items-center gap-2">
-            <Flame className="w-4 h-4 text-orange-400" />
-            <span className="text-sm font-bold text-orange-400 font-['Orbitron']">
-              {analytics.currentStreak}
-            </span>
-            <span className="text-xs text-white/40">day streak</span>
-          </div>
-          <div className="w-px h-4 bg-white/10" />
-          <div className="flex items-center gap-2">
-            <Trophy className="w-4 h-4 text-amber-400" />
-            <span className="text-sm font-bold text-amber-400 font-['Orbitron']">
-              {analytics.longestStreak}
-            </span>
-            <span className="text-xs text-white/40">best streak</span>
-          </div>
-        </motion.div>
-      )}
-
-      {/* ─── Row 2: Status Donut + Monthly Area Chart ───────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <StatCard icon={PieChart} label="Status Overview" delay={0}>
-          <div className="flex items-center gap-6">
+          {/* Status donut + legend */}
+          <div className="flex items-center gap-5 flex-1">
             <DonutChart
-              segments={[
-                { value: analytics.statusCounts['Playing'] || 0, color: statusStrokeColors['Playing'], label: 'Playing' },
-                { value: analytics.statusCounts['Completed'] || 0, color: statusStrokeColors['Completed'], label: 'Completed' },
-                { value: analytics.statusCounts['On Hold'] || 0, color: statusStrokeColors['On Hold'], label: 'On Hold' },
-                { value: analytics.statusCounts['Want to Play'] || 0, color: statusStrokeColors['Want to Play'], label: 'Want to Play' },
-              ]}
-              centerLabel={`${analytics.completionRate}%`}
-              centerSub="completed"
+              segments={ALL_STATUSES.map((s) => ({
+                value: analytics.statusCounts[s] || 0,
+                color: statusStrokeColors[s],
+                label: s,
+              }))}
+              centerLabel={String(analytics.totalGames)}
+              centerSub="games"
             />
-            <div className="space-y-2.5">
-              {(['Playing', 'Completed', 'On Hold', 'Want to Play'] as GameStatus[]).map((status) => (
-                <div key={status} className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: statusStrokeColors[status] }} />
-                  <span className={cn('text-xs font-medium', statusTextColors[status])}>{status}</span>
-                  <span className="text-xs text-white/30">{analytics.statusCounts[status] || 0}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </StatCard>
-
-        <StatCard icon={TrendingUp} label="Monthly Activity" delay={0.1}>
-          <div className="flex items-center gap-4 mb-2">
-            <div className="flex items-center gap-1.5">
-              <div className="w-2 h-2 rounded-sm bg-fuchsia-500/60" />
-              <span className="text-[10px] text-white/40">Added</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <div className="w-2 h-2 rounded-sm bg-green-500/60" />
-              <span className="text-[10px] text-white/40">Completed</span>
-            </div>
-          </div>
-          <AreaChartSVG data={analytics.monthlyActivity} data2={analytics.monthlyCompletions} />
-        </StatCard>
-      </div>
-
-      {/* ─── Row 3: Rating Distribution + Platform Breakdown ────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <StatCard icon={Star} label="Rating Distribution" delay={0}>
-          {analytics.avgRating === 0 ? (
-            <p className="text-xs text-white/40">No ratings yet</p>
-          ) : (
-            <div>
-              <div className="flex items-center gap-2 mb-3">
-                <span className="text-lg font-bold text-yellow-400 font-['Orbitron']">{analytics.avgRating}</span>
-                <MiniStars rating={Math.round(analytics.avgRating)} />
-                <span className="text-xs text-white/30">avg rating</span>
-              </div>
-              <div className="space-y-1.5">
-                {[5, 4, 3, 2, 1].map((star) => {
-                  const count = analytics.ratingCounts[star];
-                  const maxCount = Math.max(1, ...analytics.ratingCounts.slice(1));
-                  const pct = (count / maxCount) * 100;
-                  return (
-                    <div key={star} className="flex items-center gap-2">
-                      <div className="flex items-center gap-0.5 w-10 justify-end">
-                        <span className="text-[10px] text-white/50">{star}</span>
-                        <Star className="w-2.5 h-2.5 text-yellow-400 fill-yellow-400" />
-                      </div>
-                      <div className="flex-1 h-1.5 rounded-full bg-white/5 overflow-hidden">
-                        <motion.div
-                          className="h-full rounded-full bg-yellow-400/70"
-                          initial={{ width: '0%' }}
-                          whileInView={{ width: `${Math.max(pct, count > 0 ? 3 : 0)}%` }}
-                          viewport={{ once: true }}
-                          transition={{ duration: 0.6, delay: (5 - star) * 0.08, ease: 'easeOut' }}
-                        />
-                      </div>
-                      <span className="text-[10px] text-white/30 w-4 text-right">{count}</span>
-                    </div>
-                  );
-                })}
-                {analytics.ratingCounts[0] > 0 && (
-                  <div className="flex items-center gap-2 mt-1">
-                    <div className="w-10 text-right"><span className="text-[10px] text-white/25">N/A</span></div>
-                    <div className="flex-1 h-1.5 rounded-full bg-white/5 overflow-hidden">
-                      <motion.div
-                        className="h-full rounded-full bg-white/10"
-                        initial={{ width: '0%' }}
-                        whileInView={{ width: `${Math.max((analytics.ratingCounts[0] / Math.max(1, ...analytics.ratingCounts.slice(1))) * 100, 3)}%` }}
-                        viewport={{ once: true }}
-                        transition={{ duration: 0.6, delay: 0.5 }}
-                      />
-                    </div>
-                    <span className="text-[10px] text-white/25 w-4 text-right">{analytics.ratingCounts[0]}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </StatCard>
-
-        <StatCard icon={Monitor} label="Platform Breakdown" delay={0.1}>
-          {analytics.topPlatforms.length === 0 ? (
-            <p className="text-xs text-white/40">No platform data</p>
-          ) : analytics.topPlatforms.length === 1 ? (
-            <div className="flex items-center gap-3">
-              <Monitor className="w-8 h-8 text-blue-400" />
-              <div>
-                <p className="text-lg font-bold text-blue-400">{analytics.topPlatforms[0][0]}</p>
-                <p className="text-xs text-white/40">{analytics.topPlatforms[0][1]} games — 100%</p>
-              </div>
-            </div>
-          ) : (
-            <div className="flex items-center gap-6">
-              <DonutChart
-                size={100}
-                strokeWidth={10}
-                segments={analytics.topPlatforms.map(([p, count]) => ({
-                  value: count,
-                  color: getPlatformColor(p),
-                  label: p,
-                }))}
-              />
-              <div className="space-y-2">
-                {analytics.topPlatforms.map(([platform, count]) => {
-                  const pct = analytics.totalGames > 0 ? Math.round((count / analytics.totalGames) * 100) : 0;
-                  return (
-                    <div key={platform} className="flex items-center gap-2">
-                      <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: getPlatformColor(platform) }} />
-                      <span className="text-xs text-white/70">{platform}</span>
-                      <span className="text-xs text-white/30">{count} ({pct}%)</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </StatCard>
-      </div>
-
-      {/* ─── Row 4: Top Games by Hours + Top Games by Rating ────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <StatCard icon={TrendingUp} label="Top Games by Hours" delay={0}>
-          {analytics.topGames.length === 0 ? (
-            <p className="text-xs text-white/40">No hours recorded yet</p>
-          ) : (
             <div className="space-y-2">
-              {analytics.topGames.map((game, i) => {
-                const pct = analytics.maxHours > 0 ? (game.hoursPlayed / analytics.maxHours) * 100 : 0;
+              {ALL_STATUSES.map((status) => {
+                const count = analytics.statusCounts[status] || 0;
+                if (count === 0) return null;
                 return (
-                  <div key={game.gameId} className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/30 w-3 text-right font-mono">{i + 1}</span>
-                    <div className="w-5 h-7 rounded-sm overflow-hidden bg-white/5 flex-shrink-0">
-                      {(getHardcodedCover(game.title) || game.coverUrl) ? (
-                        <img src={getHardcodedCover(game.title) || game.coverUrl} alt={game.title} className="w-full h-full object-cover" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center"><Gamepad2 className="w-2.5 h-2.5 text-white/20" /></div>
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between mb-0.5">
-                        <span className="text-xs text-white/80 truncate font-medium">{game.title}</span>
-                        <span className="text-[10px] text-cyan-400 flex-shrink-0 ml-2">{game.hoursPlayed}h</span>
-                      </div>
-                      <div className="h-1 rounded-full bg-white/5 overflow-hidden">
-                        <motion.div
-                          className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-400"
-                          initial={{ width: '0%' }}
-                          whileInView={{ width: `${pct}%` }}
-                          viewport={{ once: true }}
-                          transition={{ duration: 0.7, delay: i * 0.1, ease: 'easeOut' }}
-                        />
-                      </div>
-                    </div>
+                  <div key={status} className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: statusStrokeColors[status] }} />
+                    <span className={cn('text-xs font-medium', statusTextColors[status])}>{status}</span>
+                    <span className="text-xs text-white/30">{count}</span>
                   </div>
                 );
               })}
             </div>
-          )}
-        </StatCard>
+          </div>
+        </div>
+      </StatCard>
 
-        <StatCard icon={Award} label="Top Games by Rating" delay={0.1}>
-          {analytics.topGamesByRating.length === 0 ? (
-            <p className="text-xs text-white/40">No rated games yet</p>
-          ) : (
-            <div className="space-y-2">
-              {analytics.topGamesByRating.map((game, i) => (
+      {/* ═══ Section 2: Activity & Streaks ═════════════════════════════════ */}
+      <StatCard icon={TrendingUp} label="Activity" delay={0.05}>
+        {/* Streak bar */}
+        {analytics.totalSessions > 0 && (
+          <div className="flex items-center gap-6 mb-4 pb-3 border-b border-white/[0.06]">
+            <div className="flex items-center gap-2">
+              <Flame className="w-4 h-4 text-orange-400" />
+              <span className="text-sm font-bold text-orange-400 font-['Orbitron']">
+                {analytics.currentStreak}
+              </span>
+              <span className="text-xs text-white/40">day streak</span>
+            </div>
+            <div className="w-px h-4 bg-white/10" />
+            <div className="flex items-center gap-2">
+              <Trophy className="w-4 h-4 text-amber-400" />
+              <span className="text-sm font-bold text-amber-400 font-['Orbitron']">
+                {analytics.longestStreak}
+              </span>
+              <span className="text-xs text-white/40">best streak</span>
+            </div>
+          </div>
+        )}
+
+        {/* Chart legend */}
+        <div className="flex items-center gap-4 mb-2">
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-sm bg-fuchsia-500/60" />
+            <span className="text-[10px] text-white/40">Added</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-sm bg-green-500/60" />
+            <span className="text-[10px] text-white/40">Completed</span>
+          </div>
+        </div>
+        <AreaChartSVG data={analytics.monthlyActivity} data2={analytics.monthlyCompletions} />
+      </StatCard>
+
+      {/* ═══ Section 3: Sessions ═══════════════════════════════════════════ */}
+      <StatCard icon={Activity} label="Sessions" delay={0.1}>
+        {analytics.totalSessions === 0 ? (
+          <p className="text-xs text-white/40">
+            No session data yet. Set an executable path on a game to start tracking.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {/* Top row: inline metrics */}
+            <div className="flex items-center gap-4">
+              <div className="grid grid-cols-2 gap-3 flex-1">
+                <div>
+                  <AnimatedValue value={analytics.totalSessions} formatFn={String} className="text-xl font-bold text-violet-400 font-['Orbitron']" delay={0.3} />
+                  <p className="text-[10px] text-white/40 mt-0.5">total sessions</p>
+                </div>
+                <div>
+                  <AnimatedValue value={analytics.avgSessionLength} formatFn={(n) => `${n}m`} className="text-xl font-bold text-cyan-400 font-['Orbitron']" delay={0.4} />
+                  <p className="text-[10px] text-white/40 mt-0.5">avg length</p>
+                </div>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <AnimatedRadialGauge value={analytics.idleRatio} color="#f59e0b" label={`${analytics.idleRatio}%`} />
+                <span className="text-[9px] text-white/30">idle</span>
+              </div>
+            </div>
+            {/* Session length histogram */}
+            <div>
+              <p className="text-[10px] text-white/30 mb-2 uppercase tracking-wider">Session Length</p>
+              <div className="flex items-end gap-1.5 h-20">
+                {analytics.sessionBuckets.map((bucket, i) => {
+                  const maxBucket = Math.max(1, ...analytics.sessionBuckets.map((b) => b.count));
+                  const pct = (bucket.count / maxBucket) * 100;
+                  return (
+                    <div key={bucket.label} className="flex-1 flex flex-col items-center gap-0.5 group/bar">
+                      <span className="text-[9px] text-white/30 opacity-0 group-hover/bar:opacity-100 transition-opacity">
+                        {bucket.count}
+                      </span>
+                      <motion.div
+                        className={cn(
+                          'w-full rounded-t-sm',
+                          bucket.count > 0
+                            ? 'bg-gradient-to-t from-emerald-600/80 to-emerald-400/60'
+                            : 'bg-white/5',
+                        )}
+                        initial={{ height: '2%' }}
+                        whileInView={{ height: `${Math.max(bucket.count > 0 ? 8 : 2, pct)}%` }}
+                        viewport={{ once: true }}
+                        transition={{ duration: 0.6, delay: i * 0.08, ease: 'easeOut' }}
+                      />
+                      <span className="text-[8px] text-white/25 text-center leading-tight">{bucket.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+      </StatCard>
+
+      {/* ═══ Section 4: Top Games ═════════════════════════════════════════ */}
+      <StatCard icon={TrendingUp} label="Top Games by Hours" delay={0}>
+        {analytics.topGames.length === 0 ? (
+          <p className="text-xs text-white/40">No hours recorded yet</p>
+        ) : (
+          <div className="space-y-2">
+            {analytics.topGames.map((game, i) => {
+              const pct = analytics.maxHours > 0 ? (game.hoursPlayed / analytics.maxHours) * 100 : 0;
+              return (
                 <div key={game.gameId} className="flex items-center gap-2">
                   <span className="text-[10px] text-white/30 w-3 text-right font-mono">{i + 1}</span>
                   <div className="w-5 h-7 rounded-sm overflow-hidden bg-white/5 flex-shrink-0">
@@ -1518,138 +987,82 @@ export function JourneyAnalyticsView({
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-0.5">
                       <span className="text-xs text-white/80 truncate font-medium">{game.title}</span>
-                      <MiniStars rating={game.rating} />
+                      <span className="text-[10px] text-cyan-400 flex-shrink-0 ml-2">{game.hoursPlayed}h</span>
                     </div>
-                    <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                    <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
                       <motion.div
-                        className="h-full rounded-full bg-gradient-to-r from-yellow-500 to-amber-400"
+                        className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-400"
                         initial={{ width: '0%' }}
-                        whileInView={{ width: `${(game.rating / 5) * 100}%` }}
+                        whileInView={{ width: `${pct}%` }}
                         viewport={{ once: true }}
-                        transition={{ duration: 0.7, delay: i * 0.1, ease: 'easeOut' }}
+                        transition={{ duration: 0.6, delay: i * 0.08, ease: 'easeOut' }}
                       />
                     </div>
                   </div>
                 </div>
-              ))}
+              );
+            })}
+          </div>
+        )}
+      </StatCard>
+
+      {/* ═══ Section 5: Discovery (two columns) ═══════════════════════════ */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Genre Radar */}
+        <StatCard icon={Tag} label="Genre Radar" delay={0}>
+          {analytics.genreRadar.length < 3 ? (
+            <p className="text-xs text-white/40">Add more games with varied genres to see your radar</p>
+          ) : (
+            <>
+              <div className="flex justify-center">
+                <RadarChart data={analytics.genreRadar} color="#06b6d4" size={220} />
+              </div>
+              <p className="text-[10px] text-white/30 text-center mt-2">
+                Top {analytics.genreRadar.length} genres by game count
+              </p>
+            </>
+          )}
+        </StatCard>
+
+        {/* Recommendation Sources */}
+        <StatCard icon={Share2} label="Recommendation Source" delay={0.1}>
+          {analytics.recSources.length === 0 ? (
+            <p className="text-xs text-white/40">No recommendation data</p>
+          ) : (
+            <div className="space-y-1.5">
+              {analytics.recSources.slice(0, 7).map((src, i) => {
+                const maxSrcCount = Math.max(1, ...analytics.recSources.map((s) => s.count));
+                const pct = (src.count / maxSrcCount) * 100;
+                return (
+                  <div key={src.source} className="flex items-center gap-2">
+                    <span className="text-[10px] text-white/50 w-20 text-right truncate">{src.source}</span>
+                    <div className="flex-1 h-1.5 rounded-full bg-white/5 overflow-hidden">
+                      <motion.div
+                        className="h-full rounded-full bg-gradient-to-r from-blue-500/70 to-violet-400/60"
+                        initial={{ width: '0%' }}
+                        whileInView={{ width: `${Math.max(pct, 4)}%` }}
+                        viewport={{ once: true }}
+                        transition={{ duration: 0.6, delay: i * 0.08, ease: 'easeOut' }}
+                      />
+                    </div>
+                    <span className="text-[10px] text-white/30 w-3 text-right">{src.count}</span>
+                    {src.avgRating > 0 && (
+                      <span className="text-[9px] text-yellow-400/60 w-7 text-right">{src.avgRating}&#x2605;</span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </StatCard>
       </div>
 
-      {/* ─── Row 5: Session Insights + Play Schedule Heatmap ────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <StatCard icon={Activity} label="Session Insights" delay={0}>
-          {analytics.totalSessions === 0 ? (
-            <p className="text-xs text-white/40">
-              No session data yet. Set an executable path on a game to start tracking.
-            </p>
-          ) : (
-            <div className="space-y-4">
-              <div className="flex items-center gap-4">
-                <div className="grid grid-cols-2 gap-3 flex-1">
-                  <div>
-                    <AnimatedValue value={analytics.totalSessions} formatFn={String} className="text-xl font-bold text-violet-400 font-['Orbitron']" delay={0.3} />
-                    <p className="text-[10px] text-white/40 mt-0.5">total sessions</p>
-                  </div>
-                  <div>
-                    <AnimatedValue value={analytics.avgSessionLength} formatFn={(n) => `${n}m`} className="text-xl font-bold text-cyan-400 font-['Orbitron']" delay={0.4} />
-                    <p className="text-[10px] text-white/40 mt-0.5">avg length</p>
-                  </div>
-                </div>
-                <div className="flex flex-col items-center gap-1">
-                  <AnimatedRadialGauge value={analytics.idleRatio} color="#f59e0b" label={`${analytics.idleRatio}%`} />
-                  <span className="text-[9px] text-white/30">idle</span>
-                </div>
-              </div>
-              {/* Session length distribution */}
-              <div>
-                <p className="text-[10px] text-white/30 mb-2 uppercase tracking-wider">Session Length</p>
-                <div className="flex items-end gap-1.5 h-16">
-                  {analytics.sessionBuckets.map((bucket, i) => {
-                    const maxBucket = Math.max(1, ...analytics.sessionBuckets.map((b) => b.count));
-                    const pct = (bucket.count / maxBucket) * 100;
-                    return (
-                      <div key={bucket.label} className="flex-1 flex flex-col items-center gap-0.5 group/bar">
-                        <span className="text-[8px] text-white/30 opacity-0 group-hover/bar:opacity-100 transition-opacity">
-                          {bucket.count}
-                        </span>
-                        <motion.div
-                          className={cn(
-                            'w-full rounded-t-sm',
-                            bucket.count > 0
-                              ? 'bg-gradient-to-t from-emerald-600/80 to-emerald-400/60'
-                              : 'bg-white/5',
-                          )}
-                          initial={{ height: '2%' }}
-                          whileInView={{ height: `${Math.max(bucket.count > 0 ? 8 : 2, pct)}%` }}
-                          viewport={{ once: true }}
-                          transition={{ duration: 0.6, delay: i * 0.08, ease: 'easeOut' }}
-                        />
-                        <span className="text-[7px] text-white/25 text-center leading-tight">{bucket.label}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
-        </StatCard>
-
-        <StatCard icon={CalendarDays} label="Play Schedule" delay={0.1}>
-          {analytics.totalSessions === 0 ? (
-            <p className="text-xs text-white/40">No session data yet</p>
-          ) : (
-            <div>
-              <PlayScheduleHeatmap matrix={analytics.heatmapMatrix} maxVal={analytics.heatmapMax} />
-              <div className="flex items-center justify-end gap-1 mt-2">
-                <span className="text-[8px] text-white/20">less</span>
-                {[0.05, 0.2, 0.4, 0.65, 0.85].map((v) => (
-                  <div
-                    key={v}
-                    className="w-2.5 h-2.5 rounded-[2px]"
-                    style={{ backgroundColor: `rgba(139, 92, 246, ${v})` }}
-                  />
-                ))}
-                <span className="text-[8px] text-white/20">more</span>
-              </div>
-            </div>
-          )}
-        </StatCard>
-      </div>
-
-      {/* ─── Row 6: Genre Distribution + Recent Activity Feed ───────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <StatCard icon={Tag} label="Genre Distribution" delay={0}>
-          {analytics.topGenres.length === 0 ? (
-            <p className="text-xs text-white/40">No genre data available</p>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {analytics.topGenres.map(([genre, count], i) => (
-                <motion.div
-                  key={genre}
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  whileInView={{ opacity: 1, scale: 1 }}
-                  viewport={{ once: true }}
-                  transition={{ duration: 0.3, delay: i * 0.04 }}
-                  className={cn(
-                    'px-2.5 py-1 rounded-full text-[11px] font-medium',
-                    'bg-fuchsia-500/10 text-fuchsia-300 border border-fuchsia-500/20',
-                    'hover:bg-fuchsia-500/20 hover:border-fuchsia-500/30 transition-colors',
-                  )}
-                >
-                  {genre}
-                  <span className="ml-1 text-fuchsia-400/60">{count}</span>
-                </motion.div>
-              ))}
-            </div>
-          )}
-        </StatCard>
-
-        <StatCard icon={History} label="Recent Activity" delay={0.1}>
-          {analytics.recentActivity.length === 0 ? (
-            <p className="text-xs text-white/40">No status changes recorded yet</p>
-          ) : (
+      {/* ═══ Section 6: Recent Activity ════════════════════════════════════ */}
+      <StatCard icon={History} label="Recent Activity" delay={0}>
+        {analytics.recentActivity.length === 0 ? (
+          <p className="text-xs text-white/40">No status changes recorded yet</p>
+        ) : (
+          <div className="relative">
             <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
               {analytics.recentActivity.map((entry, i) => (
                 <motion.div
@@ -1669,164 +1082,11 @@ export function JourneyAnalyticsView({
                 </motion.div>
               ))}
             </div>
-          )}
-        </StatCard>
-      </div>
-
-      {/* ─── Row 7: Gaming Profile Radar + Genre Radar ──────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <StatCard icon={Target} label="Gaming Profile" delay={0}>
-          <div className="flex justify-center">
-            <RadarChart data={analytics.gamingProfile} color="#d946ef" size={220} />
+            {/* Fade-out gradient at the bottom of the scrollable list */}
+            <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-[rgba(255,255,255,0.04)] to-transparent rounded-b-xl" />
           </div>
-          <p className="text-[10px] text-white/30 text-center mt-2">Your multi-dimensional gaming identity</p>
-        </StatCard>
-
-        <StatCard icon={Hexagon} label="Genre Radar" delay={0.1}>
-          {analytics.genreRadar.length < 3 ? (
-            <p className="text-xs text-white/40">Add more games with varied genres to see your radar</p>
-          ) : (
-            <>
-              <div className="flex justify-center">
-                <RadarChart data={analytics.genreRadar} color="#06b6d4" size={220} />
-              </div>
-              <p className="text-[10px] text-white/30 text-center mt-2">
-                Top {analytics.genreRadar.length} genres by game count
-              </p>
-            </>
-          )}
-        </StatCard>
-      </div>
-
-      {/* ─── Row 8: Completion Funnel + Backlog Insights ────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <StatCard icon={Filter} label="Completion Funnel" delay={0}>
-          <CompletionFunnel stages={analytics.funnelStages} />
-          <p className="text-[10px] text-white/30 text-center mt-3">How your library flows from added to completed</p>
-        </StatCard>
-
-        <StatCard icon={Timer} label="Backlog Insights" delay={0.1}>
-          <div className="flex items-center gap-5">
-            <AnimatedRadialGauge
-              value={analytics.backlogCount}
-              max={Math.max(analytics.totalGames, 1)}
-              size={80}
-              strokeWidth={7}
-              color="#f59e0b"
-              label={String(analytics.backlogCount)}
-            />
-            <div className="space-y-3">
-              <div>
-                <p className="text-lg font-bold text-amber-400 font-['Orbitron']">{analytics.backlogCount}</p>
-                <p className="text-[10px] text-white/40">games in backlog</p>
-              </div>
-              <div>
-                <p className="text-lg font-bold text-white/70 font-['Orbitron']">
-                  {analytics.avgBacklogAge > 0 ? `${analytics.avgBacklogAge}d` : '—'}
-                </p>
-                <p className="text-[10px] text-white/40">{analytics.avgBacklogAge > 0 ? 'avg backlog age' : 'no backlog'}</p>
-              </div>
-            </div>
-          </div>
-        </StatCard>
-      </div>
-
-      {/* ─── Row 9: Priority Breakdown + Recommendation Source ──────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <StatCard icon={Flag} label="Priority Breakdown" delay={0}>
-          {libraryEntries.length === 0 ? (
-            <p className="text-xs text-white/40">No library data</p>
-          ) : (
-            <div className="flex items-center gap-6">
-              <DonutChart
-                size={110}
-                strokeWidth={12}
-                segments={(['High', 'Medium', 'Low'] as const).map((p) => ({
-                  value: analytics.priorityCounts[p] || 0,
-                  color: priorityColors[p],
-                  label: p,
-                }))}
-              />
-              <div className="space-y-2">
-                {(['High', 'Medium', 'Low'] as const).map((priority) => {
-                  const count = analytics.priorityCounts[priority] || 0;
-                  const completed = analytics.priorityCompletedCounts[priority] || 0;
-                  const rate = count > 0 ? Math.round((completed / count) * 100) : 0;
-                  return (
-                    <div key={priority} className="flex items-center gap-2">
-                      <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: priorityColors[priority] }} />
-                      <span className="text-xs text-white/70 w-12">{priority}</span>
-                      <span className="text-[10px] text-white/30">{count}</span>
-                      <span className="text-[9px] text-green-400/60 ml-1">{rate}% done</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </StatCard>
-
-        <StatCard icon={Share2} label="Recommendation Source" delay={0.1}>
-          {analytics.recSources.length === 0 ? (
-            <p className="text-xs text-white/40">No recommendation data</p>
-          ) : (
-            <div className="space-y-1.5">
-              {analytics.recSources.slice(0, 7).map((src, i) => {
-                const maxSrcCount = Math.max(1, ...analytics.recSources.map((s) => s.count));
-                const pct = (src.count / maxSrcCount) * 100;
-                return (
-                  <div key={src.source} className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/50 w-20 text-right truncate">{src.source}</span>
-                    <div className="flex-1 h-1.5 rounded-full bg-white/5 overflow-hidden">
-                      <motion.div
-                        className="h-full rounded-full bg-gradient-to-r from-blue-500/70 to-violet-400/60"
-                        initial={{ width: '0%' }}
-                        whileInView={{ width: `${Math.max(pct, 3)}%` }}
-                        viewport={{ once: true }}
-                        transition={{ duration: 0.6, delay: i * 0.08, ease: 'easeOut' }}
-                      />
-                    </div>
-                    <span className="text-[10px] text-white/30 w-3 text-right">{src.count}</span>
-                    {src.avgRating > 0 && (
-                      <span className="text-[9px] text-yellow-400/60 w-7 text-right">{src.avgRating}★</span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </StatCard>
-      </div>
-
-      {/* ─── Row 10: Release Year Distribution ──────────────────────── */}
-      {analytics.releaseYearDisplay.length > 0 && (
-        <StatCard icon={Calendar} label="Release Year Distribution" delay={0}>
-          <div className="space-y-1">
-            {analytics.releaseYearDisplay.map((ry, i) => {
-              const maxCount = Math.max(1, ...analytics.releaseYearDisplay.map((r) => r.count));
-              const pct = (ry.count / maxCount) * 100;
-              return (
-                <div key={ry.label} className="flex items-center gap-2">
-                  <span className="text-[10px] text-white/40 w-9 text-right font-mono">{ry.label}</span>
-                  <div className="flex-1 h-1.5 rounded-full bg-white/5 overflow-hidden">
-                    <motion.div
-                      className="h-full rounded-full bg-gradient-to-r from-violet-500/70 to-fuchsia-400/50"
-                      initial={{ width: '0%' }}
-                      whileInView={{ width: `${Math.max(pct, 3)}%` }}
-                      viewport={{ once: true }}
-                      transition={{ duration: 0.6, delay: i * 0.04, ease: 'easeOut' }}
-                    />
-                  </div>
-                  <span className="text-[10px] text-white/30 w-3 text-right">{ry.count}</span>
-                </div>
-              );
-            })}
-          </div>
-          <p className="text-[10px] text-white/30 text-center mt-3">
-            {analytics.releaseYearDisplay.length > 10 ? 'Grouped by decade' : 'Games by release year'}
-          </p>
-        </StatCard>
-      )}
+        )}
+      </StatCard>
     </div>
   );
 }

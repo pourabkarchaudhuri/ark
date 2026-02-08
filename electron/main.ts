@@ -2,10 +2,12 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { app, BrowserWindow, ipcMain, dialog, shell, net } = electron;
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, net, session } = electron;
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
 import path from 'path';
+import { FiltersEngine, Request } from '@ghostery/adblocker';
+import fetch from 'cross-fetch';
 
 // ESM has no __dirname; required for loadFile/preload paths when run as module
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -184,6 +186,7 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => {
+    destroyWebContentsView();
     mainWindow = null;
   });
 }
@@ -478,76 +481,6 @@ ipcMain.handle('steam:getRecommendations', async (_event, currentAppId: number, 
     return recommendations;
   } catch (error) {
     console.error('Error getting recommendations:', error);
-    return [];
-  }
-});
-
-// ============================================================================
-// NEWS API IPC HANDLERS (Reddit gaming news)
-// ============================================================================
-
-/**
- * Fetch hot gaming posts from Reddit JSON API.
- * Runs in the main process to avoid CORS issues in the renderer.
- */
-ipcMain.handle('news:getRedditNews', async (_event, subreddits: string[] = ['gaming', 'pcgaming'], limit: number = 25) => {
-  try {
-    console.log(`[News] Fetching Reddit news from: ${subreddits.join(', ')}`);
-    const allPosts: Array<{
-      id: string;
-      title: string;
-      selftext: string;
-      thumbnail: string;
-      url: string;
-      permalink: string;
-      created_utc: number;
-      subreddit: string;
-      score: number;
-      num_comments: number;
-      preview?: { images?: Array<{ source?: { url: string } }> };
-    }> = [];
-
-    for (const sub of subreddits) {
-      try {
-        // Use Electron's net.fetch which uses Chromium's network stack
-        // and respects system certificate store (handles corporate proxies)
-        const response = await net.fetch(
-          `https://www.reddit.com/r/${sub}/hot.json?limit=${limit}`,
-          {
-            headers: {
-              'User-Agent': 'ArkGameTracker/1.0 (Electron Desktop App)',
-            },
-          }
-        );
-        if (!response.ok) continue;
-        const data = await response.json();
-        const posts = data?.data?.children ?? [];
-        for (const post of posts) {
-          const d = post.data;
-          if (!d || d.stickied) continue; // Skip stickied/pinned posts
-          allPosts.push({
-            id: d.id ?? '',
-            title: d.title ?? '',
-            selftext: d.selftext ?? '',
-            thumbnail: d.thumbnail ?? '',
-            url: d.url ?? '',
-            permalink: d.permalink ?? '',
-            created_utc: d.created_utc ?? 0,
-            subreddit: d.subreddit ?? sub,
-            score: d.score ?? 0,
-            num_comments: d.num_comments ?? 0,
-            preview: d.preview,
-          });
-        }
-      } catch (err) {
-        console.warn(`[News] Failed to fetch r/${sub}:`, err);
-      }
-    }
-
-    console.log(`[News] Got ${allPosts.length} Reddit posts total`);
-    return allPosts;
-  } catch (error) {
-    console.error('[News] Reddit fetch error:', error);
     return [];
   }
 });
@@ -998,10 +931,154 @@ ipcMain.handle('dialog:selectExecutable', async () => {
 });
 
 // ============================================================================
+// WEBCONTENTSVIEW-BASED INLINE WEBVIEW
+// ============================================================================
+
+let activeWebContentsView: any = null;
+
+function destroyWebContentsView() {
+  if (!activeWebContentsView || !mainWindow) return;
+  try { mainWindow.contentView.removeChildView(activeWebContentsView); } catch { /* already removed */ }
+  try { activeWebContentsView.webContents.close(); } catch { /* ignore */ }
+  activeWebContentsView = null;
+}
+
+ipcMain.handle('webview:open', async (_event, url: string, bounds: { x: number; y: number; width: number; height: number }) => {
+  if (!mainWindow) return { success: false };
+  destroyWebContentsView();
+
+  activeWebContentsView = new WebContentsView({
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+  mainWindow.contentView.addChildView(activeWebContentsView);
+  activeWebContentsView.setBounds({
+    x: Math.round(bounds.x),
+    y: Math.round(bounds.y),
+    width: Math.round(bounds.width),
+    height: Math.round(bounds.height),
+  });
+
+  const wc = activeWebContentsView.webContents;
+
+  // Forward lifecycle events to the renderer
+  wc.on('did-start-loading', () => mainWindow?.webContents.send('webview:loading', true));
+  wc.on('did-stop-loading', () => mainWindow?.webContents.send('webview:loading', false));
+  wc.on('page-title-updated', (_e: any, title: string) => mainWindow?.webContents.send('webview:title', title));
+  wc.on('did-fail-load', (_e: any, code: number, desc: string, _u: string, isMain: boolean) => {
+    if (!isMain || code === -3) return;
+    mainWindow?.webContents.send('webview:error', desc || 'Failed to load page');
+  });
+  const sendNavState = () => {
+    try {
+      mainWindow?.webContents.send('webview:nav-state', {
+        canGoBack: wc.navigationHistory.canGoBack(),
+        canGoForward: wc.navigationHistory.canGoForward(),
+      });
+    } catch { /* ignore */ }
+  };
+  wc.on('did-navigate', sendNavState);
+  wc.on('did-navigate-in-page', sendNavState);
+
+  // Hide scrollbars on every page load
+  const hideScrollbars = () => {
+    wc.insertCSS('::-webkit-scrollbar { display: none !important; } html, body { scrollbar-width: none !important; }').catch(() => {});
+  };
+  wc.on('dom-ready', hideScrollbars);
+
+  // External links open in OS browser
+  wc.setWindowOpenHandler(({ url: target }: { url: string }) => {
+    if (target.startsWith('http:') || target.startsWith('https:')) {
+      shell.openExternal(target);
+    }
+    return { action: 'deny' as const };
+  });
+
+  wc.loadURL(url);
+  return { success: true };
+});
+
+ipcMain.handle('webview:close', async () => destroyWebContentsView());
+
+ipcMain.handle('webview:resize', async (_event, bounds: { x: number; y: number; width: number; height: number }) => {
+  if (activeWebContentsView) {
+    activeWebContentsView.setBounds({
+      x: Math.round(bounds.x),
+      y: Math.round(bounds.y),
+      width: Math.round(bounds.width),
+      height: Math.round(bounds.height),
+    });
+  }
+});
+
+ipcMain.handle('webview:go-back', async () => {
+  if (activeWebContentsView?.webContents.navigationHistory.canGoBack()) activeWebContentsView.webContents.navigationHistory.goBack();
+});
+
+ipcMain.handle('webview:go-forward', async () => {
+  if (activeWebContentsView?.webContents.navigationHistory.canGoForward()) activeWebContentsView.webContents.navigationHistory.goForward();
+});
+
+ipcMain.handle('webview:reload', async () => {
+  activeWebContentsView?.webContents.reload();
+});
+
+ipcMain.handle('webview:open-external', async (_event, url: string) => {
+  shell.openExternal(url);
+});
+
+// ============================================================================
 // APP LIFECYCLE
 // ============================================================================
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Initialize ad blocker using core engine + session.webRequest (compatible with all Electron versions)
+  try {
+    const cachePath = path.join(app.getPath('userData'), 'adblocker-engine.bin');
+    let engine: FiltersEngine;
+
+    // Try loading from cache first for fast startup
+    if (fs.existsSync(cachePath)) {
+      const buf = await fs.promises.readFile(cachePath);
+      engine = FiltersEngine.deserialize(buf);
+      console.log('[AdBlocker] Loaded engine from cache');
+    } else {
+      // Download filter lists (EasyList + EasyPrivacy)
+      const lists = await Promise.all([
+        fetch('https://easylist.to/easylist/easylist.txt').then((r: any) => r.text()),
+        fetch('https://easylist.to/easylist/easyprivacy.txt').then((r: any) => r.text()),
+      ]);
+      engine = FiltersEngine.parse(lists.join('\n'));
+      // Cache for faster startup next time
+      await fs.promises.writeFile(cachePath, Buffer.from(engine.serialize()));
+      console.log('[AdBlocker] Downloaded filter lists and cached engine');
+    }
+
+    // Block matching network requests via session.webRequest
+    session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
+      const { url, resourceType, referrer } = details;
+      // Don't block the main page navigation itself
+      if (resourceType === 'mainFrame') {
+        callback({ cancel: false });
+        return;
+      }
+      const request = Request.fromRawDetails({ url, type: resourceType || 'other', sourceUrl: referrer || '' });
+      const { match } = engine.match(request);
+      if (match) {
+        callback({ cancel: true });
+      } else {
+        callback({ cancel: false });
+      }
+    });
+
+    console.log('[AdBlocker] Initialized and enabled');
+  } catch (err) {
+    console.warn('[AdBlocker] Failed to initialize (non-fatal):', err);
+  }
+
   try {
     createWindow();
   } catch (err) {

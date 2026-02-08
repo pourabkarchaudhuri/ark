@@ -8,14 +8,14 @@
  *  - "Noob" (default): vertical timeline grouped by year
  *  - "OCD": horizontally scrollable Gantt chart with status-colored bars
  */
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, memo, useCallback, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { motion } from 'framer-motion';
 import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, List, PieChart } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Timeline, TimelineEntry } from '@/components/ui/timeline';
-import { JourneyEntry, GameStatus, GameSession, LibraryGameEntry } from '@/types/game';
+import { JourneyEntry, GameStatus } from '@/types/game';
 import { steamService } from '@/services/steam-service';
 import { libraryStore } from '@/services/library-store';
 import { statusHistoryStore } from '@/services/status-history-store';
@@ -56,10 +56,12 @@ const statusColors: Record<GameStatus, string> = {
   'Want to Play': 'bg-white/10 text-white/60 border-white/20',
 };
 
-function StarRating({ rating }: { rating: number }) {
+const STAR_INDICES = [0, 1, 2, 3, 4];
+
+const StarRating = memo(function StarRating({ rating }: { rating: number }) {
   return (
     <div className="flex items-center gap-0.5">
-      {Array.from({ length: 5 }).map((_, i) => (
+      {STAR_INDICES.map((i) => (
         <Star
           key={i}
           className={cn(
@@ -70,9 +72,9 @@ function StarRating({ rating }: { rating: number }) {
       ))}
     </div>
   );
-}
+});
 
-function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCount?: number }) {
+const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCount?: number }) {
   const [, navigate] = useLocation();
   const addedDate = entry.addedAt
     ? new Date(entry.addedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
@@ -80,13 +82,15 @@ function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCo
   const isRemoved = !!entry.removedAt;
   const inLibrary = libraryStore.isInLibrary(entry.gameId);
 
+  const handleClick = useCallback(() => navigate(`/game/${entry.gameId}`), [navigate, entry.gameId]);
+
   return (
     <motion.div
       className={cn(
         'rounded-lg bg-white/5 border border-white/10 overflow-hidden cursor-pointer group hover:border-fuchsia-500/40 transition-colors min-h-[120px]',
         isRemoved && 'opacity-60'
       )}
-      onClick={() => navigate(`/game/${entry.gameId}`)}
+      onClick={handleClick}
       whileHover={{ scale: 1.02 }}
       transition={{ duration: 0.2 }}
     >
@@ -174,7 +178,7 @@ function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCo
       </div>
     </motion.div>
   );
-}
+});
 
 export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
   // View style toggle: "Noob" (vertical timeline) vs "OCD" (Gantt chart)
@@ -351,20 +355,40 @@ export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewP
   const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
   const completedCount = entries.filter((e) => e.status === 'Completed').length;
 
+  // Cache store snapshots to avoid creating new array references on every render.
+  // Only recalculate when the view actually needs it and dependencies change.
+  const statusHistoryRef = useRef(statusHistoryStore.getAll());
+  const sessionsRef = useRef(sessionStore.getAll());
+  const libraryEntriesRef = useRef(libraryStore.getAllEntries());
+
+  // Subscribe once and update refs (no state, so no re-render from here)
+  useEffect(() => {
+    const unsubHistory = statusHistoryStore.subscribe(() => {
+      statusHistoryRef.current = statusHistoryStore.getAll();
+    });
+    const unsubSessions = sessionStore.subscribe(() => {
+      sessionsRef.current = sessionStore.getAll();
+    });
+    const unsubLibrary = libraryStore.subscribe(() => {
+      libraryEntriesRef.current = libraryStore.getAllEntries();
+    });
+    return () => { unsubHistory(); unsubSessions(); unsubLibrary(); };
+  }, []);
+
   // Prepare Gantt/analytics data (only when OCD or Analytics view is active)
   const ganttData = useMemo(() => {
     if (viewStyle !== 'ocd' && viewStyle !== 'analytics') return null;
 
-    if (viewStyle === 'ocd' && dataSource === 'mock') {
-      return { ...generateMockGanttData(), sessions: [] as GameSession[], libraryEntries: [] as LibraryGameEntry[] };
+    if ((viewStyle === 'ocd' || viewStyle === 'analytics') && dataSource === 'mock') {
+      return generateMockGanttData();
     }
 
-    // Live data from stores
+    // Live data from cached store snapshots
     return {
       journeyEntries: entries,
-      statusHistory: statusHistoryStore.getAll(),
-      sessions: sessionStore.getAll(),
-      libraryEntries: libraryStore.getAllEntries(),
+      statusHistory: statusHistoryRef.current,
+      sessions: sessionsRef.current,
+      libraryEntries: libraryEntriesRef.current,
     };
   }, [viewStyle, dataSource, entries]);
 
@@ -426,8 +450,8 @@ export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewP
               </button>
             </div>
 
-            {/* Mock / Live toggle (only visible in OCD view) */}
-            {viewStyle === 'ocd' && (
+            {/* Mock / Live toggle (visible in OCD and Analytics views) */}
+            {(viewStyle === 'ocd' || viewStyle === 'analytics') && (
               <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
                 <button
                   onClick={() => setDataSource('live')}

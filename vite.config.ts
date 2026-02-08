@@ -23,12 +23,6 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/steam-news/, '/ISteamNews/GetNewsForApp/v2'),
       },
-      // Proxy Reddit JSON API to avoid CORS issues in dev
-      '/api/reddit': {
-        target: 'https://www.reddit.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/reddit/, ''),
-      },
     },
   },
 });

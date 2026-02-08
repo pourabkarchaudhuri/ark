@@ -4,6 +4,36 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.21] - 2026-02-08
+
+### Added
+- **Activity Chart Tooltips** – Native SVG `<title>` tooltips on every data point in the Activity area chart; hover any dot to see exact "added" / "completed" counts for that month.
+- **Custom Game Session Tracking** – `useSessionTracker` now includes custom games (negative IDs) with executable paths in the tracked-games list sent to the main process; subscribes to `customGameStore` changes for live resync.
+- **Custom Game Hours Persistence** – When a tracked custom game session ends, `hoursPlayed` is written back to the `CustomGameEntry` (new optional field added to the type).
+- **Recent Activity Fade Gradient** – Bottom of the scrollable Recent Activity list fades out to signal more content below.
+
+### Changed
+- **Font Size Standardisation** – Established a 3-tier font system across all analytics SVG charts: primary sub-labels (10 px), secondary details (9 px), micro/axis labels (8 px). Donut center number reduced from 22 → 20; donut sub-label 9 → 10; histogram bucket labels 7 → 8 px; histogram hover counts 8 → 9 px; area chart month labels 5.5 → 4.5; Y-axis labels 4 → 4.5.
+- **Stroke Width Consistency** – Radar grid/axis lines 1 → 0.5; radar polygon outline 2 → 1.5; radar dots r 3.5 → 3, stroke 1 → 0.6. Area chart primary line 1.5 → 1; secondary (dashed) line 1.2 → 0.8. All chart grid lines now uniformly 0.5.
+- **Bar & Histogram Heights** – Top Games progress bars h-1 → h-1.5 (matches Recommendation Source bars); histogram container h-16 → h-20. Stagger delays normalised to 0.08 across all animated bars.
+- **Area Chart Layout** – SVG height 140 → 160; left padding 8 → 10 for Y-axis label clearance.
+- **Buzz View UX** – Clicking a news card now opens the webview directly (removed separate "View" button); viewport height adjusted to prevent outer scrollbar; `allowpopups` fixed to boolean.
+- **OCD Gantt View** – Sticky left sidebar with synchronised vertical scroll; improved hover highlighting across sidebar and timeline rows.
+- **Removed Platform Breakdown** chart from Analytics dashboard.
+
+### Fixed
+- **Custom games not session-tracked** – `syncTrackedGames()` previously only called `libraryStore.getTrackableEntries()`, completely omitting custom games with executable paths.
+- **Custom game hours never updated** – Session-end handler only called `libraryStore.updateHoursFromSessions()` which ignores negative IDs; now routes to `customGameStore.updateGame()` for custom games.
+
+### Performance
+- `JourneyGameCard` wrapped with `React.memo`; click handler memoised with `useCallback`.
+- `StarRating` wrapped with `React.memo`; star-index array extracted to module-level constant.
+- `AnimatedValue` (analytics) wrapped with `React.memo`.
+- Store `getAll()` snapshots in `JourneyView` cached via `useRef` + subscriptions to avoid new-array-reference re-renders on every render cycle.
+- `useSessionTracker.syncTrackedGames` has stable `[]` dependency array — no subscription churn.
+
+---
+
 ## [1.0.20] - 2026-02-08
 
 ### Added

@@ -262,14 +262,41 @@ contextBridge.exposeInMainWorld('sessionTracker', {
   },
 });
 
-// Expose News API to renderer (Reddit gaming news + RSS feeds)
+// Expose News API to renderer (RSS feeds from gaming news sites)
 contextBridge.exposeInMainWorld('newsApi', {
-  // Fetch hot posts from gaming subreddits
-  getRedditNews: (subreddits, limit) =>
-    ipcRenderer.invoke('news:getRedditNews', subreddits, limit),
-  // Fetch RSS feeds from gaming news sites
   getRSSFeeds: () =>
     ipcRenderer.invoke('news:getRSSFeeds'),
 });
 
-console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi exposed');
+// Expose BrowserView-based inline webview API
+contextBridge.exposeInMainWorld('webviewApi', {
+  open: (url, bounds) => ipcRenderer.invoke('webview:open', url, bounds),
+  close: () => ipcRenderer.invoke('webview:close'),
+  resize: (bounds) => ipcRenderer.invoke('webview:resize', bounds),
+  goBack: () => ipcRenderer.invoke('webview:go-back'),
+  goForward: () => ipcRenderer.invoke('webview:go-forward'),
+  reload: () => ipcRenderer.invoke('webview:reload'),
+  openExternal: (url) => ipcRenderer.invoke('webview:open-external', url),
+  onLoading: (callback) => {
+    const handler = (_event, loading) => callback(loading);
+    ipcRenderer.on('webview:loading', handler);
+    return () => ipcRenderer.removeListener('webview:loading', handler);
+  },
+  onTitle: (callback) => {
+    const handler = (_event, title) => callback(title);
+    ipcRenderer.on('webview:title', handler);
+    return () => ipcRenderer.removeListener('webview:title', handler);
+  },
+  onError: (callback) => {
+    const handler = (_event, error) => callback(error);
+    ipcRenderer.on('webview:error', handler);
+    return () => ipcRenderer.removeListener('webview:error', handler);
+  },
+  onNavState: (callback) => {
+    const handler = (_event, state) => callback(state);
+    ipcRenderer.on('webview:nav-state', handler);
+    return () => ipcRenderer.removeListener('webview:nav-state', handler);
+  },
+});
+
+console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi exposed');

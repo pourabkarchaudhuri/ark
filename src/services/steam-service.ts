@@ -474,12 +474,11 @@ class SteamService {
       }
     }
 
-    // Fallback: use Vite dev proxy (/api/steam-news) to avoid CORS,
-    // or direct URL if the proxy isn't available (e.g. production build).
+    // Fallback: use Vite dev proxy (/api/steam-news) to avoid CORS.
+    // Never call the Steam API directly from the renderer — it will be blocked by CORS.
     const proxyUrl = `/api/steam-news?appid=${appId}&count=${count}&format=json`;
-    const directUrl = `https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=${appId}&count=${count}&format=json`;
 
-    for (const url of [proxyUrl, directUrl]) {
+    for (const url of [proxyUrl]) {
       try {
         const response = await fetch(url);
         if (!response.ok) continue;

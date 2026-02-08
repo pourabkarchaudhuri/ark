@@ -106,6 +106,7 @@ export interface CustomGameEntry {
   platform: string[];
   status: GameStatus;
   executablePath?: string; // Path to game executable for session tracking
+  hoursPlayed?: number; // Total hours played (updated from session tracker)
   addedAt: Date;
   updatedAt: Date;
 }

@@ -42,6 +42,7 @@ import {
   Newspaper,
 } from 'lucide-react';
 import { libraryStore } from '@/services/library-store';
+import { customGameStore } from '@/services/custom-game-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
 import { SettingsPanel } from '@/components/settings-panel';
 import { useSessionTracker } from '@/hooks/useSessionTracker';
@@ -407,12 +408,15 @@ export function Dashboard() {
     setDeleteConfirm({ open: false, game: null });
   }, [deleteConfirm.game, removeFromLibrary, success, showError]);
 
-  // Handle clearing entire library
+  // Handle clearing entire library (including custom games)
   const handleClearLibraryConfirm = useCallback(() => {
     try {
-      const count = libraryStore.getSize();
+      const libraryCount = libraryStore.getSize();
+      const customCount = customGameStore.getCount();
       libraryStore.clear();
-      success(`Cleared ${count} games from your library`);
+      customGameStore.clear();
+      const total = libraryCount + customCount;
+      success(`Cleared ${total} game${total !== 1 ? 's' : ''} from your library`);
     } catch (err) {
       showError('Failed to clear library. Please try again.');
     }

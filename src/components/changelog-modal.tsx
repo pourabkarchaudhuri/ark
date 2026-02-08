@@ -4,10 +4,39 @@ import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Current app version - update this with each release
-export const APP_VERSION = '1.0.19';
+export const APP_VERSION = '1.0.21';
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.21': {
+    title: "What's New in Ark 1.0.21",
+    changes: [
+      'Analytics UX Polish — Standardised font sizes (3-tier system), stroke widths, and bar thicknesses across all SVG charts for visual consistency',
+      'Activity Chart Improvements — Thinner lines, smaller X-axis labels, and native SVG tooltips on all data points (hover for exact "added" / "completed" counts)',
+      'Area Chart Redesign — Taller chart (160px), increased padding, distinct solid/dashed lines for Added vs Completed series with vertical drop lines and Y-axis labels',
+      'Session Histogram — Increased height, larger bucket labels, hover-to-reveal counts',
+      'Recent Activity Fade — Scrollable activity list now has a fade-out gradient at the bottom to signal more content',
+      'Custom Game Session Tracking — Custom games with executable paths are now tracked by the session monitor (previously only library games were tracked)',
+      'Custom Game Hours — Play hours from tracked sessions are now written back to custom game entries (new hoursPlayed field on CustomGameEntry)',
+      'Performance — JourneyGameCard and AnimatedValue wrapped with React.memo; StarRating array extracted to module-level constant; store snapshots cached via useRef to prevent new-array-reference re-renders',
+      'OCD View — Sticky sidebar with synchronised vertical scroll for game labels; improved hover highlighting across sidebar and timeline',
+      'Buzz View — Webview opens on card click (removed separate View button); portrait cards restored; viewport height adjusted to prevent scrolling',
+      'Removed Platform Breakdown chart from Analytics',
+    ],
+  },
+  '1.0.20': {
+    title: "What's New in Ark 1.0.20",
+    changes: [
+      'Advanced Analytics Dashboard — Fully redesigned Analytics tab with animated visualisations: play schedule heatmap, streak tracking, session length histogram, priority breakdown, recommendation source chart, and release year distribution',
+      'Radar & Spider Charts — Gaming Profile (6-axis) and Genre Radar with animated polygon fills',
+      'Animated Chart Components — Count-up numbers, draw-on sparklines, sweep-in donuts, radial gauges, completion funnel, and staggered card entry animations',
+      'Gantt Chart Redesign — Interactive timeline bars with status-colored segments, session overlays, and improved scrolling',
+      'OCD View Performance — Throttled scroll updates, ref-driven hover/tooltip (zero re-renders), memoized footer stats',
+      'Buzz View — Switched news cards from portrait (9:16) to square (1:1) to reduce image clipping; removed Reddit as a news source',
+      'Battlefield 6 Cover Fix — Hardcoded local cover image across all views since API images were broken',
+      'Bug Fix — "Clear All" now also removes custom games (previously only cleared library entries)',
+    ],
+  },
   '1.0.19': {
     title: "What's New in Ark 1.0.19",
     changes: [

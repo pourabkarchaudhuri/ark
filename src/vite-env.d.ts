@@ -59,20 +59,6 @@ interface SessionTrackerAPI {
 }
 
 // News API types (exposed via Electron preload)
-interface RedditPost {
-  id: string;
-  title: string;
-  selftext: string;
-  thumbnail: string;
-  url: string;
-  permalink: string;
-  created_utc: number;
-  subreddit: string;
-  score: number;
-  num_comments: number;
-  preview?: { images?: Array<{ source?: { url: string } }> };
-}
-
 interface RSSFeedItem {
   id: string;
   title: string;
@@ -84,8 +70,29 @@ interface RSSFeedItem {
 }
 
 interface NewsAPI {
-  getRedditNews: (subreddits?: string[], limit?: number) => Promise<RedditPost[]>;
   getRSSFeeds: () => Promise<RSSFeedItem[]>;
+}
+
+// BrowserView-based inline webview API (exposed via Electron preload)
+interface WebviewBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface WebviewAPI {
+  open: (url: string, bounds: WebviewBounds) => Promise<{ success: boolean }>;
+  close: () => Promise<void>;
+  resize: (bounds: WebviewBounds) => Promise<void>;
+  goBack: () => Promise<void>;
+  goForward: () => Promise<void>;
+  reload: () => Promise<void>;
+  openExternal: (url: string) => Promise<void>;
+  onLoading: (callback: (loading: boolean) => void) => () => void;
+  onTitle: (callback: (title: string) => void) => () => void;
+  onError: (callback: (error: string) => void) => () => void;
+  onNavState: (callback: (state: { canGoBack: boolean; canGoForward: boolean }) => void) => () => void;
 }
 
 declare global {
@@ -94,6 +101,7 @@ declare global {
     electron?: ElectronAPI;
     sessionTracker?: SessionTrackerAPI;
     newsApi?: NewsAPI;
+    webviewApi?: WebviewAPI;
   }
 }
 

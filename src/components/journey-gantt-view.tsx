@@ -28,7 +28,7 @@
  *  - Accessibility (ARIA roles + labels)
  */
 import { useMemo, useRef, useState, useCallback, useEffect } from 'react';
-import { useLocation } from 'wouter';
+
 import { motion } from 'framer-motion';
 import { Gamepad2, Clock, Calendar, Search, X, Crosshair, ArrowUpDown, ZoomIn } from 'lucide-react';
 import { JourneyEntry, StatusChangeEntry, GameStatus, GameSession } from '@/types/game';
@@ -55,7 +55,7 @@ export interface GanttGameRow {
   segments: GanttSegment[];
 }
 
-type SortKey = 'addedAt' | 'hours' | 'status' | 'rating';
+type SortKey = 'addedAt' | 'hours' | 'status';
 
 const STATUS_ORDER: Record<GameStatus, number> = {
   'Playing Now': 0,
@@ -174,8 +174,8 @@ function formatTimelineSpan(days: number): string {
   return `${years} years`;
 }
 
-function formatHeaderDate(date: Date): string {
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+function formatMonthLabel(date: Date): string {
+  return date.toLocaleDateString('en-US', { month: 'short' });
 }
 
 function clamp(v: number, min: number, max: number): number {
@@ -279,34 +279,7 @@ interface TooltipData {
 const TOOLTIP_W = 280;
 const TOOLTIP_H = 120;
 
-function GanttTooltip({ data }: { data: TooltipData }) {
-  const isOngoing = new Date(data.endDate).getTime() >= Date.now() - DAY_MS;
-  const style = segmentStyles[data.status];
-
-  // Clamp to viewport edges
-  const left = Math.min(data.x + 16, window.innerWidth - TOOLTIP_W - 8);
-  const top = Math.min(Math.max(8, data.y - 16), window.innerHeight - TOOLTIP_H - 8);
-
-  return (
-    <div
-      className="fixed z-[100] pointer-events-none px-5 py-4 rounded-2xl bg-black/95 backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/60 text-xs max-w-[280px]"
-      style={{ left, top }}
-    >
-      <div className="font-bold text-white text-sm mb-1.5 truncate">{data.title}</div>
-      <div className="flex items-center gap-2 mb-2">
-        <div className={cn('w-2.5 h-2.5 rounded-full', style.legendDot)} />
-        <span className="text-white/80 font-medium">{data.status}</span>
-      </div>
-      <div className="text-white/50 text-[11px]">
-        {formatShortDate(data.startDate)} — {isOngoing ? 'Present' : formatShortDate(data.endDate)}
-      </div>
-      <div className="flex items-center gap-3 mt-2 text-white/40 text-[11px]">
-        <span>{formatDuration(data.durationDays)}</span>
-        {data.hoursPlayed > 0 && <span>{data.hoursPlayed}h played</span>}
-      </div>
-    </div>
-  );
-}
+// GanttTooltip is now rendered via ref-driven DOM updates (no re-render on mouse move)
 
 // ─── Minimap sub-component (with drag-to-scrub) ─────────────────────────────
 
@@ -419,6 +392,7 @@ interface JourneyGanttViewProps {
 
 const ROW_HEIGHT = 72;
 const HEADER_HEIGHT = 56;
+const SIDEBAR_WIDTH = 200;
 const MIN_BAR_WIDTH = 8;
 const BAR_V_PADDING = 16;
 const GAME_INFO_MIN_WIDTH = 130;
@@ -426,13 +400,15 @@ const GAME_PILL_MIN_WIDTH = 70;
 const DURATION_BADGE_MIN_WIDTH = 56;
 const GAP_THRESHOLD_DAYS = 14;
 
-const ALL_STATUSES: GameStatus[] = ['Playing Now', 'Playing', 'Completed', 'On Hold', 'Want to Play'];
+const ALL_STATUSES: GameStatus[] = ['Playing Now', 'Playing'];
+
+/** Statuses excluded from OCD view — these indicate no active play */
+const EXCLUDED_STATUSES: Set<GameStatus> = new Set(['On Hold', 'Completed', 'Want to Play']);
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'addedAt', label: 'Date' },
   { key: 'hours', label: 'Hours' },
   { key: 'status', label: 'Status' },
-  { key: 'rating', label: 'Rating' },
 ];
 
 const ZOOM_PRESETS: { label: string; title: string; value: number }[] = [
@@ -442,10 +418,10 @@ const ZOOM_PRESETS: { label: string; title: string; value: number }[] = [
 ];
 
 export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: JourneyGanttViewProps) {
-  const [, navigate] = useLocation();
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const [tooltip, setTooltip] = useState<TooltipData | null>(null);
+  const sidebarBodyRef = useRef<HTMLDivElement>(null);
 
   // ── Feature state (hydrated from localStorage) ────────────────────────
   const [dayWidth, setDayWidth] = useState(() =>
@@ -460,16 +436,21 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     return new Set();
   });
   const [sortBy, setSortBy] = useState<SortKey>(() =>
-    (['addedAt', 'hours', 'status', 'rating'] as SortKey[]).includes(_savedPrefs.sortBy as SortKey)
+    (['addedAt', 'hours', 'status'] as SortKey[]).includes(_savedPrefs.sortBy as SortKey)
       ? (_savedPrefs.sortBy as SortKey)
       : 'addedAt'
   );
   const [searchQuery, setSearchQuery] = useState('');
-  const [hoveredRowId, setHoveredRowId] = useState<number | null>(null);
   const [focusedRowIdx, setFocusedRowIdx] = useState(-1);
+  // Use refs for hover/scroll state to avoid full re-renders
+  const hoveredRowIdRef = useRef<number | null>(null);
+  const rowEls = useRef<Map<number, HTMLDivElement>>(new Map());
   const [minimapScrollLeft, setMinimapScrollLeft] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(0);
+  const scrollRaf = useRef(0);
   const hasAnimated = useRef(false);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const tooltipDataRef = useRef<TooltipData | null>(null);
 
   // ── Dynamic chart height (fill remaining viewport) ─────────────────
   const [chartHeight, setChartHeight] = useState(500);
@@ -510,7 +491,9 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
   // ── Build + filter + sort rows ─────────────────────────────────────────
   const allRows = useMemo(
-    () => buildGanttRows(journeyEntries, statusHistory),
+    () => buildGanttRows(journeyEntries, statusHistory).filter(
+      (r) => !EXCLUDED_STATUSES.has(r.currentStatus)
+    ),
     [journeyEntries, statusHistory]
   );
 
@@ -532,9 +515,6 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
         break;
       case 'status':
         result = [...result].sort((a, b) => STATUS_ORDER[a.currentStatus] - STATUS_ORDER[b.currentStatus]);
-        break;
-      case 'rating':
-        result = [...result].sort((a, b) => b.rating - a.rating);
         break;
       case 'addedAt':
       default:
@@ -624,9 +604,72 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     [dateToX]
   );
 
+  // ── Hover / tooltip via refs + direct DOM (avoids re-renders) ─────────
+  // Row IDs: positive = timeline row, negative = sidebar row (negated gameId)
+  const applyHoverStyles = useCallback((gameId: number | null) => {
+    const prev = hoveredRowIdRef.current;
+    if (prev === gameId) return;
+    hoveredRowIdRef.current = gameId;
+    // Update opacity/classes via direct DOM
+    rowEls.current.forEach((el, id) => {
+      // Match both sidebar (negative offset) and timeline (positive) rows for the same game
+      const isMatch = gameId !== null && (id === gameId || id === -(gameId + 1));
+      if (gameId === null) {
+        el.style.opacity = '1';
+        el.classList.remove('bg-white/[0.02]');
+      } else if (isMatch) {
+        el.style.opacity = '1';
+        el.classList.add('bg-white/[0.02]');
+      } else {
+        el.style.opacity = '0.4';
+        el.classList.remove('bg-white/[0.02]');
+      }
+    });
+  }, []);
+
+  const handleRowEnter = useCallback((gameId: number) => {
+    applyHoverStyles(gameId);
+  }, [applyHoverStyles]);
+
+  const handleRowLeave = useCallback(() => {
+    applyHoverStyles(null);
+  }, [applyHoverStyles]);
+
+  const updateTooltipEl = useCallback((data: TooltipData | null) => {
+    tooltipDataRef.current = data;
+    const el = tooltipRef.current;
+    if (!el) return;
+    if (!data) {
+      el.style.display = 'none';
+      return;
+    }
+    const left = Math.min(data.x + 16, window.innerWidth - TOOLTIP_W - 8);
+    const top = Math.min(Math.max(8, data.y - 16), window.innerHeight - TOOLTIP_H - 8);
+    el.style.display = 'block';
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+
+    const isOngoing = new Date(data.endDate).getTime() >= Date.now() - DAY_MS;
+    const style = segmentStyles[data.status];
+    el.innerHTML = `
+      <div class="font-bold text-white text-sm mb-1.5 truncate">${data.title}</div>
+      <div class="flex items-center gap-2 mb-2">
+        <div class="w-2.5 h-2.5 rounded-full ${style.legendDot}"></div>
+        <span class="text-white/80 font-medium">${data.status}</span>
+      </div>
+      <div class="text-white/50 text-[11px]">
+        ${formatShortDate(data.startDate)} — ${isOngoing ? 'Present' : formatShortDate(data.endDate)}
+      </div>
+      <div class="flex items-center gap-3 mt-2 text-white/40 text-[11px]">
+        <span>${formatDuration(data.durationDays)}</span>
+        ${data.hoursPlayed > 0 ? `<span>${data.hoursPlayed}h played</span>` : ''}
+      </div>
+    `;
+  }, []);
+
   const handleSegmentHover = useCallback(
     (e: React.MouseEvent, seg: GanttSegment, row: GanttGameRow) => {
-      setTooltip({
+      updateTooltipEl({
         title: row.title,
         status: seg.status,
         startDate: seg.startDate,
@@ -637,10 +680,10 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
         y: e.clientY,
       });
     },
-    []
+    [updateTooltipEl]
   );
 
-  const handleSegmentLeave = useCallback(() => setTooltip(null), []);
+  const handleSegmentLeave = useCallback(() => updateTooltipEl(null), [updateTooltipEl]);
 
   // ── Ctrl+Wheel zoom ───────────────────────────────────────────────────
   useEffect(() => {
@@ -668,6 +711,20 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
   }, [totalDays, dayWidth]);
+
+  // ── Sync sidebar vertical scroll with timeline ─────────────────────────
+  useEffect(() => {
+    const timeline = scrollRef.current;
+    const sidebar = sidebarBodyRef.current;
+    if (!timeline || !sidebar) return;
+    const inner = sidebar.firstElementChild as HTMLElement | null;
+    if (!inner) return;
+    const syncScroll = () => {
+      inner.style.transform = `translateY(-${timeline.scrollTop}px)`;
+    };
+    timeline.addEventListener('scroll', syncScroll, { passive: true });
+    return () => timeline.removeEventListener('scroll', syncScroll);
+  }, []);
 
   // ── Drag-to-scroll ────────────────────────────────────────────────────
   const handleDragStart = useCallback((e: React.MouseEvent) => {
@@ -699,7 +756,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     };
   }, [isDragging]);
 
-  // ── Track viewport width + scroll position for minimap ────────────────
+  // ── Track viewport width + scroll position for minimap (RAF-throttled) ──
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -709,12 +766,19 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       setViewportWidth(el.clientWidth);
     };
 
+    // Throttle scroll updates to one per animation frame
+    const onScroll = () => {
+      cancelAnimationFrame(scrollRaf.current);
+      scrollRaf.current = requestAnimationFrame(update);
+    };
+
     update();
-    el.addEventListener('scroll', update, { passive: true });
+    el.addEventListener('scroll', onScroll, { passive: true });
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => {
-      el.removeEventListener('scroll', update);
+      el.removeEventListener('scroll', onScroll);
+      cancelAnimationFrame(scrollRaf.current);
       ro.disconnect();
     };
   }, []);
@@ -735,9 +799,6 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
           setFocusedRowIdx((prev) => Math.max(prev - 1, 0));
           break;
         case 'Enter':
-          if (focusedRowIdx >= 0 && focusedRowIdx < rows.length) {
-            navigate(`/game/${rows[focusedRowIdx].gameId}`);
-          }
           break;
         case '+':
         case '=':
@@ -755,7 +816,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
     el.addEventListener('keydown', handler);
     return () => el.removeEventListener('keydown', handler);
-  }, [focusedRowIdx, rows, navigate]);
+  }, [focusedRowIdx, rows]);
 
   // ── Focused row auto-scroll ───────────────────────────────────────────
   useEffect(() => {
@@ -787,6 +848,13 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       return next;
     });
   }, []);
+
+  // ── Memoized footer stats (avoid recalculating on every render) ────────
+  const footerStats = useMemo(() => ({
+    gameCount: rows.length,
+    totalHours: rows.reduce((sum, r) => sum + r.hoursPlayed, 0),
+    completedCount: rows.filter((r) => r.currentStatus === 'Completed').length,
+  }), [rows]);
 
   // ── Mark first animation done ─────────────────────────────────────────
   useEffect(() => {
@@ -930,24 +998,98 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
         </div>
       </div>
 
-      {/* ── Gantt container (with drag-to-scroll) ───────────────────── */}
-      <div
-        ref={scrollRef}
-        className={cn(
-          'relative overflow-x-auto overflow-y-auto select-none',
-          isDragging ? 'cursor-grabbing' : 'cursor-grab',
-        )}
-        style={{ height: chartHeight }}
-        onMouseDown={handleDragStart}
-      >
-        <div className="relative" style={{ width: timelineWidth, minWidth: '100%', height: HEADER_HEIGHT + rows.length * ROW_HEIGHT + 24 }}>
+      {/* ── Gantt container (sidebar + scrollable timeline) ──────────── */}
+      <div className="flex" style={{ height: chartHeight }}>
 
-          {/* ── Date header ──────────────────────────────────────────── */}
+        {/* ── Sticky sidebar: game labels ─────────────────────────── */}
+        <div
+          className="flex-shrink-0 overflow-hidden border-r border-white/[0.06] bg-black/40 backdrop-blur-sm z-20"
+          style={{ width: SIDEBAR_WIDTH }}
+        >
+          {/* Sidebar header (aligns with timeline date header) */}
           <div
-            className="sticky top-0 z-20 border-b border-white/[0.06]"
+            className="flex items-end px-3 pb-2 border-b border-white/[0.06] bg-black/60"
             style={{ height: HEADER_HEIGHT }}
           >
-            <div className="absolute inset-0 bg-black/60 backdrop-blur-md" />
+            <span className="text-[10px] text-white/30 font-medium uppercase tracking-wider">Games</span>
+          </div>
+
+          {/* Sidebar rows — synced scroll with timeline */}
+          <div
+            className="overflow-hidden"
+            ref={sidebarBodyRef}
+            style={{ height: chartHeight - HEADER_HEIGHT }}
+          >
+            <div style={{ height: rows.length * ROW_HEIGHT + 24 }}>
+              {rows.map((row, rowIndex) => {
+                const isFocused = focusedRowIdx === rowIndex;
+                return (
+                  <div
+                    key={row.gameId}
+                    className={cn(
+                      'flex items-center gap-2.5 px-3 border-b border-white/[0.03] transition-[opacity] duration-200',
+                      isFocused && 'bg-fuchsia-500/5',
+                    )}
+                    style={{ height: ROW_HEIGHT }}
+                    onMouseEnter={() => handleRowEnter(row.gameId)}
+                    onMouseLeave={handleRowLeave}
+                    ref={(el) => {
+                      // Register sidebar rows for hover dim effect (negative key avoids collision with timeline row refs)
+                      const key = -(row.gameId + 1); // offset+negate to avoid 0 collision
+                      if (el) rowEls.current.set(key, el);
+                      else rowEls.current.delete(key);
+                    }}
+                  >
+                    {/* Thumbnail */}
+                    <div className="flex-shrink-0 w-8 h-11 rounded-md overflow-hidden bg-white/5">
+                      {(getHardcodedCover(row.title) || row.coverUrl) ? (
+                        <img
+                          src={getHardcodedCover(row.title) || row.coverUrl}
+                          alt={row.title}
+                          className="w-full h-full object-cover"
+                          loading="lazy"
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <Gamepad2 className="w-3.5 h-3.5 text-white/20" />
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Title + hours */}
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[11px] font-semibold text-white/80 truncate leading-tight">
+                        {row.title}
+                      </div>
+                      <div className="text-[9px] text-white/30 mt-0.5">
+                        {row.hoursPlayed}h played
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Scrollable timeline area ────────────────────────────── */}
+        <div
+          ref={scrollRef}
+          className={cn(
+            'relative flex-1 overflow-x-auto overflow-y-auto select-none',
+            isDragging ? 'cursor-grabbing' : 'cursor-grab',
+          )}
+          onMouseDown={handleDragStart}
+        >
+          <div className="relative" style={{ width: timelineWidth, minWidth: '100%', height: HEADER_HEIGHT + rows.length * ROW_HEIGHT + 24 }}>
+
+            {/* ── Date header ──────────────────────────────────────────── */}
+            <div
+              className="sticky top-0 z-20 border-b border-white/[0.06]"
+              style={{ height: HEADER_HEIGHT }}
+            >
+              <div className="absolute inset-0 bg-black/60 backdrop-blur-md" />
 
             {months.map((month, i) => {
               const x = dateToX(month.toISOString());
@@ -969,7 +1111,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                       </span>
                     )}
                     <span className="text-xs text-white/50 font-medium">
-                      {formatHeaderDate(month)}
+                      {formatMonthLabel(month)}
                     </span>
                   </div>
                   <div
@@ -982,7 +1124,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                       style={{ left: midX, height: HEADER_HEIGHT }}
                     >
                       <span className="text-[10px] text-white/25 font-medium">
-                        {formatHeaderDate(mid)}
+                        15
                       </span>
                     </div>
                   )}
@@ -1010,31 +1152,29 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
           {rows.map((row, rowIndex) => {
             const infoSegIdx = getInfoSegmentIndex(row);
-            const isHovered = hoveredRowId === row.gameId;
             const isFocused = focusedRowIdx === rowIndex;
-            const isDimmed = hoveredRowId !== null && !isHovered;
             const gameSessions = sessionsByGame.get(row.gameId);
 
             return (
               <div
                 key={row.gameId}
                 data-row-index={rowIndex}
+                ref={(el) => {
+                  if (el) rowEls.current.set(row.gameId, el);
+                  else rowEls.current.delete(row.gameId);
+                }}
                 role="row"
                 aria-label={`${row.title}: ${row.currentStatus}, ${row.hoursPlayed}h played`}
                 className={cn(
-                  'relative group/row transition-all duration-200 cursor-pointer',
-                  isDimmed ? 'opacity-40' : 'opacity-100',
-                  isHovered && 'bg-white/[0.02]',
+                  'relative group/row transition-[opacity] duration-200',
                   isFocused && 'border-l-2 border-l-fuchsia-500/50',
                 )}
                 style={{ height: ROW_HEIGHT }}
                 onClick={() => {
-                  // Skip navigation if we just finished a drag
                   if (hasDragged.current) { hasDragged.current = false; return; }
-                  navigate(`/game/${row.gameId}`);
                 }}
-                onMouseEnter={() => setHoveredRowId(row.gameId)}
-                onMouseLeave={() => setHoveredRowId(null)}
+                onMouseEnter={() => handleRowEnter(row.gameId)}
+                onMouseLeave={handleRowLeave}
               >
                 {/* Vertical month gridlines */}
                 {months.map((month, mi) => (
@@ -1106,12 +1246,11 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                       role="gridcell"
                       aria-label={`${row.title}: ${seg.status} from ${formatShortDate(seg.startDate)} to ${isOngoing ? 'Present' : formatShortDate(seg.endDate)}, ${formatDuration(segDays)}`}
                       className={cn(
-                        'absolute rounded-full cursor-pointer transition-[filter,box-shadow] duration-200',
+                        'absolute rounded-full transition-[filter,box-shadow] duration-200',
                         'hover:brightness-110 hover:shadow-lg hover:scale-y-[1.04]',
                         style.bar,
                         style.glow,
                         style.border,
-                        isHovered && 'brightness-110',
                       )}
                       style={{
                         left,
@@ -1128,7 +1267,6 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                       onClick={(e) => {
                         e.stopPropagation();
                         if (hasDragged.current) { hasDragged.current = false; return; }
-                        navigate(`/game/${row.gameId}`);
                       }}
                     >
                       {/* Shimmer overlay */}
@@ -1253,6 +1391,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
           })}
         </div>
       </div>
+      </div> {/* end flex wrapper (sidebar + timeline) */}
 
       {/* ── Minimap ─────────────────────────────────────────────────── */}
       <GanttMinimap
@@ -1268,14 +1407,14 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       <div className="flex items-center gap-5 px-4 md:px-10 mt-4 text-[11px] text-white/35 flex-wrap">
         <span className="flex items-center gap-1.5">
           <Calendar className="w-3 h-3" />
-          {rows.length} game{rows.length !== 1 ? 's' : ''} tracked
+          {footerStats.gameCount} game{footerStats.gameCount !== 1 ? 's' : ''} tracked
         </span>
         <span className="flex items-center gap-1.5">
           <Clock className="w-3 h-3" />
-          {rows.reduce((sum, r) => sum + r.hoursPlayed, 0)}h total
+          {footerStats.totalHours}h total
         </span>
         <span>
-          {rows.filter((r) => r.currentStatus === 'Completed').length} completed
+          {footerStats.completedCount} completed
         </span>
       </div>
 
@@ -1291,8 +1430,12 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
         </button>
       )}
 
-      {/* Floating tooltip */}
-      {tooltip && <GanttTooltip data={tooltip} />}
+      {/* Floating tooltip (ref-driven, no re-render on mouse move) */}
+      <div
+        ref={tooltipRef}
+        className="fixed z-[100] pointer-events-none px-5 py-4 rounded-2xl bg-black/95 backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/60 text-xs max-w-[280px]"
+        style={{ display: 'none' }}
+      />
     </div>
   );
 }

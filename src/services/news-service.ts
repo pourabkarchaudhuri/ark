@@ -3,8 +3,7 @@
  *
  * Aggregates gaming news from multiple free, keyless sources:
  *   1. Steam News API — news from the user's library games + trending Steam games
- *   2. Reddit JSON API — hot posts from r/gaming, r/pcgaming, r/Games, r/gamernews
- *   3. RSS feeds — PC Gamer, Rock Paper Shotgun, Eurogamer, IGN, Ars Technica
+ *   2. RSS feeds — PC Gamer, Rock Paper Shotgun, Eurogamer, IGN, Ars Technica
  *
  * Game IDs are resolved dynamically at runtime — nothing is hardcoded.
  * All items are normalised into a common `NewsItem` interface, deduplicated,
@@ -225,115 +224,6 @@ async function fetchSteamNews(): Promise<NewsItem[]> {
   return results;
 }
 
-/** Fetch hot posts from Reddit gaming subreddits. */
-async function fetchRedditNews(): Promise<NewsItem[]> {
-  const results: NewsItem[] = [];
-
-  // Try Electron IPC first (avoids CORS)
-  if (typeof window !== 'undefined' && window.newsApi?.getRedditNews) {
-    try {
-      const posts = await window.newsApi.getRedditNews(['gaming', 'pcgaming', 'Games', 'gamernews'], 15);
-      for (const post of posts) {
-        if (!isLikelyEnglish(post.title)) continue;
-        const imageUrl = getRedditImageUrl(post);
-        results.push({
-          id: `reddit-${post.id}`,
-          title: post.title,
-          summary: stripBBCodeAndHTML(post.selftext || post.title, 500),
-          source: `Reddit r/${post.subreddit}`,
-          imageUrl,
-          url: `https://www.reddit.com${post.permalink}`,
-          publishedAt: post.created_utc,
-        });
-      }
-      return results;
-    } catch (err) {
-      console.warn('[NewsService] Electron Reddit IPC failed, falling back to proxy:', err);
-    }
-  }
-
-  // Fallback: Vite dev proxy
-  for (const sub of ['gaming', 'pcgaming', 'Games', 'gamernews']) {
-    try {
-      const response = await fetch(`/api/reddit/r/${sub}/hot.json?limit=15`);
-      if (!response.ok) continue;
-      const data = await response.json();
-      const posts = data?.data?.children ?? [];
-      for (const post of posts) {
-        const d = post.data;
-        if (!d || d.stickied) continue;
-        const title = d.title ?? '';
-        if (!isLikelyEnglish(String(title))) continue;
-        const imageUrl = getRedditImageUrlFromData(d);
-        results.push({
-          id: `reddit-${d.id}`,
-          title: String(title),
-          summary: stripBBCodeAndHTML(d.selftext || d.title || '', 500),
-          source: `Reddit r/${d.subreddit ?? sub}`,
-          imageUrl,
-          url: `https://www.reddit.com${d.permalink ?? ''}`,
-          publishedAt: d.created_utc ?? 0,
-        });
-      }
-    } catch {
-      // Try next subreddit
-    }
-  }
-
-  return results;
-}
-
-/** Extract the best (highest resolution) image URL from a Reddit post (Electron IPC shape). */
-function getRedditImageUrl(post: {
-  thumbnail: string;
-  url: string;
-  preview?: {
-    images?: Array<{
-      source?: { url: string; width?: number };
-      resolutions?: Array<{ url: string; width?: number }>;
-    }>;
-  };
-}): string | undefined {
-  // Prefer the source image from preview (original resolution, usually 1080p+)
-  const previewSource = post.preview?.images?.[0]?.source?.url;
-  if (previewSource) return previewSource.replace(/&amp;/g, '&');
-  // Try the highest resolution available
-  const resolutions = post.preview?.images?.[0]?.resolutions;
-  if (resolutions && resolutions.length > 0) {
-    const best = resolutions[resolutions.length - 1]; // Last = highest res
-    if (best?.url) return best.url.replace(/&amp;/g, '&');
-  }
-  // Fallback: if URL itself is an image
-  if (/\.(jpg|jpeg|png|gif|webp)(\?|$)/i.test(post.url)) return post.url;
-  // Fallback: thumbnail (may be "self", "default", "nsfw", or a URL)
-  if (post.thumbnail && post.thumbnail.startsWith('http')) return post.thumbnail;
-  return undefined;
-}
-
-/** Same as above but from raw Reddit JSON data shape. */
-function getRedditImageUrlFromData(d: Record<string, unknown>): string | undefined {
-  const preview = d.preview as {
-    images?: Array<{
-      source?: { url: string; width?: number };
-      resolutions?: Array<{ url: string; width?: number }>;
-    }>;
-  } | undefined;
-  // Prefer source image (original resolution)
-  const previewSource = preview?.images?.[0]?.source?.url;
-  if (previewSource) return previewSource.replace(/&amp;/g, '&');
-  // Highest resolution fallback
-  const resolutions = preview?.images?.[0]?.resolutions;
-  if (resolutions && resolutions.length > 0) {
-    const best = resolutions[resolutions.length - 1];
-    if (best?.url) return best.url.replace(/&amp;/g, '&');
-  }
-  const url = String(d.url ?? '');
-  if (/\.(jpg|jpeg|png|gif|webp)(\?|$)/i.test(url)) return url;
-  const thumbnail = String(d.thumbnail ?? '');
-  if (thumbnail.startsWith('http')) return thumbnail;
-  return undefined;
-}
-
 // ─── RSS Feed Fetcher ────────────────────────────────────────────────────────
 
 /** Fetch news from RSS feeds via Electron IPC (PC Gamer, RPS, Eurogamer, etc). */
@@ -374,15 +264,13 @@ export async function fetchAllNews(force = false): Promise<NewsItem[]> {
   }
 
   // Fetch from all sources in parallel
-  const [steamItems, redditItems, rssItems] = await Promise.allSettled([
+  const [steamItems, rssItems] = await Promise.allSettled([
     fetchSteamNews(),
-    fetchRedditNews(),
     fetchRSSNews(),
   ]);
 
   const allItems: NewsItem[] = [
     ...(steamItems.status === 'fulfilled' ? steamItems.value : []),
-    ...(redditItems.status === 'fulfilled' ? redditItems.value : []),
     ...(rssItems.status === 'fulfilled' ? rssItems.value : []),
   ];
 

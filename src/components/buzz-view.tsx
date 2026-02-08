@@ -1,13 +1,16 @@
 /**
- * Buzz View Component — Instagram Stories Style
+ * Buzz View Component — News Stories with Inline Webview
  *
- * Displays gaming news from Steam and Reddit as portrait-oriented stories
- * that fill the viewport height. Features segmented progress bars,
- * auto-advance, keyboard navigation, and always-visible nav arrows.
+ * Displays gaming news from Steam and RSS feeds as portrait story cards
+ * left-aligned in the view. Clicking a card opens the source article in
+ * an Electron webview panel on the right side.
+ *
+ * Features segmented progress bars, auto-advance, keyboard navigation,
+ * always-visible nav arrows, and an inline webview reader.
  */
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo, forwardRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Newspaper, RefreshCw, ExternalLink, Clock, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Newspaper, RefreshCw, ExternalLink, Clock, ChevronLeft, ChevronRight, X, Loader2, Globe, ArrowLeft, ArrowRight, RotateCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { BlurImage } from '@/components/ui/apple-cards-carousel';
 import { fetchAllNews, clearNewsCache, NewsItem } from '@/services/news-service';
@@ -111,15 +114,187 @@ function StoryProgressBar({
   );
 }
 
+// ─── Webview Panel ──────────────────────────────────────────────────────────
+
+function WebviewPanel({
+  url,
+  onClose,
+}: {
+  url: string;
+  onClose: () => void;
+}) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [pageTitle, setPageTitle] = useState('');
+  const [canGoBack, setCanGoBack] = useState(false);
+  const [canGoForward, setCanGoForward] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // ── Open / close BrowserView via IPC ──────────────────────────
+  useEffect(() => {
+    const api = window.webviewApi;
+    const el = contentRef.current;
+    if (!api || !el) return;
+
+    // Compute the pixel bounds of the content area
+    const getBounds = () => {
+      const r = el.getBoundingClientRect();
+      return {
+        x: Math.round(r.x),
+        y: Math.round(r.y),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+      };
+    };
+
+    // Open the BrowserView at the correct position
+    api.open(url, getBounds());
+
+    // Subscribe to events from the main process
+    const unsubs = [
+      api.onLoading((loading) => {
+        setIsLoading(loading);
+        if (loading) setLoadError(null);
+      }),
+      api.onTitle((title) => setPageTitle(title)),
+      api.onError((error) => {
+        setIsLoading(false);
+        setLoadError(error);
+      }),
+      api.onNavState((state) => {
+        setCanGoBack(state.canGoBack);
+        setCanGoForward(state.canGoForward);
+      }),
+    ];
+
+    // Keep BrowserView in sync when the container resizes / moves
+    const updateBounds = () => api.resize(getBounds());
+    const observer = new ResizeObserver(updateBounds);
+    observer.observe(el);
+    window.addEventListener('resize', updateBounds);
+
+    // Safety timeout — hide loading spinner after 20s
+    const safetyTimer = setTimeout(() => setIsLoading(false), 20000);
+
+    return () => {
+      clearTimeout(safetyTimer);
+      observer.disconnect();
+      window.removeEventListener('resize', updateBounds);
+      unsubs.forEach((u) => u());
+      api.close();
+    };
+  }, [url]);
+
+  // ── Handlers ──────────────────────────────────────────────────
+  const handleBack = useCallback(() => window.webviewApi?.goBack(), []);
+  const handleForward = useCallback(() => window.webviewApi?.goForward(), []);
+
+  const handleReload = useCallback(() => {
+    setLoadError(null);
+    setIsLoading(true);
+    window.webviewApi?.reload();
+  }, []);
+
+  const handleOpenExternal = useCallback(() => {
+    window.webviewApi?.openExternal(url);
+  }, [url]);
+
+  return (
+    <div className="flex-1 flex flex-col min-w-0 min-h-0 rounded-2xl overflow-hidden border border-white/10 bg-black/60 backdrop-blur-sm shadow-2xl shadow-black/40">
+      {/* Toolbar */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-black/80 border-b border-white/[0.06] flex-shrink-0">
+        {/* Navigation buttons */}
+        <div className="flex items-center gap-0.5">
+          <button
+            onClick={handleBack}
+            disabled={!canGoBack}
+            className={cn(
+              'w-7 h-7 rounded-lg flex items-center justify-center transition-colors',
+              canGoBack ? 'text-white/50 hover:text-white hover:bg-white/10' : 'text-white/15 cursor-not-allowed',
+            )}
+            title="Go back"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={handleForward}
+            disabled={!canGoForward}
+            className={cn(
+              'w-7 h-7 rounded-lg flex items-center justify-center transition-colors',
+              canGoForward ? 'text-white/50 hover:text-white hover:bg-white/10' : 'text-white/15 cursor-not-allowed',
+            )}
+            title="Go forward"
+          >
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={handleReload}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-colors"
+            title="Reload"
+          >
+            <RotateCw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} />
+          </button>
+        </div>
+
+        {/* URL / title bar */}
+        <div className="flex-1 min-w-0 flex items-center gap-2 px-3 py-1 rounded-lg bg-white/5 border border-white/[0.06]">
+          <Globe className="w-3 h-3 text-white/30 flex-shrink-0" />
+          <span className="text-[11px] text-white/50 truncate">
+            {pageTitle || url}
+          </span>
+          {isLoading && (
+            <Loader2 className="w-3 h-3 text-fuchsia-400 animate-spin flex-shrink-0" />
+          )}
+        </div>
+
+        {/* Open external */}
+        <button
+          onClick={handleOpenExternal}
+          className="w-7 h-7 rounded-lg flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 transition-colors"
+          title="Open in browser"
+        >
+          <ExternalLink className="w-3.5 h-3.5" />
+        </button>
+
+        {/* Close button */}
+        <button
+          onClick={onClose}
+          className="w-7 h-7 rounded-lg flex items-center justify-center text-white/40 hover:text-white hover:bg-red-500/20 transition-colors"
+          title="Close webview"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Content area — BrowserView is positioned over this div by the main process */}
+      <div ref={contentRef} className="flex-1 relative" style={{ minHeight: 0 }}>
+        {isLoading && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60 pointer-events-none">
+            <div className="flex flex-col items-center gap-3">
+              <Loader2 className="w-8 h-8 text-fuchsia-500 animate-spin" />
+              <span className="text-xs text-white/40">Loading article...</span>
+            </div>
+          </div>
+        )}
+        {loadError && !isLoading && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60">
+            <div className="flex flex-col items-center gap-3 text-center">
+              <span className="text-sm text-white/50">{loadError}</span>
+              <button onClick={handleReload} className="text-xs text-fuchsia-400 hover:text-fuchsia-300">
+                Try again
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Story Card ─────────────────────────────────────────────────────────────
 
-function StoryCard({
-  item,
-  direction,
-}: {
-  item: NewsItem;
-  direction: number;
-}) {
+const StoryCard = forwardRef<HTMLDivElement, { item: NewsItem; direction: number }>(
+  function StoryCard({ item, direction }, ref) {
   const [imgSrc, setImgSrc] = useState(item.imageUrl || FALLBACK_IMAGE);
   const steamFallback = getSteamFallbackFromSource(item.source, item.imageUrl);
 
@@ -157,6 +332,7 @@ function StoryCard({
 
   return (
     <motion.div
+      ref={ref}
       custom={direction}
       variants={variants}
       initial="enter"
@@ -203,13 +379,14 @@ function StoryCard({
           {item.summary}
         </p>
 
-        {/* Footer: date + open link */}
+        {/* Footer: date + Read more */}
         <div className="flex items-center justify-between pt-1">
           <div className="flex items-center gap-1.5 text-[10px] text-white/35">
             <Clock className="w-3 h-3" />
             <span>{formatRelativeDate(item.publishedAt)}</span>
           </div>
 
+          {/* Read more — opens in external browser */}
           <button
             onClick={handleOpenLink}
             className="flex items-center gap-1 text-[10px] text-white/40 hover:text-white transition-colors group"
@@ -221,7 +398,7 @@ function StoryCard({
       </div>
     </motion.div>
   );
-}
+});
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 
@@ -234,6 +411,7 @@ export function BuzzView() {
   const [progress, setProgress] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
   const [direction, setDirection] = useState(1);
+  const [viewUrl, setViewUrl] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const progressInterval = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -332,50 +510,67 @@ export function BuzzView() {
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
         goPrev();
+      } else if (e.key === 'Escape' && viewUrl) {
+        e.preventDefault();
+        setViewUrl(null);
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [goNext, goPrev]);
+  }, [goNext, goPrev, viewUrl]);
 
-  // ─── Click zones ──────────────────────────────────────────────
+  // ─── Card click → open webview ────────────────────────────────
 
-  const handleClickZone = useCallback(
+  const handleCardClick = useCallback(
     (e: React.MouseEvent) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
       if ((e.target as HTMLElement).closest('button, a')) return;
-      const x = e.clientX - rect.left;
-      if (x < rect.width * 0.35) {
-        goPrev();
-      } else {
-        goNext();
+      const story = stories[currentIndex];
+      if (story) {
+        setViewUrl(story.url);
+        setIsPaused(true);
       }
     },
-    [goNext, goPrev],
+    [stories, currentIndex],
   );
+
+  const handleCloseView = useCallback(() => {
+    setViewUrl(null);
+  }, []);
 
   // ─── Loading state ────────────────────────────────────────────
 
   if (loading && news.length === 0) {
     return (
-      <div className="relative w-full" style={{ height: 'calc(100vh - 120px)' }}>
-        <div className="relative z-10 flex items-center justify-center w-full h-full">
-          <div className="relative h-full max-h-[800px] aspect-[9/16] rounded-2xl overflow-hidden bg-black/40 border border-white/10 backdrop-blur-sm">
-            <div className="flex gap-[3px] w-full px-3 pt-3 pb-1">
-              {Array.from({ length: 8 }).map((_, i) => (
-                <div key={i} className="flex-1 h-[2.5px] rounded-full bg-white/10 animate-pulse" />
-              ))}
+      <div className="relative w-full overflow-hidden" style={{ height: 'calc(100vh - 180px)' }}>
+        <div className="relative z-10 flex items-stretch w-full h-full px-6 py-2 gap-4 overflow-hidden">
+          {/* Left: skeleton card */}
+          <div className="flex items-center gap-3 flex-shrink-0">
+            <div className="w-9" /> {/* arrow placeholder */}
+            <div className="relative h-full aspect-[9/16] rounded-2xl overflow-hidden bg-black/40 border border-white/10 backdrop-blur-sm">
+              <div className="flex gap-[3px] w-full px-3 pt-3 pb-1">
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <div key={i} className="flex-1 h-[2.5px] rounded-full bg-white/10 animate-pulse" />
+                ))}
+              </div>
+              <div className="absolute bottom-0 left-0 right-0 p-5 md:p-6">
+                <div className="h-4 w-20 bg-white/10 rounded-full animate-pulse mb-4" />
+                <div className="h-5 w-4/5 bg-white/10 rounded animate-pulse mb-2" />
+                <div className="h-5 w-3/5 bg-white/10 rounded animate-pulse mb-4" />
+                <div className="h-3.5 w-full bg-white/5 rounded animate-pulse mb-1.5" />
+                <div className="h-3.5 w-4/5 bg-white/5 rounded animate-pulse mb-1.5" />
+                <div className="h-3.5 w-3/5 bg-white/5 rounded animate-pulse mb-1.5" />
+                <div className="h-3.5 w-2/3 bg-white/5 rounded animate-pulse" />
+              </div>
             </div>
-            <div className="absolute bottom-0 left-0 right-0 p-5 md:p-6">
-              <div className="h-4 w-20 bg-white/10 rounded-full animate-pulse mb-4" />
-              <div className="h-5 w-4/5 bg-white/10 rounded animate-pulse mb-2" />
-              <div className="h-5 w-3/5 bg-white/10 rounded animate-pulse mb-4" />
-              <div className="h-3.5 w-full bg-white/5 rounded animate-pulse mb-1.5" />
-              <div className="h-3.5 w-4/5 bg-white/5 rounded animate-pulse mb-1.5" />
-              <div className="h-3.5 w-3/5 bg-white/5 rounded animate-pulse mb-1.5" />
-              <div className="h-3.5 w-2/3 bg-white/5 rounded animate-pulse" />
+            <div className="w-9" /> {/* arrow placeholder */}
+          </div>
+
+          {/* Right: empty placeholder */}
+          <div className="flex-1 h-full rounded-2xl border border-white/[0.06] bg-white/[0.02] flex items-center justify-center">
+            <div className="flex flex-col items-center gap-2 text-white/15">
+              <Globe className="w-8 h-8" />
+              <span className="text-xs">Webview</span>
             </div>
           </div>
         </div>
@@ -387,7 +582,7 @@ export function BuzzView() {
 
   if (error || news.length === 0) {
     return (
-      <div className="relative w-full" style={{ height: 'calc(100vh - 120px)' }}>
+      <div className="relative w-full" style={{ height: 'calc(100vh - 180px)' }}>
         <div className="relative z-10 flex flex-col items-center justify-center h-full text-center">
           <div className="w-20 h-20 rounded-full bg-white/5 flex items-center justify-center mb-6 shadow-lg shadow-fuchsia-500/10 backdrop-blur-sm">
             <Newspaper className="w-10 h-10 text-fuchsia-500" />
@@ -396,7 +591,7 @@ export function BuzzView() {
             {error ? 'Oops!' : 'No News Yet'}
           </h2>
           <p className="text-white/60 mb-6 max-w-md">
-            {error || 'Gaming news will appear here once fetched from Steam and Reddit.'}
+            {error || 'Gaming news will appear here once fetched from Steam and RSS feeds.'}
           </p>
           <Button
             onClick={() => loadNews(true)}
@@ -416,12 +611,12 @@ export function BuzzView() {
 
   return (
     <div
-      className="relative w-full"
-      style={{ height: 'calc(100vh - 120px)' }}
+      className="relative w-full overflow-hidden"
+      style={{ height: 'calc(100vh - 180px)' }}
     >
-      <div className="relative z-10 flex items-center justify-center w-full h-full">
-        {/* Outer wrapper for card + arrows */}
-        <div className="relative flex items-center gap-3 h-full max-h-[800px]">
+      <div className="relative z-10 flex items-stretch w-full h-full px-6 py-2 gap-4 overflow-hidden">
+        {/* ── Left column: card + arrows ───────────────────────────── */}
+        <div className="flex items-center gap-3 flex-shrink-0">
           {/* Left arrow */}
           <button
             onClick={goPrev}
@@ -437,7 +632,7 @@ export function BuzzView() {
             <ChevronLeft className="w-5 h-5" />
           </button>
 
-          {/* The story card — height-driven, aspect 9:16 */}
+          {/* The story card — height-driven, portrait 9:16 */}
           <div
             ref={containerRef}
             className={cn(
@@ -446,9 +641,9 @@ export function BuzzView() {
               'cursor-pointer select-none',
               'shadow-2xl shadow-black/60',
             )}
-            onClick={handleClickZone}
+            onClick={handleCardClick}
             onMouseEnter={() => setIsPaused(true)}
-            onMouseLeave={() => setIsPaused(false)}
+            onMouseLeave={() => { if (!viewUrl) setIsPaused(false); }}
           >
             {/* Progress segments */}
             <div className="absolute top-0 left-0 right-0 z-40">
@@ -492,6 +687,18 @@ export function BuzzView() {
             <ChevronRight className="w-5 h-5" />
           </button>
         </div>
+
+        {/* ── Right column: webview panel or placeholder ──────────── */}
+        {viewUrl ? (
+          <WebviewPanel url={viewUrl} onClose={handleCloseView} />
+        ) : (
+          <div className="flex-1 h-full rounded-2xl border border-white/[0.06] bg-white/[0.02] flex items-center justify-center">
+            <div className="flex flex-col items-center gap-3 text-white/15">
+              <Globe className="w-10 h-10" />
+              <span className="text-xs font-medium">Click on a story card to read it here, ad-free</span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
