@@ -19,7 +19,7 @@ import {
 } from '@/components/ui/select';
 import { LibraryGameEntry, GameStatus, GamePriority } from '@/types/game';
 import { libraryStore } from '@/services/library-store';
-import { cn } from '@/lib/utils';
+import { cn, formatHours } from '@/lib/utils';
 
 interface MyProgressTabProps {
   gameId: number;
@@ -308,7 +308,7 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
                 Hours Played
               </Label>
               <span className="text-lg font-semibold text-fuchsia-400">
-                {hoursPlayed}h
+                {formatHours(hoursPlayed)}
               </span>
             </div>
             <Slider

@@ -1237,24 +1237,41 @@ app.whenReady().then(async () => {
 
   // ---- System Tray ----
   try {
-    const iconFile = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
-    let iconPath: string;
+    // Build a list of candidate paths to search for the tray icon.
+    // Prefer .ico on Windows, fall back to .png (any platform).
+    const candidates: string[] = [];
+    const projectRoot = path.join(__dirname, '../..');
+
     if (app.isPackaged) {
-      // In packaged builds, icon is asarUnpacked
-      iconPath = path.join(process.resourcesPath, 'app.asar.unpacked', 'build', iconFile);
-      // Fallback to resources dir
-      if (!fs.existsSync(iconPath)) {
-        iconPath = path.join(process.resourcesPath, 'build', iconFile);
+      const unpacked = path.join(process.resourcesPath, 'app.asar.unpacked', 'build');
+      const resDir   = path.join(process.resourcesPath, 'build');
+      if (process.platform === 'win32') {
+        candidates.push(path.join(unpacked, 'icon.ico'), path.join(resDir, 'icon.ico'));
       }
+      candidates.push(
+        path.join(unpacked, 'icon.png'),
+        path.join(unpacked, 'icon-256.png'),
+        path.join(resDir,   'icon.png'),
+        path.join(resDir,   'icon-256.png'),
+      );
     } else {
-      iconPath = path.join(__dirname, '../../build', iconFile);
+      if (process.platform === 'win32') {
+        candidates.push(path.join(projectRoot, 'build', 'icon.ico'));
+      }
+      candidates.push(
+        path.join(projectRoot, 'build', 'icon.png'),
+        path.join(projectRoot, 'build', 'icon-256.png'),
+      );
     }
 
+    let iconPath = candidates.find((p) => fs.existsSync(p));
+    console.log('[Tray] Icon candidates:', candidates, '| resolved:', iconPath);
+
     let trayIcon;
-    if (fs.existsSync(iconPath)) {
+    if (iconPath) {
       trayIcon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
     } else {
-      console.warn('[Tray] Icon not found at', iconPath, '- using empty icon');
+      console.warn('[Tray] No icon file found in any candidate path - using empty icon');
       trayIcon = nativeImage.createEmpty();
     }
 

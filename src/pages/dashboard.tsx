@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { GameDialog } from '@/components/game-dialog';
 import { CustomGameDialog } from '@/components/custom-game-dialog';
+import { CustomGameProgressDialog } from '@/components/custom-game-progress-dialog';
 import { GameCard } from '@/components/game-card';
 import { SkeletonGrid } from '@/components/game-card-skeleton';
 // GameDetailPanel removed - now using dedicated /game/:id route
@@ -93,6 +94,9 @@ export function Dashboard() {
 
   // Custom game dialog state
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
+  
+  // Custom game progress dialog state
+  const [customProgressGameId, setCustomProgressGameId] = useState<number | null>(null);
   
   // AI Chat panel state
   const [isAIChatOpen, setIsAIChatOpen] = useState(false);
@@ -321,6 +325,11 @@ export function Dashboard() {
   const handleEdit = useCallback((game: Game) => {
     setEditingGame(game);
     setIsDialogOpen(true);
+  }, []);
+
+  // Handle clicking a custom game card — opens progress dialog
+  const handleCustomGameClick = useCallback((gameId: number) => {
+    setCustomProgressGameId(gameId);
   }, []);
 
   // Handle quick status change from card badge
@@ -817,6 +826,7 @@ export function Dashboard() {
                           game={gameWithOptionalRank}
                           onEdit={() => handleEdit(game)}
                           onDelete={() => handleDeleteClick(game)}
+                          onClick={game.isCustom && game.steamAppId ? () => handleCustomGameClick(game.steamAppId!) : undefined}
                           isInLibrary={game.isInLibrary}
                           isPlayingNow={game.steamAppId ? isPlayingNow(game.steamAppId) : false}
                           onAddToLibrary={() => handleAddToLibrary(game)}
@@ -862,6 +872,15 @@ export function Dashboard() {
           setIsCustomGameDialogOpen(false);
         }}
       />
+
+      {/* Custom Game Progress Dialog */}
+      {customProgressGameId !== null && (
+        <CustomGameProgressDialog
+          open={customProgressGameId !== null}
+          onOpenChange={(open) => { if (!open) setCustomProgressGameId(null); }}
+          gameId={customProgressGameId}
+        />
+      )}
 
       {/* Delete Confirmation Dialog */}
       <ConfirmDialog

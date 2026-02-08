@@ -148,6 +148,8 @@ export function UpdateSnackbar() {
 
   const handleDownload = useCallback(async () => {
     if (!hasUpdater) return;
+    // Guard: don't trigger if already downloading or installed
+    if (state === 'downloading' || state === 'ready') return;
     try {
       setState('downloading');
       await window.updater!.downloadUpdate();
@@ -156,7 +158,7 @@ export function UpdateSnackbar() {
       setState('error');
       setErrorMessage('Failed to download update');
     }
-  }, [hasUpdater]);
+  }, [hasUpdater, state]);
 
   const handleInstall = useCallback(() => {
     if (!hasUpdater) return;

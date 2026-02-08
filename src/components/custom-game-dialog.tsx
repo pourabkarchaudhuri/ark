@@ -112,8 +112,8 @@ export function CustomGameDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
+      <DialogContent className="max-w-md max-h-[85vh] flex flex-col overflow-hidden">
+        <DialogHeader className="flex-shrink-0">
           <div className="flex items-center gap-2">
             <Plus className="h-5 w-5 text-fuchsia-400" />
             <DialogTitle>Add Custom Game</DialogTitle>
@@ -123,129 +123,133 @@ export function CustomGameDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-          {/* Title */}
-          <div className="space-y-2">
-            <Label htmlFor="title">
-              Game Title <span className="text-red-400">*</span>
-            </Label>
-            <Input
-              id="title"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Enter game title..."
-              className="bg-white/5 border-white/10"
-              autoFocus
-            />
-          </div>
-
-          {/* Platforms */}
-          <div className="space-y-2">
-            <Label>
-              Platforms <span className="text-red-400">*</span>
-            </Label>
-            <div className="flex flex-wrap gap-2">
-              {platformOptions.map((platform) => {
-                const isSelected = selectedPlatforms.includes(platform);
-                return (
-                  <button
-                    key={platform}
-                    type="button"
-                    onClick={() => handlePlatformToggle(platform)}
-                    className={cn(
-                      'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border',
-                      isSelected
-                        ? 'bg-fuchsia-500/20 text-fuchsia-400 border-fuchsia-500/50'
-                        : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10'
-                    )}
-                  >
-                    {platform}
-                    {isSelected && <X className="inline-block h-3 w-3 ml-1" />}
-                  </button>
-                );
-              })}
+        <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0" noValidate>
+          {/* Scrollable form body */}
+          <div className="space-y-4 overflow-y-auto flex-1 min-h-0 pr-1">
+            {/* Title */}
+            <div className="space-y-2">
+              <Label htmlFor="title">
+                Game Title <span className="text-red-400">*</span>
+              </Label>
+              <Input
+                id="title"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="Enter game title..."
+                className="bg-white/5 border-white/10"
+                autoFocus
+              />
             </div>
-            {selectedPlatforms.length > 0 && (
-              <p className="text-xs text-white/40">
-                Selected: {selectedPlatforms.join(', ')}
-              </p>
-            )}
-          </div>
 
-          {/* Status */}
-          <div className="space-y-2">
-            <Label>Play Status</Label>
-            <Select
-              value={status}
-              onValueChange={(value: GameStatus) => setStatus(value)}
-            >
-              <SelectTrigger className="bg-white/5 border-white/10">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {statusOptions.map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {s}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Game Executable */}
-          <div className="space-y-2">
-            <Label>Game Executable</Label>
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleBrowseExecutable}
-                className="border-white/10 hover:bg-white/10 flex items-center gap-1.5"
-              >
-                <FolderOpen className="w-3.5 h-3.5" />
-                Browse...
-              </Button>
-              {executablePath && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setExecutablePath('')}
-                  className="text-red-400 hover:text-red-300 hover:bg-red-500/10 px-2"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </Button>
+            {/* Platforms */}
+            <div className="space-y-2">
+              <Label>
+                Platforms <span className="text-red-400">*</span>
+              </Label>
+              <div className="flex flex-wrap gap-2">
+                {platformOptions.map((platform) => {
+                  const isSelected = selectedPlatforms.includes(platform);
+                  return (
+                    <button
+                      key={platform}
+                      type="button"
+                      onClick={() => handlePlatformToggle(platform)}
+                      className={cn(
+                        'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border',
+                        isSelected
+                          ? 'bg-fuchsia-500/20 text-fuchsia-400 border-fuchsia-500/50'
+                          : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10'
+                      )}
+                    >
+                      {platform}
+                      {isSelected && <X className="inline-block h-3 w-3 ml-1" />}
+                    </button>
+                  );
+                })}
+              </div>
+              {selectedPlatforms.length > 0 && (
+                <p className="text-xs text-white/40">
+                  Selected: {selectedPlatforms.join(', ')}
+                </p>
               )}
             </div>
-            {executablePath && (
-              <p className="text-xs text-white/40 truncate" title={executablePath}>
-                {executablePath}
-              </p>
-            )}
-            {!executablePath && (
-              <p className="text-xs text-white/30">
-                Optional — select the .exe for session tracking
-              </p>
-            )}
-          </div>
 
-          {/* Error Message */}
-          {error && (
-            <div className="p-3 rounded-lg bg-red-500/20 border border-red-500/30">
-              <p className="text-sm text-red-400">{error}</p>
+            {/* Status */}
+            <div className="space-y-2">
+              <Label>Play Status</Label>
+              <Select
+                value={status}
+                onValueChange={(value: GameStatus) => setStatus(value)}
+              >
+                <SelectTrigger className="bg-white/5 border-white/10">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {statusOptions.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {s}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-          )}
 
-          {/* Info Message */}
-          <div className="p-3 rounded-lg bg-white/5 border border-white/10">
-            <p className="text-xs text-white/60">
-              Custom games will be marked with a special badge in your library.
-              They won't have cover images or metadata from Steam.
-            </p>
+            {/* Game Executable */}
+            <div className="space-y-2 min-w-0">
+              <Label>Game Executable</Label>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleBrowseExecutable}
+                  className="border-white/10 hover:bg-white/10 flex items-center gap-1.5"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  Browse...
+                </Button>
+                {executablePath && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setExecutablePath('')}
+                    className="text-red-400 hover:text-red-300 hover:bg-red-500/10 px-2"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </Button>
+                )}
+              </div>
+              {executablePath && (
+                <p className="text-xs text-white/40 truncate max-w-full break-all" title={executablePath}>
+                  {executablePath}
+                </p>
+              )}
+              {!executablePath && (
+                <p className="text-xs text-white/30">
+                  Optional — select the .exe for session tracking
+                </p>
+              )}
+            </div>
+
+            {/* Error Message */}
+            {error && (
+              <div className="p-3 rounded-lg bg-red-500/20 border border-red-500/30">
+                <p className="text-sm text-red-400">{error}</p>
+              </div>
+            )}
+
+            {/* Info Message */}
+            <div className="p-3 rounded-lg bg-white/5 border border-white/10">
+              <p className="text-xs text-white/60">
+                Custom games will be marked with a special badge in your library.
+                They won't have cover images or metadata from Steam.
+              </p>
+            </div>
           </div>
 
-          <DialogFooter className="gap-2 sm:gap-0">
+          {/* Footer pinned at bottom, inside the form */}
+          <DialogFooter className="gap-2 sm:gap-0 flex-shrink-0 pt-3 mt-3 border-t border-white/5">
             <Button
               type="button"
               variant="outline"

@@ -11,6 +11,11 @@ let mainWindow: BrowserWindowType | null = null;
 let isInitialized = false;
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
+// Guard flags to prevent duplicate downloads and redundant checks
+let isCheckingForUpdate = false;
+let isDownloading = false;
+let updateAlreadyDownloaded = false;
+
 // Polling interval: 30 minutes
 const UPDATE_POLL_INTERVAL_MS = 30 * 60 * 1000;
 
@@ -89,6 +94,7 @@ export function initAutoUpdater(window: BrowserWindowType) {
 
   autoUpdater.on('download-progress', (progress: ProgressInfo) => {
     console.log(`[AutoUpdater] Download progress: ${progress.percent.toFixed(1)}%`);
+    isDownloading = true;
     sendToRenderer('updater:download-progress', {
       percent: progress.percent,
       bytesPerSecond: progress.bytesPerSecond,
@@ -99,6 +105,8 @@ export function initAutoUpdater(window: BrowserWindowType) {
 
   autoUpdater.on('update-downloaded', (info: UpdateInfo) => {
     console.log('[AutoUpdater] Update downloaded:', info.version);
+    isDownloading = false;
+    updateAlreadyDownloaded = true;
     sendToRenderer('updater:update-downloaded', {
       version: info.version,
       releaseDate: info.releaseDate,
@@ -108,15 +116,15 @@ export function initAutoUpdater(window: BrowserWindowType) {
 
   autoUpdater.on('error', (error: Error) => {
     console.error('[AutoUpdater] Error:', error.message);
+    isDownloading = false;
     sendToRenderer('updater:error', {
       message: error.message,
     });
   });
 
-  // Check for updates after a short delay (let app fully load first)
-  setTimeout(() => {
-    checkForUpdates();
-  }, 5000);
+  // NOTE: No initial checkForUpdates() here — the renderer snackbar
+  // performs a manual check on mount via the 'updater:check' IPC handler,
+  // so a duplicate call here would cause overlapping checks and double events.
 
   // Start periodic polling for updates (every 30 minutes)
   if (pollingInterval) {
@@ -138,14 +146,31 @@ function sendToRenderer(channel: string, data?: unknown) {
 }
 
 /**
- * Check for available updates
+ * Check for available updates.
+ * Skips the check if a download is already in progress, already completed,
+ * or another check is currently running.
  */
 async function checkForUpdates() {
+  if (isDownloading) {
+    console.log('[AutoUpdater] Skipping update check — download already in progress');
+    return;
+  }
+  if (updateAlreadyDownloaded) {
+    console.log('[AutoUpdater] Skipping update check — update already downloaded');
+    return;
+  }
+  if (isCheckingForUpdate) {
+    console.log('[AutoUpdater] Skipping update check — check already in progress');
+    return;
+  }
   try {
+    isCheckingForUpdate = true;
     console.log('[AutoUpdater] Initiating update check...');
     await autoUpdater.checkForUpdates();
   } catch (error) {
     console.error('[AutoUpdater] Failed to check for updates:', error);
+  } finally {
+    isCheckingForUpdate = false;
   }
 }
 
@@ -198,11 +223,19 @@ function registerIpcHandlers() {
       ? (autoUpdater.currentVersion?.version || electronApp.getVersion())
       : electronApp.getVersion();
 
+    // Skip full check if download is already in progress or complete
+    if (isDownloading || updateAlreadyDownloaded) {
+      console.log('[AutoUpdater] Check skipped (downloading or already downloaded)');
+      return { updateAvailable: true, currentVersion, latestVersion: currentVersion };
+    }
+
     // If electron-updater is initialized, use it (handles download flow)
     if (isInitialized) {
       console.log('[AutoUpdater] Manual update check requested');
       try {
+        isCheckingForUpdate = true;
         const result = await autoUpdater.checkForUpdates();
+        isCheckingForUpdate = false;
         const latestVersion = result?.updateInfo?.version || currentVersion;
         const updateAvailable = isVersionGreater(latestVersion, currentVersion);
         return {
@@ -211,6 +244,7 @@ function registerIpcHandlers() {
           latestVersion,
         };
       } catch (error) {
+        isCheckingForUpdate = false;
         console.error('[AutoUpdater] electron-updater check failed, falling back to GitHub API:', error);
       }
     }
@@ -227,16 +261,26 @@ function registerIpcHandlers() {
     return { updateAvailable: false, currentVersion, latestVersion: currentVersion };
   });
 
-  // Download the update
+  // Download the update (guarded against duplicate calls)
   ipcMain.handle('updater:download', async () => {
     if (!isInitialized) {
       return { success: false };
     }
+    if (isDownloading) {
+      console.log('[AutoUpdater] Download already in progress, ignoring duplicate request');
+      return { success: true };
+    }
+    if (updateAlreadyDownloaded) {
+      console.log('[AutoUpdater] Update already downloaded, skipping re-download');
+      return { success: true };
+    }
     console.log('[AutoUpdater] Download requested');
+    isDownloading = true;
     try {
       await autoUpdater.downloadUpdate();
       return { success: true };
     } catch (error) {
+      isDownloading = false;
       console.error('[AutoUpdater] Download failed:', error);
       throw error;
     }

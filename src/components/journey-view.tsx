@@ -23,7 +23,7 @@ import { sessionStore } from '@/services/session-store';
 import { JourneyGanttView } from '@/components/journey-gantt-view';
 import { JourneyAnalyticsView } from '@/components/journey-analytics-view';
 import { generateMockGanttData } from '@/components/journey-gantt-mock-data';
-import { cn, getHardcodedCover } from '@/lib/utils';
+import { cn, getHardcodedCover, formatHours } from '@/lib/utils';
 
 type JourneyViewStyle = 'noob' | 'ocd' | 'analytics';
 type GanttDataSource = 'live' | 'mock';
@@ -158,7 +158,7 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
           <div className="flex items-center gap-3 mt-1.5 min-h-[1.25rem] flex-wrap">
             <div className="flex items-center gap-1 text-xs text-white/50">
               <Clock className="w-3 h-3" />
-              <span>{entry.hoursPlayed > 0 ? `${entry.hoursPlayed}h` : '0h'}</span>
+              <span>{entry.hoursPlayed > 0 ? formatHours(entry.hoursPlayed) : '0m'}</span>
             </div>
             {entry.rating > 0 && <StarRating rating={entry.rating} />}
             {addedDate && (
@@ -404,7 +404,7 @@ export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewP
             <p className="text-white/60 text-sm md:text-base max-w-lg">
               {entries.length} game{entries.length !== 1 ? 's' : ''} in your history
               {completedCount > 0 && ` · ${completedCount} completed`}
-              {totalHours > 0 && ` · ${totalHours}h played`}
+              {totalHours > 0 && ` · ${formatHours(totalHours)} played`}
             </p>
           </div>
 

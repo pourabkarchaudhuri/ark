@@ -4,10 +4,22 @@ import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Current app version - update this with each release
-export const APP_VERSION = '1.0.22';
+export const APP_VERSION = '1.0.23';
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.23': {
+    title: "What's New in Ark 1.0.23",
+    changes: [
+      'Custom Game Progress — Clicking a custom game card now opens a dedicated progress dialog with playtime stats, session history, status/hours/rating editing, and executable path management',
+      'Human-Readable Playtime — All hour displays across Journey, Analytics, OCD Gantt, and My Progress now show "Xh Ym" format instead of raw decimals (e.g. "2h 15m" instead of "2.25")',
+      'System Tray Icon Fix — Generated proper PNG/ICO icon files from the SVG source; tray now shows the Ark gamepad icon instead of a blank square',
+      'Auto-Updater Double-Download Fix — Added guard flags to prevent overlapping update checks and duplicate downloads; removed redundant 5-second initial check that conflicted with the snackbar mount check',
+      'Custom Game Dialog Overflow Fix — Restructured the Add Custom Game modal with a scrollable body and pinned footer to prevent UI overflow on smaller screens',
+      'Custom Game Executable Persistence Fix — Moved submit button back inside the form element to ensure the executable path is properly included in form submission',
+      'Re-render Optimisations — Stabilised onClick callbacks for custom game cards via useCallback; replaced inline arrow functions in progress dialog with memoised handlers',
+    ],
+  },
   '1.0.22': {
     title: "What's New in Ark 1.0.22",
     changes: [

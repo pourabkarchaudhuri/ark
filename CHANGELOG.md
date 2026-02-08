@@ -4,6 +4,29 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.23] - 2026-02-08
+
+### Added
+- **Custom Game Progress Dialog** — New dedicated progress view for custom (non-Steam) games. Clicking a custom game card in the library opens a dialog showing playtime stats (total hours, session count, last played), editable status/hours/rating, executable path management with browse/clear, platform tags, and the 10 most recent tracked sessions with dates and durations.
+- **`formatHours` Utility** — Shared function in `src/lib/utils.ts` that converts decimal hours (e.g. `2.25`) into human-readable `"2h 15m"` format, used across all views.
+
+### Changed
+- **Human-Readable Playtime** — All hour displays across Journey View, Journey Analytics (overview + top games + avg session), OCD Gantt View (sidebar, tooltip, footer, aria-labels), and My Progress tab now use `formatHours()` for `"Xh Ym"` display instead of raw decimal numbers.
+- **System Tray Icon** — Generated `build/icon.png` (256×256) and `build/icon.ico` from the existing SVG. Updated `electron/main.ts` tray icon resolution to search a prioritised candidate list (`.ico` → `.png` → sized variants) with logging, instead of a single hardcoded path that silently failed.
+- **Auto-Updater Guards** — Added `isCheckingForUpdate`, `isDownloading`, and `updateAlreadyDownloaded` flags in `auto-updater.ts` to prevent overlapping `checkForUpdates()` calls and duplicate `downloadUpdate()` invocations. Removed the redundant 5-second initial check (the snackbar mount already triggers one). The `updater:download` IPC handler now returns early if a download is already running or completed.
+- **Custom Game Card Click** — `GameCard.handleCardClick` now detects custom games (negative `steamAppId` or `isCustom` flag) and routes to the `onClick` callback instead of navigating to the non-existent `/game/-1` details page.
+
+### Fixed
+- **Custom Game Dialog Overflow** — Restructured the Add Custom Game modal: the `<form>` now wraps both the scrollable body and the footer, with an inner `<div>` handling `overflow-y-auto`. This keeps the submit button inside the form (fixing the `form="..."` attribute issue that silently broke form submission in Radix Dialog portals) and prevents the modal from overflowing the viewport.
+- **Custom Game Executable Path Persistence** — The "Add to Library" submit button was moved outside the `<form>` in a prior overflow fix, relying on the HTML `form` attribute which was unreliable inside React portals. Moved it back inside the form so `type="submit"` triggers `handleSubmit` natively, ensuring `executablePath` is included in the saved data.
+- **Auto-Updater Double Download** — When clicking "Download Now", the update would download twice (once from the user action, once from a redundant `checkForUpdates` call) before showing "Ready to Install". Fixed by the guard flags and removing the duplicate initial check.
+- **System Tray Blank Icon** — The tray code looked for `icon.ico`/`icon.png` but only `icon.svg` existed. `nativeImage.createFromPath()` doesn't support SVG, so it silently created an empty image.
+
+### Performance
+- **Re-render Optimisations** — Stabilised `onClick` prop for custom game `GameCard` instances via `useCallback`. Replaced inline arrow functions in `CustomGameProgressDialog` (`onValueChange`, `onClick`) with memoised `useCallback` handlers to prevent unnecessary child re-renders.
+
+---
+
 ## [1.0.22] - 2026-02-08
 
 ### Added

@@ -37,7 +37,7 @@ import {
   GameSession,
   LibraryGameEntry,
 } from '@/types/game';
-import { cn, getHardcodedCover } from '@/lib/utils';
+import { cn, getHardcodedCover, formatHours } from '@/lib/utils';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -827,15 +827,12 @@ export function JourneyAnalyticsView({
             <div className="w-px h-10 bg-white/10" />
             <div>
               <div className="flex items-baseline gap-1.5">
-                <AnimatedValue
-                  value={Math.round(analytics.totalHours)}
-                  formatFn={formatNumber}
-                  className="text-3xl font-bold text-cyan-400 font-['Orbitron']"
-                  delay={0.3}
-                />
+                <span className="text-3xl font-bold text-cyan-400 font-['Orbitron']">
+                  {formatHours(analytics.totalHours)}
+                </span>
                 <Clock className="w-3 h-3 text-cyan-400/50" />
               </div>
-              <p className="text-[10px] text-white/40 mt-0.5">hours played</p>
+              <p className="text-[10px] text-white/40 mt-0.5">played</p>
             </div>
           </div>
 
@@ -923,7 +920,7 @@ export function JourneyAnalyticsView({
                   <p className="text-[10px] text-white/40 mt-0.5">total sessions</p>
                 </div>
                 <div>
-                  <AnimatedValue value={analytics.avgSessionLength} formatFn={(n) => `${n}m`} className="text-xl font-bold text-cyan-400 font-['Orbitron']" delay={0.4} />
+                  <AnimatedValue value={analytics.avgSessionLength} formatFn={(n) => { const h = Math.floor(n / 60); const m = n % 60; return h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : `${n}m`; }} className="text-xl font-bold text-cyan-400 font-['Orbitron']" delay={0.4} />
                   <p className="text-[10px] text-white/40 mt-0.5">avg length</p>
                 </div>
               </div>
@@ -987,7 +984,7 @@ export function JourneyAnalyticsView({
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-0.5">
                       <span className="text-xs text-white/80 truncate font-medium">{game.title}</span>
-                      <span className="text-[10px] text-cyan-400 flex-shrink-0 ml-2">{game.hoursPlayed}h</span>
+                      <span className="text-[10px] text-cyan-400 flex-shrink-0 ml-2">{formatHours(game.hoursPlayed)}</span>
                     </div>
                     <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
                       <motion.div

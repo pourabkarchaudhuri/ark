@@ -33,7 +33,7 @@ import { motion } from 'framer-motion';
 import { Gamepad2, Clock, Calendar, Search, X, Crosshair, ArrowUpDown, ZoomIn } from 'lucide-react';
 import { JourneyEntry, StatusChangeEntry, GameStatus, GameSession } from '@/types/game';
 import { Slider } from '@/components/ui/slider';
-import { cn, getHardcodedCover } from '@/lib/utils';
+import { cn, getHardcodedCover, formatHours } from '@/lib/utils';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -662,7 +662,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       </div>
       <div class="flex items-center gap-3 mt-2 text-white/40 text-[11px]">
         <span>${formatDuration(data.durationDays)}</span>
-        ${data.hoursPlayed > 0 ? `<span>${data.hoursPlayed}h played</span>` : ''}
+        ${data.hoursPlayed > 0 ? `<span>${formatHours(data.hoursPlayed)} played</span>` : ''}
       </div>
     `;
   }, []);
@@ -1063,7 +1063,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                         {row.title}
                       </div>
                       <div className="text-[9px] text-white/30 mt-0.5">
-                        {row.hoursPlayed}h played
+                        {formatHours(row.hoursPlayed)} played
                       </div>
                     </div>
                   </div>
@@ -1164,7 +1164,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                   else rowEls.current.delete(row.gameId);
                 }}
                 role="row"
-                aria-label={`${row.title}: ${row.currentStatus}, ${row.hoursPlayed}h played`}
+                aria-label={`${row.title}: ${row.currentStatus}, ${formatHours(row.hoursPlayed)} played`}
                 className={cn(
                   'relative group/row transition-[opacity] duration-200',
                   isFocused && 'border-l-2 border-l-fuchsia-500/50',
@@ -1411,7 +1411,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
         </span>
         <span className="flex items-center gap-1.5">
           <Clock className="w-3 h-3" />
-          {footerStats.totalHours}h total
+          {formatHours(footerStats.totalHours)} total
         </span>
         <span>
           {footerStats.completedCount} completed

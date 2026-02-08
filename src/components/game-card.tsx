@@ -203,14 +203,19 @@ function GameCardComponent({
   }, [ctxMenu]);
 
   const handleCardClick = () => {
+    // Custom games (negative IDs) don't have Steam details pages — use onClick callback
+    if (game.isCustom || (game.steamAppId && game.steamAppId < 0)) {
+      if (onClick) onClick();
+      return;
+    }
+
     // Navigate to game details page if we have a Steam App ID
     // Use steamAppId directly, or extract from id if available (e.g., "steam-12345")
     const gameId = game.steamAppId || (game.id?.startsWith('steam-') ? parseInt(game.id.split('-')[1]) : null);
     
-    if (gameId) {
+    if (gameId && gameId > 0) {
       navigate(`/game/${gameId}`);
     } else if (onClick) {
-      // Fallback to onClick handler for custom games
       onClick();
     }
   };
