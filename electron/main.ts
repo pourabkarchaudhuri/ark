@@ -2,10 +2,13 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, net, session } = electron;
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, net, session, Tray, Menu, nativeImage } = electron;
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
 import path from 'path';
+
+let tray: any = null;
+let isQuitting = false;
 import { FiltersEngine, Request } from '@ghostery/adblocker';
 import fetch from 'cross-fetch';
 
@@ -85,6 +88,9 @@ let mainWindow: BrowserWindowType | null = null;
     console.warn('[Migration] Non-fatal error during data migration:', err);
   }
 })();
+
+// Set App User Model ID for proper Windows notifications and taskbar identity
+app.setAppUserModelId('com.ark.gametracker');
 
 // Register updater IPC handlers early so the renderer never hits
 // "No handler registered" errors — even in dev mode.
@@ -172,7 +178,12 @@ function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
+    // If launched with --hidden (auto-start), stay hidden in tray
+    if (!process.argv.includes('--hidden')) {
+      mainWindow?.show();
+    } else {
+      console.log('[Startup] Launched with --hidden flag, staying in tray');
+    }
     
     // Initialize auto-updater in production mode
     if (app.isPackaged && mainWindow) {
@@ -185,6 +196,14 @@ function createWindow() {
     }
   });
 
+  // Intercept close to hide to tray instead of quitting
+  mainWindow.on('close', (e: any) => {
+    if (!isQuitting) {
+      e.preventDefault();
+      mainWindow?.hide();
+    }
+  });
+
   mainWindow.on('closed', () => {
     destroyWebContentsView();
     mainWindow = null;
@@ -194,7 +213,7 @@ function createWindow() {
 // IPC handlers for window controls
 ipcMain.handle('window-minimize', () => {
   if (mainWindow) {
-    mainWindow.minimize();
+    mainWindow.hide();
   }
 });
 
@@ -481,6 +500,105 @@ ipcMain.handle('steam:getRecommendations', async (_event, currentAppId: number, 
     return recommendations;
   } catch (error) {
     console.error('Error getting recommendations:', error);
+    return [];
+  }
+});
+
+/**
+ * Get upcoming releases: combines Coming Soon + New Releases with enriched details.
+ * Batch-fetches getAppDetails for each game to get release_date, genres, platforms.
+ * Cached for 1 hour to avoid repeated batch fetches.
+ */
+let upcomingReleasesCache: { data: any[]; timestamp: number } | null = null;
+const UPCOMING_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+ipcMain.handle('steam:getUpcomingReleases', async () => {
+  try {
+    // Return cached data if still fresh
+    if (upcomingReleasesCache && (Date.now() - upcomingReleasesCache.timestamp < UPCOMING_CACHE_TTL)) {
+      console.log('[Steam IPC] getUpcomingReleases returning cached data');
+      return upcomingReleasesCache.data;
+    }
+
+    console.log('[Steam IPC] getUpcomingReleases called');
+
+    // Fetch coming soon and new releases in parallel
+    const [comingSoon, newReleases] = await Promise.all([
+      steamAPI.getComingSoon().catch(() => []),
+      steamAPI.getNewReleases().catch(() => []),
+    ]);
+
+    // Merge and deduplicate by id
+    const allGamesMap = new Map<number, { id: number; name: string; image: string }>();
+    for (const game of [...comingSoon, ...newReleases]) {
+      if (!allGamesMap.has(game.id)) {
+        allGamesMap.set(game.id, game);
+      }
+    }
+
+    const allGames = Array.from(allGamesMap.values());
+    console.log(`[Steam IPC] getUpcomingReleases: ${comingSoon.length} coming soon, ${newReleases.length} new releases, ${allGames.length} unique`);
+
+    // Batch-fetch details (5 at a time to respect rate limits)
+    const enriched: Array<{
+      id: number;
+      name: string;
+      image: string;
+      releaseDate: string;
+      comingSoon: boolean;
+      genres: string[];
+      platforms: { windows: boolean; mac: boolean; linux: boolean };
+    }> = [];
+
+    const batchSize = 5;
+    for (let i = 0; i < allGames.length; i += batchSize) {
+      const batch = allGames.slice(i, i + batchSize);
+      const detailsResults = await Promise.allSettled(
+        batch.map(async (game) => {
+          try {
+            const details = await steamAPI.getAppDetails(game.id);
+            return {
+              id: game.id,
+              name: details?.name || game.name,
+              image: details?.header_image || game.image,
+              releaseDate: details?.release_date?.date || 'Coming Soon',
+              comingSoon: details?.release_date?.coming_soon ?? true,
+              genres: details?.genres?.map((g: any) => g.description) || [],
+              platforms: details?.platforms || { windows: true, mac: false, linux: false },
+            };
+          } catch {
+            return {
+              id: game.id,
+              name: game.name,
+              image: game.image,
+              releaseDate: 'Coming Soon',
+              comingSoon: true,
+              genres: [] as string[],
+              platforms: { windows: true, mac: false, linux: false },
+            };
+          }
+        })
+      );
+
+      for (const result of detailsResults) {
+        if (result.status === 'fulfilled') {
+          enriched.push(result.value);
+        }
+      }
+
+      // Delay between batches to avoid Steam 429 rate limits
+      if (i + batchSize < allGames.length) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    // Cache the result for 1 hour
+    upcomingReleasesCache = { data: enriched, timestamp: Date.now() };
+
+    console.log(`[Steam IPC] getUpcomingReleases returning ${enriched.length} enriched games`);
+    return enriched;
+  } catch (error) {
+    console.error('[Steam IPC] Error fetching upcoming releases:', error);
     return [];
   }
 });
@@ -821,6 +939,25 @@ ipcMain.handle('settings:setOllamaSettings', async (_event, settings: { enabled?
   }
 });
 
+ipcMain.handle('settings:getAutoLaunch', async () => {
+  try {
+    return settingsStore.getAutoLaunch();
+  } catch (error) {
+    console.error('[Settings] Error getting auto-launch setting:', error);
+    return true; // Default to enabled
+  }
+});
+
+ipcMain.handle('settings:setAutoLaunch', async (_event, enabled: boolean) => {
+  try {
+    settingsStore.setAutoLaunch(enabled);
+    return { success: true };
+  } catch (error) {
+    console.error('[Settings] Error setting auto-launch:', error);
+    throw error;
+  }
+});
+
 // ============================================================================
 // FILE DIALOG IPC HANDLERS
 // ============================================================================
@@ -1035,6 +1172,18 @@ ipcMain.handle('webview:open-external', async (_event, url: string) => {
 // ============================================================================
 
 app.whenReady().then(async () => {
+  // Apply auto-launch setting on startup
+  try {
+    const autoLaunchEnabled = settingsStore.getAutoLaunch();
+    app.setLoginItemSettings({
+      openAtLogin: autoLaunchEnabled,
+      args: autoLaunchEnabled ? ['--hidden'] : [],
+    });
+    console.log(`[Startup] Auto-launch is ${autoLaunchEnabled ? 'enabled' : 'disabled'}`);
+  } catch (err) {
+    console.warn('[Startup] Failed to apply auto-launch setting:', err);
+  }
+
   // Initialize ad blocker using core engine + session.webRequest (compatible with all Electron versions)
   try {
     const cachePath = path.join(app.getPath('userData'), 'adblocker-engine.bin');
@@ -1085,17 +1234,86 @@ app.whenReady().then(async () => {
     logStartupError(err);
     app.quit();
   }
+
+  // ---- System Tray ----
+  try {
+    const iconFile = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+    let iconPath: string;
+    if (app.isPackaged) {
+      // In packaged builds, icon is asarUnpacked
+      iconPath = path.join(process.resourcesPath, 'app.asar.unpacked', 'build', iconFile);
+      // Fallback to resources dir
+      if (!fs.existsSync(iconPath)) {
+        iconPath = path.join(process.resourcesPath, 'build', iconFile);
+      }
+    } else {
+      iconPath = path.join(__dirname, '../../build', iconFile);
+    }
+
+    let trayIcon;
+    if (fs.existsSync(iconPath)) {
+      trayIcon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+    } else {
+      console.warn('[Tray] Icon not found at', iconPath, '- using empty icon');
+      trayIcon = nativeImage.createEmpty();
+    }
+
+    tray = new Tray(trayIcon);
+    tray.setToolTip('Ark');
+
+    const contextMenu = Menu.buildFromTemplate([
+      {
+        label: 'Show Ark',
+        click: () => {
+          if (mainWindow) {
+            mainWindow.show();
+            mainWindow.focus();
+          }
+        },
+      },
+      { type: 'separator' },
+      {
+        label: 'Quit',
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ]);
+
+    tray.setContextMenu(contextMenu);
+
+    // Double-click to show window
+    tray.on('double-click', () => {
+      if (mainWindow) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    });
+
+    console.log('[Tray] System tray initialized');
+  } catch (err) {
+    console.warn('[Tray] Failed to create system tray (non-fatal):', err);
+  }
+});
+
+// Set isQuitting flag before quit so close interceptor lets through
+app.on('before-quit', () => {
+  isQuitting = true;
 });
 
 app.on('window-all-closed', () => {
-  stopSessionTracker();
-  if (process.platform !== 'darwin') {
-    app.quit();
+  // Don't quit on window-all-closed; app stays in tray
+  // Only stop session tracker if actually quitting
+  if (isQuitting) {
+    stopSessionTracker();
   }
 });
 
 app.on('activate', () => {
   if (mainWindow === null) {
     createWindow();
+  } else {
+    mainWindow.show();
   }
 });

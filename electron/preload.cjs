@@ -90,6 +90,10 @@ contextBridge.exposeInMainWorld('steam', {
   // Get game recommendations based on current game and library
   getRecommendations: (currentAppId, libraryAppIds, limit) => 
     ipcRenderer.invoke('steam:getRecommendations', currentAppId, libraryAppIds, limit),
+
+  // Get upcoming releases (coming soon + new releases with enriched details)
+  getUpcomingReleases: () =>
+    ipcRenderer.invoke('steam:getUpcomingReleases'),
   
   // Helper: Get cover image URL (600x900 vertical)
   getCoverUrl: (appId) => 
@@ -171,6 +175,14 @@ contextBridge.exposeInMainWorld('settings', {
   // Set Ollama settings
   setOllamaSettings: (settings) => 
     ipcRenderer.invoke('settings:setOllamaSettings', settings),
+
+  // Get auto-launch setting
+  getAutoLaunch: () =>
+    ipcRenderer.invoke('settings:getAutoLaunch'),
+
+  // Set auto-launch setting
+  setAutoLaunch: (enabled) =>
+    ipcRenderer.invoke('settings:setAutoLaunch', enabled),
 });
 
 // Expose auto-updater API to renderer
@@ -198,6 +210,9 @@ contextBridge.exposeInMainWorld('updater', {
   onError: (callback) => {
     ipcRenderer.on('updater:error', (_event, error) => callback(error));
   },
+  onAutoDownload: (callback) => {
+    ipcRenderer.on('updater:auto-download', (_event, info) => callback(info));
+  },
   removeAllListeners: () => {
     ipcRenderer.removeAllListeners('updater:checking');
     ipcRenderer.removeAllListeners('updater:update-available');
@@ -205,6 +220,7 @@ contextBridge.exposeInMainWorld('updater', {
     ipcRenderer.removeAllListeners('updater:download-progress');
     ipcRenderer.removeAllListeners('updater:update-downloaded');
     ipcRenderer.removeAllListeners('updater:error');
+    ipcRenderer.removeAllListeners('updater:auto-download');
   },
 });
 
@@ -247,6 +263,13 @@ contextBridge.exposeInMainWorld('sessionTracker', {
     return () => ipcRenderer.removeListener('session:started', handler);
   },
 
+  // Subscribe to live playtime updates (every poll tick while game is running)
+  onLiveUpdate: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('session:liveUpdate', handler);
+    return () => ipcRenderer.removeListener('session:liveUpdate', handler);
+  },
+
   // Subscribe to completed session events
   onSessionEnded: (callback) => {
     const handler = (_event, data) => callback(data);
@@ -258,6 +281,7 @@ contextBridge.exposeInMainWorld('sessionTracker', {
   removeAllListeners: () => {
     ipcRenderer.removeAllListeners('session:statusChange');
     ipcRenderer.removeAllListeners('session:started');
+    ipcRenderer.removeAllListeners('session:liveUpdate');
     ipcRenderer.removeAllListeners('session:ended');
   },
 });

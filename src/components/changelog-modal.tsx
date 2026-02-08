@@ -4,10 +4,22 @@ import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Current app version - update this with each release
-export const APP_VERSION = '1.0.21';
+export const APP_VERSION = '1.0.22';
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.22': {
+    title: "What's New in Ark 1.0.22",
+    changes: [
+      'Release Calendar — New "Releases" tab showing upcoming game releases on a monthly grid calendar sourced from Steam Coming Soon + New Releases APIs, with date parsing, TBD section, hover tooltips, and forward-only navigation',
+      'System Tray — Discord-style minimize-to-tray behavior: closing and minimizing hide the app to the system tray instead of quitting; tray icon with context menu (Show Ark / Quit); double-click tray to restore',
+      'Launch on Startup Hidden — When auto-launch is enabled, the app starts hidden in the system tray (--hidden flag) instead of showing the window',
+      'IGDB Cleanup — Removed all unused IGDB service, types, and stale preload script; cleaned up legacy references across the codebase',
+      'Upcoming Releases Caching — 1-hour in-memory cache for the upcoming releases IPC handler prevents repeated Steam API calls on tab switches',
+      'Steam Rate Limit Mitigation — 500ms inter-batch delay when fetching game details to reduce 429 rate limit errors from Steam',
+      'Test Fixes — Updated test mocks for subscribe methods and fixed assertions to match current component behavior; all 214 tests passing',
+    ],
+  },
   '1.0.21': {
     title: "What's New in Ark 1.0.21",
     changes: [

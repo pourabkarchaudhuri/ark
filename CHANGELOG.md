@@ -4,6 +4,32 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.22] - 2026-02-08
+
+### Added
+- **Release Calendar** — New "Releases" tab on the dashboard showing upcoming game releases on a monthly grid calendar. Powered by Steam's Coming Soon + New Releases APIs with batch `getAppDetails` enrichment. Features date parsing for various Steam date formats, forward-only month navigation, "Today" button, game tile hover tooltips with cover image/genres/platforms, and a "Coming Soon (TBD)" section for games without exact dates.
+- **System Tray** — Discord-style minimize-to-tray behavior. Closing and minimizing now hide the app to the system tray instead of quitting. Tray icon with context menu (Show Ark / Quit), double-click to restore, and `before-quit` lifecycle management.
+- **Hidden Auto-Start** — When Launch on Startup is enabled, the app starts hidden in the system tray via `--hidden` flag instead of showing the main window.
+- **Upcoming Releases IPC** — New `steam:getUpcomingReleases` handler that combines `getComingSoon()` + `getNewReleases()`, deduplicates, and batch-fetches `getAppDetails()` with enriched release date, genre, and platform data.
+- **Preload Bridge** — `getUpcomingReleases` added to the Steam bridge in `preload.cjs`.
+
+### Changed
+- **IGDB Cleanup** — Deleted `igdb-service.ts`, `igdb` types, and stale `preload.ts`. Replaced IGDB-typed interfaces in `cache-store.ts` with generic cached types. Removed legacy `useIGDBGames`, `useIGDBFilters`, `useRateLimitWarning` exports. Cleaned up `igdbId` field references across game types, library store, dashboard, and custom game components.
+- **Upcoming Releases Caching** — 1-hour in-memory TTL cache on the `getUpcomingReleases` IPC handler prevents repeated Steam API calls on tab switches or React re-renders.
+- **Steam Rate Limit Mitigation** — Added 500ms delay between `getAppDetails` batch requests (5 at a time) to reduce 429 errors.
+- **`asarUnpack`** — Added `build/icon.png` and `build/icon.ico` so the tray icon is accessible in packaged builds.
+- **Dashboard Navigation** — Extended `ViewMode` with `'calendar'`, added "Releases" tab with `CalendarDays` icon. Search, filters, and game count hidden in calendar view.
+
+### Fixed
+- **Test Mocks** — Added missing `subscribe` mock to `statusHistoryStore`, `sessionStore`, and `libraryStore` in journey-view tests. Added `onAutoDownload` mock to update-snackbar tests.
+- **Test Assertions** — Fixed journey-view tests: used `getAllByText` for duplicate game titles, corrected Analytics stat card label expectations, updated Mock/Live toggle visibility test to match actual component behavior.
+- **Legacy `igdbId` in tests** — Replaced all `igdbId` references with `gameId` in library-store tests.
+
+### Performance
+- All 214 tests passing across 17 test files.
+
+---
+
 ## [1.0.21] - 2026-02-08
 
 ### Added

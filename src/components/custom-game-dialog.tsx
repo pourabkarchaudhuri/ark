@@ -119,7 +119,7 @@ export function CustomGameDialog({
             <DialogTitle>Add Custom Game</DialogTitle>
           </div>
           <DialogDescription>
-            Add a game that's not in the IGDB database to your library.
+            Add a game that's not in Steam to your library.
           </DialogDescription>
         </DialogHeader>
 
@@ -241,7 +241,7 @@ export function CustomGameDialog({
           <div className="p-3 rounded-lg bg-white/5 border border-white/10">
             <p className="text-xs text-white/60">
               Custom games will be marked with a special badge in your library.
-              They won't have cover images or metadata from IGDB.
+              They won't have cover images or metadata from Steam.
             </p>
           </div>
 

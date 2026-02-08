@@ -1,7 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from 'react';
 import { useLocation } from 'wouter';
-import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames, useRateLimitWarning } from '@/hooks/useGameStore';
-
+import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames } from '@/hooks/useGameStore';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { Game, GameStatus } from '@/types/game';
 import { Button } from '@/components/ui/button';
@@ -20,6 +19,7 @@ import { WindowControls } from '@/components/window-controls';
 import { EmptyState } from '@/components/empty-state';
 import { JourneyView } from '@/components/journey-view';
 import { BuzzView } from '@/components/buzz-view';
+import { ReleaseCalendar } from '@/components/release-calendar';
 import { useToast } from '@/components/ui/toast';
 
 const DarkVeil = lazy(() => import('@/components/ui/dark-veil'));
@@ -40,6 +40,7 @@ import {
   Trash2,
   Clock,
   Newspaper,
+  CalendarDays,
 } from 'lucide-react';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
@@ -49,7 +50,7 @@ import { useSessionTracker } from '@/hooks/useSessionTracker';
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey' | 'buzz';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar';
 
 // Track if cache has been cleared this session
 export function Dashboard() {
@@ -79,7 +80,7 @@ export function Dashboard() {
   const { results: searchResults, loading: searchLoading, isSearching } = useGameSearch(searchQuery);
   
   // Library management
-  const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, customGames } = useLibrary();
+  const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, removeCustomGame, customGames } = useLibrary();
   
   // Library games with full details (fetched independently from Steam games)
   const { games: libraryGames, loading: libraryLoading } = useLibraryGames();
@@ -143,26 +144,10 @@ export function Dashboard() {
   const hasMore = viewMode === 'browse' ? browseHasMore : false;
   const loadMore = viewMode === 'browse' ? browseLoadMore : () => {};
   
-  // IGDB filters (genres and platforms)
+  // Steam filters (genres and platforms)
   const { genres, platforms } = useSteamFilters();
   
-  const { success, error: showError, warning } = useToast();
-
-  // Rate limit warning - throttle to avoid spam
-  const lastWarningRef = useRef<number>(0);
-  const handleRateLimitWarning = useCallback((queueSize: number) => {
-    const now = Date.now();
-    // Only show warning every 5 seconds to avoid spam
-    if (now - lastWarningRef.current > 5000) {
-      lastWarningRef.current = now;
-      warning(
-        `Slow down! ${queueSize} requests queued. IGDB limits to 4 requests/second.`,
-        8000
-      );
-    }
-  }, [warning]);
-  
-  useRateLimitWarning(handleRateLimitWarning);
+  const { success, error: showError } = useToast();
 
   // Online status for offline mode
   const { isOnline, wasOffline, isSyncing, acknowledgeOffline } = useOnlineStatus();
@@ -350,7 +335,7 @@ export function Dashboard() {
   const handleSave = useCallback((gameData: Partial<Game> & { executablePath?: string }) => {
     try {
       if (editingGame) {
-        const gameId = editingGame.steamAppId || editingGame.igdbId;
+        const gameId = editingGame.steamAppId;
         if (!gameId) {
           showError('Invalid game ID');
           return;
@@ -396,9 +381,14 @@ export function Dashboard() {
   const handleDeleteConfirm = useCallback(() => {
     if (deleteConfirm.game) {
       try {
-        const gameId = deleteConfirm.game.steamAppId || deleteConfirm.game.igdbId;
+        const gameId = deleteConfirm.game.steamAppId;
         if (gameId) {
-          removeFromLibrary(gameId);
+          // Custom games use negative IDs — route to the correct store
+          if (gameId < 0) {
+            removeCustomGame(gameId);
+          } else {
+            removeFromLibrary(gameId);
+          }
           success(`"${deleteConfirm.game.title}" removed from your library`);
         }
       } catch (err) {
@@ -406,7 +396,7 @@ export function Dashboard() {
       }
     }
     setDeleteConfirm({ open: false, game: null });
-  }, [deleteConfirm.game, removeFromLibrary, success, showError]);
+  }, [deleteConfirm.game, removeFromLibrary, removeCustomGame, success, showError]);
 
   // Handle clearing entire library (including custom games)
   const handleClearLibraryConfirm = useCallback(() => {
@@ -562,6 +552,21 @@ export function Dashboard() {
                 <Newspaper className="h-3 w-3" />
                 Buzz
               </button>
+              <button
+                onClick={() => {
+                  setViewMode('calendar');
+                  setSearchQuery('');
+                }}
+                className={cn(
+                  "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                  viewMode === 'calendar' 
+                    ? "bg-fuchsia-500 text-white" 
+                    : "text-white/60 hover:text-white"
+                )}
+              >
+                <CalendarDays className="h-3 w-3" />
+                Releases
+              </button>
             </div>
 
             {/* Clear Library Button - only visible in library mode */}
@@ -577,7 +582,7 @@ export function Dashboard() {
               </Button>
             )}
 
-            {viewMode !== 'journey' && viewMode !== 'buzz' && (
+            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
               <>
                 <p className="text-sm text-white/60">
                   Showing <span className="text-white font-medium">{sortedGames.length}{viewMode === 'browse' && hasMore ? '+' : ''}</span> games
@@ -610,8 +615,8 @@ export function Dashboard() {
           </div>
           
           <div className="flex items-center gap-3">
-            {/* Search - hidden in journey and buzz mode */}
-            {viewMode !== 'journey' && viewMode !== 'buzz' && (
+            {/* Search - hidden in journey, buzz, and calendar mode */}
+            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40 z-10" />
                 <Input
@@ -692,8 +697,8 @@ export function Dashboard() {
               </Button>
             )}
 
-            {/* Filter Button - hidden in journey and buzz mode */}
-            {viewMode !== 'journey' && viewMode !== 'buzz' && (
+            {/* Filter Button - hidden in journey, buzz, and calendar mode */}
+            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
               <FilterSidebar
                 open={isFilterOpen}
                 onOpenChange={handleFilterOpenChange}
@@ -734,6 +739,8 @@ export function Dashboard() {
           />
         ) : viewMode === 'buzz' ? (
           <BuzzView />
+        ) : viewMode === 'calendar' ? (
+          <ReleaseCalendar />
         ) : (
           <>
             {/* Loading State - Skeleton Grid */}
@@ -842,7 +849,7 @@ export function Dashboard() {
         onSave={handleSave}
         genres={genres}
         platforms={platforms}
-        currentExecutablePath={editingGame ? libraryStore.getEntry(editingGame.steamAppId || editingGame.igdbId || 0)?.executablePath : undefined}
+        currentExecutablePath={editingGame ? libraryStore.getEntry(editingGame.steamAppId || 0)?.executablePath : undefined}
       />
 
       {/* Custom Game Dialog */}

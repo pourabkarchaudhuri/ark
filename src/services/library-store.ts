@@ -20,10 +20,10 @@ interface StoredData {
 
 /**
  * Library Store - Manages user's personal game library
- * Stores only user-specific data (status, priority, notes) for games added from Steam/IGDB
+ * Stores only user-specific data (status, priority, notes) for games added from Steam
  */
 class LibraryStore {
-  private entries: Map<number, LibraryGameEntry> = new Map(); // keyed by gameId (Steam appId or IGDB ID)
+  private entries: Map<number, LibraryGameEntry> = new Map(); // keyed by gameId (Steam appId)
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
 
@@ -39,8 +39,8 @@ class LibraryStore {
       let needsResave = false;
       if (stored && stored.entries.length > 0) {
         stored.entries.forEach((entry) => {
-          // Support both new gameId and legacy igdbId
-          const id = entry.gameId || entry.igdbId || entry.steamAppId;
+          // Support both new gameId and legacy fields
+          const id = entry.gameId || (entry as any).igdbId || entry.steamAppId;
           if (id) {
             // Migrate removed 'Dropped' status → 'On Hold'
             let status = entry.status;
@@ -130,7 +130,7 @@ class LibraryStore {
   // Add a game to the library
   addToLibrary(input: CreateLibraryEntry): LibraryGameEntry {
     const now = new Date();
-    const gameId = input.gameId || input.steamAppId || input.igdbId;
+    const gameId = input.gameId || input.steamAppId;
     
     if (!gameId) {
       throw new Error('No game ID provided');
@@ -209,7 +209,7 @@ class LibraryStore {
     return this.entries.has(gameId);
   }
 
-  // Get a library entry by game ID (Steam appId or IGDB ID)
+  // Get a library entry by game ID (Steam appId)
   getEntry(gameId: number): LibraryGameEntry | undefined {
     return this.entries.get(gameId);
   }
@@ -227,7 +227,7 @@ class LibraryStore {
   }
 
   // Legacy method name for backwards compatibility
-  getAllIgdbIds(): number[] {
+  getAllIgdbIds(): number[] { // kept for backward compat
     return this.getAllGameIds();
   }
 
@@ -333,7 +333,7 @@ class LibraryStore {
 
       let importCount = 0;
       entries.forEach((entry) => {
-        const id = entry.gameId || entry.igdbId || entry.steamAppId;
+        const id = entry.gameId || (entry as any).igdbId || entry.steamAppId;
         if (id) {
           this.entries.set(id, {
             ...entry,
@@ -405,7 +405,7 @@ class LibraryStore {
       let skipped = 0;
 
       entries.forEach((entry) => {
-        const id = entry.gameId || entry.igdbId || entry.steamAppId;
+        const id = entry.gameId || (entry as any).igdbId || entry.steamAppId;
         if (!id) return;
 
         const existing = this.entries.get(id);

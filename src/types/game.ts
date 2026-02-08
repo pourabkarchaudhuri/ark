@@ -1,9 +1,8 @@
-// Game type that combines Steam/IGDB data with user library data
+// Game type that combines Steam data with user library data
 export interface Game {
-  // Core fields (works with both Steam and IGDB)
-  id: string; // We use string IDs internally (e.g., "steam-123" or "igdb-456")
-  steamAppId?: number; // Steam app ID (if from Steam)
-  igdbId?: number; // IGDB ID (if from IGDB - deprecated)
+  // Core fields
+  id: string; // We use string IDs internally (e.g., "steam-123")
+  steamAppId?: number; // Steam app ID
   title: string;
   developer: string;
   publisher: string;
@@ -30,7 +29,7 @@ export interface Game {
   recommendations?: number;
   comingSoon?: boolean;
   
-  // Legacy IGDB fields (may be removed later)
+  // Extended metadata
   gameModes?: string[];
   themes?: string[];
   playerPerspectives?: string[];
@@ -47,7 +46,7 @@ export interface Game {
   createdAt: Date;
   updatedAt: Date;
   isInLibrary?: boolean;
-  isCustom?: boolean; // True for user-added games not from Steam/IGDB
+  isCustom?: boolean; // True for user-added games not from Steam
 }
 
 export type GameStatus = 'Want to Play' | 'Playing' | 'Playing Now' | 'Completed' | 'On Hold';
@@ -78,9 +77,8 @@ export type UpdateGameInput = Partial<CreateGameInput>;
 
 // Library-specific game entry (stored in localStorage)
 export interface LibraryGameEntry {
-  gameId: number; // Steam appId or IGDB ID
-  steamAppId?: number; // Steam app ID (preferred)
-  igdbId?: number; // IGDB ID (legacy)
+  gameId: number; // Steam appId
+  steamAppId?: number; // Steam app ID
   status: GameStatus;
   priority: GamePriority;
   publicReviews: string;
@@ -97,11 +95,11 @@ export type CreateLibraryEntry = Omit<LibraryGameEntry, 'addedAt' | 'updatedAt' 
   hoursPlayed?: number;
   rating?: number;
 };
-export type UpdateLibraryEntry = Partial<Omit<LibraryGameEntry, 'igdbId' | 'addedAt'>>;
+export type UpdateLibraryEntry = Partial<Omit<LibraryGameEntry, 'addedAt'>>;
 
-// Custom game entry (user-added games not from IGDB)
+// Custom game entry (user-added games not from Steam)
 export interface CustomGameEntry {
-  id: number; // Negative ID to distinguish from IGDB games
+  id: number; // Negative ID to distinguish from Steam games
   title: string;
   platform: string[];
   status: GameStatus;
@@ -127,7 +125,7 @@ export interface GameSession {
 
 // Status change log entry — records every status transition for tracking/analytics.
 export interface StatusChangeEntry {
-  gameId: number;               // Steam appId (or IGDB ID)
+  gameId: number;               // Steam appId
   title: string;                // Game title for readability
   previousStatus: GameStatus | null; // null when game is first added
   newStatus: GameStatus;
@@ -137,7 +135,7 @@ export interface StatusChangeEntry {
 // Journey history entry — a snapshot persisted when a game is added to the library.
 // Survives library removal so the Journey timeline always reflects the user's full history.
 export interface JourneyEntry {
-  gameId: number;             // Steam appId (or IGDB ID)
+  gameId: number;             // Steam appId
   title: string;
   coverUrl?: string;
   genre: string[];

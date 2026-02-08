@@ -109,7 +109,7 @@ function getGameInitials(title: string): string {
     .toUpperCase();
 }
 
-// Website category constants (compatible with IGDB data)
+// Website category constants (compatible with Steam data)
 const WEBSITE_CATEGORIES: Record<number, { name: string; icon: React.ReactNode; priority: number }> = {
   1: { name: 'Official', icon: <FaGlobe className="h-4 w-4" />, priority: 1 },
   2: { name: 'Wikia', icon: <FaWikipediaW className="h-4 w-4" />, priority: 10 },

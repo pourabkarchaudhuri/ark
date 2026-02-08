@@ -57,7 +57,7 @@ describe('LibraryStore', () => {
   describe('addToLibrary', () => {
     it('adds a game to the library', () => {
       const entry = libraryStore.addToLibrary({
-        igdbId: 12345,
+        gameId: 12345,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: 'Looking forward to this!',
@@ -65,7 +65,7 @@ describe('LibraryStore', () => {
       });
 
       expect(entry).toBeDefined();
-      expect(entry.igdbId).toBe(12345);
+      expect(entry.gameId).toBe(12345);
       expect(entry.status).toBe('Want to Play');
       expect(entry.priority).toBe('High');
       expect(entry.addedAt).toBeInstanceOf(Date);
@@ -77,7 +77,7 @@ describe('LibraryStore', () => {
       libraryStore.subscribe(listener);
 
       libraryStore.addToLibrary({
-        igdbId: 12345,
+        gameId: 12345,
         status: 'Want to Play',
         priority: 'Medium',
         publicReviews: '',
@@ -91,7 +91,7 @@ describe('LibraryStore', () => {
   describe('removeFromLibrary', () => {
     it('removes a game from the library', () => {
       libraryStore.addToLibrary({
-        igdbId: 12345,
+        gameId: 12345,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: '',
@@ -113,7 +113,7 @@ describe('LibraryStore', () => {
 
     it('notifies listeners on remove', () => {
       libraryStore.addToLibrary({
-        igdbId: 12345,
+        gameId: 12345,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: '',
@@ -132,7 +132,7 @@ describe('LibraryStore', () => {
   describe('updateEntry', () => {
     it('updates an existing entry', () => {
       libraryStore.addToLibrary({
-        igdbId: 12345,
+        gameId: 12345,
         status: 'Want to Play',
         priority: 'Low',
         publicReviews: '',
@@ -158,7 +158,7 @@ describe('LibraryStore', () => {
 
     it('updates the updatedAt timestamp', () => {
       const entry = libraryStore.addToLibrary({
-        igdbId: 12345,
+        gameId: 12345,
         status: 'Want to Play',
         priority: 'Medium',
         publicReviews: '',
@@ -177,7 +177,7 @@ describe('LibraryStore', () => {
   describe('isInLibrary', () => {
     it('returns true for existing entry', () => {
       libraryStore.addToLibrary({
-        igdbId: 12345,
+        gameId: 12345,
         status: 'Want to Play',
         priority: 'Medium',
         publicReviews: '',
@@ -193,9 +193,9 @@ describe('LibraryStore', () => {
   });
 
   describe('getEntry', () => {
-    it('returns entry for existing igdbId', () => {
+    it('returns entry for existing gameId', () => {
       libraryStore.addToLibrary({
-        igdbId: 12345,
+        gameId: 12345,
         status: 'Playing',
         priority: 'High',
         publicReviews: 'Great game!',
@@ -205,11 +205,11 @@ describe('LibraryStore', () => {
       const entry = libraryStore.getEntry(12345);
 
       expect(entry).toBeDefined();
-      expect(entry?.igdbId).toBe(12345);
+      expect(entry?.gameId).toBe(12345);
       expect(entry?.status).toBe('Playing');
     });
 
-    it('returns undefined for non-existent igdbId', () => {
+    it('returns undefined for non-existent gameId', () => {
       const entry = libraryStore.getEntry(99999);
       expect(entry).toBeUndefined();
     });
@@ -218,21 +218,21 @@ describe('LibraryStore', () => {
   describe('getAllEntries', () => {
     it('returns all entries', () => {
       libraryStore.addToLibrary({
-        igdbId: 1,
+        gameId: 1,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: '',
         recommendationSource: '',
       });
       libraryStore.addToLibrary({
-        igdbId: 2,
+        gameId: 2,
         status: 'Playing',
         priority: 'Medium',
         publicReviews: '',
         recommendationSource: '',
       });
       libraryStore.addToLibrary({
-        igdbId: 3,
+        gameId: 3,
         status: 'Completed',
         priority: 'Low',
         publicReviews: '',
@@ -250,7 +250,7 @@ describe('LibraryStore', () => {
       vi.setSystemTime(now);
       
       libraryStore.addToLibrary({
-        igdbId: 1,
+        gameId: 1,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: '',
@@ -261,7 +261,7 @@ describe('LibraryStore', () => {
       vi.setSystemTime(new Date(now.getTime() + 1000));
       
       libraryStore.addToLibrary({
-        igdbId: 2,
+        gameId: 2,
         status: 'Playing',
         priority: 'Medium',
         publicReviews: '',
@@ -270,8 +270,8 @@ describe('LibraryStore', () => {
 
       const entries = libraryStore.getAllEntries();
 
-      expect(entries[0].igdbId).toBe(2); // Most recently added
-      expect(entries[1].igdbId).toBe(1);
+      expect(entries[0].gameId).toBe(2); // Most recently added
+      expect(entries[1].gameId).toBe(1);
       
       vi.useRealTimers();
     });
@@ -280,14 +280,14 @@ describe('LibraryStore', () => {
   describe('getAllIgdbIds', () => {
     it('returns all IGDB IDs in library', () => {
       libraryStore.addToLibrary({
-        igdbId: 100,
+        gameId: 100,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: '',
         recommendationSource: '',
       });
       libraryStore.addToLibrary({
-        igdbId: 200,
+        gameId: 200,
         status: 'Playing',
         priority: 'Medium',
         publicReviews: '',
@@ -307,7 +307,7 @@ describe('LibraryStore', () => {
       expect(libraryStore.getSize()).toBe(0);
 
       libraryStore.addToLibrary({
-        igdbId: 1,
+        gameId: 1,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: '',
@@ -317,7 +317,7 @@ describe('LibraryStore', () => {
       expect(libraryStore.getSize()).toBe(1);
 
       libraryStore.addToLibrary({
-        igdbId: 2,
+        gameId: 2,
         status: 'Playing',
         priority: 'Medium',
         publicReviews: '',
@@ -331,21 +331,21 @@ describe('LibraryStore', () => {
   describe('getStats', () => {
     it('returns correct statistics', () => {
       libraryStore.addToLibrary({
-        igdbId: 1,
+        gameId: 1,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: '',
         recommendationSource: '',
       });
       libraryStore.addToLibrary({
-        igdbId: 2,
+        gameId: 2,
         status: 'Playing',
         priority: 'High',
         publicReviews: '',
         recommendationSource: '',
       });
       libraryStore.addToLibrary({
-        igdbId: 3,
+        gameId: 3,
         status: 'Completed',
         priority: 'Medium',
         publicReviews: '',
@@ -366,21 +366,21 @@ describe('LibraryStore', () => {
   describe('filterByStatus', () => {
     beforeEach(() => {
       libraryStore.addToLibrary({
-        igdbId: 1,
+        gameId: 1,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: '',
         recommendationSource: '',
       });
       libraryStore.addToLibrary({
-        igdbId: 2,
+        gameId: 2,
         status: 'Playing',
         priority: 'Medium',
         publicReviews: '',
         recommendationSource: '',
       });
       libraryStore.addToLibrary({
-        igdbId: 3,
+        gameId: 3,
         status: 'Want to Play',
         priority: 'Low',
         publicReviews: '',
@@ -408,7 +408,7 @@ describe('LibraryStore', () => {
       const unsubscribe = libraryStore.subscribe(listener);
 
       libraryStore.addToLibrary({
-        igdbId: 1,
+        gameId: 1,
         status: 'Want to Play',
         priority: 'High',
         publicReviews: '',
@@ -420,7 +420,7 @@ describe('LibraryStore', () => {
       unsubscribe();
 
       libraryStore.addToLibrary({
-        igdbId: 2,
+        gameId: 2,
         status: 'Playing',
         priority: 'Medium',
         publicReviews: '',
@@ -434,7 +434,7 @@ describe('LibraryStore', () => {
   describe('exportData', () => {
     it('exports data as JSON string', () => {
       libraryStore.addToLibrary({
-        igdbId: 12345,
+        gameId: 12345,
         status: 'Playing',
         priority: 'High',
         publicReviews: 'Test notes',
@@ -456,7 +456,7 @@ describe('LibraryStore', () => {
       const importData = JSON.stringify({
         entries: [
           {
-            igdbId: 99999,
+            gameId: 99999,
             status: 'Completed',
             priority: 'High',
             publicReviews: 'Imported!',

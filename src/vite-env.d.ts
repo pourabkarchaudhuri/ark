@@ -54,6 +54,7 @@ interface SessionTrackerAPI {
   getActiveSessions: () => Promise<Array<{ gameId: number; startTime: string; elapsedMinutes: number }>>;
   onStatusChange: (callback: (data: { gameId: number; status: string }) => void) => () => void;
   onSessionStarted: (callback: (data: { gameId: number; startTime: string }) => void) => () => void;
+  onLiveUpdate: (callback: (data: { gameId: number; activeMinutes: number }) => void) => () => void;
   onSessionEnded: (callback: (data: { gameId: number; session: import('@/types/game').GameSession }) => void) => () => void;
   removeAllListeners: () => void;
 }

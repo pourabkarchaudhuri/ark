@@ -17,7 +17,7 @@ interface Settings {
     googleAI?: string; // Encrypted
   };
   preferences: {
-    // Future preferences can go here
+    autoLaunch: boolean; // Launch app on system startup (default: true)
   };
   ollama: {
     enabled: boolean;
@@ -66,7 +66,9 @@ class SettingsStore {
     return {
       version: SETTINGS_VERSION,
       apiKeys: {},
-      preferences: {},
+      preferences: {
+        autoLaunch: true, // Default: launch on startup
+      },
       ollama: {
         enabled: true,
         url: 'http://localhost:11434',
@@ -165,6 +167,32 @@ class SettingsStore {
   // Check if Gemini should be used instead of Ollama
   shouldUseGemini(): boolean {
     return this.hasGoogleAIKey() && (this.settings.ollama?.useGeminiInstead ?? false);
+  }
+
+  // Auto-launch settings
+  getAutoLaunch(): boolean {
+    return this.settings.preferences?.autoLaunch ?? true;
+  }
+
+  setAutoLaunch(enabled: boolean): void {
+    if (!this.settings.preferences) {
+      this.settings.preferences = { autoLaunch: enabled };
+    } else {
+      this.settings.preferences.autoLaunch = enabled;
+    }
+    this.saveSettings();
+
+    // Apply immediately via Electron's login item settings
+    try {
+      app.setLoginItemSettings({
+        openAtLogin: enabled,
+        args: enabled ? ['--hidden'] : [],
+      });
+    } catch (err) {
+      console.error('[SettingsStore] Failed to set login item settings:', err);
+    }
+
+    console.log(`[SettingsStore] Auto-launch set to ${enabled}`);
   }
 }
 

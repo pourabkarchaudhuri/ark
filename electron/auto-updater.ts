@@ -5,10 +5,14 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
 import type { BrowserWindow as BrowserWindowType } from 'electron';
-const { BrowserWindow, ipcMain } = electron;
+const { BrowserWindow, ipcMain, Notification } = electron;
 
 let mainWindow: BrowserWindowType | null = null;
 let isInitialized = false;
+let pollingInterval: ReturnType<typeof setInterval> | null = null;
+
+// Polling interval: 30 minutes
+const UPDATE_POLL_INTERVAL_MS = 30 * 60 * 1000;
 
 /**
  * Register IPC handlers for the updater.
@@ -40,11 +44,40 @@ export function initAutoUpdater(window: BrowserWindowType) {
 
   autoUpdater.on('update-available', (info: UpdateInfo) => {
     console.log('[AutoUpdater] Update available:', info.version);
-    sendToRenderer('updater:update-available', {
+    const updatePayload = {
       version: info.version,
       releaseDate: info.releaseDate,
       releaseNotes: info.releaseNotes,
-    });
+    };
+    sendToRenderer('updater:update-available', updatePayload);
+
+    // Show native OS notification if the window is hidden (minimized to tray)
+    if (mainWindow && !mainWindow.isVisible() && Notification.isSupported()) {
+      try {
+        const notification = new Notification({
+          title: 'Ark Update Available',
+          body: `Version ${info.version} is ready to download. Click to update.`,
+          silent: false,
+        });
+
+        notification.on('click', () => {
+          // Show and focus the main window
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.show();
+            mainWindow.focus();
+            // Re-fire update-available so the snackbar picks it up
+            sendToRenderer('updater:update-available', updatePayload);
+            // Auto-trigger the download
+            sendToRenderer('updater:auto-download', updatePayload);
+          }
+        });
+
+        notification.show();
+        console.log('[AutoUpdater] Native notification shown for update', info.version);
+      } catch (err) {
+        console.warn('[AutoUpdater] Failed to show native notification:', err);
+      }
+    }
   });
 
   autoUpdater.on('update-not-available', (info: UpdateInfo) => {
@@ -84,6 +117,15 @@ export function initAutoUpdater(window: BrowserWindowType) {
   setTimeout(() => {
     checkForUpdates();
   }, 5000);
+
+  // Start periodic polling for updates (every 30 minutes)
+  if (pollingInterval) {
+    clearInterval(pollingInterval);
+  }
+  pollingInterval = setInterval(() => {
+    console.log('[AutoUpdater] Periodic update check...');
+    checkForUpdates();
+  }, UPDATE_POLL_INTERVAL_MS);
 }
 
 /**

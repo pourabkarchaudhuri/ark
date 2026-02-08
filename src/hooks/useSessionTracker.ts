@@ -57,6 +57,23 @@ export function useSessionTracker() {
       });
     });
 
+    // Listen for live playtime updates (every 15s while game is running)
+    const unsubLive = window.sessionTracker.onLiveUpdate((data) => {
+      const { gameId, activeMinutes } = data;
+      // Compute live total: previously recorded hours + current active session
+      const previousHours = sessionStore.getTotalHours(gameId);
+      const liveTotal = previousHours + activeMinutes / 60;
+
+      if (gameId < 0) {
+        const existing = customGameStore.getGame(gameId);
+        if (existing) {
+          customGameStore.updateGame(gameId, { hoursPlayed: liveTotal });
+        }
+      } else {
+        libraryStore.updateHoursFromSessions(gameId, liveTotal);
+      }
+    });
+
     // Listen for completed sessions
     const unsubEnded = window.sessionTracker.onSessionEnded((data) => {
       const session: GameSession = data.session;
@@ -78,7 +95,7 @@ export function useSessionTracker() {
       }
     });
 
-    cleanupRef.current = [unsubLibrary, unsubCustom, unsubStatus, unsubEnded];
+    cleanupRef.current = [unsubLibrary, unsubCustom, unsubStatus, unsubLive, unsubEnded];
 
     return () => {
       cleanupRef.current.forEach((fn) => fn());

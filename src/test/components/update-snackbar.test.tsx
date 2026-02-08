@@ -14,6 +14,7 @@ const mockUpdater = {
   onDownloadProgress: vi.fn(),
   onUpdateDownloaded: vi.fn(),
   onError: vi.fn(),
+  onAutoDownload: vi.fn(),
   removeAllListeners: vi.fn(),
 };
 

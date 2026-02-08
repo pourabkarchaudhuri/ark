@@ -3,7 +3,24 @@
  * Stores games, genres, platforms, and sync queue
  */
 
-import { IGDBGame, IGDBGenre, IGDBPlatform } from '@/types/igdb';
+// Generic cached game/genre/platform types (formerly IGDB-specific)
+interface CachedGame {
+  id: number;
+  name: string;
+  [key: string]: unknown;
+}
+
+interface CachedGenre {
+  id: number;
+  name: string;
+  slug?: string;
+}
+
+interface CachedPlatform {
+  id: number;
+  name: string;
+  abbreviation?: string;
+}
 
 const DB_NAME = 'ark-game-cache';
 const DB_VERSION = 1;
@@ -27,14 +44,14 @@ interface CacheMetadata {
 interface SyncQueueItem {
   id: string;
   action: 'add' | 'remove' | 'update';
-  igdbId: number;
+  gameId: number;
   data?: unknown;
   timestamp: number;
 }
 
 interface SearchCacheEntry {
   query: string;
-  results: IGDBGame[];
+  results: CachedGame[];
   cachedAt: number;
 }
 
@@ -72,7 +89,7 @@ class CacheStore {
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
 
-        // Games store - indexed by igdbId
+        // Games store - indexed by id
         if (!db.objectStoreNames.contains(STORES.games)) {
           const gamesStore = db.createObjectStore(STORES.games, { keyPath: 'id' });
           gamesStore.createIndex('cachedAt', 'cachedAt', { unique: false });
@@ -121,7 +138,7 @@ class CacheStore {
   }
 
   // Game caching
-  async cacheGame(game: IGDBGame): Promise<void> {
+  async cacheGame(game: CachedGame): Promise<void> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.games, 'readwrite');
@@ -141,7 +158,7 @@ class CacheStore {
     });
   }
 
-  async cacheGames(games: IGDBGame[]): Promise<void> {
+  async cacheGames(games: CachedGame[]): Promise<void> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.games, 'readwrite');
@@ -160,7 +177,7 @@ class CacheStore {
     });
   }
 
-  async getGame(id: number): Promise<IGDBGame | null> {
+  async getGame(id: number): Promise<CachedGame | null> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.games, 'readonly');
@@ -179,12 +196,12 @@ class CacheStore {
     });
   }
 
-  async getGames(ids: number[]): Promise<IGDBGame[]> {
+  async getGames(ids: number[]): Promise<CachedGame[]> {
     const db = await this.getDB();
     return new Promise((resolve) => {
       const transaction = db.transaction(STORES.games, 'readonly');
       const store = transaction.objectStore(STORES.games);
-      const results: IGDBGame[] = [];
+      const results: CachedGame[] = [];
       
       let completed = 0;
       ids.forEach(id => {
@@ -211,7 +228,7 @@ class CacheStore {
     });
   }
 
-  async getAllCachedGames(): Promise<IGDBGame[]> {
+  async getAllCachedGames(): Promise<CachedGame[]> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.games, 'readonly');
@@ -221,7 +238,7 @@ class CacheStore {
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const validGames = request.result.filter(
-          (game: IGDBGame & { cachedAt: number }) => 
+          (game: CachedGame & { cachedAt: number }) => 
             this.isValidCache(game.cachedAt, this.GAME_CACHE_TTL)
         );
         resolve(validGames);
@@ -230,7 +247,7 @@ class CacheStore {
   }
 
   // Search results caching
-  async cacheSearchResults(query: string, results: IGDBGame[]): Promise<void> {
+  async cacheSearchResults(query: string, results: CachedGame[]): Promise<void> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.searchResults, 'readwrite');
@@ -248,7 +265,7 @@ class CacheStore {
     });
   }
 
-  async getSearchResults(query: string): Promise<IGDBGame[] | null> {
+  async getSearchResults(query: string): Promise<CachedGame[] | null> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.searchResults, 'readonly');
@@ -268,7 +285,7 @@ class CacheStore {
   }
 
   // Genres caching
-  async cacheGenres(genres: IGDBGenre[]): Promise<void> {
+  async cacheGenres(genres: CachedGenre[]): Promise<void> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.genres, 'readwrite');
@@ -283,7 +300,7 @@ class CacheStore {
     });
   }
 
-  async getGenres(): Promise<IGDBGenre[]> {
+  async getGenres(): Promise<CachedGenre[]> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.genres, 'readonly');
@@ -296,7 +313,7 @@ class CacheStore {
   }
 
   // Platforms caching
-  async cachePlatforms(platforms: IGDBPlatform[]): Promise<void> {
+  async cachePlatforms(platforms: CachedPlatform[]): Promise<void> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.platforms, 'readwrite');
@@ -310,7 +327,7 @@ class CacheStore {
     });
   }
 
-  async getPlatforms(): Promise<IGDBPlatform[]> {
+  async getPlatforms(): Promise<CachedPlatform[]> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.platforms, 'readonly');

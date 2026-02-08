@@ -8,6 +8,7 @@
  * Sends events to the renderer:
  *   - session:statusChange  { gameId, status: 'Playing Now' | 'Playing' }
  *   - session:started       { gameId, startTime }
+ *   - session:liveUpdate    { gameId, activeMinutes } — every poll tick while running
  *   - session:ended         { gameId, session: GameSession }
  */
 
@@ -129,6 +130,14 @@ function pollTick() {
         existingSession.idleAccumulatedMs += POLL_INTERVAL_MS;
       }
       existingSession.lastIdleCheck = isSystemIdle;
+
+      // Send live playtime update to the renderer
+      const rawMs = Date.now() - existingSession.startTime.getTime();
+      const activeMs = Math.max(0, rawMs - existingSession.idleAccumulatedMs);
+      sendToRenderer('session:liveUpdate', {
+        gameId: game.gameId,
+        activeMinutes: Math.round(activeMs / 60_000 * 100) / 100,
+      });
 
     } else if (!running && existingSession) {
       // ---- Game stopped ----

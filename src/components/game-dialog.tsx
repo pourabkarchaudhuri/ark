@@ -251,7 +251,7 @@ export function GameDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {/* Game Info Header (Read-only from IGDB) */}
+        {/* Game Info Header (Read-only from Steam) */}
         <div className="flex gap-4 p-4 bg-white/5 rounded-lg border border-white/10">
           {/* Cover Image with fallback chain */}
           <DialogCoverImage game={game} />

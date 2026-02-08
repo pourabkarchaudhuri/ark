@@ -32,6 +32,7 @@ declare global {
       onDownloadProgress: (callback: (progress: DownloadProgress) => void) => void;
       onUpdateDownloaded: (callback: (info: UpdateInfo) => void) => void;
       onError: (callback: (error: { message: string }) => void) => void;
+      onAutoDownload: (callback: (info: UpdateInfo) => void) => void;
       removeAllListeners: () => void;
     };
   }
@@ -122,6 +123,20 @@ export function UpdateSnackbar() {
       console.error('[UpdateSnackbar] Event: error:', error.message);
       setErrorMessage(error.message);
       setState('error');
+    });
+
+    // Auto-download triggered by native notification click (from tray)
+    updater.onAutoDownload((info) => {
+      console.log('[UpdateSnackbar] Event: auto-download triggered for version:', info.version);
+      setUpdateInfo(info);
+      setDismissed(false);
+      setState('downloading');
+      // Automatically start the download
+      window.updater!.downloadUpdate().catch((err) => {
+        console.error('[UpdateSnackbar] Auto-download failed:', err);
+        setState('error');
+        setErrorMessage('Failed to download update');
+      });
     });
 
     // Cleanup listeners on unmount

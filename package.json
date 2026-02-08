@@ -1,6 +1,6 @@
 {
   "name": "ark",
-  "version": "1.0.21",
+  "version": "1.0.22",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -105,7 +105,9 @@
       "dist-electron/**/*"
     ],
     "asarUnpack": [
-      "**/preload.cjs"
+      "**/preload.cjs",
+      "**/build/icon.png",
+      "**/build/icon.ico"
     ],
     "publish": {
       "provider": "github",

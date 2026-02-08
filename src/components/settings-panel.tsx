@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,6 +22,8 @@ declare global {
       hasApiKey: () => Promise<boolean>;
       getOllamaSettings: () => Promise<{ enabled: boolean; url: string; model: string; useGeminiInstead: boolean }>;
       setOllamaSettings: (settings: { enabled?: boolean; url?: string; model?: string; useGeminiInstead?: boolean }) => Promise<void>;
+      getAutoLaunch: () => Promise<boolean>;
+      setAutoLaunch: (enabled: boolean) => Promise<void>;
     };
   }
 }
@@ -50,6 +52,9 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
   
+  // Auto-launch state
+  const [autoLaunch, setAutoLaunchState] = useState(true);
+  
   // Library import/export state
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMessage, setImportMessage] = useState<string | null>(null);
@@ -77,6 +82,10 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         setOllamaUrl(ollamaSettings.url);
         setOllamaModel(ollamaSettings.model);
         setUseGeminiInstead(ollamaSettings.useGeminiInstead ?? false);
+        
+        // Load auto-launch setting
+        const autoLaunchEnabled = await window.settings.getAutoLaunch();
+        setAutoLaunchState(autoLaunchEnabled);
         
         // Mark initial load complete after fetching
         initialLoadRef.current = false;
@@ -187,6 +196,20 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       setIsLoading(false);
     }
   }, []);
+
+  // Toggle auto-launch
+  const handleAutoLaunchToggle = useCallback(async () => {
+    if (!window.settings) return;
+    const newValue = !autoLaunch;
+    setAutoLaunchState(newValue);
+    try {
+      await window.settings.setAutoLaunch(newValue);
+    } catch (err) {
+      console.error('Failed to set auto-launch:', err);
+      // Revert on error
+      setAutoLaunchState(!newValue);
+    }
+  }, [autoLaunch]);
 
   // Mask API key for display
   const getMaskedKey = (key: string) => {
@@ -373,6 +396,40 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
             {/* Content */}
             <div className="flex-1 overflow-y-auto p-4 space-y-6">
+              {/* Application Section */}
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <Power className="h-4 w-4 text-emerald-400" />
+                  <h3 className="text-sm font-semibold text-white">Application</h3>
+                </div>
+                
+                <div className="bg-white/5 rounded-lg p-4 space-y-3">
+                  {/* Launch on Startup toggle */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-white">Launch on Startup</p>
+                      <p className="text-xs text-white/40 mt-0.5">
+                        Automatically start Ark when you log in (minimized to system tray)
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleAutoLaunchToggle}
+                      className={cn(
+                        "relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors",
+                        autoLaunch ? "bg-emerald-600" : "bg-zinc-700"
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                          autoLaunch ? "translate-x-6" : "translate-x-1"
+                        )}
+                      />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               {/* Ollama Settings Section (Main / Default AI Provider) */}
               <div className="space-y-4">
                 <div className="flex items-center gap-2">

@@ -547,7 +547,7 @@ export function useLibraryGames() {
 
           // Seed journey history with full game metadata
           for (const game of gamesWithCounts) {
-            const id = game.steamAppId ?? game.igdbId;
+            const id = game.steamAppId;
             if (!id) continue;
             const libEntry = libraryStore.getEntry(id);
             journeyStore.record({
@@ -775,14 +775,3 @@ export function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue;
 }
 
-// Legacy exports for backwards compatibility
-export const useIGDBGames = useSteamGames;
-export const useIGDBFilters = useSteamFilters;
-
-// Dummy hook for rate limit warning (Steam has less strict limits)
-export function useRateLimitWarning(_callback: (queueSize: number) => void) {
-  // Steam API has less strict rate limiting, so this is mostly a no-op
-  useEffect(() => {
-    // No action needed for Steam
-  }, []);
-}

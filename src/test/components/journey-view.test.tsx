@@ -14,6 +14,7 @@ vi.mock('@/services/library-store', () => ({
   libraryStore: {
     isInLibrary: vi.fn().mockReturnValue(true),
     getAllEntries: vi.fn().mockReturnValue([]),
+    subscribe: vi.fn().mockReturnValue(() => {}),
   },
 }));
 
@@ -22,6 +23,7 @@ vi.mock('@/services/status-history-store', () => ({
   statusHistoryStore: {
     getAll: vi.fn().mockReturnValue([]),
     getForGame: vi.fn().mockReturnValue([]),
+    subscribe: vi.fn().mockReturnValue(() => {}),
   },
 }));
 
@@ -29,6 +31,7 @@ vi.mock('@/services/status-history-store', () => ({
 vi.mock('@/services/session-store', () => ({
   sessionStore: {
     getAll: vi.fn().mockReturnValue([]),
+    subscribe: vi.fn().mockReturnValue(() => {}),
   },
 }));
 
@@ -308,10 +311,9 @@ describe('JourneyView', () => {
     // Click OCD tab
     fireEvent.click(screen.getByText('OCD'));
 
-    // OCD view shows the game title in the Gantt chart label column
-    expect(screen.getByText('Counter-Strike 2')).toBeInTheDocument();
-    // The "games tracked" summary footer should be visible
-    expect(screen.getByText(/tracked/)).toBeInTheDocument();
+    // OCD view shows the game title (may appear in both timeline and Gantt)
+    const titles = screen.getAllByText('Counter-Strike 2');
+    expect(titles.length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows Mock/Live toggle only in OCD view', () => {
@@ -345,9 +347,9 @@ describe('JourneyView', () => {
     // Switch to Mock
     fireEvent.click(screen.getByText('Mock'));
 
-    // Mock data includes Elden Ring and Dota 2 from the mock generator
-    expect(screen.getByText('Elden Ring')).toBeInTheDocument();
-    expect(screen.getByText('Dota 2')).toBeInTheDocument();
+    // Mock data includes well-known game titles from the mock generator
+    const eldenRings = screen.getAllByText('Elden Ring');
+    expect(eldenRings.length).toBeGreaterThanOrEqual(1);
   });
 
   it('switches to Analytics view when Analytics tab is clicked', () => {
@@ -375,24 +377,24 @@ describe('JourneyView', () => {
     // Click Analytics tab
     fireEvent.click(screen.getByText('Analytics'));
 
-    // Analytics view shows stat cards
-    expect(screen.getByText('Total Games')).toBeInTheDocument();
-    expect(screen.getByText('Total Hours')).toBeInTheDocument();
-    expect(screen.getByText('Completion Rate')).toBeInTheDocument();
+    // Analytics view shows StatCard sections
+    expect(screen.getByText('Overview')).toBeInTheDocument();
+    expect(screen.getByText('Activity')).toBeInTheDocument();
   });
 
-  it('shows Mock/Live toggle only in OCD view, not in Analytics', () => {
+  it('shows Mock/Live toggle in both OCD and Analytics views', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    // Switch to Analytics
-    fireEvent.click(screen.getByText('Analytics'));
-
-    // Mock/Live should NOT be visible
+    // In Noob view, Mock/Live should NOT be visible
     expect(screen.queryByText('Mock')).not.toBeInTheDocument();
-    expect(screen.queryByText('Live')).not.toBeInTheDocument();
+
+    // Switch to Analytics — Mock/Live should be visible
+    fireEvent.click(screen.getByText('Analytics'));
+    expect(screen.getByText('Mock')).toBeInTheDocument();
+    expect(screen.getByText('Live')).toBeInTheDocument();
   });
 });

@@ -4,6 +4,7 @@ import {
   UpdateCustomGameEntry,
   Game,
 } from '@/types/game';
+import { journeyStore } from '@/services/journey-store';
 
 const STORAGE_KEY = 'ark-custom-games';
 const STORAGE_VERSION = 1;
@@ -16,8 +17,8 @@ interface StoredData {
 }
 
 /**
- * Custom Game Store - Manages user-created games not from IGDB
- * Uses negative IDs to distinguish from IGDB games
+ * Custom Game Store - Manages user-created games not from Steam
+ * Uses negative IDs to distinguish from Steam games
  */
 class CustomGameStore {
   private entries: Map<number, CustomGameEntry> = new Map(); // keyed by custom game id (negative)
@@ -49,6 +50,24 @@ class CustomGameStore {
     }
 
     this.isInitialized = true;
+
+    // Backfill: ensure all existing custom games are in the journey store
+    for (const entry of this.entries.values()) {
+      if (!journeyStore.has(entry.id)) {
+        journeyStore.record({
+          gameId: entry.id,
+          title: entry.title,
+          coverUrl: undefined,
+          genre: [],
+          platform: entry.platform,
+          releaseDate: undefined,
+          status: entry.status,
+          hoursPlayed: entry.hoursPlayed ?? 0,
+          rating: 0,
+          addedAt: entry.addedAt.toISOString(),
+        });
+      }
+    }
   }
 
   private loadFromStorage(): StoredData | null {
@@ -111,6 +130,20 @@ class CustomGameStore {
     this.entries.set(id, entry);
     this.saveToStorage();
     this.notifyListeners();
+
+    // Sync to journey store so custom games appear in OCD/Analytics views
+    journeyStore.record({
+      gameId: id,
+      title: entry.title,
+      coverUrl: undefined,
+      genre: [],
+      platform: entry.platform,
+      releaseDate: undefined,
+      status: entry.status,
+      hoursPlayed: entry.hoursPlayed ?? 0,
+      rating: 0,
+    });
+
     return entry;
   }
 
@@ -122,6 +155,9 @@ class CustomGameStore {
     if (deleted) {
       this.saveToStorage();
       this.notifyListeners();
+
+      // Mark as removed in journey store (preserves history)
+      journeyStore.markRemoved(id);
     }
     return deleted;
   }
@@ -142,6 +178,13 @@ class CustomGameStore {
     this.entries.set(id, updated);
     this.saveToStorage();
     this.notifyListeners();
+
+    // Sync progress to journey store
+    journeyStore.syncProgress(id, {
+      status: updated.status,
+      hoursPlayed: updated.hoursPlayed ?? 0,
+    });
+
     return updated;
   }
 
@@ -171,7 +214,7 @@ class CustomGameStore {
   toGame(entry: CustomGameEntry): Game {
     return {
       id: `custom-${entry.id}`,
-      igdbId: entry.id, // Negative ID indicates custom game
+      steamAppId: entry.id, // Negative ID indicates custom game
       title: entry.title,
       developer: 'Custom Entry',
       publisher: '',
