@@ -8,7 +8,7 @@
   "scripts": {
     "clean": "rm -rf dist dist-electron",
     "dev": "vite",
-    "build": "npm run clean && tsc && vite build && electron-builder",
+    "build": "npm run clean && tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && electron-builder",
     "build:app": "npm run clean && tsc && tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build",
     "preview": "vite preview",
     "electron:compile": "tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs",
