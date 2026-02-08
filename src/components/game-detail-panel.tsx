@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { FaWindows, FaPlaystation, FaXbox, FaSteam, FaReddit, FaTwitter, FaTwitch, FaYoutube, FaFacebook, FaInstagram, FaGlobe, FaWikipediaW } from 'react-icons/fa';
 import { SiNintendoswitch, SiEpicgames, SiGogdotcom } from 'react-icons/si';
-import { cn } from '@/lib/utils';
+import { cn, getHardcodedCover } from '@/lib/utils';
 
 interface GameDetailPanelProps {
   game: Game | null;
@@ -338,10 +338,12 @@ export function GameDetailPanel({
   const slideshowImages = useMemo(() => {
     if (!game) return [];
     const images: string[] = [];
-    if (game.coverUrl) images.push(game.coverUrl);
+    const hardcoded = getHardcodedCover(game.title);
+    if (hardcoded) images.push(hardcoded);
+    else if (game.coverUrl) images.push(game.coverUrl);
     if (game.screenshots) images.push(...game.screenshots);
     return images;
-  }, [game?.id, game?.coverUrl, game?.screenshots]);
+  }, [game?.id, game?.title, game?.coverUrl, game?.screenshots]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {

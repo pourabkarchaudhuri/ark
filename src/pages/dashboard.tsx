@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from 'react';
 import { useLocation } from 'wouter';
 import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames, useRateLimitWarning } from '@/hooks/useGameStore';
 
@@ -21,7 +21,10 @@ import { EmptyState } from '@/components/empty-state';
 import { JourneyView } from '@/components/journey-view';
 import { BuzzView } from '@/components/buzz-view';
 import { useToast } from '@/components/ui/toast';
+
+const DarkVeil = lazy(() => import('@/components/ui/dark-veil'));
 import { cn } from '@/lib/utils';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   Gamepad2,
   Search,
@@ -56,6 +59,14 @@ export function Dashboard() {
   
   // View mode state
   const [viewMode, setViewMode] = useState<ViewMode>('browse');
+  // Tracks whether the DarkVeil bg is active (stays true during exit animation)
+  const [buzzBgActive, setBuzzBgActive] = useState(false);
+
+  useEffect(() => {
+    if (viewMode === 'buzz') {
+      setBuzzBgActive(true);
+    }
+  }, [viewMode]);
   
   // Steam Games (games for browsing) - pass category filter
   const { games: steamGames, loading: steamLoading, hasMore: browseHasMore, loadMore: browseLoadMore, error: steamError, loadingMore } = useSteamGames(filters.category);
@@ -433,9 +444,37 @@ export function Dashboard() {
   void _totalGamesCount; // Silence unused variable warning
 
   return (
-    <div className="min-h-screen bg-black">
+    <div className={cn("min-h-screen", buzzBgActive ? 'bg-transparent' : 'bg-black')}>
+      {/* DarkVeil background — only in buzz mode, fades in/out */}
+      <AnimatePresence onExitComplete={() => setBuzzBgActive(false)}>
+        {viewMode === 'buzz' && (
+          <motion.div
+            key="darkveil-bg"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1, transition: { duration: 0.6, ease: 'easeInOut' } }}
+            exit={{ opacity: 0, transition: { duration: 0.3, ease: 'easeOut' } }}
+            className="fixed inset-0 z-0 pointer-events-none"
+          >
+            <Suspense fallback={null}>
+              <DarkVeil
+                hueShift={0}
+                noiseIntensity={0}
+                scanlineIntensity={0}
+                speed={0.5}
+                scanlineFrequency={0}
+                warpAmount={3.4}
+                resolutionScale={1}
+              />
+            </Suspense>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
-      <header className="bg-black/80 backdrop-blur-xl sticky top-0 z-40 drag-region">
+      <header className={cn(
+        "sticky top-0 z-40 drag-region",
+        buzzBgActive ? 'bg-transparent' : 'bg-black/80 backdrop-blur-xl'
+      )}>
         <div className="px-6 py-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 no-drag mt-[5px]">
@@ -455,7 +494,7 @@ export function Dashboard() {
       </header>
 
       <main className={cn(
-        "px-6 py-6 transition-all duration-300",
+        "px-6 py-6 transition-all duration-300 relative z-10",
         (isFilterOpen || isAIChatOpen || isSettingsOpen) && "pr-[424px]"
       )}>
         {/* Results Header */}
@@ -534,7 +573,7 @@ export function Dashboard() {
               </Button>
             )}
 
-            {viewMode !== 'journey' && (
+            {viewMode !== 'journey' && viewMode !== 'buzz' && (
               <>
                 <p className="text-sm text-white/60">
                   Showing <span className="text-white font-medium">{sortedGames.length}{viewMode === 'browse' && hasMore ? '+' : ''}</span> games
@@ -567,8 +606,8 @@ export function Dashboard() {
           </div>
           
           <div className="flex items-center gap-3">
-            {/* Search - hidden in journey mode */}
-            {viewMode !== 'journey' && (
+            {/* Search - hidden in journey and buzz mode */}
+            {viewMode !== 'journey' && viewMode !== 'buzz' && (
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40 z-10" />
                 <Input
@@ -649,8 +688,8 @@ export function Dashboard() {
               </Button>
             )}
 
-            {/* Filter Button - hidden in journey mode */}
-            {viewMode !== 'journey' && (
+            {/* Filter Button - hidden in journey and buzz mode */}
+            {viewMode !== 'journey' && viewMode !== 'buzz' && (
               <FilterSidebar
                 open={isFilterOpen}
                 onOpenChange={handleFilterOpenChange}

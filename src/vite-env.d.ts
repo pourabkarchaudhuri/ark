@@ -73,8 +73,19 @@ interface RedditPost {
   preview?: { images?: Array<{ source?: { url: string } }> };
 }
 
+interface RSSFeedItem {
+  id: string;
+  title: string;
+  summary: string;
+  url: string;
+  imageUrl?: string;
+  publishedAt: number;
+  source: string;
+}
+
 interface NewsAPI {
   getRedditNews: (subreddits?: string[], limit?: number) => Promise<RedditPost[]>;
+  getRSSFeeds: () => Promise<RSSFeedItem[]>;
 }
 
 declare global {

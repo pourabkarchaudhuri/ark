@@ -15,14 +15,15 @@ import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, Lis
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Timeline, TimelineEntry } from '@/components/ui/timeline';
-import { JourneyEntry, GameStatus } from '@/types/game';
+import { JourneyEntry, GameStatus, GameSession, LibraryGameEntry } from '@/types/game';
 import { steamService } from '@/services/steam-service';
 import { libraryStore } from '@/services/library-store';
 import { statusHistoryStore } from '@/services/status-history-store';
+import { sessionStore } from '@/services/session-store';
 import { JourneyGanttView } from '@/components/journey-gantt-view';
 import { JourneyAnalyticsView } from '@/components/journey-analytics-view';
 import { generateMockGanttData } from '@/components/journey-gantt-mock-data';
-import { cn } from '@/lib/utils';
+import { cn, getHardcodedCover } from '@/lib/utils';
 
 type JourneyViewStyle = 'noob' | 'ocd' | 'analytics';
 type GanttDataSource = 'live' | 'mock';
@@ -92,9 +93,9 @@ function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCo
       <div className="flex gap-3 p-3 h-full">
         {/* Cover image */}
         <div className="flex-shrink-0 w-16 h-24 rounded overflow-hidden bg-white/5">
-          {entry.coverUrl ? (
+          {(getHardcodedCover(entry.title) || entry.coverUrl) ? (
             <img
-              src={entry.coverUrl}
+              src={getHardcodedCover(entry.title) || entry.coverUrl}
               alt={entry.title}
               className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
               onLoad={(e) => {
@@ -355,13 +356,15 @@ export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewP
     if (viewStyle !== 'ocd' && viewStyle !== 'analytics') return null;
 
     if (viewStyle === 'ocd' && dataSource === 'mock') {
-      return generateMockGanttData();
+      return { ...generateMockGanttData(), sessions: [] as GameSession[], libraryEntries: [] as LibraryGameEntry[] };
     }
 
     // Live data from stores
     return {
       journeyEntries: entries,
       statusHistory: statusHistoryStore.getAll(),
+      sessions: sessionStore.getAll(),
+      libraryEntries: libraryStore.getAllEntries(),
     };
   }, [viewStyle, dataSource, entries]);
 
@@ -460,12 +463,15 @@ export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewP
           <JourneyGanttView
             journeyEntries={ganttData.journeyEntries}
             statusHistory={ganttData.statusHistory}
+            sessions={ganttData.sessions}
           />
         </div>
       ) : viewStyle === 'analytics' && ganttData ? (
         <JourneyAnalyticsView
           journeyEntries={ganttData.journeyEntries}
           statusHistory={ganttData.statusHistory}
+          sessions={ganttData.sessions}
+          libraryEntries={ganttData.libraryEntries}
         />
       ) : (
         <Timeline data={timelineData} />

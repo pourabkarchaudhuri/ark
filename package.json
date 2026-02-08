@@ -1,6 +1,6 @@
 {
   "name": "ark",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -49,6 +49,7 @@
     "framer-motion": "^10.18.0",
     "langchain": "^1.2.3",
     "lucide-react": "^0.303.0",
+    "ogl": "^1.0.11",
     "postprocessing": "^6.38.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

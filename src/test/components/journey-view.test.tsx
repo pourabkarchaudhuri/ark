@@ -13,6 +13,7 @@ vi.mock('wouter', () => ({
 vi.mock('@/services/library-store', () => ({
   libraryStore: {
     isInLibrary: vi.fn().mockReturnValue(true),
+    getAllEntries: vi.fn().mockReturnValue([]),
   },
 }));
 
@@ -24,18 +25,43 @@ vi.mock('@/services/status-history-store', () => ({
   },
 }));
 
-// Mock framer-motion
-vi.mock('framer-motion', () => ({
-  motion: {
-    div: ({ children, onClick, className, ...props }: Record<string, unknown>) => (
-      <div onClick={onClick as React.MouseEventHandler} className={className as string} data-testid="motion-div" {...props}>
-        {children as React.ReactNode}
-      </div>
-    ),
+// Mock session store
+vi.mock('@/services/session-store', () => ({
+  sessionStore: {
+    getAll: vi.fn().mockReturnValue([]),
   },
-  useScroll: () => ({ scrollYProgress: { get: () => 0 } }),
-  useTransform: () => ({ get: () => 0 }),
 }));
+
+// Mock framer-motion
+vi.mock('framer-motion', () => {
+  const motionHandler = {
+    get(_: unknown, tag: string) {
+      return ({ children, onClick, className, ...props }: Record<string, unknown>) => {
+        const Tag = tag as keyof JSX.IntrinsicElements;
+        const safe: Record<string, unknown> = {};
+        // Filter out framer-motion-specific props for valid DOM attributes
+        for (const [k, v] of Object.entries(props)) {
+          if (
+            !['initial', 'animate', 'exit', 'whileInView', 'viewport', 'transition',
+             'variants', 'whileHover', 'whileTap', 'whileFocus', 'whileDrag',
+             'layout', 'layoutId', 'onAnimationComplete'].includes(k)
+          ) {
+            safe[k] = v;
+          }
+        }
+        return <Tag onClick={onClick as React.MouseEventHandler} className={className as string} {...safe}>{children as React.ReactNode}</Tag>;
+      };
+    },
+  };
+  return {
+    motion: new Proxy({}, motionHandler),
+    useScroll: () => ({ scrollYProgress: { get: () => 0 } }),
+    useTransform: () => ({ get: () => 0 }),
+    useMotionValue: () => ({ get: () => 0, set: () => {}, on: () => () => {} }),
+    useInView: () => false,
+    animate: () => ({ stop: () => {} }),
+  };
+});
 
 function createMockEntry(overrides: Partial<JourneyEntry> = {}): JourneyEntry {
   return {
@@ -185,7 +211,9 @@ describe('JourneyView', () => {
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    const card = screen.getByText('Counter-Strike 2').closest('[data-testid="motion-div"]');
+    const textEl = screen.getByText('Counter-Strike 2');
+    // Walk up to the nearest clickable card container (rendered as a plain div by the mock)
+    const card = textEl.closest('div[class]');
     expect(card).toBeInTheDocument();
     if (card) fireEvent.click(card);
 

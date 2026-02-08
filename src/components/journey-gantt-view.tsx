@@ -7,12 +7,33 @@
  *
  * Game info (cover, title, hours) is embedded directly inside the first
  * segment bar of each row so users never lose context while scrolling.
+ *
+ * UX features:
+ *  - Zoom controls (slider + Ctrl+wheel + W/M/Y presets)
+ *  - Scroll-to-Now floating button
+ *  - Keyboard navigation (arrows, enter, +/-, esc) with auto-scroll
+ *  - Session heatmap overlay (dots inside bars)
+ *  - Sort controls (date, hours, status, rating)
+ *  - Interactive legend status filters with counts
+ *  - Animated bar entrance (framer-motion)
+ *  - Row highlight on hover (dim others)
+ *  - Minimap with viewport indicator + drag-to-scrub
+ *  - Search/filter by game title
+ *  - Milestone diamond hover popovers
+ *  - Gap indicators between segments
+ *  - Live session pulse on Playing Now bars
+ *  - Drag-to-scroll (grab cursor pan)
+ *  - Toolbar state persistence (localStorage)
+ *  - Tooltip edge clamping
+ *  - Accessibility (ARIA roles + labels)
  */
-import { useMemo, useRef, useState, useCallback } from 'react';
+import { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import { useLocation } from 'wouter';
-import { Gamepad2, Clock, Calendar } from 'lucide-react';
-import { JourneyEntry, StatusChangeEntry, GameStatus } from '@/types/game';
-import { cn } from '@/lib/utils';
+import { motion } from 'framer-motion';
+import { Gamepad2, Clock, Calendar, Search, X, Crosshair, ArrowUpDown, ZoomIn } from 'lucide-react';
+import { JourneyEntry, StatusChangeEntry, GameStatus, GameSession } from '@/types/game';
+import { Slider } from '@/components/ui/slider';
+import { cn, getHardcodedCover } from '@/lib/utils';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -34,47 +55,88 @@ export interface GanttGameRow {
   segments: GanttSegment[];
 }
 
-// ─── Status colors — gradient fills with glow ────────────────────────────────
+type SortKey = 'addedAt' | 'hours' | 'status' | 'rating';
 
-const segmentStyles: Record<GameStatus, { bar: string; glow: string; border: string }> = {
-  'Playing': {
-    bar: 'bg-gradient-to-r from-blue-600/80 to-blue-400/60',
-    glow: 'shadow-lg shadow-blue-500/20',
-    border: 'border border-blue-400/30',
-  },
-  'Playing Now': {
-    bar: 'bg-gradient-to-r from-emerald-600/80 to-emerald-400/60',
-    glow: 'shadow-lg shadow-emerald-500/20',
-    border: 'border border-emerald-400/30',
-  },
-  'Completed': {
-    bar: 'bg-gradient-to-r from-green-600/80 to-green-400/60',
-    glow: 'shadow-lg shadow-green-500/20',
-    border: 'border border-green-400/30',
-  },
-  'On Hold': {
-    bar: 'bg-gradient-to-r from-amber-600/80 to-amber-400/60',
-    glow: 'shadow-lg shadow-amber-500/20',
-    border: 'border border-amber-400/30',
-  },
-  'Want to Play': {
-    bar: 'bg-gradient-to-r from-white/15 to-white/8',
-    glow: 'shadow-md shadow-white/5',
-    border: 'border border-white/15',
-  },
+const STATUS_ORDER: Record<GameStatus, number> = {
+  'Playing Now': 0,
+  'Playing': 1,
+  'On Hold': 2,
+  'Want to Play': 3,
+  'Completed': 4,
 };
 
-// Legend dot colors (solid for the legend strip)
-const legendDotColors: Record<string, string> = {
-  'Playing':      'bg-blue-500',
-  'Completed':    'bg-green-500',
-  'On Hold':      'bg-amber-500',
-  'Want to Play': 'bg-white/30',
+// ─── Status visual styles — reference-aligned two-tier system ─────────────────
+
+interface SegmentStyle {
+  bar: string;
+  glow: string;
+  border: string;
+  text: string;
+  badgeBg: string;
+  badgeText: string;
+  legendDot: string;
+  minimapColor: string;
+}
+
+const segmentStyles: Record<GameStatus, SegmentStyle> = {
+  'Playing Now': {
+    bar: 'bg-gradient-to-r from-teal-600 to-emerald-500',
+    glow: 'shadow-md shadow-teal-500/25',
+    border: 'border border-teal-400/40',
+    text: 'text-white',
+    badgeBg: 'bg-black/50',
+    badgeText: 'text-white',
+    legendDot: 'bg-gradient-to-r from-teal-500 to-emerald-400',
+    minimapColor: '#2dd4bf',
+  },
+  'Playing': {
+    bar: 'bg-white/[0.88]',
+    glow: 'shadow-sm shadow-black/10',
+    border: 'border border-white/20 border-l-[3px] border-l-teal-400',
+    text: 'text-gray-900',
+    badgeBg: 'bg-gray-800/80',
+    badgeText: 'text-white',
+    legendDot: 'bg-white/85',
+    minimapColor: '#e0e0e0',
+  },
+  'Completed': {
+    bar: 'bg-white/[0.88]',
+    glow: 'shadow-sm shadow-black/10',
+    border: 'border border-white/20 border-l-[3px] border-l-emerald-400',
+    text: 'text-gray-900',
+    badgeBg: 'bg-gray-800/80',
+    badgeText: 'text-white',
+    legendDot: 'bg-white/85',
+    minimapColor: '#d0d0d0',
+  },
+  'On Hold': {
+    bar: 'bg-white/20',
+    glow: 'shadow-sm shadow-black/5',
+    border: 'border border-white/10 border-l-[3px] border-l-amber-400/70',
+    text: 'text-white/80',
+    badgeBg: 'bg-black/40',
+    badgeText: 'text-white/80',
+    legendDot: 'bg-white/25',
+    minimapColor: '#666',
+  },
+  'Want to Play': {
+    bar: 'bg-white/10',
+    glow: '',
+    border: 'border border-white/[0.08] border-l-[3px] border-l-white/20',
+    text: 'text-white/60',
+    badgeBg: 'bg-black/30',
+    badgeText: 'text-white/60',
+    legendDot: 'bg-white/15',
+    minimapColor: '#444',
+  },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const DAY_MS = 86_400_000;
+const DAY_WIDTH_DEFAULT = 4;
+const DAY_WIDTH_MIN = 1;
+const DAY_WIDTH_MAX = 12;
 
 function daysBetween(a: string | Date, b: string | Date): number {
   return Math.max(1, Math.round((new Date(b).getTime() - new Date(a).getTime()) / DAY_MS));
@@ -82,10 +144,6 @@ function daysBetween(a: string | Date, b: string | Date): number {
 
 function formatShortDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-function formatMonth(date: Date): string {
-  return date.toLocaleDateString('en-US', { month: 'short' });
 }
 
 function startOfMonth(date: Date): Date {
@@ -98,13 +156,62 @@ function addMonths(date: Date, n: number): Date {
   return d;
 }
 
+function formatDuration(days: number): string {
+  if (days < 14) return `${days} day${days !== 1 ? 's' : ''}`;
+  if (days < 60) return `${Math.round(days / 7)} wks`;
+  if (days < 365) return `${Math.round(days / 30)} mo`;
+  const years = (days / 365).toFixed(1).replace(/\.0$/, '');
+  return `${years} yr`;
+}
+
+function formatTimelineSpan(days: number): string {
+  if (days < 60) return `${days} days`;
+  if (days < 365) {
+    const months = (days / 30.44).toFixed(1).replace(/\.0$/, '');
+    return `${months} month`;
+  }
+  const years = (days / 365.25).toFixed(1).replace(/\.0$/, '');
+  return `${years} years`;
+}
+
+function formatHeaderDate(date: Date): string {
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
+// ─── Preferences persistence ────────────────────────────────────────────────
+
+const GANTT_PREFS_KEY = 'ark-gantt-prefs';
+
+interface GanttPrefs {
+  dayWidth: number;
+  sortBy: SortKey;
+  hiddenStatuses: string[];
+}
+
+function loadPrefs(): Partial<GanttPrefs> {
+  try {
+    return JSON.parse(localStorage.getItem(GANTT_PREFS_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function savePrefs(p: GanttPrefs) {
+  localStorage.setItem(GANTT_PREFS_KEY, JSON.stringify(p));
+}
+
+const _savedPrefs = loadPrefs();
+
 // ─── Build rows from store data ─────────────────────────────────────────────
 
 export function buildGanttRows(
   journeyEntries: JourneyEntry[],
   statusHistory: StatusChangeEntry[],
 ): GanttGameRow[] {
-  // Index status history by gameId for fast lookup
   const historyByGame = new Map<number, StatusChangeEntry[]>();
   for (const entry of statusHistory) {
     if (!historyByGame.has(entry.gameId)) historyByGame.set(entry.gameId, []);
@@ -115,20 +222,17 @@ export function buildGanttRows(
 
   return journeyEntries.map((je) => {
     const changes = historyByGame.get(je.gameId) ?? [];
-    // Sort chronologically
     changes.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
     const segments: GanttSegment[] = [];
 
     if (changes.length === 0) {
-      // No status history — single bar from addedAt to now/removedAt
       segments.push({
         status: je.status,
         startDate: je.addedAt,
         endDate: je.removedAt ?? now,
       });
     } else {
-      // Build segments from transitions
       for (let i = 0; i < changes.length; i++) {
         const change = changes[i];
         const startDate = i === 0 ? je.addedAt : change.timestamp;
@@ -159,7 +263,7 @@ export function buildGanttRows(
   });
 }
 
-// ─── Tooltip ────────────────────────────────────────────────────────────────
+// ─── Tooltip (with edge clamping) ───────────────────────────────────────────
 
 interface TooltipData {
   title: string;
@@ -172,25 +276,135 @@ interface TooltipData {
   y: number;
 }
 
+const TOOLTIP_W = 280;
+const TOOLTIP_H = 120;
+
 function GanttTooltip({ data }: { data: TooltipData }) {
   const isOngoing = new Date(data.endDate).getTime() >= Date.now() - DAY_MS;
+  const style = segmentStyles[data.status];
+
+  // Clamp to viewport edges
+  const left = Math.min(data.x + 16, window.innerWidth - TOOLTIP_W - 8);
+  const top = Math.min(Math.max(8, data.y - 16), window.innerHeight - TOOLTIP_H - 8);
+
   return (
     <div
-      className="fixed z-[100] pointer-events-none px-4 py-3 rounded-xl bg-black/95 backdrop-blur-md border border-white/15 shadow-2xl shadow-black/40 text-xs max-w-[260px]"
-      style={{ left: data.x + 14, top: data.y - 14 }}
+      className="fixed z-[100] pointer-events-none px-5 py-4 rounded-2xl bg-black/95 backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/60 text-xs max-w-[280px]"
+      style={{ left, top }}
     >
-      <div className="font-bold text-white text-sm mb-1 truncate">{data.title}</div>
-      <div className="flex items-center gap-1.5 mb-1.5">
-        <div className={cn('w-2 h-2 rounded-full', segmentStyles[data.status].bar.split(' ')[1]?.replace('/80', '') || 'bg-white/40')} />
+      <div className="font-bold text-white text-sm mb-1.5 truncate">{data.title}</div>
+      <div className="flex items-center gap-2 mb-2">
+        <div className={cn('w-2.5 h-2.5 rounded-full', style.legendDot)} />
         <span className="text-white/80 font-medium">{data.status}</span>
       </div>
       <div className="text-white/50 text-[11px]">
         {formatShortDate(data.startDate)} — {isOngoing ? 'Present' : formatShortDate(data.endDate)}
       </div>
-      <div className="flex items-center gap-3 mt-1.5 text-white/40 text-[11px]">
-        <span>{data.durationDays} day{data.durationDays !== 1 ? 's' : ''}</span>
+      <div className="flex items-center gap-3 mt-2 text-white/40 text-[11px]">
+        <span>{formatDuration(data.durationDays)}</span>
         {data.hoursPlayed > 0 && <span>{data.hoursPlayed}h played</span>}
       </div>
+    </div>
+  );
+}
+
+// ─── Minimap sub-component (with drag-to-scrub) ─────────────────────────────
+
+interface MinimapProps {
+  rows: GanttGameRow[];
+  timelineWidth: number;
+  scrollLeft: number;
+  viewportWidth: number;
+  onSeek: (scrollLeft: number) => void;
+  dateToX: (iso: string) => number;
+}
+
+const MINIMAP_HEIGHT = 28;
+const MINIMAP_ROW_HEIGHT = 2;
+
+function GanttMinimap({ rows, timelineWidth, scrollLeft, viewportWidth, onSeek, dateToX }: MinimapProps) {
+  const minimapRef = useRef<HTMLDivElement>(null);
+  const isDraggingRef = useRef(false);
+
+  const scale = viewportWidth > 0 ? viewportWidth / timelineWidth : 1;
+  const vpIndicatorLeft = scrollLeft * scale;
+  const vpIndicatorWidth = Math.max(8, viewportWidth * scale);
+
+  const seekFromEvent = useCallback((clientX: number) => {
+    if (!minimapRef.current) return;
+    const rect = minimapRef.current.getBoundingClientRect();
+    const clickX = clientX - rect.left;
+    const targetScroll = (clickX / rect.width) * timelineWidth - viewportWidth / 2;
+    onSeek(Math.max(0, targetScroll));
+  }, [timelineWidth, viewportWidth, onSeek]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    isDraggingRef.current = true;
+    seekFromEvent(e.clientX);
+  }, [seekFromEvent]);
+
+  // Drag-to-scrub via document-level mouse events
+  useEffect(() => {
+    const handleMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      seekFromEvent(e.clientX);
+    };
+    const handleUp = () => {
+      isDraggingRef.current = false;
+    };
+
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseup', handleUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseup', handleUp);
+    };
+  }, [seekFromEvent]);
+
+  if (rows.length === 0 || timelineWidth <= viewportWidth) return null;
+
+  return (
+    <div
+      ref={minimapRef}
+      className="relative mx-4 md:mx-10 mt-3 rounded-lg bg-white/[0.03] border border-white/[0.06] cursor-ew-resize overflow-hidden select-none"
+      style={{ height: MINIMAP_HEIGHT }}
+      onMouseDown={handleMouseDown}
+      role="slider"
+      aria-label="Timeline minimap"
+      aria-valuemin={0}
+      aria-valuemax={timelineWidth}
+      aria-valuenow={scrollLeft}
+    >
+      {/* Compressed bars */}
+      {rows.map((row, ri) => (
+        <div key={row.gameId}>
+          {row.segments.map((seg, si) => {
+            const left = dateToX(seg.startDate) * scale;
+            const right = dateToX(seg.endDate) * scale;
+            const width = Math.max(1, right - left);
+            return (
+              <div
+                key={`${ri}-${si}`}
+                className="absolute rounded-[1px]"
+                style={{
+                  left,
+                  width,
+                  top: 2 + ri * (MINIMAP_ROW_HEIGHT + 1),
+                  height: MINIMAP_ROW_HEIGHT,
+                  backgroundColor: segmentStyles[seg.status].minimapColor,
+                  opacity: 0.7,
+                }}
+              />
+            );
+          })}
+        </div>
+      ))}
+
+      {/* Viewport indicator */}
+      <div
+        className="absolute top-0 bottom-0 border border-fuchsia-500/50 bg-fuchsia-500/10 rounded-sm"
+        style={{ left: vpIndicatorLeft, width: vpIndicatorWidth }}
+      />
     </div>
   );
 }
@@ -200,47 +414,175 @@ function GanttTooltip({ data }: { data: TooltipData }) {
 interface JourneyGanttViewProps {
   journeyEntries: JourneyEntry[];
   statusHistory: StatusChangeEntry[];
+  sessions?: GameSession[];
 }
 
-const ROW_HEIGHT = 64;          // px per game row — taller for embedded info
-const DAY_WIDTH = 4;            // px per day on the timeline
-const MONTH_HEADER_HEIGHT = 48; // px for the month/year header
-const MIN_BAR_WIDTH = 6;        // minimum px width so tiny segments are visible
-const GAME_INFO_MIN_WIDTH = 130; // min px to show full game info inside bar
-const GAME_PILL_MIN_WIDTH = 70; // min px to show compact pill
+const ROW_HEIGHT = 72;
+const HEADER_HEIGHT = 56;
+const MIN_BAR_WIDTH = 8;
+const BAR_V_PADDING = 16;
+const GAME_INFO_MIN_WIDTH = 130;
+const GAME_PILL_MIN_WIDTH = 70;
+const DURATION_BADGE_MIN_WIDTH = 56;
+const GAP_THRESHOLD_DAYS = 14;
 
-export function JourneyGanttView({ journeyEntries, statusHistory }: JourneyGanttViewProps) {
+const ALL_STATUSES: GameStatus[] = ['Playing Now', 'Playing', 'Completed', 'On Hold', 'Want to Play'];
+
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: 'addedAt', label: 'Date' },
+  { key: 'hours', label: 'Hours' },
+  { key: 'status', label: 'Status' },
+  { key: 'rating', label: 'Rating' },
+];
+
+const ZOOM_PRESETS: { label: string; title: string; value: number }[] = [
+  { label: 'W', title: 'Week view', value: 10 },
+  { label: 'M', title: 'Month view', value: 4 },
+  { label: 'Y', title: 'Year view', value: 1 },
+];
+
+export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: JourneyGanttViewProps) {
   const [, navigate] = useLocation();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const [tooltip, setTooltip] = useState<TooltipData | null>(null);
 
-  // Build rows
-  const rows = useMemo(
-    () => buildGanttRows(journeyEntries, statusHistory)
-        .sort((a, b) => new Date(a.addedAt).getTime() - new Date(b.addedAt).getTime()),
+  // ── Feature state (hydrated from localStorage) ────────────────────────
+  const [dayWidth, setDayWidth] = useState(() =>
+    typeof _savedPrefs.dayWidth === 'number'
+      ? clamp(_savedPrefs.dayWidth, DAY_WIDTH_MIN, DAY_WIDTH_MAX)
+      : DAY_WIDTH_DEFAULT
+  );
+  const [hiddenStatuses, setHiddenStatuses] = useState<Set<GameStatus>>(() => {
+    if (Array.isArray(_savedPrefs.hiddenStatuses)) {
+      return new Set(_savedPrefs.hiddenStatuses as GameStatus[]);
+    }
+    return new Set();
+  });
+  const [sortBy, setSortBy] = useState<SortKey>(() =>
+    (['addedAt', 'hours', 'status', 'rating'] as SortKey[]).includes(_savedPrefs.sortBy as SortKey)
+      ? (_savedPrefs.sortBy as SortKey)
+      : 'addedAt'
+  );
+  const [searchQuery, setSearchQuery] = useState('');
+  const [hoveredRowId, setHoveredRowId] = useState<number | null>(null);
+  const [focusedRowIdx, setFocusedRowIdx] = useState(-1);
+  const [minimapScrollLeft, setMinimapScrollLeft] = useState(0);
+  const [viewportWidth, setViewportWidth] = useState(0);
+  const hasAnimated = useRef(false);
+
+  // ── Dynamic chart height (fill remaining viewport) ─────────────────
+  const [chartHeight, setChartHeight] = useState(500);
+
+  useEffect(() => {
+    const measure = () => {
+      const el = scrollRef.current ?? wrapperRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      // Leave room for minimap (~40px) + footer (~40px) + breathing room
+      const available = window.innerHeight - rect.top - 100;
+      setChartHeight(Math.max(200, available));
+    };
+
+    measure();
+    // Re-measure on resize and after layout settles
+    window.addEventListener('resize', measure);
+    const raf = requestAnimationFrame(measure);
+    return () => {
+      window.removeEventListener('resize', measure);
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+
+  // ── Drag-to-scroll state ──────────────────────────────────────────────
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStart = useRef({ x: 0, scrollLeft: 0 });
+  const hasDragged = useRef(false);
+
+  // ── Persist preferences to localStorage ───────────────────────────────
+  useEffect(() => {
+    savePrefs({
+      dayWidth,
+      sortBy,
+      hiddenStatuses: Array.from(hiddenStatuses),
+    });
+  }, [dayWidth, sortBy, hiddenStatuses]);
+
+  // ── Build + filter + sort rows ─────────────────────────────────────────
+  const allRows = useMemo(
+    () => buildGanttRows(journeyEntries, statusHistory),
     [journeyEntries, statusHistory]
   );
 
-  // Compute time range
-  const { timelineStart, timelineEnd, totalDays, months } = useMemo(() => {
-    if (rows.length === 0) {
-      const now = new Date();
-      const start = startOfMonth(new Date(now.getFullYear(), now.getMonth() - 3, 1));
-      return { timelineStart: start, timelineEnd: now, totalDays: 90, months: [] as Date[] };
+  const rows = useMemo(() => {
+    let result = allRows;
+
+    if (hiddenStatuses.size > 0) {
+      result = result.filter((r) => !hiddenStatuses.has(r.currentStatus));
     }
 
-    const allDates = rows.flatMap((r) =>
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter((r) => r.title.toLowerCase().includes(q));
+    }
+
+    switch (sortBy) {
+      case 'hours':
+        result = [...result].sort((a, b) => b.hoursPlayed - a.hoursPlayed);
+        break;
+      case 'status':
+        result = [...result].sort((a, b) => STATUS_ORDER[a.currentStatus] - STATUS_ORDER[b.currentStatus]);
+        break;
+      case 'rating':
+        result = [...result].sort((a, b) => b.rating - a.rating);
+        break;
+      case 'addedAt':
+      default:
+        result = [...result].sort((a, b) => new Date(a.addedAt).getTime() - new Date(b.addedAt).getTime());
+        break;
+    }
+
+    return result;
+  }, [allRows, hiddenStatuses, searchQuery, sortBy]);
+
+  // ── Status counts for legend badges ───────────────────────────────────
+  const statusCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const s of ALL_STATUSES) counts[s] = 0;
+    for (const r of allRows) counts[r.currentStatus]++;
+    return counts;
+  }, [allRows]);
+
+  // ── Session map (for heatmap dots) ─────────────────────────────────────
+  const sessionsByGame = useMemo(() => {
+    const map = new Map<number, GameSession[]>();
+    if (!sessions) return map;
+    for (const s of sessions) {
+      if (!map.has(s.gameId)) map.set(s.gameId, []);
+      map.get(s.gameId)!.push(s);
+    }
+    return map;
+  }, [sessions]);
+
+  // ── Compute time range (uses allRows so filtering doesn't shift timeline) ─
+  const { timelineStart, timelineEnd, totalDays, months, spanDays } = useMemo(() => {
+    if (allRows.length === 0) {
+      const now = new Date();
+      const start = startOfMonth(new Date(now.getFullYear(), now.getMonth() - 3, 1));
+      return { timelineStart: start, timelineEnd: now, totalDays: 90, months: [] as Date[], spanDays: 90 };
+    }
+
+    const allDates = allRows.flatMap((r) =>
       r.segments.flatMap((s) => [new Date(s.startDate), new Date(s.endDate)])
     );
     const minDate = new Date(Math.min(...allDates.map((d) => d.getTime())));
     const maxDate = new Date(Math.max(...allDates.map((d) => d.getTime()), Date.now()));
+    const dataSpan = daysBetween(minDate.toISOString(), maxDate.toISOString());
 
-    // Pad: start one month before earliest, end one month after latest
     const start = startOfMonth(addMonths(minDate, -1));
     const end = addMonths(startOfMonth(maxDate), 2);
     const total = daysBetween(start.toISOString(), end.toISOString());
 
-    // Generate month markers
     const monthMarkers: Date[] = [];
     let cursor = new Date(start);
     while (cursor <= end) {
@@ -248,46 +590,34 @@ export function JourneyGanttView({ journeyEntries, statusHistory }: JourneyGantt
       cursor = addMonths(cursor, 1);
     }
 
-    return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers };
-  }, [rows]);
+    return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, spanDays: dataSpan };
+  }, [allRows]);
 
-  const timelineWidth = totalDays * DAY_WIDTH;
+  const timelineWidth = totalDays * dayWidth;
 
-  // Position helper: given an ISO date, return px offset from timeline start
+  // Position helper
   const dateToX = useCallback(
     (iso: string) => {
       const days = daysBetween(timelineStart.toISOString(), iso);
-      return Math.max(0, (days - 1) * DAY_WIDTH);
+      return Math.max(0, (days - 1) * dayWidth);
     },
-    [timelineStart]
+    [timelineStart, dayWidth]
   );
 
-  // Determine which segment index should show embedded game info
-  // Prefer the first segment, but use widest if first is too narrow
+  // Info segment index
   const getInfoSegmentIndex = useCallback(
     (row: GanttGameRow): number => {
       if (row.segments.length === 0) return -1;
-
-      // Calculate width of first segment
       const firstSeg = row.segments[0];
-      const firstLeft = dateToX(firstSeg.startDate);
-      const firstRight = dateToX(firstSeg.endDate);
-      const firstWidth = Math.max(MIN_BAR_WIDTH, firstRight - firstLeft);
-
+      const firstWidth = Math.max(MIN_BAR_WIDTH, dateToX(firstSeg.endDate) - dateToX(firstSeg.startDate));
       if (firstWidth >= GAME_PILL_MIN_WIDTH) return 0;
 
-      // Find widest segment
       let widestIdx = 0;
       let widestWidth = 0;
       for (let i = 0; i < row.segments.length; i++) {
         const seg = row.segments[i];
-        const l = dateToX(seg.startDate);
-        const r = dateToX(seg.endDate);
-        const w = Math.max(MIN_BAR_WIDTH, r - l);
-        if (w > widestWidth) {
-          widestWidth = w;
-          widestIdx = i;
-        }
+        const w = Math.max(MIN_BAR_WIDTH, dateToX(seg.endDate) - dateToX(seg.startDate));
+        if (w > widestWidth) { widestWidth = w; widestIdx = i; }
       }
       return widestIdx;
     },
@@ -312,7 +642,162 @@ export function JourneyGanttView({ journeyEntries, statusHistory }: JourneyGantt
 
   const handleSegmentLeave = useCallback(() => setTooltip(null), []);
 
-  if (rows.length === 0) {
+  // ── Ctrl+Wheel zoom ───────────────────────────────────────────────────
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const handler = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+
+      const rect = el.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left + el.scrollLeft;
+      const dateFraction = cursorX / (totalDays * dayWidth);
+
+      setDayWidth((prev) => {
+        const next = clamp(prev + (e.deltaY < 0 ? 1 : -1), DAY_WIDTH_MIN, DAY_WIDTH_MAX);
+        requestAnimationFrame(() => {
+          const newCursorX = dateFraction * totalDays * next;
+          el.scrollLeft = newCursorX - (e.clientX - rect.left);
+        });
+        return next;
+      });
+    };
+
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, [totalDays, dayWidth]);
+
+  // ── Drag-to-scroll ────────────────────────────────────────────────────
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    // Only start drag on the scroll container background, not on bars
+    const el = scrollRef.current;
+    if (!el) return;
+    setIsDragging(true);
+    hasDragged.current = false;
+    dragStart.current = { x: e.clientX, scrollLeft: el.scrollLeft };
+  }, []);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMove = (e: MouseEvent) => {
+      const el = scrollRef.current;
+      if (!el) return;
+      const dx = e.clientX - dragStart.current.x;
+      if (Math.abs(dx) > 3) hasDragged.current = true;
+      el.scrollLeft = dragStart.current.scrollLeft - dx;
+    };
+    const handleUp = () => setIsDragging(false);
+
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseup', handleUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseup', handleUp);
+    };
+  }, [isDragging]);
+
+  // ── Track viewport width + scroll position for minimap ────────────────
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const update = () => {
+      setMinimapScrollLeft(el.scrollLeft);
+      setViewportWidth(el.clientWidth);
+    };
+
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener('scroll', update);
+      ro.disconnect();
+    };
+  }, []);
+
+  // ── Keyboard navigation ───────────────────────────────────────────────
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+
+    const handler = (e: KeyboardEvent) => {
+      switch (e.key) {
+        case 'ArrowDown':
+          e.preventDefault();
+          setFocusedRowIdx((prev) => Math.min(prev + 1, rows.length - 1));
+          break;
+        case 'ArrowUp':
+          e.preventDefault();
+          setFocusedRowIdx((prev) => Math.max(prev - 1, 0));
+          break;
+        case 'Enter':
+          if (focusedRowIdx >= 0 && focusedRowIdx < rows.length) {
+            navigate(`/game/${rows[focusedRowIdx].gameId}`);
+          }
+          break;
+        case '+':
+        case '=':
+          setDayWidth((prev) => clamp(prev + 1, DAY_WIDTH_MIN, DAY_WIDTH_MAX));
+          break;
+        case '-':
+          setDayWidth((prev) => clamp(prev - 1, DAY_WIDTH_MIN, DAY_WIDTH_MAX));
+          break;
+        case 'Escape':
+          setSearchQuery('');
+          setFocusedRowIdx(-1);
+          break;
+      }
+    };
+
+    el.addEventListener('keydown', handler);
+    return () => el.removeEventListener('keydown', handler);
+  }, [focusedRowIdx, rows, navigate]);
+
+  // ── Focused row auto-scroll ───────────────────────────────────────────
+  useEffect(() => {
+    if (focusedRowIdx < 0) return;
+    const el = wrapperRef.current?.querySelector(`[data-row-index="${focusedRowIdx}"]`);
+    if (el) (el as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [focusedRowIdx]);
+
+  // ── Scroll-to-Now helper ──────────────────────────────────────────────
+  const nowX = useMemo(() => dateToX(new Date().toISOString()), [dateToX]);
+
+  const scrollToNow = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ left: nowX - el.clientWidth / 2, behavior: 'smooth' });
+  }, [nowX]);
+
+  const isNowVisible = useMemo(() => {
+    if (viewportWidth === 0) return true;
+    return nowX >= minimapScrollLeft && nowX <= minimapScrollLeft + viewportWidth;
+  }, [nowX, minimapScrollLeft, viewportWidth]);
+
+  // ── Legend toggle handler ─────────────────────────────────────────────
+  const toggleStatus = useCallback((status: GameStatus) => {
+    setHiddenStatuses((prev) => {
+      const next = new Set(prev);
+      if (next.has(status)) next.delete(status);
+      else next.add(status);
+      return next;
+    });
+  }, []);
+
+  // ── Mark first animation done ─────────────────────────────────────────
+  useEffect(() => {
+    if (rows.length > 0 && !hasAnimated.current) {
+      const timer = setTimeout(() => { hasAnimated.current = true; }, 800);
+      return () => clearTimeout(timer);
+    }
+  }, [rows.length]);
+
+  // ── Empty state ───────────────────────────────────────────────────────
+  if (allRows.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <Gamepad2 className="w-10 h-10 text-fuchsia-500 mb-4" />
@@ -322,99 +807,318 @@ export function JourneyGanttView({ journeyEntries, statusHistory }: JourneyGantt
   }
 
   return (
-    <div className="relative max-w-[100vw]">
-      {/* Legend */}
-      <div className="flex items-center gap-3 px-4 md:px-10 mb-4 flex-wrap">
-        {(['Playing', 'Completed', 'On Hold', 'Want to Play'] as GameStatus[]).map((s) => (
-          <div key={s} className="flex items-center gap-1.5">
-            <div className={cn('w-3 h-3 rounded-sm', legendDotColors[s])} />
-            <span className="text-xs text-white/50">{s}</span>
+    <div
+      ref={wrapperRef}
+      className="relative max-w-[100vw] outline-none"
+      tabIndex={0}
+      role="grid"
+      aria-label="Gaming journey Gantt chart"
+    >
+
+      {/* ── Toolbar: Legend + Search + Sort + Zoom + Span ─────────────── */}
+      <div className="px-4 md:px-10 mb-5 space-y-3">
+
+        {/* Row 1: Legend (clickable filters with counts) + Span label */}
+        <div className="flex items-center justify-between flex-wrap gap-y-2">
+          <div className="flex items-center gap-3 flex-wrap">
+            {ALL_STATUSES.map((s) => {
+              const isHidden = hiddenStatuses.has(s);
+              return (
+                <button
+                  key={s}
+                  onClick={() => toggleStatus(s)}
+                  aria-pressed={!isHidden}
+                  className={cn(
+                    'flex items-center gap-1.5 transition-opacity cursor-pointer select-none',
+                    isHidden && 'opacity-30',
+                  )}
+                >
+                  <div className={cn('w-2.5 h-2.5 rounded-full', segmentStyles[s].legendDot)} />
+                  <span className="text-[11px] text-white/45 font-medium">{s}</span>
+                  <span className="text-[9px] text-white/25">{statusCounts[s]}</span>
+                </button>
+              );
+            })}
+            {hiddenStatuses.size > 0 && (
+              <button
+                onClick={() => setHiddenStatuses(new Set())}
+                className="text-[10px] text-fuchsia-400/70 hover:text-fuchsia-400 ml-1 underline underline-offset-2"
+              >
+                Show All
+              </button>
+            )}
           </div>
-        ))}
+
+          <span className="text-sm text-white/30 font-medium tabular-nums">
+            {formatTimelineSpan(spanDays)}
+          </span>
+        </div>
+
+        {/* Row 2: Search + Sort + Zoom */}
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Search */}
+          <div className="relative flex-shrink-0">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search games..."
+              aria-label="Search games"
+              className="w-44 pl-8 pr-7 py-1.5 text-[11px] rounded-lg bg-white/5 border border-white/10 text-white placeholder:text-white/25 outline-none focus:border-fuchsia-500/40 transition-colors"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60"
+                aria-label="Clear search"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+
+          {/* Sort pills */}
+          <div className="flex items-center gap-0.5 bg-white/5 rounded-lg p-0.5 border border-white/10">
+            <ArrowUpDown className="w-3 h-3 text-white/30 mx-1.5" />
+            {SORT_OPTIONS.map((opt) => (
+              <button
+                key={opt.key}
+                onClick={() => setSortBy(opt.key)}
+                className={cn(
+                  'px-2 py-1 text-[10px] font-medium rounded-md transition-colors',
+                  sortBy === opt.key
+                    ? 'bg-fuchsia-500 text-white'
+                    : 'text-white/45 hover:text-white/70',
+                )}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Zoom: presets + slider */}
+          <div className="flex items-center gap-2 ml-auto">
+            <ZoomIn className="w-3.5 h-3.5 text-white/30" />
+            <div className="flex items-center gap-0.5">
+              {ZOOM_PRESETS.map((p) => (
+                <button
+                  key={p.label}
+                  onClick={() => setDayWidth(p.value)}
+                  title={p.title}
+                  className={cn(
+                    'px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors',
+                    dayWidth === p.value
+                      ? 'bg-fuchsia-500 text-white'
+                      : 'text-white/30 hover:text-white/60 bg-white/5',
+                  )}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <Slider
+              value={[dayWidth]}
+              onValueChange={([v]) => setDayWidth(v)}
+              min={DAY_WIDTH_MIN}
+              max={DAY_WIDTH_MAX}
+              step={1}
+              className="w-24"
+            />
+            <span className="text-[10px] text-white/25 tabular-nums w-5 text-center">{dayWidth}x</span>
+          </div>
+        </div>
       </div>
 
-      {/* Gantt container — full-width timeline, no sticky left column */}
+      {/* ── Gantt container (with drag-to-scroll) ───────────────────── */}
       <div
         ref={scrollRef}
-        className="relative overflow-x-auto overflow-y-hidden"
-        style={{ minHeight: MONTH_HEADER_HEIGHT + rows.length * ROW_HEIGHT + 20 }}
+        className={cn(
+          'relative overflow-x-auto overflow-y-auto select-none',
+          isDragging ? 'cursor-grabbing' : 'cursor-grab',
+        )}
+        style={{ height: chartHeight }}
+        onMouseDown={handleDragStart}
       >
-        <div className="relative" style={{ width: timelineWidth, minWidth: '100%' }}>
+        <div className="relative" style={{ width: timelineWidth, minWidth: '100%', height: HEADER_HEIGHT + rows.length * ROW_HEIGHT + 24 }}>
 
-          {/* Month header */}
+          {/* ── Date header ──────────────────────────────────────────── */}
           <div
-            className="flex border-b border-white/10 sticky top-0 z-10 bg-black/80 backdrop-blur-sm"
-            style={{ height: MONTH_HEADER_HEIGHT }}
+            className="sticky top-0 z-20 border-b border-white/[0.06]"
+            style={{ height: HEADER_HEIGHT }}
           >
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-md" />
+
             {months.map((month, i) => {
               const x = dateToX(month.toISOString());
               const nextMonth = i < months.length - 1 ? months[i + 1] : timelineEnd;
-              const width = dateToX(nextMonth.toISOString()) - x;
-
-              // Show year for first month or January
+              const monthWidth = dateToX(nextMonth.toISOString()) - x;
               const showYear = i === 0 || month.getMonth() === 0;
+              const mid = new Date(month.getFullYear(), month.getMonth(), 15);
+              const midX = dateToX(mid.toISOString());
 
               return (
-                <div
-                  key={i}
-                  className="absolute flex flex-col items-start justify-end pb-1 pl-2 border-l border-white/10"
-                  style={{ left: x, width, height: MONTH_HEADER_HEIGHT }}
-                >
-                  {showYear && (
-                    <span className="text-[10px] text-fuchsia-400/80 font-bold font-['Orbitron']">
-                      {month.getFullYear()}
+                <div key={i}>
+                  <div
+                    className="absolute flex flex-col items-start justify-end pb-2 pl-2"
+                    style={{ left: x, width: monthWidth, height: HEADER_HEIGHT }}
+                  >
+                    {showYear && (
+                      <span className="text-[10px] text-fuchsia-400/70 font-bold font-display tracking-wider">
+                        {month.getFullYear()}
+                      </span>
+                    )}
+                    <span className="text-xs text-white/50 font-medium">
+                      {formatHeaderDate(month)}
                     </span>
+                  </div>
+                  <div
+                    className="absolute top-0 w-px bg-white/[0.06]"
+                    style={{ left: x, height: HEADER_HEIGHT }}
+                  />
+                  {monthWidth > 50 && (
+                    <div
+                      className="absolute flex items-end pb-2 pl-1"
+                      style={{ left: midX, height: HEADER_HEIGHT }}
+                    >
+                      <span className="text-[10px] text-white/25 font-medium">
+                        {formatHeaderDate(mid)}
+                      </span>
+                    </div>
                   )}
-                  <span className="text-xs text-white/50 font-medium">
-                    {formatMonth(month)}
-                  </span>
                 </div>
               );
             })}
+
+            {/* "Now" pill badge */}
+            <div
+              className="absolute z-30 flex flex-col items-center"
+              style={{ left: nowX, top: 6 }}
+            >
+              <div className="relative -left-[14px] px-2.5 py-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold tracking-wide shadow-lg shadow-red-500/30">
+                Now
+              </div>
+            </div>
           </div>
 
-          {/* Rows / bars */}
-          {rows.map((row) => {
+          {/* ── Row area ─────────────────────────────────────────────── */}
+          {rows.length === 0 && allRows.length > 0 && (
+            <div className="flex items-center justify-center py-16 text-white/40 text-sm">
+              No games match your filters.
+            </div>
+          )}
+
+          {rows.map((row, rowIndex) => {
             const infoSegIdx = getInfoSegmentIndex(row);
+            const isHovered = hoveredRowId === row.gameId;
+            const isFocused = focusedRowIdx === rowIndex;
+            const isDimmed = hoveredRowId !== null && !isHovered;
+            const gameSessions = sessionsByGame.get(row.gameId);
 
             return (
               <div
                 key={row.gameId}
-                className="relative border-b border-white/5 group/row hover:bg-white/[0.02] transition-colors cursor-pointer"
+                data-row-index={rowIndex}
+                role="row"
+                aria-label={`${row.title}: ${row.currentStatus}, ${row.hoursPlayed}h played`}
+                className={cn(
+                  'relative group/row transition-all duration-200 cursor-pointer',
+                  isDimmed ? 'opacity-40' : 'opacity-100',
+                  isHovered && 'bg-white/[0.02]',
+                  isFocused && 'border-l-2 border-l-fuchsia-500/50',
+                )}
                 style={{ height: ROW_HEIGHT }}
-                onClick={() => navigate(`/game/${row.gameId}`)}
+                onClick={() => {
+                  // Skip navigation if we just finished a drag
+                  if (hasDragged.current) { hasDragged.current = false; return; }
+                  navigate(`/game/${row.gameId}`);
+                }}
+                onMouseEnter={() => setHoveredRowId(row.gameId)}
+                onMouseLeave={() => setHoveredRowId(null)}
               >
-                {/* Vertical month gridlines (faint) */}
-                {months.map((month, i) => (
+                {/* Vertical month gridlines */}
+                {months.map((month, mi) => (
                   <div
-                    key={i}
-                    className="absolute top-0 bottom-0 w-px bg-white/5"
+                    key={mi}
+                    className="absolute top-0 bottom-0 w-px bg-white/[0.04]"
                     style={{ left: dateToX(month.toISOString()) }}
                   />
                 ))}
 
-                {/* Segment bars */}
+                {/* "Now" dashed vertical line */}
+                <div
+                  className="absolute top-0 bottom-0 w-px border-l border-dashed border-red-500/30"
+                  style={{ left: nowX }}
+                />
+
+                {/* ── Gap indicators between segments ────────────────── */}
+                {row.segments.map((seg, i) => {
+                  if (i === 0) return null;
+                  const prevEnd = row.segments[i - 1].endDate;
+                  const curStart = seg.startDate;
+                  const gapDays = daysBetween(prevEnd, curStart);
+                  if (gapDays <= GAP_THRESHOLD_DAYS) return null;
+
+                  const gapLeft = dateToX(prevEnd);
+                  const gapRight = dateToX(curStart);
+                  const gapMid = (gapLeft + gapRight) / 2;
+
+                  return (
+                    <span
+                      key={`gap-${i}`}
+                      className="absolute text-[8px] text-white/20 italic pointer-events-none whitespace-nowrap"
+                      style={{
+                        left: gapMid,
+                        top: ROW_HEIGHT / 2 - 5,
+                        transform: 'translateX(-50%)',
+                      }}
+                    >
+                      {formatDuration(gapDays)}
+                    </span>
+                  );
+                })}
+
+                {/* ── Segment bars ───────────────────────────────────── */}
                 {row.segments.map((seg, i) => {
                   const left = dateToX(seg.startDate);
                   const right = dateToX(seg.endDate);
                   const width = Math.max(MIN_BAR_WIDTH, right - left);
                   const style = segmentStyles[seg.status];
                   const isInfoSegment = i === infoSegIdx;
+                  const isTealBar = seg.status === 'Playing Now';
+                  const segDays = daysBetween(seg.startDate, seg.endDate);
+                  const isOngoing = new Date(seg.endDate).getTime() >= Date.now() - DAY_MS;
+
+                  const animProps = !hasAnimated.current
+                    ? {
+                        initial: { scaleX: 0, opacity: 0 } as const,
+                        animate: { scaleX: 1, opacity: 1 } as const,
+                        transition: { duration: 0.4, delay: rowIndex * 0.03 + i * 0.02, ease: 'easeOut' as const },
+                      }
+                    : {
+                        initial: false as const,
+                      };
 
                   return (
-                    <div
+                    <motion.div
                       key={i}
+                      {...animProps}
+                      role="gridcell"
+                      aria-label={`${row.title}: ${seg.status} from ${formatShortDate(seg.startDate)} to ${isOngoing ? 'Present' : formatShortDate(seg.endDate)}, ${formatDuration(segDays)}`}
                       className={cn(
-                        'absolute top-2 rounded-lg backdrop-blur-sm cursor-pointer transition-all duration-200',
-                        'hover:brightness-125 hover:shadow-xl hover:scale-y-105',
+                        'absolute rounded-full cursor-pointer transition-[filter,box-shadow] duration-200',
+                        'hover:brightness-110 hover:shadow-lg hover:scale-y-[1.04]',
                         style.bar,
                         style.glow,
                         style.border,
+                        isHovered && 'brightness-110',
                       )}
                       style={{
                         left,
                         width,
-                        height: ROW_HEIGHT - 16,
+                        top: BAR_V_PADDING / 2,
+                        height: ROW_HEIGHT - BAR_V_PADDING,
+                        transformOrigin: 'left center',
                       }}
                       onMouseMove={(e) => {
                         e.stopPropagation();
@@ -423,106 +1127,150 @@ export function JourneyGanttView({ journeyEntries, statusHistory }: JourneyGantt
                       onMouseLeave={handleSegmentLeave}
                       onClick={(e) => {
                         e.stopPropagation();
+                        if (hasDragged.current) { hasDragged.current = false; return; }
                         navigate(`/game/${row.gameId}`);
                       }}
                     >
-                      {/* Glassmorphism shimmer overlay */}
-                      <div className="absolute inset-0 rounded-lg bg-gradient-to-b from-white/10 to-transparent pointer-events-none" />
+                      {/* Shimmer overlay */}
+                      <div className={cn(
+                        'absolute inset-0 rounded-full pointer-events-none',
+                        isTealBar
+                          ? 'bg-gradient-to-b from-white/15 to-transparent'
+                          : 'bg-gradient-to-b from-white/5 to-transparent',
+                      )} />
 
-                      {/* Embedded game info — only in the designated segment */}
-                      {isInfoSegment && width >= GAME_INFO_MIN_WIDTH && (
-                        <div className="absolute inset-0 flex items-center gap-1.5 px-2 overflow-hidden">
-                          {/* Tiny cover thumbnail */}
-                          <div className="flex-shrink-0 w-5 h-7 rounded-sm overflow-hidden bg-black/30">
-                            {row.coverUrl ? (
-                              <img
-                                src={row.coverUrl}
-                                alt={row.title}
-                                className="w-full h-full object-cover"
-                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                      {/* Session heatmap dots */}
+                      {gameSessions && gameSessions.length > 0 && (
+                        <div className="absolute inset-0 rounded-full overflow-hidden pointer-events-none">
+                          {gameSessions.map((session) => {
+                            const sessionX = dateToX(session.startTime) - left;
+                            if (sessionX < 0 || sessionX > width) return null;
+                            return (
+                              <div
+                                key={session.id}
+                                className="absolute rounded-full bg-fuchsia-400/40"
+                                style={{
+                                  left: sessionX,
+                                  top: '50%',
+                                  width: 3,
+                                  height: 3,
+                                  transform: 'translateY(-50%)',
+                                }}
                               />
-                            ) : (
-                              <div className="w-full h-full flex items-center justify-center">
-                                <Gamepad2 className="w-3 h-3 text-white/30" />
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Bar content: game info + duration badge */}
+                      <div className="absolute inset-0 flex items-center justify-between px-3 overflow-hidden gap-2">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          {isInfoSegment && width >= GAME_INFO_MIN_WIDTH && (
+                            <>
+                              <div className={cn(
+                                'flex-shrink-0 w-5 h-7 rounded-sm overflow-hidden',
+                                isTealBar ? 'bg-black/20' : 'bg-black/10',
+                              )}>
+                                {(getHardcodedCover(row.title) || row.coverUrl) ? (
+                                  <img
+                                    src={getHardcodedCover(row.title) || row.coverUrl}
+                                    alt={row.title}
+                                    className="w-full h-full object-cover"
+                                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center">
+                                    <Gamepad2 className={cn('w-3 h-3', isTealBar ? 'text-white/40' : 'text-gray-400')} />
+                                  </div>
+                                )}
                               </div>
-                            )}
-                          </div>
-                          {/* Title & hours */}
-                          <div className="flex-1 min-w-0 flex items-center gap-1.5">
-                            <span className="text-[11px] font-semibold text-white truncate drop-shadow-md">
+                              <span className={cn('text-[11px] font-semibold truncate', style.text)}>
+                                {row.title}
+                              </span>
+                            </>
+                          )}
+
+                          {isInfoSegment && width >= GAME_PILL_MIN_WIDTH && width < GAME_INFO_MIN_WIDTH && (
+                            <span className={cn('text-[10px] font-semibold truncate', style.text)}>
                               {row.title}
                             </span>
-                            {row.hoursPlayed > 0 && width >= GAME_INFO_MIN_WIDTH + 40 && (
-                              <span className="text-[10px] text-white/60 flex-shrink-0 flex items-center gap-0.5">
-                                <Clock className="w-2.5 h-2.5" />
-                                {row.hoursPlayed}h
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      )}
+                          )}
 
-                      {/* Compact pill — title only, when bar is wide enough for pill but not full info */}
-                      {isInfoSegment && width >= GAME_PILL_MIN_WIDTH && width < GAME_INFO_MIN_WIDTH && (
-                        <div className="absolute inset-0 flex items-center px-2 overflow-hidden">
-                          <span className="text-[10px] font-semibold text-white truncate drop-shadow-md">
-                            {row.title}
+                          {!isInfoSegment && width > 60 && (
+                            <span className={cn('text-[10px] font-medium truncate', style.text, !isTealBar && 'opacity-70')}>
+                              {seg.status}
+                            </span>
+                          )}
+                        </div>
+
+                        {width >= DURATION_BADGE_MIN_WIDTH && (
+                          <span className={cn(
+                            'flex-shrink-0 text-[9px] font-semibold px-2 py-0.5 rounded-full',
+                            style.badgeBg, style.badgeText,
+                          )}>
+                            {formatDuration(segDays)}
                           </span>
-                        </div>
-                      )}
+                        )}
+                      </div>
 
-                      {/* Status label inside bar (non-info segments, wide enough) */}
-                      {!isInfoSegment && width > 60 && (
-                        <span className="absolute inset-0 flex items-center px-2 text-[10px] text-white/70 font-medium truncate">
-                          {seg.status}
-                        </span>
+                      {/* Live session pulse (Playing Now only) */}
+                      {isTealBar && (
+                        <div
+                          className="absolute top-1/2 -translate-y-1/2 right-0 w-1 h-4 rounded-full bg-emerald-400 gantt-live-pulse"
+                        />
                       )}
-                    </div>
+                    </motion.div>
                   );
                 })}
 
-                {/* "Added" marker dot */}
+                {/* ── "Added" milestone diamond with popover ──────────── */}
                 <div
-                  className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-fuchsia-500 border border-fuchsia-300 z-10"
-                  style={{ left: dateToX(row.addedAt) - 4 }}
-                  title={`Added: ${formatShortDate(row.addedAt)}`}
-                />
+                  className="absolute top-1/2 -translate-y-1/2 z-10 group/diamond"
+                  style={{ left: dateToX(row.addedAt) - 5 }}
+                >
+                  <div className="w-[10px] h-[10px] rotate-45 bg-fuchsia-500 border border-fuchsia-300/60 shadow-sm shadow-fuchsia-500/30" />
+                  <div className="hidden group-hover/diamond:block absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1 rounded-lg bg-black/90 border border-white/10 text-[10px] text-white/70 whitespace-nowrap shadow-lg z-20">
+                    Added: {formatShortDate(row.addedAt)}
+                    <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-t-[4px] border-t-black/90" />
+                  </div>
+                </div>
 
-                {/* "Removed" marker (if applicable) */}
+                {/* ── "Removed" milestone diamond with popover ────────── */}
                 {row.removedAt && (
                   <div
-                    className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-red-500 border border-red-300 z-10"
-                    style={{ left: dateToX(row.removedAt) - 4 }}
-                    title={`Removed: ${formatShortDate(row.removedAt)}`}
-                  />
+                    className="absolute top-1/2 -translate-y-1/2 z-10 group/removed"
+                    style={{ left: dateToX(row.removedAt) - 5 }}
+                  >
+                    <div className="w-[10px] h-[10px] rotate-45 bg-red-500 border border-red-300/60 shadow-sm shadow-red-500/30" />
+                    <div className="hidden group-hover/removed:block absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1 rounded-lg bg-black/90 border border-white/10 text-[10px] text-white/70 whitespace-nowrap shadow-lg z-20">
+                      Removed: {formatShortDate(row.removedAt)}
+                      <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-t-[4px] border-t-black/90" />
+                    </div>
+                  </div>
                 )}
               </div>
             );
           })}
-
-          {/* Today marker */}
-          <div
-            className="absolute top-0 z-10"
-            style={{
-              left: dateToX(new Date().toISOString()),
-              height: MONTH_HEADER_HEIGHT + rows.length * ROW_HEIGHT,
-            }}
-          >
-            <div className="w-px h-full bg-fuchsia-500/60" />
-            <div className="absolute -top-0 -left-[18px] text-[9px] text-fuchsia-400 font-semibold bg-black/80 px-1 rounded">
-              Today
-            </div>
-          </div>
         </div>
       </div>
 
-      {/* Summary footer */}
-      <div className="flex items-center gap-4 px-4 md:px-10 mt-4 text-xs text-white/40 flex-wrap">
-        <span className="flex items-center gap-1">
+      {/* ── Minimap ─────────────────────────────────────────────────── */}
+      <GanttMinimap
+        rows={rows}
+        timelineWidth={timelineWidth}
+        scrollLeft={minimapScrollLeft}
+        viewportWidth={viewportWidth}
+        dateToX={dateToX}
+        onSeek={(left) => scrollRef.current?.scrollTo({ left, behavior: 'smooth' })}
+      />
+
+      {/* ── Summary footer ──────────────────────────────────────────── */}
+      <div className="flex items-center gap-5 px-4 md:px-10 mt-4 text-[11px] text-white/35 flex-wrap">
+        <span className="flex items-center gap-1.5">
           <Calendar className="w-3 h-3" />
           {rows.length} game{rows.length !== 1 ? 's' : ''} tracked
         </span>
-        <span className="flex items-center gap-1">
+        <span className="flex items-center gap-1.5">
           <Clock className="w-3 h-3" />
           {rows.reduce((sum, r) => sum + r.hoursPlayed, 0)}h total
         </span>
@@ -530,6 +1278,18 @@ export function JourneyGanttView({ journeyEntries, statusHistory }: JourneyGantt
           {rows.filter((r) => r.currentStatus === 'Completed').length} completed
         </span>
       </div>
+
+      {/* ── Scroll-to-Now FAB ───────────────────────────────────────── */}
+      {!isNowVisible && (
+        <button
+          onClick={scrollToNow}
+          aria-label="Scroll to current date"
+          className="absolute bottom-14 right-6 z-30 flex items-center gap-1.5 px-3 py-2 rounded-full bg-red-500/90 hover:bg-red-500 text-white text-[11px] font-bold shadow-lg shadow-red-500/30 transition-colors backdrop-blur-sm border border-red-400/30"
+        >
+          <Crosshair className="w-3.5 h-3.5" />
+          Now
+        </button>
+      )}
 
       {/* Floating tooltip */}
       {tooltip && <GanttTooltip data={tooltip} />}

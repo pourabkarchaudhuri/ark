@@ -20,7 +20,7 @@ import {
   Plus,
 } from 'lucide-react';
 import { FaWindows, FaApple, FaLinux } from 'react-icons/fa';
-import { cn } from '@/lib/utils';
+import { cn, getHardcodedCover } from '@/lib/utils';
 
 interface GameCardProps {
   game: Game;
@@ -234,6 +234,9 @@ function GameCardComponent({
   // Consecutive duplicates (e.g. headerImage == old CDN header.jpg) are removed
   // so the chain never stalls on an identical src that won't fire a new load event.
   const fallbackUrls = useMemo(() => {
+    const hardcoded = getHardcodedCover(game.title);
+    if (hardcoded) return [hardcoded];
+
     if (!game.steamAppId) return [game.coverUrl || ''];
 
     const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
@@ -254,7 +257,7 @@ function GameCardComponent({
       seen.add(url);
       return true;
     });
-  }, [game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
+  }, [game.title, game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
 
   // Handle image error - try next fallback URL
   const handleImageError = useCallback(() => {

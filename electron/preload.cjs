@@ -262,11 +262,14 @@ contextBridge.exposeInMainWorld('sessionTracker', {
   },
 });
 
-// Expose News API to renderer (Reddit gaming news)
+// Expose News API to renderer (Reddit gaming news + RSS feeds)
 contextBridge.exposeInMainWorld('newsApi', {
   // Fetch hot posts from gaming subreddits
   getRedditNews: (subreddits, limit) =>
     ipcRenderer.invoke('news:getRedditNews', subreddits, limit),
+  // Fetch RSS feeds from gaming news sites
+  getRSSFeeds: () =>
+    ipcRenderer.invoke('news:getRSSFeeds'),
 });
 
 console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi exposed');
