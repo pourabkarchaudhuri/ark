@@ -103,6 +103,7 @@ class CustomGameStore {
       title: input.title,
       platform: input.platform,
       status: input.status,
+      executablePath: input.executablePath,
       addedAt: now,
       updatedAt: now,
     };

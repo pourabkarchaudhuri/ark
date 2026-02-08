@@ -3,18 +3,29 @@
  * Shows the user's gaming history as a vertical timeline, grouped by year.
  * Uses the journey store which persists entries even after library removal.
  * Scrolls from latest (top) to oldest (bottom).
+ *
+ * Two view styles:
+ *  - "Noob" (default): vertical timeline grouped by year
+ *  - "OCD": horizontally scrollable Gantt chart with status-colored bars
  */
 import { useMemo, useState, useEffect } from 'react';
 import { useLocation } from 'wouter';
 import { motion } from 'framer-motion';
-import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users } from 'lucide-react';
+import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, List, PieChart } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Timeline, TimelineEntry } from '@/components/ui/timeline';
 import { JourneyEntry, GameStatus } from '@/types/game';
 import { steamService } from '@/services/steam-service';
 import { libraryStore } from '@/services/library-store';
+import { statusHistoryStore } from '@/services/status-history-store';
+import { JourneyGanttView } from '@/components/journey-gantt-view';
+import { JourneyAnalyticsView } from '@/components/journey-analytics-view';
+import { generateMockGanttData } from '@/components/journey-gantt-mock-data';
 import { cn } from '@/lib/utils';
+
+type JourneyViewStyle = 'noob' | 'ocd' | 'analytics';
+type GanttDataSource = 'live' | 'mock';
 
 /** Format player count with K/M suffixes */
 function formatPlayerCount(count: number): string {
@@ -71,14 +82,14 @@ function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCo
   return (
     <motion.div
       className={cn(
-        'rounded-lg bg-white/5 border border-white/10 overflow-hidden cursor-pointer group hover:border-fuchsia-500/40 transition-colors',
+        'rounded-lg bg-white/5 border border-white/10 overflow-hidden cursor-pointer group hover:border-fuchsia-500/40 transition-colors min-h-[120px]',
         isRemoved && 'opacity-60'
       )}
       onClick={() => navigate(`/game/${entry.gameId}`)}
       whileHover={{ scale: 1.02 }}
       transition={{ duration: 0.2 }}
     >
-      <div className="flex gap-3 p-3">
+      <div className="flex gap-3 p-3 h-full">
         {/* Cover image */}
         <div className="flex-shrink-0 w-16 h-24 rounded overflow-hidden bg-white/5">
           {entry.coverUrl ? (
@@ -139,13 +150,11 @@ function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCo
             </div>
           </div>
 
-          <div className="flex items-center gap-3 mt-1.5 flex-wrap">
-            {entry.hoursPlayed > 0 && (
-              <div className="flex items-center gap-1 text-xs text-white/50">
-                <Clock className="w-3 h-3" />
-                <span>{entry.hoursPlayed}h</span>
-              </div>
-            )}
+          <div className="flex items-center gap-3 mt-1.5 min-h-[1.25rem] flex-wrap">
+            <div className="flex items-center gap-1 text-xs text-white/50">
+              <Clock className="w-3 h-3" />
+              <span>{entry.hoursPlayed > 0 ? `${entry.hoursPlayed}h` : '0h'}</span>
+            </div>
             {entry.rating > 0 && <StarRating rating={entry.rating} />}
             {addedDate && (
               <div className="flex items-center gap-1 text-xs text-white/40">
@@ -167,6 +176,11 @@ function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCo
 }
 
 export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
+  // View style toggle: "Noob" (vertical timeline) vs "OCD" (Gantt chart)
+  const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('noob');
+  // Data source for OCD view: live store data vs mock data for dev/demo
+  const [dataSource, setDataSource] = useState<GanttDataSource>('live');
+
   // Fetch live player counts for journey entries in the background.
   const [playerCounts, setPlayerCounts] = useState<Record<number, number>>({});
 
@@ -336,21 +350,126 @@ export function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewP
   const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
   const completedCount = entries.filter((e) => e.status === 'Completed').length;
 
+  // Prepare Gantt/analytics data (only when OCD or Analytics view is active)
+  const ganttData = useMemo(() => {
+    if (viewStyle !== 'ocd' && viewStyle !== 'analytics') return null;
+
+    if (viewStyle === 'ocd' && dataSource === 'mock') {
+      return generateMockGanttData();
+    }
+
+    // Live data from stores
+    return {
+      journeyEntries: entries,
+      statusHistory: statusHistoryStore.getAll(),
+    };
+  }, [viewStyle, dataSource, entries]);
+
   return (
     <div className="relative w-full overflow-clip">
       {/* Header */}
       <div className="max-w-7xl mx-auto py-10 px-4 md:px-8 lg:px-10">
-        <h2 className="text-lg md:text-3xl mb-2 text-white font-bold font-['Orbitron']">
-          Your Gaming Journey
-        </h2>
-        <p className="text-white/60 text-sm md:text-base max-w-lg">
-          {entries.length} game{entries.length !== 1 ? 's' : ''} in your history
-          {completedCount > 0 && ` · ${completedCount} completed`}
-          {totalHours > 0 && ` · ${totalHours}h played`}
-        </p>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h2 className="text-lg md:text-3xl mb-2 text-white font-bold font-['Orbitron']">
+              Your Gaming Journey
+            </h2>
+            <p className="text-white/60 text-sm md:text-base max-w-lg">
+              {entries.length} game{entries.length !== 1 ? 's' : ''} in your history
+              {completedCount > 0 && ` · ${completedCount} completed`}
+              {totalHours > 0 && ` · ${totalHours}h played`}
+            </p>
+          </div>
+
+          {/* View style toggle + data source toggle */}
+          <div className="flex items-center gap-3">
+            {/* Noob / OCD / Analytics toggle */}
+            <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
+              <button
+                onClick={() => setViewStyle('noob')}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                  viewStyle === 'noob'
+                    ? 'bg-fuchsia-500 text-white'
+                    : 'text-white/60 hover:text-white'
+                )}
+              >
+                <List className="w-3 h-3" />
+                Noob
+              </button>
+              <button
+                onClick={() => setViewStyle('ocd')}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                  viewStyle === 'ocd'
+                    ? 'bg-fuchsia-500 text-white'
+                    : 'text-white/60 hover:text-white'
+                )}
+              >
+                <BarChart3 className="w-3 h-3" />
+                OCD
+              </button>
+              <button
+                onClick={() => setViewStyle('analytics')}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                  viewStyle === 'analytics'
+                    ? 'bg-fuchsia-500 text-white'
+                    : 'text-white/60 hover:text-white'
+                )}
+              >
+                <PieChart className="w-3 h-3" />
+                Analytics
+              </button>
+            </div>
+
+            {/* Mock / Live toggle (only visible in OCD view) */}
+            {viewStyle === 'ocd' && (
+              <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
+                <button
+                  onClick={() => setDataSource('live')}
+                  className={cn(
+                    'px-2.5 py-1 text-[10px] font-medium rounded-md transition-colors',
+                    dataSource === 'live'
+                      ? 'bg-emerald-500 text-white'
+                      : 'text-white/50 hover:text-white'
+                  )}
+                >
+                  Live
+                </button>
+                <button
+                  onClick={() => setDataSource('mock')}
+                  className={cn(
+                    'px-2.5 py-1 text-[10px] font-medium rounded-md transition-colors',
+                    dataSource === 'mock'
+                      ? 'bg-amber-500 text-white'
+                      : 'text-white/50 hover:text-white'
+                  )}
+                >
+                  Mock
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      <Timeline data={timelineData} />
+      {/* Conditional view rendering */}
+      {viewStyle === 'ocd' && ganttData ? (
+        <div className="px-0 md:px-4 lg:px-6">
+          <JourneyGanttView
+            journeyEntries={ganttData.journeyEntries}
+            statusHistory={ganttData.statusHistory}
+          />
+        </div>
+      ) : viewStyle === 'analytics' && ganttData ? (
+        <JourneyAnalyticsView
+          journeyEntries={ganttData.journeyEntries}
+          statusHistory={ganttData.statusHistory}
+        />
+      ) : (
+        <Timeline data={timelineData} />
+      )}
     </div>
   );
 }

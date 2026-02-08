@@ -58,11 +58,31 @@ interface SessionTrackerAPI {
   removeAllListeners: () => void;
 }
 
+// News API types (exposed via Electron preload)
+interface RedditPost {
+  id: string;
+  title: string;
+  selftext: string;
+  thumbnail: string;
+  url: string;
+  permalink: string;
+  created_utc: number;
+  subreddit: string;
+  score: number;
+  num_comments: number;
+  preview?: { images?: Array<{ source?: { url: string } }> };
+}
+
+interface NewsAPI {
+  getRedditNews: (subreddits?: string[], limit?: number) => Promise<RedditPost[]>;
+}
+
 declare global {
   interface Window {
     fileDialog?: FileDialogAPI;
     electron?: ElectronAPI;
     sessionTracker?: SessionTrackerAPI;
+    newsApi?: NewsAPI;
   }
 }
 

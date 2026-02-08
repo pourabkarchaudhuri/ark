@@ -19,6 +19,7 @@ import { APP_VERSION } from '@/components/changelog-modal';
 import { WindowControls } from '@/components/window-controls';
 import { EmptyState } from '@/components/empty-state';
 import { JourneyView } from '@/components/journey-view';
+import { BuzzView } from '@/components/buzz-view';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 import {
@@ -35,6 +36,7 @@ import {
   Settings,
   Trash2,
   Clock,
+  Newspaper,
 } from 'lucide-react';
 import { libraryStore } from '@/services/library-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
@@ -43,7 +45,7 @@ import { useSessionTracker } from '@/hooks/useSessionTracker';
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz';
 
 // Track if cache has been cleared this session
 export function Dashboard() {
@@ -502,6 +504,21 @@ export function Dashboard() {
                 <Clock className="h-3 w-3" />
                 Journey
               </button>
+              <button
+                onClick={() => {
+                  setViewMode('buzz');
+                  setSearchQuery('');
+                }}
+                className={cn(
+                  "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                  viewMode === 'buzz' 
+                    ? "bg-fuchsia-500 text-white" 
+                    : "text-white/60 hover:text-white"
+                )}
+              >
+                <Newspaper className="h-3 w-3" />
+                Buzz
+              </button>
             </div>
 
             {/* Clear Library Button - only visible in library mode */}
@@ -672,6 +689,8 @@ export function Dashboard() {
             loading={libraryLoading}
             onSwitchToBrowse={() => setViewMode('browse')}
           />
+        ) : viewMode === 'buzz' ? (
+          <BuzzView />
         ) : (
           <>
             {/* Loading State - Skeleton Grid */}
@@ -780,7 +799,7 @@ export function Dashboard() {
         onSave={handleSave}
         genres={genres}
         platforms={platforms}
-        currentExecutablePath={editingGame?.steamAppId ? libraryStore.getEntry(editingGame.steamAppId)?.executablePath : undefined}
+        currentExecutablePath={editingGame ? libraryStore.getEntry(editingGame.steamAppId || editingGame.igdbId || 0)?.executablePath : undefined}
       />
 
       {/* Custom Game Dialog */}

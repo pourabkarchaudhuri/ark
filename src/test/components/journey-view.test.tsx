@@ -16,6 +16,14 @@ vi.mock('@/services/library-store', () => ({
   },
 }));
 
+// Mock status history store
+vi.mock('@/services/status-history-store', () => ({
+  statusHistoryStore: {
+    getAll: vi.fn().mockReturnValue([]),
+    getForGame: vi.fn().mockReturnValue([]),
+  },
+}));
+
 // Mock framer-motion
 vi.mock('framer-motion', () => ({
   motion: {
@@ -235,5 +243,128 @@ describe('JourneyView', () => {
 
     expect(screen.getByText('In Library')).toBeInTheDocument();
     expect(screen.queryByText('Removed')).not.toBeInTheDocument();
+  });
+
+  // ── Noob / OCD / Analytics tab toggle tests ──
+
+  it('renders Noob, OCD, and Analytics tab buttons', () => {
+    const entries = [
+      createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
+    ];
+
+    render(<JourneyView entries={entries} loading={false} />);
+
+    expect(screen.getByText('Noob')).toBeInTheDocument();
+    expect(screen.getByText('OCD')).toBeInTheDocument();
+    expect(screen.getByText('Analytics')).toBeInTheDocument();
+  });
+
+  it('defaults to Noob view (timeline renders)', () => {
+    const entries = [
+      createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
+    ];
+
+    render(<JourneyView entries={entries} loading={false} />);
+
+    // Noob view shows year labels via the Timeline component
+    expect(screen.getAllByText('2025').length).toBeGreaterThan(0);
+  });
+
+  it('switches to OCD view when OCD tab is clicked', () => {
+    const entries = [
+      createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
+    ];
+
+    render(<JourneyView entries={entries} loading={false} />);
+
+    // Click OCD tab
+    fireEvent.click(screen.getByText('OCD'));
+
+    // OCD view shows the game title in the Gantt chart label column
+    expect(screen.getByText('Counter-Strike 2')).toBeInTheDocument();
+    // The "games tracked" summary footer should be visible
+    expect(screen.getByText(/tracked/)).toBeInTheDocument();
+  });
+
+  it('shows Mock/Live toggle only in OCD view', () => {
+    const entries = [
+      createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
+    ];
+
+    render(<JourneyView entries={entries} loading={false} />);
+
+    // In Noob view, Mock/Live should NOT be visible
+    expect(screen.queryByText('Mock')).not.toBeInTheDocument();
+    expect(screen.queryByText('Live')).not.toBeInTheDocument();
+
+    // Switch to OCD
+    fireEvent.click(screen.getByText('OCD'));
+
+    // Now Mock/Live should be visible
+    expect(screen.getByText('Mock')).toBeInTheDocument();
+    expect(screen.getByText('Live')).toBeInTheDocument();
+  });
+
+  it('loads mock data when Mock is clicked in OCD view', () => {
+    const entries = [
+      createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
+    ];
+
+    render(<JourneyView entries={entries} loading={false} />);
+
+    // Switch to OCD
+    fireEvent.click(screen.getByText('OCD'));
+    // Switch to Mock
+    fireEvent.click(screen.getByText('Mock'));
+
+    // Mock data includes Elden Ring and Dota 2 from the mock generator
+    expect(screen.getByText('Elden Ring')).toBeInTheDocument();
+    expect(screen.getByText('Dota 2')).toBeInTheDocument();
+  });
+
+  it('switches to Analytics view when Analytics tab is clicked', () => {
+    const entries = [
+      createMockEntry({
+        gameId: 730,
+        title: 'Counter-Strike 2',
+        addedAt: '2025-01-01T00:00:00.000Z',
+        hoursPlayed: 120,
+        status: 'Completed',
+        genre: ['Action', 'FPS'],
+      }),
+      createMockEntry({
+        gameId: 570,
+        title: 'Dota 2',
+        addedAt: '2025-02-01T00:00:00.000Z',
+        hoursPlayed: 50,
+        status: 'Playing',
+        genre: ['Strategy', 'MOBA'],
+      }),
+    ];
+
+    render(<JourneyView entries={entries} loading={false} />);
+
+    // Click Analytics tab
+    fireEvent.click(screen.getByText('Analytics'));
+
+    // Analytics view shows stat cards
+    expect(screen.getByText('Total Games')).toBeInTheDocument();
+    expect(screen.getByText('Total Hours')).toBeInTheDocument();
+    expect(screen.getByText('Completion Rate')).toBeInTheDocument();
+  });
+
+  it('shows Mock/Live toggle only in OCD view, not in Analytics', () => {
+    const entries = [
+      createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
+    ];
+
+    render(<JourneyView entries={entries} loading={false} />);
+
+    // Switch to Analytics
+    fireEvent.click(screen.getByText('Analytics'));
+
+    // Mock/Live should NOT be visible
+    expect(screen.queryByText('Mock')).not.toBeInTheDocument();
+    expect(screen.queryByText('Live')).not.toBeInTheDocument();
   });
 });

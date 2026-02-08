@@ -18,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Plus, X } from 'lucide-react';
+import { Plus, X, FolderOpen } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface CustomGameDialogProps {
@@ -44,6 +44,7 @@ export function CustomGameDialog({
   const [title, setTitle] = useState('');
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
   const [status, setStatus] = useState<GameStatus>('Want to Play');
+  const [executablePath, setExecutablePath] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const handlePlatformToggle = (platform: string) => {
@@ -53,6 +54,19 @@ export function CustomGameDialog({
         : [...prev, platform]
     );
   };
+
+  const handleBrowseExecutable = useCallback(async () => {
+    try {
+      if (window.fileDialog?.selectExecutable) {
+        const result = await window.fileDialog.selectExecutable();
+        if (result.success && result.filePath) {
+          setExecutablePath(result.filePath);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to select executable:', err);
+    }
+  }, []);
 
   const handleSubmit = useCallback(
     (e: React.FormEvent) => {
@@ -74,14 +88,16 @@ export function CustomGameDialog({
         title: title.trim(),
         platform: selectedPlatforms,
         status,
+        executablePath: executablePath || undefined,
       });
 
       // Reset form
       setTitle('');
       setSelectedPlatforms([]);
       setStatus('Want to Play');
+      setExecutablePath('');
     },
-    [title, selectedPlatforms, status, onSave]
+    [title, selectedPlatforms, status, executablePath, onSave]
   );
 
   const handleClose = () => {
@@ -89,6 +105,7 @@ export function CustomGameDialog({
     setTitle('');
     setSelectedPlatforms([]);
     setStatus('Want to Play');
+    setExecutablePath('');
     setError(null);
     onOpenChange(false);
   };
@@ -175,6 +192,44 @@ export function CustomGameDialog({
             </Select>
           </div>
 
+          {/* Game Executable */}
+          <div className="space-y-2">
+            <Label>Game Executable</Label>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleBrowseExecutable}
+                className="border-white/10 hover:bg-white/10 flex items-center gap-1.5"
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                Browse...
+              </Button>
+              {executablePath && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setExecutablePath('')}
+                  className="text-red-400 hover:text-red-300 hover:bg-red-500/10 px-2"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </Button>
+              )}
+            </div>
+            {executablePath && (
+              <p className="text-xs text-white/40 truncate" title={executablePath}>
+                {executablePath}
+              </p>
+            )}
+            {!executablePath && (
+              <p className="text-xs text-white/30">
+                Optional — select the .exe for session tracking
+              </p>
+            )}
+          </div>
+
           {/* Error Message */}
           {error && (
             <div className="p-3 rounded-lg bg-red-500/20 border border-red-500/30">
@@ -211,4 +266,3 @@ export function CustomGameDialog({
     </Dialog>
   );
 }
-

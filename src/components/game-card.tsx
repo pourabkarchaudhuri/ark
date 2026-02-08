@@ -398,22 +398,32 @@ function GameCardComponent({
       <div className="p-3 space-y-1.5">
         {/* Title Row with Actions */}
         <div className="flex items-start justify-between gap-2">
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-0 min-h-[5.5rem]">
             <h3 
               className="font-semibold text-sm text-white leading-tight line-clamp-2 h-[2.5rem]" 
               title={game.title}
             >
               {game.title}
             </h3>
-            <p className="text-xs text-white/60 truncate mt-0.5">{game.developer}</p>
-            {game.releaseDate && (
-              <p className="text-xs text-white/40 mt-0.5">{formatDisplayDate(game.releaseDate)}</p>
-            )}
-            {game.playerCount !== undefined && game.playerCount > 0 && (
-              <p className="text-xs text-cyan-400 mt-0.5">
-                {formatPlayerCount(game.playerCount)} playing now
-              </p>
-            )}
+            <div className="min-h-[1rem] mt-0.5">
+              <p className="text-xs text-white/60 truncate">{game.developer || '\u00A0'}</p>
+            </div>
+            <div className="min-h-[1rem] mt-0.5">
+              {game.releaseDate ? (
+                <p className="text-xs text-white/40">{formatDisplayDate(game.releaseDate)}</p>
+              ) : (
+                <p className="text-xs text-white/40">&nbsp;</p>
+              )}
+            </div>
+            <div className="min-h-[1rem] mt-0.5">
+              {game.playerCount !== undefined && game.playerCount > 0 ? (
+                <p className="text-xs text-cyan-400">
+                  {formatPlayerCount(game.playerCount)} playing now
+                </p>
+              ) : (
+                <p className="text-xs">&nbsp;</p>
+              )}
+            </div>
           </div>
           {/* Ellipsis Menu - button only for library games (right-click uses custom context menu below) */}
           <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>

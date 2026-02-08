@@ -483,6 +483,74 @@ ipcMain.handle('steam:getRecommendations', async (_event, currentAppId: number, 
 });
 
 // ============================================================================
+// NEWS API IPC HANDLERS (Reddit gaming news)
+// ============================================================================
+
+/**
+ * Fetch hot gaming posts from Reddit JSON API.
+ * Runs in the main process to avoid CORS issues in the renderer.
+ */
+ipcMain.handle('news:getRedditNews', async (_event, subreddits: string[] = ['gaming', 'pcgaming'], limit: number = 25) => {
+  try {
+    console.log(`[News] Fetching Reddit news from: ${subreddits.join(', ')}`);
+    const allPosts: Array<{
+      id: string;
+      title: string;
+      selftext: string;
+      thumbnail: string;
+      url: string;
+      permalink: string;
+      created_utc: number;
+      subreddit: string;
+      score: number;
+      num_comments: number;
+      preview?: { images?: Array<{ source?: { url: string } }> };
+    }> = [];
+
+    for (const sub of subreddits) {
+      try {
+        const response = await fetch(
+          `https://www.reddit.com/r/${sub}/hot.json?limit=${limit}`,
+          {
+            headers: {
+              'User-Agent': 'ArkGameTracker/1.0 (Electron Desktop App)',
+            },
+          }
+        );
+        if (!response.ok) continue;
+        const data = await response.json();
+        const posts = data?.data?.children ?? [];
+        for (const post of posts) {
+          const d = post.data;
+          if (!d || d.stickied) continue; // Skip stickied/pinned posts
+          allPosts.push({
+            id: d.id ?? '',
+            title: d.title ?? '',
+            selftext: d.selftext ?? '',
+            thumbnail: d.thumbnail ?? '',
+            url: d.url ?? '',
+            permalink: d.permalink ?? '',
+            created_utc: d.created_utc ?? 0,
+            subreddit: d.subreddit ?? sub,
+            score: d.score ?? 0,
+            num_comments: d.num_comments ?? 0,
+            preview: d.preview,
+          });
+        }
+      } catch (err) {
+        console.warn(`[News] Failed to fetch r/${sub}:`, err);
+      }
+    }
+
+    console.log(`[News] Got ${allPosts.length} Reddit posts total`);
+    return allPosts;
+  } catch (error) {
+    console.error('[News] Reddit fetch error:', error);
+    return [];
+  }
+});
+
+// ============================================================================
 // METACRITIC API IPC HANDLERS
 // ============================================================================
 

@@ -105,6 +105,7 @@ export interface CustomGameEntry {
   title: string;
   platform: string[];
   status: GameStatus;
+  executablePath?: string; // Path to game executable for session tracking
   addedAt: Date;
   updatedAt: Date;
 }
