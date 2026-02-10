@@ -4,13 +4,14 @@ import {
   GamePriority,
   CreateLibraryEntry,
   UpdateLibraryEntry,
+  migrateGameId,
 } from '@/types/game';
 import { journeyStore } from './journey-store';
 import { statusHistoryStore } from './status-history-store';
 import { sessionStore } from './session-store';
 
 const STORAGE_KEY = 'ark-library-data';
-const STORAGE_VERSION = 4; // Bumped version for progress tracking fields
+const STORAGE_VERSION = 5; // v5: gameId migrated from number to string
 
 interface StoredData {
   version: number;
@@ -20,10 +21,10 @@ interface StoredData {
 
 /**
  * Library Store - Manages user's personal game library
- * Stores only user-specific data (status, priority, notes) for games added from Steam
+ * Stores only user-specific data (status, priority, notes) for games added from Steam/Epic
  */
 class LibraryStore {
-  private entries: Map<number, LibraryGameEntry> = new Map(); // keyed by gameId (Steam appId)
+  private entries: Map<string, LibraryGameEntry> = new Map(); // keyed by universal gameId string
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
 
@@ -39,8 +40,8 @@ class LibraryStore {
       let needsResave = false;
       if (stored && stored.entries.length > 0) {
         stored.entries.forEach((entry) => {
-          // Support both new gameId and legacy fields
-          const id = entry.gameId || (entry as any).igdbId || entry.steamAppId;
+          // Migrate numeric gameId to string format
+          const id = migrateGameId(entry as any);
           if (id) {
             // Migrate removed 'Dropped' status → 'On Hold'
             let status = entry.status;
@@ -59,11 +60,20 @@ class LibraryStore {
             });
           }
         });
+        // Always resave if we loaded data (ensures migration persists)
+        if (stored.version < STORAGE_VERSION) {
+          needsResave = true;
+        }
       }
-      // Persist migrated entries so the migration only runs once
-      if (needsResave) {
+      // Persist migrated entries so the migration only runs once.
+      // GUARD: Never overwrite existing data with an empty store — if all
+      // entries failed migration something went wrong and we must not wipe
+      // the user's library.
+      if (needsResave && this.entries.size > 0) {
         this.saveToStorage();
-        console.log('[LibraryStore] Migrated "Dropped" entries to "On Hold"');
+        console.log(`[LibraryStore] Migrated ${this.entries.size} entries to v5 (string gameId)`);
+      } else if (needsResave && this.entries.size === 0) {
+        console.warn('[LibraryStore] Migration produced 0 entries — skipping save to prevent data loss');
       }
     } catch (error) {
       console.error('Failed to load library data:', error);
@@ -78,10 +88,10 @@ class LibraryStore {
       if (!data) return null;
 
       const parsed = JSON.parse(data) as StoredData;
-      // Allow migration from older versions
+      // Allow migration from older versions — attempt to load entries
+      // even from very old formats rather than silently discarding them.
       if (parsed.version < 2) {
-        console.log('Library storage version too old, resetting data');
-        return null;
+        console.warn('[LibraryStore] Storage version very old (v' + parsed.version + ') — attempting migration');
       }
 
       // Migrate entries from v3 to v4 (add progress tracking fields)
@@ -91,8 +101,9 @@ class LibraryStore {
           hoursPlayed: entry.hoursPlayed ?? 0,
           rating: entry.rating ?? 0,
         }));
-        parsed.version = 4;
       }
+
+      // v5 migration (number → string gameId) happens in initialize()
 
       return parsed;
     } catch (error) {
@@ -130,7 +141,7 @@ class LibraryStore {
   // Add a game to the library
   addToLibrary(input: CreateLibraryEntry): LibraryGameEntry {
     const now = new Date();
-    const gameId = input.gameId || input.steamAppId;
+    const gameId = input.gameId;
     
     if (!gameId) {
       throw new Error('No game ID provided');
@@ -158,7 +169,7 @@ class LibraryStore {
   }
 
   // Remove a game from the library
-  removeFromLibrary(gameId: number): boolean {
+  removeFromLibrary(gameId: string): boolean {
     const deleted = this.entries.delete(gameId);
     if (deleted) {
       this.saveToStorage();
@@ -170,7 +181,7 @@ class LibraryStore {
   }
 
   // Update a library entry
-  updateEntry(gameId: number, input: UpdateLibraryEntry): LibraryGameEntry | undefined {
+  updateEntry(gameId: string, input: UpdateLibraryEntry): LibraryGameEntry | undefined {
     const existing = this.entries.get(gameId);
     if (!existing) return undefined;
 
@@ -205,12 +216,12 @@ class LibraryStore {
   }
 
   // Check if a game is in the library
-  isInLibrary(gameId: number): boolean {
+  isInLibrary(gameId: string): boolean {
     return this.entries.has(gameId);
   }
 
-  // Get a library entry by game ID (Steam appId)
-  getEntry(gameId: number): LibraryGameEntry | undefined {
+  // Get a library entry by universal game ID
+  getEntry(gameId: string): LibraryGameEntry | undefined {
     return this.entries.get(gameId);
   }
 
@@ -222,12 +233,12 @@ class LibraryStore {
   }
 
   // Get all game IDs in library
-  getAllGameIds(): number[] {
+  getAllGameIds(): string[] {
     return Array.from(this.entries.keys());
   }
 
   // Legacy method name for backwards compatibility
-  getAllIgdbIds(): number[] { // kept for backward compat
+  getAllIgdbIds(): string[] { // kept for backward compat
     return this.getAllGameIds();
   }
 
@@ -279,7 +290,7 @@ class LibraryStore {
   }
 
   // Update hoursPlayed from session tracking totals
-  updateHoursFromSessions(gameId: number, totalHours: number) {
+  updateHoursFromSessions(gameId: string, totalHours: number) {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
@@ -293,7 +304,7 @@ class LibraryStore {
   }
 
   // Get all entries that have an executablePath set
-  getTrackableEntries(): Array<{ gameId: number; executablePath: string }> {
+  getTrackableEntries(): Array<{ gameId: string; executablePath: string }> {
     return Array.from(this.entries.values())
       .filter((e) => e.executablePath)
       .map((e) => ({ gameId: e.gameId, executablePath: e.executablePath! }));
@@ -333,7 +344,7 @@ class LibraryStore {
 
       let importCount = 0;
       entries.forEach((entry) => {
-        const id = entry.gameId || (entry as any).igdbId || entry.steamAppId;
+        const id = migrateGameId(entry as any);
         if (id) {
           this.entries.set(id, {
             ...entry,
@@ -405,7 +416,7 @@ class LibraryStore {
       let skipped = 0;
 
       entries.forEach((entry) => {
-        const id = entry.gameId || (entry as any).igdbId || entry.steamAppId;
+        const id = migrateGameId(entry as any);
         if (!id) return;
 
         const existing = this.entries.get(id);

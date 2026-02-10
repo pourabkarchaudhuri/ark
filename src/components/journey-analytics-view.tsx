@@ -12,7 +12,7 @@
  *  5. Discovery — Genre radar + recommendation sources
  *  6. Recent Activity — Status change feed
  */
-import React, { useMemo, useRef, useEffect } from 'react';
+import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react';
 import {
   motion,
   useMotionValue,
@@ -37,7 +37,38 @@ import {
   GameSession,
   LibraryGameEntry,
 } from '@/types/game';
-import { cn, getHardcodedCover, formatHours } from '@/lib/utils';
+import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
+
+// ─── Fallback cover image ────────────────────────────────────────────────────
+
+function FallbackImg({
+  gameId, title, coverUrl, alt, className,
+}: {
+  gameId: string; title: string; coverUrl?: string;
+  alt?: string; className?: string;
+}) {
+  const chain = useMemo(() => buildGameImageChain(gameId, title, coverUrl), [gameId, title, coverUrl]);
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+
+  const handleError = useCallback(() => {
+    const next = attempt + 1;
+    if (next < chain.length) setAttempt(next);
+    else setFailed(true);
+  }, [attempt, chain.length]);
+
+  if (failed || chain.length === 0) return null;
+  return (
+    <img
+      src={chain[attempt]}
+      alt={alt ?? title}
+      className={className}
+      loading="lazy"
+      decoding="async"
+      onError={handleError}
+    />
+  );
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -975,11 +1006,12 @@ export function JourneyAnalyticsView({
                 <div key={game.gameId} className="flex items-center gap-2">
                   <span className="text-[10px] text-white/30 w-3 text-right font-mono">{i + 1}</span>
                   <div className="w-5 h-7 rounded-sm overflow-hidden bg-white/5 flex-shrink-0">
-                    {(getHardcodedCover(game.title) || game.coverUrl) ? (
-                      <img src={getHardcodedCover(game.title) || game.coverUrl} alt={game.title} className="w-full h-full object-cover" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center"><Gamepad2 className="w-2.5 h-2.5 text-white/20" /></div>
-                    )}
+                    <FallbackImg
+                      gameId={game.gameId}
+                      title={game.title}
+                      coverUrl={game.coverUrl}
+                      className="w-full h-full object-cover"
+                    />
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-0.5">

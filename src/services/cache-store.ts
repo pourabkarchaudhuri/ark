@@ -5,7 +5,7 @@
 
 // Generic cached game/genre/platform types (formerly IGDB-specific)
 interface CachedGame {
-  id: number;
+  id: string | number; // String for new format ("steam-730"), number for legacy
   name: string;
   [key: string]: unknown;
 }
@@ -23,7 +23,7 @@ interface CachedPlatform {
 }
 
 const DB_NAME = 'ark-game-cache';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // v2: game id keyPath now supports strings
 
 // Store names
 const STORES = {
@@ -44,7 +44,7 @@ interface CacheMetadata {
 interface SyncQueueItem {
   id: string;
   action: 'add' | 'remove' | 'update';
-  gameId: number;
+  gameId: string;
   data?: unknown;
   timestamp: number;
 }
@@ -88,8 +88,19 @@ class CacheStore {
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
+        const oldVersion = (event as IDBVersionChangeEvent).oldVersion;
 
-        // Games store - indexed by id
+        // v1 → v2: wipe games store (cache is disposable) to support string IDs
+        if (oldVersion >= 1 && oldVersion < 2) {
+          if (db.objectStoreNames.contains(STORES.games)) {
+            db.deleteObjectStore(STORES.games);
+          }
+          if (db.objectStoreNames.contains(STORES.searchResults)) {
+            db.deleteObjectStore(STORES.searchResults);
+          }
+        }
+
+        // Games store - indexed by id (now supports string or number keys)
         if (!db.objectStoreNames.contains(STORES.games)) {
           const gamesStore = db.createObjectStore(STORES.games, { keyPath: 'id' });
           gamesStore.createIndex('cachedAt', 'cachedAt', { unique: false });
@@ -177,7 +188,7 @@ class CacheStore {
     });
   }
 
-  async getGame(id: number): Promise<CachedGame | null> {
+  async getGame(id: string | number): Promise<CachedGame | null> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORES.games, 'readonly');
@@ -196,7 +207,7 @@ class CacheStore {
     });
   }
 
-  async getGames(ids: number[]): Promise<CachedGame[]> {
+  async getGames(ids: (string | number)[]): Promise<CachedGame[]> {
     const db = await this.getDB();
     return new Promise((resolve) => {
       const transaction = db.transaction(STORES.games, 'readonly');

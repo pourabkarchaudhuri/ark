@@ -220,6 +220,12 @@ export interface SteamReviewsResponse {
   reviews: SteamReview[];
 }
 
+// App list item from ISteamApps/GetAppList/v2 (for Catalog A–Z browsing)
+export interface SteamAppListItem {
+  appid: number;
+  name: string;
+}
+
 // Window interface for Steam API exposure
 declare global {
   interface Window {
@@ -233,6 +239,8 @@ declare global {
       getComingSoon: () => Promise<Array<{ id: number; name: string; image: string }>>;
       getGameReviews: (appId: number, limit?: number) => Promise<SteamReviewsResponse>;
       getNewsForApp: (appId: number, count?: number) => Promise<SteamNewsItem[]>;
+      // Full app list for Catalog browsing
+      getAppList: () => Promise<SteamAppListItem[]>;
       // Player counts
       getPlayerCount: (appId: number) => Promise<number>;
       getMultiplePlayerCounts: (appIds: number[]) => Promise<Record<number, number>>;
@@ -247,6 +255,16 @@ declare global {
       getCachedGameNames: (appIds: number[]) => Promise<Record<number, string>>;
       // Game recommendations
       getRecommendations: (currentAppId: number, libraryAppIds: number[], limit?: number) => Promise<GameRecommendation[]>;
+      // Upcoming releases (enriched coming soon + new releases)
+      getUpcomingReleases: () => Promise<Array<{
+        id: number;
+        name: string;
+        image: string;
+        releaseDate: string;
+        comingSoon: boolean;
+        genres: string[];
+        platforms: { windows: boolean; mac: boolean; linux: boolean };
+      }>>;
       // Helper functions for image URLs
       getCoverUrl: (appId: number) => string;
       getHeaderUrl: (appId: number) => string;

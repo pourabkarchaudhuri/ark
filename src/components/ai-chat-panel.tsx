@@ -554,8 +554,8 @@ const QUICK_PROMPTS = [
   "Search for RPG games",
 ];
 
-// Main component
-export function AIChatPanel({ isOpen, onClose, initialGameContext }: AIChatPanelProps) {
+// Main component — memoized to avoid re-renders from Dashboard state changes
+export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, initialGameContext }: AIChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -665,23 +665,25 @@ export function AIChatPanel({ isOpen, onClose, initialGameContext }: AIChatPanel
     try {
       // Get library data with game names from Electron cache
       const libraryEntries = getAllEntries();
-      const appIds = libraryEntries.map(e => e.steamAppId || e.gameId || 0);
+      // Extract numeric Steam appIds for the name cache lookup
+      const numericAppIds = libraryEntries
+        .map(e => e.steamAppId ?? 0)
+        .filter((id): id is number => id > 0);
       
       // Fetch cached game names from Electron backend
       let gameNames: Record<number, string> = {};
-      if (window.steam && appIds.length > 0) {
+      if (window.steam && numericAppIds.length > 0) {
         try {
-          gameNames = await window.steam.getCachedGameNames(appIds);
+          gameNames = await window.steam.getCachedGameNames(numericAppIds);
         } catch (err) {
           console.warn('[AI Chat] Failed to fetch cached game names:', err);
         }
       }
       
       const libraryData = libraryEntries.map(e => {
-        const appId = e.steamAppId || e.gameId || 0;
         return {
-          gameId: appId,
-          name: gameNames[appId] || undefined, // Include name if available in cache
+          gameId: e.gameId,
+          name: e.steamAppId ? gameNames[e.steamAppId] || undefined : undefined,
           status: e.status,
           priority: e.priority,
           addedAt: e.addedAt.toISOString(),
@@ -720,10 +722,11 @@ export function AIChatPanel({ isOpen, onClose, initialGameContext }: AIChatPanel
         // Handle library actions
         if (response.actions && response.actions.length > 0) {
           for (const action of response.actions) {
+            const stringId = `steam-${action.appId}`;
             if (action.type === 'add') {
               try {
                 await addToLibrary({ 
-                  gameId: action.appId,
+                  gameId: stringId,
                   steamAppId: action.appId, 
                   status: (action.status as GameStatus) || 'Want to Play' 
                 });
@@ -732,7 +735,7 @@ export function AIChatPanel({ isOpen, onClose, initialGameContext }: AIChatPanel
               }
             } else if (action.type === 'remove') {
               try {
-                removeFromLibrary(action.appId);
+                removeFromLibrary(stringId);
               } catch (e) {
                 console.error('Failed to remove game:', e);
               }
@@ -967,4 +970,4 @@ export function AIChatPanel({ isOpen, onClose, initialGameContext }: AIChatPanel
       )}
     </AnimatePresence>
   );
-}
+});

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
-import { Router } from 'wouter';
+import { render, screen, waitFor, act } from '@testing-library/react';
+import { Router, useRoute } from 'wouter';
 import { GameDetailsPage } from '@/pages/game-details';
 import { ToastProvider } from '@/components/ui/toast';
 import { SteamAppDetails, SteamReviewsResponse } from '@/types/steam';
@@ -10,10 +10,40 @@ vi.mock('wouter', async () => {
   const actual = await vi.importActual('wouter');
   return {
     ...actual,
-    useRoute: vi.fn(() => [true, { id: '730' }]), // Mock route params for CS2 (appId 730)
+    useRoute: vi.fn(() => [true, { id: 'steam-730' }]), // Universal string ID for CS2
     useLocation: vi.fn(() => ['/', vi.fn()]),
   };
 });
+
+// Mock prefetch-store — avoids side-effects from the real module
+vi.mock('@/services/prefetch-store', () => ({
+  findGameById: vi.fn(() => null),
+  searchPrefetchedGames: vi.fn(() => []),
+  getPrefetchedGames: vi.fn(() => null),
+  isPrefetchReady: vi.fn(() => false),
+}));
+
+// Mock fitgirl-service — avoids network calls
+vi.mock('@/services/fitgirl-service', () => ({
+  getRepackLinkForGame: vi.fn().mockResolvedValue(null),
+}));
+
+// Mock steam-service — avoids IPC/fetch calls
+vi.mock('@/services/steam-service', () => ({
+  steamService: {
+    getNewsForApp: vi.fn().mockResolvedValue([]),
+    getMultiplePlayerCounts: vi.fn().mockResolvedValue({}),
+  },
+}));
+
+// Mock epic-service
+vi.mock('@/services/epic-service', () => ({
+  epicService: {
+    getGameDetails: vi.fn().mockResolvedValue(null),
+  },
+}));
+
+const mockUseRoute = vi.mocked(useRoute);
 
 // Mock game details
 const mockGameDetails: SteamAppDetails = {
@@ -197,6 +227,23 @@ describe('GameDetailsPage', () => {
       configurable: true,
     });
 
+    // Mock window.epic
+    Object.defineProperty(window, 'epic', {
+      value: {
+        searchGames: vi.fn().mockResolvedValue([]),
+        getGameDetails: vi.fn().mockResolvedValue(null),
+        getNewReleases: vi.fn().mockResolvedValue([]),
+        getComingSoon: vi.fn().mockResolvedValue([]),
+        getFreeGames: vi.fn().mockResolvedValue([]),
+        getUpcomingReleases: vi.fn().mockResolvedValue([]),
+        getCoverUrl: vi.fn().mockReturnValue(null),
+        clearCache: vi.fn().mockResolvedValue(undefined),
+        getCacheStats: vi.fn().mockResolvedValue({ total: 0, fresh: 0, stale: 0 }),
+      },
+      writable: true,
+      configurable: true,
+    });
+
     // Mock window.metacritic
     Object.defineProperty(window, 'metacritic', {
       value: {
@@ -277,7 +324,7 @@ describe('GameDetailsPage', () => {
     expect(percentageElements.length).toBeGreaterThan(0);
   });
 
-  it('calls Steam API on mount', async () => {
+  it('calls Steam API on mount with correct app ID', async () => {
     renderGameDetails();
 
     await waitFor(() => {
@@ -381,6 +428,23 @@ describe('Metacritic Integration', () => {
       configurable: true,
     });
 
+    // Mock window.epic
+    Object.defineProperty(window, 'epic', {
+      value: {
+        searchGames: vi.fn().mockResolvedValue([]),
+        getGameDetails: vi.fn().mockResolvedValue(null),
+        getNewReleases: vi.fn().mockResolvedValue([]),
+        getComingSoon: vi.fn().mockResolvedValue([]),
+        getFreeGames: vi.fn().mockResolvedValue([]),
+        getUpcomingReleases: vi.fn().mockResolvedValue([]),
+        getCoverUrl: vi.fn().mockReturnValue(null),
+        clearCache: vi.fn().mockResolvedValue(undefined),
+        getCacheStats: vi.fn().mockResolvedValue({ total: 0, fresh: 0, stale: 0 }),
+      },
+      writable: true,
+      configurable: true,
+    });
+
     // Mock window.metacritic
     Object.defineProperty(window, 'metacritic', {
       value: {
@@ -470,3 +534,312 @@ describe('Metacritic Integration', () => {
   });
 });
 
+describe('Epic Game Details', () => {
+  beforeEach(() => {
+    // Override route to point to an Epic game
+    mockUseRoute.mockReturnValue([true, { id: 'epic-fn:fortnite' }] as any);
+
+    // Mock window.steam
+    Object.defineProperty(window, 'steam', {
+      value: {
+        getAppDetails: vi.fn().mockResolvedValue(null),
+        getGameReviews: vi.fn().mockResolvedValue(null),
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    // Mock window.epic
+    Object.defineProperty(window, 'epic', {
+      value: {
+        searchGames: vi.fn().mockResolvedValue([]),
+        getGameDetails: vi.fn().mockResolvedValue({
+          namespace: 'fn',
+          id: 'fortnite',
+          title: 'Fortnite',
+          description: 'A battle royale game',
+          developer: 'Epic Games',
+          publisher: 'Epic Games',
+          releaseDate: '2017-07-25',
+          keyImages: [
+            { type: 'DieselStoreFrontWide', url: 'https://example.com/wide.jpg' },
+            { type: 'OfferImageTall', url: 'https://example.com/tall.jpg' },
+          ],
+          categories: [{ path: 'games/edition/base' }],
+          price: { totalPrice: { fmtPrice: { originalPrice: 'Free' } }, totalPaymentPrice: { fmtPrice: { originalPrice: 'Free' } } },
+          tags: [{ id: '1216', name: 'Action' }],
+        }),
+        getNewReleases: vi.fn().mockResolvedValue([]),
+        getComingSoon: vi.fn().mockResolvedValue([]),
+        getFreeGames: vi.fn().mockResolvedValue([]),
+        getUpcomingReleases: vi.fn().mockResolvedValue([]),
+        getCoverUrl: vi.fn().mockReturnValue('https://example.com/cover.jpg'),
+        clearCache: vi.fn().mockResolvedValue(undefined),
+        getCacheStats: vi.fn().mockResolvedValue({ total: 0, fresh: 0, stale: 0 }),
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    // Mock window.metacritic
+    Object.defineProperty(window, 'metacritic', {
+      value: {
+        getGameReviews: vi.fn().mockResolvedValue(null),
+        clearCache: vi.fn().mockResolvedValue(true),
+      },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    // Reset route mock
+    mockUseRoute.mockReturnValue([true, { id: 'steam-730' }] as any);
+  });
+
+  it('fetches Epic game details for epic-prefixed IDs', async () => {
+    renderGameDetails();
+
+    // The component uses epicService (the module), not window.epic directly
+    await waitFor(() => {
+      expect(mockedEpicService.getGameDetails).toHaveBeenCalledWith('fn', 'fortnite');
+    });
+  });
+
+  it('does not call Steam API for Epic games', async () => {
+    renderGameDetails();
+
+    // Give it time to process
+    await waitFor(() => {
+      expect(mockedEpicService.getGameDetails).toHaveBeenCalled();
+    });
+
+    // Steam API should NOT be called for Epic game IDs
+    expect(window.steam!.getAppDetails).not.toHaveBeenCalled();
+  });
+});
+
+// ─── State Reset on Navigation ──────────────────────────────────────────────
+// Verifies that stale data from a previous game doesn't bleed through when the
+// user navigates to a different game details page.
+
+describe('State Reset on Navigation', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, 'steam', {
+      value: {
+        getAppDetails: vi.fn().mockResolvedValue(mockGameDetails),
+        getGameReviews: vi.fn().mockResolvedValue(mockReviews),
+        getRecommendations: vi.fn().mockResolvedValue([]),
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    Object.defineProperty(window, 'epic', {
+      value: {
+        searchGames: vi.fn().mockResolvedValue([]),
+        getGameDetails: vi.fn().mockResolvedValue(null),
+        getNewReleases: vi.fn().mockResolvedValue([]),
+        getComingSoon: vi.fn().mockResolvedValue([]),
+        getFreeGames: vi.fn().mockResolvedValue([]),
+        getUpcomingReleases: vi.fn().mockResolvedValue([]),
+        getCoverUrl: vi.fn().mockReturnValue(null),
+        clearCache: vi.fn().mockResolvedValue(undefined),
+        getCacheStats: vi.fn().mockResolvedValue({ total: 0, fresh: 0, stale: 0 }),
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    Object.defineProperty(window, 'metacritic', {
+      value: {
+        getGameReviews: vi.fn().mockResolvedValue(mockMetacriticReviews),
+        clearCache: vi.fn().mockResolvedValue(true),
+      },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    mockUseRoute.mockReturnValue([true, { id: 'steam-730' }] as any);
+  });
+
+  it('resets state when gameId changes (no stale data)', async () => {
+    // First render — load CS2
+    const { unmount } = renderGameDetails();
+
+    await waitFor(() => {
+      expect(screen.getByText('Counter-Strike 2')).toBeInTheDocument();
+    });
+
+    // Verify Steam API was called for the first game
+    expect(window.steam!.getAppDetails).toHaveBeenCalledWith(730);
+
+    unmount();
+
+    // Second render — load a different game
+    const differentDetails = { ...mockGameDetails, name: 'Half-Life 3', steam_appid: 999 };
+    window.steam!.getAppDetails = vi.fn().mockResolvedValue(differentDetails);
+    mockUseRoute.mockReturnValue([true, { id: 'steam-999' }] as any);
+
+    renderGameDetails();
+
+    await waitFor(() => {
+      expect(screen.getByText('Half-Life 3')).toBeInTheDocument();
+    });
+
+    // The first game's name should NOT be present
+    expect(screen.queryByText('Counter-Strike 2')).not.toBeInTheDocument();
+    // API should have been called with the new appId
+    expect(window.steam!.getAppDetails).toHaveBeenCalledWith(999);
+  });
+
+  it('shows loading skeleton during navigation', async () => {
+    // Make the API slow to resolve
+    let resolveDetails!: (val: SteamAppDetails) => void;
+    window.steam!.getAppDetails = vi.fn().mockReturnValue(
+      new Promise((resolve) => { resolveDetails = resolve; })
+    );
+
+    renderGameDetails();
+
+    // Should show skeleton while loading
+    const skeletonElements = document.querySelectorAll('.animate-pulse');
+    expect(skeletonElements.length).toBeGreaterThan(0);
+
+    // Resolve the API call
+    await act(async () => {
+      resolveDetails(mockGameDetails);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Counter-Strike 2')).toBeInTheDocument();
+    });
+  });
+});
+
+// ─── epicToSteamDetails Normalizer ──────────────────────────────────────────
+// Tests the conversion function that transforms Epic Game objects into
+// SteamAppDetails-compatible shapes for the unified detail layout.
+
+// Import the mocked epicService (vi.mock hoists above imports)
+import { epicService } from '@/services/epic-service';
+const mockedEpicService = vi.mocked(epicService);
+
+describe('epicToSteamDetails normalizer (via Epic rendering)', () => {
+
+  beforeEach(() => {
+    mockUseRoute.mockReturnValue([true, { id: 'epic-ns:offer1' }] as any);
+
+    Object.defineProperty(window, 'steam', {
+      value: {
+        getAppDetails: vi.fn().mockResolvedValue(null),
+        getGameReviews: vi.fn().mockResolvedValue(null),
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    Object.defineProperty(window, 'epic', {
+      value: {
+        searchGames: vi.fn().mockResolvedValue([]),
+        getGameDetails: vi.fn().mockResolvedValue(null),
+        getNewReleases: vi.fn().mockResolvedValue([]),
+        getComingSoon: vi.fn().mockResolvedValue([]),
+        getFreeGames: vi.fn().mockResolvedValue([]),
+        getUpcomingReleases: vi.fn().mockResolvedValue([]),
+        getCoverUrl: vi.fn().mockReturnValue(null),
+        clearCache: vi.fn().mockResolvedValue(undefined),
+        getCacheStats: vi.fn().mockResolvedValue({ total: 0, fresh: 0, stale: 0 }),
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    Object.defineProperty(window, 'metacritic', {
+      value: {
+        getGameReviews: vi.fn().mockResolvedValue(null),
+        clearCache: vi.fn().mockResolvedValue(true),
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    // Mock epicService to return a Game object (the normalized shape)
+    mockedEpicService.getGameDetails.mockResolvedValue({
+      id: 'epic-ns:offer1',
+      title: 'Epic Test Game',
+      developer: 'TestDev',
+      publisher: 'TestPub',
+      genre: ['Action', 'Adventure'],
+      platform: ['Windows', 'Mac'],
+      metacriticScore: 78,
+      releaseDate: 'Dec 15, 2025',
+      summary: 'A test game from Epic Store',
+      coverUrl: 'https://example.com/cover.jpg',
+      headerImage: 'https://example.com/header.jpg',
+      screenshots: ['https://example.com/ss1.jpg', 'https://example.com/ss2.jpg'],
+      price: { isFree: false, finalFormatted: '$29.99', discountPercent: 10 },
+      store: 'epic',
+      status: 'Want to Play',
+      priority: 'Medium',
+      publicReviews: '',
+      recommendationSource: '',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    mockUseRoute.mockReturnValue([true, { id: 'steam-730' }] as any);
+  });
+
+  it('renders Epic game using the unified layout (epicToSteamDetails)', async () => {
+    renderGameDetails();
+
+    // The game title should render (epicToSteamDetails maps title → name)
+    await waitFor(() => {
+      expect(screen.getByText('Epic Test Game')).toBeInTheDocument();
+    });
+  });
+
+  it('renders Epic game genres from normalized data', async () => {
+    renderGameDetails();
+
+    await waitFor(() => {
+      expect(screen.getByText('Action')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Adventure')).toBeInTheDocument();
+  });
+
+  it('renders Epic game description', async () => {
+    renderGameDetails();
+
+    await waitFor(() => {
+      expect(screen.getByText('A test game from Epic Store')).toBeInTheDocument();
+    });
+  });
+
+  it('shows Epic store badge for Epic-primary games', async () => {
+    renderGameDetails();
+
+    await waitFor(() => {
+      expect(screen.getByText('Epic Test Game')).toBeInTheDocument();
+    });
+
+    // Should show "View on Epic Games" link
+    expect(screen.getByText('View on Epic Games')).toBeInTheDocument();
+  });
+
+  it('renders price from Epic game data', async () => {
+    renderGameDetails();
+
+    await waitFor(() => {
+      expect(screen.getByText('$29.99')).toBeInTheDocument();
+    });
+  });
+});

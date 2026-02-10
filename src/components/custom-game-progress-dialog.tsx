@@ -44,7 +44,7 @@ import { cn, formatHours } from '@/lib/utils';
 interface CustomGameProgressDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  gameId: number; // negative custom-game ID
+  gameId: string; // custom game ID (e.g., "custom-1")
 }
 
 const statusOptions: GameStatus[] = [

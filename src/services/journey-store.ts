@@ -1,7 +1,7 @@
-import { JourneyEntry, GameStatus } from '@/types/game';
+import { JourneyEntry, GameStatus, migrateGameId } from '@/types/game';
 
 const STORAGE_KEY = 'ark-journey-history';
-const STORAGE_VERSION = 1;
+const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
 
 interface StoredJourneyData {
   version: number;
@@ -15,7 +15,7 @@ interface StoredJourneyData {
  * This powers the Journey timeline view.
  */
 class JourneyStore {
-  private entries: Map<number, JourneyEntry> = new Map(); // keyed by gameId
+  private entries: Map<string, JourneyEntry> = new Map(); // keyed by universal gameId string
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
 
@@ -26,20 +26,34 @@ class JourneyStore {
   private initialize() {
     if (this.isInitialized) return;
 
+    let needsResave = false;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as StoredJourneyData;
-        if (parsed.version === STORAGE_VERSION && Array.isArray(parsed.entries)) {
+        if (Array.isArray(parsed.entries)) {
           for (const entry of parsed.entries) {
-            if (entry.gameId) {
-              this.entries.set(entry.gameId, entry);
+            const id = migrateGameId(entry as any);
+            if (id) {
+              this.entries.set(id, { ...entry, gameId: id });
             }
+          }
+          if (parsed.version < STORAGE_VERSION) {
+            needsResave = true;
           }
         }
       }
     } catch (error) {
       console.error('[JourneyStore] Failed to load:', error);
+    }
+
+    // GUARD: Never overwrite existing data with an empty store — if all entries
+    // failed migration something went wrong and we must not wipe the journey.
+    if (needsResave && this.entries.size > 0) {
+      this.save();
+      console.log(`[JourneyStore] Migrated ${this.entries.size} entries to v2 (string gameId)`);
+    } else if (needsResave && this.entries.size === 0) {
+      console.warn('[JourneyStore] Migration produced 0 entries — skipping save to prevent data loss');
     }
 
     this.isInitialized = true;
@@ -93,7 +107,7 @@ class JourneyStore {
   /**
    * Mark a game as removed (sets removedAt but does NOT delete).
    */
-  markRemoved(gameId: number) {
+  markRemoved(gameId: string) {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
@@ -105,7 +119,7 @@ class JourneyStore {
   /**
    * Sync status / hours / rating for a game already in the journey.
    */
-  syncProgress(gameId: number, fields: { status?: GameStatus; hoursPlayed?: number; rating?: number }) {
+  syncProgress(gameId: string, fields: { status?: GameStatus; hoursPlayed?: number; rating?: number }) {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
@@ -119,7 +133,7 @@ class JourneyStore {
 
   // ------ Queries ------
 
-  getEntry(gameId: number): JourneyEntry | undefined {
+  getEntry(gameId: string): JourneyEntry | undefined {
     return this.entries.get(gameId);
   }
 
@@ -136,7 +150,7 @@ class JourneyStore {
     return this.entries.size;
   }
 
-  has(gameId: number): boolean {
+  has(gameId: string): boolean {
     return this.entries.has(gameId);
   }
 
@@ -155,32 +169,34 @@ class JourneyStore {
     let skipped = 0;
 
     for (const incoming of entries) {
-      if (!incoming.gameId) { skipped++; continue; }
+      const migratedId = migrateGameId(incoming as any);
+      if (!migratedId) { skipped++; continue; }
+      const migratedIncoming = { ...incoming, gameId: migratedId };
 
-      const existing = this.entries.get(incoming.gameId);
+      const existing = this.entries.get(migratedId);
 
       if (!existing) {
-        this.entries.set(incoming.gameId, incoming);
+        this.entries.set(migratedId, migratedIncoming);
         added++;
       } else {
         // Keep earliest addedAt
         const keepAddedAt =
-          new Date(existing.addedAt).getTime() <= new Date(incoming.addedAt).getTime()
+          new Date(existing.addedAt).getTime() <= new Date(migratedIncoming.addedAt).getTime()
             ? existing.addedAt
-            : incoming.addedAt;
+            : migratedIncoming.addedAt;
 
         // Keep removedAt only if both have it; otherwise prefer the one that doesn't
-        const removedAt = !incoming.removedAt ? undefined : (!existing.removedAt ? undefined : incoming.removedAt);
+        const removedAt = !migratedIncoming.removedAt ? undefined : (!existing.removedAt ? undefined : migratedIncoming.removedAt);
 
         const merged: JourneyEntry = {
           ...existing,
-          ...incoming,
+          ...migratedIncoming,
           addedAt: keepAddedAt,
           removedAt,
         };
 
         if (JSON.stringify(existing) !== JSON.stringify(merged)) {
-          this.entries.set(incoming.gameId, merged);
+          this.entries.set(migratedId, merged);
           updated++;
         } else {
           skipped++;
@@ -194,6 +210,19 @@ class JourneyStore {
     }
 
     return { added, updated, skipped };
+  }
+
+  /**
+   * Permanently delete a journey entry.
+   * Unlike markRemoved(), this fully removes the entry from the store.
+   */
+  deleteEntry(gameId: string): boolean {
+    const existed = this.entries.delete(gameId);
+    if (existed) {
+      this.save();
+      this.notifyListeners();
+    }
+    return existed;
   }
 
   /** Clear all journey data (mainly for testing / reset). */

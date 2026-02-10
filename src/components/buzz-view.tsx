@@ -8,11 +8,10 @@
  * Features segmented progress bars, auto-advance, keyboard navigation,
  * always-visible nav arrows, and an inline webview reader.
  */
-import { useEffect, useState, useCallback, useRef, useMemo, forwardRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo, forwardRef, memo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Newspaper, RefreshCw, ExternalLink, Clock, ChevronLeft, ChevronRight, X, Loader2, Globe, ArrowLeft, ArrowRight, RotateCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { BlurImage } from '@/components/ui/apple-cards-carousel';
 import { fetchAllNews, clearNewsCache, NewsItem } from '@/services/news-service';
 import { cn } from '@/lib/utils';
 
@@ -57,6 +56,98 @@ function getSteamFallbackFromSource(_source: string, imageUrl?: string): string 
     }
   }
   return undefined;
+}
+
+// ─── Fade-in Image ──────────────────────────────────────────────────────────
+// Combines native lazy loading, async decoding, and opacity fade-in.
+
+function BuzzFadeImage({
+  src,
+  alt = '',
+  className = '',
+  onError,
+}: {
+  src: string;
+  alt?: string;
+  className?: string;
+  onError?: () => void;
+}) {
+  const [loaded, setLoaded] = useState(false);
+
+  // Reset loaded state when src changes (story navigation)
+  useEffect(() => {
+    setLoaded(false);
+  }, [src]);
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      loading="eager"      // stories are preloaded, show immediately
+      decoding="async"
+      onLoad={() => setLoaded(true)}
+      onError={onError}
+      className={cn(
+        className,
+        'transition-opacity duration-300 ease-in',
+        loaded ? 'opacity-100' : 'opacity-0',
+      )}
+    />
+  );
+}
+
+// ─── Image Preloader Hook ───────────────────────────────────────────────────
+// Preloads story images in the background the moment news data arrives.
+// Prioritises the current image + nearby stories, then loads the rest.
+
+function usePreloadStoryImages(stories: NewsItem[], currentIndex: number) {
+  const preloadedRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (stories.length === 0) return;
+
+    // Build priority-ordered URL list: current → next 5 → prev 2 → rest
+    const urls: string[] = [];
+    const seen = new Set<string>();
+    const addUrl = (idx: number) => {
+      const url = stories[((idx % stories.length) + stories.length) % stories.length]?.imageUrl;
+      if (url && !seen.has(url) && !preloadedRef.current.has(url)) {
+        seen.add(url);
+        urls.push(url);
+      }
+    };
+
+    // Current + next 5
+    for (let i = 0; i <= 5; i++) addUrl(currentIndex + i);
+    // Previous 2
+    for (let i = 1; i <= 2; i++) addUrl(currentIndex - i);
+    // Everything else
+    for (let i = 0; i < stories.length; i++) addUrl(i);
+
+    // Preload in micro-batches to avoid flooding the network
+    let cancelled = false;
+    const BATCH = 4;
+    let offset = 0;
+
+    const loadBatch = () => {
+      if (cancelled || offset >= urls.length) return;
+      const batch = urls.slice(offset, offset + BATCH);
+      offset += BATCH;
+
+      for (const url of batch) {
+        const img = new Image();
+        img.src = url;
+        img.onload = () => { preloadedRef.current.add(url); };
+        img.onerror = () => { preloadedRef.current.add(url); }; // mark done even on error
+      }
+
+      // Next batch after a short delay
+      setTimeout(loadBatch, 200);
+    };
+
+    loadBatch();
+    return () => { cancelled = true; };
+  }, [stories, currentIndex]);
 }
 
 // ─── Progress Bar Segments ──────────────────────────────────────────────────
@@ -342,10 +433,10 @@ const StoryCard = forwardRef<HTMLDivElement, { item: NewsItem; direction: number
       className="absolute inset-0"
     >
       {/* Background image */}
-      <BlurImage
+      <BuzzFadeImage
         src={imgSrc}
         alt={item.title}
-        className="absolute inset-0 z-0 object-cover"
+        className="absolute inset-0 w-full h-full z-0 object-cover"
         onError={handleImgError}
       />
 
@@ -402,7 +493,7 @@ const StoryCard = forwardRef<HTMLDivElement, { item: NewsItem; direction: number
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 
-export function BuzzView() {
+export const BuzzView = memo(function BuzzView() {
   const [news, setNews] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -418,6 +509,9 @@ export function BuzzView() {
 
   const stories = useMemo(() => news.slice(0, 30), [news]);
   const total = stories.length;
+
+  // Preload story images in the background for instant navigation
+  usePreloadStoryImages(stories, currentIndex);
 
   // ─── Data fetching ────────────────────────────────────────────
 
@@ -702,4 +796,4 @@ export function BuzzView() {
       </div>
     </div>
   );
-}
+});

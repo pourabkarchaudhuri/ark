@@ -3,7 +3,7 @@
  * Provides settings for the application including BYOK (Bring Your Own Key) API key management
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -33,7 +33,7 @@ interface SettingsPanelProps {
   onClose: () => void;
 }
 
-export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
+export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   // API Key state
   const [apiKey, setApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
@@ -739,5 +739,4 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       )}
     </AnimatePresence>
   );
-}
-
+});

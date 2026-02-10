@@ -1,6 +1,26 @@
 import '@testing-library/jest-dom';
 import { vi } from 'vitest';
 
+// ─── Mock window.steam (preload bridge) ─────────────────────────────────────
+// Provides a no-op default so tests that don't explicitly mock window.steam
+// won't crash when components check for its existence.
+if (!window.steam) {
+  Object.defineProperty(window, 'steam', {
+    value: undefined,
+    writable: true,
+    configurable: true,
+  });
+}
+
+// ─── Mock window.epic (preload bridge) ──────────────────────────────────────
+if (!window.epic) {
+  Object.defineProperty(window, 'epic', {
+    value: undefined,
+    writable: true,
+    configurable: true,
+  });
+}
+
 // Mock window.matchMedia
 Object.defineProperty(window, 'matchMedia', {
   writable: true,

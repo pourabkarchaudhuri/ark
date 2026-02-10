@@ -34,7 +34,7 @@ interface GameContext {
 }
 
 interface LibraryEntry {
-  gameId: number;
+  gameId: string;
   name?: string;
   status: string;
   priority: string;
@@ -198,7 +198,8 @@ const addToLibraryTool = tool(
     console.log(`[AI Tool] addToLibrary: ${appId} with status "${status}"`);
     try {
       // Check if already in library
-      const existing = currentLibraryData.find(e => e.gameId === appId);
+      const stringId = `steam-${appId}`;
+      const existing = currentLibraryData.find(e => e.gameId === stringId || e.gameId === String(appId));
       if (existing) {
         return `Game ${appId} is already in the library with status "${existing.status}"`;
       }
@@ -238,7 +239,8 @@ const removeFromLibraryTool = tool(
     console.log(`[AI Tool] removeFromLibrary: ${appId}`);
     try {
       // Check if in library
-      const existing = currentLibraryData.find(e => e.gameId === appId);
+      const stringId = `steam-${appId}`;
+      const existing = currentLibraryData.find(e => e.gameId === stringId || e.gameId === String(appId));
       if (!existing) {
         return `Game ${appId} is not in the library`;
       }
@@ -279,14 +281,23 @@ const getRecommendationsTool = tool(
         return 'Cannot provide recommendations - the library is empty. Please add some games to your library first.';
       }
 
-      // Get the library app IDs
-      const libraryAppIds = currentLibraryData.map(e => e.gameId);
-      
-      // Use the first game as the base for recommendations, but consider all library games
-      const baseGameId = libraryAppIds[0];
+      // Extract numeric Steam app IDs from string gameIds (e.g. "steam-12345" -> 12345)
+      const steamAppIds = currentLibraryData
+        .map(e => {
+          const m = e.gameId.match(/^(?:steam-)?(\d+)$/);
+          return m ? Number(m[1]) : null;
+        })
+        .filter((id): id is number => id !== null);
+
+      if (steamAppIds.length === 0) {
+        return 'No Steam games found in the library. Recommendations are currently based on Steam data.';
+      }
+
+      // Use the first Steam game as the base for recommendations
+      const baseGameId = steamAppIds[0];
       
       // Get recommendations from Steam API
-      const recommendations = await steamAPI.getRecommendations(baseGameId, libraryAppIds, limit);
+      const recommendations = await steamAPI.getRecommendations(baseGameId, steamAppIds, limit);
       
       if (recommendations.length === 0) {
         return 'No recommendations found based on your library. Try adding more games.';

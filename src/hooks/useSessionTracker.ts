@@ -12,10 +12,10 @@ import { sessionStore } from '@/services/session-store';
  *    — includes both library games AND custom games
  * 2. Listens for live status changes (Playing Now / Playing) and tracks which games are live
  * 3. Records completed sessions to the session store
- * 4. Auto-updates hoursPlayed in library store (or custom game store for negative IDs)
+ * 4. Auto-updates hoursPlayed in library store (or custom game store for "custom-" IDs)
  */
 export function useSessionTracker() {
-  const [liveGames, setLiveGames] = useState<Set<number>>(new Set());
+  const [liveGames, setLiveGames] = useState<Set<string>>(new Set());
   const cleanupRef = useRef<Array<() => void>>([]);
 
   // Send tracked games list to the main process — stable ref, never changes
@@ -25,7 +25,7 @@ export function useSessionTracker() {
     // Library games with executable paths
     const libraryTrackable = libraryStore.getTrackableEntries();
 
-    // Custom games with executable paths (negative IDs)
+    // Custom games with executable paths
     const customTrackable = customGameStore
       .getAllGames()
       .filter((g) => g.executablePath)
@@ -46,12 +46,13 @@ export function useSessionTracker() {
 
     // Listen for live status changes
     const unsubStatus = window.sessionTracker.onStatusChange((data) => {
+      const gameId = typeof data.gameId === 'number' ? `steam-${data.gameId}` : String(data.gameId);
       setLiveGames((prev) => {
         const next = new Set(prev);
         if (data.status === 'Playing Now') {
-          next.add(data.gameId);
+          next.add(gameId);
         } else {
-          next.delete(data.gameId);
+          next.delete(gameId);
         }
         return next;
       });
@@ -59,12 +60,13 @@ export function useSessionTracker() {
 
     // Listen for live playtime updates (every 15s while game is running)
     const unsubLive = window.sessionTracker.onLiveUpdate((data) => {
-      const { gameId, activeMinutes } = data;
+      const gameId = typeof data.gameId === 'number' ? `steam-${data.gameId}` : String(data.gameId);
+      const activeMinutes = data.activeMinutes;
       // Compute live total: previously recorded hours + current active session
       const previousHours = sessionStore.getTotalHours(gameId);
       const liveTotal = previousHours + activeMinutes / 60;
 
-      if (gameId < 0) {
+      if (gameId.startsWith('custom-')) {
         const existing = customGameStore.getGame(gameId);
         if (existing) {
           customGameStore.updateGame(gameId, { hoursPlayed: liveTotal });
@@ -76,15 +78,20 @@ export function useSessionTracker() {
 
     // Listen for completed sessions
     const unsubEnded = window.sessionTracker.onSessionEnded((data) => {
-      const session: GameSession = data.session;
+      const session: GameSession = {
+        ...data.session,
+        gameId: typeof data.session.gameId === 'number'
+          ? `steam-${data.session.gameId}`
+          : String(data.session.gameId),
+      };
 
       // Record the session
       sessionStore.record(session);
 
-      // Update hoursPlayed — route to correct store based on ID sign
+      // Update hoursPlayed — route to correct store based on ID prefix
       const totalHours = sessionStore.getTotalHours(session.gameId);
-      if (session.gameId < 0) {
-        // Custom game (negative ID) — update custom game store
+      if (session.gameId.startsWith('custom-')) {
+        // Custom game — update custom game store
         const existing = customGameStore.getGame(session.gameId);
         if (existing) {
           customGameStore.updateGame(session.gameId, { hoursPlayed: totalHours });
@@ -106,9 +113,13 @@ export function useSessionTracker() {
 
   /**
    * Check if a game is currently being played (exe is running).
+   * Accepts both numeric Steam appId (for backwards compat) and string gameId.
    */
   const isPlayingNow = useCallback(
-    (gameId: number) => liveGames.has(gameId),
+    (gameId: number | string) => {
+      const key = typeof gameId === 'number' ? `steam-${gameId}` : gameId;
+      return liveGames.has(key);
+    },
     [liveGames]
   );
 

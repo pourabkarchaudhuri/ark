@@ -2,6 +2,8 @@ import { memo, useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { Game } from '@/types/game';
 import { cn } from '@/lib/utils';
 import { Search, Gamepad2 } from 'lucide-react';
+import { FaSteam } from 'react-icons/fa';
+import { SiEpicgames } from 'react-icons/si';
 
 interface SearchSuggestionsProps {
   results: Game[];
@@ -25,35 +27,56 @@ function SearchResultImage({ game }: { game: Game }) {
     setFallbackAttempt(0);
   }, [game.id]);
 
-  // Deduplicated fallback URL list — prevents chain stalling on duplicate URLs
+  // Deduplicated fallback URL list — prevents chain stalling on duplicate URLs.
+  // Epic images use various CDN hosts; we collect every unique URL we can find
+  // so the fallback chain has the best chance of finding a working one.
   const fallbackUrls = useMemo(() => {
-    if (!game.steamAppId) return [game.coverUrl || ''];
-    const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
-    const candidates = [
-      game.coverUrl || `${cdnBase}/${game.steamAppId}/header.jpg`,
-      game.headerImage || `${cdnBase}/${game.steamAppId}/header.jpg`,
-      `${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`,
-      `${cdnBase}/${game.steamAppId}/capsule_616x353.jpg`,
-      `${cdnBase}/${game.steamAppId}/library_600x900.jpg`,
-      `${cdnBase}/${game.steamAppId}/logo.png`,
-      game.screenshots?.[0] || '',
-    ];
+    const candidates: string[] = [];
+
+    if (game.store === 'epic' || game.id?.startsWith('epic-')) {
+      // Epic-first candidates, then any Steam CDN URLs on deduped games
+      if (game.coverUrl) candidates.push(game.coverUrl);
+      if (game.headerImage) candidates.push(game.headerImage);
+      if (game.screenshots) candidates.push(...game.screenshots.slice(0, 3));
+      // For deduped games that also have a Steam app ID, add Steam CDN fallbacks
+      if (game.steamAppId) {
+        const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
+        candidates.push(`${cdnBase}/${game.steamAppId}/header.jpg`);
+        candidates.push(`${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`);
+      }
+    } else {
+      const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
+      if (game.coverUrl) candidates.push(game.coverUrl);
+      if (game.headerImage) candidates.push(game.headerImage);
+      if (game.steamAppId) {
+        candidates.push(
+          `${cdnBase}/${game.steamAppId}/header.jpg`,
+          `${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`,
+          `${cdnBase}/${game.steamAppId}/capsule_616x353.jpg`,
+          `${cdnBase}/${game.steamAppId}/library_600x900.jpg`,
+          `${cdnBase}/${game.steamAppId}/logo.png`,
+        );
+      }
+      if (game.screenshots?.[0]) candidates.push(game.screenshots[0]);
+    }
+
+    // Deduplicate while preserving order
     const seen = new Set<string>();
     return candidates.filter(url => {
       if (!url || seen.has(url)) return false;
       seen.add(url);
       return true;
     });
-  }, [game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
+  }, [game.id, game.store, game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
 
   const handleError = useCallback(() => {
-    if (game.steamAppId && fallbackAttempt < fallbackUrls.length - 1) {
+    if (fallbackAttempt < fallbackUrls.length - 1) {
       setFallbackAttempt(prev => prev + 1);
       setImageLoaded(false);
     } else {
       setImageError(true);
     }
-  }, [game.steamAppId, fallbackAttempt, fallbackUrls.length]);
+  }, [fallbackAttempt, fallbackUrls.length]);
 
   // Detect placeholder images (tiny dimensions) from old CDN
   const handleLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
@@ -64,6 +87,15 @@ function SearchResultImage({ game }: { game: Game }) {
     }
     setImageLoaded(true);
   }, [handleError]);
+
+  // Per-URL timeout — if an image takes > 4s it's likely stuck; skip to next
+  useEffect(() => {
+    if (imageLoaded || imageError) return;
+    const timer = setTimeout(() => {
+      handleError();
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [fallbackAttempt, imageLoaded, imageError, handleError]);
 
   const imageUrl = fallbackUrls[fallbackAttempt] || '';
 
@@ -83,6 +115,9 @@ function SearchResultImage({ game }: { game: Game }) {
       <img
         src={imageUrl}
         alt=""
+        loading="lazy"
+        decoding="async"
+        referrerPolicy="no-referrer"
         className={cn(
           "w-full h-full object-cover transition-opacity duration-200",
           imageLoaded ? "opacity-100" : "opacity-0"
@@ -90,6 +125,37 @@ function SearchResultImage({ game }: { game: Game }) {
         onLoad={handleLoad}
         onError={handleError}
       />
+    </div>
+  );
+}
+
+/** Inline store indicator icons for a search result row. */
+function StoreBadges({ game }: { game: Game }) {
+  const stores = game.availableOn && game.availableOn.length > 0
+    ? game.availableOn
+    : game.store === 'epic' ? ['epic'] : game.isCustom ? [] : ['steam'];
+
+  const onSteam = stores.includes('steam');
+  const onEpic = stores.includes('epic');
+
+  return (
+    <div className="flex items-center gap-0.5 flex-shrink-0">
+      {onSteam && (
+        <div
+          className="flex items-center justify-center w-5 h-5 rounded bg-white/5"
+          title="Available on Steam"
+        >
+          <FaSteam className="h-3 w-3 text-white/60" />
+        </div>
+      )}
+      {onEpic && (
+        <div
+          className="flex items-center justify-center w-5 h-5 rounded bg-white/5"
+          title="Available on Epic Games"
+        >
+          <SiEpicgames className="h-3 w-3 text-white/60" />
+        </div>
+      )}
     </div>
   );
 }
@@ -160,7 +226,7 @@ function SearchSuggestionsComponent({
           ))}
           <div className="flex items-center justify-center gap-2 px-4 py-2 text-white/40 text-xs">
             <div className="w-3 h-3 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
-            Searching Steam...
+            Searching games...
           </div>
         </div>
       )}
@@ -198,6 +264,9 @@ function SearchSuggestionsComponent({
                     {game.developer} • {game.releaseDate?.split('-')[0] || 'TBA'}
                   </p>
                 </div>
+
+                {/* Store badges */}
+                <StoreBadges game={game} />
 
                 {/* Rating */}
                 {game.metacriticScore !== null && (

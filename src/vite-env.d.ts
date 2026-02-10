@@ -46,16 +46,18 @@ interface ElectronAPI {
   close: () => Promise<void>;
   isMaximized: () => Promise<boolean>;
   openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
+  /** Fetch HTML from a URL via the main process (bypasses CORS). Domain-restricted. */
+  fetchHtml: (url: string) => Promise<string | null>;
 }
 
 // Session Tracker API types (exposed via Electron preload)
 interface SessionTrackerAPI {
-  setTrackedGames: (games: Array<{ gameId: number; executablePath: string }>) => Promise<{ success: boolean }>;
-  getActiveSessions: () => Promise<Array<{ gameId: number; startTime: string; elapsedMinutes: number }>>;
-  onStatusChange: (callback: (data: { gameId: number; status: string }) => void) => () => void;
-  onSessionStarted: (callback: (data: { gameId: number; startTime: string }) => void) => () => void;
-  onLiveUpdate: (callback: (data: { gameId: number; activeMinutes: number }) => void) => () => void;
-  onSessionEnded: (callback: (data: { gameId: number; session: import('@/types/game').GameSession }) => void) => () => void;
+  setTrackedGames: (games: Array<{ gameId: string; executablePath: string }>) => Promise<{ success: boolean }>;
+  getActiveSessions: () => Promise<Array<{ gameId: string; startTime: string; elapsedMinutes: number }>>;
+  onStatusChange: (callback: (data: { gameId: string; status: string }) => void) => () => void;
+  onSessionStarted: (callback: (data: { gameId: string; startTime: string }) => void) => () => void;
+  onLiveUpdate: (callback: (data: { gameId: string; activeMinutes: number }) => void) => () => void;
+  onSessionEnded: (callback: (data: { gameId: string; session: import('@/types/game').GameSession }) => void) => () => void;
   removeAllListeners: () => void;
 }
 

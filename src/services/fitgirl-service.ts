@@ -1,37 +1,31 @@
 const BASE_URL = "https://fitgirl-repacks.site/";
 
-// Utility function to try fetching without proxy first, and use proxy if it fails
-async function fetchHTMLWithFallback(url: string, retries: number = 10): Promise<string> {
-    try {
-        console.log("Attempting to fetch without proxy...");
-        const response = await fetch(url);
-
-        if (response.ok) {
-            return await response.text();
-        } else {
-            throw new Error(`Failed with status: ${response.status}`);
-        }
-    } catch (error) {
-        console.warn(`Direct fetch failed: ${error instanceof Error ? error.message : 'Unknown error'}, switching to proxy.`);
-        return await fetchViaProxy(url, retries);
-    }
-}
-
-// Utility function to make a GET request through the proxy
-async function fetchViaProxy(url: string, retries: number = 10): Promise<string> {
-    const proxyUrl = `https://www.whateverorigin.org/get?url=${encodeURIComponent(url)}`;
-
-    for (let i = 0; i < retries; i++) {
-        try {
-            const proxyResponse = await fetch(proxyUrl);
-            const proxyData = await proxyResponse.json() as { contents: string };
-            return proxyData.contents;
-        } catch (error) {
-            console.error(`Proxy fetch failed on attempt ${i + 1}: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+/**
+ * Fetch HTML from a URL.
+ *
+ * In Electron, routes the request through the main process via IPC so it
+ * bypasses CORS entirely (Node.js fetch has no same-origin restrictions).
+ *
+ * Falls back to a direct renderer `fetch()` (works in dev with proxy or
+ * when CORS headers happen to be present) and finally to a third-party
+ * CORS proxy as a last resort.
+ */
+async function fetchHTMLWithFallback(url: string, _retries: number = 3): Promise<string> {
+    // Strategy 1 (preferred): Electron main-process fetch — bypasses CORS entirely.
+    if (typeof window !== 'undefined' && window.electron?.fetchHtml) {
+        const html = await window.electron.fetchHtml(url);
+        if (html) return html;
+        // Main-process fetch returned null (SSL / network error).
+        // Do NOT fall through to a renderer-side fetch — it will always fail
+        // with CORS for external sites like fitgirl-repacks.site.
+        throw new Error(`Main-process fetch returned null for ${url}`);
     }
 
-    throw new Error(`Failed to fetch via proxy after ${retries} attempts`);
+    // Outside Electron (e.g. plain browser dev): try direct fetch as a last resort.
+    const response = await fetch(url);
+    if (response.ok) return await response.text();
+
+    throw new Error(`Fetch failed with status ${response.status} for ${url}`);
 }
 
 // Function to fetch an image from the repack page
@@ -103,7 +97,6 @@ export async function searchFitGirlRepacks(query: string, page: number = 1): Pro
     lastPage: number;
 }> {
     const searchUrl = `${BASE_URL}page/${page}/?s=${encodeURIComponent(query)}`;
-    console.log(`Fetching search results from: ${searchUrl}`);
 
     // Fetch the main search page HTML
     const html = await fetchHTMLWithFallback(searchUrl);

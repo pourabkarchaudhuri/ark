@@ -33,7 +33,40 @@ import { motion } from 'framer-motion';
 import { Gamepad2, Clock, Calendar, Search, X, Crosshair, ArrowUpDown, ZoomIn } from 'lucide-react';
 import { JourneyEntry, StatusChangeEntry, GameStatus, GameSession } from '@/types/game';
 import { Slider } from '@/components/ui/slider';
-import { cn, getHardcodedCover, formatHours } from '@/lib/utils';
+import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
+
+// ─── Fallback cover image ────────────────────────────────────────────────────
+// Walks through a chain of URLs on error (Steam CDN cover → header → capsule).
+
+function FallbackImg({
+  gameId, title, coverUrl, alt, className, onAllFailed,
+}: {
+  gameId: string; title: string; coverUrl?: string;
+  alt?: string; className?: string;
+  onAllFailed?: () => void;
+}) {
+  const chain = useMemo(() => buildGameImageChain(gameId, title, coverUrl), [gameId, title, coverUrl]);
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+
+  const handleError = useCallback(() => {
+    const next = attempt + 1;
+    if (next < chain.length) { setAttempt(next); }
+    else { setFailed(true); onAllFailed?.(); }
+  }, [attempt, chain.length, onAllFailed]);
+
+  if (failed || chain.length === 0) return null;
+  return (
+    <img
+      src={chain[attempt]}
+      alt={alt ?? title}
+      className={className}
+      loading="lazy"
+      decoding="async"
+      onError={handleError}
+    />
+  );
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -44,7 +77,7 @@ export interface GanttSegment {
 }
 
 export interface GanttGameRow {
-  gameId: number;
+  gameId: string;
   title: string;
   coverUrl?: string;
   addedAt: string;
@@ -212,7 +245,7 @@ export function buildGanttRows(
   journeyEntries: JourneyEntry[],
   statusHistory: StatusChangeEntry[],
 ): GanttGameRow[] {
-  const historyByGame = new Map<number, StatusChangeEntry[]>();
+  const historyByGame = new Map<string, StatusChangeEntry[]>();
   for (const entry of statusHistory) {
     if (!historyByGame.has(entry.gameId)) historyByGame.set(entry.gameId, []);
     historyByGame.get(entry.gameId)!.push(entry);
@@ -443,8 +476,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
   const [searchQuery, setSearchQuery] = useState('');
   const [focusedRowIdx, setFocusedRowIdx] = useState(-1);
   // Use refs for hover/scroll state to avoid full re-renders
-  const hoveredRowIdRef = useRef<number | null>(null);
-  const rowEls = useRef<Map<number, HTMLDivElement>>(new Map());
+  const hoveredRowIdRef = useRef<string | null>(null);
+  const rowEls = useRef<Map<string, HTMLDivElement>>(new Map());
   const [minimapScrollLeft, setMinimapScrollLeft] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(0);
   const scrollRaf = useRef(0);
@@ -535,7 +568,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
   // ── Session map (for heatmap dots) ─────────────────────────────────────
   const sessionsByGame = useMemo(() => {
-    const map = new Map<number, GameSession[]>();
+    const map = new Map<string, GameSession[]>();
     if (!sessions) return map;
     for (const s of sessions) {
       if (!map.has(s.gameId)) map.set(s.gameId, []);
@@ -605,15 +638,15 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
   );
 
   // ── Hover / tooltip via refs + direct DOM (avoids re-renders) ─────────
-  // Row IDs: positive = timeline row, negative = sidebar row (negated gameId)
-  const applyHoverStyles = useCallback((gameId: number | null) => {
+  // Row keys: "tl:{gameId}" = timeline row, "sb:{gameId}" = sidebar row
+  const applyHoverStyles = useCallback((gameId: string | null) => {
     const prev = hoveredRowIdRef.current;
     if (prev === gameId) return;
     hoveredRowIdRef.current = gameId;
     // Update opacity/classes via direct DOM
     rowEls.current.forEach((el, id) => {
-      // Match both sidebar (negative offset) and timeline (positive) rows for the same game
-      const isMatch = gameId !== null && (id === gameId || id === -(gameId + 1));
+      // Match both sidebar and timeline rows for the same game
+      const isMatch = gameId !== null && (id === `tl:${gameId}` || id === `sb:${gameId}`);
       if (gameId === null) {
         el.style.opacity = '1';
         el.classList.remove('bg-white/[0.02]');
@@ -627,7 +660,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     });
   }, []);
 
-  const handleRowEnter = useCallback((gameId: number) => {
+  const handleRowEnter = useCallback((gameId: string) => {
     applyHoverStyles(gameId);
   }, [applyHoverStyles]);
 
@@ -1034,27 +1067,20 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                     onMouseEnter={() => handleRowEnter(row.gameId)}
                     onMouseLeave={handleRowLeave}
                     ref={(el) => {
-                      // Register sidebar rows for hover dim effect (negative key avoids collision with timeline row refs)
-                      const key = -(row.gameId + 1); // offset+negate to avoid 0 collision
+                      // Register sidebar rows for hover dim effect
+                      const key = `sb:${row.gameId}`;
                       if (el) rowEls.current.set(key, el);
                       else rowEls.current.delete(key);
                     }}
                   >
                     {/* Thumbnail */}
                     <div className="flex-shrink-0 w-8 h-11 rounded-md overflow-hidden bg-white/5">
-                      {(getHardcodedCover(row.title) || row.coverUrl) ? (
-                        <img
-                          src={getHardcodedCover(row.title) || row.coverUrl}
-                          alt={row.title}
-                          className="w-full h-full object-cover"
-                          loading="lazy"
-                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center">
-                          <Gamepad2 className="w-3.5 h-3.5 text-white/20" />
-                        </div>
-                      )}
+                      <FallbackImg
+                        gameId={row.gameId}
+                        title={row.title}
+                        coverUrl={row.coverUrl}
+                        className="w-full h-full object-cover"
+                      />
                     </div>
 
                     {/* Title + hours */}
@@ -1160,8 +1186,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                 key={row.gameId}
                 data-row-index={rowIndex}
                 ref={(el) => {
-                  if (el) rowEls.current.set(row.gameId, el);
-                  else rowEls.current.delete(row.gameId);
+                  if (el) rowEls.current.set(`tl:${row.gameId}`, el);
+                  else rowEls.current.delete(`tl:${row.gameId}`);
                 }}
                 role="row"
                 aria-label={`${row.title}: ${row.currentStatus}, ${formatHours(row.hoursPlayed)} played`}
@@ -1309,18 +1335,12 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                                 'flex-shrink-0 w-5 h-7 rounded-sm overflow-hidden',
                                 isTealBar ? 'bg-black/20' : 'bg-black/10',
                               )}>
-                                {(getHardcodedCover(row.title) || row.coverUrl) ? (
-                                  <img
-                                    src={getHardcodedCover(row.title) || row.coverUrl}
-                                    alt={row.title}
-                                    className="w-full h-full object-cover"
-                                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                  />
-                                ) : (
-                                  <div className="w-full h-full flex items-center justify-center">
-                                    <Gamepad2 className={cn('w-3 h-3', isTealBar ? 'text-white/40' : 'text-gray-400')} />
-                                  </div>
-                                )}
+                                <FallbackImg
+                                  gameId={row.gameId}
+                                  title={row.title}
+                                  coverUrl={row.coverUrl}
+                                  className="w-full h-full object-cover"
+                                />
                               </div>
                               <span className={cn('text-[11px] font-semibold truncate', style.text)}>
                                 {row.title}

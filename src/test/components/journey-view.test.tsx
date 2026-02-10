@@ -68,7 +68,7 @@ vi.mock('framer-motion', () => {
 
 function createMockEntry(overrides: Partial<JourneyEntry> = {}): JourneyEntry {
   return {
-    gameId: 730,
+    gameId: 'steam-730',
     title: 'Counter-Strike 2',
     coverUrl: 'https://cdn.akamai.steamstatic.com/steam/apps/730/library_600x900.jpg',
     genre: ['Action', 'FPS'],
@@ -116,19 +116,19 @@ describe('JourneyView', () => {
   it('groups entries by year', () => {
     const entries = [
       createMockEntry({
-        gameId: 730,
+        gameId: 'steam-730',
         title: 'Counter-Strike 2',
         addedAt: '2025-03-15T00:00:00.000Z',
         status: 'Playing',
       }),
       createMockEntry({
-        gameId: 570,
+        gameId: 'steam-570',
         title: 'Dota 2',
         addedAt: '2024-06-20T00:00:00.000Z',
         status: 'Completed',
       }),
       createMockEntry({
-        gameId: 1086940,
+        gameId: 'steam-1086940',
         title: "Baldur's Gate 3",
         addedAt: '2024-08-10T00:00:00.000Z',
         status: 'Completed',
@@ -144,8 +144,8 @@ describe('JourneyView', () => {
 
   it('shows game titles in cards', () => {
     const entries = [
-      createMockEntry({ gameId: 730, title: 'Counter-Strike 2', addedAt: '2025-01-01T00:00:00.000Z' }),
-      createMockEntry({ gameId: 570, title: 'Dota 2', addedAt: '2025-02-01T00:00:00.000Z' }),
+      createMockEntry({ gameId: 'steam-730', title: 'Counter-Strike 2', addedAt: '2025-01-01T00:00:00.000Z' }),
+      createMockEntry({ gameId: 'steam-570', title: 'Dota 2', addedAt: '2025-02-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
@@ -158,7 +158,7 @@ describe('JourneyView', () => {
     const entries = [
       createMockEntry({ status: 'Playing', addedAt: '2025-01-01T00:00:00.000Z' }),
       createMockEntry({
-        gameId: 570,
+        gameId: 'steam-570',
         title: 'Dota 2',
         status: 'Completed',
         addedAt: '2025-02-01T00:00:00.000Z',
@@ -173,7 +173,7 @@ describe('JourneyView', () => {
 
   it('shows hours played when available', () => {
     const entries = [
-      createMockEntry({ gameId: 730, hoursPlayed: 120, addedAt: '2025-01-01T00:00:00.000Z' }),
+      createMockEntry({ gameId: 'steam-730', hoursPlayed: 120, addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
@@ -184,13 +184,13 @@ describe('JourneyView', () => {
   it('shows total stats in header', () => {
     const entries = [
       createMockEntry({
-        gameId: 730,
+        gameId: 'steam-730',
         status: 'Completed',
         hoursPlayed: 120,
         addedAt: '2025-01-01T00:00:00.000Z',
       }),
       createMockEntry({
-        gameId: 570,
+        gameId: 'steam-570',
         title: 'Dota 2',
         status: 'Playing',
         hoursPlayed: 50,
@@ -209,7 +209,7 @@ describe('JourneyView', () => {
 
   it('navigates to game details on card click', () => {
     const entries = [
-      createMockEntry({ gameId: 730, addedAt: '2025-01-01T00:00:00.000Z' }),
+      createMockEntry({ gameId: 'steam-730', addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
@@ -220,14 +220,14 @@ describe('JourneyView', () => {
     expect(card).toBeInTheDocument();
     if (card) fireEvent.click(card);
 
-    expect(mockNavigate).toHaveBeenCalledWith('/game/730');
+    expect(mockNavigate).toHaveBeenCalledWith('/game/steam-730');
   });
 
   it('shows year summary with game count', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z', status: 'Playing' }),
       createMockEntry({
-        gameId: 570,
+        gameId: 'steam-570',
         title: 'Dota 2',
         addedAt: '2025-06-01T00:00:00.000Z',
         status: 'Completed',
@@ -247,7 +247,7 @@ describe('JourneyView', () => {
 
     const entries = [
       createMockEntry({
-        gameId: 730,
+        gameId: 'steam-730',
         addedAt: '2025-01-01T00:00:00.000Z',
         removedAt: '2025-06-01T00:00:00.000Z',
       }),
@@ -265,7 +265,7 @@ describe('JourneyView', () => {
 
     const entries = [
       createMockEntry({
-        gameId: 730,
+        gameId: 'steam-730',
         addedAt: '2025-01-01T00:00:00.000Z',
       }),
     ];
@@ -355,7 +355,7 @@ describe('JourneyView', () => {
   it('switches to Analytics view when Analytics tab is clicked', () => {
     const entries = [
       createMockEntry({
-        gameId: 730,
+        gameId: 'steam-730',
         title: 'Counter-Strike 2',
         addedAt: '2025-01-01T00:00:00.000Z',
         hoursPlayed: 120,
@@ -363,7 +363,7 @@ describe('JourneyView', () => {
         genre: ['Action', 'FPS'],
       }),
       createMockEntry({
-        gameId: 570,
+        gameId: 'steam-570',
         title: 'Dota 2',
         addedAt: '2025-02-01T00:00:00.000Z',
         hoursPlayed: 50,

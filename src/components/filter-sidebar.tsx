@@ -1,5 +1,7 @@
-import { useMemo } from 'react';
-import { GameStatus, GamePriority } from '@/types/game';
+import { useMemo, useCallback, memo } from 'react';
+import { GameStatus, GamePriority, GameStore, GameFilters, GameCategory } from '@/types/game';
+import { FaSteam } from 'react-icons/fa';
+import { SiEpicgames } from 'react-icons/si';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
@@ -11,9 +13,9 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Combobox } from '@/components/ui/combobox';
+import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Filter,
   RotateCcw,
   X,
   ArrowUpDown,
@@ -36,19 +38,19 @@ const priorityOptions: (GamePriority | 'All')[] = [
   'Low',
 ];
 
-export type GameCategory = 'all' | 'most-played' | 'trending' | 'recent' | 'award-winning';
-
 const categoryOptions: { value: GameCategory; label: string }[] = [
   { value: 'all', label: 'All Games' },
   { value: 'most-played', label: 'Most Played' },
   { value: 'trending', label: 'Top Sellers' },
+  { value: 'free', label: 'Free Games' },
   { value: 'recent', label: 'New Releases' },
   { value: 'award-winning', label: 'Coming Soon' },
+  { value: 'catalog', label: 'Catalog (A–Z)' },
 ];
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey' | 'buzz';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar';
 
 const sortOptions: { value: SortOption; label: string }[] = [
   { value: 'rating', label: 'Rating' },
@@ -56,21 +58,16 @@ const sortOptions: { value: SortOption; label: string }[] = [
   { value: 'title', label: 'Title' },
 ];
 
-interface FilterState {
-  search: string;
-  status: GameStatus | 'All';
-  priority: GamePriority | 'All';
-  genre: string;
-  platform: string;
-  category: GameCategory;
-  releaseYear: string;
-}
+const storeOptions: { value: GameStore; label: string }[] = [
+  { value: 'steam', label: 'Steam' },
+  { value: 'epic', label: 'Epic Games' },
+];
 
 interface FilterSidebarProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  filters: FilterState;
-  updateFilter: <K extends keyof FilterState>(key: K, value: FilterState[K]) => void;
+  filters: GameFilters;
+  updateFilter: <K extends keyof GameFilters>(key: K, value: GameFilters[K]) => void;
   resetFilters: () => void;
   genres: string[];
   platforms: string[];
@@ -81,7 +78,60 @@ interface FilterSidebarProps {
   viewMode: ViewMode;
 }
 
-export function FilterSidebar({
+// ─── Trigger Button ──────────────────────────────────────────────────────────
+// Renders the small icon button that toggles the filter panel.  This stays
+// inline in the header toolbar (inside <main>).
+
+interface FilterTriggerProps {
+  open: boolean;
+  onToggle: () => void;
+  filters: GameFilters;
+  viewMode: ViewMode;
+}
+
+export const FilterTrigger = memo(function FilterTrigger({
+  open,
+  onToggle,
+  filters,
+  viewMode,
+}: FilterTriggerProps) {
+  const activeFilterCount = [
+    filters.status !== 'All' && viewMode === 'library',
+    filters.priority !== 'All' && viewMode === 'library',
+    filters.genre !== 'All',
+    filters.platform !== 'All',
+    filters.category !== 'all' && viewMode === 'browse',
+    filters.releaseYear !== 'All',
+    filters.store.length > 0,
+  ].filter(Boolean).length;
+
+  return (
+    <Button
+      variant="outline"
+      size="icon"
+      className="h-9 w-9 relative"
+      onClick={onToggle}
+      aria-label={open ? 'Close filters' : 'Open filters'}
+    >
+      <SlidersHorizontal className="h-4 w-4 pointer-events-none" />
+      {activeFilterCount > 0 && (
+        <Badge
+          variant="secondary"
+          className="absolute -top-1 -right-1 h-5 w-5 p-0 flex items-center justify-center text-xs bg-fuchsia-500 text-white"
+        >
+          {activeFilterCount}
+        </Badge>
+      )}
+    </Button>
+  );
+});
+
+// ─── Panel Overlay ───────────────────────────────────────────────────────────
+// The fixed-position slide-in panel.  Must be rendered OUTSIDE <main> (at the
+// root of the Dashboard) so it shares the root stacking context with the
+// sticky header (z-40).  z-50 on the panel then correctly layers it above.
+
+export const FilterPanel = memo(function FilterPanel({
   open,
   onOpenChange,
   filters,
@@ -101,16 +151,8 @@ export function FilterSidebar({
     filters.genre !== 'All' || 
     filters.platform !== 'All' ||
     filters.category !== 'all' ||
-    filters.releaseYear !== 'All';
-
-  const activeFilterCount = [
-    filters.status !== 'All' && viewMode === 'library',
-    filters.priority !== 'All' && viewMode === 'library',
-    filters.genre !== 'All',
-    filters.platform !== 'All',
-    filters.category !== 'all' && viewMode === 'browse',
-    filters.releaseYear !== 'All',
-  ].filter(Boolean).length;
+    filters.releaseYear !== 'All' ||
+    filters.store.length > 0;
 
   // Convert arrays to combobox options
   const genreOptions = useMemo(() => [
@@ -135,58 +177,51 @@ export function FilterSidebar({
     return years;
   }, []);
 
+  // Toggle a store in the multi-select filter
+  const toggleStore = useCallback((store: GameStore) => {
+    const current = filters.store;
+    const next = current.includes(store)
+      ? current.filter(s => s !== store)
+      : [...current, store];
+    updateFilter('store', next);
+  }, [filters.store, updateFilter]);
+
   return (
-    <>
-      <Button 
-        variant="outline" 
-        size="icon"
-        className="h-9 w-9 relative"
-        onClick={() => onOpenChange(!open)}
-        aria-label="Open filters"
-      >
-        <SlidersHorizontal className="h-4 w-4 pointer-events-none" />
-        {activeFilterCount > 0 && (
-          <Badge 
-            variant="secondary" 
-            className="absolute -top-1 -right-1 h-5 w-5 p-0 flex items-center justify-center text-xs bg-fuchsia-500 text-white"
-          >
-            {activeFilterCount}
-          </Badge>
-        )}
-      </Button>
-
-      <AnimatePresence>
-        {open && (
-          <motion.aside
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 400, opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
-            transition={{ duration: 0.3, ease: 'easeInOut' }}
-            className="fixed top-0 right-0 h-full bg-zinc-950 border-l border-zinc-800 z-50 overflow-hidden shadow-2xl"
-          >
-            <div className="w-[400px] h-full overflow-y-auto p-6">
-              <div className="pb-6 mb-6 border-b border-zinc-800">
-                <div className="flex items-center justify-between gap-4 mb-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Filter className="h-5 w-5 text-fuchsia-400 flex-shrink-0" />
-                    <h2 className="text-lg font-semibold text-white truncate">Filters & Sort</h2>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => onOpenChange(false)}
-                    className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 flex-shrink-0"
-                    aria-label="Close filters"
-                  >
-                    <X className="h-4 w-4 pointer-events-none" />
-                  </Button>
+    <AnimatePresence>
+      {open && (
+        <motion.aside
+          initial={{ width: 0, opacity: 0 }}
+          animate={{ width: 400, opacity: 1 }}
+          exit={{ width: 0, opacity: 0 }}
+          transition={{ duration: 0.3, ease: 'easeInOut' }}
+          className="fixed right-0 top-0 bottom-0 bg-zinc-950 border-l border-zinc-800 z-50 overflow-hidden shadow-2xl"
+        >
+          <div className="w-[400px] h-full flex flex-col">
+            {/* Header — fixed, never scrolls */}
+            <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-lg flex items-center justify-center">
+                  <SlidersHorizontal className="h-5 w-5 text-white" />
                 </div>
-                <p className="text-sm text-white/60">
-                  Refine your game collection
-                </p>
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Filters & Sort</h2>
+                  <p className="text-xs text-white/40">Refine your game collection</p>
+                </div>
               </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => onOpenChange(false)}
+                className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 flex-shrink-0"
+                aria-label="Close filters"
+              >
+                <X className="h-4 w-4 pointer-events-none" />
+              </Button>
+            </div>
 
-        <div className="space-y-6">
+            {/* Content — scrollable */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
+
           {/* Sort */}
           <div className="space-y-2">
             <Label className="text-sm font-medium">Sort By</Label>
@@ -240,6 +275,49 @@ export function FilterSidebar({
             </div>
           )}
 
+          {/* Store Filter — available in both browse and library modes */}
+          {/* Store Filter — multi-select checkboxes */}
+          {(viewMode === 'browse' || viewMode === 'library') && (
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Store</Label>
+              <div className="flex gap-2">
+                {storeOptions.map((option) => {
+                  const selected = filters.store.includes(option.value);
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => toggleStore(option.value)}
+                      aria-pressed={selected}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-all',
+                        selected
+                          ? 'bg-fuchsia-500/20 border-fuchsia-500/50 text-fuchsia-300'
+                          : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
+                      )}
+                    >
+                      <span className={cn(
+                        'flex h-4 w-4 items-center justify-center rounded border transition-colors',
+                        selected ? 'bg-fuchsia-500 border-fuchsia-500' : 'border-zinc-600',
+                      )}>
+                        {selected && (
+                          <svg className="h-3 w-3 text-white" viewBox="0 0 12 12" fill="none">
+                            <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        )}
+                      </span>
+                      {option.value === 'steam' ? <FaSteam className="h-3.5 w-3.5" /> : <SiEpicgames className="h-3.5 w-3.5" />}
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {filters.store.length === 0 && (
+                <p className="text-xs text-white/30">No filter — showing all stores</p>
+              )}
+            </div>
+          )}
+
           {/* Status Filter - Only in Library mode */}
           {viewMode === 'library' && (
             <div className="space-y-2">
@@ -284,44 +362,53 @@ export function FilterSidebar({
             </div>
           )}
 
-          {/* Genre Filter - Searchable Combobox */}
-          <div className="space-y-2">
-            <Label className="text-sm font-medium">Genre</Label>
-            <Combobox
-              options={genreOptions}
-              value={filters.genre}
-              onValueChange={(value) => updateFilter('genre', value)}
-              placeholder="All Genres"
-              searchPlaceholder="Search genres..."
-              emptyMessage="No genre found."
-            />
-          </div>
+          {/* Genre / Platform / Year filters are disabled in Catalog mode */}
+          {filters.category === 'catalog' ? (
+            <div className="rounded-md bg-white/5 border border-white/10 px-3 py-2.5 text-xs text-white/50">
+              Filters are not available in Catalog mode. Use Search to find specific games.
+            </div>
+          ) : (
+            <>
+              {/* Genre Filter - Searchable Combobox */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Genre</Label>
+                <Combobox
+                  options={genreOptions}
+                  value={filters.genre}
+                  onValueChange={(value) => updateFilter('genre', value)}
+                  placeholder="All Genres"
+                  searchPlaceholder="Search genres..."
+                  emptyMessage="No genre found."
+                />
+              </div>
 
-          {/* Platform Filter - Searchable Combobox */}
-          <div className="space-y-2">
-            <Label className="text-sm font-medium">Platform</Label>
-            <Combobox
-              options={platformOptions}
-              value={filters.platform}
-              onValueChange={(value) => updateFilter('platform', value)}
-              placeholder="All Platforms"
-              searchPlaceholder="Search platforms..."
-              emptyMessage="No platform found."
-            />
-          </div>
+              {/* Platform Filter - Searchable Combobox */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Platform</Label>
+                <Combobox
+                  options={platformOptions}
+                  value={filters.platform}
+                  onValueChange={(value) => updateFilter('platform', value)}
+                  placeholder="All Platforms"
+                  searchPlaceholder="Search platforms..."
+                  emptyMessage="No platform found."
+                />
+              </div>
 
-          {/* Release Year Filter */}
-          <div className="space-y-2">
-            <Label className="text-sm font-medium">Release Year</Label>
-            <Combobox
-              options={releaseYearOptions}
-              value={filters.releaseYear}
-              onValueChange={(value) => updateFilter('releaseYear', value)}
-              placeholder="All Years"
-              searchPlaceholder="Search year..."
-              emptyMessage="No year found."
-            />
-          </div>
+              {/* Release Year Filter */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Release Year</Label>
+                <Combobox
+                  options={releaseYearOptions}
+                  value={filters.releaseYear}
+                  onValueChange={(value) => updateFilter('releaseYear', value)}
+                  placeholder="All Years"
+                  searchPlaceholder="Search year..."
+                  emptyMessage="No year found."
+                />
+              </div>
+            </>
+          )}
 
           <div className="h-px bg-border" />
 
@@ -402,6 +489,18 @@ export function FilterSidebar({
                     </button>
                   </Badge>
                 )}
+                {filters.store.map(s => (
+                  <Badge key={s} variant="secondary" className="gap-1 bg-fuchsia-500/20 text-white border-fuchsia-500/30">
+                    {storeOptions.find(o => o.value === s)?.label ?? s}
+                    <button 
+                      onClick={() => toggleStore(s)} 
+                      className="ml-1 hover:text-red-400"
+                      aria-label={`Remove ${s} store filter`}
+                    >
+                      <X className="h-3 w-3 pointer-events-none" />
+                    </button>
+                  </Badge>
+                ))}
               </div>
             </div>
           )}
@@ -422,6 +521,10 @@ export function FilterSidebar({
           </motion.aside>
         )}
       </AnimatePresence>
-    </>
   );
-}
+});
+
+// ─── Legacy combined export (backwards-compatible) ───────────────────────────
+// Kept for any tests or consumers that still import FilterSidebar.
+// Simply re-exports FilterPanel under the old name.
+export const FilterSidebar = FilterPanel;

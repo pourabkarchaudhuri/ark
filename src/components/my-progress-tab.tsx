@@ -22,7 +22,7 @@ import { libraryStore } from '@/services/library-store';
 import { cn, formatHours } from '@/lib/utils';
 
 interface MyProgressTabProps {
-  gameId: number;
+  gameId: string;
   gameName?: string; // Reserved for future use (display purposes)
 }
 

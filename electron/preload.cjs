@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('electron', {
   isMaximized: () => ipcRenderer.invoke('window-is-maximized'),
   // Open URL in default OS browser
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  // Proxy fetch — routes HTTP requests through the main process to bypass CORS.
+  // Only allowed for whitelisted domains (see main.ts PROXY_FETCH_ALLOWED_DOMAINS).
+  fetchHtml: (url) => ipcRenderer.invoke('proxy:fetchHtml', url),
 });
 
 // Steam CDN base URL for constructing image URLs client-side
@@ -87,6 +90,10 @@ contextBridge.exposeInMainWorld('steam', {
   getMultiplePlayerCounts: (appIds) =>
     ipcRenderer.invoke('steam:getMultiplePlayerCounts', appIds),
 
+  // Get full Steam app list (for Catalog A–Z browsing)
+  getAppList: () =>
+    ipcRenderer.invoke('steam:getAppList'),
+
   // Get game recommendations based on current game and library
   getRecommendations: (currentAppId, libraryAppIds, limit) => 
     ipcRenderer.invoke('steam:getRecommendations', currentAppId, libraryAppIds, limit),
@@ -102,6 +109,53 @@ contextBridge.exposeInMainWorld('steam', {
   // Helper: Get header image URL (460x215 horizontal)
   getHeaderUrl: (appId) => 
     `${STEAM_CDN_BASE}/${appId}/header.jpg`,
+});
+
+// Expose Epic Games Store API to renderer
+contextBridge.exposeInMainWorld('epic', {
+  // Search games by keyword
+  searchGames: (query, limit) =>
+    ipcRenderer.invoke('epic:searchGames', query, limit),
+
+  // Get details for a single game by namespace + offerId
+  getGameDetails: (namespace, offerId) =>
+    ipcRenderer.invoke('epic:getGameDetails', namespace, offerId),
+
+  // Get new releases
+  getNewReleases: () =>
+    ipcRenderer.invoke('epic:getNewReleases'),
+
+  // Get coming soon games
+  getComingSoon: () =>
+    ipcRenderer.invoke('epic:getComingSoon'),
+
+  // Get current free games
+  getFreeGames: () =>
+    ipcRenderer.invoke('epic:getFreeGames'),
+
+  // Get upcoming releases (combined new + coming soon, enriched)
+  getUpcomingReleases: () =>
+    ipcRenderer.invoke('epic:getUpcomingReleases'),
+
+  // Get cover image URL for a game (returns cached URL or null)
+  // Browse full Epic catalog (paginated)
+  browseCatalog: (limit) =>
+    ipcRenderer.invoke('epic:browseCatalog', limit),
+
+  getCoverUrl: (namespace, offerId) =>
+    ipcRenderer.invoke('epic:getCoverUrl', namespace, offerId),
+
+  // Clear Epic cache
+  clearCache: () =>
+    ipcRenderer.invoke('epic:clearCache'),
+
+  // Get cache statistics
+  getCacheStats: () =>
+    ipcRenderer.invoke('epic:getCacheStats'),
+
+  // Get rich product content (full description + system requirements)
+  getProductContent: (slug) =>
+    ipcRenderer.invoke('epic:getProductContent', slug),
 });
 
 // Expose Metacritic API to renderer
@@ -323,4 +377,4 @@ contextBridge.exposeInMainWorld('webviewApi', {
   },
 });
 
-console.log('Preload script loaded - window.steam, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi exposed');
+console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi exposed');

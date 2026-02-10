@@ -4,7 +4,7 @@
  */
 
 import { Game, LibraryGameEntry } from '@/types/game';
-import { SteamMostPlayedGame, SteamAppDetails, SteamSearchItem, SteamNewsItem, getSteamCoverUrl } from '@/types/steam';
+import { SteamMostPlayedGame, SteamAppDetails, SteamSearchItem, SteamNewsItem, SteamAppListItem, getSteamCoverUrl } from '@/types/steam';
 import { libraryStore } from './library-store';
 
 // Check if running in Electron
@@ -211,7 +211,7 @@ class SteamService {
       for (const mp of gamesToFetch) {
         const details = detailsMap.get(mp.appid);
         if (details) {
-          const libraryEntry = libraryStore.getEntry(mp.appid);
+          const libraryEntry = libraryStore.getEntry(`steam-${mp.appid}`);
           // Don't pass peak_in_game as playerCount — it's a *peak* metric, not
           // the current count.  The real-time count is fetched separately via
           // getMultiplePlayerCounts so that dashboard and details page always agree.
@@ -254,7 +254,7 @@ class SteamService {
       const games: Game[] = [];
       for (const { appId, details } of detailsArray) {
         if (details) {
-          const libraryEntry = libraryStore.getEntry(appId);
+          const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
           games.push(transformSteamGame(details, libraryEntry));
         }
       }
@@ -284,7 +284,7 @@ class SteamService {
       const games: Game[] = [];
       for (const { appId, details } of detailsArray) {
         if (details) {
-          const libraryEntry = libraryStore.getEntry(appId);
+          const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
           games.push(transformSteamGame(details, libraryEntry));
         }
       }
@@ -314,7 +314,7 @@ class SteamService {
       const games: Game[] = [];
       for (const { appId, details } of detailsArray) {
         if (details) {
-          const libraryEntry = libraryStore.getEntry(appId);
+          const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
           games.push(transformSteamGame(details, libraryEntry));
         }
       }
@@ -365,7 +365,7 @@ class SteamService {
       const games: Game[] = [];
       for (const { appId, details } of detailsArray) {
         if (details) {
-          const libraryEntry = libraryStore.getEntry(appId);
+          const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
           games.push(transformSteamGame(details, libraryEntry));
         }
       }
@@ -387,7 +387,7 @@ class SteamService {
     // Check cache first
     if (gameDetailsCache.has(appId)) {
       const cached = gameDetailsCache.get(appId)!;
-      const libraryEntry = libraryStore.getEntry(appId);
+      const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
       return transformSteamGame(cached, libraryEntry);
     }
 
@@ -400,11 +400,44 @@ class SteamService {
       if (!details) return null;
       
       gameDetailsCache.set(appId, details);
-      const libraryEntry = libraryStore.getEntry(appId);
+      const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
       return transformSteamGame(details, libraryEntry);
     } catch (error) {
       console.error(`[Steam Service] Error getting details for ${appId}:`, error);
       return null;
+    }
+  }
+
+  /**
+   * Get full Steam app list (for Catalog A–Z browsing).
+   * Returns sorted array of { appid, name }.
+   */
+  async getAppList(): Promise<SteamAppListItem[]> {
+    if (!isElectron()) {
+      console.warn('[Steam Service] Not in Electron, returning mock app list for catalog');
+      // Return a small mock list so the UI works in browser dev mode
+      return [
+        { appid: 730, name: 'Counter-Strike 2' },
+        { appid: 570, name: 'Dota 2' },
+        { appid: 578080, name: 'PUBG: BATTLEGROUNDS' },
+        { appid: 1172470, name: 'Apex Legends' },
+        { appid: 271590, name: 'Grand Theft Auto V' },
+        { appid: 1245620, name: 'Elden Ring' },
+        { appid: 1086940, name: "Baldur's Gate 3" },
+        { appid: 1091500, name: 'Cyberpunk 2077' },
+        { appid: 292030, name: 'The Witcher 3: Wild Hunt' },
+        { appid: 1174180, name: 'Red Dead Redemption 2' },
+      ].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    }
+
+    try {
+      console.log('[Steam Service] Fetching full app list...');
+      const apps = await window.steam!.getAppList();
+      console.log(`[Steam Service] Got ${apps.length} apps from app list`);
+      return apps; // Already sorted by name in Electron backend
+    } catch (error) {
+      console.error('[Steam Service] Error getting app list:', error);
+      throw error;
     }
   }
 

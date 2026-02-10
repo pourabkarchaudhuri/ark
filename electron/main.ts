@@ -5,6 +5,7 @@ const electron = require('electron');
 const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, net, session, Tray, Menu, nativeImage } = electron;
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
+import * as https from 'https';
 import path from 'path';
 
 let tray: any = null;
@@ -14,6 +15,9 @@ import fetch from 'cross-fetch';
 
 // ESM has no __dirname; required for loadFile/preload paths when run as module
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Set Node.js process title — visible in system monitors and some task managers
+process.title = 'Ark';
 
 // Handle EPIPE errors globally to prevent crashes when stdout/stderr is closed
 process.stdout.on('error', (err) => {
@@ -47,6 +51,7 @@ process.on('uncaughtException', (err) => {
 });
 
 import { steamAPI, getSteamCoverUrl, getSteamHeaderUrl } from './steam-api.js';
+import { epicAPI } from './epic-api.js';
 import { fetchMetacriticReviews, clearMetacriticCache } from './metacritic-api.js';
 import { processMessage, searchGamesForContext, chatStore } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
@@ -89,8 +94,39 @@ let mainWindow: BrowserWindowType | null = null;
   }
 })();
 
-// Set App User Model ID for proper Windows notifications and taskbar identity
+// Set the app name early — affects window titles, tray labels, and process
+// descriptions where the runtime can influence them.
+app.name = 'Ark';
 app.setAppUserModelId('com.ark.gametracker');
+
+// ---------------------------------------------------------------------------
+// Single Instance Lock — prevent multiple instances from running
+// ---------------------------------------------------------------------------
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  // Another instance already owns the lock — quit immediately.
+  // The 'second-instance' event on the first instance will focus its window.
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    // A second instance was attempted — bring the existing window to front
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Suppress noisy Chromium/Electron errors on Windows
+// ---------------------------------------------------------------------------
+// GPU shader disk cache causes "Unable to move the cache: Access is denied"
+// and "Gpu Cache Creation failed" on Windows due to file locking conflicts.
+app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
+// Reduce quota database errors ("Could not open the quota database, resetting")
+// caused by stale locks when multiple Electron instances fight over storage.
+app.commandLine.appendSwitch('disable-features', 'ServiceWorkerBypassFetchHandler');
 
 // Register updater IPC handlers early so the renderer never hits
 // "No handler registered" errors — even in dev mode.
@@ -115,12 +151,33 @@ function createWindow() {
     indexPath = path.join(__dirname, '../../dist/index.html');
   }
 
+  // Resolve the window icon — use the ICO for Windows taskbar / ALT+TAB.
+  // In dev mode the icon lives in build/; in production electron-builder embeds it.
+  const projectRoot = path.join(__dirname, '../..');
+  let windowIcon;
+  if (app.isPackaged) {
+    const icoCandidates = [
+      path.join(process.resourcesPath, 'icons', 'icon.ico'),
+      path.join(process.resourcesPath, 'icons', 'icon-256.png'),
+    ];
+    const found = icoCandidates.find((p) => fs.existsSync(p));
+    if (found) windowIcon = nativeImage.createFromPath(found);
+  } else {
+    const icoCandidates = [
+      path.join(projectRoot, 'build', 'icon.ico'),
+      path.join(projectRoot, 'build', 'icon.png'),
+    ];
+    const found = icoCandidates.find((p) => fs.existsSync(p));
+    if (found) windowIcon = nativeImage.createFromPath(found);
+  }
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1024,
     minHeight: 768,
     title: 'Ark',
+    ...(windowIcon && !windowIcon.isEmpty() ? { icon: windowIcon } : {}),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -491,6 +548,21 @@ ipcMain.handle('steam:getCachedGameNames', async (_event, appIds: number[]) => {
 });
 
 /**
+ * Get full Steam app list (for Catalog A–Z browsing)
+ */
+ipcMain.handle('steam:getAppList', async () => {
+  try {
+    console.log('[Steam IPC] getAppList called');
+    const apps = await steamAPI.getAppList();
+    console.log(`[Steam IPC] getAppList returned ${apps.length} apps`);
+    return apps;
+  } catch (error) {
+    console.error('[Steam IPC] Error fetching app list:', error);
+    throw error;
+  }
+});
+
+/**
  * Get game recommendations based on a game and user's library
  */
 ipcMain.handle('steam:getRecommendations', async (_event, currentAppId: number, libraryAppIds: number[], limit: number = 10) => {
@@ -600,6 +672,136 @@ ipcMain.handle('steam:getUpcomingReleases', async () => {
   } catch (error) {
     console.error('[Steam IPC] Error fetching upcoming releases:', error);
     return [];
+  }
+});
+
+// ============================================================================
+// EPIC GAMES STORE IPC HANDLERS
+// ============================================================================
+
+/**
+ * Search Epic Games Store by keyword
+ */
+ipcMain.handle('epic:searchGames', async (_event, query: string, limit: number = 20) => {
+  try {
+    console.log(`[Epic IPC] searchGames: "${query}" (limit ${limit})`);
+    return await epicAPI.searchGames(query, limit);
+  } catch (error) {
+    console.error('[Epic IPC] Error searching games:', error);
+    return [];
+  }
+});
+
+/**
+ * Get details for a single Epic game by namespace + offerId
+ */
+ipcMain.handle('epic:getGameDetails', async (_event, namespace: string, offerId: string) => {
+  try {
+    console.log(`[Epic IPC] getGameDetails: ${namespace} / ${offerId}`);
+    return await epicAPI.getGameDetails(namespace, offerId);
+  } catch (error) {
+    console.error('[Epic IPC] Error getting game details:', error);
+    return null;
+  }
+});
+
+/**
+ * Get new releases from Epic Games Store
+ */
+ipcMain.handle('epic:getNewReleases', async () => {
+  try {
+    console.log('[Epic IPC] getNewReleases');
+    return await epicAPI.getNewReleases();
+  } catch (error) {
+    console.error('[Epic IPC] Error fetching new releases:', error);
+    return [];
+  }
+});
+
+/**
+ * Get coming soon games from Epic Games Store
+ */
+ipcMain.handle('epic:getComingSoon', async () => {
+  try {
+    console.log('[Epic IPC] getComingSoon');
+    return await epicAPI.getComingSoon();
+  } catch (error) {
+    console.error('[Epic IPC] Error fetching coming soon:', error);
+    return [];
+  }
+});
+
+/**
+ * Get current free games on Epic Games Store
+ */
+ipcMain.handle('epic:getFreeGames', async () => {
+  try {
+    console.log('[Epic IPC] getFreeGames');
+    return await epicAPI.getFreeGames();
+  } catch (error) {
+    console.error('[Epic IPC] Error fetching free games:', error);
+    return [];
+  }
+});
+
+/**
+ * Get upcoming releases from Epic (combined new + coming soon, enriched)
+ */
+ipcMain.handle('epic:getUpcomingReleases', async () => {
+  try {
+    console.log('[Epic IPC] getUpcomingReleases');
+    return await epicAPI.getUpcomingReleases();
+  } catch (error) {
+    console.error('[Epic IPC] Error fetching upcoming releases:', error);
+    return [];
+  }
+});
+
+/**
+ * Browse the full Epic catalog (paginated, no date filter — returns 200+ games)
+ */
+ipcMain.handle('epic:browseCatalog', async (_event, limit: number = 0) => {
+  try {
+    console.log(`[Epic IPC] browseCatalog (limit ${limit || 'ALL'})`);
+    return await epicAPI.browseCatalog(limit);
+  } catch (error) {
+    console.error('[Epic IPC] Error browsing catalog:', error);
+    return [];
+  }
+});
+
+/**
+ * Get cover URL for an Epic game (returns cached image URL or null)
+ */
+ipcMain.handle('epic:getCoverUrl', async (_event, namespace: string, offerId: string) => {
+  return epicAPI.getCoverUrl(namespace, offerId);
+});
+
+/**
+ * Clear Epic API cache
+ */
+ipcMain.handle('epic:clearCache', async () => {
+  epicAPI.clearCache();
+  return true;
+});
+
+/**
+ * Get Epic cache statistics
+ */
+ipcMain.handle('epic:getCacheStats', async () => {
+  return epicAPI.getCacheStats();
+});
+
+/**
+ * Get rich product page content (full About description + system requirements)
+ * from the Epic CMS REST endpoint.
+ */
+ipcMain.handle('epic:getProductContent', async (_event, slug: string) => {
+  try {
+    return await epicAPI.getProductContent(slug);
+  } catch (error) {
+    console.error('[Epic IPC] getProductContent error:', error);
+    return null;
   }
 });
 
@@ -786,6 +988,64 @@ ipcMain.handle('metacritic:getGameReviews', async (_event, gameName: string) => 
 ipcMain.handle('metacritic:clearCache', async () => {
   clearMetacriticCache();
   return true;
+});
+
+// ============================================================================
+// PROXY FETCH IPC HANDLER
+// ============================================================================
+// Generic HTML fetcher routed through the main process so renderer-side code
+// is not blocked by CORS.  Restricted to a domain allowlist for security.
+
+const PROXY_FETCH_ALLOWED_DOMAINS = [
+  'fitgirl-repacks.site',
+];
+
+ipcMain.handle('proxy:fetchHtml', async (_event, url: string) => {
+  try {
+    const parsed = new URL(url);
+    const allowed = PROXY_FETCH_ALLOWED_DOMAINS.some(
+      d => parsed.hostname === d || parsed.hostname.endsWith(`.${d}`),
+    );
+    if (!allowed) {
+      console.warn(`[Proxy] Blocked fetch to disallowed domain: ${parsed.hostname}`);
+      return null;
+    }
+
+    // Use Node.js https directly so we can set rejectUnauthorized: false
+    // for sites with self-signed / intermediate certificate issues.
+    const html = await new Promise<string | null>((resolve) => {
+      const req = https.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        rejectUnauthorized: false,
+      }, (res) => {
+        if (!res.statusCode || res.statusCode >= 400) { resolve(null); res.resume(); return; }
+        // Follow redirects (301/302)
+        if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+          https.get(res.headers.location, { rejectUnauthorized: false }, (rRes) => {
+            let data = '';
+            rRes.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+            rRes.on('end', () => resolve(data));
+            rRes.on('error', () => resolve(null));
+          }).on('error', () => resolve(null));
+          res.resume();
+          return;
+        }
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        res.on('end', () => resolve(data));
+        res.on('error', () => resolve(null));
+      });
+      req.on('error', () => resolve(null));
+      req.setTimeout(15000, () => { req.destroy(); resolve(null); });
+    });
+    return html;
+  } catch (error) {
+    console.error('[Proxy] fetchHtml error:', error);
+    return null;
+  }
 });
 
 // ============================================================================
@@ -1026,7 +1286,7 @@ ipcMain.handle('dialog:openFile', async (_event, options?: {
 /**
  * Receive the list of games to track from the renderer
  */
-ipcMain.handle('session:setTrackedGames', async (_event, games: Array<{ gameId: number; executablePath: string }>) => {
+ipcMain.handle('session:setTrackedGames', async (_event, games: Array<{ gameId: string; executablePath: string }>) => {
   setTrackedGames(games);
   return { success: true };
 });
@@ -1234,6 +1494,14 @@ app.whenReady().then(async () => {
     logStartupError(err);
     app.quit();
   }
+
+  // ---- Epic Cloudflare clearance (background, non-blocking) ----
+  // Epic's GraphQL API is behind Cloudflare JS challenge.  We solve it once
+  // at startup using a hidden BrowserWindow so all Epic catalog queries work.
+  epicAPI.initCloudflare().then(ok => {
+    if (ok) console.log('[Startup] Epic Cloudflare clearance ready');
+    else console.warn('[Startup] Epic Cloudflare clearance failed — REST fallback active');
+  }).catch(() => {});
 
   // ---- System Tray ----
   try {

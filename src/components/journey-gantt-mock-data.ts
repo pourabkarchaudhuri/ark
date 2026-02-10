@@ -11,7 +11,7 @@ import { JourneyEntry, StatusChangeEntry, GameStatus, GameSession, LibraryGameEn
 const STEAM_CDN = 'https://cdn.akamai.steamstatic.com/steam/apps';
 
 interface MockGame {
-  gameId: number;
+  gameId: number; // Steam appId — converted to "steam-{id}" string at output
   title: string;
   genre: string[];
   platform: string[];
@@ -422,7 +422,7 @@ function generateMockSessions(now: Date, offsetMs: number = 0): GameSession[] {
 
         sessions.push({
           id: `mock-sess-${game.gameId}-${sessionIdx}`,
-          gameId: game.gameId,
+          gameId: `steam-${game.gameId}`,
           executablePath: `C:\\Games\\${game.title.replace(/[^a-zA-Z0-9]/g, '')}\\game.exe`,
           startTime: startDate.toISOString(),
           endTime: endDate.toISOString(),
@@ -452,7 +452,7 @@ function generateMockLibraryEntries(): LibraryGameEntry[] {
     const addedDate = new Date(game.addedAt);
 
     return {
-      gameId: game.gameId,
+      gameId: `steam-${game.gameId}`,
       steamAppId: game.gameId,
       status: game.currentStatus,
       priority: meta.priority,
@@ -501,7 +501,7 @@ export function generateMockGanttData(): {
   const dateOffset = now.getTime() - latestMs;
 
   const journeyEntries: JourneyEntry[] = MOCK_GAMES.map((game) => ({
-    gameId: game.gameId,
+    gameId: `steam-${game.gameId}`,
     title: game.title,
     coverUrl: `${STEAM_CDN}/${game.gameId}/library_600x900.jpg`,
     genre: game.genre,
@@ -519,7 +519,7 @@ export function generateMockGanttData(): {
     for (let i = 0; i < game.transitions.length; i++) {
       const t = game.transitions[i];
       statusHistory.push({
-        gameId: game.gameId,
+        gameId: `steam-${game.gameId}`,
         title: game.title,
         previousStatus: i === 0 ? null : game.transitions[i - 1].status,
         newStatus: t.status,

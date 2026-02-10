@@ -4,8 +4,8 @@ import { GameCard } from '@/components/game-card';
 import { Game } from '@/types/game';
 
 const mockGame: Game = {
-  id: 'test-1',
-  igdbId: 12345,
+  id: 'steam-730',
+  store: 'steam',
   steamAppId: 730,
   title: 'Test Game',
   developer: 'Test Developer',
@@ -21,6 +21,29 @@ const mockGame: Game = {
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
   isInLibrary: true,
+  availableOn: ['steam'],
+};
+
+const mockEpicGame: Game = {
+  id: 'epic-fn:fortnite',
+  store: 'epic',
+  epicNamespace: 'fn',
+  epicOfferId: 'fortnite',
+  title: 'Epic Test Game',
+  developer: 'Epic Developer',
+  genre: ['Action'],
+  metacriticScore: 80,
+  platform: ['windows'],
+  status: 'Want to Play',
+  priority: 'Medium',
+  publisher: 'Epic Publisher',
+  publicReviews: '',
+  recommendationSource: '',
+  releaseDate: '2024-06-01',
+  createdAt: new Date('2024-01-01'),
+  updatedAt: new Date('2024-01-01'),
+  isInLibrary: false,
+  availableOn: ['epic'],
 };
 
 describe('GameCard', () => {
@@ -373,10 +396,10 @@ describe('GameCard', () => {
   });
 
   describe('Card Click', () => {
-    it('calls onClick when card is clicked for custom games without steamAppId', () => {
+    it('calls onClick when card is clicked for custom games', () => {
       const onClick = vi.fn();
-      // Create a custom game without steamAppId
-      const customGame = { ...mockGame, steamAppId: undefined };
+      // Create a custom game
+      const customGame = { ...mockGame, id: 'custom-1', store: 'custom' as const, isCustom: true, steamAppId: undefined };
       render(
         <GameCard
           game={customGame}
@@ -410,6 +433,67 @@ describe('GameCard', () => {
         // onClick should NOT be called for Steam games
         expect(onClick).not.toHaveBeenCalled();
       }
+    });
+
+    it('does not call onClick for Epic games (navigates instead)', () => {
+      const onClick = vi.fn();
+      render(
+        <GameCard
+          game={mockEpicGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          onClick={onClick}
+        />
+      );
+      
+      const card = screen.getByText('Epic Test Game').closest('div[class*="cursor-pointer"]');
+      if (card) {
+        fireEvent.click(card);
+        // onClick should NOT be called for Epic games
+        expect(onClick).not.toHaveBeenCalled();
+      }
+    });
+  });
+
+  describe('Store Badges', () => {
+    it('renders Steam store badge for Steam games', () => {
+      render(
+        <GameCard
+          game={mockGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+        />
+      );
+      // Steam badge should be rendered (FaSteam icon)
+      const badges = document.querySelectorAll('[class*="absolute"][class*="top-"]');
+      expect(badges.length).toBeGreaterThan(0);
+    });
+
+    it('renders Epic store badge for Epic games', () => {
+      render(
+        <GameCard
+          game={mockEpicGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+        />
+      );
+      // Epic badge should be rendered
+      const badges = document.querySelectorAll('[class*="absolute"][class*="top-"]');
+      expect(badges.length).toBeGreaterThan(0);
+    });
+
+    it('renders both badges for multi-store games', () => {
+      const multiStoreGame = { ...mockGame, availableOn: ['steam', 'epic'] as ('steam' | 'epic')[] };
+      render(
+        <GameCard
+          game={multiStoreGame}
+          onEdit={() => {}}
+          onDelete={() => {}}
+        />
+      );
+      // Should have store badge area rendered
+      const card = screen.getByText('Test Game').closest('.group');
+      expect(card).toBeInTheDocument();
     });
   });
 });

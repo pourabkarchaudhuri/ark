@@ -11,10 +11,10 @@ const STEAM_WEB_API_BASE = 'https://api.steampowered.com';
 const STEAM_STORE_API_BASE = 'https://store.steampowered.com/api';
 const STEAM_CDN_BASE = 'https://cdn.akamai.steamstatic.com/steam/apps';
 
-// Rate limiting configuration - OPTIMIZED for faster loading
-// Steam API is fairly tolerant, so we can be more aggressive
-const RATE_LIMIT_DELAY = 100; // 100ms between requests (10 requests/second)
-const MAX_CONCURRENT_REQUESTS = 5; // Increased concurrent requests
+// Rate limiting configuration - balanced for speed vs Steam's 429 limits
+// Steam appdetails endpoint rate-limits at ~200 requests per 5 minutes
+const RATE_LIMIT_DELAY = 200; // 200ms between requests (5 requests/second)
+const MAX_CONCURRENT_REQUESTS = 3; // Conservative to avoid 429 bursts
 
 /**
  * Construct cover image URL for a Steam game
@@ -200,14 +200,38 @@ export interface SteamReviewsResponse {
   reviews: SteamReview[];
 }
 
-// Rate Limiter
+// Rate Limiter with promise coalescing — identical concurrent requests
+// (same dedup key) share a single in-flight promise instead of hitting
+// the API multiple times.
+const MAX_QUEUE_SIZE = 500; // Prevent unbounded queue growth
+
 class RateLimiter {
   private queue: Array<() => Promise<void>> = [];
   private activeRequests = 0;
   private lastRequestTime = 0;
+  /** In-flight promise cache keyed by dedup key — collapses identical requests */
+  private inFlight = new Map<string, Promise<unknown>>();
 
-  async execute<T>(fn: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
+  /**
+   * Execute a rate-limited request.
+   * @param fn - The async function to execute
+   * @param dedupKey - Optional dedup key; if provided, concurrent calls with the
+   *                   same key share one in-flight promise (promise coalescing).
+   */
+  async execute<T>(fn: () => Promise<T>, dedupKey?: string): Promise<T> {
+    // Promise coalescing — reuse an existing in-flight request for the same key
+    if (dedupKey) {
+      const existing = this.inFlight.get(dedupKey) as Promise<T> | undefined;
+      if (existing) return existing;
+    }
+
+    const promise = new Promise<T>((resolve, reject) => {
+      // Reject immediately if queue is at capacity to prevent memory bloat
+      if (this.queue.length >= MAX_QUEUE_SIZE) {
+        reject(new Error('Rate limiter queue full'));
+        return;
+      }
+
       const task = async () => {
         const now = Date.now();
         const timeSinceLastRequest = now - this.lastRequestTime;
@@ -236,6 +260,14 @@ class RateLimiter {
         this.queue.push(task);
       }
     });
+
+    // Register in-flight promise for dedup
+    if (dedupKey) {
+      this.inFlight.set(dedupKey, promise);
+      promise.finally(() => this.inFlight.delete(dedupKey!));
+    }
+
+    return promise;
   }
 
   private processQueue() {
@@ -252,191 +284,8 @@ class RateLimiter {
   }
 }
 
-// Persistent Cache with Stale-While-Revalidate Strategy
-import * as fs from 'fs';
-import * as path from 'path';
-import { createRequire } from 'node:module';
-const require = createRequire(import.meta.url);
-const electron = require('electron');
-const { app } = electron;
-
-interface CacheEntry<T> {
-  data: T;
-  timestamp: number;
-  ttl: number;
-}
-
-// Persistent TTL - data is considered "stale" but still usable for faster loads
-const STALE_TTL = 24 * 60 * 60 * 1000; // 24 hours - show stale data while revalidating
-const MAX_CACHE_SIZE = 500; // Maximum number of entries to persist
-
-class PersistentCache {
-  private memoryStore: Map<string, CacheEntry<unknown>> = new Map();
-  private cacheFilePath: string;
-  private isDirty: boolean = false;
-  private saveTimeout: NodeJS.Timeout | null = null;
-
-  constructor() {
-    // Store cache in user data directory
-    const userDataPath = app?.getPath('userData') || './cache';
-    this.cacheFilePath = path.join(userDataPath, 'steam-cache.json');
-    this.loadFromDisk();
-  }
-
-  /**
-   * Load cache from disk on startup
-   */
-  private loadFromDisk(): void {
-    try {
-      if (fs.existsSync(this.cacheFilePath)) {
-        const data = fs.readFileSync(this.cacheFilePath, 'utf-8');
-        const parsed = JSON.parse(data);
-        
-        // Restore cache entries
-        let loadedCount = 0;
-        for (const [key, entry] of Object.entries(parsed)) {
-          const cacheEntry = entry as CacheEntry<unknown>;
-          // Only load entries that aren't completely expired (within stale TTL)
-          if (Date.now() - cacheEntry.timestamp < STALE_TTL) {
-            this.memoryStore.set(key, cacheEntry);
-            loadedCount++;
-          }
-        }
-        console.log(`[Cache] Loaded ${loadedCount} entries from disk cache`);
-      }
-    } catch (error) {
-      console.warn('[Cache] Failed to load disk cache:', error);
-    }
-  }
-
-  /**
-   * Save cache to disk (debounced)
-   */
-  private saveToDisk(): void {
-    if (this.saveTimeout) {
-      clearTimeout(this.saveTimeout);
-    }
-    
-    this.saveTimeout = setTimeout(() => {
-      try {
-        // Convert map to object, keeping only recent entries
-        const entries = Array.from(this.memoryStore.entries())
-          .filter(([, entry]) => Date.now() - entry.timestamp < STALE_TTL)
-          .slice(-MAX_CACHE_SIZE); // Keep most recent entries
-        
-        const obj: Record<string, CacheEntry<unknown>> = {};
-        for (const [key, value] of entries) {
-          obj[key] = value;
-        }
-        
-        fs.writeFileSync(this.cacheFilePath, JSON.stringify(obj), 'utf-8');
-        console.log(`[Cache] Saved ${entries.length} entries to disk`);
-        this.isDirty = false;
-      } catch (error) {
-        console.error('[Cache] Failed to save disk cache:', error);
-      }
-    }, 5000); // Debounce writes by 5 seconds
-  }
-
-  set<T>(key: string, data: T, ttl: number = CACHE_TTL): void {
-    this.memoryStore.set(key, { data, timestamp: Date.now(), ttl });
-    this.isDirty = true;
-    this.saveToDisk();
-  }
-
-  /**
-   * Get cached data
-   * @param allowStale - If true, returns stale data (useful for stale-while-revalidate)
-   */
-  get<T>(key: string, allowStale: boolean = false): T | null {
-    const entry = this.memoryStore.get(key);
-    if (!entry) return null;
-    
-    const age = Date.now() - entry.timestamp;
-    
-    // If within normal TTL, return fresh data
-    if (age <= entry.ttl) {
-      return entry.data as T;
-    }
-    
-    // If stale but within stale TTL and allowStale is true, return stale data
-    if (allowStale && age <= STALE_TTL) {
-      return entry.data as T;
-    }
-    
-    // Completely expired
-    if (age > STALE_TTL) {
-      this.memoryStore.delete(key);
-    }
-    
-    return null;
-  }
-
-  /**
-   * Check if key exists and is fresh (within normal TTL)
-   */
-  has(key: string): boolean {
-    const entry = this.memoryStore.get(key);
-    if (!entry) return false;
-    
-    if (Date.now() - entry.timestamp > entry.ttl) {
-      return false;
-    }
-    
-    return true;
-  }
-
-  /**
-   * Check if key exists (even if stale)
-   */
-  hasStale(key: string): boolean {
-    const entry = this.memoryStore.get(key);
-    if (!entry) return false;
-    
-    if (Date.now() - entry.timestamp > STALE_TTL) {
-      this.memoryStore.delete(key);
-      return false;
-    }
-    
-    return true;
-  }
-
-  /**
-   * Check if cached data is stale (but still usable)
-   */
-  isStale(key: string): boolean {
-    const entry = this.memoryStore.get(key);
-    if (!entry) return true;
-    
-    return Date.now() - entry.timestamp > entry.ttl;
-  }
-
-  clear(): void {
-    this.memoryStore.clear();
-    this.isDirty = true;
-    this.saveToDisk();
-  }
-
-  /**
-   * Get cache statistics
-   */
-  getStats(): { total: number; fresh: number; stale: number } {
-    let fresh = 0;
-    let stale = 0;
-    
-    const entries = Array.from(this.memoryStore.values());
-    for (const entry of entries) {
-      const age = Date.now() - entry.timestamp;
-      if (age <= entry.ttl) {
-        fresh++;
-      } else if (age <= STALE_TTL) {
-        stale++;
-      }
-    }
-    
-    return { total: this.memoryStore.size, fresh, stale };
-  }
-}
+// PersistentCache — imported from shared module
+import { PersistentCache } from './persistent-cache.js';
 
 // Alias for backwards compatibility
 const Cache = PersistentCache;
@@ -444,7 +293,7 @@ const Cache = PersistentCache;
 // Steam API Client
 class SteamAPIClient {
   private rateLimiter = new RateLimiter();
-  private cache = new Cache();
+  private cache = new Cache('steam-cache.json');
 
   /**
    * Get most played games from Steam Charts
@@ -538,7 +387,7 @@ class SteamAPIClient {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
         return res.json() as Promise<{ [key: string]: SteamAppDetails }>;
-      });
+      }, `appdetails-${appId}`);
 
       const appData = response[appId.toString()];
       if (appData?.success && appData.data) {
@@ -692,7 +541,7 @@ class SteamAPIClient {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
         return res.json() as Promise<SteamFeaturedCategories>;
-      });
+      }, 'featured-categories');
 
       this.cache.set(cacheKey, response);
       return response;
@@ -834,13 +683,14 @@ class SteamAPIClient {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Player count API error: ${res.status}`);
         return res.json();
-      });
+      }, `player-count-${appId}`);
 
       const count = Number(result?.response?.player_count ?? 0);
       this.cache.set(cacheKey, count, PLAYER_COUNT_TTL);
       return count;
     } catch (error) {
-      console.warn(`[Steam] Failed to get player count for ${appId}:`, error);
+      // Expected for unreleased/new games — silently return 0
+      void error;
       return 0;
     }
   }
@@ -1240,6 +1090,100 @@ class SteamAPIClient {
     scored.sort((a, b) => b.score - a.score);
 
     return scored;
+  }
+
+  /**
+   * Get full Steam game list (appid + name) for Catalog (A–Z) browsing.
+   *
+   * Uses IStoreService/GetAppList/v1 (requires API key) which supports:
+   *   - Pagination via `last_appid` cursor
+   *   - Type filtering (games only — excludes DLCs, software, videos, hardware)
+   *   - Up to 50 000 results per page
+   *
+   * The old ISteamApps/GetAppList/v2 endpoint is now defunct (returns 404).
+   *
+   * Cached on disk for 24 hours with stale-while-revalidate.
+   */
+  async getAppList(): Promise<Array<{ appid: number; name: string }>> {
+    const cacheKey = 'full-app-list-v2'; // New key — don't read the old stale 143-entry cache
+    const APP_LIST_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+    // Check fresh cache
+    const freshCached = this.cache.get<Array<{ appid: number; name: string }>>(cacheKey);
+    if (freshCached) {
+      console.log(`[Steam] getAppList: returning fresh cache (${freshCached.length} apps)`);
+      return freshCached;
+    }
+
+    // Check stale cache — return immediately, refresh in background
+    const staleCached = this.cache.get<Array<{ appid: number; name: string }>>(cacheKey, true);
+    if (staleCached) {
+      console.log(`[Steam] getAppList: returning stale cache (${staleCached.length} apps), refreshing in background`);
+      this.refreshAppList(APP_LIST_TTL).catch(err =>
+        console.warn('[Steam] Background refresh of app list failed:', err)
+      );
+      return staleCached;
+    }
+
+    // No cache — must fetch
+    return this.refreshAppList(APP_LIST_TTL);
+  }
+
+  /**
+   * Paginate through IStoreService/GetAppList/v1 to build the full games list.
+   * Each page returns up to 50 000 entries; typically 3-4 pages for ~155k games.
+   */
+  private async refreshAppList(ttl: number): Promise<Array<{ appid: number; name: string }>> {
+    const cacheKey = 'full-app-list-v2';
+    const PAGE_SIZE = 50000;
+    const allApps: Array<{ appid: number; name: string }> = [];
+    let lastAppId: number | undefined;
+    let page = 0;
+
+    console.log('[Steam] Fetching full game list from IStoreService/GetAppList/v1 (paginated)...');
+
+    while (true) {
+      page++;
+      let url = `${STEAM_WEB_API_BASE}/IStoreService/GetAppList/v1/?key=${STEAM_API_KEY}`
+        + `&max_results=${PAGE_SIZE}`
+        + `&include_games=true&include_dlc=false&include_software=false&include_videos=false&include_hardware=false`;
+      if (lastAppId !== undefined) {
+        url += `&last_appid=${lastAppId}`;
+      }
+
+      const response = await this.rateLimiter.execute(async () => {
+        console.log(`[Steam] getAppList page ${page}${lastAppId ? ` (after appid ${lastAppId})` : ''}...`);
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Steam IStoreService API error: ${res.status}`);
+        return res.json() as Promise<{
+          response: {
+            apps: Array<{ appid: number; name: string; last_modified: number; price_change_number: number }>;
+            have_more_results?: boolean;
+            last_appid?: number;
+          };
+        }>;
+      });
+
+      const pageApps = response.response?.apps || [];
+      for (const app of pageApps) {
+        if (app.name && app.name.trim().length > 0) {
+          allApps.push({ appid: app.appid, name: app.name });
+        }
+      }
+
+      console.log(`[Steam] getAppList page ${page}: ${pageApps.length} entries (${allApps.length} total so far)`);
+
+      if (!response.response?.have_more_results) break;
+      lastAppId = response.response.last_appid;
+      if (!lastAppId) break; // Safety: avoid infinite loop
+    }
+
+    // Sort by name (A–Z) for catalog browsing
+    allApps.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+    console.log(`[Steam] getAppList: complete — ${allApps.length} games fetched and sorted`);
+    this.cache.set(cacheKey, allApps, ttl);
+    return allApps;
   }
 }
 

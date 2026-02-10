@@ -1,7 +1,7 @@
-import { GameSession } from '@/types/game';
+import { GameSession, migrateGameId } from '@/types/game';
 
 const STORAGE_KEY = 'ark-session-history';
-const STORAGE_VERSION = 1;
+const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
 
 interface StoredSessionData {
   version: number;
@@ -29,16 +29,28 @@ class SessionStore {
   private initialize() {
     if (this.isInitialized) return;
 
+    let needsResave = false;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as StoredSessionData;
-        if (parsed.version === STORAGE_VERSION && Array.isArray(parsed.entries)) {
-          this.entries = parsed.entries;
+        if (Array.isArray(parsed.entries)) {
+          this.entries = parsed.entries.map(entry => ({
+            ...entry,
+            gameId: migrateGameId(entry as any),
+          }));
+          if (parsed.version < STORAGE_VERSION) {
+            needsResave = true;
+          }
         }
       }
     } catch (error) {
       console.error('[SessionStore] Failed to load:', error);
+    }
+
+    if (needsResave && this.entries.length > 0) {
+      this.save();
+      console.log('[SessionStore] Migrated entries to v2 (string gameId)');
     }
 
     this.isInitialized = true;
@@ -84,7 +96,7 @@ class SessionStore {
   /**
    * Get all sessions for a specific game, ordered chronologically.
    */
-  getForGame(gameId: number): GameSession[] {
+  getForGame(gameId: string): GameSession[] {
     return this.entries.filter((e) => e.gameId === gameId);
   }
 
@@ -98,7 +110,7 @@ class SessionStore {
   /**
    * Calculate total active hours played for a game from recorded sessions.
    */
-  getTotalHours(gameId: number): number {
+  getTotalHours(gameId: string): number {
     const sessions = this.getForGame(gameId);
     const totalMinutes = sessions.reduce((sum, s) => sum + s.durationMinutes, 0);
     return Math.round(totalMinutes / 60 * 100) / 100;
@@ -107,7 +119,7 @@ class SessionStore {
   /**
    * Get the number of sessions for a game.
    */
-  getSessionCount(gameId: number): number {
+  getSessionCount(gameId: string): number {
     return this.entries.filter((e) => e.gameId === gameId).length;
   }
 

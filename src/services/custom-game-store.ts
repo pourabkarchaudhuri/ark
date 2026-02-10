@@ -7,22 +7,22 @@ import {
 import { journeyStore } from '@/services/journey-store';
 
 const STORAGE_KEY = 'ark-custom-games';
-const STORAGE_VERSION = 1;
+const STORAGE_VERSION = 2; // v2: id migrated from negative number to "custom-N" string
 
 interface StoredData {
   version: number;
   entries: CustomGameEntry[];
-  nextId: number; // Counter for generating negative IDs
+  nextCounter: number; // Counter for generating custom IDs
   lastUpdated: string;
 }
 
 /**
- * Custom Game Store - Manages user-created games not from Steam
- * Uses negative IDs to distinguish from Steam games
+ * Custom Game Store - Manages user-created games not from Steam/Epic
+ * Uses "custom-N" string IDs to distinguish from store games
  */
 class CustomGameStore {
-  private entries: Map<number, CustomGameEntry> = new Map(); // keyed by custom game id (negative)
-  private nextId: number = -1; // Start from -1, decrement for each new game
+  private entries: Map<string, CustomGameEntry> = new Map(); // keyed by "custom-N"
+  private nextCounter: number = 1; // Start from 1, increment for each new game
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
 
@@ -33,23 +33,43 @@ class CustomGameStore {
   private initialize() {
     if (this.isInitialized) return;
 
+    let needsResave = false;
     try {
       const stored = this.loadFromStorage();
       if (stored) {
         stored.entries.forEach((entry) => {
-          this.entries.set(entry.id, {
+          // Migrate legacy negative numeric IDs to "custom-N" format
+          const id = this.migrateId(entry.id);
+          this.entries.set(id, {
             ...entry,
+            id,
             addedAt: new Date(entry.addedAt),
             updatedAt: new Date(entry.updatedAt),
           });
         });
-        this.nextId = stored.nextId;
+        if (stored.version < STORAGE_VERSION) {
+          // Recalculate nextCounter from migrated entries
+          let maxCounter = 0;
+          for (const key of this.entries.keys()) {
+            const num = parseInt(key.replace('custom-', ''), 10);
+            if (!isNaN(num) && num > maxCounter) maxCounter = num;
+          }
+          this.nextCounter = maxCounter + 1;
+          needsResave = true;
+        } else {
+          this.nextCounter = stored.nextCounter;
+        }
       }
     } catch (error) {
       console.error('Failed to load custom games data:', error);
     }
 
     this.isInitialized = true;
+
+    if (needsResave) {
+      this.saveToStorage();
+      console.log('[CustomGameStore] Migrated entries to v2 (string id)');
+    }
 
     // Backfill: ensure all existing custom games are in the journey store
     for (const entry of this.entries.values()) {
@@ -64,10 +84,19 @@ class CustomGameStore {
           status: entry.status,
           hoursPlayed: entry.hoursPlayed ?? 0,
           rating: 0,
-          addedAt: entry.addedAt.toISOString(),
+          addedAt: entry.addedAt instanceof Date ? entry.addedAt.toISOString() : String(entry.addedAt),
         });
       }
     }
+  }
+
+  /** Migrate legacy negative numeric ID to "custom-N" string format */
+  private migrateId(id: string | number): string {
+    if (typeof id === 'string') {
+      return id.startsWith('custom-') ? id : `custom-${id}`;
+    }
+    // Legacy negative numeric IDs: -1 → "custom-1", -2 → "custom-2"
+    return `custom-${Math.abs(id)}`;
   }
 
   private loadFromStorage(): StoredData | null {
@@ -75,13 +104,19 @@ class CustomGameStore {
       const data = localStorage.getItem(STORAGE_KEY);
       if (!data) return null;
 
-      const parsed = JSON.parse(data) as StoredData;
-      if (parsed.version !== STORAGE_VERSION) {
-        console.log('Custom games storage version mismatch, resetting data');
+      const parsed = JSON.parse(data);
+      // Accept v1 or v2 data (v1 will be migrated in initialize())
+      if (!parsed.version || parsed.version < 1) {
+        console.log('Custom games storage version too old, resetting data');
         return null;
       }
 
-      return parsed;
+      return {
+        version: parsed.version,
+        entries: parsed.entries || [],
+        nextCounter: parsed.nextCounter ?? Math.abs(parsed.nextId ?? -1),
+        lastUpdated: parsed.lastUpdated,
+      };
     } catch (error) {
       console.error('Failed to parse custom games data:', error);
       return null;
@@ -93,7 +128,7 @@ class CustomGameStore {
       const data: StoredData = {
         version: STORAGE_VERSION,
         entries: Array.from(this.entries.values()),
-        nextId: this.nextId,
+        nextCounter: this.nextCounter,
         lastUpdated: new Date().toISOString(),
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
@@ -115,7 +150,7 @@ class CustomGameStore {
   // Add a custom game
   addGame(input: CreateCustomGameEntry): CustomGameEntry {
     const now = new Date();
-    const id = this.nextId--;
+    const id = `custom-${this.nextCounter++}`;
     
     const entry: CustomGameEntry = {
       id,
@@ -148,8 +183,8 @@ class CustomGameStore {
   }
 
   // Remove a custom game
-  removeGame(id: number): boolean {
-    if (id >= 0) return false; // Only allow removing negative IDs (custom games)
+  removeGame(id: string): boolean {
+    if (!this.isCustomGame(id)) return false;
     
     const deleted = this.entries.delete(id);
     if (deleted) {
@@ -163,8 +198,8 @@ class CustomGameStore {
   }
 
   // Update a custom game
-  updateGame(id: number, input: UpdateCustomGameEntry): CustomGameEntry | undefined {
-    if (id >= 0) return undefined; // Only allow updating negative IDs
+  updateGame(id: string, input: UpdateCustomGameEntry): CustomGameEntry | undefined {
+    if (!this.isCustomGame(id)) return undefined;
     
     const existing = this.entries.get(id);
     if (!existing) return undefined;
@@ -189,7 +224,7 @@ class CustomGameStore {
   }
 
   // Get a custom game by ID
-  getGame(id: number): CustomGameEntry | undefined {
+  getGame(id: string): CustomGameEntry | undefined {
     return this.entries.get(id);
   }
 
@@ -206,15 +241,16 @@ class CustomGameStore {
   }
 
   // Check if ID is a custom game
-  isCustomGame(id: number): boolean {
-    return id < 0;
+  isCustomGame(id: string | number): boolean {
+    if (typeof id === 'string') return id.startsWith('custom-');
+    return id < 0; // Legacy check
   }
 
   // Convert custom game to Game type for display
   toGame(entry: CustomGameEntry): Game {
     return {
-      id: `custom-${entry.id}`,
-      steamAppId: entry.id, // Negative ID indicates custom game
+      id: entry.id,
+      store: 'custom',
       title: entry.title,
       developer: 'Custom Entry',
       publisher: '',
@@ -244,7 +280,7 @@ class CustomGameStore {
   // Clear all custom games
   clear() {
     this.entries.clear();
-    this.nextId = -1;
+    this.nextCounter = 1;
     localStorage.removeItem(STORAGE_KEY);
     this.notifyListeners();
   }
@@ -252,4 +288,3 @@ class CustomGameStore {
 
 // Singleton instance
 export const customGameStore = new CustomGameStore();
-

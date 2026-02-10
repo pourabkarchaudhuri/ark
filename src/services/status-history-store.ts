@@ -1,7 +1,7 @@
-import { StatusChangeEntry, GameStatus } from '@/types/game';
+import { StatusChangeEntry, GameStatus, migrateGameId } from '@/types/game';
 
 const STORAGE_KEY = 'ark-status-history';
-const STORAGE_VERSION = 1;
+const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
 
 interface StoredStatusHistoryData {
   version: number;
@@ -31,16 +31,28 @@ class StatusHistoryStore {
   private initialize() {
     if (this.isInitialized) return;
 
+    let needsResave = false;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as StoredStatusHistoryData;
-        if (parsed.version === STORAGE_VERSION && Array.isArray(parsed.entries)) {
-          this.entries = parsed.entries;
+        if (Array.isArray(parsed.entries)) {
+          this.entries = parsed.entries.map(entry => ({
+            ...entry,
+            gameId: migrateGameId(entry as any),
+          }));
+          if (parsed.version < STORAGE_VERSION) {
+            needsResave = true;
+          }
         }
       }
     } catch (error) {
       console.error('[StatusHistoryStore] Failed to load:', error);
+    }
+
+    if (needsResave && this.entries.length > 0) {
+      this.save();
+      console.log('[StatusHistoryStore] Migrated entries to v2 (string gameId)');
     }
 
     this.isInitialized = true;
@@ -77,7 +89,7 @@ class StatusHistoryStore {
    * Appends a new entry to the chronological log.
    */
   record(
-    gameId: number,
+    gameId: string,
     title: string,
     previousStatus: GameStatus | null,
     newStatus: GameStatus,
@@ -100,7 +112,7 @@ class StatusHistoryStore {
   /**
    * Get all status change entries for a specific game, ordered chronologically.
    */
-  getForGame(gameId: number): StatusChangeEntry[] {
+  getForGame(gameId: string): StatusChangeEntry[] {
     return this.entries.filter((e) => e.gameId === gameId);
   }
 

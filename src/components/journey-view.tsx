@@ -11,22 +11,53 @@
 import { useMemo, useState, useEffect, memo, useCallback, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { motion } from 'framer-motion';
-import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, List, PieChart } from 'lucide-react';
+import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, List, PieChart, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Timeline, TimelineEntry } from '@/components/ui/timeline';
 import { JourneyEntry, GameStatus } from '@/types/game';
 import { steamService } from '@/services/steam-service';
 import { libraryStore } from '@/services/library-store';
+import { journeyStore } from '@/services/journey-store';
 import { statusHistoryStore } from '@/services/status-history-store';
 import { sessionStore } from '@/services/session-store';
 import { JourneyGanttView } from '@/components/journey-gantt-view';
 import { JourneyAnalyticsView } from '@/components/journey-analytics-view';
 import { generateMockGanttData } from '@/components/journey-gantt-mock-data';
 import { cn, getHardcodedCover, formatHours } from '@/lib/utils';
+import { getSteamCoverUrl, getSteamHeaderUrl } from '@/types/steam';
 
 type JourneyViewStyle = 'noob' | 'ocd' | 'analytics';
 type GanttDataSource = 'live' | 'mock';
+
+/** Extract a numeric Steam appId from a universal game ID (e.g. "steam-12345" → 12345) */
+function extractSteamAppId(gameId: string): number | null {
+  if (gameId.startsWith('steam-')) {
+    const n = parseInt(gameId.replace('steam-', ''), 10);
+    return isNaN(n) ? null : n;
+  }
+  return null;
+}
+
+/** Resolve the best image URL for a journey entry, with Steam CDN fallback */
+function resolveJourneyCoverUrl(entry: { gameId: string; title: string; coverUrl?: string }): string | undefined {
+  // 1. Hardcoded overrides always win
+  const hardcoded = getHardcodedCover(entry.title);
+  if (hardcoded) return hardcoded;
+  // 2. Stored coverUrl from journey entry
+  if (entry.coverUrl) return entry.coverUrl;
+  // 3. Construct from Steam CDN if it's a Steam game
+  const appId = extractSteamAppId(entry.gameId);
+  if (appId) return getSteamCoverUrl(appId);
+  return undefined;
+}
+
+/** Get a fallback image URL (header.jpg) if the primary cover fails to load */
+function getJourneyFallbackUrl(gameId: string): string | undefined {
+  const appId = extractSteamAppId(gameId);
+  if (appId) return getSteamHeaderUrl(appId);
+  return undefined;
+}
 
 /** Format player count with K/M suffixes */
 function formatPlayerCount(count: number): string {
@@ -45,7 +76,7 @@ interface JourneyViewProps {
   entries: JourneyEntry[];
   loading: boolean;
   onSwitchToBrowse?: () => void;
-  onCustomGameClick?: (gameId: number) => void;
+  onCustomGameClick?: (gameId: string) => void;
 }
 
 // Status badge color mapping
@@ -75,8 +106,58 @@ const StarRating = memo(function StarRating({ rating }: { rating: number }) {
   );
 });
 
-const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, onCustomGameClick }: { entry: JourneyEntry; playerCount?: number; onCustomGameClick?: (gameId: number) => void }) {
+/** Cover image with automatic Steam CDN fallback for missing/broken images */
+const JourneyCoverImage = memo(function JourneyCoverImage({ entry }: { entry: JourneyEntry }) {
+  const primaryUrl = useMemo(() => resolveJourneyCoverUrl(entry), [entry]);
+  const fallbackUrl = useMemo(() => getJourneyFallbackUrl(entry.gameId), [entry.gameId]);
+  const [currentSrc, setCurrentSrc] = useState(primaryUrl);
+  const [failed, setFailed] = useState(false);
+
+  // Reset state when the entry changes
+  useEffect(() => {
+    setCurrentSrc(primaryUrl);
+    setFailed(false);
+  }, [primaryUrl]);
+
+  const handleError = useCallback(() => {
+    if (currentSrc === primaryUrl && fallbackUrl && fallbackUrl !== primaryUrl) {
+      // Try the fallback URL
+      setCurrentSrc(fallbackUrl);
+    } else {
+      setFailed(true);
+    }
+  }, [currentSrc, primaryUrl, fallbackUrl]);
+
+  return (
+    <div className="flex-shrink-0 w-16 h-24 rounded overflow-hidden bg-white/5">
+      {currentSrc && !failed ? (
+        <img
+          src={currentSrc}
+          alt={entry.title}
+          loading="lazy"
+          decoding="async"
+          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+          onLoad={(e) => {
+            // Detect tiny placeholder images from old CDN
+            const img = e.currentTarget;
+            if (img.naturalWidth < 50 || img.naturalHeight < 50) {
+              handleError();
+            }
+          }}
+          onError={handleError}
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center text-white/20">
+          <Gamepad2 className="w-6 h-6" />
+        </div>
+      )}
+    </div>
+  );
+});
+
+const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, onCustomGameClick }: { entry: JourneyEntry; playerCount?: number; onCustomGameClick?: (gameId: string) => void }) {
   const [, navigate] = useLocation();
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const addedDate = entry.addedAt
     ? new Date(entry.addedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
     : '';
@@ -84,55 +165,62 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, onCu
   const inLibrary = libraryStore.isInLibrary(entry.gameId);
 
   const handleClick = useCallback(() => {
-    // Custom games have negative IDs — open progress dialog instead of game details page
-    if (entry.gameId < 0) {
+    // Custom games use "custom-" prefix — open progress dialog instead of game details page
+    if (entry.gameId.startsWith('custom-')) {
       if (onCustomGameClick) onCustomGameClick(entry.gameId);
       return;
     }
     navigate(`/game/${entry.gameId}`);
   }, [navigate, entry.gameId, onCustomGameClick]);
 
+  const handleDelete = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation(); // Don't navigate when clicking delete
+    if (confirmDelete) {
+      journeyStore.deleteEntry(entry.gameId);
+    } else {
+      setConfirmDelete(true);
+      // Auto-reset confirmation after 3 seconds
+      setTimeout(() => setConfirmDelete(false), 3000);
+    }
+  }, [confirmDelete, entry.gameId]);
+
   return (
     <motion.div
       className={cn(
-        'rounded-lg bg-white/5 border border-white/10 overflow-hidden cursor-pointer group hover:border-fuchsia-500/40 transition-colors min-h-[120px]',
+        'rounded-lg bg-white/5 border border-white/10 overflow-hidden cursor-pointer group hover:border-fuchsia-500/40 transition-colors min-h-[120px] relative',
         isRemoved && 'opacity-60'
       )}
       onClick={handleClick}
       whileHover={{ scale: 1.02 }}
       transition={{ duration: 0.2 }}
     >
-      <div className="flex gap-3 p-3 h-full">
-        {/* Cover image */}
-        <div className="flex-shrink-0 w-16 h-24 rounded overflow-hidden bg-white/5">
-          {(getHardcodedCover(entry.title) || entry.coverUrl) ? (
-            <img
-              src={getHardcodedCover(entry.title) || entry.coverUrl}
-              alt={entry.title}
-              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-              onLoad={(e) => {
-                // Detect tiny placeholder images from old CDN (newer games)
-                const img = e.currentTarget;
-                if (img.naturalWidth < 50 || img.naturalHeight < 50) {
-                  img.style.display = 'none';
-                }
-              }}
-              onError={(e) => {
-                const img = e.target as HTMLImageElement;
-                img.style.display = 'none';
-              }}
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center text-white/20">
-              <Gamepad2 className="w-6 h-6" />
-            </div>
-          )}
+      {/* Delete button — top-right corner */}
+      <button
+        onClick={handleDelete}
+        className={cn(
+          'absolute top-1.5 right-1.5 z-10 rounded-full p-1 transition-all',
+          confirmDelete
+            ? 'bg-red-500/80 text-white hover:bg-red-500'
+            : 'bg-black/40 text-white/40 opacity-0 group-hover:opacity-100 hover:bg-red-500/60 hover:text-white/90',
+        )}
+        title={confirmDelete ? 'Click again to confirm removal' : 'Remove from journey'}
+      >
+        <X className="w-3 h-3" />
+      </button>
+      {confirmDelete && (
+        <div className="absolute top-8 right-1 z-10 text-[9px] text-red-400 bg-black/80 rounded px-1.5 py-0.5 whitespace-nowrap pointer-events-none">
+          Click again to confirm
         </div>
+      )}
+
+      <div className="flex gap-3 p-3 h-full">
+        {/* Cover image — resolves with Steam CDN fallback for missing coverUrls */}
+        <JourneyCoverImage entry={entry} />
 
         {/* Info */}
         <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
           <div>
-            <h4 className="font-semibold text-sm truncate group-hover:text-fuchsia-400 transition-colors">
+            <h4 className="font-semibold text-sm truncate group-hover:text-fuchsia-400 transition-colors pr-5">
               {entry.title}
             </h4>
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
@@ -176,7 +264,7 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, onCu
               </div>
             )}
             {playerCount !== undefined && playerCount > 0 && (
-              <div className="flex items-center gap-1 text-xs text-cyan-400">
+              <div className="flex items-center gap-1 text-xs text-cyan-400" title="Live player count from Steam">
                 <Users className="w-3 h-3" />
                 <span>{formatPlayerCount(playerCount)} playing</span>
               </div>
@@ -188,14 +276,15 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, onCu
   );
 });
 
-export function JourneyView({ entries, loading, onSwitchToBrowse, onCustomGameClick }: JourneyViewProps) {
+export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse, onCustomGameClick }: JourneyViewProps) {
   // View style toggle: "Noob" (vertical timeline) vs "OCD" (Gantt chart)
   const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('noob');
   // Data source for OCD view: live store data vs mock data for dev/demo
   const [dataSource, setDataSource] = useState<GanttDataSource>('live');
 
   // Fetch live player counts for journey entries in the background.
-  const [playerCounts, setPlayerCounts] = useState<Record<number, number>>({});
+  // Keys are gameId strings ("steam-730") — values are player counts.
+  const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
 
   // Stabilise the dependency: only re-fetch when the set of game IDs changes,
   // not when the parent passes a new array reference with the same entries.
@@ -209,29 +298,36 @@ export function JourneyView({ entries, loading, onSwitchToBrowse, onCustomGameCl
     let cancelled = false;
 
     const fetchCounts = async () => {
-      const ids = entries.map(e => e.gameId);
-      const allCounts: Record<number, number> = {};
+      // Only fetch player counts for Steam games
+      const steamIds = entries
+        .filter(e => e.gameId.startsWith('steam-'))
+        .map(e => parseInt(e.gameId.replace('steam-', ''), 10))
+        .filter(id => !isNaN(id));
+
+      if (steamIds.length === 0) return;
+
+      const allCounts: Record<string, number> = {};
 
       const BATCH_SIZE = 20;
-      for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+      for (let i = 0; i < steamIds.length; i += BATCH_SIZE) {
         if (cancelled) return;
-        const batch = ids.slice(i, i + BATCH_SIZE);
+        const batch = steamIds.slice(i, i + BATCH_SIZE);
         try {
           const counts = await steamService.getMultiplePlayerCounts(batch);
           if (cancelled) return;
-          Object.assign(allCounts, counts);
+          // Map numeric Steam IDs back to string gameId keys
+          for (const [numericId, count] of Object.entries(counts)) {
+            allCounts[`steam-${numericId}`] = count as number;
+          }
         } catch {
           // Non-critical
         }
       }
 
-      if (!cancelled) {
+      if (!cancelled && Object.keys(allCounts).length > 0) {
         setPlayerCounts(prev => {
-          // Only update state if counts actually changed
           const next = { ...prev, ...allCounts };
-          const changed = Object.keys(allCounts).some(
-            k => prev[Number(k)] !== allCounts[Number(k)]
-          );
+          const changed = Object.keys(allCounts).some(k => prev[k] !== allCounts[k]);
           return changed ? next : prev;
         });
       }
@@ -511,4 +607,4 @@ export function JourneyView({ entries, loading, onSwitchToBrowse, onCustomGameCl
       )}
     </div>
   );
-}
+});

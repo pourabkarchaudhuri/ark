@@ -4,10 +4,27 @@ import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Current app version - update this with each release
-export const APP_VERSION = '1.0.24';
+export const APP_VERSION = '1.0.25';
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.25': {
+    title: "What's New in Ark 1.0.25",
+    changes: [
+      'Performance & Memory Optimization — LRU eviction caps for detail-enricher sets (5K/500 entries), enrichment map (2K cap), background timer cleanup on unmount, and async disk writes in PersistentCache prevent memory bloat during long sessions',
+      'Single-Pass Filtering — Dashboard filter chain collapsed from 7 sequential .filter() calls into one pass with pre-computed values and Set lookups for stores, dramatically reducing intermediate array allocations',
+      'Promise Coalescing in Rate Limiter — Identical concurrent API requests (appdetails, featured-categories, player-count) now share a single in-flight promise instead of hitting Steam twice; queue capped at 500 to prevent unbounded growth',
+      'Diff-Based Library Refresh — useLibraryGames now caches fetched game details and only makes API calls for newly added games; status/priority updates are applied locally without network requests',
+      'Pre-Computed Search Index — Prefetch store builds a parallel lowercase index on load, eliminating thousands of .toLowerCase() calls per keystroke during Browse search',
+      'Release Calendar Overhaul — "+X more" button opens a slide-out side panel with smooth framer-motion enter/exit animation; multi-step Steam CDN fallback chain (cover → header → capsule) for thumbnails; fixed popover positioning bug (viewport-relative fix) and added debounced hover timing to prevent flicker',
+      'Journey Thumbnail Fallbacks — All three Journey views (Noob timeline, OCD Gantt, Analytics) now use a shared buildGameImageChain() utility that walks through Steam CDN URL variants on error instead of showing blank placeholders',
+      'Journey CoverUrl Backfill — Library refresh now patches older journey entries that have missing coverUrl fields with freshly fetched image URLs',
+      'Epic System Requirements Fix — Epic CMS requirements are now handled for all data shapes (string, array, object) instead of breaking when Object.entries() was called on a plain string',
+      'Epic Library Bug Fix — Fixed broken GraphQL schema (removed deprecated releaseInfo field), added REST fallback for getGameDetails, and introduced multi-tier offline fallback (cachedMeta → journeyStore → placeholder) so Epic games always appear in Library',
+      'Stable View-Mode Handlers — Extracted 5 inline onClick closures to useCallback; memoized hasActiveFilters and activeFilterCount to reduce unnecessary re-renders',
+      'Filter Sidebar Type Fix — Added missing "calendar" to ViewMode union, resolving TypeScript compilation error; cleaned up unused Filter import',
+    ],
+  },
   '1.0.24': {
     title: "What's New in Ark 1.0.24",
     changes: [
@@ -253,7 +270,7 @@ export function ChangelogModal() {
             transition={{ duration: 0.3, ease: 'easeOut' }}
             className="fixed inset-0 z-[201] flex items-center justify-center p-4 pointer-events-none"
           >
-            <div className="bg-gradient-to-b from-gray-900 to-gray-950 border border-white/10 rounded-2xl shadow-2xl max-w-md w-full pointer-events-auto overflow-hidden">
+            <div className="bg-gradient-to-b from-gray-900 to-gray-950 border border-white/10 rounded-2xl shadow-2xl max-w-2xl w-full pointer-events-auto overflow-hidden">
               {/* Header with gradient */}
               <div className="bg-gradient-to-r from-fuchsia-500/20 to-purple-500/20 px-6 py-4 border-b border-white/10">
                 <div className="flex items-center justify-between">

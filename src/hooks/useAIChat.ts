@@ -91,15 +91,16 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
   // Execute library actions
   const executeActions = useCallback((actions: LibraryAction[]) => {
     for (const action of actions) {
+      const stringId = `steam-${action.appId}`;
       if (action.type === 'add') {
         addToLibrary({
-          gameId: action.appId,
+          gameId: stringId,
           steamAppId: action.appId,
           status: (action.status as 'Want to Play' | 'Playing' | 'Playing Now' | 'Completed' | 'On Hold') || 'Want to Play',
           priority: 'Medium',
         });
       } else if (action.type === 'remove') {
-        removeFromLibrary(action.appId);
+        removeFromLibrary(stringId);
       }
     }
   }, [addToLibrary, removeFromLibrary]);

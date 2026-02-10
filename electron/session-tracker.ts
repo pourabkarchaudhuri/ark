@@ -27,12 +27,12 @@ const { powerMonitor } = electron;
 // ---------------------------------------------------------------------------
 
 export interface TrackedGame {
-  gameId: number;
+  gameId: string;
   executablePath: string;
 }
 
 interface ActiveSession {
-  gameId: number;
+  gameId: string;
   executablePath: string;
   startTime: Date;
   idleAccumulatedMs: number; // Total idle time accumulated during the session
@@ -41,7 +41,7 @@ interface ActiveSession {
 
 export interface CompletedSession {
   id: string;
-  gameId: number;
+  gameId: string;
   executablePath: string;
   startTime: string;
   endTime: string;
@@ -86,7 +86,7 @@ function isProcessRunning(exePath: string): boolean {
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let mainWindowRef: BrowserWindowType | null = null;
 let trackedGames: TrackedGame[] = [];
-const activeSessions: Map<number, ActiveSession> = new Map(); // gameId -> session
+const activeSessions: Map<string, ActiveSession> = new Map(); // gameId -> session
 
 // ---------------------------------------------------------------------------
 // Core poll loop
@@ -241,7 +241,7 @@ export function setTrackedGames(games: TrackedGame[]) {
 /**
  * Get currently active sessions (for IPC queries).
  */
-export function getActiveSessions(): Array<{ gameId: number; startTime: string; elapsedMinutes: number }> {
+export function getActiveSessions(): Array<{ gameId: string; startTime: string; elapsedMinutes: number }> {
   const now = Date.now();
   return Array.from(activeSessions.values()).map((s) => ({
     gameId: s.gameId,

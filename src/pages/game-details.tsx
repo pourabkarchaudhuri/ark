@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, memo, type MouseEvent } from 'react';
 import { useRoute, useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
@@ -20,6 +20,7 @@ import {
   Download,
 } from 'lucide-react';
 import { FaWindows, FaApple, FaLinux, FaSteam } from 'react-icons/fa';
+import { SiEpicgames } from 'react-icons/si';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { GameDialog } from '@/components/game-dialog';
@@ -28,15 +29,175 @@ import { SteamAppDetails, SteamReviewsResponse, GameRecommendation, SteamNewsIte
 import { MetacriticGameResponse } from '@/types/metacritic';
 import { Game } from '@/types/game';
 import { libraryStore } from '@/services/library-store';
-import { useLibrary } from '@/hooks/useGameStore';
+import { useLibrary, extractCachedMeta } from '@/hooks/useGameStore';
 import { useToast } from '@/components/ui/toast';
 import { getRepackLinkForGame } from '@/services/fitgirl-service';
 import { steamService } from '@/services/steam-service';
+import { epicService } from '@/services/epic-service';
+import { findGameById, searchPrefetchedGames } from '@/services/prefetch-store';
 import { WindowControls } from '@/components/window-controls';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { MyProgressTab, MyProgressSkeleton } from '@/components/my-progress-tab';
 import { Gamepad2, BarChart3, Newspaper } from 'lucide-react';
 import { Carousel, BlurImage, type CardType } from '@/components/ui/apple-cards-carousel';
+
+// ─── Epic → SteamAppDetails Normalizer ───────────────────────────────────────
+// Converts an Epic `Game` object into a `SteamAppDetails`-compatible shape so
+// the same unified layout renders for both stores.  Sections that have no data
+// simply won't render (conditional checks throughout the UI handle this).
+//
+// `productContent` is optional rich data from the Epic CMS REST endpoint
+// (store-content.ak.epicgames.com) — it provides the full HTML "About the
+// Game" description and per-platform system requirements.
+function epicToSteamDetails(
+  game: Game,
+  productContent?: {
+    about?: string;
+    requirements?: Array<{
+      systemType: string;
+      details: Array<{
+        title: string;
+        minimum: Record<string, string>;
+        recommended: Record<string, string>;
+      }>;
+    }>;
+    gallery?: Array<{ type: 'image' | 'video'; url: string; thumbnail?: string }>;
+  } | null,
+): SteamAppDetails {
+  const hasWindows = game.platform?.some(p => /win|pc/i.test(p)) ?? true;
+  const hasMac = game.platform?.some(p => /mac|osx/i.test(p)) ?? false;
+  const hasLinux = game.platform?.some(p => /linux/i.test(p)) ?? false;
+
+  // ── Description hierarchy ─────────────────────────────────────────────
+  // 1. Product content "about" (full rich HTML from CMS)
+  // 2. Game.longDescription (from GraphQL catalogOffer)
+  // 3. Game.summary (short description fallback)
+  const fullDescription = productContent?.about || game.longDescription || game.summary || '';
+  const shortDescription = game.summary || '';
+
+  // ── System requirements (from CMS product content) ────────────────────
+  // Epic CMS stores requirements per-platform in varying shapes:
+  //   • Object  { "GPU": "RTX 3070", "CPU": "i7-8700" }  → render as key-value list
+  //   • String  "Intel HD 4000, ..."                       → render as plain text
+  //   • Array   ["Intel HD 4000", ...]                     → join and render
+  // Convert to HTML strings matching Steam's pc_requirements format.
+  let pcRequirements: { minimum?: string; recommended?: string } = {};
+
+  /** Convert a CMS spec value (object | string | array | unknown) to an HTML string */
+  const specsToHtml = (specs: unknown): string | undefined => {
+    if (!specs) return undefined;
+    // Plain string — render as-is (wrapped in a paragraph)
+    if (typeof specs === 'string') {
+      const trimmed = specs.trim();
+      return trimmed ? `<p>${trimmed}</p>` : undefined;
+    }
+    // Array of strings — join with line breaks
+    if (Array.isArray(specs)) {
+      const items = specs.filter(s => typeof s === 'string' && s.trim());
+      return items.length > 0
+        ? '<ul class="bb_ul">' + items.map(s => `<li>${s}</li>`).join('') + '</ul>'
+        : undefined;
+    }
+    // Object with key-value pairs — render as definition list
+    if (typeof specs === 'object') {
+      const entries = Object.entries(specs as Record<string, unknown>)
+        .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '');
+      return entries.length > 0
+        ? '<ul class="bb_ul">' + entries.map(([k, v]) => `<li><strong>${k}:</strong> ${String(v)}</li>`).join('') + '</ul>'
+        : undefined;
+    }
+    return undefined;
+  };
+
+  if (productContent?.requirements) {
+    for (const system of productContent.requirements) {
+      if (/windows|pc/i.test(system.systemType)) {
+        for (const detail of system.details) {
+          if (!pcRequirements.minimum) {
+            pcRequirements.minimum = specsToHtml(detail.minimum);
+          }
+          if (!pcRequirements.recommended) {
+            pcRequirements.recommended = specsToHtml(detail.recommended);
+          }
+        }
+      }
+    }
+  }
+
+  // ── Store URL ─────────────────────────────────────────────────────────
+  const epicStoreUrl = game.epicSlug
+    ? `https://store.epicgames.com/p/${game.epicSlug}`
+    : null;
+
+  return {
+    type: 'game',
+    name: game.title,
+    steam_appid: game.steamAppId || 0,
+    required_age: 0,
+    is_free: game.price?.isFree ?? false,
+    detailed_description: fullDescription,
+    about_the_game: fullDescription,
+    short_description: shortDescription,
+    supported_languages: '',
+    header_image: game.headerImage || game.coverUrl || '',
+    capsule_image: game.coverUrl || game.headerImage || '',
+    capsule_imagev5: game.coverUrl || game.headerImage || '',
+    website: epicStoreUrl,
+    pc_requirements: pcRequirements,
+    developers: game.developer && game.developer !== 'Unknown Developer' ? [game.developer] : undefined,
+    publishers: game.publisher && game.publisher !== 'Unknown Publisher' ? [game.publisher] : undefined,
+    price_overview: game.price && !game.price.isFree && game.price.finalFormatted ? {
+      currency: 'USD',
+      initial: 0,
+      final: 0,
+      discount_percent: game.price.discountPercent || 0,
+      final_formatted: game.price.finalFormatted,
+    } : undefined,
+    platforms: { windows: hasWindows, mac: hasMac, linux: hasLinux },
+    metacritic: game.metacriticScore ? { score: game.metacriticScore, url: '' } : undefined,
+    genres: game.genre?.map((g, i) => ({ id: String(i), description: g })),
+    screenshots: (() => {
+      // Prefer CMS gallery screenshots (real gameplay images) over keyImages (marketing covers)
+      const galleryImages = productContent?.gallery
+        ?.filter(g => g.type === 'image')
+        .map((g, i) => ({ id: i, path_thumbnail: g.url, path_full: g.url }));
+
+      if (galleryImages && galleryImages.length > 0) return galleryImages;
+
+      // Fall back to keyImages-based screenshots from the Game object
+      return game.screenshots?.map((url, i) => ({
+        id: i,
+        path_thumbnail: url,
+        path_full: url,
+      }));
+    })(),
+    // Map CMS gallery videos to the movies array
+    movies: (() => {
+      const galleryVideos = productContent?.gallery?.filter(g => g.type === 'video');
+      if (!galleryVideos || galleryVideos.length === 0) return undefined;
+      return galleryVideos.map((v, i) => ({
+        id: i,
+        name: `Video ${i + 1}`,
+        thumbnail: v.thumbnail || game.headerImage || '',
+        mp4: { '480': v.url, max: v.url },
+      }));
+    })(),
+    release_date: game.releaseDate ? {
+      coming_soon: game.comingSoon ?? false,
+      date: (() => {
+        // Format ISO dates to human-readable (e.g. "Mar 2, 2026") to match Steam
+        try {
+          const d = new Date(game.releaseDate);
+          if (!isNaN(d.getTime()) && d.getFullYear() > 1970) {
+            return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+          }
+        } catch { /* fall through */ }
+        return game.releaseDate;
+      })(),
+    } : undefined,
+    background: game.headerImage || game.coverUrl || '',
+  };
+}
 
 // Check if running in Electron
 function isElectron(): boolean {
@@ -65,13 +226,19 @@ function handleContentLinkClick(e: MouseEvent<HTMLDivElement>): void {
 
 // Extract the first image URL from Steam news BBCode/HTML contents.
 // Supports [img]url[/img], {STEAM_CLAN_IMAGE}/path, and <img src="url"> patterns.
+//
+// Regexes are pre-compiled at module level to avoid re-creation on every call
+// (this function runs once per news item in a .map loop).
 const STEAM_CLAN_IMAGE_BASE = 'https://clan.akamai.steamstatic.com/images/';
+const RE_BBCODE_IMG = /\[img\](.*?)\[\/img\]/i;
+const RE_CLAN_IMAGE = /\{STEAM_CLAN_IMAGE\}\/([\w/.-]+)/;
+const RE_HTML_IMG = /<img[^>]+src=["']([^"']+)["']/i;
 
 function extractNewsThumbnail(contents?: string): string | null {
   if (!contents) return null;
 
   // 1. BBCode [img] tags — may contain {STEAM_CLAN_IMAGE}
-  const bbcodeMatch = contents.match(/\[img\](.*?)\[\/img\]/i);
+  const bbcodeMatch = contents.match(RE_BBCODE_IMG);
   if (bbcodeMatch) {
     let src = bbcodeMatch[1].trim();
     if (src.startsWith('{STEAM_CLAN_IMAGE}')) {
@@ -81,13 +248,13 @@ function extractNewsThumbnail(contents?: string): string | null {
   }
 
   // 2. Inline {STEAM_CLAN_IMAGE} references outside of [img] tags
-  const clanMatch = contents.match(/\{STEAM_CLAN_IMAGE\}\/([\w/.-]+)/);
+  const clanMatch = contents.match(RE_CLAN_IMAGE);
   if (clanMatch) {
     return `${STEAM_CLAN_IMAGE_BASE}${clanMatch[1]}`;
   }
 
   // 3. HTML <img> tags
-  const htmlImgMatch = contents.match(/<img[^>]+src=["']([^"']+)["']/i);
+  const htmlImgMatch = contents.match(RE_HTML_IMG);
   if (htmlImgMatch) {
     const src = htmlImgMatch[1];
     if (src.startsWith('http')) return src;
@@ -105,6 +272,14 @@ function formatPlaytime(minutes: number): string {
   if (mins === 0) return `${hours} ${hrLabel}`;
   const minLabel = mins === 1 ? 'Min' : 'Mins';
   return `${hours} ${hrLabel} ${mins} ${minLabel}`;
+}
+
+// Review score color — pure function, kept outside components to avoid re-creation
+function getScoreColor(score?: number): string {
+  if (!score) return 'text-white/60';
+  if (score >= 75) return 'text-green-400';
+  if (score >= 50) return 'text-yellow-400';
+  return 'text-red-400';
 }
 
 // Format player count with K/M suffixes
@@ -186,7 +361,6 @@ function NewsCard({
   fallbackImage,
 }: {
   card: CardType;
-  index: number;
   newsItem: SteamNewsItem;
   fallbackImage: string;
 }) {
@@ -238,12 +412,53 @@ function NewsCard({
   );
 }
 
+/**
+ * Error / "game not found" fallback with auto-redirect to dashboard.
+ * Prevents the app from getting stuck on a broken details page on cold-start.
+ */
+function ErrorFallback({ error, navigate }: { error: string | null; navigate: (to: string) => void }) {
+  useEffect(() => {
+    const timer = setTimeout(() => navigate('/'), 5000);
+    return () => clearTimeout(timer);
+  }, [navigate]);
+
+  return (
+    <div className="min-h-screen bg-black flex flex-col">
+      <div className="flex items-center justify-between px-4 py-3 app-drag-region">
+        <div />
+        <WindowControls />
+      </div>
+      <div className="flex-1 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 text-center">
+          <p className="text-red-400 text-xl">{error || 'Game not found'}</p>
+          <p className="text-white/40 text-sm">Redirecting to dashboard in 5 seconds...</p>
+          <Button onClick={() => navigate('/')} variant="outline">
+            <ArrowLeft className="w-4 h-4 mr-2 pointer-events-none" />
+            Back to Dashboard
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function GameDetailsPage() {
-  const [, params] = useRoute('/game/:id');
+  const [, params] = useRoute('/game/:id') as [boolean, Record<string, string> | null];
   const [, navigate] = useLocation();
-  const appId = params?.id ? parseInt(params.id, 10) : null;
+
+  // Decode the URL param — supports "steam-730", "epic-namespace:offerId", or legacy numeric "730"
+  const rawId = params?.id ? decodeURIComponent(params.id) : null;
+  const gameId = rawId
+    ? rawId.match(/^\d+$/) ? `steam-${rawId}` : rawId  // Legacy numeric → "steam-N"
+    : null;
+  const isSteamGame = gameId?.startsWith('steam-') ?? false;
+  const isEpicGame = gameId?.startsWith('epic-') ?? false;
+  const appId = isSteamGame ? parseInt(gameId!.slice(6), 10) : null;
 
   const [details, setDetails] = useState<SteamAppDetails | null>(null);
+  const [epicGame, setEpicGame] = useState<Game | null>(null);
+  // Cross-store metadata from prefetch (e.g., price/link from the "other" store)
+  const [crossStoreGame, setCrossStoreGame] = useState<Game | null>(null);
   const [reviews, setReviews] = useState<SteamReviewsResponse | null>(null);
   const [metacriticReviews, setMetacriticReviews] = useState<MetacriticGameResponse | null>(null);
   const [metacriticLoading, setMetacriticLoading] = useState(false);
@@ -252,7 +467,29 @@ export function GameDetailsPage() {
   const [currentMediaIndex, setCurrentMediaIndex] = useState(0);
   const [showFullDescription, setShowFullDescription] = useState(false);
   const [mediaLoading, setMediaLoading] = useState(true);
-  const [thumbnailsLoaded, setThumbnailsLoaded] = useState<Set<number>>(new Set());
+  const [thumbnailsLoaded, setThumbnailsLoaded] = useState<Set<number>>(() => new Set());
+  // Stable callback that batches thumbnail-loaded updates without creating a new
+  // Set on every single onLoad.  The ref tracks pending indices and a microtask
+  // flushes them into state in one batch.
+  const pendingThumbsRef = useRef<number[]>([]);
+  const thumbFlushScheduledRef = useRef(false);
+  const markThumbnailLoaded = useCallback((index: number) => {
+    pendingThumbsRef.current.push(index);
+    if (!thumbFlushScheduledRef.current) {
+      thumbFlushScheduledRef.current = true;
+      queueMicrotask(() => {
+        thumbFlushScheduledRef.current = false;
+        const pending = pendingThumbsRef.current;
+        pendingThumbsRef.current = [];
+        if (pending.length === 0) return;
+        setThumbnailsLoaded(prev => {
+          const next = new Set(prev);
+          for (const idx of pending) next.add(idx);
+          return next;
+        });
+      });
+    }
+  }, []);
   const [isAutoplayPaused, setIsAutoplayPaused] = useState(false);
   const [headerImageError, setHeaderImageError] = useState(false);
   const [headerImageLoaded, setHeaderImageLoaded] = useState(false);
@@ -270,28 +507,34 @@ export function GameDetailsPage() {
   const recommendationsScrollRef = useRef<HTMLDivElement>(null);
   const recommendationsAutoScrollRef = useRef<NodeJS.Timeout | null>(null);
   
+  // Ref mirror of currentMediaIndex — lets callbacks read the latest value
+  // without adding it as a dependency (prevents needless re-creation every 5s
+  // autoplay tick, which would otherwise bust GameDetailsContent's memo).
+  const currentMediaIndexRef = useRef(currentMediaIndex);
+  currentMediaIndexRef.current = currentMediaIndex;
   
-  // Scroll to top when page loads or appId changes
+  
+  // Scroll to top when page loads or gameId changes
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
-  }, [appId]);
+  }, [gameId]);
   
   // Library management
   const { addToLibrary, removeFromLibrary, isInLibrary, updateEntry, getAllGameIds } = useLibrary();
-  const gameInLibrary = appId ? isInLibrary(appId) : false;
+  const gameInLibrary = gameId ? isInLibrary(gameId) : false;
   const { success: toastSuccess } = useToast();
 
   // Track whether the game was already in the library when this page loaded.
   // If the user adds it during this session, we keep showing the details view
   // instead of immediately switching to the My Progress tab.
   const wasInLibraryOnLoad = useRef<boolean | null>(null);
-  if (wasInLibraryOnLoad.current === null && appId) {
+  if (wasInLibraryOnLoad.current === null && gameId) {
     wasInLibraryOnLoad.current = gameInLibrary;
   }
   // Reset when navigating to a different game
   useEffect(() => {
     wasInLibraryOnLoad.current = null;
-  }, [appId]);
+  }, [gameId]);
 
   const showProgressTabs = gameInLibrary && wasInLibraryOnLoad.current === true;
   
@@ -299,8 +542,13 @@ export function GameDetailsPage() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [dialogGame, setDialogGame] = useState<Game | null>(null);
   
-  // Convert Steam details to Game object for the dialog
+  // Convert details to Game object for the dialog
   const createGameFromDetails = useCallback((): Game | null => {
+    // Epic games: use epicGame directly
+    if (epicGame) {
+      return { ...epicGame, isInLibrary: gameInLibrary };
+    }
+
     if (!details || !appId) return null;
     
     const platforms: string[] = [];
@@ -328,7 +576,7 @@ export function GameDetailsPage() {
       updatedAt: new Date(),
       isInLibrary: gameInLibrary,
     };
-  }, [details, appId, gameInLibrary]);
+  }, [details, appId, epicGame, gameInLibrary]);
   
   // Handle opening the add to library dialog
   const handleOpenLibraryDialog = useCallback(() => {
@@ -341,13 +589,14 @@ export function GameDetailsPage() {
   
   // Handle saving library entry from dialog
   const handleSaveLibraryEntry = useCallback((gameData: Partial<Game> & { executablePath?: string }) => {
-    if (!appId) return;
+    if (!gameId) return;
     
     const isNewAdd = !gameInLibrary;
+    const gameName = details?.name || epicGame?.title || 'Game';
     
     if (gameInLibrary) {
       // Update existing entry
-      updateEntry(appId, {
+      updateEntry(gameId, {
         status: gameData.status,
         priority: gameData.priority,
         publicReviews: gameData.publicReviews,
@@ -355,11 +604,12 @@ export function GameDetailsPage() {
         executablePath: gameData.executablePath,
       });
     } else {
-      // Add to library
-      addToLibrary(appId, gameData.status || 'Want to Play');
+      // Add to library — cache metadata for offline resilience
+      const meta = dialogGame ? extractCachedMeta(dialogGame) : undefined;
+      addToLibrary(gameId, gameData.status || 'Want to Play', meta);
       // Then update with additional fields if provided
       if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath) {
-        updateEntry(appId, {
+        updateEntry(gameId, {
           priority: gameData.priority,
           publicReviews: gameData.publicReviews,
           recommendationSource: gameData.recommendationSource,
@@ -372,41 +622,243 @@ export function GameDetailsPage() {
     setDialogGame(null);
 
     if (isNewAdd) {
-      toastSuccess(`${details?.name || 'Game'} added to your library!`);
+      toastSuccess(`${gameName} added to your library!`);
     }
-  }, [appId, gameInLibrary, addToLibrary, updateEntry, details, toastSuccess]);
+  }, [gameId, gameInLibrary, addToLibrary, updateEntry, details, epicGame, toastSuccess]);
 
-  // Fetch game details and reviews - PARALLELIZED for faster loading
+  // Fetch game details and reviews - uses prefetch store first, then API
   useEffect(() => {
-    if (!appId) return;
+    if (!gameId) {
+      // No valid game ID — redirect to dashboard to avoid stuck state
+      navigate('/');
+      return;
+    }
 
     let isMounted = true;
 
     const fetchData = async () => {
+      // Reset ALL state to avoid stale data from the previous game bleeding through
       setLoading(true);
       setError(null);
+      setDetails(null);
+      setEpicGame(null);
+      setCrossStoreGame(null);
+      setReviews(null);
+      setMetacriticReviews(null);
+      setMetacriticLoading(false);
+      setCurrentMediaIndex(0);
+      setShowFullDescription(false);
+      setMediaLoading(true);
+      setThumbnailsLoaded(new Set());
+      setIsAutoplayPaused(false);
+      setHeaderImageError(false);
+      setHeaderImageLoaded(false);
+      setRecommendations([]);
+      setRecommendationsLoading(false);
+      setFitgirlRepack(null);
+      setFitgirlLoading(false);
+      setIsRecommendationsPaused(false);
+      setSteamNews([]);
+      setSteamNewsLoading(false);
+      setPlayerCount(null);
 
       try {
+        // --- Step 0: Look up from prefetch store (instant, no API call) ---
+        const prefetched = findGameById(gameId);
+
+        // --- Epic Games ---
+        if (isEpicGame) {
+          // Try multiple lookup strategies in order of speed:
+          // 1. Direct prefetch lookup by ID / secondaryId
+          // 2. Title-based search in prefetch store (handles dedup ID changes)
+          // 3. Live Epic API call (slowest, needs network)
+          let epicData = prefetched;
+
+          if (!epicData) {
+            // Secondary lookup: try searching by offerId as title hint
+            const rest = gameId.slice(5); // remove "epic-"
+            const colonIdx = rest.indexOf(':');
+            if (colonIdx !== -1) {
+              const offerId = rest.slice(colonIdx + 1);
+              // The offerId is often a slug of the game title
+              const titleHint = offerId.replace(/[-_]/g, ' ');
+              const searchHits = searchPrefetchedGames(titleHint, 3);
+              if (searchHits && searchHits.length > 0) {
+                // Pick the best match — prefer one with matching Epic metadata
+                epicData = searchHits.find(g =>
+                  g.epicOfferId === offerId || g.secondaryId === gameId
+                ) || searchHits[0];
+              }
+            }
+          }
+
+          // Track the resolved title locally so the Metacritic fetch below
+          // doesn't rely on stale React state (setState is async).
+          let resolvedEpicTitle: string | undefined;
+
+          if (epicData) {
+            if (!isMounted) return;
+
+            // ── Dual-store: prioritise Steam data when available ──────────
+            // If this Epic game is also on Steam, load the rich Steam details
+            // as primary and keep the Epic data for cross-store links / pricing.
+            if (epicData.availableOn?.includes('steam') && epicData.steamAppId && isElectron()) {
+              try {
+                const [steamDetails, steamReviews] = await Promise.all([
+                  window.steam!.getAppDetails(epicData.steamAppId),
+                  typeof window.steam!.getGameReviews === 'function'
+                    ? window.steam!.getGameReviews(epicData.steamAppId, 10).catch(() => null)
+                    : Promise.resolve(null),
+                ]);
+                if (!isMounted) return;
+                if (steamDetails) {
+                  // Use Steam detail view — set `details` so the Steam render path is used
+                  setDetails(steamDetails);
+                  if (steamReviews) setReviews(steamReviews);
+                  // Show Epic as the cross-store link with its pricing
+                  setCrossStoreGame({
+                    ...epicData,
+                    store: 'epic',
+                    price: epicData.epicPrice ?? epicData.price,
+                  } as Game);
+                  // Fetch Metacritic using the Steam title
+                  if (steamDetails.name && typeof window.metacritic?.getGameReviews === 'function') {
+                    setMetacriticLoading(true);
+                    window.metacritic.getGameReviews(steamDetails.name)
+                      .then((data) => { if (isMounted && data) setMetacriticReviews(data); })
+                      .catch(() => {})
+                      .finally(() => { if (isMounted) setMetacriticLoading(false); });
+                  }
+                  setLoading(false);
+                  return;
+                }
+              } catch {
+                // Steam fetch failed — fall through to Epic-only view
+              }
+            }
+
+            // Epic-only view (not on Steam, or Steam fetch failed)
+            setEpicGame(epicData);
+            resolvedEpicTitle = epicData.title;
+
+            // If this game is known to also be on Steam, set a cross-store ref
+            // so the sidebar can show an "Also on Steam" link
+            if (epicData.availableOn?.includes('steam') && epicData.steamAppId) {
+              setCrossStoreGame({ ...epicData, store: 'steam' } as Game);
+            }
+
+            // The prefetched data came from SEARCH_STORE_QUERY which is missing
+            // longDescription, full screenshots, etc.  Always enrich with the
+            // full CATALOG_QUERY data + CMS product content in parallel.
+            let enrichedGame = epicData;
+            const enrichNs = epicData.epicNamespace;
+            const enrichOid = epicData.epicOfferId;
+
+            // Fire parallel requests: full details + CMS product content
+            const [fullDetails, productContent] = await Promise.all([
+              // Re-fetch full details from CATALOG_QUERY (has longDescription, customAttributes, etc.)
+              (enrichNs && enrichOid && isElectron())
+                ? epicService.getGameDetails(enrichNs, enrichOid).catch(() => null)
+                : Promise.resolve(null),
+              // CMS REST endpoint for full About HTML + system requirements
+              (epicData.epicSlug && window.epic?.getProductContent)
+                ? window.epic.getProductContent(epicData.epicSlug).catch(() => null)
+                : Promise.resolve(null),
+            ]);
+            if (!isMounted) return;
+
+            // Merge full details into the prefetched game — keep prefetch
+            // fields as fallbacks but prefer the richer CATALOG_QUERY data
+            if (fullDetails) {
+              enrichedGame = {
+                ...epicData,
+                summary: fullDetails.summary || epicData.summary,
+                longDescription: fullDetails.longDescription || epicData.longDescription,
+                screenshots: (fullDetails.screenshots && fullDetails.screenshots.length > 0)
+                  ? fullDetails.screenshots
+                  : epicData.screenshots,
+                epicSlug: fullDetails.epicSlug || epicData.epicSlug,
+                platform: (fullDetails.platform && fullDetails.platform.length > 0)
+                  ? fullDetails.platform
+                  : epicData.platform,
+              };
+              setEpicGame(enrichedGame);
+            }
+
+            setDetails(epicToSteamDetails(enrichedGame, productContent));
+          } else {
+            // Final fallback: try the Epic API directly
+            const rest = gameId.slice(5); // remove "epic-"
+            const colonIdx = rest.indexOf(':');
+            if (colonIdx === -1) {
+              if (isMounted) setError('Invalid Epic game ID');
+              return;
+            }
+            const namespace = rest.slice(0, colonIdx);
+            const offerId = rest.slice(colonIdx + 1);
+
+            const game = await epicService.getGameDetails(namespace, offerId);
+            if (!isMounted) return;
+            if (game) {
+              setEpicGame(game);
+              resolvedEpicTitle = game.title;
+
+              // Fetch rich product content
+              const slug = game.epicSlug;
+              let productContent: Awaited<ReturnType<NonNullable<typeof window.epic>['getProductContent']>> = null;
+              if (slug && window.epic?.getProductContent) {
+                productContent = await window.epic.getProductContent(slug).catch(() => null);
+              }
+              if (!isMounted) return;
+              setDetails(epicToSteamDetails(game, productContent));
+            } else {
+              setError('Game not found');
+              return;
+            }
+          }
+
+          // Fetch Metacritic for Epic games — use the local variable, NOT
+          // React state which is still stale at this point.
+          if (resolvedEpicTitle && typeof window.metacritic?.getGameReviews === 'function') {
+            setMetacriticLoading(true);
+            window.metacritic.getGameReviews(resolvedEpicTitle)
+              .then((data) => { if (isMounted && data) setMetacriticReviews(data); })
+              .catch(() => {})
+              .finally(() => { if (isMounted) setMetacriticLoading(false); });
+          }
+          return;
+        }
+
+        // --- Steam Games ---
+        if (!appId) {
+          if (isMounted) setError('Invalid game ID');
+          return;
+        }
+
+        // Check if this Steam game is also on Epic (cross-store)
+        if (prefetched?.availableOn?.includes('epic') && prefetched.epicNamespace && prefetched.epicOfferId) {
+          setCrossStoreGame({
+            ...prefetched,
+            store: 'epic',
+            // Use preserved Epic pricing from dedup if available
+            price: prefetched.epicPrice ?? prefetched.price,
+          } as Game);
+        }
+
         if (isElectron()) {
-          // OPTIMIZATION: Fetch game details and reviews in PARALLEL
+          // Fetch Steam details + reviews in PARALLEL
           const detailsPromise = window.steam!.getAppDetails(appId);
           const reviewsPromise = typeof window.steam!.getGameReviews === 'function'
-            ? window.steam!.getGameReviews(appId, 10).catch((err) => {
-                console.warn('Failed to fetch Steam reviews:', err);
-                return null;
-              })
+            ? window.steam!.getGameReviews(appId, 10).catch(() => null)
             : Promise.resolve(null);
 
-          // Wait for both in parallel
           const [detailsData, reviewsData] = await Promise.all([detailsPromise, reviewsPromise]);
           
           if (!isMounted) return;
           
           if (detailsData) {
             setDetails(detailsData);
-            if (reviewsData) {
-              setReviews(reviewsData);
-            }
+            if (reviewsData) setReviews(reviewsData);
           } else {
             setError('Game not found');
             setLoading(false);
@@ -414,28 +866,14 @@ export function GameDetailsPage() {
           }
 
           // Fetch Metacritic reviews asynchronously (don't block page load)
-          // This is intentionally NOT awaited - it loads after the main content
           if (detailsData?.name && typeof window.metacritic?.getGameReviews === 'function') {
-            console.log(`[GameDetails] Fetching Metacritic reviews for: ${detailsData.name}`);
-            if (isMounted) setMetacriticLoading(true);
+            setMetacriticLoading(true);
             window.metacritic.getGameReviews(detailsData.name)
-              .then((metacriticData) => {
-                console.log(`[GameDetails] Metacritic response:`, metacriticData);
-                if (isMounted && metacriticData) {
-                  setMetacriticReviews(metacriticData);
-                }
-              })
-              .catch((err) => {
-                console.warn('[GameDetails] Failed to fetch Metacritic reviews:', err);
-              })
-              .finally(() => {
-                if (isMounted) setMetacriticLoading(false);
-              });
-          } else {
-            console.log('[GameDetails] Metacritic API not available or game name missing');
+              .then((data) => { if (isMounted && data) setMetacriticReviews(data); })
+              .catch(() => {})
+              .finally(() => { if (isMounted) setMetacriticLoading(false); });
           }
-        } else {
-          // Mock data for browser development
+          } else {
           if (isMounted) setError('Steam API only available in Electron');
         }
       } catch (err) {
@@ -453,41 +891,42 @@ export function GameDetailsPage() {
     return () => {
       isMounted = false;
     };
-  }, [appId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameId, isEpicGame, appId]);
 
   // Fetch recommendations (asynchronously, after main content)
+  // Use a boolean gate (!!details) instead of the object reference so that
+  // swapping from one details object to another doesn't trigger a refetch
+  // when the appId hasn't changed.
+  const hasDetails = !!details;
   useEffect(() => {
     // Only run when we have both appId and details loaded
-    if (!appId || !details) {
+    if (!appId || !hasDetails) {
       return;
     }
     
-    console.log('[GameDetails] Recommendations useEffect - details loaded, checking API...');
-    
     // Check if the API is available
     if (!isElectron()) {
-      console.log('[GameDetails] Skipping recommendations: not in Electron');
       return;
     }
     
     if (!window.steam?.getRecommendations) {
-      console.log('[GameDetails] Skipping recommendations: getRecommendations not available');
-      console.log('[GameDetails] Available steam methods:', window.steam ? Object.keys(window.steam) : 'undefined');
       return;
     }
 
     let isMounted = true;
-    console.log('[GameDetails] Starting recommendations fetch...');
 
     const fetchRecommendations = async () => {
       setRecommendationsLoading(true);
       try {
         const libraryIds = getAllGameIds();
-        console.log(`[GameDetails] Fetching recommendations for ${appId} with ${libraryIds.length} library games`);
-        const recs = await window.steam!.getRecommendations(appId, libraryIds, 8);
+        // Extract numeric Steam appIds from string gameIds for the recommendations API
+        const numericLibIds = libraryIds
+          .map(id => { const m = id.match(/^(?:steam-)?(\d+)$/); return m ? Number(m[1]) : null; })
+          .filter((id): id is number => id !== null);
+        const recs = await window.steam!.getRecommendations(appId, numericLibIds, 8);
         if (isMounted) {
           setRecommendations(recs);
-          console.log(`[GameDetails] Got ${recs.length} recommendations`);
         }
       } catch (err) {
         console.warn('[GameDetails] Failed to fetch recommendations:', err);
@@ -502,24 +941,23 @@ export function GameDetailsPage() {
       isMounted = false;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appId, details]);
+  }, [appId, hasDetails]);
 
   // Fetch FitGirl repack link (asynchronously, after main content)
   useEffect(() => {
-    if (!details?.name) {
+    const gameName = details?.name || epicGame?.title;
+    if (!gameName) {
       return;
     }
 
     let isMounted = true;
-    console.log('[GameDetails] Fetching FitGirl repack link for:', details.name);
 
     const fetchFitgirlRepack = async () => {
       setFitgirlLoading(true);
       try {
-        const repackData = await getRepackLinkForGame(details.name);
+        const repackData = await getRepackLinkForGame(gameName);
         if (isMounted) {
           setFitgirlRepack(repackData);
-          console.log('[GameDetails] FitGirl repack data:', repackData);
         }
       } catch (err) {
         console.warn('[GameDetails] Failed to fetch FitGirl repack:', err);
@@ -536,7 +974,7 @@ export function GameDetailsPage() {
     return () => {
       isMounted = false;
     };
-  }, [details?.name]);
+  }, [details?.name, epicGame?.title]);
 
   // Fetch Steam news for this game (IPC with fetch fallback)
   useEffect(() => {
@@ -545,9 +983,7 @@ export function GameDetailsPage() {
     let isMounted = true;
     setSteamNewsLoading(true);
 
-    console.log('[GameDetails] Fetching Steam news for appId:', appId);
     steamService.getNewsForApp(appId, 15).then((news) => {
-      console.log('[GameDetails] Got Steam news:', news.length, 'items');
       if (isMounted) setSteamNews(news);
     }).catch((err) => {
       console.warn('[GameDetails] Failed to fetch Steam news:', err);
@@ -642,12 +1078,12 @@ export function GameDetailsPage() {
   }, [pauseAutoplay, nextMedia, prevMedia]);
 
   const handleThumbnailClick = useCallback((index: number) => {
-    if (currentMediaIndex !== index) {
+    if (currentMediaIndexRef.current !== index) {
       pauseAutoplay();
       setMediaLoading(true);
       setCurrentMediaIndex(index);
     }
-  }, [currentMediaIndex, pauseAutoplay]);
+  }, [pauseAutoplay]);
 
   // Autoplay media every 5 seconds
   useEffect(() => {
@@ -720,13 +1156,18 @@ export function GameDetailsPage() {
   }, [recommendations, isRecommendationsPaused]);
 
 
-  // Review score color
-  const getScoreColor = (score?: number) => {
-    if (!score) return 'text-white/60';
-    if (score >= 75) return 'text-green-400';
-    if (score >= 50) return 'text-yellow-400';
-    return 'text-red-400';
-  };
+  // Memoize derived arrays to avoid creating new references on every render
+  const dialogGenres = useMemo(
+    () => details?.genres?.map(g => g.description) || [],
+    [details?.genres]
+  );
+  const dialogPlatforms = useMemo(() => {
+    const p: string[] = [];
+    if (details?.platforms?.windows) p.push('Windows');
+    if (details?.platforms?.mac) p.push('Mac');
+    if (details?.platforms?.linux) p.push('Linux');
+    return p;
+  }, [details?.platforms?.windows, details?.platforms?.mac, details?.platforms?.linux]);
 
   // Calculate positive percentage
   const positivePercentage = useMemo(() => {
@@ -887,27 +1328,14 @@ export function GameDetailsPage() {
     );
   }
 
-  if (error || !details) {
+  if (error || (!loading && !details && !epicGame)) {
     return (
-      <div className="min-h-screen bg-black flex flex-col">
-        {/* Top Navigation Bar */}
-        <div className="flex items-center justify-between px-4 py-3 app-drag-region">
-          <div /> {/* Spacer */}
-          <WindowControls />
-        </div>
-        
-        <div className="flex-1 flex items-center justify-center">
-          <div className="flex flex-col items-center gap-4 text-center">
-            <p className="text-red-400 text-xl">{error || 'Game not found'}</p>
-            <Button onClick={() => navigate('/')} variant="outline">
-              <ArrowLeft className="w-4 h-4 mr-2 pointer-events-none" />
-              Back to Dashboard
-            </Button>
-          </div>
-        </div>
-      </div>
+      <ErrorFallback error={error} navigate={navigate} />
     );
   }
+
+  // --- Unified Game Rendering (Steam / Epic / Dual-store) ---
+  if (!details) return null;
 
   return (
     <div className="min-h-screen bg-black text-white">
@@ -943,9 +1371,20 @@ export function GameDetailsPage() {
         {/* Title and Basic Info */}
         <div className="absolute bottom-0 left-0 right-0 p-6 z-10">
           <div className="max-w-7xl mx-auto">
-            <h1 className="text-3xl md:text-4xl font-bold mb-3 font-['Orbitron']">
+            <div className="flex items-center gap-3 mb-3">
+              <h1 className="text-3xl md:text-4xl font-bold font-['Orbitron']">
               {details.name}
             </h1>
+              {epicGame ? (
+                <Badge variant="outline" className="border-white/30">
+                  <SiEpicgames className="w-3 h-3 mr-1" />Epic
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="border-white/30">
+                  <FaSteam className="w-3 h-3 mr-1" />Steam
+                </Badge>
+              )}
+            </div>
             
             <div className="flex flex-wrap items-center gap-4 mb-4">
               {/* Developer */}
@@ -979,11 +1418,11 @@ export function GameDetailsPage() {
                 </Badge>
               )}
 
-              {/* Player Count */}
+              {/* Player Count (Steam API — Epic does not expose this data) */}
               {playerCount !== null && playerCount > 0 && (
-                <Badge variant="outline" className="border-cyan-500/30 text-cyan-400 bg-cyan-500/10">
+                <Badge variant="outline" className="border-cyan-500/30 text-cyan-400 bg-cyan-500/10" title="Live concurrent players from Steam">
                   <Users className="w-3 h-3 mr-1" />
-                  {formatPlayerCount(playerCount)} playing now
+                  {formatPlayerCount(playerCount)} playing on Steam
                 </Badge>
               )}
             </div>
@@ -1003,7 +1442,7 @@ export function GameDetailsPage() {
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 py-6">
         {/* Tabbed view — only when game was already in library on page load */}
-        {showProgressTabs && appId ? (
+        {showProgressTabs && gameId ? (
           <Tabs defaultValue="progress" className="w-full">
             <TabsList className="mb-6 bg-white/5">
               <TabsTrigger value="progress" className="flex items-center gap-2">
@@ -1018,13 +1457,14 @@ export function GameDetailsPage() {
 
             <TabsContent value="progress">
               <div className="p-6 rounded-lg bg-white/5 border border-white/10">
-                <MyProgressTab gameId={appId} gameName={details.name} />
+                <MyProgressTab gameId={gameId} gameName={details.name} />
               </div>
             </TabsContent>
 
             <TabsContent value="details">
               <GameDetailsContent
                 details={details}
+                epicGame={epicGame}
                 reviews={reviews}
                 metacriticReviews={metacriticReviews}
                 metacriticLoading={metacriticLoading}
@@ -1035,7 +1475,7 @@ export function GameDetailsPage() {
                 handleManualNav={handleManualNav}
                 handleThumbnailClick={handleThumbnailClick}
                 setMediaLoading={setMediaLoading}
-                setThumbnailsLoaded={setThumbnailsLoaded}
+                markThumbnailLoaded={markThumbnailLoaded}
                 positivePercentage={positivePercentage}
                 showFullDescription={showFullDescription}
                 setShowFullDescription={setShowFullDescription}
@@ -1055,6 +1495,8 @@ export function GameDetailsPage() {
                 gameInLibrary={gameInLibrary}
                 handleOpenLibraryDialog={handleOpenLibraryDialog}
                 removeFromLibrary={removeFromLibrary}
+                crossStoreGame={crossStoreGame}
+                gameId={gameId}
                 appId={appId}
                 navigate={navigate}
               />
@@ -1063,6 +1505,7 @@ export function GameDetailsPage() {
         ) : (
           <GameDetailsContent
             details={details}
+            epicGame={epicGame}
             reviews={reviews}
             metacriticReviews={metacriticReviews}
             metacriticLoading={metacriticLoading}
@@ -1073,7 +1516,7 @@ export function GameDetailsPage() {
             handleManualNav={handleManualNav}
             handleThumbnailClick={handleThumbnailClick}
             setMediaLoading={setMediaLoading}
-            setThumbnailsLoaded={setThumbnailsLoaded}
+            markThumbnailLoaded={markThumbnailLoaded}
             positivePercentage={positivePercentage}
             showFullDescription={showFullDescription}
             setShowFullDescription={setShowFullDescription}
@@ -1093,6 +1536,8 @@ export function GameDetailsPage() {
             gameInLibrary={gameInLibrary}
             handleOpenLibraryDialog={handleOpenLibraryDialog}
             removeFromLibrary={removeFromLibrary}
+            crossStoreGame={crossStoreGame}
+            gameId={gameId}
             appId={appId}
             navigate={navigate}
           />
@@ -1105,13 +1550,9 @@ export function GameDetailsPage() {
         onOpenChange={setIsDialogOpen}
         game={dialogGame}
         onSave={handleSaveLibraryEntry}
-        currentExecutablePath={appId ? libraryStore.getEntry(appId)?.executablePath : undefined}
-        genres={details?.genres?.map(g => g.description) || []}
-        platforms={[
-          ...(details?.platforms?.windows ? ['Windows'] : []),
-          ...(details?.platforms?.mac ? ['Mac'] : []),
-          ...(details?.platforms?.linux ? ['Linux'] : []),
-        ]}
+        currentExecutablePath={gameId ? libraryStore.getEntry(gameId)?.executablePath : undefined}
+        genres={dialogGenres}
+        platforms={dialogPlatforms}
       />
     </div>
   );
@@ -1120,6 +1561,7 @@ export function GameDetailsPage() {
 // Extracted Game Details Content Component
 interface GameDetailsContentProps {
   details: SteamAppDetails;
+  epicGame: Game | null; // Non-null when Epic is the primary store
   reviews: SteamReviewsResponse | null;
   metacriticReviews: MetacriticGameResponse | null;
   metacriticLoading: boolean;
@@ -1130,7 +1572,7 @@ interface GameDetailsContentProps {
   handleManualNav: (direction: 'next' | 'prev') => void;
   handleThumbnailClick: (index: number) => void;
   setMediaLoading: (loading: boolean) => void;
-  setThumbnailsLoaded: React.Dispatch<React.SetStateAction<Set<number>>>;
+  markThumbnailLoaded: (index: number) => void;
   positivePercentage: number | null;
   showFullDescription: boolean;
   setShowFullDescription: (show: boolean) => void;
@@ -1149,13 +1591,16 @@ interface GameDetailsContentProps {
   steamNewsLoading: boolean;
   gameInLibrary: boolean;
   handleOpenLibraryDialog: () => void;
-  removeFromLibrary: (gameId: number) => void;
+  removeFromLibrary: (gameId: string) => void;
+  crossStoreGame: Game | null;
+  gameId: string | null;
   appId: number | null;
   navigate: (path: string) => void;
 }
 
-function GameDetailsContent({
+const GameDetailsContent = memo(function GameDetailsContent({
   details,
+  epicGame,
   reviews,
   metacriticReviews,
   metacriticLoading,
@@ -1166,7 +1611,7 @@ function GameDetailsContent({
   handleManualNav,
   handleThumbnailClick,
   setMediaLoading,
-  setThumbnailsLoaded,
+  markThumbnailLoaded,
   positivePercentage,
   showFullDescription,
   setShowFullDescription,
@@ -1186,10 +1631,84 @@ function GameDetailsContent({
   gameInLibrary,
   handleOpenLibraryDialog,
   removeFromLibrary,
-  appId,
+  crossStoreGame,
+  gameId,
+  appId: _appId,
   navigate,
 }: GameDetailsContentProps) {
   const [reviewsExpanded, setReviewsExpanded] = useState(false);
+  // Determine whether Epic is the primary store for this game
+  const isEpicPrimary = !!epicGame;
+
+  // ── Memoized derived JSX ─────────────────────────────────────────────────
+  // These heavy .map() calls produce stable element arrays that survive the
+  // 5-second autoplay re-renders (currentMediaIndex changes) without being
+  // re-created.
+
+  const newsCarouselItems = useMemo(() => {
+    if (steamNews.length === 0) return [];
+    const fallback = details.header_image;
+    return steamNews.map((item) => {
+      const thumbnail = extractNewsThumbnail(item.contents);
+      const cardData: CardType = {
+        src: thumbnail || fallback,
+        title: item.title,
+        category: item.feedlabel || 'News',
+        href: item.url,
+      };
+      return (
+        <NewsCard
+          key={item.gid}
+          card={cardData}
+          newsItem={item}
+          fallbackImage={fallback}
+        />
+      );
+    });
+  }, [steamNews, details.header_image]);
+
+  const recommendationsRendered = useMemo(() => {
+    if (recommendations.length === 0) return [];
+    const maxScore = Math.max(...recommendations.map(r => r.score), 1);
+    return recommendations.map((rec) => {
+      const matchPercentage = Math.min(Math.round((rec.score / maxScore) * 95), 99);
+      return (
+        <motion.div
+          key={rec.appId}
+          className="flex-shrink-0 w-64 cursor-pointer group"
+          onClick={() => navigate(`/game/steam-${rec.appId}`)}
+          whileHover={{ scale: 1.02 }}
+          transition={{ duration: 0.2 }}
+        >
+          <div className="relative aspect-[460/215] rounded-lg overflow-hidden bg-white/5">
+            <RecommendationImage appId={rec.appId} name={rec.name} />
+            <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          </div>
+          <h3 className="mt-2 font-semibold text-sm truncate group-hover:text-fuchsia-400 transition-colors">
+            {rec.name}
+          </h3>
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+            <Badge className={cn(
+              "text-[10px] px-1.5 py-0.5 font-semibold",
+              matchPercentage >= 80 ? "bg-fuchsia-600" :
+              matchPercentage >= 60 ? "bg-purple-600" : "bg-purple-800"
+            )}>
+              {matchPercentage}% Match
+            </Badge>
+            {rec.reasons.slice(0, 2).map((reason, i) => (
+              <Badge
+                key={i}
+                variant="outline"
+                className="text-[10px] px-1.5 py-0.5 border-white/20 text-white/70"
+              >
+                {reason}
+              </Badge>
+            ))}
+          </div>
+        </motion.div>
+      );
+    });
+  }, [recommendations, navigate]);
 
   return (
     <>
@@ -1332,7 +1851,7 @@ function GameDetailsContent({
                             thumbnailsLoaded.has(index) ? "opacity-100" : "opacity-0"
                           )}
                           loading="lazy"
-                          onLoad={() => setThumbnailsLoaded(prev => new Set(prev).add(index))}
+                          onLoad={() => markThumbnailLoaded(index)}
                         />
                         {item.type === 'video' && (
                           <div className="absolute inset-0 flex items-center justify-center bg-black/40">
@@ -1347,26 +1866,28 @@ function GameDetailsContent({
             )}
 
             {/* Description */}
-            <section>
-              <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">About This Game</h2>
-              <div 
-                className={cn(
-                  "prose prose-invert prose-sm max-w-none",
-                  !showFullDescription && "line-clamp-6"
+            {(details.detailed_description || details.about_the_game) && (
+              <section>
+                <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">About This Game</h2>
+                <div 
+                  className={cn(
+                    "prose prose-invert prose-sm max-w-none",
+                    !showFullDescription && "line-clamp-6"
+                  )}
+                  dangerouslySetInnerHTML={{ __html: details.detailed_description || details.about_the_game }}
+                  onClick={handleContentLinkClick}
+                />
+                {(details.detailed_description || details.about_the_game)?.length > 500 && (
+                  <Button
+                    variant="link"
+                    onClick={() => setShowFullDescription(!showFullDescription)}
+                    className="mt-2 p-0 h-auto text-fuchsia-400 hover:text-fuchsia-300"
+                  >
+                    {showFullDescription ? 'Show Less' : 'Read More'}
+                  </Button>
                 )}
-                dangerouslySetInnerHTML={{ __html: details.detailed_description || details.about_the_game }}
-                onClick={handleContentLinkClick}
-              />
-              {(details.detailed_description || details.about_the_game)?.length > 500 && (
-                <Button
-                  variant="link"
-                  onClick={() => setShowFullDescription(!showFullDescription)}
-                  className="mt-2 p-0 h-auto text-fuchsia-400 hover:text-fuchsia-300"
-                >
-                  {showFullDescription ? 'Show Less' : 'Read More'}
-                </Button>
-              )}
-            </section>
+              </section>
+            )}
 
             {/* System Requirements */}
             {details.pc_requirements && (details.pc_requirements.minimum || details.pc_requirements.recommended) && (
@@ -1545,8 +2066,8 @@ function GameDetailsContent({
               )}
 
               {/* Cost Per Hour — only shown when game is in library with hoursPlayed > 0 */}
-              {gameInLibrary && appId && (() => {
-                const libEntry = libraryStore.getEntry(appId);
+              {gameInLibrary && gameId && (() => {
+                const libEntry = libraryStore.getEntry(gameId);
                 const hours = libEntry?.hoursPlayed ?? 0;
                 if (hours <= 0) return null;
 
@@ -1597,7 +2118,7 @@ function GameDetailsContent({
               {/* Remove from Library - only show if in library */}
               {gameInLibrary && (
                 <Button
-                  onClick={() => appId && removeFromLibrary(appId)}
+                  onClick={() => gameId && removeFromLibrary(gameId)}
                   variant="outline"
                   className="w-full text-red-400 border-red-400/30 hover:bg-red-400/10"
                 >
@@ -1605,7 +2126,21 @@ function GameDetailsContent({
                 </Button>
               )}
 
-              {/* Steam Link */}
+              {/* Primary store link */}
+              {isEpicPrimary ? (
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  onClick={() => {
+                    const slug = epicGame.epicNamespace;
+                    openExternalUrl(`https://store.epicgames.com/p/${slug || details.name.toLowerCase().replace(/\s+/g, '-')}`);
+                  }}
+                >
+                  <SiEpicgames className="w-4 h-4 mr-2" />
+                  View on Epic Games
+                  <ExternalLink className="w-3 h-3 ml-2" />
+                </Button>
+              ) : details.steam_appid ? (
               <Button
                 variant="outline"
                 className="w-full"
@@ -1615,6 +2150,42 @@ function GameDetailsContent({
                 View on Steam
                 <ExternalLink className="w-3 h-3 ml-2" />
               </Button>
+              ) : null}
+
+              {/* Cross-store: Also on the other store */}
+              {crossStoreGame?.store === 'epic' && crossStoreGame.epicNamespace && (
+                <>
+                  <Button variant="outline" className="w-full" onClick={() => {
+                    const slug = crossStoreGame.epicNamespace;
+                    openExternalUrl(`https://store.epicgames.com/p/${slug || details.name.toLowerCase().replace(/\s+/g, '-')}`);
+                  }}>
+                    <SiEpicgames className="w-4 h-4 mr-2" />Also on Epic Games<ExternalLink className="w-3 h-3 ml-2" />
+                  </Button>
+                  {crossStoreGame.price && !crossStoreGame.price.isFree && crossStoreGame.price.finalFormatted && (
+                    <div className="text-center text-sm text-white/60">
+                      Epic price: <span className="text-white/90 font-medium">{crossStoreGame.price.finalFormatted}</span>
+                      {crossStoreGame.price.discountPercent && crossStoreGame.price.discountPercent > 0 && (
+                        <Badge className="ml-2 bg-green-600 text-xs">-{crossStoreGame.price.discountPercent}%</Badge>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              {crossStoreGame?.store === 'steam' && crossStoreGame.steamAppId && (
+                <>
+                  <Button variant="outline" className="w-full" onClick={() => openExternalUrl(`https://store.steampowered.com/app/${crossStoreGame.steamAppId}`)}>
+                    <FaSteam className="w-4 h-4 mr-2" />Also on Steam<ExternalLink className="w-3 h-3 ml-2" />
+                  </Button>
+                  {crossStoreGame.price && !crossStoreGame.price.isFree && crossStoreGame.price.finalFormatted && (
+                    <div className="text-center text-sm text-white/60">
+                      Steam price: <span className="text-white/90 font-medium">{crossStoreGame.price.finalFormatted}</span>
+                      {crossStoreGame.price.discountPercent && crossStoreGame.price.discountPercent > 0 && (
+                        <Badge className="ml-2 bg-green-600 text-xs">-{crossStoreGame.price.discountPercent}%</Badge>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
 
               {/* Website Link */}
               {details.website && (
@@ -1872,27 +2443,8 @@ function GameDetailsContent({
                 </div>
               ))}
             </div>
-          ) : steamNews.length > 0 ? (
-            <Carousel
-              items={steamNews.map((item, index) => {
-                const thumbnail = extractNewsThumbnail(item.contents);
-                const cardData: CardType = {
-                  src: thumbnail || details.header_image,
-                  title: item.title,
-                  category: item.feedlabel || 'News',
-                  href: item.url,
-                };
-                return (
-                  <NewsCard
-                    key={item.gid}
-                    card={cardData}
-                    index={index}
-                    newsItem={item}
-                    fallbackImage={details.header_image}
-                  />
-                );
-              })}
-            />
+          ) : newsCarouselItems.length > 0 ? (
+            <Carousel items={newsCarouselItems} />
           ) : (
             <div className="text-center py-6 text-white/40 text-sm">
               No news available for this game.
@@ -1955,55 +2507,7 @@ function GameDetailsContent({
                   onMouseLeave={() => setIsRecommendationsPaused(false)}
                   className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin scrollbar-thumb-white/20 scrollbar-track-transparent scroll-smooth"
                 >
-                  {(() => {
-                    // Normalize scores relative to the top recommendation (max ≈ 95%)
-                    const maxScore = Math.max(...recommendations.map(r => r.score), 1);
-                    return recommendations.map((rec) => {
-                    const matchPercentage = Math.min(Math.round((rec.score / maxScore) * 95), 99);
-                    return (
-                      <motion.div
-                        key={rec.appId}
-                        className="flex-shrink-0 w-64 cursor-pointer group"
-                        onClick={() => navigate(`/game/${rec.appId}`)}
-                        whileHover={{ scale: 1.02 }}
-                        transition={{ duration: 0.2 }}
-                      >
-                        <div className="relative aspect-[460/215] rounded-lg overflow-hidden bg-white/5">
-                          <RecommendationImage appId={rec.appId} name={rec.name} />
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                        </div>
-                        
-                        {/* Title */}
-                        <h3 className="mt-2 font-semibold text-sm truncate group-hover:text-fuchsia-400 transition-colors">
-                          {rec.name}
-                        </h3>
-                        
-                        {/* Badges below title */}
-                        <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-                          {/* Match Score Badge */}
-                          <Badge className={cn(
-                            "text-[10px] px-1.5 py-0.5 font-semibold",
-                            matchPercentage >= 80 ? "bg-fuchsia-600" :
-                            matchPercentage >= 60 ? "bg-purple-600" : "bg-purple-800"
-                          )}>
-                            {matchPercentage}% Match
-                          </Badge>
-                          
-                          {/* Reason Badges */}
-                          {rec.reasons.slice(0, 2).map((reason, i) => (
-                            <Badge 
-                              key={i}
-                              variant="outline"
-                              className="text-[10px] px-1.5 py-0.5 border-white/20 text-white/70"
-                            >
-                              {reason}
-                            </Badge>
-                          ))}
-                        </div>
-                      </motion.div>
-                    );
-                  });
-                  })()}
+                  {recommendationsRendered}
                 </div>
               </div>
             )}
@@ -2012,4 +2516,4 @@ function GameDetailsContent({
       )}
     </>
   );
-}
+});

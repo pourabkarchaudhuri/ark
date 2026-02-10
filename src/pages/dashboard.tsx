@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from 'react';
 import { useLocation } from 'wouter';
-import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames } from '@/hooks/useGameStore';
+import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames, extractCachedMeta } from '@/hooks/useGameStore';
+import { useDetailEnricher } from '@/hooks/useDetailEnricher';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { Game, GameStatus } from '@/types/game';
 import { Button } from '@/components/ui/button';
@@ -11,8 +12,9 @@ import { CustomGameDialog } from '@/components/custom-game-dialog';
 import { CustomGameProgressDialog } from '@/components/custom-game-progress-dialog';
 import { GameCard } from '@/components/game-card';
 import { SkeletonGrid } from '@/components/game-card-skeleton';
+import { VirtualGameGrid } from '@/components/virtual-game-grid';
 // GameDetailPanel removed - now using dedicated /game/:id route
-import { FilterSidebar } from '@/components/filter-sidebar';
+import { FilterTrigger, FilterPanel } from '@/components/filter-sidebar';
 import { SearchSuggestions } from '@/components/search-suggestions';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { APP_VERSION } from '@/components/changelog-modal';
@@ -69,10 +71,25 @@ export function Dashboard() {
     if (viewMode === 'buzz') {
       setBuzzBgActive(true);
     }
+    // Close the filter panel when switching to a view that doesn't support it
+    // (journey, buzz, calendar have no filterable grid).  This prevents the
+    // panel from reserving space / staying visible after a tab switch.
+    if (viewMode === 'journey' || viewMode === 'buzz' || viewMode === 'calendar') {
+      setIsFilterOpen(false);
+    }
   }, [viewMode]);
   
   // Steam Games (games for browsing) - pass category filter
-  const { games: steamGames, loading: steamLoading, hasMore: browseHasMore, loadMore: browseLoadMore, error: steamError, loadingMore } = useSteamGames(filters.category);
+  const { games: steamGames, loading: steamLoading, hasMore: browseHasMore, loadMore: browseLoadMore, error: steamError, loadingMore, isSyncing: isBrowseSyncing, catalogLetter, jumpToLetter: rawJumpToLetter, enrichGames, allGamesRef, enrichmentMapRef, totalCount } = useSteamGames(filters.category);
+
+  // Wire up the detail enricher — lazily fetches metadata for visible catalog cards
+  useDetailEnricher(enrichGames, allGamesRef, enrichmentMapRef);
+
+  // Scroll to top before jumping to a letter in catalog mode
+  const jumpToLetter = useCallback((letter: string) => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    rawJumpToLetter(letter);
+  }, [rawJumpToLetter]);
   
   // Note: Cache clearing removed - useSteamGames handles data fetching on mount
   
@@ -96,7 +113,7 @@ export function Dashboard() {
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
   
   // Custom game progress dialog state
-  const [customProgressGameId, setCustomProgressGameId] = useState<number | null>(null);
+  const [customProgressGameId, setCustomProgressGameId] = useState<string | null>(null);
   
   // AI Chat panel state
   const [isAIChatOpen, setIsAIChatOpen] = useState(false);
@@ -110,12 +127,16 @@ export function Dashboard() {
     setIsSettingsOpen(false);
     setIsAIChatOpen(true);
   }, []);
+
+  const closeAIChat = useCallback(() => setIsAIChatOpen(false), []);
   
   const openSettings = useCallback(() => {
     setIsFilterOpen(false);
     setIsAIChatOpen(false);
     setIsSettingsOpen(true);
   }, []);
+
+  const closeSettings = useCallback(() => setIsSettingsOpen(false), []);
   
   const openFilters = useCallback(() => {
     setIsAIChatOpen(false);
@@ -145,8 +166,19 @@ export function Dashboard() {
   
   const currentLoading = viewMode === 'browse' ? steamLoading : libraryLoading;
   const currentError = steamError;
-  const hasMore = viewMode === 'browse' ? browseHasMore : false;
-  const loadMore = viewMode === 'browse' ? browseLoadMore : () => {};
+  // Epic store filter: Epic data is a finite curated set (new releases + coming
+  // soon + free games), not backed by the 155k+ Steam catalog.  The catalog
+  // infinite-scroll fallback only loads Steam titles, so when the user filters
+  // to "epic", loading more would yield zero results and cause a tight
+  // IntersectionObserver loop that hangs the UI.  Disable hasMore for Epic.
+  // When the store filter is exclusively Epic, disable infinite scroll —
+  // Epic data is a finite curated set not backed by the 155k+ Steam catalog.
+  const isEpicOnly = filters.store.length === 1 && filters.store[0] === 'epic';
+  const hasMore = viewMode === 'browse' && !isEpicOnly ? browseHasMore : false;
+  // Stable noop — avoids creating a new () => {} every render, which would
+  // invalidate the IntersectionObserver useEffect dependency array.
+  const noopRef = useRef(() => {});
+  const loadMore = viewMode === 'browse' ? browseLoadMore : noopRef.current;
   
   // Steam filters (genres and platforms)
   const { genres, platforms } = useSteamFilters();
@@ -213,36 +245,40 @@ export function Dashboard() {
       games = currentGames;
     }
 
-    // Apply sidebar filters only to non-search browse results and library
+    // Apply sidebar filters in a SINGLE pass (avoids creating intermediate arrays).
+    // Pre-compute filter checks outside the loop for efficiency.
     if (!skipBrowseFilters) {
-      // Apply genre filter
-      if (filters.genre !== 'All') {
-        games = games.filter(game => game.genre.includes(filters.genre));
-      }
+      const hasGenre = filters.genre !== 'All';
+      const hasPlatform = filters.platform !== 'All';
+      const platformLower = hasPlatform ? filters.platform.toLowerCase() : '';
+      const hasStatus = filters.status !== 'All' && viewMode === 'library';
+      const hasPriority = filters.priority !== 'All' && viewMode === 'library';
+      const hasYear = filters.releaseYear !== 'All';
+      const hasStore = filters.store.length > 0;
+      const storeSet = hasStore ? new Set(filters.store) : null;
+      const hideSentinel = viewMode === 'browse';
 
-      // Apply platform filter
-      if (filters.platform !== 'All') {
-        games = games.filter(game => 
-          game.platform.some(p => p.toLowerCase().includes(filters.platform.toLowerCase()))
-        );
-      }
+      const anyFilter = hasGenre || hasPlatform || hasStatus || hasPriority || hasYear || hasStore || hideSentinel;
 
-      // Apply status filter (only for library games)
-      if (filters.status !== 'All' && viewMode === 'library') {
-        games = games.filter(game => game.isInLibrary && game.status === filters.status);
-      }
-
-      // Apply priority filter (only for library games)
-      if (filters.priority !== 'All' && viewMode === 'library') {
-        games = games.filter(game => game.isInLibrary && game.priority === filters.priority);
-      }
-
-      // Apply release year filter
-      if (filters.releaseYear !== 'All') {
+      if (anyFilter) {
         games = games.filter(game => {
-          if (!game.releaseDate) return false;
-          const gameYear = new Date(game.releaseDate).getFullYear().toString();
-          return gameYear === filters.releaseYear;
+          if (hasGenre && !game.genre.includes(filters.genre)) return false;
+          if (hasPlatform && !game.platform.some(p => p.toLowerCase().includes(platformLower))) return false;
+          if (hasStatus && !(game.isInLibrary && game.status === filters.status)) return false;
+          if (hasPriority && !(game.isInLibrary && game.priority === filters.priority)) return false;
+          if (hasYear) {
+            if (!game.releaseDate) return false;
+            // Extract year without creating a Date object (ISO dates start with YYYY-)
+            const year = game.releaseDate.slice(0, 4);
+            if (year !== filters.releaseYear) return false;
+          }
+          if (storeSet) {
+            const directMatch = game.store && storeSet.has(game.store);
+            const availMatch = game.availableOn?.some(s => storeSet.has(s));
+            if (!directMatch && !availMatch) return false;
+          }
+          if (hideSentinel && game.comingSoon && game.releaseDate === 'Coming Soon') return false;
+          return true;
         });
       }
     }
@@ -250,8 +286,17 @@ export function Dashboard() {
     return games;
   }, [currentGames, searchResults, isSearching, viewMode, searchQuery, filters]);
 
-  // Sort games
+  // Sort games (skip sort in catalog mode — data is already A-Z from the hook).
+  // Uses an index tiebreaker so that when enrichment fills in releaseDate /
+  // metacriticScore, cards with previously-equal values keep their position
+  // instead of shuffling the grid and jumping the user's scroll.
   const sortedGames = useMemo(() => {
+    if (filters.category === 'catalog') return displayedGames;
+
+    // Build index map for stable tiebreaker
+    const indexMap = new Map<string, number>();
+    displayedGames.forEach((g, i) => indexMap.set(g.id, i));
+
     const sorted = [...displayedGames].sort((a, b) => {
       let comparison = 0;
 
@@ -264,18 +309,40 @@ export function Dashboard() {
           break;
         case 'releaseDate':
         default:
-          comparison = new Date(a.releaseDate || 0).getTime() - new Date(b.releaseDate || 0).getTime();
+          // Use pre-computed numeric timestamp from dedup worker (O(1) instead of parsing 12000+ Dates)
+          comparison = ((a as any)._releaseTs ?? 0) - ((b as any)._releaseTs ?? 0);
           break;
       }
 
-      return sortDirection === 'desc' ? -comparison : comparison;
+      if (comparison !== 0) {
+        return sortDirection === 'desc' ? -comparison : comparison;
+      }
+      // Stable tiebreaker: preserve insertion order
+      return (indexMap.get(a.id) ?? 0) - (indexMap.get(b.id) ?? 0);
     });
 
     return sorted;
-  }, [displayedGames, sortBy, sortDirection]);
+  }, [displayedGames, sortBy, sortDirection, filters.category]);
 
   // Infinite scroll with IntersectionObserver
   const loadMoreRef = useRef<HTMLDivElement>(null);
+
+  // Infinite scroll sentinel footer for the virtual grid.
+  // The sentinel div must always be present (for IntersectionObserver) but
+  // the visual spinner only shows when loadingMore is actually true.
+  const infiniteScrollSentinel = useMemo(() => {
+    if (viewMode !== 'browse' || isSearching || (!hasMore && !loadingMore)) return null;
+    return (
+      <div ref={loadMoreRef} className="py-8">
+        {loadingMore && (
+          <div className="flex flex-col items-center justify-center gap-2">
+            <div className="w-8 h-8 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
+            <span className="text-sm text-white/70">Loading more…</span>
+          </div>
+        )}
+      </div>
+    );
+  }, [viewMode, isSearching, hasMore, loadingMore]);
 
   useEffect(() => {
     // Only enable infinite scroll for browse view
@@ -315,6 +382,13 @@ export function Dashboard() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
+  // Stable view-mode handlers — avoids creating new closures on every render
+  const switchToBrowse = useCallback(() => setViewMode('browse'), []);
+  const switchToLibrary = useCallback(() => { setViewMode('library'); setSearchQuery(''); }, []);
+  const switchToJourney = useCallback(() => { setViewMode('journey'); setSearchQuery(''); }, []);
+  const switchToBuzz = useCallback(() => { setViewMode('buzz'); setSearchQuery(''); }, []);
+  const switchToCalendar = useCallback(() => { setViewMode('calendar'); setSearchQuery(''); }, []);
+
   // Handle adding game to library
   const handleAddToLibrary = useCallback((game: Game) => {
     setEditingGame(game);
@@ -323,8 +397,8 @@ export function Dashboard() {
 
   // Handle editing library entry — custom games open their dedicated progress dialog
   const handleEdit = useCallback((game: Game) => {
-    if (game.isCustom || (game.steamAppId !== undefined && game.steamAppId < 0)) {
-      setCustomProgressGameId(game.steamAppId!);
+    if (game.isCustom || game.id.startsWith('custom-')) {
+      setCustomProgressGameId(game.id);
       return;
     }
     setEditingGame(game);
@@ -333,14 +407,14 @@ export function Dashboard() {
 
   // Handle clicking a custom game card — opens progress dialog.
   // Direct callback for components that receive (gameId) => void (e.g. JourneyView).
-  const handleCustomGameClick = useCallback((gameId: number) => {
+  const handleCustomGameClick = useCallback((gameId: string) => {
     setCustomProgressGameId(gameId);
   }, []);
 
   // Ref-backed map so each custom game gets a *stable* zero-arg callback reference
   // that won't break React.memo comparisons on GameCard.
-  const customClickHandlersRef = useRef<Map<number, () => void>>(new Map());
-  const getCustomGameClickHandler = useCallback((gameId: number): () => void => {
+  const customClickHandlersRef = useRef<Map<string, () => void>>(new Map());
+  const getCustomGameClickHandler = useCallback((gameId: string): () => void => {
     let handler = customClickHandlersRef.current.get(gameId);
     if (!handler) {
       handler = () => setCustomProgressGameId(gameId);
@@ -351,9 +425,8 @@ export function Dashboard() {
 
   // Handle quick status change from card badge
   const handleStatusChange = useCallback((game: Game, status: GameStatus) => {
-    const gameId = game.steamAppId || (game.id?.startsWith('steam-') ? parseInt(game.id.split('-')[1]) : null);
-    if (gameId && isInLibrary(gameId)) {
-      updateEntry(gameId, { status });
+    if (isInLibrary(game.id)) {
+      updateEntry(game.id, { status });
     }
   }, [isInLibrary, updateEntry]);
 
@@ -361,7 +434,7 @@ export function Dashboard() {
   const handleSave = useCallback((gameData: Partial<Game> & { executablePath?: string }) => {
     try {
       if (editingGame) {
-        const gameId = editingGame.steamAppId;
+        const gameId = editingGame.id;
         if (!gameId) {
           showError('Invalid game ID');
           return;
@@ -378,8 +451,10 @@ export function Dashboard() {
           });
           success(`"${editingGame.title}" updated successfully`);
         } else {
-          // Add to library
-          addToLibrary(gameId, gameData.status || 'Want to Play');
+          // Add to library — cache game metadata so library can always display
+          // the game even when the remote API is unreachable (e.g. Epic/Cloudflare).
+          const cachedMeta = extractCachedMeta(editingGame);
+          addToLibrary(gameId, gameData.status || 'Want to Play', cachedMeta);
           // Update with additional fields including executablePath
           if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath) {
             updateEntry(gameId, {
@@ -404,13 +479,65 @@ export function Dashboard() {
     setDeleteConfirm({ open: true, game });
   }, []);
 
+  // ------ Stable gameId-based callbacks (never re-created → GameCard memo works) ------
+  const handleCardEdit = useCallback((gameId: string) => {
+    const game = allGamesRef.current.find(g => g.id === gameId);
+    if (game) handleEdit(game);
+  }, [handleEdit, allGamesRef]);
+
+  const handleCardDelete = useCallback((gameId: string) => {
+    const game = allGamesRef.current.find(g => g.id === gameId);
+    if (game) handleDeleteClick(game);
+  }, [handleDeleteClick, allGamesRef]);
+
+  const handleCardAddToLibrary = useCallback((gameId: string) => {
+    const game = allGamesRef.current.find(g => g.id === gameId);
+    if (game) handleAddToLibrary(game);
+  }, [handleAddToLibrary, allGamesRef]);
+
+  const handleCardRemoveFromLibrary = useCallback((gameId: string) => {
+    const game = allGamesRef.current.find(g => g.id === gameId);
+    if (game) handleDeleteClick(game);
+  }, [handleDeleteClick, allGamesRef]);
+
+  const handleCardStatusChange = useCallback((gameId: string, status: GameStatus) => {
+    const game = allGamesRef.current.find(g => g.id === gameId);
+    if (game) handleStatusChange(game, status);
+  }, [handleStatusChange, allGamesRef]);
+
+  // Stable render callback for VirtualGameGrid
+  const showRankInGrid = filters.category === 'trending';
+  const hideLibBadge = viewMode === 'library';
+  const renderGameCard = useCallback((game: Game) => {
+    return (
+      <GameCard
+        game={game}
+        hideRank={!showRankInGrid}
+        onEdit={handleCardEdit}
+        onDelete={handleCardDelete}
+        onClick={
+          (game.isCustom || game.id.startsWith('custom-'))
+            ? getCustomGameClickHandler(game.id)
+            : undefined
+        }
+        isInLibrary={game.isInLibrary}
+        isPlayingNow={game.steamAppId ? isPlayingNow(game.steamAppId) : false}
+        onAddToLibrary={handleCardAddToLibrary}
+        onRemoveFromLibrary={handleCardRemoveFromLibrary}
+        onStatusChange={handleCardStatusChange}
+        hideLibraryBadge={hideLibBadge}
+      />
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showRankInGrid, hideLibBadge, handleCardEdit, handleCardDelete, handleCardAddToLibrary, handleCardRemoveFromLibrary, handleCardStatusChange]);
+
   const handleDeleteConfirm = useCallback(() => {
     if (deleteConfirm.game) {
       try {
-        const gameId = deleteConfirm.game.steamAppId;
+        const gameId = deleteConfirm.game.id;
         if (gameId) {
-          // Custom games use negative IDs — route to the correct store
-          if (gameId < 0) {
+          // Custom games use "custom-" prefix — route to the correct store
+          if (gameId.startsWith('custom-')) {
             removeCustomGame(gameId);
           } else {
             removeFromLibrary(gameId);
@@ -439,29 +566,51 @@ export function Dashboard() {
     setClearLibraryConfirm(false);
   }, [success, showError]);
 
+  // Stable callbacks for dialog/panel open-change handlers.
+  // Avoids creating new closures on every Dashboard render.
+  const handleProgressDialogChange = useCallback((open: boolean) => {
+    if (!open) setCustomProgressGameId(null);
+  }, []);
+
+  const handleDeleteDialogChange = useCallback((open: boolean) => {
+    if (!open) setDeleteConfirm({ open: false, game: null });
+    // When opening (true), we keep the current game — setDeleteConfirm is only called from handleDeleteClick
+  }, []);
+
+  const handleCustomGameSave = useCallback((customGame: Parameters<typeof addCustomGame>[0]) => {
+    addCustomGame(customGame);
+    success(`"${customGame.title}" added to your library`);
+    setIsCustomGameDialogOpen(false);
+  }, [addCustomGame, success]);
+
   const toggleSortDirection = useCallback(() => {
     setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
   }, []);
 
-  const hasActiveFilters = 
-    searchQuery || 
+  const hasActiveFilters = useMemo(() =>
+    !!(searchQuery || 
     filters.status !== 'All' || 
     filters.priority !== 'All' ||
     filters.genre !== 'All' || 
     filters.platform !== 'All' ||
-    filters.category !== 'all';
+    filters.category !== 'all' ||
+    filters.store.length > 0),
+  [searchQuery, filters.status, filters.priority, filters.genre, filters.platform, filters.category, filters.store.length]);
 
-  const activeFilterCount = [
-    filters.status !== 'All' && viewMode === 'library',
-    filters.priority !== 'All' && viewMode === 'library',
-    filters.genre !== 'All',
-    filters.platform !== 'All',
-    filters.category !== 'all' && viewMode === 'browse',
-  ].filter(Boolean).length;
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (filters.status !== 'All' && viewMode === 'library') count++;
+    if (filters.priority !== 'All' && viewMode === 'library') count++;
+    if (filters.genre !== 'All') count++;
+    if (filters.platform !== 'All') count++;
+    if (filters.category !== 'all' && viewMode === 'browse') count++;
+    if (filters.store.length > 0) count++;
+    return count;
+  }, [filters.status, filters.priority, filters.genre, filters.platform, filters.category, filters.store.length, viewMode]);
 
-  // Total games count for display (unused after count fix, keeping for potential future use)
-  const _totalGamesCount = viewMode === 'library' ? librarySize : steamGames.length;
-  void _totalGamesCount; // Silence unused variable warning
+  // Total games count — for browse mode use the hook's totalCount (includes full catalog);
+  // for library mode use the local librarySize.
+  const browseTotalCount = viewMode === 'library' ? librarySize : totalCount;
 
   return (
     <div className={cn("min-h-screen", buzzBgActive ? 'bg-transparent' : 'bg-black')}>
@@ -523,7 +672,7 @@ export function Dashboard() {
             {/* View Mode Toggle */}
             <div className="flex items-center bg-white/5 rounded-lg p-1">
               <button
-                onClick={() => setViewMode('browse')}
+                onClick={switchToBrowse}
                 className={cn(
                   "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
                   viewMode === 'browse' 
@@ -534,10 +683,7 @@ export function Dashboard() {
                 Browse
               </button>
               <button
-                onClick={() => {
-                  setViewMode('library');
-                  setSearchQuery(''); // Clear search when switching to Library
-                }}
+                onClick={switchToLibrary}
                 className={cn(
                   "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'library' 
@@ -549,10 +695,7 @@ export function Dashboard() {
                 Library ({librarySize})
               </button>
               <button
-                onClick={() => {
-                  setViewMode('journey');
-                  setSearchQuery('');
-                }}
+                onClick={switchToJourney}
                 className={cn(
                   "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'journey' 
@@ -564,10 +707,7 @@ export function Dashboard() {
                 Journey
               </button>
               <button
-                onClick={() => {
-                  setViewMode('buzz');
-                  setSearchQuery('');
-                }}
+                onClick={switchToBuzz}
                 className={cn(
                   "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'buzz' 
@@ -579,10 +719,7 @@ export function Dashboard() {
                 Buzz
               </button>
               <button
-                onClick={() => {
-                  setViewMode('calendar');
-                  setSearchQuery('');
-                }}
+                onClick={switchToCalendar}
                 className={cn(
                   "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'calendar' 
@@ -610,8 +747,24 @@ export function Dashboard() {
 
             {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
               <>
-                <p className="text-sm text-white/60">
-                  Showing <span className="text-white font-medium">{sortedGames.length}{viewMode === 'browse' && hasMore ? '+' : ''}</span> games
+                <p className="text-sm text-white/60 flex items-center gap-1.5">
+                  {isBrowseSyncing ? (
+                    <>
+                      <svg className="h-3 w-3 animate-spin text-fuchsia-400 shrink-0" viewBox="0 0 24 24" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      <span className="text-fuchsia-400 font-medium">Syncing</span>{' '}
+                      <span className="text-white font-medium">{sortedGames.length.toLocaleString()}</span>
+                      {browseTotalCount > 0 && browseTotalCount !== sortedGames.length && (
+                        <> / <span className="text-white font-medium">{browseTotalCount.toLocaleString()}</span>{' '}
+                        <span className="text-white/40">({Math.round((sortedGames.length / browseTotalCount) * 100)}%)</span></>
+                      )}
+                      {' '}games
+                    </>
+                  ) : (
+                    <><span className="text-white font-medium">{sortedGames.length.toLocaleString()}</span> games</>
+                  )}
                 </p>
                 {hasActiveFilters && (
                   <div className="flex items-center gap-2">
@@ -647,7 +800,7 @@ export function Dashboard() {
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40 z-10" />
                 <Input
                   ref={searchInputRef}
-                  placeholder={viewMode === 'library' ? "Search your library..." : "Search Steam games..."}
+                  placeholder={viewMode === 'library' ? "Search your library..." : "Search games..."}
                   value={searchQuery}
                   onChange={(e) => {
                     setSearchQuery(e.target.value);
@@ -689,9 +842,9 @@ export function Dashboard() {
                     visible={showSuggestions && searchQuery.trim().length > 0}
                     onSelect={(game) => {
                       setShowSuggestions(false);
-                      // Navigate to game details page
-                      if (game.steamAppId) {
-                        navigate(`/game/${game.steamAppId}`);
+                      // Navigate to game details page using universal game ID
+                      if (game.id) {
+                        navigate(`/game/${encodeURIComponent(game.id)}`);
                       }
                     }}
                     onClose={() => setShowSuggestions(false)}
@@ -725,18 +878,10 @@ export function Dashboard() {
 
             {/* Filter Button - hidden in journey, buzz, and calendar mode */}
             {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
-              <FilterSidebar
+              <FilterTrigger
                 open={isFilterOpen}
-                onOpenChange={handleFilterOpenChange}
+                onToggle={() => handleFilterOpenChange(!isFilterOpen)}
                 filters={filters}
-                updateFilter={updateFilter}
-                resetFilters={resetFilters}
-                genres={genres}
-                platforms={platforms}
-                sortBy={sortBy}
-                setSortBy={setSortBy}
-                sortDirection={sortDirection}
-                toggleSortDirection={toggleSortDirection}
                 viewMode={viewMode}
               />
             )}
@@ -794,6 +939,27 @@ export function Dashboard() {
               </div>
             )}
 
+            {/* Catalog A–Z Letter Bar */}
+            {viewMode === 'browse' && filters.category === 'catalog' && !currentLoading && (
+              <div className="flex flex-wrap items-center gap-1 mb-4">
+                <span className="text-xs text-white/50 mr-1 font-medium">Jump to:</span>
+                {'#ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => (
+                  <button
+                    key={letter}
+                    onClick={() => jumpToLetter(letter === '#' ? '0' : letter)}
+                    className={cn(
+                      "w-7 h-7 text-xs font-medium rounded transition-colors flex items-center justify-center",
+                      catalogLetter?.toUpperCase() === (letter === '#' ? '0' : letter)
+                        ? "bg-fuchsia-500 text-white"
+                        : "bg-white/5 text-white/60 hover:bg-white/10 hover:text-white"
+                    )}
+                  >
+                    {letter}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Games Grid */}
             {!currentLoading && !searchLoading && !currentError && sortedGames.length === 0 ? (
               (() => {
@@ -830,44 +996,12 @@ export function Dashboard() {
                 );
               })()
             ) : (
-              <>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 auto-rows-fr">
-                  {sortedGames.map((game) => {
-                    // Only show rank for 'trending' category (top sellers) or when explicitly ranked
-                    // Hide ranks in 'all' view to avoid confusion since all games from Steam Charts have ranks
-                    const showRank = filters.category === 'trending' && game.rank !== undefined;
-                    const gameWithOptionalRank = showRank ? game : { ...game, rank: undefined };
-                    
-                    return (
-                      <div key={game.id} className="min-w-0">
-                        <GameCard
-                          game={gameWithOptionalRank}
-                          onEdit={() => handleEdit(game)}
-                          onDelete={() => handleDeleteClick(game)}
-                          onClick={
-                            (game.isCustom || (game.steamAppId !== undefined && game.steamAppId < 0))
-                              ? getCustomGameClickHandler(game.steamAppId!)
-                              : undefined
-                          }
-                          isInLibrary={game.isInLibrary}
-                          isPlayingNow={game.steamAppId ? isPlayingNow(game.steamAppId) : false}
-                          onAddToLibrary={() => handleAddToLibrary(game)}
-                          onRemoveFromLibrary={() => handleDeleteClick(game)}
-                          onStatusChange={(status) => handleStatusChange(game, status)}
-                          hideLibraryBadge={viewMode === 'library'}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-                {/* Infinite scroll sentinel - show while hasMore or while loading more (append) */}
-                {viewMode === 'browse' && !isSearching && (hasMore || loadingMore) && (
-                  <div ref={loadMoreRef} className="flex flex-col items-center justify-center gap-2 py-8">
-                    <div className="w-8 h-8 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
-                    {loadingMore && <span className="text-sm text-white/70">Loading more…</span>}
-                  </div>
-                )}
-              </>
+              <VirtualGameGrid
+                games={sortedGames}
+                renderCard={renderGameCard}
+                gap={16}
+                footer={infiniteScrollSentinel}
+              />
             )}
           </>
         )}
@@ -881,25 +1015,21 @@ export function Dashboard() {
         onSave={handleSave}
         genres={genres}
         platforms={platforms}
-        currentExecutablePath={editingGame ? libraryStore.getEntry(editingGame.steamAppId || 0)?.executablePath : undefined}
+        currentExecutablePath={editingGame ? libraryStore.getEntry(editingGame.id)?.executablePath : undefined}
       />
 
       {/* Custom Game Dialog */}
       <CustomGameDialog
         open={isCustomGameDialogOpen}
         onOpenChange={setIsCustomGameDialogOpen}
-        onSave={(customGame) => {
-          addCustomGame(customGame);
-          success(`"${customGame.title}" added to your library`);
-          setIsCustomGameDialogOpen(false);
-        }}
+        onSave={handleCustomGameSave}
       />
 
       {/* Custom Game Progress Dialog */}
       {customProgressGameId !== null && (
         <CustomGameProgressDialog
           open={customProgressGameId !== null}
-          onOpenChange={(open) => { if (!open) setCustomProgressGameId(null); }}
+          onOpenChange={handleProgressDialogChange}
           gameId={customProgressGameId}
         />
       )}
@@ -907,7 +1037,7 @@ export function Dashboard() {
       {/* Delete Confirmation Dialog */}
       <ConfirmDialog
         open={deleteConfirm.open}
-        onOpenChange={(open) => setDeleteConfirm({ open, game: open ? deleteConfirm.game : null })}
+        onOpenChange={handleDeleteDialogChange}
         title="Remove from Library"
         description={`Are you sure you want to remove "${deleteConfirm.game?.title}" from your library? This will delete your progress tracking and notes.`}
         confirmText="Remove"
@@ -955,16 +1085,33 @@ export function Dashboard() {
         </div>
       )}
 
+      {/* Filter & Sort Panel — rendered at root level (outside <main>) so
+          its z-50 sits above the sticky z-40 header in the same stacking context */}
+      <FilterPanel
+        open={isFilterOpen}
+        onOpenChange={handleFilterOpenChange}
+        filters={filters}
+        updateFilter={updateFilter}
+        resetFilters={resetFilters}
+        genres={genres}
+        platforms={platforms}
+        sortBy={sortBy}
+        setSortBy={setSortBy}
+        sortDirection={sortDirection}
+        toggleSortDirection={toggleSortDirection}
+        viewMode={viewMode}
+      />
+
       {/* AI Chat Panel */}
       <AIChatPanel
         isOpen={isAIChatOpen}
-        onClose={() => setIsAIChatOpen(false)}
+        onClose={closeAIChat}
       />
 
       {/* Settings Panel */}
       <SettingsPanel
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={closeSettings}
       />
 
     </div>

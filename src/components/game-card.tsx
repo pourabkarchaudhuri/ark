@@ -19,20 +19,28 @@ import {
   Library,
   Plus,
 } from 'lucide-react';
-import { FaWindows, FaApple, FaLinux } from 'react-icons/fa';
+import { FaWindows, FaApple, FaLinux, FaSteam } from 'react-icons/fa';
+import { SiEpicgames } from 'react-icons/si';
 import { cn, getHardcodedCover } from '@/lib/utils';
+import { detailEnricher } from '@/services/detail-enricher';
 
 interface GameCardProps {
   game: Game;
-  onEdit: () => void;
-  onDelete: () => void;
+  /** Callback receives gameId so parent can use a single stable function */
+  onEdit: (gameId: string) => void;
+  /** Callback receives gameId so parent can use a single stable function */
+  onDelete: (gameId: string) => void;
   onClick?: () => void;
   isInLibrary?: boolean;
   isPlayingNow?: boolean; // Live indicator: game's exe is currently running
-  onAddToLibrary?: () => void;
-  onRemoveFromLibrary?: () => void;
-  onStatusChange?: (status: GameStatus) => void;
+  /** Callback receives gameId so parent can use a single stable function */
+  onAddToLibrary?: (gameId: string) => void;
+  /** Callback receives gameId so parent can use a single stable function */
+  onRemoveFromLibrary?: (gameId: string) => void;
+  /** Callback receives (gameId, status) so parent can use a single stable function */
+  onStatusChange?: (gameId: string, status: GameStatus) => void;
   hideLibraryBadge?: boolean; // Hide heart button and library badge (e.g., when already in library view)
+  hideRank?: boolean; // Hide rank badge (avoids creating a new game object in parent)
 }
 
 // Steam platforms (Steam is primarily PC)
@@ -144,6 +152,7 @@ function GameCardComponent({
   onRemoveFromLibrary,
   onStatusChange,
   hideLibraryBadge,
+  hideRank,
 }: GameCardProps) {
   const [, navigate] = useLocation();
   const [imageError, setImageError] = useState(false);
@@ -162,11 +171,8 @@ function GameCardComponent({
   // Compute whether library badge should be shown (memoized for performance)
   const showLibraryBadge = useMemo(() => inLibrary && !hideLibraryBadge, [inLibrary, hideLibraryBadge]);
   
-  // Compute rating badge position based on visible badges (memoized for performance)
-  const ratingBadgePosition = useMemo(() => {
-    if (showLibraryBadge) return "top-9";
-    return "top-2";
-  }, [showLibraryBadge]);
+  // (ratingBadgePosition removed — rating is now in the top-right flex column,
+  //  store badges moved to bottom-left, so no overlap)
 
   // Notify other cards to close their context menus when this card opens one
   const CONTEXT_MENU_CLOSE_EVENT = 'gamecard:closeContextMenu';
@@ -202,21 +208,26 @@ function GameCardComponent({
     };
   }, [ctxMenu]);
 
-  const handleCardClick = () => {
-    // Custom games use negative IDs and don't have Steam details pages.
-    // Detect them via the isCustom flag OR a negative steamAppId.
-    const isCustomGame = game.isCustom || (game.steamAppId !== undefined && game.steamAppId !== null && game.steamAppId < 0);
+  // --- Detail enricher: observe this card so its metadata is lazy-loaded (Steam only) ---
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el || !game.steamAppId || game.developer) return; // already enriched or no appId
+    // Only enrich Steam games — Epic games arrive fully enriched from the API
+    if (game.store === 'epic') return;
+    detailEnricher.observe(el, game.steamAppId);
+    return () => { detailEnricher.unobserve(el); };
+  }, [game.steamAppId, game.developer, game.store]);
 
-    if (isCustomGame) {
+  const handleCardClick = () => {
+    // Custom games don't have store details pages
+    if (game.isCustom || game.id?.startsWith('custom-')) {
       if (onClick) onClick();
       return;
     }
 
-    // Navigate to game details page if we have a positive Steam App ID
-    const gameId = game.steamAppId || (game.id?.startsWith('steam-') ? parseInt(game.id.split('-')[1]) : null);
-    
-    if (gameId && gameId > 0) {
-      navigate(`/game/${gameId}`);
+    // Navigate to game details page using the universal string ID
+    if (game.id) {
+      navigate(`/game/${encodeURIComponent(game.id)}`);
     } else if (onClick) {
       onClick();
     }
@@ -227,12 +238,12 @@ function GameCardComponent({
     if (inLibrary) {
       // Already in library - trigger remove
       if (onRemoveFromLibrary) {
-        onRemoveFromLibrary();
+        onRemoveFromLibrary(game.id);
       }
     } else {
       // Not in library - trigger add
       if (onAddToLibrary) {
-        onAddToLibrary();
+        onAddToLibrary(game.id);
       }
     }
   };
@@ -243,6 +254,21 @@ function GameCardComponent({
   const fallbackUrls = useMemo(() => {
     const hardcoded = getHardcodedCover(game.title);
     if (hardcoded) return [hardcoded];
+
+    // Epic games: use coverUrl directly (no CDN URL construction)
+    if (game.store === 'epic' || game.id?.startsWith('epic-')) {
+      const candidates = [
+        game.coverUrl || '',
+        game.headerImage || '',
+        ...(game.screenshots || []),
+      ];
+      const seen = new Set<string>();
+      return candidates.filter(url => {
+        if (!url || seen.has(url)) return false;
+        seen.add(url);
+        return true;
+      });
+    }
 
     if (!game.steamAppId) return [game.coverUrl || ''];
 
@@ -264,11 +290,11 @@ function GameCardComponent({
       seen.add(url);
       return true;
     });
-  }, [game.title, game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
+  }, [game.title, game.id, game.store, game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
 
   // Handle image error - try next fallback URL
   const handleImageError = useCallback(() => {
-    if (game.steamAppId && fallbackAttempt < fallbackUrls.length - 1) {
+    if (fallbackAttempt < fallbackUrls.length - 1) {
       console.log(`[GameCard] Image ${fallbackAttempt} failed for ${game.title}, trying next fallback`);
       setFallbackAttempt(prev => prev + 1);
       setImageLoaded(false);
@@ -276,7 +302,7 @@ function GameCardComponent({
       // All fallbacks exhausted - show gradient with initials
       setImageError(true);
     }
-  }, [fallbackAttempt, fallbackUrls.length, game.steamAppId, game.title]);
+  }, [fallbackAttempt, fallbackUrls.length, game.title]);
 
   // Detect placeholder images: newer Steam games return 200 from the old CDN
   // but with tiny (< 5KB) transparent placeholder images instead of real art.
@@ -300,6 +326,7 @@ function GameCardComponent({
   return (
     <div 
       ref={cardRef}
+      data-appid={game.steamAppId}
       className="group relative flex flex-col rounded-xl overflow-hidden bg-card/30 hover:bg-card/50 border border-transparent hover:border-white/10 transition-all duration-300 w-full cursor-pointer"
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
@@ -316,6 +343,7 @@ function GameCardComponent({
           <img
             src={coverUrl}
             alt={game.title}
+            loading="lazy"
             className={cn(
               "w-full h-full object-cover transition-all duration-500",
               imageLoaded ? "opacity-100" : "opacity-0",
@@ -344,7 +372,7 @@ function GameCardComponent({
         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent pointer-events-none" />
         
         {/* Rank Badge for Top 100 games */}
-        {game.rank && (
+        {game.rank && !hideRank && (
           <div className="absolute top-2 left-2 flex items-center justify-center min-w-[28px] h-7 px-1.5 rounded-lg bg-gradient-to-br from-amber-500 to-amber-600 text-black font-bold text-sm shadow-lg z-10">
             #{game.rank}
           </div>
@@ -357,7 +385,7 @@ function GameCardComponent({
             onClick={handleHeartClick}
             className={cn(
               "absolute top-2 p-1.5 rounded-full bg-black/50 backdrop-blur-sm transition-all duration-200 hover:bg-black/70 z-10",
-              game.rank ? "left-12" : "left-2",
+              game.rank && !hideRank ? "left-12" : "left-2",
               inLibrary ? "opacity-100" : isHovered ? "opacity-100" : "opacity-0"
             )}
             aria-label={inLibrary ? "Remove from library" : "Add to library"}
@@ -371,7 +399,7 @@ function GameCardComponent({
           </button>
         )}
 
-        {/* Top Right Badges (Library, Installed) */}
+        {/* Top Right Badge (Library only) */}
         <div className="absolute top-2 right-2 z-10 flex flex-col gap-1 items-end">
           {/* In Library / Custom Badge - Hidden when hideLibraryBadge is true */}
           {showLibraryBadge && (
@@ -383,24 +411,48 @@ function GameCardComponent({
               {game.isCustom ? 'Custom' : 'Library'}
             </Badge>
           )}
-          
+
+          {/* Rating Badge (visible on hover only) */}
+          {game.metacriticScore !== null && game.metacriticScore !== undefined && game.metacriticScore > 0 && (
+            <div 
+              className={cn(
+                "px-2 py-1 rounded bg-black/70 backdrop-blur-sm text-xs font-bold shadow-lg transition-opacity duration-200",
+                isHovered ? "opacity-100" : "opacity-0"
+              )}
+              aria-label={`Rating: ${game.metacriticScore}`}
+            >
+              <span className="text-white">
+                Rating: {game.metacriticScore}
+              </span>
+            </div>
+          )}
         </div>
-        
-        {/* Rating Badge (visible on hover only, positioned below other badges) */}
-        {game.metacriticScore !== null && game.metacriticScore !== undefined && game.metacriticScore > 0 && (
-          <div 
-            className={cn(
-              "absolute px-2 py-1 rounded bg-black/70 backdrop-blur-sm text-xs font-bold shadow-lg transition-opacity duration-200 right-2",
-              ratingBadgePosition,
-              isHovered ? "opacity-100" : "opacity-0"
-            )}
-            aria-label={`Rating: ${game.metacriticScore}`}
-          >
-            <span className="text-white">
-              Rating: {game.metacriticScore}
-            </span>
-          </div>
-        )}
+
+        {/* Store badges — bottom-left over the gradient */}
+        <div className="absolute bottom-2 left-2 z-10 flex items-center gap-1">
+          {game.availableOn && game.availableOn.length > 0 ? (
+            <>
+              {game.availableOn.includes('steam') && (
+                <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm" title="Available on Steam">
+                  <FaSteam className="h-3.5 w-3.5 text-white/90" />
+                </div>
+              )}
+              {game.availableOn.includes('epic') && (
+                <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm" title="Available on Epic Games">
+                  <SiEpicgames className="h-3.5 w-3.5 text-white/90" />
+                </div>
+              )}
+            </>
+          ) : game.store === 'epic' ? (
+            <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm" title="Epic Games">
+              <SiEpicgames className="h-3.5 w-3.5 text-white/90" />
+            </div>
+          ) : !game.isCustom ? (
+            <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm" title="Steam">
+              <FaSteam className="h-3.5 w-3.5 text-white/90" />
+            </div>
+          ) : null}
+        </div>
 
       </div>
 
@@ -428,7 +480,8 @@ function GameCardComponent({
             <div className="min-h-[1rem] mt-0.5">
               {game.playerCount !== undefined && game.playerCount > 0 ? (
                 <p className="text-xs text-cyan-400">
-                  {formatPlayerCount(game.playerCount)} playing now
+                  {formatPlayerCount(game.playerCount)} playing
+                  {game.availableOn && game.availableOn.length > 1 ? ' on Steam' : ' now'}
                 </p>
               ) : (
                 <p className="text-xs">&nbsp;</p>
@@ -450,13 +503,13 @@ function GameCardComponent({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="bg-card border-white/10 whitespace-nowrap">
-                  <DropdownMenuItem onClick={onEdit} className="cursor-pointer">
+                  <DropdownMenuItem onClick={() => onEdit(game.id)} className="cursor-pointer">
                     <Edit className="h-4 w-4 mr-2" />
                     Edit Entry
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem 
-                    onClick={onDelete} 
+                    onClick={() => onDelete(game.id)} 
                     className="cursor-pointer text-red-400 focus:text-red-300 focus:bg-red-500/10"
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
@@ -513,7 +566,7 @@ function GameCardComponent({
                       )}
                       onClick={() => {
                         if (status !== game.status && onStatusChange) {
-                          onStatusChange(status);
+                          onStatusChange(game.id, status);
                         }
                       }}
                     >
@@ -548,7 +601,7 @@ function GameCardComponent({
             <>
               <button
                 className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-white/10 cursor-pointer"
-                onClick={() => { setCtxMenu(null); onEdit(); }}
+                onClick={() => { setCtxMenu(null); onEdit(game.id); }}
               >
                 <Edit className="h-4 w-4 mr-2" />
                 Edit Entry
@@ -556,7 +609,7 @@ function GameCardComponent({
               <div className="my-1 h-px bg-white/10" />
               <button
                 className="flex w-full items-center rounded-sm px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 cursor-pointer"
-                onClick={() => { setCtxMenu(null); onDelete(); }}
+                onClick={() => { setCtxMenu(null); onDelete(game.id); }}
               >
                 <Trash2 className="h-4 w-4 mr-2" />
                 Remove from Library
@@ -565,7 +618,7 @@ function GameCardComponent({
           ) : (
             <button
               className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-white/10 cursor-pointer"
-              onClick={() => { setCtxMenu(null); if (onAddToLibrary) onAddToLibrary(); }}
+              onClick={() => { setCtxMenu(null); if (onAddToLibrary) onAddToLibrary(game.id); }}
             >
               <Plus className="h-4 w-4 mr-2" />
               Add to Library
@@ -578,12 +631,9 @@ function GameCardComponent({
   );
 }
 
-// Memoize to prevent re-renders when parent re-renders but props haven't changed
-// Note: We don't compare callback functions (onEdit, onDelete, etc.) since they are
-// inline arrow functions that capture the game object - comparing them would always fail.
-// The game data and boolean props are sufficient for determining if re-render is needed.
-// IMPORTANT: onClick is compared by reference identity — a change from undefined → function
-// (or vice-versa) MUST trigger a re-render so custom game cards pick up the progress dialog.
+// Memoize to prevent re-renders when parent re-renders but props haven't changed.
+// Since callbacks now accept gameId (stable references via useCallback), we can
+// safely compare them by reference identity for even tighter bailouts.
 export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
   return (
     prevProps.game.id === nextProps.game.id &&
@@ -593,13 +643,23 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.game.playerCount === nextProps.game.playerCount &&
     prevProps.game.coverUrl === nextProps.game.coverUrl &&
     prevProps.game.headerImage === nextProps.game.headerImage &&
+    prevProps.game.developer === nextProps.game.developer &&
+    prevProps.game.platform?.length === nextProps.game.platform?.length &&
     prevProps.game.isInLibrary === nextProps.game.isInLibrary &&
     prevProps.game.isCustom === nextProps.game.isCustom &&
     prevProps.game.steamAppId === nextProps.game.steamAppId &&
+    prevProps.game.store === nextProps.game.store &&
+    prevProps.game.availableOn?.length === nextProps.game.availableOn?.length &&
     prevProps.game.status === nextProps.game.status &&
     prevProps.isInLibrary === nextProps.isInLibrary &&
     prevProps.isPlayingNow === nextProps.isPlayingNow &&
     prevProps.hideLibraryBadge === nextProps.hideLibraryBadge &&
-    prevProps.onClick === nextProps.onClick
+    prevProps.hideRank === nextProps.hideRank &&
+    prevProps.onClick === nextProps.onClick &&
+    prevProps.onEdit === nextProps.onEdit &&
+    prevProps.onDelete === nextProps.onDelete &&
+    prevProps.onAddToLibrary === nextProps.onAddToLibrary &&
+    prevProps.onRemoveFromLibrary === nextProps.onRemoveFromLibrary &&
+    prevProps.onStatusChange === nextProps.onStatusChange
   );
 });

@@ -86,6 +86,13 @@ function DialogCoverImage({ game }: { game: Game }) {
 
   // Build a deduplicated fallback URL list so consecutive duplicates never stall the chain
   const fallbackUrls = useMemo(() => {
+    // Epic games: use coverUrl / headerImage directly (no CDN construction)
+    if (game.store === 'epic' || game.id?.startsWith('epic-')) {
+      const candidates = [game.coverUrl || '', game.headerImage || '', ...(game.screenshots || [])];
+      const seen = new Set<string>();
+      return candidates.filter(url => { if (!url || seen.has(url)) return false; seen.add(url); return true; });
+    }
+
     const id = game.steamAppId;
     if (!id) return [game.coverUrl || ''];
 
@@ -105,7 +112,7 @@ function DialogCoverImage({ game }: { game: Game }) {
       seen.add(url);
       return true;
     });
-  }, [game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
+  }, [game.id, game.store, game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
 
   // Reset state when the game changes
   useEffect(() => {

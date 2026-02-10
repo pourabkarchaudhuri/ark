@@ -97,7 +97,7 @@ export interface SendMessagePayload {
   message: string;
   gameContext?: GameContext;
   libraryData?: Array<{
-    gameId: number;
+    gameId: string;
     name?: string;
     status: string;
     priority: string;

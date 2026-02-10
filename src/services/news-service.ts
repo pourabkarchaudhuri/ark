@@ -134,9 +134,13 @@ async function resolveNewsGameIds(): Promise<{ appId: number; name: string }[]> 
     const libraryIds = libraryStore.getAllGameIds();
     for (const id of libraryIds) {
       if (result.length >= MAX_STEAM_NEWS_GAMES) break;
+      // Extract numeric Steam appId — skip non-Steam entries
+      const m = id.match(/^(?:steam-)?(\d+)$/);
+      if (!m) continue;
+      const numericId = Number(m[1]);
       const journeyEntry = journeyStore.getEntry(id);
       const name = journeyEntry?.title ?? `Game ${id}`;
-      addGame(id, name);
+      addGame(numericId, name);
     }
   } catch {
     // Non-critical
