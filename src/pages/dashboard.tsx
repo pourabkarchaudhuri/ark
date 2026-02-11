@@ -408,7 +408,10 @@ export function Dashboard() {
 
   // Handle quick status change from card badge
   const handleStatusChange = useCallback((game: Game, status: GameStatus) => {
-    if (isInLibrary(game.id)) {
+    if (game.id.startsWith('custom-')) {
+      // Custom games live in customGameStore, not libraryStore
+      customGameStore.updateGame(game.id, { status });
+    } else if (isInLibrary(game.id)) {
       updateEntry(game.id, { status });
     }
   }, [isInLibrary, updateEntry]);
@@ -422,8 +425,20 @@ export function Dashboard() {
           showError('Invalid game ID');
           return;
         }
+
+        const isCustom = gameId.startsWith('custom-');
         
-        if (isInLibrary(gameId)) {
+        if (isCustom) {
+          // Custom games live in customGameStore, not libraryStore
+          customGameStore.updateGame(gameId, {
+            status: gameData.status,
+            priority: gameData.priority,
+            publicReviews: gameData.publicReviews,
+            recommendationSource: gameData.recommendationSource,
+            executablePath: gameData.executablePath,
+          });
+          success(`"${editingGame.title}" updated successfully`);
+        } else if (isInLibrary(gameId)) {
           // Update existing library entry
           updateEntry(gameId, {
             status: gameData.status,

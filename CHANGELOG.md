@@ -4,6 +4,15 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.27] - 2026-02-09
+
+### Fixed
+- **Browse Game Count After View Switch** — Background refresh no longer silently drops cross-store (Steam + Epic) games. The Epic data filter now includes games the dedup worker merged into Steam entries (`availableOn` includes 'epic'), preserving the full catalog across refreshes.
+- **Background Refresh Safety Net** — If a background refresh produces >10% fewer games than the current set (e.g., a data source failed silently), the swap is skipped entirely to prevent games from disappearing mid-session.
+- **Custom Game Status Dropdown in Library** — Changing the status of a custom game via the card dropdown in Library view now correctly updates `customGameStore` instead of silently failing (the previous code only checked `libraryStore`, which doesn't hold custom games).
+- **Custom Game Duplicate on Edit** — Editing a custom game entry no longer creates a duplicate record in `libraryStore`; updates now route to `customGameStore.updateGame()` on both the dashboard and game details page.
+- **Infinite-Scroll Spinner Behind Cards** — The loading spinner no longer renders at `y=0` behind the first row of game cards. The footer sentinel is now placed outside the absolutely-positioned virtual grid container so it flows naturally below the last row.
+
 ## [1.0.26] - 2026-02-09
 
 ### Added

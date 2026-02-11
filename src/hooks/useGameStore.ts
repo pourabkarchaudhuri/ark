@@ -333,9 +333,17 @@ export function useSteamGames(category: GameCategory = 'all') {
                 steamService.getNewReleases(),
                 steamService.getTopSellers(),
                 steamService.getComingSoon(),
-                // Re-use existing Epic data from the prefetch store instead of
-                // re-fetching the full catalog (saves ~60+ seconds of API calls)
-                Promise.resolve(getPrefetchedGames()?.filter(g => g.store === 'epic') ?? []),
+                // Re-use existing Epic-originating data from the prefetch store
+                // instead of re-fetching the full catalog (saves ~60+ seconds
+                // of API calls).  Include both Epic-primary games AND cross-store
+                // games that the dedup worker merged into Steam entries — those
+                // have store:'steam' but availableOn includes 'epic'.  Without
+                // this, the refresh silently drops hundreds of catalog games.
+                Promise.resolve(
+                  getPrefetchedGames()?.filter(g =>
+                    g.store === 'epic' || g.availableOn?.includes('epic')
+                  ) ?? []
+                ),
                 epicService.getFreeGames().catch(() => [] as Game[]),
               ]).then(async ([mp, nr, ts, cs, ec, ef]) => {
                 if (!isMountedRef.current) return;
@@ -343,8 +351,20 @@ export function useSteamGames(category: GameCategory = 'all') {
                 // Offload dedup + sort to Web Worker
                 const fresh = await dedupSortInWorker(raw);
 
-                // Atomic swap — single setState call, no intermediate renders
                 if (!isMountedRef.current) return;
+
+                // Safety net: if the refresh produced significantly fewer games
+                // than the current set, a data source probably failed silently.
+                // Skip the swap to avoid the user seeing games disappear.
+                const currentCount = allGamesRef.current.length;
+                if (currentCount > 0 && fresh.length < currentCount * 0.9) {
+                  console.warn(
+                    `[useSteamGames] Background refresh dropped from ${currentCount} to ${fresh.length} games — skipping swap to prevent data loss`
+                  );
+                  return;
+                }
+
+                // Atomic swap — single setState call, no intermediate renders
                 setAllGames(fresh);
                 // Expose full refreshed dataset — virtual grid only renders visible items
                 setDisplayCount(fresh.length);

@@ -646,10 +646,19 @@ export function GameDetailsPage() {
   const handleSaveLibraryEntry = useCallback((gameData: Partial<Game> & { executablePath?: string }) => {
     if (!gameId) return;
     
-    const isNewAdd = !gameInLibrary;
+    const isNewAdd = !gameInLibrary && !isCustomGame;
     const gameName = details?.name || epicGame?.title || 'Game';
     
-    if (gameInLibrary) {
+    if (isCustomGame) {
+      // Custom games live in customGameStore, not libraryStore
+      customGameStore.updateGame(gameId, {
+        status: gameData.status,
+        priority: gameData.priority,
+        publicReviews: gameData.publicReviews,
+        recommendationSource: gameData.recommendationSource,
+        executablePath: gameData.executablePath,
+      });
+    } else if (gameInLibrary) {
       // Update existing entry
       updateEntry(gameId, {
         status: gameData.status,
@@ -682,7 +691,7 @@ export function GameDetailsPage() {
     } else {
       toastSuccess(`${gameName} updated successfully`);
     }
-  }, [gameId, gameInLibrary, addToLibrary, updateEntry, details, epicGame, toastSuccess]);
+  }, [gameId, gameInLibrary, isCustomGame, addToLibrary, updateEntry, details, epicGame, toastSuccess]);
 
   // Fetch game details and reviews - uses prefetch store first, then API
   useEffect(() => {

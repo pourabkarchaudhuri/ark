@@ -106,51 +106,55 @@ export function VirtualGameGrid({
   );
 
   return (
-    <div
-      ref={containerRef}
-      style={{
-        height: virtualizer.getTotalSize(),
-        width: '100%',
-        position: 'relative',
-      }}
-    >
-      {virtualRows.map((virtualRow) => {
-        const startIdx = virtualRow.index * columns;
-        const rowGames = games.slice(startIdx, startIdx + columns);
+    <>
+      <div
+        ref={containerRef}
+        style={{
+          height: virtualizer.getTotalSize(),
+          width: '100%',
+          position: 'relative',
+        }}
+      >
+        {virtualRows.map((virtualRow) => {
+          const startIdx = virtualRow.index * columns;
+          const rowGames = games.slice(startIdx, startIdx + columns);
 
-        return (
-          <div
-            key={virtualRow.key}
-            data-index={virtualRow.index}
-            ref={virtualizer.measureElement}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              transform: `translateY(${virtualRow.start - virtualizer.options.scrollMargin}px)`,
-            }}
-          >
+          return (
             <div
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={virtualizer.measureElement}
               style={{
-                display: 'grid',
-                gridTemplateColumns: gridTemplateCols,
-                gap: `${gap}px`,
-                paddingBottom: `${gap}px`,
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                transform: `translateY(${virtualRow.start - virtualizer.options.scrollMargin}px)`,
               }}
             >
-              {rowGames.map((game) => (
-                <div key={game.id} className="min-w-0">
-                  {renderCard(game)}
-                </div>
-              ))}
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: gridTemplateCols,
+                  gap: `${gap}px`,
+                  paddingBottom: `${gap}px`,
+                }}
+              >
+                {rowGames.map((game) => (
+                  <div key={game.id} className="min-w-0">
+                    {renderCard(game)}
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
 
-      {/* Footer (e.g. infinite-scroll sentinel) placed after all virtual rows */}
+      {/* Footer (e.g. infinite-scroll sentinel) placed AFTER the virtual
+          container so it flows naturally below the grid instead of sitting
+          at y=0 behind the absolutely-positioned rows. */}
       {footer}
-    </div>
+    </>
   );
 }
