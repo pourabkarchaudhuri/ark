@@ -28,8 +28,10 @@ import { cn } from '@/lib/utils';
 import { SteamAppDetails, SteamReviewsResponse, GameRecommendation, SteamNewsItem } from '@/types/steam';
 import { MetacriticGameResponse } from '@/types/metacritic';
 import { Game } from '@/types/game';
-import { libraryStore } from '@/services/library-store';
 import { useLibrary, extractCachedMeta } from '@/hooks/useGameStore';
+import { libraryStore } from '@/services/library-store';
+import { customGameStore } from '@/services/custom-game-store';
+import { GameDialogInitialEntry } from '@/components/game-dialog';
 import { useToast } from '@/components/ui/toast';
 import { getRepackLinkForGame } from '@/services/fitgirl-service';
 import { steamService } from '@/services/steam-service';
@@ -126,7 +128,7 @@ function epicToSteamDetails(
 
   // ── Store URL ─────────────────────────────────────────────────────────
   const epicStoreUrl = game.epicSlug
-    ? `https://store.epicgames.com/p/${game.epicSlug}`
+    ? `https://store.epicgames.com/en-US/p/${game.epicSlug}`
     : null;
 
   return {
@@ -453,6 +455,7 @@ export function GameDetailsPage() {
     : null;
   const isSteamGame = gameId?.startsWith('steam-') ?? false;
   const isEpicGame = gameId?.startsWith('epic-') ?? false;
+  const isCustomGame = gameId?.startsWith('custom-') ?? false;
   const appId = isSteamGame ? parseInt(gameId!.slice(6), 10) : null;
 
   const [details, setDetails] = useState<SteamAppDetails | null>(null);
@@ -536,17 +539,45 @@ export function GameDetailsPage() {
     wasInLibraryOnLoad.current = null;
   }, [gameId]);
 
-  const showProgressTabs = gameInLibrary && wasInLibraryOnLoad.current === true;
+  const showProgressTabs = isCustomGame || (gameInLibrary && wasInLibraryOnLoad.current === true);
   
-  // Dialog state for add to library
+  // Dialog state for add to library / edit library entry
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [dialogGame, setDialogGame] = useState<Game | null>(null);
+  const [dialogInitialEntry, setDialogInitialEntry] = useState<GameDialogInitialEntry | null>(null);
   
   // Convert details to Game object for the dialog
   const createGameFromDetails = useCallback((): Game | null => {
     // Epic games: use epicGame directly
     if (epicGame) {
       return { ...epicGame, isInLibrary: gameInLibrary };
+    }
+
+    // Custom games: build from customGameStore + libraryStore
+    if (isCustomGame && gameId) {
+      const customEntry = customGameStore.getGame(gameId);
+      const libEntry = libraryStore.getEntry(gameId);
+      if (!customEntry && !libEntry) return null;
+      return {
+        id: gameId,
+        title: customEntry?.title ?? libEntry?.cachedMeta?.title ?? 'Custom Game',
+        developer: 'Custom Game',
+        publisher: '',
+        genre: libEntry?.cachedMeta?.genre ?? [],
+        platform: customEntry?.platform ?? [],
+        metacriticScore: null,
+        releaseDate: '',
+        summary: '',
+        coverUrl: libEntry?.cachedMeta?.coverUrl ?? '',
+        status: customEntry?.status ?? libEntry?.status ?? 'Want to Play',
+        priority: customEntry?.priority ?? libEntry?.priority ?? 'Medium',
+        publicReviews: customEntry?.publicReviews ?? libEntry?.publicReviews ?? '',
+        recommendationSource: customEntry?.recommendationSource ?? libEntry?.recommendationSource ?? 'Personal Discovery',
+        isCustom: true,
+        createdAt: customEntry?.addedAt ?? new Date(),
+        updatedAt: customEntry?.updatedAt ?? new Date(),
+        isInLibrary: true,
+      };
     }
 
     if (!details || !appId) return null;
@@ -576,16 +607,40 @@ export function GameDetailsPage() {
       updatedAt: new Date(),
       isInLibrary: gameInLibrary,
     };
-  }, [details, appId, epicGame, gameInLibrary]);
+  }, [details, appId, epicGame, gameInLibrary, isCustomGame, gameId]);
   
   // Handle opening the add to library dialog
+  const handleDialogOpenChange = useCallback((open: boolean) => {
+    setIsDialogOpen(open);
+    if (!open) {
+      setDialogGame(null);
+      setDialogInitialEntry(null);
+    }
+  }, []);
+
   const handleOpenLibraryDialog = useCallback(() => {
     const game = createGameFromDetails();
     if (game) {
       setDialogGame(game);
+
+      // If already in library, open in edit mode with current values pre-filled
+      if (gameId && (gameInLibrary || isCustomGame)) {
+        const libEntry = libraryStore.getEntry(gameId);
+        const customEntry = isCustomGame ? customGameStore.getGame(gameId) : null;
+        setDialogInitialEntry({
+          status: libEntry?.status ?? customEntry?.status ?? 'Want to Play',
+          priority: libEntry?.priority ?? customEntry?.priority ?? 'Medium',
+          publicReviews: libEntry?.publicReviews ?? customEntry?.publicReviews ?? '',
+          recommendationSource: libEntry?.recommendationSource ?? customEntry?.recommendationSource ?? 'Personal Discovery',
+          executablePath: libEntry?.executablePath ?? customEntry?.executablePath,
+        });
+      } else {
+        setDialogInitialEntry(null);
+      }
+
       setIsDialogOpen(true);
     }
-  }, [createGameFromDetails]);
+  }, [createGameFromDetails, gameId, gameInLibrary, isCustomGame]);
   
   // Handle saving library entry from dialog
   const handleSaveLibraryEntry = useCallback((gameData: Partial<Game> & { executablePath?: string }) => {
@@ -620,9 +675,12 @@ export function GameDetailsPage() {
     
     setIsDialogOpen(false);
     setDialogGame(null);
+    setDialogInitialEntry(null);
 
     if (isNewAdd) {
       toastSuccess(`${gameName} added to your library!`);
+    } else {
+      toastSuccess(`${gameName} updated successfully`);
     }
   }, [gameId, gameInLibrary, addToLibrary, updateEntry, details, epicGame, toastSuccess]);
 
@@ -663,6 +721,61 @@ export function GameDetailsPage() {
       setPlayerCount(null);
 
       try {
+        // --- Custom Games (no API calls needed) ---
+        if (isCustomGame) {
+          const customEntry = customGameStore.getGame(gameId);
+          const libEntry = libraryStore.getEntry(gameId);
+
+          if (!customEntry && !libEntry) {
+            if (isMounted) setError('Custom game not found');
+            return;
+          }
+
+          const title = customEntry?.title ?? libEntry?.cachedMeta?.title ?? 'Custom Game';
+          const platforms = customEntry?.platform ?? [];
+
+          // Build a minimal SteamAppDetails-compatible object
+          const customDetails: SteamAppDetails = {
+            type: 'game',
+            name: title,
+            steam_appid: 0,
+            required_age: 0,
+            is_free: false,
+            detailed_description: '',
+            about_the_game: '',
+            short_description: '',
+            supported_languages: '',
+            header_image: libEntry?.cachedMeta?.coverUrl ?? '',
+            capsule_image: '',
+            capsule_imagev5: '',
+            website: null,
+            developers: ['Custom Game'],
+            publishers: [],
+            platforms: {
+              windows: platforms.some(p => /win|pc/i.test(p)),
+              mac: platforms.some(p => /mac|osx/i.test(p)),
+              linux: platforms.some(p => /linux/i.test(p)),
+            },
+            categories: [],
+            genres: (libEntry?.cachedMeta?.genre ?? []).map((g, i) => ({ id: String(i), description: g })),
+            screenshots: [],
+            movies: [],
+            release_date: {
+              coming_soon: false,
+              date: customEntry?.addedAt
+                ? new Date(customEntry.addedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                : 'Custom Game',
+            },
+            pc_requirements: {},
+          };
+
+          if (isMounted) {
+            setDetails(customDetails);
+            setLoading(false);
+          }
+          return;
+        }
+
         // --- Step 0: Look up from prefetch store (instant, no API call) ---
         const prefetched = findGameById(gameId);
 
@@ -892,7 +1005,7 @@ export function GameDetailsPage() {
       isMounted = false;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameId, isEpicGame, appId]);
+  }, [gameId, isEpicGame, isCustomGame, appId]);
 
   // Fetch recommendations (asynchronously, after main content)
   // Use a boolean gate (!!details) instead of the object reference so that
@@ -1544,15 +1657,15 @@ export function GameDetailsPage() {
         )}
       </div>
       
-      {/* Library Dialog */}
+      {/* Library Dialog — Add or Edit */}
       <GameDialog
         open={isDialogOpen}
-        onOpenChange={setIsDialogOpen}
+        onOpenChange={handleDialogOpenChange}
         game={dialogGame}
         onSave={handleSaveLibraryEntry}
-        currentExecutablePath={gameId ? libraryStore.getEntry(gameId)?.executablePath : undefined}
         genres={dialogGenres}
         platforms={dialogPlatforms}
+        initialEntry={dialogInitialEntry}
       />
     </div>
   );
@@ -2065,42 +2178,6 @@ const GameDetailsContent = memo(function GameDetailsContent({
                 </div>
               )}
 
-              {/* Cost Per Hour — only shown when game is in library with hoursPlayed > 0 */}
-              {gameInLibrary && gameId && (() => {
-                const libEntry = libraryStore.getEntry(gameId);
-                const hours = libEntry?.hoursPlayed ?? 0;
-                if (hours <= 0) return null;
-
-                const isFree = details.is_free;
-                const priceInCents = details.price_overview?.final;
-
-                if (isFree) {
-                  return (
-                    <div className="flex items-center justify-between p-3 rounded-lg bg-green-500/10 border border-green-500/20">
-                      <span className="text-sm text-white/60">Cost / Hour</span>
-                      <Badge className="bg-green-600 hover:bg-green-700">Free</Badge>
-                    </div>
-                  );
-                }
-
-                if (priceInCents && priceInCents > 0) {
-                  const costPerHour = (priceInCents / 100) / hours;
-                  const formatted = `$${costPerHour.toFixed(2)}/hr`;
-                  const colorClass =
-                    costPerHour < 1 ? 'bg-green-600' :
-                    costPerHour < 5 ? 'bg-yellow-600' :
-                    'bg-red-600';
-                  return (
-                    <div className="flex items-center justify-between p-3 rounded-lg bg-white/5 border border-white/10">
-                      <span className="text-sm text-white/60">Cost / Hour</span>
-                      <Badge className={cn(colorClass, 'hover:opacity-80')}>{formatted}</Badge>
-                    </div>
-                  );
-                }
-
-                return null;
-              })()}
-
               {/* Add to Library / Edit Library Entry */}
               <Button
                 onClick={handleOpenLibraryDialog}
@@ -2127,13 +2204,12 @@ const GameDetailsContent = memo(function GameDetailsContent({
               )}
 
               {/* Primary store link */}
-              {isEpicPrimary ? (
+              {isEpicPrimary && epicGame.epicSlug ? (
                 <Button
                   variant="outline"
                   className="w-full"
                   onClick={() => {
-                    const slug = epicGame.epicNamespace;
-                    openExternalUrl(`https://store.epicgames.com/p/${slug || details.name.toLowerCase().replace(/\s+/g, '-')}`);
+                    openExternalUrl(`https://store.epicgames.com/en-US/p/${epicGame.epicSlug}`);
                   }}
                 >
                   <SiEpicgames className="w-4 h-4 mr-2" />
@@ -2153,11 +2229,10 @@ const GameDetailsContent = memo(function GameDetailsContent({
               ) : null}
 
               {/* Cross-store: Also on the other store */}
-              {crossStoreGame?.store === 'epic' && crossStoreGame.epicNamespace && (
+              {crossStoreGame?.store === 'epic' && crossStoreGame.epicSlug && (
                 <>
                   <Button variant="outline" className="w-full" onClick={() => {
-                    const slug = crossStoreGame.epicNamespace;
-                    openExternalUrl(`https://store.epicgames.com/p/${slug || details.name.toLowerCase().replace(/\s+/g, '-')}`);
+                    openExternalUrl(`https://store.epicgames.com/en-US/p/${crossStoreGame.epicSlug}`);
                   }}>
                     <SiEpicgames className="w-4 h-4 mr-2" />Also on Epic Games<ExternalLink className="w-3 h-3 ml-2" />
                   </Button>

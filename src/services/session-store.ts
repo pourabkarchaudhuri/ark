@@ -15,7 +15,7 @@ interface StoredSessionData {
  * Each session records when a game's executable was running, how long the
  * user actively played (minus idle time), and the idle time detected.
  *
- * This data powers the cost-per-hour analysis and enriches the Journey view.
+ * This data enriches the Journey view with play-time analytics.
  */
 class SessionStore {
   private entries: GameSession[] = [];

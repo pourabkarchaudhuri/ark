@@ -4,6 +4,37 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.26] - 2026-02-09
+
+### Added
+- **Release Calendar Overhaul** — Complete rework with 8 new features: "My Radar" filter (library-only toggle), Week and Agenda views with virtualised lists, countdown chips showing days until release, genre/platform quick-filter chips, heat-map density dots on calendar cells, one-click "Add to Library" from any game tile, a "This Week" banner highlighting imminent releases, and a multi-month mini-map strip for fast navigation.
+- **Game Details for Custom Games** — Custom games (`custom-*` IDs) now open the full `/game/:id` details page with hero section, My Progress tab, and Game Details tab instead of a limited modal. The page builds a minimal details view from `customGameStore` and `libraryStore` without any API calls.
+- **Edit Library Entry Dialog** — `GameDialog` now supports an edit mode via an `initialEntry` prop. When editing, the dialog pre-fills status, priority, notes, discovery source, and executable path from the existing library entry, auto-expands the advanced section if any advanced field is populated, and shows "Edit Library Entry" / "Save Changes" instead of "Add to Library".
+- **Dashboard Filter Badge Redesign** — Active filter badge in Browse view now shows only the filter icon and count (e.g., filter icon + "1") for a more compact display.
+- **Matching Percentage Indicator** — The "matching" count in Browse view is now a circular progress bar with a percentage label and a tooltip showing the full matching numbers.
+
+### Changed
+- **Consistent Edit Entry Flow** — Right-clicking any game card (Steam, Epic, or custom) and selecting "Edit Entry" now opens the same `GameDialog` in edit mode, pre-filled with the current library values. Previously, it opened a separate progress-only dialog.
+- **Custom Game Card Navigation** — Clicking a custom game card now navigates to `/game/:id` (the full game details page with My Progress) instead of opening a modal. This matches the behavior of Steam and Epic game cards.
+- **Journey View Navigation** — Custom game cards in the Journey timeline now navigate to `/game/:id` instead of opening a modal, consistent with store game behavior.
+
+### Fixed
+- **Release Calendar Toast Provider** — Fixed `useToast must be used within a ToastProvider` crash when the calendar's one-click-add feature was used.
+- **Epic Game Store Badge** — Fixed "View on Epic Games" link not rendering for Epic-primary games when `epicSlug` metadata was available.
+- **Custom Game Click Handler** — Removed the custom game special-case in `GameCard.handleCardClick` that was inconsistent with the unified navigation model.
+
+### Performance
+- **LazyFadeImage Stale State** — `loaded`, `attempt`, and `errored` states now reset synchronously via `useRef` comparison when the `src` prop changes, preventing stale fade-in artifacts.
+- **Eliminated Double Library Subscription** — Removed redundant `useLibrary()` hook from the calendar; direct `libraryStore` calls avoid an extra subscription and internal re-render loop.
+- **Toast Context Ref** — Stored `useToast()` context in a `useRef` so toast-array state changes don't trigger calendar re-renders.
+- **GameTile Memo Dependencies** — Narrowed `fallbackChain` `useMemo` deps from `[game]` to `[game.id, game.image]` to prevent unnecessary recomputations.
+- **Module-Level Constants** — Moved `COMING_SOON_CAP` and `VIEW_TOGGLE_OPTIONS` out of the component body to avoid re-allocation on every render.
+- **AgendaGameRow Extraction** — Extracted virtualised agenda row rendering from an inline IIFE into a dedicated `memo` component, enabling React to skip unchanged rows.
+- **Stable Callback Refs** — Wrapped `onSwitchToBrowse` (dashboard → JourneyView) and `onOpenChange` (game-details → GameDialog) in `useCallback` to prevent memo-busting re-renders.
+
+### Removed
+- **EditProgressDialog from Dashboard** — The standalone edit progress modal is no longer opened from the dashboard. All edit actions route through `GameDialog` in edit mode, and progress tracking remains on the game details page.
+
 ## [1.0.24] - 2026-02-09
 
 ### Added

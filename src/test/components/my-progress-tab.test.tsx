@@ -24,6 +24,15 @@ vi.mock('@/services/library-store', () => ({
   },
 }));
 
+// Mock customGameStore (used by MyProgressTab for custom-* game IDs)
+vi.mock('@/services/custom-game-store', () => ({
+  customGameStore: {
+    getGame: vi.fn(),
+    updateGame: vi.fn(),
+    subscribe: vi.fn(() => () => {}),
+  },
+}));
+
 const mockLibraryEntry = {
   gameId: 'steam-730',
   steamAppId: 730,

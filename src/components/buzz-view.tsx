@@ -72,12 +72,25 @@ function BuzzFadeImage({
   className?: string;
   onError?: () => void;
 }) {
-  const [loaded, setLoaded] = useState(false);
-
-  // Reset loaded state when src changes (story navigation)
-  useEffect(() => {
-    setLoaded(false);
+  // Check if the image is already in the browser cache (e.g. preloaded).
+  // If so, skip the fade-in and show it immediately.
+  const isCached = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    const img = new Image();
+    img.src = src;
+    return img.complete && img.naturalWidth > 0;
   }, [src]);
+
+  const [loaded, setLoaded] = useState(isCached);
+
+  // Reset loaded state when src changes — but stay true if already cached
+  useEffect(() => {
+    if (isCached) {
+      setLoaded(true);
+    } else {
+      setLoaded(false);
+    }
+  }, [src, isCached]);
 
   return (
     <img
@@ -430,7 +443,7 @@ const StoryCard = forwardRef<HTMLDivElement, { item: NewsItem; direction: number
       animate="center"
       exit="exit"
       transition={{ duration: 0.3, ease: [0.32, 0.72, 0, 1] }}
-      className="absolute inset-0"
+      className="absolute inset-0 bg-black"
     >
       {/* Background image */}
       <BuzzFadeImage

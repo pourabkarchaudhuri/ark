@@ -155,6 +155,8 @@ export interface EpicCatalogItem {
   urlSlug?: string;
   url?: string;
   productSlug?: string;
+  offerMappings?: Array<{ pageSlug: string; pageType: string }>;
+  catalogNs?: { mappings?: Array<{ pageSlug: string; pageType: string }> };
   price?: {
     totalPrice: {
       discountPrice: number;
@@ -219,8 +221,19 @@ query searchStoreQuery($keyword: String!, $count: Int, $locale: String, $country
         }
         effectiveDate
         developer
+        url
         urlSlug
         productSlug
+        offerMappings {
+          pageSlug
+          pageType
+        }
+        catalogNs {
+          mappings(pageType: "productHome") {
+            pageSlug
+            pageType
+          }
+        }
         seller {
           name
         }
@@ -284,8 +297,19 @@ query catalogQuery($namespace: String!, $id: String!, $locale: String, $country:
       }
       effectiveDate
       developer
+      url
       urlSlug
       productSlug
+      offerMappings {
+        pageSlug
+        pageType
+      }
+      catalogNs {
+        mappings(pageType: "productHome") {
+          pageSlug
+          pageType
+        }
+      }
       seller {
         name
       }
@@ -339,8 +363,19 @@ query browseStoreQuery($count: Int, $start: Int, $locale: String, $country: Stri
         }
         effectiveDate
         developer
+        url
         urlSlug
         productSlug
+        offerMappings {
+          pageSlug
+          pageType
+        }
+        catalogNs {
+          mappings(pageType: "productHome") {
+            pageSlug
+            pageType
+          }
+        }
         seller {
           name
         }

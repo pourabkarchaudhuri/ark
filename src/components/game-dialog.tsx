@@ -19,9 +19,17 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { Library, Plus, ChevronDown, ChevronUp, FolderOpen, X } from 'lucide-react';
-
+import { Plus, Library, ChevronDown, ChevronUp, FolderOpen, X } from 'lucide-react';
 interface GameDialogSaveData extends Partial<Game> {
+  executablePath?: string;
+}
+
+/** Pre-fill data for edit mode. When provided, the dialog shows "Edit Library Entry" instead of "Add to Library". */
+export interface GameDialogInitialEntry {
+  status: GameStatus;
+  priority: GamePriority;
+  publicReviews: string;
+  recommendationSource: string;
   executablePath?: string;
 }
 
@@ -32,8 +40,8 @@ interface GameDialogProps {
   onSave: (game: GameDialogSaveData) => void;
   genres: string[];
   platforms: string[];
-  /** Current executablePath from library entry (only set when editing) */
-  currentExecutablePath?: string;
+  /** When provided, dialog opens in edit mode with these values pre-filled. */
+  initialEntry?: GameDialogInitialEntry | null;
 }
 
 const statusOptions: GameStatus[] = [
@@ -169,7 +177,7 @@ export function GameDialog({
   onOpenChange,
   game,
   onSave,
-  currentExecutablePath,
+  initialEntry,
 }: GameDialogProps) {
   const [formData, setFormData] = useState({
     status: 'Want to Play' as GameStatus,
@@ -180,37 +188,39 @@ export function GameDialog({
   const [executablePath, setExecutablePath] = useState<string | undefined>(undefined);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  const isEditing = game?.isInLibrary ?? false;
+  const isEditing = !!initialEntry;
 
-  // Reset form when dialog opens/closes or game changes
+  // Reset form when dialog opens/closes or game changes.
+  // In edit mode, pre-fill from initialEntry; otherwise reset to defaults.
   useEffect(() => {
-    if (open && game) {
-      setFormData({
-        status: game.status || 'Want to Play',
-        priority: game.priority || 'Medium',
-        publicReviews: game.publicReviews || '',
-        recommendationSource: game.recommendationSource || 'Personal Discovery',
-      });
-      setExecutablePath(currentExecutablePath);
-      // Show advanced options if editing and any advanced field has data
-      const hasAdvancedData = Boolean(
-        (game.priority && game.priority !== 'Medium') ||
-        game.publicReviews ||
-        (game.recommendationSource && game.recommendationSource !== 'Personal Discovery') ||
-        currentExecutablePath
-      );
-      setShowAdvanced(isEditing && hasAdvancedData);
-    } else if (open) {
-      setFormData({
-        status: 'Want to Play',
-        priority: 'Medium',
-        publicReviews: '',
-        recommendationSource: 'Personal Discovery',
-      });
-      setExecutablePath(undefined);
-      setShowAdvanced(false);
+    if (open) {
+      if (initialEntry) {
+        setFormData({
+          status: initialEntry.status,
+          priority: initialEntry.priority,
+          publicReviews: initialEntry.publicReviews,
+          recommendationSource: initialEntry.recommendationSource,
+        });
+        setExecutablePath(initialEntry.executablePath);
+        // Auto-expand advanced section if any advanced field is populated
+        const hasAdvanced =
+          initialEntry.priority !== 'Medium' ||
+          !!initialEntry.publicReviews ||
+          !!initialEntry.executablePath ||
+          (initialEntry.recommendationSource && initialEntry.recommendationSource !== 'Personal Discovery');
+        setShowAdvanced(!!hasAdvanced);
+      } else {
+        setFormData({
+          status: 'Want to Play',
+          priority: 'Medium',
+          publicReviews: '',
+          recommendationSource: 'Personal Discovery',
+        });
+        setExecutablePath(undefined);
+        setShowAdvanced(false);
+      }
     }
-  }, [game, open, isEditing, currentExecutablePath]);
+  }, [game, open, initialEntry]);
 
   const handleSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
@@ -247,14 +257,10 @@ export function GameDialog({
             ) : (
               <Plus className="h-5 w-5 text-fuchsia-400" />
             )}
-            <DialogTitle>
-              {isEditing ? 'Edit Library Entry' : 'Add to Library'}
-            </DialogTitle>
+            <DialogTitle>{isEditing ? 'Edit Library Entry' : 'Add to Library'}</DialogTitle>
           </div>
           <DialogDescription>
-            {isEditing 
-              ? 'Update your progress and notes for this game.' 
-              : 'Set your preferences for tracking this game.'}
+            {isEditing ? 'Update your tracking preferences for this game.' : 'Set your preferences for tracking this game.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -435,7 +441,7 @@ export function GameDialog({
               type="submit"
               className="bg-fuchsia-500 hover:bg-fuchsia-600 text-white"
             >
-              {isEditing ? 'Update Entry' : 'Add to Library'}
+              {isEditing ? 'Save Changes' : 'Add to Library'}
             </Button>
           </DialogFooter>
         </form>

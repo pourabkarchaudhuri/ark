@@ -155,10 +155,12 @@ function getOtherLinks(websites?: { url: string; category: number }[]) {
 function StoreLinksSection({ 
   websites, 
   steamAppId,
+  epicSlug,
   epicNamespace,
 }: { 
   websites?: { url: string; category: number }[]; 
   steamAppId?: number;
+  epicSlug?: string;
   epicNamespace?: string;
 }) {
   const storeLinks = getStoreLinks(websites);
@@ -171,10 +173,11 @@ function StoreLinksSection({
     ? { url: `https://store.steampowered.com/app/${steamAppId}`, category: 13, ...WEBSITE_CATEGORIES[13] }
     : null;
 
-  // If we have an Epic namespace but no Epic link in websites, add one
+  // If we have an Epic slug/namespace but no Epic link in websites, add one
   const hasEpicLink = storeLinks.some(l => l.category === 16);
-  const epicLink = epicNamespace && !hasEpicLink
-    ? { url: `https://store.epicgames.com/p/${epicNamespace}`, category: 16, ...WEBSITE_CATEGORIES[16] }
+  const epicStoreSlug = epicSlug || epicNamespace;
+  const epicLink = epicStoreSlug && !hasEpicLink
+    ? { url: `https://store.epicgames.com/en-US/p/${epicStoreSlug}`, category: 16, ...WEBSITE_CATEGORIES[16] }
     : null;
   
   const allStoreLinks = [
@@ -594,7 +597,7 @@ export function GameDetailPanel({
                 
                 {/* Store Links */}
                 {game.websites && game.websites.length > 0 && (
-                  <StoreLinksSection websites={game.websites} steamAppId={game.steamAppId} epicNamespace={game.epicNamespace} />
+                  <StoreLinksSection websites={game.websites} steamAppId={game.steamAppId} epicSlug={game.epicSlug} epicNamespace={game.epicNamespace} />
                 )}
 
                 {/* Storyline (expandable) */}

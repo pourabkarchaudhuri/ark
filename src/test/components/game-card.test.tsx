@@ -396,9 +396,9 @@ describe('GameCard', () => {
   });
 
   describe('Card Click', () => {
-    it('calls onClick when card is clicked for custom games', () => {
+    it('navigates to game details for custom games (same as store games)', () => {
       const onClick = vi.fn();
-      // Create a custom game
+      // Create a custom game — custom games now navigate to /game/{id} like all others
       const customGame = { ...mockGame, id: 'custom-1', store: 'custom' as const, isCustom: true, steamAppId: undefined };
       render(
         <GameCard
@@ -412,7 +412,8 @@ describe('GameCard', () => {
       const card = screen.getByText('Test Game').closest('div[class*="cursor-pointer"]');
       if (card) {
         fireEvent.click(card);
-        expect(onClick).toHaveBeenCalled();
+        // onClick should NOT be called — custom games navigate like store games now
+        expect(onClick).not.toHaveBeenCalled();
       }
     });
 

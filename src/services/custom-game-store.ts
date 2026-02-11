@@ -218,6 +218,7 @@ class CustomGameStore {
     journeyStore.syncProgress(id, {
       status: updated.status,
       hoursPlayed: updated.hoursPlayed ?? 0,
+      rating: updated.rating ?? 0,
     });
 
     return updated;
@@ -262,9 +263,9 @@ class CustomGameStore {
       coverUrl: undefined,
       screenshots: [],
       status: entry.status,
-      priority: 'Medium',
-      publicReviews: '',
-      recommendationSource: '',
+      priority: entry.priority || 'Medium',
+      publicReviews: entry.publicReviews || '',
+      recommendationSource: entry.recommendationSource || '',
       createdAt: entry.addedAt,
       updatedAt: entry.updatedAt,
       isInLibrary: true,

@@ -7,9 +7,9 @@ import { Game, GameStatus } from '@/types/game';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { GameDialog } from '@/components/game-dialog';
+import { GameDialog, GameDialogInitialEntry } from '@/components/game-dialog';
 import { CustomGameDialog } from '@/components/custom-game-dialog';
-import { CustomGameProgressDialog } from '@/components/custom-game-progress-dialog';
+// EditProgressDialog removed — edits now route through GameDialog in edit mode
 import { GameCard } from '@/components/game-card';
 import { SkeletonGrid } from '@/components/game-card-skeleton';
 import { VirtualGameGrid } from '@/components/virtual-game-grid';
@@ -112,8 +112,6 @@ export function Dashboard() {
   // Custom game dialog state
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
   
-  // Custom game progress dialog state
-  const [customProgressGameId, setCustomProgressGameId] = useState<string | null>(null);
   
   // AI Chat panel state
   const [isAIChatOpen, setIsAIChatOpen] = useState(false);
@@ -164,6 +162,11 @@ export function Dashboard() {
     return steamGames;
   }, [viewMode, steamGames, customGames, libraryGames]);
   
+  // Ref mirror of currentGames — lets stable callbacks (handleCardEdit etc.)
+  // find custom / library games without being recreated on every data change.
+  const currentGamesRef = useRef<Game[]>([]);
+  currentGamesRef.current = currentGames;
+
   const currentLoading = viewMode === 'browse' ? steamLoading : libraryLoading;
   const currentError = steamError;
   // Epic store filter: Epic data is a finite curated set (new releases + coming
@@ -198,6 +201,7 @@ export function Dashboard() {
 
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingGame, setEditingGame] = useState<Game | null>(null);
+  const [editInitialEntry, setEditInitialEntry] = useState<GameDialogInitialEntry | null>(null);
   const [sortBy, setSortBy] = useState<SortOption>('releaseDate');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
@@ -211,8 +215,8 @@ export function Dashboard() {
     game: null,
   });
   
-  // Clear library confirmation state
-  const [clearLibraryConfirm, setClearLibraryConfirm] = useState(false);
+  // Clear library confirmation state — two-step: step 1 = first "are you sure", step 2 = final confirmation
+  const [clearLibraryStep, setClearLibraryStep] = useState<0 | 1 | 2>(0);
 
   // Determine which games to show based on mode and search
   const displayedGames = useMemo(() => {
@@ -275,7 +279,13 @@ export function Dashboard() {
           if (storeSet) {
             const directMatch = game.store && storeSet.has(game.store);
             const availMatch = game.availableOn?.some(s => storeSet.has(s));
-            if (!directMatch && !availMatch) return false;
+            // Fallback: infer store from ID prefix when both fields are missing
+            // (handles older cached data that predates the store field fix)
+            const inferredMatch = !directMatch && !availMatch
+              ? (game.id.startsWith('steam-') && storeSet.has('steam')) ||
+                (game.id.startsWith('epic-') && storeSet.has('epic'))
+              : false;
+            if (!directMatch && !availMatch && !inferredMatch) return false;
           }
           if (hideSentinel && game.comingSoon && game.releaseDate === 'Coming Soon') return false;
           return true;
@@ -392,35 +402,8 @@ export function Dashboard() {
   // Handle adding game to library
   const handleAddToLibrary = useCallback((game: Game) => {
     setEditingGame(game);
+    setEditInitialEntry(null); // Add mode — no initial values
     setIsDialogOpen(true);
-  }, []);
-
-  // Handle editing library entry — custom games open their dedicated progress dialog
-  const handleEdit = useCallback((game: Game) => {
-    if (game.isCustom || game.id.startsWith('custom-')) {
-      setCustomProgressGameId(game.id);
-      return;
-    }
-    setEditingGame(game);
-    setIsDialogOpen(true);
-  }, []);
-
-  // Handle clicking a custom game card — opens progress dialog.
-  // Direct callback for components that receive (gameId) => void (e.g. JourneyView).
-  const handleCustomGameClick = useCallback((gameId: string) => {
-    setCustomProgressGameId(gameId);
-  }, []);
-
-  // Ref-backed map so each custom game gets a *stable* zero-arg callback reference
-  // that won't break React.memo comparisons on GameCard.
-  const customClickHandlersRef = useRef<Map<string, () => void>>(new Map());
-  const getCustomGameClickHandler = useCallback((gameId: string): () => void => {
-    let handler = customClickHandlersRef.current.get(gameId);
-    if (!handler) {
-      handler = () => setCustomProgressGameId(gameId);
-      customClickHandlersRef.current.set(gameId, handler);
-    }
-    return handler;
   }, []);
 
   // Handle quick status change from card badge
@@ -469,6 +452,7 @@ export function Dashboard() {
       }
       setIsDialogOpen(false);
       setEditingGame(null);
+      setEditInitialEntry(null);
     } catch (err) {
       showError('Failed to save. Please try again.');
     }
@@ -480,30 +464,54 @@ export function Dashboard() {
   }, []);
 
   // ------ Stable gameId-based callbacks (never re-created → GameCard memo works) ------
+  // Helper: find a game across ALL sources (browse + library + custom).
+  // allGamesRef has Steam/Epic browse games; currentGamesRef has the active
+  // view's data (library + custom games in library mode, browse in browse mode).
+  const resolveGame = useCallback((gameId: string): Game | undefined => {
+    return allGamesRef.current.find(g => g.id === gameId)
+      || currentGamesRef.current.find(g => g.id === gameId);
+  }, [allGamesRef]);
+
   const handleCardEdit = useCallback((gameId: string) => {
-    const game = allGamesRef.current.find(g => g.id === gameId);
-    if (game) handleEdit(game);
-  }, [handleEdit, allGamesRef]);
+    const game = resolveGame(gameId);
+    if (!game) return;
+
+    // Build initialEntry from library store or custom game store
+    const libEntry = libraryStore.getEntry(gameId);
+    const customEntry = gameId.startsWith('custom-') ? customGameStore.getGame(gameId) : null;
+
+    const entry: GameDialogInitialEntry = {
+      status: libEntry?.status ?? customEntry?.status ?? 'Want to Play',
+      priority: libEntry?.priority ?? customEntry?.priority ?? 'Medium',
+      publicReviews: libEntry?.publicReviews ?? customEntry?.publicReviews ?? '',
+      recommendationSource: libEntry?.recommendationSource ?? customEntry?.recommendationSource ?? 'Personal Discovery',
+      executablePath: libEntry?.executablePath ?? customEntry?.executablePath,
+    };
+
+    setEditingGame(game);
+    setEditInitialEntry(entry);
+    setIsDialogOpen(true);
+  }, [resolveGame]);
 
   const handleCardDelete = useCallback((gameId: string) => {
-    const game = allGamesRef.current.find(g => g.id === gameId);
+    const game = resolveGame(gameId);
     if (game) handleDeleteClick(game);
-  }, [handleDeleteClick, allGamesRef]);
+  }, [handleDeleteClick, resolveGame]);
 
   const handleCardAddToLibrary = useCallback((gameId: string) => {
-    const game = allGamesRef.current.find(g => g.id === gameId);
+    const game = resolveGame(gameId);
     if (game) handleAddToLibrary(game);
-  }, [handleAddToLibrary, allGamesRef]);
+  }, [handleAddToLibrary, resolveGame]);
 
   const handleCardRemoveFromLibrary = useCallback((gameId: string) => {
-    const game = allGamesRef.current.find(g => g.id === gameId);
+    const game = resolveGame(gameId);
     if (game) handleDeleteClick(game);
-  }, [handleDeleteClick, allGamesRef]);
+  }, [handleDeleteClick, resolveGame]);
 
   const handleCardStatusChange = useCallback((gameId: string, status: GameStatus) => {
-    const game = allGamesRef.current.find(g => g.id === gameId);
+    const game = resolveGame(gameId);
     if (game) handleStatusChange(game, status);
-  }, [handleStatusChange, allGamesRef]);
+  }, [handleStatusChange, resolveGame]);
 
   // Stable render callback for VirtualGameGrid
   const showRankInGrid = filters.category === 'trending';
@@ -515,11 +523,6 @@ export function Dashboard() {
         hideRank={!showRankInGrid}
         onEdit={handleCardEdit}
         onDelete={handleCardDelete}
-        onClick={
-          (game.isCustom || game.id.startsWith('custom-'))
-            ? getCustomGameClickHandler(game.id)
-            : undefined
-        }
         isInLibrary={game.isInLibrary}
         isPlayingNow={game.steamAppId ? isPlayingNow(game.steamAppId) : false}
         onAddToLibrary={handleCardAddToLibrary}
@@ -551,8 +554,15 @@ export function Dashboard() {
     setDeleteConfirm({ open: false, game: null });
   }, [deleteConfirm.game, removeFromLibrary, removeCustomGame, success, showError]);
 
-  // Handle clearing entire library (including custom games)
-  const handleClearLibraryConfirm = useCallback(() => {
+  // Handle clearing entire library — two-step confirmation.
+  // Step 1 closes itself immediately and opens step 2 after a brief delay
+  // so the first dialog can animate out before the second appears.
+  const handleClearLibraryStep1Confirm = useCallback(() => {
+    setClearLibraryStep(0);
+    setTimeout(() => setClearLibraryStep(2), 200);
+  }, []);
+
+  const handleClearLibraryFinalConfirm = useCallback(() => {
     try {
       const libraryCount = libraryStore.getSize();
       const customCount = customGameStore.getCount();
@@ -563,13 +573,17 @@ export function Dashboard() {
     } catch (err) {
       showError('Failed to clear library. Please try again.');
     }
-    setClearLibraryConfirm(false);
+    setClearLibraryStep(0);
   }, [success, showError]);
 
   // Stable callbacks for dialog/panel open-change handlers.
   // Avoids creating new closures on every Dashboard render.
-  const handleProgressDialogChange = useCallback((open: boolean) => {
-    if (!open) setCustomProgressGameId(null);
+  const handleGameDialogChange = useCallback((open: boolean) => {
+    setIsDialogOpen(open);
+    if (!open) {
+      setEditingGame(null);
+      setEditInitialEntry(null);
+    }
   }, []);
 
   const handleDeleteDialogChange = useCallback((open: boolean) => {
@@ -737,7 +751,7 @@ export function Dashboard() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setClearLibraryConfirm(true)}
+                onClick={() => setClearLibraryStep(1)}
                 className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/20"
               >
                 <Trash2 className="h-3 w-3 mr-1" />
@@ -748,33 +762,45 @@ export function Dashboard() {
             {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
               <>
                 <p className="text-sm text-white/60 flex items-center gap-1.5">
-                  {isBrowseSyncing ? (
-                    <>
-                      <svg className="h-3 w-3 animate-spin text-fuchsia-400 shrink-0" viewBox="0 0 24 24" fill="none">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                      <span className="text-fuchsia-400 font-medium">Syncing</span>{' '}
-                      <span className="text-white font-medium">{sortedGames.length.toLocaleString()}</span>
-                      {browseTotalCount > 0 && browseTotalCount !== sortedGames.length && (
-                        <> / <span className="text-white font-medium">{browseTotalCount.toLocaleString()}</span>{' '}
-                        <span className="text-white/40">({Math.round((sortedGames.length / browseTotalCount) * 100)}%)</span></>
-                      )}
-                      {' '}games
-                    </>
-                  ) : (
+                  {/* Syncing spinner — only visible during background refresh */}
+                  {isBrowseSyncing && (
+                    <svg className="h-3 w-3 animate-spin text-fuchsia-400 shrink-0" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                  )}
+                  {viewMode === 'library' ? (
                     <><span className="text-white font-medium">{sortedGames.length.toLocaleString()}</span> games</>
+                  ) : (
+                    <>
+                      <span className="text-white font-medium">
+                        {(browseTotalCount > 0 ? browseTotalCount : sortedGames.length).toLocaleString()}
+                      </span> games
+                      {hasActiveFilters && sortedGames.length !== browseTotalCount && browseTotalCount > 0 && (() => {
+                        const pct = Math.round((sortedGames.length / browseTotalCount) * 100);
+                        const r = 7; const c = 2 * Math.PI * r; const dash = (pct / 100) * c;
+                        return (
+                          <span className="inline-flex items-center gap-1 text-white/50" title={`${sortedGames.length.toLocaleString()} of ${browseTotalCount.toLocaleString()} matching`}>
+                            <svg width="18" height="18" viewBox="0 0 18 18" className="shrink-0 -rotate-90">
+                              <circle cx="9" cy="9" r={r} fill="none" stroke="currentColor" strokeWidth="2" className="text-white/10" />
+                              <circle cx="9" cy="9" r={r} fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray={`${dash} ${c}`} strokeLinecap="round" className="text-fuchsia-400" />
+                            </svg>
+                            <span className="text-[11px] font-medium tabular-nums">{pct}%</span>
+                          </span>
+                        );
+                      })()}
+                    </>
                   )}
                 </p>
                 {hasActiveFilters && (
                   <div className="flex items-center gap-2">
                     <Badge 
                       variant="secondary" 
-                      className="gap-1 bg-fuchsia-500/20 text-fuchsia-400 border-fuchsia-500/30 hover:bg-fuchsia-500/30 cursor-pointer"
+                      className="gap-1 px-1.5 bg-fuchsia-500/20 text-fuchsia-400 border-fuchsia-500/30 hover:bg-fuchsia-500/30 cursor-pointer"
                       onClick={openFilters}
                     >
                       <Filter className="h-3 w-3 pointer-events-none" />
-                      {activeFilterCount} filter{activeFilterCount !== 1 ? 's' : ''} active
+                      {activeFilterCount}
                     </Badge>
                     <button
                       onClick={() => {
@@ -906,8 +932,7 @@ export function Dashboard() {
           <JourneyView
             entries={journeyEntries}
             loading={libraryLoading}
-            onSwitchToBrowse={() => setViewMode('browse')}
-            onCustomGameClick={handleCustomGameClick}
+            onSwitchToBrowse={switchToBrowse}
           />
         ) : viewMode === 'buzz' ? (
           <BuzzView />
@@ -1007,15 +1032,15 @@ export function Dashboard() {
         )}
       </main>
 
-      {/* Game Dialog - Now for library entry */}
+      {/* Game Dialog — Add or Edit library entry */}
       <GameDialog
         open={isDialogOpen}
-        onOpenChange={setIsDialogOpen}
+        onOpenChange={handleGameDialogChange}
         game={editingGame}
         onSave={handleSave}
         genres={genres}
         platforms={platforms}
-        currentExecutablePath={editingGame ? libraryStore.getEntry(editingGame.id)?.executablePath : undefined}
+        initialEntry={editInitialEntry}
       />
 
       {/* Custom Game Dialog */}
@@ -1024,15 +1049,6 @@ export function Dashboard() {
         onOpenChange={setIsCustomGameDialogOpen}
         onSave={handleCustomGameSave}
       />
-
-      {/* Custom Game Progress Dialog */}
-      {customProgressGameId !== null && (
-        <CustomGameProgressDialog
-          open={customProgressGameId !== null}
-          onOpenChange={handleProgressDialogChange}
-          gameId={customProgressGameId}
-        />
-      )}
 
       {/* Delete Confirmation Dialog */}
       <ConfirmDialog
@@ -1046,16 +1062,28 @@ export function Dashboard() {
         onConfirm={handleDeleteConfirm}
       />
 
-      {/* Clear Library Confirmation Dialog */}
+      {/* Clear Library — Step 1: Initial confirmation */}
       <ConfirmDialog
-        open={clearLibraryConfirm}
-        onOpenChange={setClearLibraryConfirm}
+        open={clearLibraryStep === 1}
+        onOpenChange={(open) => { if (!open) setClearLibraryStep(0); }}
         title="Clear Entire Library"
-        description={`Are you sure you want to remove all ${librarySize} games from your library? This action cannot be undone. Consider exporting your library first from Settings.`}
-        confirmText="Clear All"
+        description={`Are you sure you want to remove all ${librarySize} game${librarySize !== 1 ? 's' : ''} from your library? This action cannot be undone.`}
+        confirmText="Yes, Continue"
         cancelText="Cancel"
+        variant="warning"
+        onConfirm={handleClearLibraryStep1Confirm}
+      />
+
+      {/* Clear Library — Step 2: Final confirmation */}
+      <ConfirmDialog
+        open={clearLibraryStep === 2}
+        onOpenChange={(open) => { if (!open) setClearLibraryStep(0); }}
+        title="This Cannot Be Undone"
+        description={`You are about to permanently delete ${librarySize} game${librarySize !== 1 ? 's' : ''}, including all progress, ratings, and notes. Consider exporting your library from Settings first. Are you absolutely sure?`}
+        confirmText="Delete Everything"
+        cancelText="Go Back"
         variant="danger"
-        onConfirm={handleClearLibraryConfirm}
+        onConfirm={handleClearLibraryFinalConfirm}
       />
 
       {/* Scroll to Top FAB - z-60 to stay above filter sidebar (z-50) */}

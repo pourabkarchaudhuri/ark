@@ -219,13 +219,8 @@ function GameCardComponent({
   }, [game.steamAppId, game.developer, game.store]);
 
   const handleCardClick = () => {
-    // Custom games don't have store details pages
-    if (game.isCustom || game.id?.startsWith('custom-')) {
-      if (onClick) onClick();
-      return;
-    }
-
     // Navigate to game details page using the universal string ID
+    // All game types (Steam, Epic, custom) use the same /game/:id route
     if (game.id) {
       navigate(`/game/${encodeURIComponent(game.id)}`);
     } else if (onClick) {

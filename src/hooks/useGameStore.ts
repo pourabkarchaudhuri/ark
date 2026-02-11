@@ -19,6 +19,36 @@ import { detailEnricher } from '@/services/detail-enricher';
 /** Unused — kept for reference. Individual appdetails calls removed in favor of lightweight catalog cards. */
 // const CATALOG_CHUNK_SIZE = 50;
 
+// ---------------------------------------------------------------------------
+// Module-level background refresh throttle
+// ---------------------------------------------------------------------------
+// Persists across hook re-mounts (tab switches) and even app restarts via
+// localStorage.  This ensures the full browse library is NOT re-fetched on
+// every tab switch or app start — only once per BG_REFRESH_INTERVAL_MS.
+
+const BG_REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const BG_REFRESH_LS_KEY = 'ark-bg-refresh-ts';
+
+let _lastBgRefreshMs: number =
+  parseInt(localStorage.getItem(BG_REFRESH_LS_KEY) || '0', 10) || 0;
+let _bgRefreshRunning = false;
+let _catalogPreloaded = false; // catalog app-list only needs one load per session
+
+function shouldBackgroundRefresh(): boolean {
+  if (_bgRefreshRunning) return false;
+  return Date.now() - _lastBgRefreshMs > BG_REFRESH_INTERVAL_MS;
+}
+
+function markBackgroundRefreshDone(): void {
+  _lastBgRefreshMs = Date.now();
+  _bgRefreshRunning = false;
+  try {
+    localStorage.setItem(BG_REFRESH_LS_KEY, String(_lastBgRefreshMs));
+  } catch {
+    /* localStorage quota — non-critical */
+  }
+}
+
 /** Extract essential display metadata from a Game for offline caching in the library. */
 export function extractCachedMeta(game: Game): CachedGameMeta {
   return {
@@ -54,7 +84,6 @@ export function useSteamGames(category: GameCategory = 'all') {
   const [error, setError] = useState<string | null>(null);
   const isMountedRef = useRef(true);
   const genreSearchIndexRef = useRef(0);
-  const backgroundRefreshRef = useRef(false);
   const bgRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const allGamesRef = useRef<Game[]>([]);
@@ -107,6 +136,7 @@ export function useSteamGames(category: GameCategory = 'all') {
 
     const games: Game[] = chunk.map(app => ({
       id: `steam-${app.appid}`,
+      store: 'steam' as const,
       steamAppId: app.appid,
       title: app.name,
       developer: '',
@@ -181,7 +211,10 @@ export function useSteamGames(category: GameCategory = 'all') {
 
     setLoading(true);
     setError(null);
-    setDisplayCount(30); // Reset pagination on category change
+    // Don't reset displayCount to a tiny number — it will be set to the full
+    // dataset size once fetching completes. Setting it low here only matters
+    // briefly during the loading state, so 0 is safe (no stale items shown).
+    setDisplayCount(0);
     // Reset catalog refs when leaving catalog
     catalogAppListRef.current = [];
     catalogOffsetRef.current = 0;
@@ -207,6 +240,7 @@ export function useSteamGames(category: GameCategory = 'all') {
           console.log(`[useSteamGames] Fetched ${fetchedGames.length} most-played games (rank order)`);
           if (isMountedRef.current) {
             setAllGames(fetchedGames);
+            setDisplayCount(fetchedGames.length);
             setLoading(false);
           }
           return; // Early return to skip date sorting
@@ -227,18 +261,16 @@ export function useSteamGames(category: GameCategory = 'all') {
           break;
         case 'all':
         default: {
-          // Show syncing indicator from the very start of the "all" fetch
-          setIsSyncing(true);
-
-          // ---- Step 1: Use pre-fetched data from the loading screen (instant) ----
+          // ---- Step 1: Use pre-fetched / cached data (instant — no API calls) ----
           const prefetched = getPrefetchedGames();
           if (prefetched && prefetched.length > 0) {
             fetchedGames = prefetched;
-            console.log(`[useSteamGames] Using ${prefetched.length} pre-fetched games (instant)`);
+            console.log(`[useSteamGames] Using ${prefetched.length} pre-fetched games (instant, no API calls)`);
           } else {
             // Fallback: loading screen didn't prefetch (edge case / error).
             // Do a full fetch now — same logic as prefetch-store.
             console.warn('[useSteamGames] No pre-fetched data — fetching now (slow path)');
+            setIsSyncing(true);
             const [mostPlayed, newReleases, topSellers, comingSoon, epicCatalog, epicFreeGames] = await Promise.all([
               steamService.getMostPlayedGames(500),
               steamService.getNewReleases(),
@@ -255,34 +287,46 @@ export function useSteamGames(category: GameCategory = 'all') {
             fetchedGames = await dedupSortInWorker(allRawGames);
             // Cache for next time
             setPrefetchedGames(fetchedGames);
+            markBackgroundRefreshDone(); // count this as a full refresh
+            if (isMountedRef.current) setIsSyncing(false);
             console.log(`[useSteamGames] Fetched and deduped: ${fetchedGames.length} games`);
           }
 
           // ---- Step 2: Background catalog preload for infinite scroll ----
-          const catalogPromise = steamService.getAppList().then(appList => {
-            if (isMountedRef.current) {
-              catalogAppListRef.current = appList;
-              catalogListReadyRef.current = true;
-              catalogOffsetRef.current = 0;
-              setCatalogTotalCount(appList.length);
-              console.log(`[useSteamGames] Background catalog preload: ${appList.length} apps ready`);
-            }
-          }).catch(err => console.warn('[useSteamGames] Background catalog preload failed:', err));
-          void catalogPromise;
-
-          // ---- Step 3: Silent background refresh (non-blocking) ----
-          // Only if we used cached/prefetched data — refresh in background and
-          // do a single atomic swap when done. No intermediate state updates.
-          if (!prefetched || prefetched.length === 0) {
-            // Fallback path had no background refresh — clear syncing now
-            if (isMountedRef.current) setIsSyncing(false);
+          // Only load the catalog app-list once per session (it's 155K+ entries).
+          if (!_catalogPreloaded) {
+            _catalogPreloaded = true;
+            const catalogPromise = steamService.getAppList().then(appList => {
+              if (isMountedRef.current) {
+                catalogAppListRef.current = appList;
+                catalogListReadyRef.current = true;
+                catalogOffsetRef.current = 0;
+                setCatalogTotalCount(appList.length);
+                console.log(`[useSteamGames] Background catalog preload: ${appList.length} apps ready`);
+              }
+            }).catch(err => {
+              _catalogPreloaded = false; // allow retry on next mount
+              console.warn('[useSteamGames] Background catalog preload failed:', err);
+            });
+            void catalogPromise;
+          } else if (catalogListReadyRef.current) {
+            // Catalog was already loaded in a previous mount — reuse it.
+            // catalogAppListRef and catalogListReadyRef are hook-instance refs
+            // so they reset on remount; re-trigger the preload from module cache
+            // isn't needed because the ref is local. Instead, just re-mark.
           }
-          if (prefetched && prefetched.length > 0) {
+
+          // ---- Step 3: Throttled background refresh (module-level guard) ----
+          // Only fires if more than BG_REFRESH_INTERVAL_MS (1 hour) has
+          // elapsed since the last refresh. Survives tab switches (module
+          // scope) and app restarts (localStorage).  No refresh on every
+          // mount — the user sees cached data instantly.
+          if (prefetched && prefetched.length > 0 && shouldBackgroundRefresh()) {
             bgRefreshTimerRef.current = setTimeout(() => {
               bgRefreshTimerRef.current = null;
-              if (!isMountedRef.current || backgroundRefreshRef.current) return;
-              backgroundRefreshRef.current = true;
-              setIsSyncing(true);
+              if (!isMountedRef.current || _bgRefreshRunning) return;
+              _bgRefreshRunning = true;
+              if (isMountedRef.current) setIsSyncing(true);
 
               Promise.all([
                 steamService.getMostPlayedGames(500),
@@ -302,17 +346,17 @@ export function useSteamGames(category: GameCategory = 'all') {
                 // Atomic swap — single setState call, no intermediate renders
                 if (!isMountedRef.current) return;
                 setAllGames(fresh);
-                // Keep displayCount at current level (or 100 minimum) — virtual grid handles viewport
-                setDisplayCount(prev => Math.max(prev, 100));
+                // Expose full refreshed dataset — virtual grid only renders visible items
+                setDisplayCount(fresh.length);
                 setPrefetchedGames(fresh);
                 console.log(`[useSteamGames] Background refresh complete: ${fresh.length} games (atomic swap)`);
               }).catch(err => {
                 console.warn('[useSteamGames] Background refresh failed:', err);
               }).finally(() => {
-                backgroundRefreshRef.current = false;
+                markBackgroundRefreshDone();
                 if (isMountedRef.current) setIsSyncing(false);
               });
-            }, 5_000); // Start refresh 5s after initial display
+            }, 10_000); // 10s delay — let the UI settle before refreshing
           }
 
           break;
@@ -328,8 +372,11 @@ export function useSteamGames(category: GameCategory = 'all') {
       console.log(`[useSteamGames] Fetched and sorted ${fetchedGames.length} ${cat} games`);
       if (isMountedRef.current) {
         setAllGames(fetchedGames);
-        // Cap initial display — virtual grid + infinite scroll will paginate the rest
-        setDisplayCount(100);
+        // Expose the full dataset to the dashboard — the virtual grid only renders
+        // visible cards (~40), so there's no rendering cost.  Capping to a small
+        // number (e.g. 100) breaks store/genre/year filters that run AFTER the
+        // slice, causing most filtered results to be silently truncated.
+        setDisplayCount(fetchedGames.length);
       }
     } catch (err) {
       console.error('[useSteamGames] Failed to fetch games:', err);
@@ -532,7 +579,11 @@ export function useSteamGames(category: GameCategory = 'all') {
     catalogOffsetRef.current = 0;
     catalogListReadyRef.current = false;
     allCatalogActiveRef.current = false;
-    backgroundRefreshRef.current = false;
+    _catalogPreloaded = false;
+    // Reset the module-level refresh guard so manual refresh forces a re-fetch
+    _lastBgRefreshMs = 0;
+    _bgRefreshRunning = false;
+    try { localStorage.removeItem(BG_REFRESH_LS_KEY); } catch { /* ignore */ }
     fetchGames(category);
   }, [fetchGames, category]);
 

@@ -159,8 +159,27 @@ export function transformEpicGame(
     ? new Date(item.effectiveDate).getTime() > Date.now()
     : false;
 
-  // Epic slug for store URL generation (e.g. https://store.epicgames.com/p/{slug})
-  const epicSlug = item.productSlug || item.urlSlug || undefined;
+  // Epic slug for store URL generation (e.g. https://store.epicgames.com/en-US/p/{slug})
+  //
+  // Priority:
+  //   1. catalogNs.mappings pageSlug  — most reliable, set by Epic for product pages
+  //   2. offerMappings pageSlug       — same idea, offer-level mapping
+  //   3. url field                    — authoritative relative path from the API (e.g. "/p/slug")
+  //   4. productSlug                  — deprecated by Epic but still present on older titles
+  //   5. urlSlug                      — only if not a hex UUID (often useless)
+  const catalogPageSlug = item.catalogNs?.mappings?.find(
+    (m: { pageSlug: string; pageType: string }) => m.pageType === 'productHome',
+  )?.pageSlug;
+  const offerPageSlug = item.offerMappings?.find(
+    (m: { pageSlug: string; pageType: string }) => m.pageType === 'productHome',
+  )?.pageSlug;
+  // Extract slug from the `url` field (relative path like "/p/some-slug" or "/en-US/p/some-slug")
+  const urlFieldSlug = item.url?.match(/\/p\/([^/]+)/)?.[1] || undefined;
+  const cleanProductSlug = item.productSlug?.replace(/\/home$/, '') || undefined;
+  // urlSlug is only useful if it's a human-readable slug, not a UUID
+  const isUuid = /^[0-9a-f]{32}$/i.test(item.urlSlug || '');
+  const safeUrlSlug = item.urlSlug && !isUuid ? item.urlSlug : undefined;
+  const epicSlug = catalogPageSlug || offerPageSlug || urlFieldSlug || cleanProductSlug || safeUrlSlug || undefined;
 
   const game: Game = {
     id: gameId,

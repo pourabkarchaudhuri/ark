@@ -97,7 +97,6 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
       'Idle Detection — System idle time (5-minute threshold) is subtracted from sessions using Electron powerMonitor for accurate play-time reporting',
       'Playing Now Status — Live "Playing Now" badge with pulse animation appears on game cards when a tracked game\'s executable is running',
       'Executable Path Picker — Native OS file explorer dialog (Browse button) in Edit Entry to select game executables for tracking — no copy-pasting paths',
-      'Cost Per Hour Analysis — Dynamic badge on game details page shows $/hr based on Steam price and tracked play hours, color-coded green/yellow/red',
       'Session History Store — Persistent session log with import/export support, integrated with library data backup',
       'Removed "Dropped" Status — Replaced with "On Hold"; existing Dropped entries are auto-migrated on startup',
     ],
@@ -270,9 +269,9 @@ export function ChangelogModal() {
             transition={{ duration: 0.3, ease: 'easeOut' }}
             className="fixed inset-0 z-[201] flex items-center justify-center p-4 pointer-events-none"
           >
-            <div className="bg-gradient-to-b from-gray-900 to-gray-950 border border-white/10 rounded-2xl shadow-2xl max-w-2xl w-full pointer-events-auto overflow-hidden">
-              {/* Header with gradient */}
-              <div className="bg-gradient-to-r from-fuchsia-500/20 to-purple-500/20 px-6 py-4 border-b border-white/10">
+            <div className="bg-gradient-to-b from-gray-900 to-gray-950 border border-white/10 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[85vh] pointer-events-auto overflow-hidden flex flex-col">
+              {/* Header with gradient — pinned */}
+              <div className="flex-shrink-0 bg-gradient-to-r from-fuchsia-500/20 to-purple-500/20 px-6 py-4 border-b border-white/10">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="h-10 w-10 bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-fuchsia-500/30">
@@ -293,8 +292,8 @@ export function ChangelogModal() {
                 </div>
               </div>
 
-              {/* Content */}
-              <div className="px-6 py-5">
+              {/* Content — scrollable */}
+              <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
                 <ul className="space-y-3">
                   {changelogData.changes.map((change, index) => (
                     <motion.li
@@ -311,8 +310,8 @@ export function ChangelogModal() {
                 </ul>
               </div>
 
-              {/* Footer */}
-              <div className="px-6 py-4 border-t border-white/10 bg-white/5">
+              {/* Footer — pinned */}
+              <div className="flex-shrink-0 px-6 py-4 border-t border-white/10 bg-white/5">
                 <Button
                   onClick={handleClose}
                   className="w-full bg-gradient-to-r from-fuchsia-500 to-purple-600 hover:from-fuchsia-600 hover:to-purple-700 text-white font-medium"

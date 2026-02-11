@@ -1,6 +1,7 @@
 /**
  * My Progress Tab Component
- * Displays and allows editing of user's progress for a library game
+ * Unified progress / tracking interface used by ALL game types:
+ * Steam, Epic, and custom games.
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -17,13 +18,25 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { LibraryGameEntry, GameStatus, GamePriority } from '@/types/game';
+import { GameStatus, GamePriority } from '@/types/game';
 import { libraryStore } from '@/services/library-store';
+import { customGameStore } from '@/services/custom-game-store';
 import { cn, formatHours } from '@/lib/utils';
 
 interface MyProgressTabProps {
   gameId: string;
   gameName?: string; // Reserved for future use (display purposes)
+}
+
+/** Normalised shape used internally — works for both library and custom entries. */
+interface ProgressData {
+  status: GameStatus;
+  priority: GamePriority;
+  hoursPlayed: number;
+  rating: number;
+  publicReviews: string;
+  recommendationSource: string;
+  addedAt: Date;
 }
 
 const statusOptions: GameStatus[] = [
@@ -45,6 +58,74 @@ const recommendationSources = [
   'Streaming',
   'Other',
 ];
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function isCustomId(gameId: string): boolean {
+  return gameId.startsWith('custom-');
+}
+
+/** Read from the correct store and normalise into ProgressData. */
+function loadProgressData(gameId: string): ProgressData | null {
+  if (isCustomId(gameId)) {
+    const entry = customGameStore.getGame(gameId);
+    if (!entry) return null;
+    return {
+      status: entry.status,
+      priority: entry.priority || 'Medium',
+      hoursPlayed: entry.hoursPlayed ?? 0,
+      rating: entry.rating ?? 0,
+      publicReviews: entry.publicReviews ?? '',
+      recommendationSource: entry.recommendationSource || 'Personal Discovery',
+      addedAt: entry.addedAt instanceof Date ? entry.addedAt : new Date(entry.addedAt),
+    };
+  }
+
+  const entry = libraryStore.getEntry(gameId);
+  if (!entry) return null;
+  return {
+    status: entry.status,
+    priority: entry.priority,
+    hoursPlayed: entry.hoursPlayed || 0,
+    rating: entry.rating || 0,
+    publicReviews: entry.publicReviews || '',
+    recommendationSource: entry.recommendationSource || 'Personal Discovery',
+    addedAt: entry.addedAt instanceof Date ? entry.addedAt : new Date(entry.addedAt),
+  };
+}
+
+/** Persist back to the correct store. */
+function saveProgressData(
+  gameId: string,
+  data: {
+    status: GameStatus;
+    priority: GamePriority;
+    hoursPlayed: number;
+    rating: number;
+    publicReviews: string;
+    recommendationSource: string;
+  },
+): void {
+  if (isCustomId(gameId)) {
+    customGameStore.updateGame(gameId, {
+      status: data.status,
+      priority: data.priority,
+      hoursPlayed: data.hoursPlayed,
+      rating: data.rating,
+      publicReviews: data.publicReviews,
+      recommendationSource: data.recommendationSource,
+    });
+  } else {
+    libraryStore.updateEntry(gameId, {
+      hoursPlayed: data.hoursPlayed,
+      rating: data.rating,
+      status: data.status,
+      priority: data.priority,
+      publicReviews: data.publicReviews,
+      recommendationSource: data.recommendationSource,
+    });
+  }
+}
 
 // Get status badge color
 function getStatusColor(status: GameStatus): string {
@@ -162,15 +243,15 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
 
   // Initialise state eagerly from the synchronous store so the first render
   // already has data and the skeleton never flickers.
-  const initialEntry = libraryStore.getEntry(gameId) ?? null;
-  const [entry, setEntry] = useState<LibraryGameEntry | null>(initialEntry);
-  const [hoursPlayed, setHoursPlayed] = useState(initialEntry?.hoursPlayed || 0);
-  const [rating, setRating] = useState(initialEntry?.rating || 0);
-  const [status, setStatus] = useState<GameStatus>(initialEntry?.status || 'Want to Play');
-  const [priority, setPriority] = useState<GamePriority>(initialEntry?.priority || 'Medium');
-  const [notes, setNotes] = useState(initialEntry?.publicReviews || '');
+  const initialData = loadProgressData(gameId);
+  const [data, setData] = useState<ProgressData | null>(initialData);
+  const [hoursPlayed, setHoursPlayed] = useState(initialData?.hoursPlayed || 0);
+  const [rating, setRating] = useState(initialData?.rating || 0);
+  const [status, setStatus] = useState<GameStatus>(initialData?.status || 'Want to Play');
+  const [priority, setPriority] = useState<GamePriority>(initialData?.priority || 'Medium');
+  const [notes, setNotes] = useState(initialData?.publicReviews || '');
   const [recommendationSource, setRecommendationSource] = useState(
-    initialEntry?.recommendationSource || 'Personal Discovery'
+    initialData?.recommendationSource || 'Personal Discovery'
   );
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -178,42 +259,42 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
 
   // Re-sync when navigating to a different game
   useEffect(() => {
-    const loadedEntry = libraryStore.getEntry(gameId);
-    if (loadedEntry) {
-      setEntry(loadedEntry);
-      setHoursPlayed(loadedEntry.hoursPlayed || 0);
-      setRating(loadedEntry.rating || 0);
-      setStatus(loadedEntry.status);
-      setPriority(loadedEntry.priority);
-      setNotes(loadedEntry.publicReviews || '');
-      setRecommendationSource(loadedEntry.recommendationSource || 'Personal Discovery');
+    const loaded = loadProgressData(gameId);
+    if (loaded) {
+      setData(loaded);
+      setHoursPlayed(loaded.hoursPlayed);
+      setRating(loaded.rating);
+      setStatus(loaded.status);
+      setPriority(loaded.priority);
+      setNotes(loaded.publicReviews);
+      setRecommendationSource(loaded.recommendationSource);
     }
   }, [gameId]);
 
   // Track changes
   useEffect(() => {
-    if (!entry) return;
+    if (!data) return;
     const changed =
-      hoursPlayed !== (entry.hoursPlayed || 0) ||
-      rating !== (entry.rating || 0) ||
-      status !== entry.status ||
-      priority !== entry.priority ||
-      notes !== (entry.publicReviews || '') ||
-      recommendationSource !== (entry.recommendationSource || 'Personal Discovery');
+      hoursPlayed !== data.hoursPlayed ||
+      rating !== data.rating ||
+      status !== data.status ||
+      priority !== data.priority ||
+      notes !== data.publicReviews ||
+      recommendationSource !== data.recommendationSource;
     setHasChanges(changed);
-  }, [entry, hoursPlayed, rating, status, priority, notes, recommendationSource]);
+  }, [data, hoursPlayed, rating, status, priority, notes, recommendationSource]);
 
   // Save changes
   const handleSave = useCallback(() => {
-    if (!entry) return;
+    if (!data) return;
     
     setIsSaving(true);
-    
-    libraryStore.updateEntry(gameId, {
-      hoursPlayed,
-      rating,
+
+    saveProgressData(gameId, {
       status,
       priority,
+      hoursPlayed,
+      rating,
       publicReviews: notes,
       recommendationSource,
     });
@@ -225,17 +306,15 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
       setHasChanges(false);
       
       // Reload entry
-      const updatedEntry = libraryStore.getEntry(gameId);
-      if (updatedEntry) {
-        setEntry(updatedEntry);
-      }
+      const updated = loadProgressData(gameId);
+      if (updated) setData(updated);
       
       // Hide success after 2 seconds
       setTimeout(() => {
         setSaveSuccess(false);
       }, 2000);
     }, 300);
-  }, [entry, gameId, hoursPlayed, rating, status, priority, notes, recommendationSource]);
+  }, [data, gameId, hoursPlayed, rating, status, priority, notes, recommendationSource]);
 
   // Star rating component
   const StarRating = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => {
@@ -271,7 +350,7 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
     );
   };
 
-  if (!entry) {
+  if (!data) {
     return (
       <div className="p-6">
         <MyProgressSkeleton />
@@ -292,7 +371,7 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
           </Badge>
         </div>
         <div className="text-sm text-white/50">
-          Added {formatProgressDate(entry.addedAt)}
+          Added {formatProgressDate(data.addedAt)}
         </div>
       </div>
 

@@ -21,8 +21,11 @@ export interface EpicCatalogItem {
   developer?: string;
   publisher?: string;
   seller?: { name: string };
+  url?: string;
   urlSlug?: string;
   productSlug?: string;
+  offerMappings?: Array<{ pageSlug: string; pageType: string }>;
+  catalogNs?: { mappings?: Array<{ pageSlug: string; pageType: string }> };
   price?: {
     totalPrice: {
       discountPrice: number;

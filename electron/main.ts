@@ -1444,56 +1444,59 @@ app.whenReady().then(async () => {
     console.warn('[Startup] Failed to apply auto-launch setting:', err);
   }
 
-  // Initialize ad blocker using core engine + session.webRequest (compatible with all Electron versions)
-  try {
-    const cachePath = path.join(app.getPath('userData'), 'adblocker-engine.bin');
-    let engine: FiltersEngine;
-
-    // Try loading from cache first for fast startup
-    if (fs.existsSync(cachePath)) {
-      const buf = await fs.promises.readFile(cachePath);
-      engine = FiltersEngine.deserialize(buf);
-      console.log('[AdBlocker] Loaded engine from cache');
-    } else {
-      // Download filter lists (EasyList + EasyPrivacy)
-      const lists = await Promise.all([
-        fetch('https://easylist.to/easylist/easylist.txt').then((r: any) => r.text()),
-        fetch('https://easylist.to/easylist/easyprivacy.txt').then((r: any) => r.text()),
-      ]);
-      engine = FiltersEngine.parse(lists.join('\n'));
-      // Cache for faster startup next time
-      await fs.promises.writeFile(cachePath, Buffer.from(engine.serialize()));
-      console.log('[AdBlocker] Downloaded filter lists and cached engine');
-    }
-
-    // Block matching network requests via session.webRequest
-    session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
-      const { url, resourceType, referrer } = details;
-      // Don't block the main page navigation itself
-      if (resourceType === 'mainFrame') {
-        callback({ cancel: false });
-        return;
-      }
-      const request = Request.fromRawDetails({ url, type: resourceType || 'other', sourceUrl: referrer || '' });
-      const { match } = engine.match(request);
-      if (match) {
-        callback({ cancel: true });
-      } else {
-        callback({ cancel: false });
-      }
-    });
-
-    console.log('[AdBlocker] Initialized and enabled');
-  } catch (err) {
-    console.warn('[AdBlocker] Failed to initialize (non-fatal):', err);
-  }
-
+  // Show window as early as possible — don't block on ad blocker
   try {
     createWindow();
   } catch (err) {
     logStartupError(err);
     app.quit();
   }
+
+  // Initialize ad blocker in the background (non-blocking — runs after window is shown)
+  (async () => {
+    try {
+      const cachePath = path.join(app.getPath('userData'), 'adblocker-engine.bin');
+      let engine: FiltersEngine;
+
+      // Try loading from cache first for fast startup
+      if (fs.existsSync(cachePath)) {
+        const buf = await fs.promises.readFile(cachePath);
+        engine = FiltersEngine.deserialize(buf);
+        console.log('[AdBlocker] Loaded engine from cache');
+      } else {
+        // Download filter lists (EasyList + EasyPrivacy)
+        const lists = await Promise.all([
+          fetch('https://easylist.to/easylist/easylist.txt').then((r: any) => r.text()),
+          fetch('https://easylist.to/easylist/easyprivacy.txt').then((r: any) => r.text()),
+        ]);
+        engine = FiltersEngine.parse(lists.join('\n'));
+        // Cache for faster startup next time
+        await fs.promises.writeFile(cachePath, Buffer.from(engine.serialize()));
+        console.log('[AdBlocker] Downloaded filter lists and cached engine');
+      }
+
+      // Block matching network requests via session.webRequest
+      session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
+        const { url, resourceType, referrer } = details;
+        // Don't block the main page navigation itself
+        if (resourceType === 'mainFrame') {
+          callback({ cancel: false });
+          return;
+        }
+        const request = Request.fromRawDetails({ url, type: resourceType || 'other', sourceUrl: referrer || '' });
+        const { match } = engine.match(request);
+        if (match) {
+          callback({ cancel: true });
+        } else {
+          callback({ cancel: false });
+        }
+      });
+
+      console.log('[AdBlocker] Initialized and enabled');
+    } catch (err) {
+      console.warn('[AdBlocker] Failed to initialize (non-fatal):', err);
+    }
+  })();
 
   // ---- Epic Cloudflare clearance (background, non-blocking) ----
   // Epic's GraphQL API is behind Cloudflare JS challenge.  We solve it once

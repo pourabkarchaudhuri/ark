@@ -69,6 +69,7 @@ export function transformSteamGame(
 
   const game: Game = {
     id: `steam-${details.steam_appid}`,
+    store: 'steam',
     steamAppId: details.steam_appid,
     title: details.name,
     developer: details.developers?.[0] || 'Unknown Developer',
@@ -116,6 +117,7 @@ export function transformSteamGame(
 export function transformSearchResult(item: SteamSearchItem): Partial<Game> {
   return {
     id: `steam-${item.id}`,
+    store: 'steam',
     steamAppId: item.id,
     title: item.name,
     coverUrl: item.tiny_image,
@@ -576,6 +578,7 @@ class SteamService {
       const data = mockGamesData[i];
       mockGames.push({
         id: `steam-${data.appId}`,
+        store: 'steam',
         steamAppId: data.appId,
         title: data.title,
         developer: data.developer,

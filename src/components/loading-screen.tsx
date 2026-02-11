@@ -45,7 +45,7 @@ function LogEntry({ line }: { line: LogLine }) {
   );
 }
 
-export function LoadingScreen({ onComplete, duration = 5000 }: LoadingScreenProps) {
+export function LoadingScreen({ onComplete, duration = 2500 }: LoadingScreenProps) {
   const [isVisible, setIsVisible] = useState(true);
   const [lines, setLines] = useState<LogLine[]>([]);
   const [progress, setProgress] = useState(0); // 0..1
@@ -64,8 +64,8 @@ export function LoadingScreen({ onComplete, duration = 5000 }: LoadingScreenProp
   /** Append a line to the terminal. Returns a small delay promise for visual pacing. */
   const log = useCallback((text: string, type: LogLine['type'] = 'info') => {
     setLines(prev => [...prev, { text, type }]);
-    // Small stagger so lines appear one-by-one
-    return new Promise<void>(r => setTimeout(r, prefersReducedMotion ? 10 : 150));
+    // Small stagger so lines appear one-by-one (kept snappy to avoid slowing boot)
+    return new Promise<void>(r => setTimeout(r, prefersReducedMotion ? 5 : 60));
   }, [prefersReducedMotion]);
 
   /** Finish the loading screen — respects minimum display time. */
@@ -113,41 +113,43 @@ export function LoadingScreen({ onComplete, duration = 5000 }: LoadingScreenProp
         await log(`✓ Journey history — ${journeyCount} entr${journeyCount !== 1 ? 'ies' : 'y'} loaded`, 'success');
       }
 
-      // --- 3. Store connections ---
+      // --- 3. Store connections + data prefetch (parallelized) ---
       if (cancelled) return;
       const steamAvailable = typeof window !== 'undefined' && !!window.steam;
       const epicAvailable = typeof window !== 'undefined' && !!window.epic;
 
+      // Fire cache stats + browse data prefetch in parallel.
+      // Cache stats are informational only and should never block the data load.
+      const cacheStatsPromise = Promise.allSettled([
+        steamAvailable ? window.steam!.getCacheStats().catch(() => null) : Promise.resolve(null),
+        epicAvailable ? window.epic!.getCacheStats().catch(() => null) : Promise.resolve(null),
+      ]);
+      const browseDataPromise = getCachedBrowseData();
+
+      // Log store connections while data loads in the background
       if (steamAvailable) {
         await log('✓ Steam API connected', 'success');
-        try {
-          const stats = await window.steam!.getCacheStats();
-          if (stats.total > 0) {
-            await log(`  ${stats.total} cached entries (${stats.fresh} fresh, ${stats.stale} stale)`, 'info');
-          }
-        } catch { /* non-critical */ }
       } else {
         await log('⚠ Steam API not available (running outside Electron?)', 'warn');
       }
-
-      if (cancelled) return;
       if (epicAvailable) {
         await log('✓ Epic Games API connected', 'success');
-        try {
-          const stats = await window.epic!.getCacheStats();
-          if (stats.total > 0) {
-            await log(`  ${stats.total} cached entries (${stats.fresh} fresh, ${stats.stale} stale)`, 'info');
-          }
-        } catch { /* non-critical */ }
-      } else {
-        await log('⚠ Epic Games API not available', 'warn');
       }
 
-      // --- 4. Data prefetch (the real work) ---
-      if (cancelled) return;
-      await log('Checking browse data cache...', 'info');
+      // Await cache stats (should be fast) and display results
+      const [steamStats, epicStats] = await cacheStatsPromise;
+      if (steamStats.status === 'fulfilled' && steamStats.value && (steamStats.value as any).total > 0) {
+        const s = steamStats.value as { total: number; fresh: number; stale: number };
+        await log(`  Steam: ${s.total} cached (${s.fresh} fresh, ${s.stale} stale)`, 'info');
+      }
+      if (epicStats.status === 'fulfilled' && epicStats.value && (epicStats.value as any).total > 0) {
+        const s = epicStats.value as { total: number; fresh: number; stale: number };
+        await log(`  Epic: ${s.total} cached (${s.fresh} fresh, ${s.stale} stale)`, 'info');
+      }
 
-      const cached = await getCachedBrowseData();
+      // --- 4. Data prefetch (the real work — already started above) ---
+      if (cancelled) return;
+      const cached = await browseDataPromise;
 
       if (cached) {
         // Cache hit — instant
@@ -200,13 +202,13 @@ export function LoadingScreen({ onComplete, duration = 5000 }: LoadingScreenProp
       finish();
     };
 
-    // Timeout safety: finish after 75s no matter what (Epic catalog can be large)
+    // Timeout safety: finish after 45s no matter what (Epic catalog can be large)
     const safetyTimeout = setTimeout(() => {
       if (!hasCompletedRef.current) {
         console.warn('[LoadingScreen] Safety timeout — finishing with partial data');
         finish();
       }
-    }, 75_000);
+    }, 45_000);
 
     run().catch(() => finish());
 

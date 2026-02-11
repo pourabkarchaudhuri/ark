@@ -76,7 +76,6 @@ interface JourneyViewProps {
   entries: JourneyEntry[];
   loading: boolean;
   onSwitchToBrowse?: () => void;
-  onCustomGameClick?: (gameId: string) => void;
 }
 
 // Status badge color mapping
@@ -155,7 +154,7 @@ const JourneyCoverImage = memo(function JourneyCoverImage({ entry }: { entry: Jo
   );
 });
 
-const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, onCustomGameClick }: { entry: JourneyEntry; playerCount?: number; onCustomGameClick?: (gameId: string) => void }) {
+const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCount?: number }) {
   const [, navigate] = useLocation();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const addedDate = entry.addedAt
@@ -165,13 +164,8 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, onCu
   const inLibrary = libraryStore.isInLibrary(entry.gameId);
 
   const handleClick = useCallback(() => {
-    // Custom games use "custom-" prefix — open progress dialog instead of game details page
-    if (entry.gameId.startsWith('custom-')) {
-      if (onCustomGameClick) onCustomGameClick(entry.gameId);
-      return;
-    }
-    navigate(`/game/${entry.gameId}`);
-  }, [navigate, entry.gameId, onCustomGameClick]);
+    navigate(`/game/${encodeURIComponent(entry.gameId)}`);
+  }, [navigate, entry.gameId]);
 
   const handleDelete = useCallback((e: React.MouseEvent) => {
     e.stopPropagation(); // Don't navigate when clicking delete
@@ -276,7 +270,7 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, onCu
   );
 });
 
-export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse, onCustomGameClick }: JourneyViewProps) {
+export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
   // View style toggle: "Noob" (vertical timeline) vs "OCD" (Gantt chart)
   const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('noob');
   // Data source for OCD view: live store data vs mock data for dev/demo
@@ -384,7 +378,6 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
                   key={entry.gameId}
                   entry={entry}
                   playerCount={playerCounts[entry.gameId]}
-                  onCustomGameClick={onCustomGameClick}
                 />
               ))}
             </div>

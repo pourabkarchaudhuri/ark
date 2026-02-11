@@ -19,8 +19,8 @@ const BROWSE_DB_NAME = 'ark-browse-cache';
 const BROWSE_DB_VERSION = 1;
 const BROWSE_STORE = 'data';
 const CACHE_KEY = 'browse-games';
-const CACHE_TTL = 30 * 60 * 1000;        // 30 min fresh
-const CACHE_STALE_TTL = 24 * 60 * 60 * 1000; // 24h stale-usable
+const CACHE_TTL = 60 * 60 * 1000;              // 1 hour fresh (aligned with bg refresh interval)
+const CACHE_STALE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days stale-usable (hourly bg refresh keeps data current)
 
 // Heavy fields that are only needed on the detail page (not browse cards)
 const STRIP_KEYS = ['screenshots', 'videos', 'summary', 'movies', 'detailedDescription', 'aboutTheGame'];

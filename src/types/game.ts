@@ -144,8 +144,12 @@ export interface CustomGameEntry {
   title: string;
   platform: string[];
   status: GameStatus;
+  priority?: GamePriority;
   executablePath?: string; // Path to game executable for session tracking
   hoursPlayed?: number; // Total hours played (updated from session tracker)
+  rating?: number; // User rating 1-5 stars (0 = not rated)
+  publicReviews?: string; // Personal notes / reviews
+  recommendationSource?: string; // How the user discovered this game
   addedAt: Date;
   updatedAt: Date;
 }
