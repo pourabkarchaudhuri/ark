@@ -402,6 +402,16 @@ const StoryCard = forwardRef<HTMLDivElement, { item: NewsItem; direction: number
   const [imgSrc, setImgSrc] = useState(item.imageUrl || FALLBACK_IMAGE);
   const steamFallback = getSteamFallbackFromSource(item.source, item.imageUrl);
 
+  // Keep imgSrc in sync when the item prop changes (e.g. React reuses this
+  // component instance because AnimatePresence recycled the key).
+  const prevItemIdRef = useRef(item.id);
+  useEffect(() => {
+    if (prevItemIdRef.current !== item.id) {
+      prevItemIdRef.current = item.id;
+      setImgSrc(item.imageUrl || FALLBACK_IMAGE);
+    }
+  }, [item.id, item.imageUrl]);
+
   const handleOpenLink = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (window.electron?.openExternal) {
@@ -445,8 +455,9 @@ const StoryCard = forwardRef<HTMLDivElement, { item: NewsItem; direction: number
       transition={{ duration: 0.3, ease: [0.32, 0.72, 0, 1] }}
       className="absolute inset-0 bg-black"
     >
-      {/* Background image */}
+      {/* Background image — key forces DOM replacement when src changes */}
       <BuzzFadeImage
+        key={imgSrc}
         src={imgSrc}
         alt={item.title}
         className="absolute inset-0 w-full h-full z-0 object-cover"
@@ -772,7 +783,7 @@ export const BuzzView = memo(function BuzzView() {
             {/* Story cards with animation */}
             <AnimatePresence initial={false} custom={direction} mode="popLayout">
               <StoryCard
-                key={currentStory.id}
+                key={`${currentStory.id}-${currentIndex}`}
                 item={currentStory}
                 direction={direction}
               />

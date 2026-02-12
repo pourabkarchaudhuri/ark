@@ -39,9 +39,8 @@ const priorityOptions: (GamePriority | 'All')[] = [
 ];
 
 const categoryOptions: { value: GameCategory; label: string }[] = [
-  { value: 'all', label: 'All Games' },
-  { value: 'most-played', label: 'Most Played' },
   { value: 'trending', label: 'Top Sellers' },
+  { value: 'most-played', label: 'Most Played' },
   { value: 'free', label: 'Free Games' },
   { value: 'recent', label: 'New Releases' },
   { value: 'award-winning', label: 'Coming Soon' },
@@ -58,10 +57,6 @@ const sortOptions: { value: SortOption; label: string }[] = [
   { value: 'title', label: 'Title' },
 ];
 
-const storeOptions: { value: GameStore; label: string }[] = [
-  { value: 'steam', label: 'Steam' },
-  { value: 'epic', label: 'Epic Games' },
-];
 
 interface FilterSidebarProps {
   open: boolean;
@@ -71,6 +66,14 @@ interface FilterSidebarProps {
   resetFilters: () => void;
   genres: string[];
   platforms: string[];
+  /** Dynamic genre options derived from games matching filters above Genre */
+  dynamicGenres?: string[];
+  /** Dynamic platform options derived from games matching filters above Platform (incl. Genre) */
+  dynamicPlatforms?: string[];
+  /** Dynamic year options derived from games matching filters above Release Year (incl. Genre + Platform) */
+  dynamicYears?: string[];
+  /** Full Steam catalog count — 0 means catalog is still syncing */
+  catalogTotalCount?: number;
   sortBy: SortOption;
   setSortBy: (value: SortOption) => void;
   sortDirection: SortDirection;
@@ -100,7 +103,7 @@ export const FilterTrigger = memo(function FilterTrigger({
     filters.priority !== 'All' && viewMode === 'library',
     filters.genre !== 'All',
     filters.platform !== 'All',
-    filters.category !== 'all' && viewMode === 'browse',
+    filters.category !== 'trending' && viewMode === 'browse',
     filters.releaseYear !== 'All',
     filters.store.length > 0,
   ].filter(Boolean).length;
@@ -139,34 +142,56 @@ export const FilterPanel = memo(function FilterPanel({
   resetFilters,
   genres,
   platforms,
+  dynamicGenres,
+  dynamicPlatforms,
+  dynamicYears,
+  catalogTotalCount = 0,
   sortBy,
   setSortBy,
   sortDirection,
   toggleSortDirection,
   viewMode,
 }: FilterSidebarProps) {
+  const isCatalog = filters.category === 'catalog' && viewMode === 'browse';
+  // Most-played data is Steam-only — Epic doesn't expose player counts
+  const isMostPlayed = filters.category === 'most-played' && viewMode === 'browse';
+  // Free Games data is Epic-only — Steam doesn't have a dedicated free games feed
+  const isFreeGames = filters.category === 'free' && viewMode === 'browse';
+
   const hasActiveFilters = 
     filters.status !== 'All' || 
     filters.priority !== 'All' ||
     filters.genre !== 'All' || 
     filters.platform !== 'All' ||
-    filters.category !== 'all' ||
+    filters.category !== 'trending' ||
     filters.releaseYear !== 'All' ||
     filters.store.length > 0;
 
-  // Convert arrays to combobox options
+  // Convert arrays to combobox options — prefer dynamic (contextual) lists
+  // when available; fall back to the full static lists for the initial load
+  // or catalog mode where dynamic lists are empty.
+  const effectiveGenres = dynamicGenres && dynamicGenres.length > 0 ? dynamicGenres : genres;
+  const effectivePlatforms = dynamicPlatforms && dynamicPlatforms.length > 0 ? dynamicPlatforms : platforms;
+
   const genreOptions = useMemo(() => [
     { value: 'All', label: 'All Genres' },
-    ...genres.map(g => ({ value: g, label: g }))
-  ], [genres]);
+    ...effectiveGenres.map(g => ({ value: g, label: g }))
+  ], [effectiveGenres]);
 
   const platformOptions = useMemo(() => [
     { value: 'All', label: 'All Platforms' },
-    ...platforms.map(p => ({ value: p, label: p }))
-  ], [platforms]);
+    ...effectivePlatforms.map(p => ({ value: p, label: p }))
+  ], [effectivePlatforms]);
 
-  // Generate release year options (current year down to 2015)
+  // Release year options — use dynamic years when available, otherwise
+  // generate a static range (current year + 1 down to 2015).
   const releaseYearOptions = useMemo(() => {
+    if (dynamicYears && dynamicYears.length > 0) {
+      return [
+        { value: 'All', label: 'All Years' },
+        ...dynamicYears.map(y => ({ value: y, label: y })),
+      ];
+    }
     const currentYear = new Date().getFullYear();
     const years: { value: string; label: string }[] = [
       { value: 'All', label: 'All Years' },
@@ -175,16 +200,21 @@ export const FilterPanel = memo(function FilterPanel({
       years.push({ value: String(year), label: String(year) });
     }
     return years;
-  }, []);
+  }, [dynamicYears]);
 
-  // Toggle a store in the multi-select filter
-  const toggleStore = useCallback((store: GameStore) => {
-    const current = filters.store;
-    const next = current.includes(store)
-      ? current.filter(s => s !== store)
-      : [...current, store];
-    updateFilter('store', next);
-  }, [filters.store, updateFilter]);
+  // Toggle a store filter — mutually exclusive (radio-style)
+  // Clicking the already-active option deselects it (shows all stores).
+  const isBothActive = filters.store.length === 2 && filters.store.includes('steam') && filters.store.includes('epic');
+
+  const selectStore = useCallback((mode: 'steam' | 'epic' | 'both') => {
+    if (mode === 'both') {
+      // Toggle off if already active
+      updateFilter('store', isBothActive ? [] : ['steam', 'epic'] as GameStore[]);
+    } else {
+      const alreadyActive = filters.store.length === 1 && filters.store[0] === mode;
+      updateFilter('store', alreadyActive ? [] : [mode] as GameStore[]);
+    }
+  }, [filters.store, isBothActive, updateFilter]);
 
   return (
     <AnimatePresence>
@@ -208,25 +238,75 @@ export const FilterPanel = memo(function FilterPanel({
                   <p className="text-xs text-white/40">Refine your game collection</p>
                 </div>
               </div>
-              <Button
-                variant="ghost"
-                size="icon"
+              <button
+                type="button"
                 onClick={() => onOpenChange(false)}
-                className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 flex-shrink-0"
+                className="h-9 w-9 flex items-center justify-center rounded-md text-zinc-400 hover:text-white hover:bg-zinc-700 transition-none flex-shrink-0"
                 aria-label="Close filters"
               >
                 <X className="h-4 w-4 pointer-events-none" />
-              </Button>
+              </button>
             </div>
 
             {/* Content — scrollable */}
             <div className="flex-1 overflow-y-auto p-4 space-y-6">
 
-          {/* Sort */}
-          <div className="space-y-2">
+          {/* Category Filter - Only in Browse mode (always interactive) */}
+          {viewMode === 'browse' && (
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Category</Label>
+              <Select
+                value={filters.category}
+                onValueChange={(value) => {
+                  // Prevent selecting catalog if not synced yet
+                  if (value === 'catalog' && catalogTotalCount === 0) return;
+                  // Changing category resets all filters below it (store, genre,
+                  // platform, release year) so stale selections from the previous
+                  // category don't silently produce empty results.
+                  updateFilter('category', value as GameCategory);
+                  updateFilter('store', []);
+                  updateFilter('genre', 'All');
+                  updateFilter('platform', 'All');
+                  updateFilter('releaseYear', 'All');
+                }}
+              >
+                <SelectTrigger className="w-full bg-background/50" aria-label="Filter by category">
+                  <SelectValue placeholder="Top Sellers" />
+                </SelectTrigger>
+                <SelectContent>
+                  {categoryOptions.map((option) => {
+                    const isCatalogUnavailable = option.value === 'catalog' && catalogTotalCount === 0;
+                    return (
+                      <SelectItem
+                        key={option.value}
+                        value={option.value}
+                        disabled={isCatalogUnavailable}
+                        className={cn(isCatalogUnavailable && 'opacity-40')}
+                      >
+                        <span className="flex items-center gap-2">
+                          {option.label}
+                          {isCatalogUnavailable && (
+                            <span className="inline-flex items-center gap-1 text-[10px] text-white/40 font-normal">
+                              <span className="inline-block w-3 h-3 border-2 border-white/20 border-t-white/50 rounded-full animate-spin" />
+                              Syncing
+                            </span>
+                          )}
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          <div className="h-px bg-border" />
+
+          {/* Sort — disabled in Catalog mode (A–Z order is fixed) */}
+          <div className={cn('space-y-2', isCatalog && 'opacity-40 pointer-events-none')}>
             <Label className="text-sm font-medium">Sort By</Label>
             <div className="flex gap-2">
-              <Select value={sortBy} onValueChange={(value) => setSortBy(value as SortOption)}>
+              <Select value={sortBy} onValueChange={(value) => setSortBy(value as SortOption)} disabled={isCatalog}>
                 <SelectTrigger className="flex-1 bg-background/50" aria-label="Sort by">
                   <ArrowUpDown className="h-4 w-4 mr-2 pointer-events-none" />
                   <SelectValue />
@@ -245,75 +325,103 @@ export const FilterPanel = memo(function FilterPanel({
                 onClick={toggleSortDirection}
                 aria-label={`Sort ${sortDirection === 'asc' ? 'ascending' : 'descending'}`}
                 className="flex-shrink-0"
+                disabled={isCatalog}
               >
                 {sortDirection === 'asc' ? '↑' : '↓'}
               </Button>
             </div>
           </div>
 
-          <div className="h-px bg-border" />
-
-          {/* Category Filter - Only in Browse mode */}
-          {viewMode === 'browse' && (
-            <div className="space-y-2">
-              <Label className="text-sm font-medium">Category</Label>
-              <Select
-                value={filters.category}
-                onValueChange={(value) => updateFilter('category', value as GameCategory)}
-              >
-                <SelectTrigger className="w-full bg-background/50" aria-label="Filter by category">
-                  <SelectValue placeholder="All Games" />
-                </SelectTrigger>
-                <SelectContent>
-                  {categoryOptions.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-
-          {/* Store Filter — available in both browse and library modes */}
-          {/* Store Filter — multi-select checkboxes */}
+          {/* Store Filter — disabled in Catalog mode (Steam-only catalog) */}
           {(viewMode === 'browse' || viewMode === 'library') && (
-            <div className="space-y-2">
+            <div className={cn('space-y-2', isCatalog && 'opacity-40 pointer-events-none')}>
               <Label className="text-sm font-medium">Store</Label>
               <div className="flex gap-2">
-                {storeOptions.map((option) => {
-                  const selected = filters.store.includes(option.value);
+                {/* Steam only — disabled when Free Games (Epic-only data) */}
+                {(() => {
+                  const selected = filters.store.length === 1 && filters.store[0] === 'steam';
+                  const disabled = isCatalog || isFreeGames;
                   return (
                     <button
-                      key={option.value}
                       type="button"
-                      onClick={() => toggleStore(option.value)}
+                      onClick={() => !disabled && selectStore('steam')}
                       aria-pressed={selected}
+                      disabled={disabled}
                       className={cn(
                         'flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-all',
-                        selected
-                          ? 'bg-fuchsia-500/20 border-fuchsia-500/50 text-fuchsia-300'
-                          : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
+                        disabled
+                          ? 'opacity-40 cursor-not-allowed'
+                          : selected
+                            ? 'bg-fuchsia-500/20 border-fuchsia-500/50 text-fuchsia-300'
+                            : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
                       )}
                     >
-                      <span className={cn(
-                        'flex h-4 w-4 items-center justify-center rounded border transition-colors',
-                        selected ? 'bg-fuchsia-500 border-fuchsia-500' : 'border-zinc-600',
-                      )}>
-                        {selected && (
-                          <svg className="h-3 w-3 text-white" viewBox="0 0 12 12" fill="none">
-                            <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        )}
-                      </span>
-                      {option.value === 'steam' ? <FaSteam className="h-3.5 w-3.5" /> : <SiEpicgames className="h-3.5 w-3.5" />}
-                      {option.label}
+                      <FaSteam className="h-3.5 w-3.5" />
+                      Steam
                     </button>
                   );
-                })}
+                })()}
+                {/* Epic only — disabled when Most Played (Steam-only data) */}
+                {(() => {
+                  const selected = filters.store.length === 1 && filters.store[0] === 'epic';
+                  const disabled = isCatalog || isMostPlayed;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => !disabled && selectStore('epic')}
+                      aria-pressed={selected}
+                      disabled={disabled}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-all',
+                        disabled
+                          ? 'opacity-40 cursor-not-allowed'
+                          : selected
+                            ? 'bg-fuchsia-500/20 border-fuchsia-500/50 text-fuchsia-300'
+                            : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
+                      )}
+                    >
+                      <SiEpicgames className="h-3.5 w-3.5" />
+                      Epic Games
+                    </button>
+                  );
+                })()}
+                {/* Both stores (intersection) — disabled when Most Played or Free Games (single-store data) */}
+                {(() => {
+                  const disabled = isCatalog || isMostPlayed || isFreeGames;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => !disabled && selectStore('both')}
+                      aria-pressed={isBothActive}
+                      disabled={disabled}
+                      title="Show games available on both stores"
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-all',
+                        disabled
+                          ? 'opacity-40 cursor-not-allowed'
+                          : isBothActive
+                            ? 'bg-fuchsia-500/20 border-fuchsia-500/50 text-fuchsia-300'
+                            : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
+                      )}
+                    >
+                      <FaSteam className="h-3 w-3" />
+                      <span className="text-white/30 font-mono text-xs">∩</span>
+                      <SiEpicgames className="h-3 w-3" />
+                    </button>
+                  );
+                })()}
               </div>
-              {filters.store.length === 0 && (
+              {filters.store.length === 0 && !isCatalog && !isMostPlayed && !isFreeGames && (
                 <p className="text-xs text-white/30">No filter — showing all stores</p>
+              )}
+              {isBothActive && (
+                <p className="text-xs text-white/30">Showing games available on both stores (intersection)</p>
+              )}
+              {isMostPlayed && (
+                <p className="text-xs text-white/30">Most Played data is Steam-only</p>
+              )}
+              {isFreeGames && (
+                <p className="text-xs text-white/30">Free Games data is Epic-only</p>
               )}
             </div>
           )}
@@ -363,9 +471,9 @@ export const FilterPanel = memo(function FilterPanel({
           )}
 
           {/* Genre / Platform / Year filters are disabled in Catalog mode */}
-          {filters.category === 'catalog' ? (
+          {isCatalog ? (
             <div className="rounded-md bg-white/5 border border-white/10 px-3 py-2.5 text-xs text-white/50">
-              Filters are not available in Catalog mode. Use Search to find specific games.
+              Sort and filters are disabled in Catalog (A–Z) mode. Browse alphabetically or use Search to find specific games.
             </div>
           ) : (
             <>
@@ -417,11 +525,11 @@ export const FilterPanel = memo(function FilterPanel({
             <div className="space-y-2">
               <Label className="text-sm font-medium text-muted-foreground">Active Filters</Label>
               <div className="flex flex-wrap gap-2">
-                {filters.category !== 'all' && viewMode === 'browse' && (
-                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 text-white border-fuchsia-500/30">
+                {filters.category !== 'trending' && viewMode === 'browse' && (
+                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 hover:bg-fuchsia-500/20 text-white border-fuchsia-500/30">
                     {categoryOptions.find(c => c.value === filters.category)?.label}
                     <button 
-                      onClick={() => updateFilter('category', 'all')} 
+                      onClick={() => updateFilter('category', 'trending')} 
                       className="ml-1 hover:text-red-400"
                       aria-label="Remove category filter"
                     >
@@ -430,7 +538,7 @@ export const FilterPanel = memo(function FilterPanel({
                   </Badge>
                 )}
                 {filters.status !== 'All' && viewMode === 'library' && (
-                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 text-white border-fuchsia-500/30">
+                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 hover:bg-fuchsia-500/20 text-white border-fuchsia-500/30">
                     {filters.status}
                     <button 
                       onClick={() => updateFilter('status', 'All')} 
@@ -442,7 +550,7 @@ export const FilterPanel = memo(function FilterPanel({
                   </Badge>
                 )}
                 {filters.priority !== 'All' && viewMode === 'library' && (
-                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 text-white border-fuchsia-500/30">
+                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 hover:bg-fuchsia-500/20 text-white border-fuchsia-500/30">
                     {filters.priority} Priority
                     <button 
                       onClick={() => updateFilter('priority', 'All')} 
@@ -454,7 +562,7 @@ export const FilterPanel = memo(function FilterPanel({
                   </Badge>
                 )}
                 {filters.genre !== 'All' && (
-                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 text-white border-fuchsia-500/30">
+                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 hover:bg-fuchsia-500/20 text-white border-fuchsia-500/30">
                     {filters.genre}
                     <button 
                       onClick={() => updateFilter('genre', 'All')} 
@@ -466,7 +574,7 @@ export const FilterPanel = memo(function FilterPanel({
                   </Badge>
                 )}
                 {filters.platform !== 'All' && (
-                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 text-white border-fuchsia-500/30">
+                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 hover:bg-fuchsia-500/20 text-white border-fuchsia-500/30">
                     {filters.platform}
                     <button 
                       onClick={() => updateFilter('platform', 'All')} 
@@ -478,7 +586,7 @@ export const FilterPanel = memo(function FilterPanel({
                   </Badge>
                 )}
                 {filters.releaseYear !== 'All' && (
-                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 text-white border-fuchsia-500/30">
+                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 hover:bg-fuchsia-500/20 text-white border-fuchsia-500/30">
                     {filters.releaseYear}
                     <button 
                       onClick={() => updateFilter('releaseYear', 'All')} 
@@ -489,18 +597,18 @@ export const FilterPanel = memo(function FilterPanel({
                     </button>
                   </Badge>
                 )}
-                {filters.store.map(s => (
-                  <Badge key={s} variant="secondary" className="gap-1 bg-fuchsia-500/20 text-white border-fuchsia-500/30">
-                    {storeOptions.find(o => o.value === s)?.label ?? s}
+                {filters.store.length > 0 && (
+                  <Badge variant="secondary" className="gap-1 bg-fuchsia-500/20 hover:bg-fuchsia-500/20 text-white border-fuchsia-500/30">
+                    {isBothActive ? 'Steam ∩ Epic' : filters.store[0] === 'steam' ? 'Steam' : 'Epic Games'}
                     <button 
-                      onClick={() => toggleStore(s)} 
+                      onClick={() => updateFilter('store', [])} 
                       className="ml-1 hover:text-red-400"
-                      aria-label={`Remove ${s} store filter`}
+                      aria-label="Remove store filter"
                     >
                       <X className="h-3 w-3 pointer-events-none" />
                     </button>
                   </Badge>
-                ))}
+                )}
               </div>
             </div>
           )}

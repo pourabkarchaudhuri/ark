@@ -62,10 +62,23 @@ class GameService {
   }
 
   /**
-   * Get top sellers (Steam-only).
+   * Get top sellers from both stores, deduplicated.
+   * Steam: top sellers ranking. Epic: full catalog (sorted by relevance).
    */
   async getTopSellers(): Promise<Game[]> {
-    return steamService.getTopSellers();
+    const [steamSellers, epicCatalog, epicFree] = await Promise.allSettled([
+      steamService.getTopSellers(),
+      epicService.browseCatalog(0),
+      epicService.getFreeGames(),
+    ]);
+
+    const allGames: Game[] = [
+      ...(steamSellers.status === 'fulfilled' ? steamSellers.value : []),
+      ...(epicCatalog.status === 'fulfilled' ? epicCatalog.value : []),
+      ...(epicFree.status === 'fulfilled' ? epicFree.value : []),
+    ];
+
+    return deduplicateGames(allGames);
   }
 
   /**

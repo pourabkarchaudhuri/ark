@@ -4,13 +4,12 @@
  * A streamlined dashboard of contextually grouped analytics derived from
  * journey entries, status-change history, play sessions, and library entries.
  *
- * 6 cohesive sections:
+ * 5 cohesive sections:
  *  1. Overview — Total games, total hours, and status donut
  *  2. Activity & Streaks — Monthly area chart with streak counters
- *  3. Sessions — Session count, avg length, idle ratio, histogram
- *  4. Library — Top games by hours + platform breakdown
- *  5. Discovery — Genre radar + recommendation sources
- *  6. Recent Activity — Status change feed
+ *  3. Top Games — Top games by hours
+ *  4. Discovery — Genre radar + recommendation sources
+ *  5. Recent Activity — Status change feed
  */
 import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react';
 import {
@@ -24,7 +23,6 @@ import {
   Clock,
   Trophy,
   TrendingUp,
-  Activity,
   History,
   Flame,
   Share2,
@@ -38,6 +36,7 @@ import {
   LibraryGameEntry,
 } from '@/types/game';
 import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
+import { libraryStore } from '@/services/library-store';
 
 // ─── Fallback cover image ────────────────────────────────────────────────────
 
@@ -47,7 +46,12 @@ function FallbackImg({
   gameId: string; title: string; coverUrl?: string;
   alt?: string; className?: string;
 }) {
-  const chain = useMemo(() => buildGameImageChain(gameId, title, coverUrl), [gameId, title, coverUrl]);
+  const chain = useMemo(() => {
+    const meta = libraryStore.getEntry(gameId)?.cachedMeta;
+    const resolvedCover = coverUrl || meta?.coverUrl;
+    const headerImage = meta?.headerImage;
+    return buildGameImageChain(gameId, title, resolvedCover, headerImage);
+  }, [gameId, title, coverUrl]);
   const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
 
@@ -549,52 +553,6 @@ function RadarChart({
   );
 }
 
-// ─── Animated Radial Gauge ──────────────────────────────────────────────────
-
-function AnimatedRadialGauge({
-  value,
-  max = 100,
-  size = 56,
-  strokeWidth = 5,
-  color = '#22c55e',
-  label,
-}: {
-  value: number;
-  max?: number;
-  size?: number;
-  strokeWidth?: number;
-  color?: string;
-  label?: string;
-}) {
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const pct = Math.min(value / max, 1);
-  const dashLength = pct * circumference;
-
-  return (
-    <div className="relative inline-flex items-center justify-center">
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth={strokeWidth} />
-        <motion.circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          fill="none"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinecap="round"
-          transform={`rotate(-90 ${size / 2} ${size / 2})`}
-          initial={{ strokeDasharray: `0 ${circumference}` }}
-          whileInView={{ strokeDasharray: `${dashLength} ${circumference - dashLength}` }}
-          viewport={{ once: true }}
-          transition={{ duration: 1, ease: 'easeOut', delay: 0.4 }}
-        />
-      </svg>
-      {label && <span className="absolute text-[9px] font-bold text-white/70">{label}</span>}
-    </div>
-  );
-}
-
 // ─── Glassmorphic card wrapper ──────────────────────────────────────────────
 
 function StatCard({
@@ -683,16 +641,6 @@ export function JourneyAnalyticsView({
     }
     const topGenres = Object.entries(genreCounts).sort((a, b) => b[1] - a[1]).slice(0, 10);
 
-    // ── Session stats ────────────────────────────────────────────────────
-    const totalSessions = sessions.length;
-    const totalSessionMinutes = sessions.reduce((s, ses) => s + ses.durationMinutes, 0);
-    const totalIdleMinutes = sessions.reduce((s, ses) => s + ses.idleMinutes, 0);
-    const avgSessionLength = totalSessions > 0 ? Math.round(totalSessionMinutes / totalSessions) : 0;
-    const idleRatio =
-      totalSessionMinutes + totalIdleMinutes > 0
-        ? Math.round((totalIdleMinutes / (totalSessionMinutes + totalIdleMinutes)) * 100)
-        : 0;
-
     // ── Monthly completions (last 12 months) ─────────────────────────────
     const monthlyCompletions: { label: string; count: number }[] = [];
     for (let i = 11; i >= 0; i--) {
@@ -771,20 +719,6 @@ export function JourneyAnalyticsView({
       longestStreak = Math.max(longestStreak, streak);
     }
 
-    // ── Session length distribution ─────────────────────────────────────
-    const sessionBuckets = [
-      { label: '<15m', min: 0, max: 15, count: 0 },
-      { label: '15-30m', min: 15, max: 30, count: 0 },
-      { label: '30m-1h', min: 30, max: 60, count: 0 },
-      { label: '1-2h', min: 60, max: 120, count: 0 },
-      { label: '2-4h', min: 120, max: 240, count: 0 },
-      { label: '4h+', min: 240, max: Infinity, count: 0 },
-    ];
-    for (const ses of sessions) {
-      const b = sessionBuckets.find((bk) => ses.durationMinutes >= bk.min && ses.durationMinutes < bk.max);
-      if (b) b.count++;
-    }
-
     // ── Recommendation source analysis ──────────────────────────────────
     const recSourceMap: Record<string, { count: number; totalRating: number; ratedCount: number }> = {};
     for (const le of libraryEntries) {
@@ -812,15 +746,11 @@ export function JourneyAnalyticsView({
       topGames,
       maxHours,
       monthlyActivity,
-      totalSessions,
-      avgSessionLength,
-      idleRatio,
       monthlyCompletions,
       recentActivity,
       genreRadar,
       currentStreak,
       longestStreak,
-      sessionBuckets,
       recSources,
     };
   }, [journeyEntries, statusHistory, sessions, libraryEntries]);
@@ -901,7 +831,7 @@ export function JourneyAnalyticsView({
       {/* ═══ Section 2: Activity & Streaks ═════════════════════════════════ */}
       <StatCard icon={TrendingUp} label="Activity" delay={0.05}>
         {/* Streak bar */}
-        {analytics.totalSessions > 0 && (
+        {(analytics.currentStreak > 0 || analytics.longestStreak > 0) && (
           <div className="flex items-center gap-6 mb-4 pb-3 border-b border-white/[0.06]">
             <div className="flex items-center gap-2">
               <Flame className="w-4 h-4 text-orange-400" />
@@ -935,66 +865,7 @@ export function JourneyAnalyticsView({
         <AreaChartSVG data={analytics.monthlyActivity} data2={analytics.monthlyCompletions} />
       </StatCard>
 
-      {/* ═══ Section 3: Sessions ═══════════════════════════════════════════ */}
-      <StatCard icon={Activity} label="Sessions" delay={0.1}>
-        {analytics.totalSessions === 0 ? (
-          <p className="text-xs text-white/40">
-            No session data yet. Set an executable path on a game to start tracking.
-          </p>
-        ) : (
-          <div className="space-y-4">
-            {/* Top row: inline metrics */}
-            <div className="flex items-center gap-4">
-              <div className="grid grid-cols-2 gap-3 flex-1">
-                <div>
-                  <AnimatedValue value={analytics.totalSessions} formatFn={String} className="text-xl font-bold text-violet-400 font-['Orbitron']" delay={0.3} />
-                  <p className="text-[10px] text-white/40 mt-0.5">total sessions</p>
-                </div>
-                <div>
-                  <AnimatedValue value={analytics.avgSessionLength} formatFn={(n) => { const h = Math.floor(n / 60); const m = n % 60; const hrL = h === 1 ? 'Hr' : 'Hrs'; const minL = m === 1 ? 'Min' : 'Mins'; return h > 0 ? (m > 0 ? `${h} ${hrL} ${m} ${minL}` : `${h} ${hrL}`) : `${n} ${minL}`; }} className="text-xl font-bold text-cyan-400 font-['Orbitron']" delay={0.4} />
-                  <p className="text-[10px] text-white/40 mt-0.5">avg length</p>
-                </div>
-              </div>
-              <div className="flex flex-col items-center gap-1">
-                <AnimatedRadialGauge value={analytics.idleRatio} color="#f59e0b" label={`${analytics.idleRatio}%`} />
-                <span className="text-[9px] text-white/30">idle</span>
-              </div>
-            </div>
-            {/* Session length histogram */}
-            <div>
-              <p className="text-[10px] text-white/30 mb-2 uppercase tracking-wider">Session Length</p>
-              <div className="flex items-end gap-1.5 h-20">
-                {analytics.sessionBuckets.map((bucket, i) => {
-                  const maxBucket = Math.max(1, ...analytics.sessionBuckets.map((b) => b.count));
-                  const pct = (bucket.count / maxBucket) * 100;
-                  return (
-                    <div key={bucket.label} className="flex-1 flex flex-col items-center gap-0.5 group/bar">
-                      <span className="text-[9px] text-white/30 opacity-0 group-hover/bar:opacity-100 transition-opacity">
-                        {bucket.count}
-                      </span>
-                      <motion.div
-                        className={cn(
-                          'w-full rounded-t-sm',
-                          bucket.count > 0
-                            ? 'bg-gradient-to-t from-emerald-600/80 to-emerald-400/60'
-                            : 'bg-white/5',
-                        )}
-                        initial={{ height: '2%' }}
-                        whileInView={{ height: `${Math.max(bucket.count > 0 ? 8 : 2, pct)}%` }}
-                        viewport={{ once: true }}
-                        transition={{ duration: 0.6, delay: i * 0.08, ease: 'easeOut' }}
-                      />
-                      <span className="text-[8px] text-white/25 text-center leading-tight">{bucket.label}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        )}
-      </StatCard>
-
-      {/* ═══ Section 4: Top Games ═════════════════════════════════════════ */}
+      {/* ═══ Section 3: Top Games ═════════════════════════════════════════ */}
       <StatCard icon={TrendingUp} label="Top Games by Hours" delay={0}>
         {analytics.topGames.length === 0 ? (
           <p className="text-xs text-white/40">No hours recorded yet</p>

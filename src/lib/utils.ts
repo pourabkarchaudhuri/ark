@@ -24,13 +24,17 @@ const STEAM_CDN = 'https://cdn.akamai.steamstatic.com/steam/apps';
 
 /**
  * Build a deduplicated chain of image URLs to try for a game.
- * Priority: hardcoded override → coverUrl → Steam CDN variants (cover, header, capsule).
+ * Priority: hardcoded override → coverUrl → Steam CDN variants (cover, header,
+ * capsule large, capsule small, logo).
  * Used by Journey views and the Release Calendar for multi-step fallback.
  */
 export function buildGameImageChain(
   gameId: string,
   title: string,
   coverUrl?: string,
+  headerImage?: string,
+  /** Additional fallback URLs (e.g. Epic screenshots) appended after header */
+  extraFallbacks?: string[],
 ): string[] {
   const hardcoded = getHardcodedCover(title);
   if (hardcoded) return [hardcoded];
@@ -38,22 +42,37 @@ export function buildGameImageChain(
   const chain: string[] = [];
   if (coverUrl) chain.push(coverUrl);
 
-  // For Steam games, add CDN fallbacks
-  if (gameId.startsWith('steam-')) {
-    const appId = parseInt(gameId.replace('steam-', ''), 10);
-    if (!isNaN(appId)) {
-      chain.push(
-        `${STEAM_CDN}/${appId}/library_600x900.jpg`,
-        `${STEAM_CDN}/${appId}/header.jpg`,
-        `${STEAM_CDN}/${appId}/capsule_616x353.jpg`,
-      );
+  // For Steam games (or cross-store games that have a Steam appId), add CDN fallbacks
+  const steamAppId = gameId.startsWith('steam-')
+    ? parseInt(gameId.replace('steam-', ''), 10)
+    : null;
+
+  if (steamAppId && !isNaN(steamAppId)) {
+    if (headerImage) chain.push(headerImage);
+    chain.push(
+      `${STEAM_CDN}/${steamAppId}/library_600x900.jpg`,
+      `${STEAM_CDN}/${steamAppId}/header.jpg`,
+      `${STEAM_CDN}/${steamAppId}/capsule_616x353.jpg`,
+      `${STEAM_CDN}/${steamAppId}/capsule_231x87.jpg`,
+      `${STEAM_CDN}/${steamAppId}/logo.png`,
+    );
+  } else {
+    // Non-Steam game — headerImage is the only extra fallback we have
+    if (headerImage) chain.push(headerImage);
+  }
+
+  // Append any extra fallback URLs (e.g. screenshots for Epic games)
+  if (extraFallbacks) {
+    for (const url of extraFallbacks) {
+      if (url) chain.push(url);
     }
   }
 
-  // Deduplicate consecutive identical URLs
+  // Deduplicate while preserving order
+  const seen = new Set<string>();
   const deduped: string[] = [];
   for (const url of chain) {
-    if (url && url !== deduped[deduped.length - 1]) deduped.push(url);
+    if (url && !seen.has(url)) { seen.add(url); deduped.push(url); }
   }
   return deduped;
 }

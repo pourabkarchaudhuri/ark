@@ -33,21 +33,36 @@ function getIdbWorker(): Worker {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory state
+// In-memory state  (survives Vite HMR via globalThis stash)
 // ---------------------------------------------------------------------------
 
-let prefetchedGames: Game[] | null = null;
-let prefetchReady = false;
+// During development, Vite HMR re-executes this module on every save, which
+// would wipe the in-memory game cache and break the browse grid.  We stash
+// the state on globalThis so it survives module re-initialization.
+interface PrefetchHmrState {
+  games: Game[] | null;
+  ready: boolean;
+  searchIndex: Array<{ titleLower: string; devLower: string }> | null;
+}
+const _hmr: PrefetchHmrState = ((globalThis as any).__ARK_PREFETCH_STATE__ ??= {
+  games: null,
+  ready: false,
+  searchIndex: null,
+});
+
+let prefetchedGames: Game[] | null = _hmr.games;
+let prefetchReady = _hmr.ready;
 let prefetchPromise: Promise<Game[]> | null = null;
 // Pre-computed lowercase search strings — avoids calling .toLowerCase() on
 // every game during every keystroke. Built once when games are set.
-let searchIndex: Array<{ titleLower: string; devLower: string }> | null = null;
+let searchIndex: Array<{ titleLower: string; devLower: string }> | null = _hmr.searchIndex;
 
 function buildSearchIndex(games: Game[]): void {
   searchIndex = games.map(g => ({
     titleLower: g.title.toLowerCase(),
     devLower: (g.developer || '').toLowerCase(),
   }));
+  _hmr.searchIndex = searchIndex;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +101,8 @@ export async function getCachedBrowseData(): Promise<{
             // Store in memory for sync access
             prefetchedGames = data.games;
             prefetchReady = true;
+            _hmr.games = prefetchedGames;
+            _hmr.ready = prefetchReady;
             buildSearchIndex(data.games);
           }
           resolve(data);
@@ -218,6 +235,8 @@ async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
   // Store in memory for synchronous access by useSteamGames
   prefetchedGames = deduplicated;
   prefetchReady = true;
+  _hmr.games = prefetchedGames;
+  _hmr.ready = prefetchReady;
   buildSearchIndex(deduplicated);
 
   // Save to IndexedDB (non-blocking)
@@ -245,6 +264,16 @@ export function getPrefetchedGames(): Game[] | null {
  * Supports exact match and cross-store lookup via secondaryId.
  */
 export function findGameById(id: string): Game | null {
+  // Check the navigation transfer first (set by the card click that navigated here).
+  // Uses a 10-second TTL instead of consume-once so it survives React StrictMode
+  // double-execution in development.
+  if (
+    _navTransfer &&
+    _navTransfer.game.id === id &&
+    Date.now() - _navTransfer.ts < 10_000
+  ) {
+    return _navTransfer.game;
+  }
   if (!prefetchedGames) return null;
   // Direct match
   const direct = prefetchedGames.find(g => g.id === id);
@@ -253,6 +282,21 @@ export function findGameById(id: string): Game | null {
   const secondary = prefetchedGames.find(g => g.secondaryId === id);
   if (secondary) return secondary;
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Navigation transfer — lets the game card pass its full Game object to the
+// details page without encoding it in the URL.  Valid for 10 seconds (survives
+// React StrictMode double-execution).
+// ---------------------------------------------------------------------------
+let _navTransfer: { game: Game; ts: number } | null = null;
+
+/**
+ * Stash a Game object before navigating to /game/:id.
+ * The details page will pick it up via findGameById on mount.
+ */
+export function setNavigatingGame(game: Game): void {
+  _navTransfer = { game, ts: Date.now() };
 }
 
 /**
@@ -305,6 +349,8 @@ export function isPrefetchReady(): boolean {
 export function setPrefetchedGames(games: Game[]): void {
   prefetchedGames = games;
   prefetchReady = true;
+  _hmr.games = prefetchedGames;
+  _hmr.ready = prefetchReady;
   buildSearchIndex(games);
   // Persist to IndexedDB silently
   saveBrowseCache(games).catch(() => {});
@@ -317,6 +363,9 @@ export async function clearBrowseCache(): Promise<void> {
   prefetchedGames = null;
   prefetchReady = false;
   searchIndex = null;
+  _hmr.games = null;
+  _hmr.ready = false;
+  _hmr.searchIndex = null;
   try {
     const w = getIdbWorker();
     w.postMessage({ type: 'clear' });

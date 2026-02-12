@@ -596,7 +596,7 @@ export function GameDetailPanel({
                 </div>
                 
                 {/* Store Links */}
-                {game.websites && game.websites.length > 0 && (
+                {((game.websites && game.websites.length > 0) || game.steamAppId || game.epicSlug || game.epicNamespace) && (
                   <StoreLinksSection websites={game.websites} steamAppId={game.steamAppId} epicSlug={game.epicSlug} epicNamespace={game.epicNamespace} />
                 )}
 

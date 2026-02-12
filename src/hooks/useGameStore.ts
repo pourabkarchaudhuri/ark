@@ -15,6 +15,13 @@ import {
 import { Game, GameFilters, GameCategory, UpdateLibraryEntry, CreateCustomGameEntry, GameStatus, CachedGameMeta } from '@/types/game';
 import { SteamAppListItem } from '@/types/steam';
 import { detailEnricher } from '@/services/detail-enricher';
+import {
+  getCachedCatalog,
+  setCachedCatalog,
+  isCatalogStale,
+  clearCatalogCache,
+  sortCatalogAZ,
+} from '@/services/catalog-cache';
 
 /** Unused — kept for reference. Individual appdetails calls removed in favor of lightweight catalog cards. */
 // const CATALOG_CHUNK_SIZE = 50;
@@ -33,6 +40,75 @@ let _lastBgRefreshMs: number =
   parseInt(localStorage.getItem(BG_REFRESH_LS_KEY) || '0', 10) || 0;
 let _bgRefreshRunning = false;
 let _catalogPreloaded = false; // catalog app-list only needs one load per session
+
+// ---------------------------------------------------------------------------
+// Smart catalog loader — IndexedDB cache → API → persist
+// ---------------------------------------------------------------------------
+// In-memory copy so subsequent reads within the same session are instant.
+let _catalogMemCache: SteamAppListItem[] | null = null;
+// Whether the in-memory cache has been sorted A-Z.  The preload stores
+// unsorted data (fast); sorting is deferred until catalog mode is opened.
+let _catalogMemCacheSorted = false;
+
+/**
+ * Load the Steam app list with a tiered strategy:
+ *   1. In-memory cache (instant, survives tab switches)
+ *   2. IndexedDB cache (fast, survives app restarts, checked for staleness)
+ *   3. API fetch (slow, re-persists to IndexedDB + memory)
+ *
+ * Options:
+ *   - `forceRefresh`: skip caches and fetch from API.
+ *   - `sorted`: sort the list A-Z by title before returning.  This uses the
+ *     fast `sortCatalogAZ` (~300ms for 155K items) instead of localeCompare
+ *     (~5-10s).  Only pass `true` when catalog A-Z mode actually needs it;
+ *     the background preload should NOT sort.
+ */
+async function loadCatalogAppList(opts?: { forceRefresh?: boolean; sorted?: boolean }): Promise<SteamAppListItem[]> {
+  const forceRefresh = opts?.forceRefresh ?? false;
+  const needsSorted = opts?.sorted ?? false;
+
+  // 1. In-memory (session-level)
+  if (!forceRefresh && _catalogMemCache && _catalogMemCache.length > 0) {
+    if (needsSorted && !_catalogMemCacheSorted) {
+      sortCatalogAZ(_catalogMemCache);
+      _catalogMemCacheSorted = true;
+    }
+    return _catalogMemCache;
+  }
+
+  // 2. IndexedDB (persistent, check staleness)
+  if (!forceRefresh) {
+    const stale = await isCatalogStale();
+    if (!stale) {
+      const cached = await getCachedCatalog();
+      if (cached.length > 0) {
+        if (needsSorted) {
+          sortCatalogAZ(cached);
+        }
+        _catalogMemCache = cached;
+        _catalogMemCacheSorted = needsSorted;
+        console.log(`[CatalogLoader] Loaded ${cached.length} apps from IndexedDB cache`);
+        return cached;
+      }
+    }
+  }
+
+  // 3. Fresh fetch from Steam API
+  console.log('[CatalogLoader] Fetching fresh catalog from Steam API...');
+  const appList = await steamService.getAppList();
+  if (needsSorted) {
+    sortCatalogAZ(appList);
+  }
+  _catalogMemCache = appList;
+  _catalogMemCacheSorted = needsSorted;
+
+  // Persist in background (don't block the caller)
+  setCachedCatalog(appList).catch(err =>
+    console.warn('[CatalogLoader] Background persist failed:', err)
+  );
+
+  return appList;
+}
 
 function shouldBackgroundRefresh(): boolean {
   if (_bgRefreshRunning) return false;
@@ -76,13 +152,40 @@ export function extractCachedMeta(game: Game): CachedGameMeta {
  * Default view: all games sorted by release date (newest first)
  * 'catalog' category: continuous A–Z browsing via GetAppList + chunked details
  */
-export function useSteamGames(category: GameCategory = 'all') {
-  const [allGames, setAllGames] = useState<Game[]>([]); // All fetched games
-  const [displayCount, setDisplayCount] = useState(30); // Number of games to display
-  const [loading, setLoading] = useState(false);
+export function useSteamGames(category: GameCategory = 'trending') {
+  // If prefetched data is available (loaded during splash), initialize instantly
+  // to eliminate the 1-2s blank/skeleton flash on dashboard mount.
+  const [allGames, setAllGames] = useState<Game[]>(() => {
+    if (category === 'trending' || category === 'all') {
+      const prefetched = getPrefetchedGames();
+      if (prefetched && prefetched.length > 0) return prefetched;
+    }
+    return [];
+  });
+  // Start with a small batch to keep the first render fast (<50ms), then
+  // expand to the full dataset after the first paint via useEffect below.
+  // Processing 6000+ games in useMemo (enrichment, filtering, dynamic filters,
+  // sorting) on the very first render frame freezes the UI for several seconds.
+  const INITIAL_DISPLAY_BATCH = 120;
+  const [displayCount, setDisplayCount] = useState(() => {
+    if (category === 'trending' || category === 'all') {
+      const prefetched = getPrefetchedGames();
+      if (prefetched && prefetched.length > 0) return Math.min(prefetched.length, INITIAL_DISPLAY_BATCH);
+    }
+    return 30;
+  });
+  const [loading, setLoading] = useState(() => {
+    // Skip loading state if we already have data
+    if (category === 'trending' || category === 'all') {
+      const prefetched = getPrefetchedGames();
+      if (prefetched && prefetched.length > 0) return false;
+    }
+    return false;
+  });
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isMountedRef = useRef(true);
+  const initialFetchDoneRef = useRef(false);
   const genreSearchIndexRef = useRef(0);
   const bgRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -181,15 +284,29 @@ export function useSteamGames(category: GameCategory = 'all') {
       setAllGames([]);
       setDisplayCount(0);
       catalogOffsetRef.current = 0;
-      catalogListReadyRef.current = false;
 
       try {
-        console.log('[useSteamGames] Fetching catalog app list...');
-        const appList = await steamService.getAppList();
-        console.log(`[useSteamGames] Catalog: got ${appList.length} apps`);
-        catalogAppListRef.current = appList;
-        catalogListReadyRef.current = true;
-        setCatalogTotalCount(appList.length);
+        // Fast path: reuse the background-preloaded app list if available
+        let appList = catalogListReadyRef.current
+          ? catalogAppListRef.current
+          : null;
+
+        if (!appList || appList.length === 0) {
+          catalogListReadyRef.current = false;
+          console.log('[useSteamGames] Loading catalog app list...');
+          appList = await loadCatalogAppList({ sorted: true });
+          catalogAppListRef.current = appList;
+          catalogListReadyRef.current = true;
+          setCatalogTotalCount(appList.length);
+          console.log(`[useSteamGames] Catalog ready: ${appList.length} apps`);
+        } else {
+          // Ensure the preloaded list is sorted (preload doesn't sort)
+          if (!_catalogMemCacheSorted) {
+            sortCatalogAZ(appList);
+            _catalogMemCacheSorted = true;
+          }
+          console.log(`[useSteamGames] Catalog: reusing preloaded ${appList.length} apps`);
+        }
 
         // If a letter was already set, jump there
         if (catalogLetterRef.current) {
@@ -208,6 +325,20 @@ export function useSteamGames(category: GameCategory = 'all') {
       }
       return;
     }
+
+    // Fast path: if prefetched data was already loaded into initial state
+    // (via useState initializer), skip the fetch entirely on first mount.
+    // This eliminates the 1-2s blank/skeleton flash on dashboard open.
+    if (
+      (cat === 'trending' || cat === 'all') &&
+      allGamesRef.current.length > 0 &&
+      !initialFetchDoneRef.current
+    ) {
+      initialFetchDoneRef.current = true;
+      console.log(`[useSteamGames] Skipping fetch — ${allGamesRef.current.length} games already in initial state`);
+      return;
+    }
+    initialFetchDoneRef.current = true;
 
     setLoading(true);
     setError(null);
@@ -244,9 +375,18 @@ export function useSteamGames(category: GameCategory = 'all') {
             setLoading(false);
           }
           return; // Early return to skip date sorting
-        case 'trending':
-          fetchedGames = await steamService.getTopSellers();
+        case 'trending': {
+          // Use prefetched data if available (already contains top sellers + epic catalog).
+          // This avoids 3 redundant API calls on dashboard mount.
+          const prefetchedForTrending = getPrefetchedGames();
+          if (prefetchedForTrending && prefetchedForTrending.length > 0) {
+            fetchedGames = prefetchedForTrending;
+            console.log(`[useSteamGames] Trending: using ${prefetchedForTrending.length} pre-fetched games (instant)`);
+          } else {
+            fetchedGames = await gameService.getTopSellers();
+          }
           break;
+        }
         case 'recent':
           fetchedGames = await gameService.getNewReleases();
           break;
@@ -293,10 +433,10 @@ export function useSteamGames(category: GameCategory = 'all') {
           }
 
           // ---- Step 2: Background catalog preload for infinite scroll ----
-          // Only load the catalog app-list once per session (it's 155K+ entries).
+          // Uses tiered cache: memory → IndexedDB → API (only if stale/missing).
           if (!_catalogPreloaded) {
             _catalogPreloaded = true;
-            const catalogPromise = steamService.getAppList().then(appList => {
+            const catalogPromise = loadCatalogAppList().then(appList => {
               if (isMountedRef.current) {
                 catalogAppListRef.current = appList;
                 catalogListReadyRef.current = true;
@@ -310,10 +450,7 @@ export function useSteamGames(category: GameCategory = 'all') {
             });
             void catalogPromise;
           } else if (catalogListReadyRef.current) {
-            // Catalog was already loaded in a previous mount — reuse it.
-            // catalogAppListRef and catalogListReadyRef are hook-instance refs
-            // so they reset on remount; re-trigger the preload from module cache
-            // isn't needed because the ref is local. Instead, just re-mark.
+            // Already loaded in memory from a previous mount — nothing to do.
           }
 
           // ---- Step 3: Throttled background refresh (module-level guard) ----
@@ -421,7 +558,79 @@ export function useSteamGames(category: GameCategory = 'all') {
     };
   }, [category, fetchGames]);
 
-  // Jump-to-letter for catalog mode (synchronous — no API calls)
+  // After the first paint, expand displayCount to the full dataset so filters
+  // and scroll work over the complete list.  The heavy filter/sort computation
+  // in the dashboard is already deferred (useDeferredFilterSort), so this
+  // expansion only costs the enrichment useMemo (which is identity-stable
+  // for most games).  Using rAF ensures the initial 120-item render is
+  // painted before we trigger the enrichment pass for the full dataset.
+  useEffect(() => {
+    if (allGames.length > displayCount) {
+      const id = requestAnimationFrame(() => {
+        if (isMountedRef.current) {
+          setDisplayCount(allGames.length);
+        }
+      });
+      return () => cancelAnimationFrame(id);
+    }
+  }, [allGames.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Background catalog count — fires once per session regardless of category.
+  // Loads the full Steam app list (cached 24h on disk) just to get the count
+  // for the "X of 155K" display in the toolbar.  Also primes the list for
+  // when the user switches to Catalog (A–Z) mode.
+  useEffect(() => {
+    if (_catalogPreloaded || catalogTotalCount > 0) return;
+    _catalogPreloaded = true;
+    loadCatalogAppList().then(appList => {
+      if (isMountedRef.current) {
+        catalogAppListRef.current = appList;
+        catalogListReadyRef.current = true;
+        catalogOffsetRef.current = 0;
+        setCatalogTotalCount(appList.length);
+        console.log(`[useSteamGames] Background catalog count: ${appList.length} games`);
+      }
+    }).catch(err => {
+      _catalogPreloaded = false;
+      console.warn('[useSteamGames] Background catalog count failed:', err);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Periodic catalog staleness check ─────────────────────────────────────
+  // Every 30 minutes while the app is open, check if the catalog cache is
+  // older than 6 hours.  If so, silently re-sync in the background so the
+  // user always has a fresh list available.
+  useEffect(() => {
+    const POLL_INTERVAL_MS = 30 * 60 * 1000; // 30 min
+
+    const checkAndRefresh = async () => {
+      try {
+        const stale = await isCatalogStale();
+        if (!stale) return;
+        console.log('[useSteamGames] Catalog cache is stale, refreshing in background...');
+        const appList = await loadCatalogAppList({ forceRefresh: true }); // force API fetch, no sort needed
+        if (isMountedRef.current) {
+          catalogAppListRef.current = appList;
+          catalogListReadyRef.current = true;
+          setCatalogTotalCount(appList.length);
+          console.log(`[useSteamGames] Background catalog refresh complete: ${appList.length} apps`);
+        }
+      } catch (err) {
+        console.warn('[useSteamGames] Periodic catalog refresh failed:', err);
+      }
+    };
+
+    const intervalId = setInterval(checkAndRefresh, POLL_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Jump-to-letter for catalog mode (synchronous — no API calls).
+  // Builds the first page of games directly and replaces allGames in a single
+  // setState call.  This avoids the append-vs-replace ambiguity of calling
+  // fetchCatalogChunk after setAllGames([]) (the ref check inside the chunk
+  // loader can't see the pending [] because React hasn't rendered yet).
   const jumpToLetter = useCallback((letter: string) => {
     if (category !== 'catalog' || !catalogListReadyRef.current) return;
     setCatalogLetter(letter);
@@ -429,13 +638,38 @@ export function useSteamGames(category: GameCategory = 'all') {
     const lowerLetter = letter.toLowerCase();
     const appList = catalogAppListRef.current;
     const idx = appList.findIndex(a => a.name.toLowerCase() >= lowerLetter);
-    catalogOffsetRef.current = idx >= 0 ? idx : 0;
+    const startOffset = idx >= 0 ? idx : 0;
 
-    // Clear current games and load from the new offset
-    setAllGames([]);
-    setDisplayCount(0);
-    fetchCatalogChunk(true);
-  }, [category, fetchCatalogChunk]);
+    // Slice the first page from the new starting position
+    const chunk = appList.slice(startOffset, startOffset + CATALOG_PAGE_SIZE);
+    const newOffset = startOffset + chunk.length;
+
+    const games: Game[] = chunk.map(app => ({
+      id: `steam-${app.appid}`,
+      store: 'steam' as const,
+      steamAppId: app.appid,
+      title: app.name,
+      developer: '',
+      publisher: '',
+      genre: [],
+      platform: [],
+      metacriticScore: null,
+      releaseDate: '',
+      status: 'Want to Play' as const,
+      priority: 'Medium' as const,
+      publicReviews: '',
+      recommendationSource: '',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
+
+    // Direct replacement — single setState, no batching ambiguity
+    catalogOffsetRef.current = newOffset;
+    allGamesRef.current = games;          // keep ref in sync immediately
+    setAllGames(games);
+    setDisplayCount(games.length);
+    setCatalogHasMore(newOffset < appList.length);
+  }, [category]);
 
   // Once games are loaded, fetch real-time player counts in the background.
   // Counts come from ISteamUserStats/GetNumberOfCurrentPlayers (Steam API).
@@ -501,7 +735,7 @@ export function useSteamGames(category: GameCategory = 'all') {
   const loadCatalogForAllMode = useCallback(async () => {
     if (catalogListReadyRef.current) return; // Already loaded
     console.log('[useSteamGames] Loading catalog app list for All Games infinite scroll...');
-    const appList = await steamService.getAppList();
+    const appList = await loadCatalogAppList({ sorted: true });
     if (!isMountedRef.current) return;
     catalogAppListRef.current = appList;
     catalogListReadyRef.current = true;
@@ -510,26 +744,47 @@ export function useSteamGames(category: GameCategory = 'all') {
     console.log(`[useSteamGames] Catalog ready for All Games (${appList.length} apps)`);
   }, []);
 
-  // Pagination - games to display, with enrichment + player-count + library status merged at read-time.
-  // The enrichmentEpoch dep ensures we re-merge after new enrichments/player-counts/library changes arrive,
-  // but allGames itself stays untouched so sort/filter logic isn't disturbed.
+  // Pagination + enrichment — merges player-counts, detail enrichment, and
+  // library status into the game objects at read-time.
+  //
+  // **Stability optimisation**: returns the SAME array reference if no game
+  // actually changed.  This prevents the dashboard's deferred filter/sort
+  // hook from re-scheduling heavy computation on every enrichmentEpoch bump
+  // that only touched a handful of games (or none at all).
+  const prevGamesRef = useRef<Game[]>([]);
   const games = useMemo(() => {
     const slice = allGames.slice(0, displayCount);
-    return slice.map(game => {
-      let merged = game;
-      // Detail enrichment
+    let anyDiff = slice.length !== prevGamesRef.current.length;
+
+    const result = slice.map((game, idx) => {
+      // Determine what enrichment data is available
       const enrichment = enrichmentMapRef.current.get(game.id);
-      if (enrichment) merged = { ...merged, ...enrichment };
-      // Player counts (out-of-band)
       const pc = game.steamAppId ? playerCountMapRef.current.get(game.steamAppId) : undefined;
-      if (pc !== undefined) merged = { ...merged, playerCount: pc, playerCountSource: 'steam' as const };
-      // Library status (out-of-band — checked at read-time instead of remapping all 6000)
       const libraryEntry = libraryStore.getEntry(game.id);
+
+      // Fast path: nothing to merge — return the original object
+      if (!enrichment && pc === undefined && !libraryEntry) {
+        if (!anyDiff && game !== prevGamesRef.current[idx]) anyDiff = true;
+        return game;
+      }
+
+      // Merge enrichment data
+      let merged = game;
+      if (enrichment) merged = { ...merged, ...enrichment };
+      if (pc !== undefined) merged = { ...merged, playerCount: pc, playerCountSource: 'steam' as const };
       if (libraryEntry) {
         merged = { ...merged, isInLibrary: true, status: libraryEntry.status || merged.status };
       }
+
+      // Mark as different (merged objects are always new references)
+      anyDiff = true;
       return merged;
     });
+
+    // If nothing changed, return the previous reference to avoid downstream cascading
+    if (!anyDiff) return prevGamesRef.current;
+    prevGamesRef.current = result;
+    return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allGames, displayCount, enrichmentEpoch]);
   // "all" mode: always has more games (catalog has 155k+)
@@ -591,6 +846,8 @@ export function useSteamGames(category: GameCategory = 'all') {
   const refresh = useCallback(() => {
     gameService.clearCache();
     clearBrowseCache(); // Clear the prefetch IndexedDB cache too
+    clearCatalogCache(); // Clear the persistent catalog cache so it re-fetches fresh
+    _catalogMemCache = null; // Wipe in-memory catalog copy
     detailEnricher.reset();
     enrichmentMapRef.current.clear();
     setEnrichmentEpoch(0);
@@ -653,6 +910,8 @@ export function useSteamGames(category: GameCategory = 'all') {
     loadMore,
     refresh,
     totalCount,
+    // Full Steam catalog count (~155K) — loaded in background for display purposes
+    catalogTotalCount,
     // Sync state — true while background refresh is in progress
     isSyncing,
     // Catalog-specific
@@ -1292,7 +1551,7 @@ export function useFilteredGames(initialFilters?: Partial<GameFilters>) {
     priority: 'All',
     genre: 'All',
     platform: 'All',
-    category: 'all',
+    category: 'trending',
     releaseYear: 'All',
     store: [],
     ...initialFilters,
@@ -1329,7 +1588,7 @@ export function useFilteredGames(initialFilters?: Partial<GameFilters>) {
       priority: 'All',
       genre: 'All',
       platform: 'All',
-      category: 'all',
+      category: 'trending',
       releaseYear: 'All',
       store: [],
     });
@@ -1342,7 +1601,7 @@ export function useFilteredGames(initialFilters?: Partial<GameFilters>) {
       filters.genre !== 'All' ||
       filters.platform !== 'All' ||
       filters.releaseYear !== 'All' ||
-      filters.category !== 'all' ||
+      filters.category !== 'trending' ||
       filters.store.length > 0
     );
   }, [filters]);
@@ -1354,7 +1613,7 @@ export function useFilteredGames(initialFilters?: Partial<GameFilters>) {
     if (filters.genre !== 'All') count++;
     if (filters.platform !== 'All') count++;
     if (filters.releaseYear !== 'All') count++;
-    if (filters.category !== 'all') count++;
+    if (filters.category !== 'trending') count++;
     if (filters.store.length > 0) count++;
     return count;
   }, [filters]);

@@ -4,13 +4,14 @@ import { Router, Route, Switch } from 'wouter';
 import { useHashLocation } from 'wouter/use-hash-location';
 import { Dashboard } from '@/pages/dashboard';
 import { GameDetailsPage } from '@/pages/game-details';
+import { SplashScreen } from '@/components/splash-screen';
 import { LoadingScreen } from '@/components/loading-screen';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { ToastProvider } from '@/components/ui/toast';
 import { UpdateSnackbar } from '@/components/update-snackbar';
 import { ChangelogModal } from '@/components/changelog-modal';
 
-type AppState = 'loading' | 'ready';
+type AppState = 'splash' | 'loading' | 'ready';
 
 function AppRoutes() {
   return (
@@ -26,8 +27,12 @@ function AppRoutes() {
 }
 
 function AppContent() {
-  // Start directly with loading screen as the landing page
-  const [appState, setAppState] = useState<AppState>('loading');
+  // Splash → Loading → Ready
+  const [appState, setAppState] = useState<AppState>('splash');
+
+  const handleSplashEnter = useCallback(() => {
+    setAppState('loading');
+  }, []);
 
   const handleLoadingComplete = useCallback(() => {
     setAppState('ready');
@@ -41,6 +46,10 @@ function AppContent() {
     <div className="dark">
       <ErrorBoundary onReset={handleReset}>
         <AnimatePresence mode="wait">
+          {appState === 'splash' && (
+            <SplashScreen key="splash" onEnter={handleSplashEnter} />
+          )}
+
           {appState === 'loading' && (
             <LoadingScreen key="app-loading" onComplete={handleLoadingComplete} duration={2500} />
           )}

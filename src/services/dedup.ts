@@ -84,6 +84,7 @@ export function deduplicateGames(games: Game[]): Game[] {
       const newStore: 'steam' | 'epic' = game.store === 'epic' ? 'epic' : 'steam';
 
       if (existingStore !== newStore) {
+
         const stores = new Set(existing.availableOn || [existingStore]);
         stores.add(newStore);
 
@@ -106,6 +107,7 @@ export function deduplicateGames(games: Game[]): Game[] {
           // Always keep both stores' key identifiers
           epicNamespace: epicSide.epicNamespace,
           epicOfferId:  epicSide.epicOfferId,
+          epicSlug:     epicSide.epicSlug,
           steamAppId:   steamSide.steamAppId,
           // Preserve Epic price for cross-store display when Steam is primary
           epicPrice: epicSide.price ?? undefined,

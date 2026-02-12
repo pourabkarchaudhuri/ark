@@ -95,8 +95,45 @@ declare global {
         }>;
         gallery?: Array<{ type: 'image' | 'video'; url: string; thumbnail?: string }>;
       } | null>;
+      /** News/blog articles related to a game (filtered by keyword) */
+      getNewsFeed: (keyword: string, limit?: number) => Promise<EpicNewsArticle[]>;
+      /** Product reviews/ratings for a game */
+      getProductReviews: (slug: string) => Promise<EpicProductReviews | null>;
+      /** DLC and add-ons for a game namespace */
+      getAddons: (namespace: string, limit?: number) => Promise<EpicAddon[]>;
     };
   }
+}
+
+export interface EpicNewsArticle {
+  title: string;
+  url: string;
+  date: string;
+  image?: string;
+  body?: string;
+  source?: string;
+}
+
+export interface EpicProductReviews {
+  overallScore: string;
+  totalReviews: number;
+  averageRating: number;
+  recentReviews?: Array<{
+    rating: number;
+    body: string;
+    date: string;
+    userName?: string;
+  }>;
+}
+
+export interface EpicAddon {
+  id: string;
+  title: string;
+  description: string;
+  image?: string;
+  price?: string;
+  isFree: boolean;
+  releaseDate?: string;
 }
 
 export {};

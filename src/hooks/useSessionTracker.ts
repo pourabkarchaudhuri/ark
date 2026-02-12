@@ -37,8 +37,23 @@ export function useSessionTracker() {
   useEffect(() => {
     if (!window.sessionTracker) return;
 
-    // Initial sync
+    // Initial sync — send tracked games list to the main process
     syncTrackedGames();
+
+    // Hydrate liveGames with any sessions already running in the main process
+    // (covers app reload / HMR where the main process kept polling but the
+    // renderer lost its in-memory state).
+    window.sessionTracker.getActiveSessions().then((active) => {
+      if (!active || active.length === 0) return;
+      setLiveGames((prev) => {
+        const next = new Set(prev);
+        for (const s of active) {
+          const gid = typeof s.gameId === 'number' ? `steam-${s.gameId}` : String(s.gameId);
+          next.add(gid);
+        }
+        return next;
+      });
+    }).catch(() => { /* non-critical — fresh start has no sessions */ });
 
     // Re-sync whenever the library or custom games change
     const unsubLibrary = libraryStore.subscribe(syncTrackedGames);

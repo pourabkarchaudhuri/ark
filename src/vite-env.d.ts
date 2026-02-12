@@ -99,6 +99,9 @@ interface WebviewAPI {
 }
 
 declare global {
+  // Build-time constant injected by Vite from package.json (see vite.config.ts `define`)
+  const __APP_VERSION__: string;
+
   interface Window {
     fileDialog?: FileDialogAPI;
     electron?: ElectronAPI;

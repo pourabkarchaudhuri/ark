@@ -1666,7 +1666,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
               title="Show Coming Soon"
             >
               <PanelRightOpen className="w-3.5 h-3.5" />
-              <span className="text-[10px] font-medium">TBD</span>
+              <span className="text-[10px] font-medium">TBA</span>
               {tbdReleases.length > 0 && (
                 <span className="text-[9px] text-fuchsia-400/80 bg-fuchsia-500/15 px-1.5 py-0.5 rounded-full font-medium">{tbdReleases.length}</span>
               )}

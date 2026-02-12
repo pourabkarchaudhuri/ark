@@ -13,6 +13,7 @@ vi.mock('wouter', () => ({
 vi.mock('@/services/library-store', () => ({
   libraryStore: {
     isInLibrary: vi.fn().mockReturnValue(true),
+    getEntry: vi.fn().mockReturnValue(null),
     getAllEntries: vi.fn().mockReturnValue([]),
     subscribe: vi.fn().mockReturnValue(() => {}),
   },

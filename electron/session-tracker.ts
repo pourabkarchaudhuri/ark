@@ -57,26 +57,50 @@ const POLL_INTERVAL_MS = 15_000;   // Check every 15 seconds
 const IDLE_THRESHOLD_S = 300;      // 5 minutes idle threshold
 
 // ---------------------------------------------------------------------------
-// Process detection
+// Process detection — single OS call per poll tick, not per game
 // ---------------------------------------------------------------------------
 
-function isProcessRunning(exePath: string): boolean {
-  const exeName = path.basename(exePath);
+/** Cache of lowercased process names from the most recent snapshot. */
+let _runningProcesses: Set<string> = new Set();
+
+/**
+ * Snapshot all running processes into `_runningProcesses`.
+ * Called once per poll tick — avoids spawning N `tasklist` commands for N games.
+ */
+function refreshProcessSnapshot(): void {
   try {
     if (process.platform === 'win32') {
-      const output = execSync(
-        `tasklist /FI "IMAGENAME eq ${exeName}" /NH`,
-        { encoding: 'utf-8', timeout: 5000, windowsHide: true }
-      );
-      return output.toLowerCase().includes(exeName.toLowerCase());
+      // /FO CSV /NH → one line per process: "imagename","PID","sessionname","session#","memUsage"
+      const output = execSync('tasklist /FO CSV /NH', {
+        encoding: 'utf-8',
+        timeout: 10_000,
+        windowsHide: true,
+      });
+      const names = new Set<string>();
+      for (const line of output.split('\n')) {
+        // Extract the first quoted field (image name)
+        const match = line.match(/^"([^"]+)"/);
+        if (match) names.add(match[1].toLowerCase());
+      }
+      _runningProcesses = names;
     } else {
-      // macOS / Linux
-      const output = execSync(`pgrep -f "${exeName}"`, { encoding: 'utf-8', timeout: 5000 });
-      return output.trim().length > 0;
+      // macOS / Linux — `ps -eo comm=` prints just the command name, one per line
+      const output = execSync('ps -eo comm=', { encoding: 'utf-8', timeout: 5000 });
+      const names = new Set<string>();
+      for (const line of output.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed) names.add(trimmed.toLowerCase());
+      }
+      _runningProcesses = names;
     }
   } catch {
-    return false;
+    // If the snapshot fails, keep the previous set — better stale than empty
   }
+}
+
+/** Check the cached snapshot for a specific executable. */
+function isProcessRunning(exePath: string): boolean {
+  return _runningProcesses.has(path.basename(exePath).toLowerCase());
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +118,9 @@ const activeSessions: Map<string, ActiveSession> = new Map(); // gameId -> sessi
 
 function pollTick() {
   if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
+
+  // Snapshot all running processes ONCE — O(1) lookups for each game below
+  refreshProcessSnapshot();
 
   // Get system idle time (seconds)
   let systemIdleS = 0;
@@ -232,8 +259,37 @@ export function stopSessionTracker() {
 /**
  * Update the list of games to monitor.
  * Called from an IPC handler when the renderer sends its tracked games list.
+ *
+ * Any active session whose gameId is no longer in the new list is finalized
+ * immediately — prevents orphaned "Playing Now" ghosts.
  */
 export function setTrackedGames(games: TrackedGame[]) {
+  const newIds = new Set(games.map((g) => g.gameId));
+
+  // Finalize sessions for games that were removed from the tracked list
+  for (const [gameId, session] of activeSessions) {
+    if (!newIds.has(gameId)) {
+      const endTime = new Date();
+      const rawDurationMs = endTime.getTime() - session.startTime.getTime();
+      const activeDurationMs = Math.max(0, rawDurationMs - session.idleAccumulatedMs);
+
+      const completed: CompletedSession = {
+        id: uuidv4(),
+        gameId,
+        executablePath: session.executablePath,
+        startTime: session.startTime.toISOString(),
+        endTime: endTime.toISOString(),
+        durationMinutes: Math.round(activeDurationMs / 60_000 * 100) / 100,
+        idleMinutes: Math.round(session.idleAccumulatedMs / 60_000 * 100) / 100,
+      };
+
+      activeSessions.delete(gameId);
+      sendToRenderer('session:statusChange', { gameId, status: 'Playing' });
+      sendToRenderer('session:ended', { gameId, session: completed });
+      console.log(`[SessionTracker] Finalized orphaned session for ${gameId}`);
+    }
+  }
+
   trackedGames = games;
   console.log(`[SessionTracker] Now tracking ${games.length} game(s)`);
 }

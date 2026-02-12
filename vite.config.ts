@@ -1,9 +1,15 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import pkg from './package.json';
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    // Inject the package.json version at build time so the changelog modal
+    // and navbar always match — no more manual APP_VERSION bumps.
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

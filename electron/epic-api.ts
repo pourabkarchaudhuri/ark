@@ -1265,6 +1265,364 @@ class EpicAPIClient {
     return null;
   }
 
+  // -----------------------------------------------------------------------
+  // News / Feed
+  //
+  // Epic's CMS blog endpoint is NOT behind Cloudflare and returns global
+  // store news articles.  We filter by keyword (game title) to find
+  // game-specific articles.
+  // -----------------------------------------------------------------------
+
+  async getNewsFeed(keyword: string, limit: number = 15): Promise<Array<{
+    title: string;
+    url: string;
+    date: string;
+    image?: string;
+    body?: string;
+    source?: string;
+  }>> {
+    if (!keyword) return [];
+
+    const cacheKey = `epic:news:${keyword.toLowerCase()}:${limit}`;
+    const cached = this.cache.get<any[]>(cacheKey, true);
+    if (cached && !this.cache.isStale(cacheKey)) return cached;
+
+    const results: Array<{
+      title: string;
+      url: string;
+      date: string;
+      image?: string;
+      body?: string;
+      source?: string;
+    }> = [];
+
+    try {
+      await this.rateLimiter.acquire();
+      try {
+        // Fetch the latest blog posts from Epic CMS (not behind Cloudflare)
+        const url = `https://store-content.ak.epicgames.com/api/en-US/content/blog?offset=0&limit=50`;
+        const response = await this.doFetch(url, {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          },
+        });
+
+        if (response.ok) {
+          const json = await response.json();
+          const posts = Array.isArray(json) ? json : (json?.blogList || json?.elements || []);
+          const kw = keyword.toLowerCase();
+
+          for (const post of posts) {
+            // Filter by keyword match on title, body, or content
+            const title = post?.title || post?.name || '';
+            const body = post?.body || post?.content || post?.short || '';
+            const slug = post?.slug || post?._slug || '';
+
+            if (
+              title.toLowerCase().includes(kw) ||
+              body.toLowerCase().includes(kw) ||
+              slug.toLowerCase().includes(kw.replace(/\s+/g, '-'))
+            ) {
+              results.push({
+                title,
+                url: post?.url || post?.externalLink || (slug ? `https://store.epicgames.com/en-US/news/${slug}` : ''),
+                date: post?.date || post?.lastModified || post?._activeDate || '',
+                image: post?.image?.src || post?.image || post?.featuredImage?.src || undefined,
+                body: body.slice(0, 500),
+                source: 'Epic Games Store',
+              });
+            }
+
+            if (results.length >= limit) break;
+          }
+        }
+      } finally {
+        this.rateLimiter.release();
+      }
+    } catch (error) {
+      console.debug(`[EpicAPI] News feed fetch failed:`, (error as Error).message);
+    }
+
+    // Also try the product-specific CMS endpoint for news
+    // (some games have dedicated news pages)
+    if (results.length === 0) {
+      try {
+        // Attempt a slug-based product news fetch
+        const slug = keyword.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        await this.rateLimiter.acquire();
+        try {
+          const url = `https://store-content.ak.epicgames.com/api/en-US/content/products/${slug}`;
+          const response = await this.doFetch(url, {
+            headers: {
+              'Accept': 'application/json',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            },
+          });
+
+          if (response.ok) {
+            const json = await response.json();
+            const pages = json?.pages || [];
+            for (const page of pages) {
+              const news = page?.data?.news?.articles || page?.data?.news?.items || [];
+              for (const article of (Array.isArray(news) ? news : [])) {
+                results.push({
+                  title: article?.title || article?.name || 'News Update',
+                  url: article?.url || article?.link || `https://store.epicgames.com/en-US/p/${slug}`,
+                  date: article?.date || article?.publishDate || '',
+                  image: article?.image?.src || article?.image || undefined,
+                  body: (article?.body || article?.content || '').slice(0, 500),
+                  source: 'Epic Games Store',
+                });
+                if (results.length >= limit) break;
+              }
+            }
+          }
+        } finally {
+          this.rateLimiter.release();
+        }
+      } catch {
+        // Silently ignore — news is a nice-to-have
+      }
+    }
+
+    if (results.length > 0) {
+      this.cache.set(cacheKey, results, RELEASES_CACHE_TTL);
+      console.log(`[EpicAPI] News feed: ${results.length} articles for "${keyword}"`);
+    }
+    return results;
+  }
+
+  // -----------------------------------------------------------------------
+  // Product Reviews
+  //
+  // Epic's product reviews endpoint returns user ratings for a game.
+  // The SKU is typically the product slug (or EPIC_{slug}).
+  // -----------------------------------------------------------------------
+
+  async getProductReviews(slug: string): Promise<{
+    overallScore: string;
+    totalReviews: number;
+    averageRating: number;
+    recentReviews?: Array<{
+      rating: number;
+      body: string;
+      date: string;
+      userName?: string;
+    }>;
+  } | null> {
+    if (!slug) return null;
+
+    const cacheKey = `epic:reviews:${slug}`;
+    const cached = this.cache.get<any>(cacheKey, true);
+    if (cached && !this.cache.isStale(cacheKey)) return cached;
+
+    // Try multiple SKU formats that Epic uses
+    const skuVariants = [slug, `EPIC_${slug}`, slug.replace(/-/g, '')];
+
+    for (const sku of skuVariants) {
+      try {
+        await this.rateLimiter.acquire();
+        try {
+          const url = `https://store-content.ak.epicgames.com/api/en-US/content/productReviews/${sku}`;
+          const response = await this.doFetch(url, {
+            headers: {
+              'Accept': 'application/json',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            },
+          });
+
+          if (response.ok) {
+            const json = await response.json();
+            // Parse response — format varies but typically contains an array of reviews
+            const reviews = json?.reviews || json?.data?.reviews || json?.elements || [];
+            const overallRating = json?.averageRating || json?.data?.averageRating || 0;
+            const totalCount = json?.totalCount || json?.data?.totalCount || reviews.length;
+
+            if (totalCount > 0 || reviews.length > 0) {
+              // Compute a verbal score similar to Steam's
+              let overallScore = 'Mixed';
+              const avgRating = overallRating || (reviews.length > 0
+                ? reviews.reduce((sum: number, r: any) => sum + (r.rating || 0), 0) / reviews.length
+                : 0);
+
+              if (avgRating >= 4.5) overallScore = 'Overwhelmingly Positive';
+              else if (avgRating >= 4.0) overallScore = 'Very Positive';
+              else if (avgRating >= 3.5) overallScore = 'Mostly Positive';
+              else if (avgRating >= 3.0) overallScore = 'Mixed';
+              else if (avgRating >= 2.0) overallScore = 'Mostly Negative';
+              else overallScore = 'Negative';
+
+              const result = {
+                overallScore,
+                totalReviews: totalCount,
+                averageRating: Math.round(avgRating * 10) / 10,
+                recentReviews: reviews.slice(0, 10).map((r: any) => ({
+                  rating: r.rating || 0,
+                  body: r.body || r.text || r.content || '',
+                  date: r.date || r.createdAt || '',
+                  userName: r.userName || r.user?.displayName || undefined,
+                })),
+              };
+
+              this.cache.set(cacheKey, result, CACHE_TTL);
+              console.log(`[EpicAPI] Product reviews for "${slug}": ${totalCount} reviews, avg ${avgRating}`);
+              return result;
+            }
+          }
+        } finally {
+          this.rateLimiter.release();
+        }
+      } catch (error) {
+        console.debug(`[EpicAPI] Reviews fetch failed for SKU "${sku}":`, (error as Error).message);
+      }
+    }
+
+    // Also try the GraphQL polling endpoint (newer Epic review system)
+    try {
+      const data = await this.gqlFetch<{
+        OpenCritic?: { productReviews?: { openCriticScore?: number; topCriticScore?: number; percentRecommended?: number } };
+      }>(`
+        query getProductReviews($sandboxId: String!) {
+          OpenCritic {
+            productReviews(sandboxId: $sandboxId) {
+              openCriticScore
+              topCriticScore
+              percentRecommended
+            }
+          }
+        }
+      `, { sandboxId: slug }).catch(() => null);
+
+      if (data?.OpenCritic?.productReviews) {
+        const oc = data.OpenCritic.productReviews;
+        const pctRec = oc.percentRecommended ?? 0;
+        let overallScore = 'Mixed';
+        if (pctRec >= 85) overallScore = 'Very Positive';
+        else if (pctRec >= 70) overallScore = 'Mostly Positive';
+        else if (pctRec >= 50) overallScore = 'Mixed';
+        else overallScore = 'Mostly Negative';
+
+        const result = {
+          overallScore,
+          totalReviews: 0,
+          averageRating: oc.openCriticScore ?? oc.topCriticScore ?? 0,
+          recentReviews: [],
+        };
+        this.cache.set(cacheKey, result, CACHE_TTL);
+        console.log(`[EpicAPI] OpenCritic reviews for "${slug}": score ${result.averageRating}, ${pctRec}% recommended`);
+        return result;
+      }
+    } catch {
+      // Silently ignore
+    }
+
+    if (cached) return cached;
+    return null;
+  }
+
+  // -----------------------------------------------------------------------
+  // DLC / Add-ons
+  //
+  // Queries the catalog for addons belonging to a given namespace.
+  // -----------------------------------------------------------------------
+
+  private readonly ADDONS_QUERY = `
+    query addonsQuery($namespace: String!, $count: Int, $locale: String, $country: String!) {
+      Catalog {
+        searchStore(
+          namespace: $namespace
+          count: $count
+          locale: $locale
+          country: $country
+          category: "addons|digitalextras"
+          sortBy: "releaseDate"
+          sortDir: "DESC"
+        ) {
+          elements {
+            namespace
+            id
+            title
+            description
+            keyImages {
+              type
+              url
+            }
+            effectiveDate
+            price(country: $country) {
+              totalPrice {
+                discountPrice
+                originalPrice
+                fmtPrice {
+                  originalPrice
+                  discountPrice
+                  intermediatePrice
+                }
+              }
+            }
+          }
+          paging {
+            count
+            total
+          }
+        }
+      }
+    }`;
+
+  async getAddons(namespace: string, limit: number = 50): Promise<Array<{
+    id: string;
+    title: string;
+    description: string;
+    image?: string;
+    price?: string;
+    isFree: boolean;
+    releaseDate?: string;
+  }>> {
+    if (!namespace) return [];
+
+    const cacheKey = `epic:addons:${namespace}:${limit}`;
+    const cached = this.cache.get<any[]>(cacheKey, true);
+    if (cached && !this.cache.isStale(cacheKey)) return cached;
+
+    try {
+      const data = await this.gqlFetch<{
+        Catalog: {
+          searchStore: {
+            elements: EpicCatalogItem[];
+            paging: { count: number; total: number };
+          };
+        };
+      }>(this.ADDONS_QUERY, {
+        namespace,
+        count: limit,
+        locale: 'en-US',
+        country: 'US',
+      });
+
+      const elements = data.Catalog.searchStore.elements || [];
+      const addons = elements.map(el => ({
+        id: el.id,
+        title: el.title,
+        description: el.description || '',
+        image: resolveEpicImage(el.keyImages),
+        price: el.price?.totalPrice.fmtPrice?.discountPrice,
+        isFree: el.price?.totalPrice.discountPrice === 0,
+        releaseDate: el.effectiveDate,
+      }));
+
+      if (addons.length > 0) {
+        this.cache.set(cacheKey, addons, RELEASES_CACHE_TTL);
+        console.log(`[EpicAPI] Addons for namespace "${namespace}": ${addons.length} found (total available: ${data.Catalog.searchStore.paging.total})`);
+      }
+      return addons;
+    } catch (error) {
+      console.debug(`[EpicAPI] Addons query failed for "${namespace}":`, (error as Error).message);
+    }
+
+    if (cached) return cached;
+    return [];
+  }
+
   /**
    * Clear all cached Epic data.
    */

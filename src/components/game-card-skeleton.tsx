@@ -17,19 +17,21 @@ function GameCardSkeletonComponent() {
       <div className="p-3 space-y-1.5">
         {/* Title Row with Actions */}
         <div className="flex items-start justify-between gap-2">
-          <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex-1 min-w-0 min-h-[5.5rem] space-y-1.5">
             {/* Title skeleton - 2 lines */}
             <div className="h-4 bg-white/10 rounded animate-pulse w-[85%]" />
             <div className="h-4 bg-white/10 rounded animate-pulse w-[60%]" />
             {/* Developer skeleton */}
             <div className="h-3 bg-white/5 rounded animate-pulse w-[50%] mt-1" />
+            {/* Release date skeleton */}
+            <div className="h-3 bg-white/5 rounded animate-pulse w-[35%]" />
           </div>
           {/* Ellipsis menu skeleton */}
           <div className="h-8 w-8 bg-white/5 rounded animate-pulse flex-shrink-0" />
         </div>
         
         {/* Platform Icons and Status Badge Row */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between min-h-[1.5rem]">
           {/* Platform Icons skeleton */}
           <div className="flex items-center gap-1.5">
             <div className="w-6 h-6 rounded bg-white/10 animate-pulse" />

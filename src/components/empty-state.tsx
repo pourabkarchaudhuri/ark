@@ -1,8 +1,8 @@
-import { motion } from 'framer-motion';
+import { useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { 
   Search, 
-  Gamepad2, 
   Filter,
   Plus,
 } from 'lucide-react';
@@ -41,16 +41,143 @@ const emptyStateConfig: Record<EmptyStateType, {
     glowColor: "shadow-yellow-500/20",
   },
   'no-games': {
-    icon: Gamepad2,
+    icon: Search, // Not used for 'no-games' (caveman GIF is used instead)
     title: "No Games in Library",
     description: "Your game library is empty. Start building your collection by adding your first game!",
-    actionLabel: "Add Your First Game",
+    actionLabel: "Browse Games",
     iconColor: "text-fuchsia-500",
     glowColor: "shadow-fuchsia-500/20",
   },
 };
 
-export function EmptyState({ type, onAction, className }: EmptyStateProps) {
+// ─── Caveman Empty State ──────────────────────────────────────────────────────
+// Fun animated caveman GIF for the empty library state.
+const CAVEMAN_GIF = 'https://cdn.dribbble.com/users/285475/screenshots/2083086/dribbble_1.gif';
+
+// Electrocution puns — the caveman is getting zapped, and the app is "Arc".
+// One random message is picked each time the component mounts.
+const CAVEMAN_MESSAGES = [
+  "Looks like the Arc lost power.",
+  "How shocking!",
+  "This library is… sparking empty.",
+  "No games? That hertz.",
+  "Watt happened to your collection?",
+  "Ohm my… no games found.",
+  "Current status: empty.",
+  "Zero resistance to adding games.",
+  "This is a high-voltage situation.",
+  "Amp up your library!",
+  "Looks like someone blew a fuse.",
+  "Your library needs a recharge.",
+  "Static. Just static.",
+  "Disconnected from the grid.",
+  "Power outage in your library.",
+  "Voltage detected. Games not detected.",
+  "Short circuit. Long library.",
+  "Grounded. Literally.",
+  "The circuit is complete. The library isn't.",
+  "Conducting a search… found nothing.",
+  "Positive charge, negative games.",
+  "Plug in some games already.",
+  "Arc reactor: online. Games: offline.",
+  "You've been… discharged.",
+  "Charged up, but nothing to play.",
+  "Electrifying emptiness.",
+  "Switch it on. Add some games.",
+  "Running on empty current.",
+  "This shelf has zero joules.",
+];
+
+function CavemanEmptyState({ onAction, className }: { onAction?: () => void; className?: string }) {
+  const config = emptyStateConfig['no-games'];
+  const [showText, setShowText] = useState(false);
+
+  // Pick one random message per mount
+  const [message] = useState(
+    () => CAVEMAN_MESSAGES[Math.floor(Math.random() * CAVEMAN_MESSAGES.length)],
+  );
+
+  // Show text + button after 3 seconds
+  useEffect(() => {
+    const timer = setTimeout(() => setShowText(true), 3000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4 }}
+      className={cn(
+        "flex flex-col items-center justify-center px-4 min-h-[calc(100vh-10rem)]",
+        className
+      )}
+    >
+      {/* Caveman Animation — appears immediately */}
+      <motion.div
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ type: "spring", stiffness: 150, damping: 20, delay: 0.1 }}
+        className="relative mb-2"
+      >
+        {/* Glow behind the image */}
+        <div className="absolute inset-0 blur-3xl opacity-20 bg-fuchsia-500 rounded-full scale-75" />
+
+        <div
+          className="relative w-[680px] h-[520px] rounded-2xl overflow-hidden bg-center bg-no-repeat bg-contain mix-blend-screen"
+          style={{
+            backgroundImage: `url(${CAVEMAN_GIF})`,
+            filter: 'invert(1) hue-rotate(180deg)',
+          }}
+          role="img"
+          aria-label="Animated caveman getting electrocuted"
+        />
+      </motion.div>
+
+      {/* Text + button — fades in after 3 seconds */}
+      <AnimatePresence>
+        {showText && (
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, ease: 'easeOut' }}
+            className="text-center max-w-md"
+          >
+            {/* Random pun — one per visit */}
+            <p className="text-lg font-semibold text-fuchsia-400 italic mb-2">
+              {message}
+            </p>
+
+            <p className="text-white/50 text-sm leading-relaxed mb-6">
+              {config.description}
+            </p>
+
+            {config.actionLabel && onAction && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.3, duration: 0.3 }}
+              >
+                <Button
+                  onClick={onAction}
+                  className="gap-2 px-6 bg-fuchsia-500 hover:bg-fuchsia-600 text-white"
+                >
+                  <Plus className="w-4 h-4" />
+                  {config.actionLabel}
+                </Button>
+              </motion.div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}
+
+// ─── Default Icon Empty State ─────────────────────────────────────────────────
+// Used for search / filter empty states (non-library).
+
+function IconEmptyState({ type, onAction, className }: EmptyStateProps) {
   const config = emptyStateConfig[type];
   const Icon = config.icon;
 
@@ -147,14 +274,8 @@ export function EmptyState({ type, onAction, className }: EmptyStateProps) {
           >
             <Button
               onClick={onAction}
-              className={cn(
-                "gap-2 px-6",
-                type === 'no-games' 
-                  ? "bg-fuchsia-500 hover:bg-fuchsia-600 text-white" 
-                  : "bg-white/10 hover:bg-white/20 text-white border border-white/10"
-              )}
+              className="gap-2 px-6 bg-white/10 hover:bg-white/20 text-white border border-white/10"
             >
-              {type === 'no-games' && <Plus className="w-4 h-4" />}
               {config.actionLabel}
             </Button>
           </motion.div>
@@ -172,3 +293,12 @@ export function EmptyState({ type, onAction, className }: EmptyStateProps) {
   );
 }
 
+// ─── Public Export ─────────────────────────────────────────────────────────────
+// Routes to the caveman animation for 'no-games' (library), icon style for others.
+
+export function EmptyState({ type, onAction, className }: EmptyStateProps) {
+  if (type === 'no-games') {
+    return <CavemanEmptyState onAction={onAction} className={className} />;
+  }
+  return <IconEmptyState type={type} onAction={onAction} className={className} />;
+}

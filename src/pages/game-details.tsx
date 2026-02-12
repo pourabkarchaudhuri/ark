@@ -36,7 +36,7 @@ import { useToast } from '@/components/ui/toast';
 import { getRepackLinkForGame } from '@/services/fitgirl-service';
 import { steamService } from '@/services/steam-service';
 import { epicService } from '@/services/epic-service';
-import { findGameById, searchPrefetchedGames } from '@/services/prefetch-store';
+import { findGameById, searchPrefetchedGames, getPrefetchedGames } from '@/services/prefetch-store';
 import { WindowControls } from '@/components/window-controls';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { MyProgressTab, MyProgressSkeleton } from '@/components/my-progress-tab';
@@ -72,9 +72,10 @@ function epicToSteamDetails(
 
   // ── Description hierarchy ─────────────────────────────────────────────
   // 1. Product content "about" (full rich HTML from CMS)
-  // 2. Game.longDescription (from GraphQL catalogOffer)
+  // 2. Game.longDescription (from GraphQL catalogOffer — often Markdown, convert it)
   // 3. Game.summary (short description fallback)
-  const fullDescription = productContent?.about || game.longDescription || game.summary || '';
+  const longDescHtml = game.longDescription ? markdownToHtml(game.longDescription) : '';
+  const fullDescription = productContent?.about || longDescHtml || game.summary || '';
   const shortDescription = game.summary || '';
 
   // ── System requirements (from CMS product content) ────────────────────
@@ -214,6 +215,106 @@ function openExternalUrl(url: string): void {
     // Fallback for browser development
     window.open(url, '_blank');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Lightweight Markdown → HTML converter for Epic's longDescription field.
+// Epic's GraphQL catalogOffer returns longDescription as Markdown, not HTML.
+// When the CMS "about" (rich HTML) is unavailable, we fall back to
+// longDescription and need to render it properly instead of showing raw
+// markdown symbols (#, **, *, -, etc.).
+// ---------------------------------------------------------------------------
+function markdownToHtml(md: string): string {
+  if (!md) return md;
+
+  // If it already looks like HTML (has tags), return as-is
+  if (/<[a-z][\s\S]*>/i.test(md)) return md;
+
+  let html = md;
+
+  // Escape ampersands that aren't already entities
+  html = html.replace(/&(?!#?\w+;)/g, '&amp;');
+
+  // Images: ![alt](url)
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g,
+    '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px;margin:12px 0;" loading="lazy" />');
+
+  // Links: [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  // Headings: ### → h3, ## → h2, # → h1 (must be at start of line)
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // Horizontal rules
+  html = html.replace(/^---+$/gm, '<hr/>');
+  html = html.replace(/^\*\*\*+$/gm, '<hr/>');
+
+  // Bold + Italic: ***text*** or ___text___
+  html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  html = html.replace(/___(.+?)___/g, '<strong><em>$1</em></strong>');
+
+  // Bold: **text** or __text__
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
+
+  // Italic: *text* or _text_ (but not mid-word underscores like file_name)
+  html = html.replace(/(?<!\w)\*([^*\n]+?)\*(?!\w)/g, '<em>$1</em>');
+  html = html.replace(/(?<!\w)_([^_\n]+?)_(?!\w)/g, '<em>$1</em>');
+
+  // Unordered lists: lines starting with - or * (not hr)
+  // Collect consecutive list lines into <ul>
+  html = html.replace(/((?:^[\t ]*[-*] .+\n?)+)/gm, (block) => {
+    const items = block
+      .split('\n')
+      .filter(l => l.trim())
+      .map(l => `<li>${l.replace(/^[\t ]*[-*] /, '')}</li>`)
+      .join('');
+    return `<ul>${items}</ul>`;
+  });
+
+  // Paragraphs: split on double newlines
+  html = html
+    .split(/\n{2,}/)
+    .map(p => {
+      const trimmed = p.trim();
+      if (!trimmed) return '';
+      // Don't wrap block-level elements in <p>
+      if (/^<(?:h[1-6]|ul|ol|li|hr|img|div|blockquote|table|pre)/i.test(trimmed)) return trimmed;
+      return `<p>${trimmed}</p>`;
+    })
+    .join('\n');
+
+  // Single newlines within paragraphs → <br>
+  html = html.replace(/<p>([\s\S]*?)<\/p>/g, (_, inner) => {
+    return `<p>${inner.replace(/\n/g, '<br/>')}</p>`;
+  });
+
+  return html;
+}
+
+// ---------------------------------------------------------------------------
+// Embed bare image URLs found in Epic game descriptions.
+// Epic's longDescription (and sometimes CMS "about") contains raw URLs to
+// images (e.g. https://cdn1.epicgames.com/…/Screenshot.png) that are not
+// wrapped in <img> tags.  This function detects those URLs and converts them
+// to inline <img> elements so they render like Steam's about-the-game section.
+//
+// It carefully avoids converting URLs that are already inside an HTML tag
+// (src="…", href="…") or BBCode [img]…[/img] blocks.
+// ---------------------------------------------------------------------------
+const RE_BARE_IMAGE_URL = /(?<![="'\w/])(?<!\[img\])(https?:\/\/[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s<>"']*)?)(?!\[\/img\])/gi;
+
+function embedDescriptionImages(html: string): string {
+  if (!html) return html;
+
+  // Quick bail — if there are no image-extension URLs at all, skip the regex work
+  if (!/\.(?:png|jpg|jpeg|gif|webp|bmp|svg)/i.test(html)) return html;
+
+  return html.replace(RE_BARE_IMAGE_URL, (url) => {
+    return `<img src="${url}" alt="" style="max-width:100%;border-radius:8px;margin:12px 0;" loading="lazy" />`;
+  });
 }
 
 // Intercept link clicks in HTML content (description, requirements, etc.) so they open in system browser
@@ -504,6 +605,11 @@ export function GameDetailsPage() {
   const [steamNews, setSteamNews] = useState<SteamNewsItem[]>([]);
   const [steamNewsLoading, setSteamNewsLoading] = useState(false);
   const [playerCount, setPlayerCount] = useState<number | null>(null);
+  // Epic-specific enrichment
+  const [epicNews, setEpicNews] = useState<import('@/types/epic').EpicNewsArticle[]>([]);
+  const [epicNewsLoading, setEpicNewsLoading] = useState(false);
+  const [epicReviews, setEpicReviews] = useState<import('@/types/epic').EpicProductReviews | null>(null);
+  const [epicAddons, setEpicAddons] = useState<import('@/types/epic').EpicAddon[]>([]);
   
   const autoplayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const resumeAutoplayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -725,6 +831,10 @@ export function GameDetailsPage() {
       setFitgirlRepack(null);
       setFitgirlLoading(false);
       setIsRecommendationsPaused(false);
+      setEpicNews([]);
+      setEpicNewsLoading(false);
+      setEpicReviews(null);
+      setEpicAddons([]);
       setSteamNews([]);
       setSteamNewsLoading(false);
       setPlayerCount(null);
@@ -826,11 +936,18 @@ export function GameDetailsPage() {
             // as primary and keep the Epic data for cross-store links / pricing.
             if (epicData.availableOn?.includes('steam') && epicData.steamAppId && isElectron()) {
               try {
-                const [steamDetails, steamReviews] = await Promise.all([
+                // Fetch Steam details + optionally live Epic price in parallel
+                const needsEpicPrice = !epicData.price?.finalFormatted && !epicData.epicPrice?.finalFormatted;
+                const epicPriceFetch = (needsEpicPrice && epicData.epicNamespace && epicData.epicOfferId && window.epic?.getGameDetails)
+                  ? epicService.getGameDetails(epicData.epicNamespace, epicData.epicOfferId).catch(() => null)
+                  : Promise.resolve(null);
+
+                const [steamDetails, steamReviews, liveEpic] = await Promise.all([
                   window.steam!.getAppDetails(epicData.steamAppId),
                   typeof window.steam!.getGameReviews === 'function'
                     ? window.steam!.getGameReviews(epicData.steamAppId, 10).catch(() => null)
                     : Promise.resolve(null),
+                  epicPriceFetch,
                 ]);
                 if (!isMounted) return;
                 if (steamDetails) {
@@ -838,10 +955,16 @@ export function GameDetailsPage() {
                   setDetails(steamDetails);
                   if (steamReviews) setReviews(steamReviews);
                   // Show Epic as the cross-store link with its pricing
+                  // Prefer existing price with finalFormatted, then live-fetched, then epicPrice
+                  const epicPrice = epicData.price?.finalFormatted
+                    ? epicData.price
+                    : liveEpic?.price?.finalFormatted
+                      ? liveEpic.price
+                      : epicData.epicPrice;
                   setCrossStoreGame({
                     ...epicData,
                     store: 'epic',
-                    price: epicData.epicPrice ?? epicData.price,
+                    price: epicPrice,
                   } as Game);
                   // Fetch Metacritic using the Steam title
                   if (steamDetails.name && typeof window.metacritic?.getGameReviews === 'function') {
@@ -892,6 +1015,8 @@ export function GameDetailsPage() {
             // Merge full details into the prefetched game — keep prefetch
             // fields as fallbacks but prefer the richer CATALOG_QUERY data
             if (fullDetails) {
+              // Use live price if the prefetched price is missing finalFormatted
+              const bestPrice = (epicData.price?.finalFormatted ? epicData.price : fullDetails.price) || epicData.price;
               enrichedGame = {
                 ...epicData,
                 summary: fullDetails.summary || epicData.summary,
@@ -903,6 +1028,7 @@ export function GameDetailsPage() {
                 platform: (fullDetails.platform && fullDetails.platform.length > 0)
                   ? fullDetails.platform
                   : epicData.platform,
+                price: bestPrice,
               };
               setEpicGame(enrichedGame);
             }
@@ -958,12 +1084,42 @@ export function GameDetailsPage() {
         }
 
         // Check if this Steam game is also on Epic (cross-store)
-        if (prefetched?.availableOn?.includes('epic') && prefetched.epicNamespace && prefetched.epicOfferId) {
+        const hasEpicAvailable = prefetched?.availableOn?.includes('epic');
+        const hasEpicIds = prefetched && !!(prefetched.epicSlug || prefetched.epicNamespace);
+        let isCrossStoreEpic = prefetched && (hasEpicAvailable || hasEpicIds) && (prefetched.epicSlug || prefetched.epicNamespace);
+
+        // Fallback: if the prefetched object is missing Epic metadata (stale
+        // IDB cache from before dedup cross-store merge), search prefetchedGames
+        // by title for an Epic match.
+        let epicMeta: { epicSlug?: string; epicNamespace?: string; epicOfferId?: string; epicPrice?: Game['epicPrice'] } | null = null;
+        if (!isCrossStoreEpic && prefetched?.title) {
+          const allGames = getPrefetchedGames();
+          if (allGames) {
+            const titleLower = prefetched.title.toLowerCase();
+            const epicMatch = allGames.find(
+              g => g.store === 'epic' && g.title?.toLowerCase() === titleLower,
+            );
+            if (epicMatch) {
+              epicMeta = {
+                epicSlug: epicMatch.epicSlug,
+                epicNamespace: epicMatch.epicNamespace,
+                epicOfferId: epicMatch.epicOfferId,
+                epicPrice: epicMatch.price as Game['epicPrice'],
+              };
+              isCrossStoreEpic = !!(epicMeta.epicSlug || epicMeta.epicNamespace);
+            }
+          }
+        }
+
+        if (isCrossStoreEpic) {
           setCrossStoreGame({
             ...prefetched,
+            // Prefer merged metadata from dedup; fall back to live search match
+            epicSlug: prefetched?.epicSlug || epicMeta?.epicSlug,
+            epicNamespace: prefetched?.epicNamespace || epicMeta?.epicNamespace,
+            epicOfferId: prefetched?.epicOfferId || epicMeta?.epicOfferId,
             store: 'epic',
-            // Use preserved Epic pricing from dedup if available
-            price: prefetched.epicPrice ?? prefetched.price,
+            price: prefetched?.epicPrice ?? epicMeta?.epicPrice ?? undefined,
           } as Game);
         }
 
@@ -973,8 +1129,20 @@ export function GameDetailsPage() {
           const reviewsPromise = typeof window.steam!.getGameReviews === 'function'
             ? window.steam!.getGameReviews(appId, 10).catch(() => null)
             : Promise.resolve(null);
+          // If cross-store and we don't have a usable Epic price yet, fetch it live.
+          // Check for finalFormatted specifically — the epicPrice object can exist
+          // with finalFormatted: undefined if the Epic catalog API didn't return price data.
+          const resolvedEpicNs = prefetched?.epicNamespace || epicMeta?.epicNamespace;
+          const resolvedEpicOid = prefetched?.epicOfferId || epicMeta?.epicOfferId;
+          const hasUsableEpicPrice = !!(
+            (prefetched?.epicPrice?.finalFormatted) ||
+            (epicMeta?.epicPrice && typeof epicMeta.epicPrice === 'object' && 'finalFormatted' in epicMeta.epicPrice && (epicMeta.epicPrice as any).finalFormatted)
+          );
+          const epicPricePromise = (isCrossStoreEpic && !hasUsableEpicPrice && resolvedEpicNs && resolvedEpicOid && window.epic?.getGameDetails)
+            ? epicService.getGameDetails(resolvedEpicNs, resolvedEpicOid).catch(() => null)
+            : Promise.resolve(null);
 
-          const [detailsData, reviewsData] = await Promise.all([detailsPromise, reviewsPromise]);
+          const [detailsData, reviewsData, liveEpicDetails] = await Promise.all([detailsPromise, reviewsPromise, epicPricePromise]);
           
           if (!isMounted) return;
           
@@ -985,6 +1153,15 @@ export function GameDetailsPage() {
             setError('Game not found');
             setLoading(false);
             return;
+          }
+
+          // Update cross-store Epic price from live fetch — overwrite if the
+          // existing price is missing or has no finalFormatted string.
+          if (liveEpicDetails?.price?.finalFormatted && isCrossStoreEpic) {
+            setCrossStoreGame(prev => prev ? {
+              ...prev,
+              price: prev.price?.finalFormatted ? prev.price : liveEpicDetails.price,
+            } as Game : prev);
           }
 
           // Fetch Metacritic reviews asynchronously (don't block page load)
@@ -1131,6 +1308,41 @@ export function GameDetailsPage() {
 
     return () => { isMounted = false; };
   }, [appId]);
+
+  // ── Epic-specific enrichment: news, reviews, DLC ──────────────────────
+  useEffect(() => {
+    if (!isEpicGame || !epicGame) return;
+    let isMounted = true;
+
+    // News feed — search by game title
+    const gameName = epicGame.title;
+    if (gameName && window.epic?.getNewsFeed) {
+      setEpicNewsLoading(true);
+      window.epic.getNewsFeed(gameName, 15).then((articles) => {
+        if (isMounted) setEpicNews(articles);
+      }).catch(() => {}).finally(() => {
+        if (isMounted) setEpicNewsLoading(false);
+      });
+    }
+
+    // Product reviews — use Epic slug
+    const slug = epicGame.epicSlug;
+    if (slug && window.epic?.getProductReviews) {
+      window.epic.getProductReviews(slug).then((data) => {
+        if (isMounted && data) setEpicReviews(data);
+      }).catch(() => {});
+    }
+
+    // DLC/Add-ons — use Epic namespace
+    const ns = epicGame.epicNamespace;
+    if (ns && window.epic?.getAddons) {
+      window.epic.getAddons(ns, 50).then((addons) => {
+        if (isMounted) setEpicAddons(addons);
+      }).catch(() => {});
+    }
+
+    return () => { isMounted = false; };
+  }, [isEpicGame, epicGame?.title, epicGame?.epicSlug, epicGame?.epicNamespace]);
 
   // Media items (screenshots + movies)
   const mediaItems = useMemo(() => {
@@ -1497,14 +1709,24 @@ export function GameDetailsPage() {
               <h1 className="text-3xl md:text-4xl font-bold font-['Orbitron']">
               {details.name}
             </h1>
-              {epicGame ? (
+              {/* Primary store badge */}
+              {epicGame && !crossStoreGame ? (
                 <Badge variant="outline" className="border-white/30">
                   <SiEpicgames className="w-3 h-3 mr-1" />Epic
                 </Badge>
-              ) : (
+              ) : !epicGame && !crossStoreGame ? (
                 <Badge variant="outline" className="border-white/30">
                   <FaSteam className="w-3 h-3 mr-1" />Steam
                 </Badge>
+              ) : (
+                <>
+                  <Badge variant="outline" className="border-white/30">
+                    <FaSteam className="w-3 h-3 mr-1" />Steam
+                  </Badge>
+                  <Badge variant="outline" className="border-white/30">
+                    <SiEpicgames className="w-3 h-3 mr-1" />Epic
+                  </Badge>
+                </>
               )}
             </div>
             
@@ -1614,6 +1836,10 @@ export function GameDetailsPage() {
                 recommendationsScrollRef={recommendationsScrollRef}
                 steamNews={steamNews}
                 steamNewsLoading={steamNewsLoading}
+                epicNews={epicNews}
+                epicNewsLoading={epicNewsLoading}
+                epicReviews={epicReviews}
+                epicAddons={epicAddons}
                 gameInLibrary={gameInLibrary}
                 handleOpenLibraryDialog={handleOpenLibraryDialog}
                 removeFromLibrary={removeFromLibrary}
@@ -1655,6 +1881,10 @@ export function GameDetailsPage() {
             recommendationsScrollRef={recommendationsScrollRef}
             steamNews={steamNews}
             steamNewsLoading={steamNewsLoading}
+            epicNews={epicNews}
+            epicNewsLoading={epicNewsLoading}
+            epicReviews={epicReviews}
+            epicAddons={epicAddons}
             gameInLibrary={gameInLibrary}
             handleOpenLibraryDialog={handleOpenLibraryDialog}
             removeFromLibrary={removeFromLibrary}
@@ -1711,6 +1941,10 @@ interface GameDetailsContentProps {
   recommendationsScrollRef: React.RefObject<HTMLDivElement>;
   steamNews: SteamNewsItem[];
   steamNewsLoading: boolean;
+  epicNews: import('@/types/epic').EpicNewsArticle[];
+  epicNewsLoading: boolean;
+  epicReviews: import('@/types/epic').EpicProductReviews | null;
+  epicAddons: import('@/types/epic').EpicAddon[];
   gameInLibrary: boolean;
   handleOpenLibraryDialog: () => void;
   removeFromLibrary: (gameId: string) => void;
@@ -1750,6 +1984,10 @@ const GameDetailsContent = memo(function GameDetailsContent({
   recommendationsScrollRef,
   steamNews,
   steamNewsLoading,
+  epicNews,
+  epicNewsLoading,
+  epicReviews,
+  epicAddons,
   gameInLibrary,
   handleOpenLibraryDialog,
   removeFromLibrary,
@@ -1768,26 +2006,60 @@ const GameDetailsContent = memo(function GameDetailsContent({
   // re-created.
 
   const newsCarouselItems = useMemo(() => {
-    if (steamNews.length === 0) return [];
     const fallback = details.header_image;
-    return steamNews.map((item) => {
-      const thumbnail = extractNewsThumbnail(item.contents);
-      const cardData: CardType = {
-        src: thumbnail || fallback,
-        title: item.title,
-        category: item.feedlabel || 'News',
-        href: item.url,
-      };
-      return (
-        <NewsCard
-          key={item.gid}
-          card={cardData}
-          newsItem={item}
-          fallbackImage={fallback}
-        />
-      );
-    });
-  }, [steamNews, details.header_image]);
+
+    // Steam news — from Steam GetNewsForApp API
+    if (steamNews.length > 0) {
+      return steamNews.map((item) => {
+        const thumbnail = extractNewsThumbnail(item.contents);
+        const cardData: CardType = {
+          src: thumbnail || fallback,
+          title: item.title,
+          category: item.feedlabel || 'News',
+          href: item.url,
+        };
+        return (
+          <NewsCard
+            key={item.gid}
+            card={cardData}
+            newsItem={item}
+            fallbackImage={fallback}
+          />
+        );
+      });
+    }
+
+    // Epic news — from Epic CMS blog feed (fallback when no Steam news)
+    if (epicNews.length > 0) {
+      return epicNews.map((article, i) => {
+        const cardData: CardType = {
+          src: article.image || fallback,
+          title: article.title,
+          category: article.source || 'Epic Games Store',
+          href: article.url,
+        };
+        // Create a SteamNewsItem-compatible object for the NewsCard
+        const fakeNewsItem: SteamNewsItem = {
+          gid: `epic-news-${i}`,
+          title: article.title,
+          url: article.url,
+          author: '',
+          feedlabel: article.source || 'Epic Games Store',
+          date: article.date ? Math.floor(new Date(article.date).getTime() / 1000) : 0,
+        };
+        return (
+          <NewsCard
+            key={`epic-news-${i}`}
+            card={cardData}
+            newsItem={fakeNewsItem}
+            fallbackImage={fallback}
+          />
+        );
+      });
+    }
+
+    return [];
+  }, [steamNews, epicNews, details.header_image]);
 
   const recommendationsRendered = useMemo(() => {
     if (recommendations.length === 0) return [];
@@ -1993,12 +2265,16 @@ const GameDetailsContent = memo(function GameDetailsContent({
                 <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">About This Game</h2>
                 <div 
                   className={cn(
-                    "prose prose-invert prose-sm max-w-none",
-                    !showFullDescription && "line-clamp-6"
+                    "prose prose-invert prose-sm max-w-none prose-img:rounded-lg prose-img:my-4 prose-img:max-w-full",
+                    !showFullDescription && "max-h-[10rem] overflow-hidden"
                   )}
-                  dangerouslySetInnerHTML={{ __html: details.detailed_description || details.about_the_game }}
+                  dangerouslySetInnerHTML={{ __html: embedDescriptionImages(details.detailed_description || details.about_the_game) }}
                   onClick={handleContentLinkClick}
                 />
+                {/* Gradient fade at bottom when collapsed */}
+                {!showFullDescription && (details.detailed_description || details.about_the_game)?.length > 300 && (
+                  <div className="h-12 -mt-12 relative bg-gradient-to-t from-[#0a0a0a] to-transparent pointer-events-none" />
+                )}
                 {(details.detailed_description || details.about_the_game)?.length > 500 && (
                   <Button
                     variant="link"
@@ -2140,6 +2416,160 @@ const GameDetailsContent = memo(function GameDetailsContent({
                 </AnimatePresence>
               </section>
             )}
+
+            {/* Epic Reviews — shown when Steam reviews are not available */}
+            {!reviews && epicReviews && epicReviews.totalReviews > 0 && (
+              <section>
+                <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">Epic Store Reviews</h2>
+                
+                <button
+                  type="button"
+                  onClick={() => setReviewsExpanded(prev => !prev)}
+                  className="w-full flex items-center gap-6 p-4 rounded-lg bg-white/5 border border-white/10 hover:bg-white/[0.07] transition-colors cursor-pointer text-left"
+                >
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-fuchsia-400">
+                      {epicReviews.averageRating > 5 ? epicReviews.averageRating : `${epicReviews.averageRating}/5`}
+                    </div>
+                    <div className="text-sm text-white/60">
+                      {epicReviews.averageRating > 5 ? 'OpenCritic' : 'Rating'}
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-lg font-medium">
+                      {epicReviews.overallScore}
+                    </div>
+                    <div className="text-sm text-white/60">
+                      {epicReviews.totalReviews > 0
+                        ? `${epicReviews.totalReviews.toLocaleString()} reviews`
+                        : 'Critic score'}
+                    </div>
+                  </div>
+                  {epicReviews.recentReviews && epicReviews.recentReviews.length > 0 && (
+                    <ChevronDown className={cn(
+                      "w-5 h-5 text-white/40 transition-transform duration-200 flex-shrink-0",
+                      reviewsExpanded && "rotate-180"
+                    )} />
+                  )}
+                </button>
+
+                {/* Individual Epic Reviews — collapsed by default */}
+                {epicReviews.recentReviews && epicReviews.recentReviews.length > 0 && (
+                  <AnimatePresence>
+                    {reviewsExpanded && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.25, ease: 'easeInOut' }}
+                        className="overflow-hidden"
+                      >
+                        <div className="space-y-4 mt-4">
+                          {epicReviews.recentReviews.slice(0, 5).map((review, idx) => (
+                            <div
+                              key={`epic-review-${idx}`}
+                              className="p-4 rounded-lg bg-white/5 border border-white/10"
+                            >
+                              <div className="flex items-start gap-3 mb-3">
+                                <div className={cn(
+                                  "p-2 rounded",
+                                  review.rating >= 3 ? "bg-green-500/20" : "bg-red-500/20"
+                                )}>
+                                  {review.rating >= 3 ? (
+                                    <ThumbsUp className="w-4 h-4 text-green-400" />
+                                  ) : (
+                                    <ThumbsDown className="w-4 h-4 text-red-400" />
+                                  )}
+                                </div>
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2 text-sm text-white/60">
+                                    <Star className="w-3 h-3" />
+                                    {review.rating}/5
+                                    {review.userName && (
+                                      <>
+                                        <span className="text-white/40">•</span>
+                                        {review.userName}
+                                      </>
+                                    )}
+                                    {review.date && (
+                                      <>
+                                        <span className="text-white/40">•</span>
+                                        {new Date(review.date).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                              {review.body && (
+                                <p className="text-white/80 text-sm line-clamp-4">
+                                  {review.body}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                )}
+              </section>
+            )}
+
+            {/* Epic Reviews — OpenCritic score only (no individual reviews) */}
+            {!reviews && epicReviews && epicReviews.totalReviews === 0 && epicReviews.averageRating > 0 && (
+              <section>
+                <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">Critic Score</h2>
+                <div className="flex items-center gap-6 p-4 rounded-lg bg-white/5 border border-white/10">
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-fuchsia-400">
+                      {epicReviews.averageRating}
+                    </div>
+                    <div className="text-sm text-white/60">OpenCritic</div>
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-lg font-medium">{epicReviews.overallScore}</div>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {/* Epic DLC / Add-ons */}
+            {epicAddons.length > 0 && (
+              <section>
+                <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">DLC & Add-ons</h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {epicAddons.slice(0, 8).map((addon) => (
+                    <div
+                      key={addon.id}
+                      className="flex gap-3 p-3 rounded-lg bg-white/5 border border-white/10 hover:bg-white/[0.07] transition-colors"
+                    >
+                      {addon.image && (
+                        <img
+                          src={addon.image}
+                          alt={addon.title}
+                          className="w-16 h-16 rounded object-cover flex-shrink-0 bg-white/10"
+                          loading="lazy"
+                        />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-white truncate">{addon.title}</p>
+                        {addon.description && (
+                          <p className="text-xs text-white/50 line-clamp-2 mt-0.5">{addon.description}</p>
+                        )}
+                        <p className="text-xs text-fuchsia-400 mt-1">
+                          {addon.isFree ? 'Free' : addon.price || 'View on Store'}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {epicAddons.length > 8 && (
+                  <p className="text-xs text-white/40 mt-2 text-center">
+                    +{epicAddons.length - 8} more add-ons available on the Epic Games Store
+                  </p>
+                )}
+              </section>
+            )}
           </div>
 
           {/* Right Column - Info Panel */}
@@ -2175,14 +2605,37 @@ const GameDetailsContent = memo(function GameDetailsContent({
                   Free to Play
                 </Badge>
               ) : details.price_overview && (
-                <div className="text-center">
+                <div className="text-center space-y-1">
                   {details.price_overview.discount_percent > 0 && (
-                    <Badge className="mb-2 bg-green-600">
+                    <Badge className="mb-1 bg-green-600">
                       -{details.price_overview.discount_percent}%
                     </Badge>
                   )}
                   <div className="text-2xl font-bold">
                     {details.price_overview.final_formatted}
+                  </div>
+                  {/* Show the store label when cross-store Epic data is present */}
+                  {crossStoreGame?.store === 'epic' && (
+                    <div className="text-xs text-white/40 flex items-center justify-center gap-1">
+                      <FaSteam className="w-3 h-3" /> Steam
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Cross-store price (shown inline next to primary price) */}
+              {crossStoreGame?.store === 'epic' && crossStoreGame.price && !crossStoreGame.price.isFree && crossStoreGame.price.finalFormatted && !details.is_free && (
+                <div className="text-center space-y-1 -mt-1">
+                  {crossStoreGame.price.discountPercent && crossStoreGame.price.discountPercent > 0 && (
+                    <Badge className="mb-1 bg-green-600 text-xs">
+                      -{crossStoreGame.price.discountPercent}%
+                    </Badge>
+                  )}
+                  <div className="text-lg font-semibold text-white/80">
+                    {crossStoreGame.price.finalFormatted}
+                  </div>
+                  <div className="text-xs text-white/40 flex items-center justify-center gap-1">
+                    <SiEpicgames className="w-3 h-3" /> Epic Games
                   </div>
                 </div>
               )}
@@ -2237,38 +2690,20 @@ const GameDetailsContent = memo(function GameDetailsContent({
               </Button>
               ) : null}
 
-              {/* Cross-store: Also on the other store */}
-              {crossStoreGame?.store === 'epic' && crossStoreGame.epicSlug && (
-                <>
-                  <Button variant="outline" className="w-full" onClick={() => {
-                    openExternalUrl(`https://store.epicgames.com/en-US/p/${crossStoreGame.epicSlug}`);
-                  }}>
-                    <SiEpicgames className="w-4 h-4 mr-2" />Also on Epic Games<ExternalLink className="w-3 h-3 ml-2" />
-                  </Button>
-                  {crossStoreGame.price && !crossStoreGame.price.isFree && crossStoreGame.price.finalFormatted && (
-                    <div className="text-center text-sm text-white/60">
-                      Epic price: <span className="text-white/90 font-medium">{crossStoreGame.price.finalFormatted}</span>
-                      {crossStoreGame.price.discountPercent && crossStoreGame.price.discountPercent > 0 && (
-                        <Badge className="ml-2 bg-green-600 text-xs">-{crossStoreGame.price.discountPercent}%</Badge>
-                      )}
-                    </div>
-                  )}
-                </>
+              {/* Cross-store: Also on Epic */}
+              {crossStoreGame?.store === 'epic' && (crossStoreGame.epicSlug || crossStoreGame.epicNamespace) && (
+                <Button variant="outline" className="w-full" onClick={() => {
+                  const slug = crossStoreGame.epicSlug || crossStoreGame.epicNamespace;
+                  openExternalUrl(`https://store.epicgames.com/en-US/p/${slug}`);
+                }}>
+                  <SiEpicgames className="w-4 h-4 mr-2" />View on Epic Games<ExternalLink className="w-3 h-3 ml-2" />
+                </Button>
               )}
+              {/* Cross-store: Also on Steam */}
               {crossStoreGame?.store === 'steam' && crossStoreGame.steamAppId && (
-                <>
-                  <Button variant="outline" className="w-full" onClick={() => openExternalUrl(`https://store.steampowered.com/app/${crossStoreGame.steamAppId}`)}>
-                    <FaSteam className="w-4 h-4 mr-2" />Also on Steam<ExternalLink className="w-3 h-3 ml-2" />
-                  </Button>
-                  {crossStoreGame.price && !crossStoreGame.price.isFree && crossStoreGame.price.finalFormatted && (
-                    <div className="text-center text-sm text-white/60">
-                      Steam price: <span className="text-white/90 font-medium">{crossStoreGame.price.finalFormatted}</span>
-                      {crossStoreGame.price.discountPercent && crossStoreGame.price.discountPercent > 0 && (
-                        <Badge className="ml-2 bg-green-600 text-xs">-{crossStoreGame.price.discountPercent}%</Badge>
-                      )}
-                    </div>
-                  )}
-                </>
+                <Button variant="outline" className="w-full" onClick={() => openExternalUrl(`https://store.steampowered.com/app/${crossStoreGame.steamAppId}`)}>
+                  <FaSteam className="w-4 h-4 mr-2" />View on Steam<ExternalLink className="w-3 h-3 ml-2" />
+                </Button>
               )}
 
               {/* Website Link */}
@@ -2391,6 +2826,17 @@ const GameDetailsContent = memo(function GameDetailsContent({
                   <div>
                     <span className="text-white/60">Achievements</span>
                     <div className="text-white">{details.achievements.total}</div>
+                  </div>
+                )}
+
+                {/* Epic DLC count */}
+                {epicAddons.length > 0 && (
+                  <div>
+                    <span className="text-white/60">DLC & Add-ons</span>
+                    <div className="text-white flex items-center gap-1">
+                      <Download className="w-3 h-3" />
+                      {epicAddons.length}
+                    </div>
                   </div>
                 )}
 
@@ -2519,7 +2965,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
             News & Updates
           </h2>
 
-          {steamNewsLoading ? (
+          {(steamNewsLoading || epicNewsLoading) ? (
             <div className="flex gap-4 overflow-x-auto py-6 pl-4">
               {Array.from({ length: 6 }).map((_, i) => (
                 <div key={i} className="flex-shrink-0 w-40 md:w-52">
@@ -2530,7 +2976,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
           ) : newsCarouselItems.length > 0 ? (
             <Carousel items={newsCarouselItems} />
           ) : (
-            <div className="text-center py-6 text-white/40 text-sm">
+            <div className="flex items-center justify-center min-h-[256px] md:min-h-[336px] text-white/40 text-sm">
               No news available for this game.
             </div>
           )}

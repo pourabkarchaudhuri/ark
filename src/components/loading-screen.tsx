@@ -8,6 +8,8 @@ import { customGameStore } from '@/services/custom-game-store';
 import {
   getCachedBrowseData,
   prefetchBrowseData,
+  isPrefetchReady,
+  getPrefetchedGames,
   type PrefetchProgress,
 } from '@/services/prefetch-store';
 import { ErrorBoundary } from '@/components/error-boundary';
@@ -118,76 +120,95 @@ export function LoadingScreen({ onComplete, duration = 2500 }: LoadingScreenProp
       const steamAvailable = typeof window !== 'undefined' && !!window.steam;
       const epicAvailable = typeof window !== 'undefined' && !!window.epic;
 
-      // Fire cache stats + browse data prefetch in parallel.
-      // Cache stats are informational only and should never block the data load.
-      const cacheStatsPromise = Promise.allSettled([
-        steamAvailable ? window.steam!.getCacheStats().catch(() => null) : Promise.resolve(null),
-        epicAvailable ? window.epic!.getCacheStats().catch(() => null) : Promise.resolve(null),
-      ]);
-      const browseDataPromise = getCachedBrowseData();
+      // Check if splash screen already loaded data into memory
+      const alreadyPrefetched = isPrefetchReady();
+      const prefetchedGames = alreadyPrefetched ? getPrefetchedGames() : null;
 
-      // Log store connections while data loads in the background
-      if (steamAvailable) {
-        await log('✓ Steam API connected', 'success');
-      } else {
-        await log('⚠ Steam API not available (running outside Electron?)', 'warn');
-      }
-      if (epicAvailable) {
-        await log('✓ Epic Games API connected', 'success');
-      }
-
-      // Await cache stats (should be fast) and display results
-      const [steamStats, epicStats] = await cacheStatsPromise;
-      if (steamStats.status === 'fulfilled' && steamStats.value && (steamStats.value as any).total > 0) {
-        const s = steamStats.value as { total: number; fresh: number; stale: number };
-        await log(`  Steam: ${s.total} cached (${s.fresh} fresh, ${s.stale} stale)`, 'info');
-      }
-      if (epicStats.status === 'fulfilled' && epicStats.value && (epicStats.value as any).total > 0) {
-        const s = epicStats.value as { total: number; fresh: number; stale: number };
-        await log(`  Epic: ${s.total} cached (${s.fresh} fresh, ${s.stale} stale)`, 'info');
-      }
-
-      // --- 4. Data prefetch (the real work — already started above) ---
-      if (cancelled) return;
-      const cached = await browseDataPromise;
-
-      if (cached) {
-        // Cache hit — instant
+      if (alreadyPrefetched && prefetchedGames) {
+        // Data was loaded during the splash screen — fast-forward!
         setProgress(1);
-        const freshLabel = cached.isFresh ? 'fresh' : 'stale';
-        await log(
-          `✓ Loaded ${cached.games.length} games from cache (${freshLabel})`,
-          'success',
-        );
+        await log(`✓ Data pre-loaded during cold boot — ${prefetchedGames.length} games in memory`, 'success');
 
-        if (!cached.isFresh) {
-          await log('  Data will refresh silently in the background', 'info');
+        if (steamAvailable) {
+          await log('✓ Steam API connected', 'success');
+        }
+        if (epicAvailable) {
+          await log('✓ Epic Games API connected', 'success');
         }
       } else {
-        // Cache miss — first launch or expired cache. Do a full fetch with progress.
-        await log('First launch — fetching game catalogs...', 'info');
+        // Data not yet ready — do the full fetch here (splash didn't finish in time)
 
+        // Fire cache stats + browse data prefetch in parallel.
+        const cacheStatsPromise = Promise.allSettled([
+          steamAvailable ? window.steam!.getCacheStats().catch(() => null) : Promise.resolve(null),
+          epicAvailable ? window.epic!.getCacheStats().catch(() => null) : Promise.resolve(null),
+        ]);
+        const browseDataPromise = getCachedBrowseData();
+
+        // Log store connections while data loads in the background
+        if (steamAvailable) {
+          await log('✓ Steam API connected', 'success');
+        } else {
+          await log('⚠ Steam API not available (running outside Electron?)', 'warn');
+        }
+        if (epicAvailable) {
+          await log('✓ Epic Games API connected', 'success');
+        }
+
+        // Await cache stats (should be fast) and display results
+        const [steamStats, epicStats] = await cacheStatsPromise;
+        if (steamStats.status === 'fulfilled' && steamStats.value && (steamStats.value as any).total > 0) {
+          const s = steamStats.value as { total: number; fresh: number; stale: number };
+          await log(`  Steam: ${s.total} cached (${s.fresh} fresh, ${s.stale} stale)`, 'info');
+        }
+        if (epicStats.status === 'fulfilled' && epicStats.value && (epicStats.value as any).total > 0) {
+          const s = epicStats.value as { total: number; fresh: number; stale: number };
+          await log(`  Epic: ${s.total} cached (${s.fresh} fresh, ${s.stale} stale)`, 'info');
+        }
+
+        // --- 4. Data prefetch ---
         if (cancelled) return;
+        const cached = await browseDataPromise;
 
-        const handleProgress = (p: PrefetchProgress) => {
-          if (cancelled) return;
-          setProgress(p.current / p.total);
-        };
-
-        try {
-          // This is the heavy lift: 6 parallel API calls + dedup
-          const games = await prefetchBrowseData(handleProgress);
-
-          if (cancelled) return;
+        if (cached) {
+          // Cache hit — instant
           setProgress(1);
+          const freshLabel = cached.isFresh ? 'fresh' : 'stale';
           await log(
-            `✓ Aggregation complete — ${games.length} unique games ready`,
+            `✓ Loaded ${cached.games.length} games from cache (${freshLabel})`,
             'success',
           );
-        } catch (err) {
+
+          if (!cached.isFresh) {
+            await log('  Data will refresh silently in the background', 'info');
+          }
+        } else {
+          // Cache miss — first launch or expired cache. Do a full fetch with progress.
+          await log('First launch — fetching game catalogs...', 'info');
+
           if (cancelled) return;
-          console.error('[LoadingScreen] Prefetch failed:', err);
-          await log('⚠ Some game sources failed — partial data available', 'warn');
+
+          const handleProgress = (p: PrefetchProgress) => {
+            if (cancelled) return;
+            setProgress(p.current / p.total);
+          };
+
+          try {
+            // This is the heavy lift: 6 parallel API calls + dedup
+            // If the splash already started this, prefetchBrowseData() will share the same promise
+            const games = await prefetchBrowseData(handleProgress);
+
+            if (cancelled) return;
+            setProgress(1);
+            await log(
+              `✓ Aggregation complete — ${games.length} unique games ready`,
+              'success',
+            );
+          } catch (err) {
+            if (cancelled) return;
+            console.error('[LoadingScreen] Prefetch failed:', err);
+            await log('⚠ Some game sources failed — partial data available', 'warn');
+          }
         }
       }
 

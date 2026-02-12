@@ -156,6 +156,18 @@ contextBridge.exposeInMainWorld('epic', {
   // Get rich product content (full description + system requirements)
   getProductContent: (slug) =>
     ipcRenderer.invoke('epic:getProductContent', slug),
+
+  // Get news/blog articles related to a game
+  getNewsFeed: (keyword, limit) =>
+    ipcRenderer.invoke('epic:getNewsFeed', keyword, limit),
+
+  // Get product reviews for a game
+  getProductReviews: (slug) =>
+    ipcRenderer.invoke('epic:getProductReviews', slug),
+
+  // Get DLC/add-ons by namespace
+  getAddons: (namespace, limit) =>
+    ipcRenderer.invoke('epic:getAddons', namespace, limit),
 });
 
 // Expose Metacritic API to renderer

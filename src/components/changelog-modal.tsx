@@ -3,11 +3,46 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Sparkles, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-// Current app version - update this with each release
-export const APP_VERSION = '1.0.25';
+// Current app version — injected from package.json at build time by Vite.
+// No manual bumps needed; just update package.json.
+export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.28': {
+    title: "What's New in Ark 1.0.28",
+    changes: [
+      'Epic Games Store Integration — Browse, filter, and view Epic games alongside Steam; merged catalogs for Top Sellers, Coming Soon, and Free Games; store filter (Steam / Epic / Both) in the filter sidebar',
+      'Game Details Overhaul — Full-page /game/:id route with hero section, media carousel, cross-store badges ("Also on Steam" / "Also on Epic"), Epic DLC/add-ons, Epic reviews fallback, and tabbed layout (Overview, My Progress, News & Reviews)',
+      '3D Splash Screen — "ARK DEEP STORAGE RECOVERY" boot sequence with Three.js scene, terminal-style output, and three-step flow (Splash → Loading → Ready) that prefetches browse data in the background',
+      'Animated Empty States — Contextual empty states for no search results, no matching filters, and empty library with animated caveman GIF and electricity puns; one-click "Clear Search", "Clear Filters", or "Browse Games" actions',
+      'Catalog (A-Z) Mode — Full Steam catalog (~155K games) with letter-jump bar, cached in IndexedDB with 6-hour staleness; optimized sort (~300ms vs 5-10s) deferred until catalog mode is opened',
+      'Dashboard Performance Fix — Heavy filter/sort/dynamic-filter computation moved off the render phase into a deferred async hook (useDeferredFilterSort) using requestAnimationFrame + startTransition; catalog preload no longer blocks the main thread with a 155K-item localeCompare sort',
+      'Session Tracking Improvements — Idle time exclusion via Electron powerMonitor, single process snapshot per poll, live "Playing Now" badge with status events',
+      'Filter Sidebar Redesign — Store filter radio group, category-aware filter disabling, dynamic genre/platform/year options derived from current filter set, catalog count indicator',
+    ],
+  },
+  '1.0.27': {
+    title: "What's New in Ark 1.0.27",
+    changes: [
+      'Browse Game Count Fix — Background refresh no longer silently drops cross-store (Steam + Epic) games; the full catalog is preserved across refreshes',
+      'Background Refresh Safety Net — If a refresh produces >10% fewer games than the current set, the swap is skipped to prevent games from disappearing mid-session',
+      'Custom Game Status Dropdown — Changing status from the card dropdown in Library view now correctly updates custom games instead of silently failing',
+      'Custom Game Duplicate Fix — Editing a custom game entry no longer creates a duplicate record; updates route to the correct store on both dashboard and game details page',
+      'Spinner Z-Order Fix — The infinite-scroll loading spinner no longer renders behind game cards; it now appears naturally below the grid',
+    ],
+  },
+  '1.0.26': {
+    title: "What's New in Ark 1.0.26",
+    changes: [
+      'Release Calendar Overhaul — 8 new features: "My Radar" library-only filter, Week and Agenda views, countdown chips, genre/platform quick-filters, heat-map density dots, one-click "Add to Library", "This Week" banner, and multi-month mini-map',
+      'Game Details for Custom Games — Custom games now open the full game details page with hero section, My Progress tab, and Game Details tab',
+      'Edit Library Entry Dialog — GameDialog supports edit mode with pre-filled status, priority, notes, discovery source, and executable path',
+      'Consistent Edit Entry Flow — Right-clicking any game card and selecting "Edit Entry" opens the same dialog in edit mode across Steam, Epic, and custom games',
+      'Custom Game Card Navigation — Clicking a custom game card navigates to the full game details page instead of a modal',
+      'Performance — LazyFadeImage stale state reset, eliminated double library subscription, stable callback refs, module-level constants, and AgendaGameRow memo extraction',
+    ],
+  },
   '1.0.25': {
     title: "What's New in Ark 1.0.25",
     changes: [

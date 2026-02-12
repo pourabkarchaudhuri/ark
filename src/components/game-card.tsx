@@ -2,6 +2,7 @@ import { memo, useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation } from 'wouter';
 import { Game, GameStatus } from '@/types/game';
+import { setNavigatingGame } from '@/services/prefetch-store';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -40,7 +41,6 @@ interface GameCardProps {
   /** Callback receives (gameId, status) so parent can use a single stable function */
   onStatusChange?: (gameId: string, status: GameStatus) => void;
   hideLibraryBadge?: boolean; // Hide heart button and library badge (e.g., when already in library view)
-  hideRank?: boolean; // Hide rank badge (avoids creating a new game object in parent)
 }
 
 // Steam platforms (Steam is primarily PC)
@@ -152,7 +152,6 @@ function GameCardComponent({
   onRemoveFromLibrary,
   onStatusChange,
   hideLibraryBadge,
-  hideRank,
 }: GameCardProps) {
   const [, navigate] = useLocation();
   const [imageError, setImageError] = useState(false);
@@ -222,6 +221,10 @@ function GameCardComponent({
     // Navigate to game details page using the universal string ID
     // All game types (Steam, Epic, custom) use the same /game/:id route
     if (game.id) {
+      // Stash the full game object so the details page gets all cross-store
+      // metadata (availableOn, epicSlug, etc.) even if the prefetch store
+      // hasn't been refreshed with the latest dedup output.
+      setNavigatingGame(game);
       navigate(`/game/${encodeURIComponent(game.id)}`);
     } else if (onClick) {
       onClick();
@@ -366,21 +369,13 @@ function GameCardComponent({
         {/* Gradient overlay */}
         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent pointer-events-none" />
         
-        {/* Rank Badge for Top 100 games */}
-        {game.rank && !hideRank && (
-          <div className="absolute top-2 left-2 flex items-center justify-center min-w-[28px] h-7 px-1.5 rounded-lg bg-gradient-to-br from-amber-500 to-amber-600 text-black font-bold text-sm shadow-lg z-10">
-            #{game.rank}
-          </div>
-        )}
-        
-        {/* Library Heart Button - Top Left (visible on hover or if in library) - shifted right if rank badge is present */}
+        {/* Library Heart Button - Top Left (visible on hover or if in library) */}
         {/* Hidden when hideLibraryBadge is true (e.g., in Library view where all games are already in library) */}
         {!hideLibraryBadge && (
           <button 
             onClick={handleHeartClick}
             className={cn(
-              "absolute top-2 p-1.5 rounded-full bg-black/50 backdrop-blur-sm transition-all duration-200 hover:bg-black/70 z-10",
-              game.rank && !hideRank ? "left-12" : "left-2",
+              "absolute top-2 left-2 p-1.5 rounded-full bg-black/50 backdrop-blur-sm transition-all duration-200 hover:bg-black/70 z-10",
               inLibrary ? "opacity-100" : isHovered ? "opacity-100" : "opacity-0"
             )}
             aria-label={inLibrary ? "Remove from library" : "Add to library"}
@@ -517,7 +512,7 @@ function GameCardComponent({
         </div>
         
         {/* Platform Icons and Status Badge Row */}
-        <div className="flex items-center justify-between text-xs">
+        <div className="flex items-center justify-between text-xs min-h-[1.5rem]">
           {/* Platform Icons - Show only unique platform types */}
           <div className="flex items-center gap-1.5">
             {getUniquePlatformTypes(game.platform).map((type) => (
@@ -634,7 +629,6 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.game.id === nextProps.game.id &&
     prevProps.game.updatedAt === nextProps.game.updatedAt &&
     prevProps.game.releaseDate === nextProps.game.releaseDate &&
-    prevProps.game.rank === nextProps.game.rank &&
     prevProps.game.playerCount === nextProps.game.playerCount &&
     prevProps.game.coverUrl === nextProps.game.coverUrl &&
     prevProps.game.headerImage === nextProps.game.headerImage &&
@@ -649,7 +643,6 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.isInLibrary === nextProps.isInLibrary &&
     prevProps.isPlayingNow === nextProps.isPlayingNow &&
     prevProps.hideLibraryBadge === nextProps.hideLibraryBadge &&
-    prevProps.hideRank === nextProps.hideRank &&
     prevProps.onClick === nextProps.onClick &&
     prevProps.onEdit === nextProps.onEdit &&
     prevProps.onDelete === nextProps.onDelete &&

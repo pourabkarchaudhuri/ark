@@ -22,6 +22,10 @@ const CACHE_KEY = 'browse-games';
 const CACHE_TTL = 60 * 60 * 1000;              // 1 hour fresh (aligned with bg refresh interval)
 const CACHE_STALE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days stale-usable (hourly bg refresh keeps data current)
 
+// Bump this whenever the dedup/merge logic changes to invalidate old cached
+// game objects that are missing new cross-store fields (epicSlug, availableOn, etc.)
+const CACHE_FORMAT_VERSION = 2;
+
 // Heavy fields that are only needed on the detail page (not browse cards)
 const STRIP_KEYS = ['screenshots', 'videos', 'summary', 'movies', 'detailedDescription', 'aboutTheGame'];
 
@@ -29,6 +33,7 @@ interface BrowseCacheEntry {
   key: string;
   games: any[];
   timestamp: number;
+  formatVersion?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +99,7 @@ self.onmessage = async (e: MessageEvent) => {
           key: CACHE_KEY,
           games: slimmed,
           timestamp: Date.now(),
+          formatVersion: CACHE_FORMAT_VERSION,
         };
         store.put(entry);
         tx.oncomplete = () => resolve();
@@ -123,7 +129,11 @@ self.onmessage = async (e: MessageEvent) => {
             resolve(null);
             return;
           }
-          resolve({ games: entry.games, isFresh: age <= CACHE_TTL });
+          // If the cache was written by an older format version (missing
+          // cross-store fields etc.), treat it as stale so a fresh
+          // fetch + dedup runs.
+          const versionMatch = (entry.formatVersion ?? 0) >= CACHE_FORMAT_VERSION;
+          resolve({ games: entry.games, isFresh: versionMatch && age <= CACHE_TTL });
         };
         req.onerror = () => resolve(null);
       });

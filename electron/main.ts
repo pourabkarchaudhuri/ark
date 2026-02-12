@@ -805,6 +805,42 @@ ipcMain.handle('epic:getProductContent', async (_event, slug: string) => {
   }
 });
 
+/**
+ * Get news/blog articles related to an Epic game.
+ */
+ipcMain.handle('epic:getNewsFeed', async (_event, keyword: string, limit: number = 15) => {
+  try {
+    return await epicAPI.getNewsFeed(keyword, limit);
+  } catch (error) {
+    console.error('[Epic IPC] getNewsFeed error:', error);
+    return [];
+  }
+});
+
+/**
+ * Get product reviews for an Epic game.
+ */
+ipcMain.handle('epic:getProductReviews', async (_event, slug: string) => {
+  try {
+    return await epicAPI.getProductReviews(slug);
+  } catch (error) {
+    console.error('[Epic IPC] getProductReviews error:', error);
+    return null;
+  }
+});
+
+/**
+ * Get DLC/add-ons for an Epic game by namespace.
+ */
+ipcMain.handle('epic:getAddons', async (_event, namespace: string, limit: number = 50) => {
+  try {
+    return await epicAPI.getAddons(namespace, limit);
+  } catch (error) {
+    console.error('[Epic IPC] getAddons error:', error);
+    return [];
+  }
+});
+
 // ============================================================================
 // RSS FEED IPC HANDLERS (Gaming news sites)
 // ============================================================================

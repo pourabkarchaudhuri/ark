@@ -34,6 +34,7 @@ import { Gamepad2, Clock, Calendar, Search, X, Crosshair, ArrowUpDown, ZoomIn } 
 import { JourneyEntry, StatusChangeEntry, GameStatus, GameSession } from '@/types/game';
 import { Slider } from '@/components/ui/slider';
 import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
+import { libraryStore } from '@/services/library-store';
 
 // ─── Fallback cover image ────────────────────────────────────────────────────
 // Walks through a chain of URLs on error (Steam CDN cover → header → capsule).
@@ -45,7 +46,12 @@ function FallbackImg({
   alt?: string; className?: string;
   onAllFailed?: () => void;
 }) {
-  const chain = useMemo(() => buildGameImageChain(gameId, title, coverUrl), [gameId, title, coverUrl]);
+  const chain = useMemo(() => {
+    const meta = libraryStore.getEntry(gameId)?.cachedMeta;
+    const resolvedCover = coverUrl || meta?.coverUrl;
+    const headerImage = meta?.headerImage;
+    return buildGameImageChain(gameId, title, resolvedCover, headerImage);
+  }, [gameId, title, coverUrl]);
   const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
 

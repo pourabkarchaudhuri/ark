@@ -24,39 +24,26 @@ import { sessionStore } from '@/services/session-store';
 import { JourneyGanttView } from '@/components/journey-gantt-view';
 import { JourneyAnalyticsView } from '@/components/journey-analytics-view';
 import { generateMockGanttData } from '@/components/journey-gantt-mock-data';
-import { cn, getHardcodedCover, formatHours } from '@/lib/utils';
-import { getSteamCoverUrl, getSteamHeaderUrl } from '@/types/steam';
+import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
 
 type JourneyViewStyle = 'noob' | 'ocd' | 'analytics';
 type GanttDataSource = 'live' | 'mock';
 
-/** Extract a numeric Steam appId from a universal game ID (e.g. "steam-12345" → 12345) */
-function extractSteamAppId(gameId: string): number | null {
-  if (gameId.startsWith('steam-')) {
-    const n = parseInt(gameId.replace('steam-', ''), 10);
-    return isNaN(n) ? null : n;
-  }
-  return null;
-}
+/**
+ * Build a full fallback chain of image URLs for a journey entry.
+ * Also looks up the library entry's cachedMeta for richer image data
+ * (especially important for Epic games where we can't construct CDN URLs).
+ */
+function getJourneyImageChain(entry: { gameId: string; title: string; coverUrl?: string }): string[] {
+  // Try to get richer image data from the library's cached metadata
+  const libEntry = libraryStore.getEntry(entry.gameId);
+  const meta = libEntry?.cachedMeta;
 
-/** Resolve the best image URL for a journey entry, with Steam CDN fallback */
-function resolveJourneyCoverUrl(entry: { gameId: string; title: string; coverUrl?: string }): string | undefined {
-  // 1. Hardcoded overrides always win
-  const hardcoded = getHardcodedCover(entry.title);
-  if (hardcoded) return hardcoded;
-  // 2. Stored coverUrl from journey entry
-  if (entry.coverUrl) return entry.coverUrl;
-  // 3. Construct from Steam CDN if it's a Steam game
-  const appId = extractSteamAppId(entry.gameId);
-  if (appId) return getSteamCoverUrl(appId);
-  return undefined;
-}
+  // Merge coverUrl: prefer entry's, then cachedMeta's
+  const coverUrl = entry.coverUrl || meta?.coverUrl;
+  const headerImage = meta?.headerImage;
 
-/** Get a fallback image URL (header.jpg) if the primary cover fails to load */
-function getJourneyFallbackUrl(gameId: string): string | undefined {
-  const appId = extractSteamAppId(gameId);
-  if (appId) return getSteamHeaderUrl(appId);
-  return undefined;
+  return buildGameImageChain(entry.gameId, entry.title, coverUrl, headerImage);
 }
 
 /** Format player count with K/M suffixes */
@@ -105,32 +92,27 @@ const StarRating = memo(function StarRating({ rating }: { rating: number }) {
   );
 });
 
-/** Cover image with automatic Steam CDN fallback for missing/broken images */
+/** Cover image with multi-step fallback chain (cover → header → capsule → logo) */
 const JourneyCoverImage = memo(function JourneyCoverImage({ entry }: { entry: JourneyEntry }) {
-  const primaryUrl = useMemo(() => resolveJourneyCoverUrl(entry), [entry]);
-  const fallbackUrl = useMemo(() => getJourneyFallbackUrl(entry.gameId), [entry.gameId]);
-  const [currentSrc, setCurrentSrc] = useState(primaryUrl);
-  const [failed, setFailed] = useState(false);
+  const chain = useMemo(() => getJourneyImageChain(entry), [entry]);
+  const [attempt, setAttempt] = useState(0);
 
-  // Reset state when the entry changes
+  // Reset when the entry (and therefore the chain) changes
   useEffect(() => {
-    setCurrentSrc(primaryUrl);
-    setFailed(false);
-  }, [primaryUrl]);
+    setAttempt(0);
+  }, [chain]);
 
   const handleError = useCallback(() => {
-    if (currentSrc === primaryUrl && fallbackUrl && fallbackUrl !== primaryUrl) {
-      // Try the fallback URL
-      setCurrentSrc(fallbackUrl);
-    } else {
-      setFailed(true);
-    }
-  }, [currentSrc, primaryUrl, fallbackUrl]);
+    setAttempt(prev => prev + 1);
+  }, []);
+
+  const currentSrc = chain[attempt];
 
   return (
     <div className="flex-shrink-0 w-16 h-24 rounded overflow-hidden bg-white/5">
-      {currentSrc && !failed ? (
+      {currentSrc ? (
         <img
+          key={currentSrc}
           src={currentSrc}
           alt={entry.title}
           loading="lazy"
@@ -164,8 +146,10 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
   const inLibrary = libraryStore.isInLibrary(entry.gameId);
 
   const handleClick = useCallback(() => {
+    // Removed entries have no detail page — the only interaction is delete
+    if (isRemoved) return;
     navigate(`/game/${encodeURIComponent(entry.gameId)}`);
-  }, [navigate, entry.gameId]);
+  }, [navigate, entry.gameId, isRemoved]);
 
   const handleDelete = useCallback((e: React.MouseEvent) => {
     e.stopPropagation(); // Don't navigate when clicking delete
@@ -181,11 +165,13 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
   return (
     <motion.div
       className={cn(
-        'rounded-lg bg-white/5 border border-white/10 overflow-hidden cursor-pointer group hover:border-fuchsia-500/40 transition-colors min-h-[120px] relative',
-        isRemoved && 'opacity-60'
+        'rounded-lg bg-white/5 border border-white/10 overflow-hidden transition-colors min-h-[120px] relative group',
+        isRemoved
+          ? 'opacity-60 cursor-default'
+          : 'cursor-pointer hover:border-fuchsia-500/40'
       )}
       onClick={handleClick}
-      whileHover={{ scale: 1.02 }}
+      whileHover={isRemoved ? undefined : { scale: 1.02 }}
       transition={{ duration: 0.2 }}
     >
       {/* Delete button — top-right corner */}
@@ -214,7 +200,7 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
         {/* Info */}
         <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
           <div>
-            <h4 className="font-semibold text-sm truncate group-hover:text-fuchsia-400 transition-colors pr-5">
+            <h4 className={cn('font-semibold text-sm truncate transition-colors pr-5', !isRemoved && 'group-hover:text-fuchsia-400')}>
               {entry.title}
             </h4>
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
