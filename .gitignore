@@ -44,3 +44,6 @@ playwright-report-electron/
 *.temp
 
 splash screen.zip
+
+# Local NSIS cache for offline electron-builder builds
+.nsis-cache/
