@@ -9,6 +9,15 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.29': {
+    title: "What's New in Ark 1.0.29",
+    changes: [
+      'Splash Screen Fix — Fixed crash on startup in packaged Electron builds caused by absolute asset paths not resolving under file:// protocol; 3D scene and custom font now load correctly',
+      'Error Boundary — Added error boundary around the Three.js canvas so WebGL or model load failures degrade gracefully instead of crashing the app',
+      'Asset Path Hardening — All public directory asset references (GLB model, hardcoded cover images) now use relative paths via import.meta.env.BASE_URL for cross-environment compatibility',
+      'Splash Screen Polish — Reduced ARK title font size for better visual balance',
+    ],
+  },
   '1.0.28': {
     title: "What's New in Ark 1.0.28",
     changes: [

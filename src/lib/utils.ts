@@ -10,9 +10,12 @@ export function cn(...inputs: ClassValue[]) {
  * are missing or broken. Maps normalised (lowercase) game titles to
  * a local asset path served from /public.
  */
+/** Resolve a public-dir asset path that works under both dev (http) and production (file://) */
+const publicAsset = (name: string) => `${import.meta.env.BASE_URL}${name}`;
+
 const HARDCODED_COVERS: Record<string, string> = {
-  'battlefield 6': '/images/battlefield-6-cover.png',
-  'battlefield™ 6': '/images/battlefield-6-cover.png',
+  'battlefield 6': publicAsset('images/battlefield-6-cover.png'),
+  'battlefield™ 6': publicAsset('images/battlefield-6-cover.png'),
 };
 
 /** Return a hardcoded cover URL for a game title, or undefined if none exists. */

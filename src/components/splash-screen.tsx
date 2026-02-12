@@ -1,4 +1,5 @@
-import { Suspense, useState, useRef, useCallback, useEffect } from 'react';
+import { Component, Suspense, useState, useRef, useCallback, useEffect } from 'react';
+import type { ErrorInfo, ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { useGLTF, OrbitControls, PerspectiveCamera, Stars } from '@react-three/drei';
@@ -13,6 +14,31 @@ import {
 import { fetchAllNews } from '@/services/news-service';
 import { MathUtils } from 'three';
 import type { Group, AmbientLight, SpotLight } from 'three';
+
+/* ------------------------------------------------------------------ */
+/*  Error boundary — prevents a WebGL / Three.js crash from taking     */
+/*  down the entire splash screen.  Falls back to a plain background.  */
+/* ------------------------------------------------------------------ */
+
+class CanvasErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.warn('[SplashScreen] 3D canvas failed — falling back to flat background', error, info);
+  }
+
+  render() {
+    if (this.state.hasError) return null; // parent already has gradient bg
+    return this.props.children;
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Boot sequence — fast line-by-line with randomized sub-tasks         */
@@ -322,6 +348,9 @@ function SceneLights({ progress }: { progress: number }) {
 /*  3D Planet model                                                    */
 /* ------------------------------------------------------------------ */
 
+/** Resolve a public-dir asset path that works under both dev (http) and production (file://) */
+const assetUrl = (name: string) => `${import.meta.env.BASE_URL}${name}`;
+
 function Planet({ url }: { url: string }) {
   const { nodes } = useGLTF(url) as any;
   const groupRef = useRef<Group>(null);
@@ -482,25 +511,28 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
             }}
           />
 
-          {/* Three.js Canvas */}
+          {/* Three.js Canvas — wrapped in error boundary so a WebGL / GLB
+              failure doesn't crash the entire application */}
           <div className="absolute inset-0">
-            <Canvas dpr={[1.5, 2]} linear shadows>
-              <fog attach="fog" args={['#0a0010', 16, 30]} />
-              <SceneLights progress={bootProgress} />
-              <PerspectiveCamera makeDefault position={[0, 0, 16]} fov={75} />
-              <Suspense fallback={null}>
-                <Planet url="/scene.glb" />
-              </Suspense>
-              <OrbitControls
-                autoRotate
-                autoRotateSpeed={0.5}
-                enablePan={false}
-                enableZoom={false}
-                maxPolarAngle={Math.PI / 2}
-                minPolarAngle={Math.PI / 2}
-              />
-              <Stars radius={500} depth={50} count={1000} factor={10} />
-            </Canvas>
+            <CanvasErrorBoundary>
+              <Canvas dpr={[1.5, 2]} linear shadows>
+                <fog attach="fog" args={['#0a0010', 16, 30]} />
+                <SceneLights progress={bootProgress} />
+                <PerspectiveCamera makeDefault position={[0, 0, 16]} fov={75} />
+                <Suspense fallback={null}>
+                  <Planet url={assetUrl('scene.glb')} />
+                </Suspense>
+                <OrbitControls
+                  autoRotate
+                  autoRotateSpeed={0.5}
+                  enablePan={false}
+                  enableZoom={false}
+                  maxPolarAngle={Math.PI / 2}
+                  minPolarAngle={Math.PI / 2}
+                />
+                <Stars radius={500} depth={50} count={1000} factor={10} />
+              </Canvas>
+            </CanvasErrorBoundary>
           </div>
 
           {/* Overlay gradient */}
@@ -545,8 +577,8 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
               <h1
                 className="text-white leading-[0.82] tracking-[0.04em]"
                 style={{
-                  fontFamily: "'Bebas Neue', sans-serif",
-                  fontSize: '26rem',
+                  fontFamily: "'Sterion', sans-serif",
+                  fontSize: '13rem',
                   textShadow: '0 0 80px rgba(255, 255, 255, 0.06)',
                 }}
               >
@@ -650,4 +682,4 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
 
 // Eagerly start fetching the GLB model as soon as this module is imported,
 // so it's (likely) cached by the time the Canvas mounts the Planet component.
-useGLTF.preload('/scene.glb');
+useGLTF.preload(assetUrl('scene.glb'));
