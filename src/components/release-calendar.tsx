@@ -1,31 +1,32 @@
 /**
  * Release Calendar Component
  *
- * Monthly / Week / Agenda calendar showing upcoming game releases from Steam
+ * Year / Month / Week calendar showing upcoming game releases from Steam
  * and Epic Games Store APIs. Forward-only navigation starting from the
  * current month.
  *
  * Features:
- *  - Three view modes: Month grid, Week detail, Agenda list
+ *  - Three view modes: Year (default), Month, Week
+ *  - Poster-card feed — games displayed directly as visual poster cards
+ *  - Grouped by time period with sticky section headers
  *  - "My Radar" filter — highlights library / Want-to-Play games
  *  - Genre / platform quick-filter chips
- *  - Heat-map cell density in month view
+ *  - Heat-map density on section headers
  *  - Countdown chips (3d, Tomorrow, Today!) for library games
- *  - One-click "Add to Library" from tooltip
- *  - "This Week" summary banner
- *  - Multi-month mini-map for quick navigation
+ *  - One-click "Add to Library" from poster hover
+ *  - Multi-month mini-map for quick navigation (month view)
  *  - Coming Soon sidebar with virtualized list
- *  - Calendar-shaped skeleton loader during initial fetch
- *  - Dynamic viewport-fill height so the grid always fits the screen
+ *  - Skeleton loader during initial fetch
+ *  - Dynamic viewport-fill height so the feed always fits the screen
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
-import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   CalendarDays,
   Loader2,
   Clock,
@@ -34,9 +35,7 @@ import {
   Terminal,
   PanelRightClose,
   PanelRightOpen,
-  X,
   Crosshair,
-  Plus,
   List,
   Grid3X3,
   Calendar,
@@ -49,11 +48,10 @@ import { getPrefetchedGames, isPrefetchReady } from '@/services/prefetch-store';
 import { getSteamHeaderUrl } from '@/types/steam';
 import { libraryStore } from '@/services/library-store';
 import { useToast } from '@/components/ui/toast';
-import type { CachedGameMeta } from '@/types/game';
+import { GameCard } from '@/components/game-card';
+import type { CachedGameMeta, Game, GameStatus } from '@/types/game';
 
 // ─── Lazy fade-in image ─────────────────────────────────────────────────────
-// Shared by calendar-cell thumbnails, tooltip images, and TBD-tray thumbnails.
-// Loads lazily (native `loading="lazy"`) and fades in when the image is ready.
 
 function LazyFadeImage({
   src,
@@ -67,14 +65,12 @@ function LazyFadeImage({
   className?: string;
   /** @deprecated Use fallbackChain for multi-step fallbacks */
   fallbackSrc?: string;
-  /** Ordered list of fallback URLs to try when `src` (and earlier fallbacks) fail */
   fallbackChain?: string[];
 }) {
   const [loaded, setLoaded] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [errored, setErrored] = useState(false);
 
-  // Reset state when src changes (prevents stale loaded/errored when reused without remount)
   const prevSrcRef = useRef(src);
   if (prevSrcRef.current !== src) {
     prevSrcRef.current = src;
@@ -83,12 +79,10 @@ function LazyFadeImage({
     setErrored(false);
   }
 
-  // Build the full URL chain: primary → chain entries → single fallback
   const urls = useMemo(() => {
     const chain = [src];
     if (fallbackChain) chain.push(...fallbackChain);
     else if (fallbackSrc) chain.push(fallbackSrc);
-    // Deduplicate consecutive identical URLs (avoids stuck loops)
     const deduped: string[] = [];
     for (const url of chain) {
       if (url && url !== deduped[deduped.length - 1]) deduped.push(url);
@@ -133,7 +127,6 @@ function LazyFadeImage({
 
 // ─── Image helpers ──────────────────────────────────────────────────────────
 
-/** Extract a numeric Steam appId from a game ID (e.g. "steam-12345" → 12345) */
 function extractSteamAppId(id: string | number): number | null {
   if (typeof id === 'number') return id;
   if (typeof id === 'string' && id.startsWith('steam-')) {
@@ -143,8 +136,6 @@ function extractSteamAppId(id: string | number): number | null {
   return null;
 }
 
-/** Build a full fallback chain of image URLs for a release entry.
- *  Mirrors GameCard's multi-step approach: cover → header → capsule → small capsule */
 function buildImageFallbackChain(game: { id: string | number; image: string }): string[] {
   const appId = extractSteamAppId(game.id);
   if (!appId) return [];
@@ -154,7 +145,7 @@ function buildImageFallbackChain(game: { id: string | number; image: string }): 
     `${cdnBase}/${appId}/header.jpg`,
     `${cdnBase}/${appId}/capsule_616x353.jpg`,
     `${cdnBase}/${appId}/capsule_231x87.jpg`,
-  ].filter(url => url !== game.image); // Skip URLs identical to the primary src
+  ].filter(url => url !== game.image);
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -172,11 +163,19 @@ interface UpcomingRelease {
 
 interface ParsedRelease extends UpcomingRelease {
   parsedDate: Date | null;
+  _fallbackChain: string[];
+  _stores: Set<string>;
 }
 
-type CalendarView = 'month' | 'week' | 'agenda';
+type CalendarView = 'year' | 'month' | 'week';
 
-// Window.steam type is declared in @/types/steam.ts
+interface FeedGroup {
+  key: string;
+  label: string;
+  sublabel?: string;
+  isCurrentPeriod: boolean;
+  releases: ParsedRelease[];
+}
 
 // ─── Date Helpers ───────────────────────────────────────────────────────────
 
@@ -190,18 +189,12 @@ const MONTH_NAMES_SHORT = [
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ];
 
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const DAY_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DAY_NAMES_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 function getDaysInMonth(year: number, month: number): number {
   return new Date(year, month + 1, 0).getDate();
 }
 
-function getFirstDayOfMonth(year: number, month: number): number {
-  return new Date(year, month, 1).getDay();
-}
-
-// Dates more than 5 years out are sentinel placeholders (e.g. Epic's 2099-01-01)
 const MAX_REASONABLE_MS = 5 * 365.25 * 24 * 60 * 60 * 1000;
 
 function parseReleaseDate(dateStr: string): Date | null {
@@ -230,7 +223,6 @@ function parseReleaseDate(dateStr: string): Date | null {
     }
   }
 
-  // Reject far-future sentinel dates (e.g. 2099) — treat as TBD
   if (result && result.getTime() - Date.now() > MAX_REASONABLE_MS) {
     return null;
   }
@@ -249,36 +241,27 @@ function isToday(date: Date): boolean {
   return isSameDay(date, new Date());
 }
 
-// ─── Countdown helper ────────────────────────────────────────────────────────
+// ─── Human-readable date formatter ───────────────────────────────────────────
 
-/** Compute a countdown label for games releasing within 7 days. */
-function getCountdownLabel(releaseDate: Date | null): string | null {
-  if (!releaseDate) return null;
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  const target = new Date(releaseDate);
-  target.setHours(0, 0, 0, 0);
-  const diffMs = target.getTime() - now.getTime();
-  const diffDays = Math.round(diffMs / (24 * 60 * 60 * 1000));
-  if (diffDays < 0) return null;
-  if (diffDays === 0) return 'Today!';
-  if (diffDays === 1) return 'Tomorrow';
-  if (diffDays <= 7) return `${diffDays}d`;
-  return null;
+function ordinalSuffix(day: number): string {
+  if (day >= 11 && day <= 13) return 'th';
+  switch (day % 10) {
+    case 1: return 'st';
+    case 2: return 'nd';
+    case 3: return 'rd';
+    default: return 'th';
+  }
 }
 
 // ─── Layout constants ───────────────────────────────────────────────────────
 
-// Skeleton: which cells get fake game tile bars (deterministic pattern)
-const SKEL_TILE_CELLS = new Set([3, 8, 10, 15, 17, 22, 25, 29]);
-const SKEL_DOUBLE_CELLS = new Set([8, 17, 25]);
 const COMING_SOON_CAP = 300;
+const INITIAL_CARD_COUNT = 12;
 
-// View toggle button definitions (stable reference — avoids per-render allocation)
 const VIEW_TOGGLE_OPTIONS: { id: CalendarView; icon: typeof Grid3X3; label: string }[] = [
-  { id: 'month', icon: Grid3X3, label: 'Month' },
-  { id: 'week', icon: Calendar, label: 'Week' },
-  { id: 'agenda', icon: List, label: 'Agenda' },
+  { id: 'year', icon: Grid3X3, label: 'Year' },
+  { id: 'month', icon: Calendar, label: 'Month' },
+  { id: 'week', icon: List, label: 'Week' },
 ];
 
 // ─── Library helpers ─────────────────────────────────────────────────────────
@@ -297,7 +280,6 @@ function isReleaseInLibrary(id: string | number, libSet: Set<string>): boolean {
   return false;
 }
 
-/** Convert a release entry ID to a canonical library game ID. */
 function releaseToGameId(game: ParsedRelease): string {
   const strId = String(game.id);
   if (strId.startsWith('steam-') || strId.startsWith('epic-')) return strId;
@@ -305,7 +287,6 @@ function releaseToGameId(game: ParsedRelease): string {
   return strId;
 }
 
-/** Build a CachedGameMeta from a ParsedRelease for offline library display. */
 function releaseToMeta(game: ParsedRelease): CachedGameMeta {
   const platformArr: string[] = [];
   if (game.platforms.windows) platformArr.push('Windows');
@@ -322,229 +303,62 @@ function releaseToMeta(game: ParsedRelease): CachedGameMeta {
   };
 }
 
-// ─── Game Tile (inside calendar cell) ───────────────────────────────────────
-// Compact text pills with tiny thumbnails. Hover tooltip shows full details
-// including a one-click "Add to Library" button and countdown chip.
+// ─── ParsedRelease → Game adapter ────────────────────────────────────────────
+// Converts a ParsedRelease into a Game-shaped object so we can reuse the
+// shared GameCard component for visual consistency with browse / library views.
 
-const TOOLTIP_SHOW_DELAY = 120;
-const TOOLTIP_HIDE_DELAY = 80;
+function releaseToGame(release: ParsedRelease, inLibrary: boolean): Game {
+  const platformArr: string[] = [];
+  if (release.platforms.windows) platformArr.push('Windows');
+  if (release.platforms.mac) platformArr.push('Mac');
+  if (release.platforms.linux) platformArr.push('Linux');
 
-const GameTile = memo(function GameTile({
-  game,
-  inLibrary,
-  onNavigate,
-  onAddToLibrary,
-  radarDimmed,
-  countdownLabel,
-}: {
-  game: ParsedRelease;
-  inLibrary?: boolean;
-  compact?: boolean;
-  onNavigate?: (id: string | number) => void;
-  onAddToLibrary?: (game: ParsedRelease) => void;
-  radarDimmed?: boolean;
-  countdownLabel?: string | null;
-}) {
-  const [showTooltip, setShowTooltip] = useState(false);
-  const pillRef = useRef<HTMLDivElement>(null);
-  const [tooltipPos, setTooltipPos] = useState<{ top: number; left: number } | null>(null);
-  const showTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const appId = extractSteamAppId(release.id);
 
-  // Use primitive deps — game object ref changes on filter recalc but id/image stay the same
-  const fallbackChain = useMemo(() => buildImageFallbackChain(game), [game.id, game.image]);
+  const availableOn: ('steam' | 'epic')[] = [];
+  if (release._stores.has('steam')) availableOn.push('steam');
+  if (release._stores.has('epic')) availableOn.push('epic');
 
-  const handleEnter = useCallback(() => {
-    if (hideTimerRef.current) { clearTimeout(hideTimerRef.current); hideTimerRef.current = null; }
-    if (showTimerRef.current) return;
-    showTimerRef.current = setTimeout(() => {
-      showTimerRef.current = null;
-      if (pillRef.current) {
-        const rect = pillRef.current.getBoundingClientRect();
-        setTooltipPos({ top: rect.top, left: rect.left + rect.width / 2 });
-      }
-      setShowTooltip(true);
-    }, TOOLTIP_SHOW_DELAY);
-  }, []);
-
-  const handleLeave = useCallback(() => {
-    if (showTimerRef.current) { clearTimeout(showTimerRef.current); showTimerRef.current = null; }
-    if (hideTimerRef.current) return;
-    hideTimerRef.current = setTimeout(() => {
-      hideTimerRef.current = null;
-      setShowTooltip(false);
-    }, TOOLTIP_HIDE_DELAY);
-  }, []);
-
-  const handleTooltipEnter = useCallback(() => {
-    if (hideTimerRef.current) { clearTimeout(hideTimerRef.current); hideTimerRef.current = null; }
-  }, []);
-
-  const handleTooltipLeave = useCallback(() => {
-    hideTimerRef.current = setTimeout(() => {
-      hideTimerRef.current = null;
-      setShowTooltip(false);
-    }, TOOLTIP_HIDE_DELAY);
-  }, []);
-
-  useEffect(() => () => {
-    if (showTimerRef.current) clearTimeout(showTimerRef.current);
-    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
-  }, []);
-
-  const handleClick = useCallback(() => {
-    if (onNavigate && game.id) onNavigate(game.id);
-  }, [onNavigate, game.id]);
-
-  const handleAdd = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (onAddToLibrary) onAddToLibrary(game);
-  }, [onAddToLibrary, game]);
-
-  return (
-    <div
-      ref={pillRef}
-      className={cn('relative', radarDimmed && 'opacity-[0.15] pointer-events-none')}
-      onMouseEnter={handleEnter}
-      onMouseLeave={handleLeave}
-    >
-      {/* Compact pill: tiny thumbnail + game name + optional countdown */}
-      <div
-        onClick={handleClick}
-        className={cn(
-          'flex items-center gap-1 rounded px-1 py-0.5 cursor-pointer transition-all',
-          inLibrary
-            ? 'bg-fuchsia-500/15 ring-1 ring-fuchsia-500/30 hover:bg-fuchsia-500/25 hover:ring-fuchsia-500/50'
-            : 'bg-white/[0.04] hover:bg-white/10 hover:ring-1 hover:ring-fuchsia-500/40',
-        )}
-      >
-        <div className={cn(
-          'w-4 h-4 rounded-sm overflow-hidden flex-shrink-0',
-          inLibrary ? 'bg-fuchsia-500/10' : 'bg-white/5',
-        )}>
-          {game.image ? (
-            <LazyFadeImage src={game.image} fallbackChain={fallbackChain} className="w-full h-full object-cover" />
-          ) : (
-            <CalendarDays className="w-2.5 h-2.5 m-auto text-white/20" />
-          )}
-        </div>
-        <span className={cn(
-          'text-[9px] truncate leading-tight flex-1 min-w-0',
-          inLibrary ? 'text-fuchsia-300/90 font-medium' : 'text-white/60',
-        )}>
-          {game.name}
-        </span>
-        {/* Countdown chip */}
-        {countdownLabel && (
-          <span className={cn(
-            'text-[7px] px-1 py-px rounded font-bold flex-shrink-0 uppercase tracking-wide',
-            countdownLabel === 'Today!'
-              ? 'bg-green-500/25 text-green-300 animate-pulse'
-              : countdownLabel === 'Tomorrow'
-                ? 'bg-amber-500/25 text-amber-300'
-                : 'bg-fuchsia-500/25 text-fuchsia-300/80',
-          )}>
-            {countdownLabel}
-          </span>
-        )}
-        {game.store && (
-          game.store === 'steam'
-            ? <FaSteam className={cn('w-2 h-2 flex-shrink-0', inLibrary ? 'text-fuchsia-400/50' : 'text-white/30')} />
-            : <SiEpicgames className={cn('w-2 h-2 flex-shrink-0', inLibrary ? 'text-fuchsia-400/50' : 'text-white/30')} />
-        )}
-      </div>
-
-      {/* Hover tooltip — ONLY mount the portal when visible */}
-      {showTooltip && tooltipPos && createPortal(
-        <div
-          className="fixed z-[9999] w-56"
-          style={{
-            top: tooltipPos.top - 8,
-            left: tooltipPos.left,
-            transform: 'translate(-50%, -100%)',
-          }}
-          onMouseEnter={handleTooltipEnter}
-          onMouseLeave={handleTooltipLeave}
-        >
-          <div className="absolute left-0 right-0 bottom-0 h-4 -mb-4" />
-          <div
-            onClick={handleClick}
-            className={cn(
-              'rounded-lg shadow-xl overflow-hidden cursor-pointer transition-colors animate-in fade-in duration-150',
-              inLibrary
-                ? 'bg-zinc-900 border border-fuchsia-500/30 hover:border-fuchsia-500/50 ring-1 ring-fuchsia-500/10'
-                : 'bg-zinc-900 border border-white/10 hover:border-fuchsia-500/40',
-            )}
-          >
-            {game.image && (
-              <div className="relative">
-                <LazyFadeImage src={game.image} fallbackChain={fallbackChain} alt={game.name} className="w-full h-24 object-cover" />
-                {inLibrary && (
-                  <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-fuchsia-500/90 text-[8px] font-bold text-white uppercase tracking-wide shadow-lg">
-                    In Library
-                  </div>
-                )}
-                {countdownLabel && (
-                  <div className={cn(
-                    'absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded text-[8px] font-bold text-white uppercase tracking-wide shadow-lg',
-                    countdownLabel === 'Today!' ? 'bg-green-500/90' : countdownLabel === 'Tomorrow' ? 'bg-amber-500/90' : 'bg-fuchsia-500/90',
-                  )}>
-                    {countdownLabel}
-                  </div>
-                )}
-              </div>
-            )}
-            <div className="p-2.5 space-y-1.5">
-              <div className="flex items-start justify-between gap-1">
-                <p className={cn('text-xs font-semibold leading-tight', inLibrary ? 'text-fuchsia-300' : 'text-white')}>{game.name}</p>
-                {game.store && (
-                  <div className="flex-shrink-0 mt-0.5">
-                    {game.store === 'steam'
-                      ? <FaSteam className="w-3 h-3 text-white/40" />
-                      : <SiEpicgames className="w-3 h-3 text-white/40" />}
-                  </div>
-                )}
-              </div>
-              <p className="text-[10px] text-white/50">{game.releaseDate}</p>
-              {game.genres.length > 0 && (
-                <div className="flex flex-wrap gap-1">
-                  {game.genres.slice(0, 3).map((g) => (
-                    <span key={g} className="text-[9px] px-1.5 py-0.5 bg-white/10 rounded text-white/60">{g}</span>
-                  ))}
-                </div>
-              )}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5 text-white/40">
-                  {game.platforms.windows && <Monitor className="w-2.5 h-2.5" />}
-                  {game.platforms.mac && <Apple className="w-2.5 h-2.5" />}
-                  {game.platforms.linux && <Terminal className="w-2.5 h-2.5" />}
-                </div>
-                {/* One-click add to library */}
-                {!inLibrary && onAddToLibrary && (
-                  <button
-                    onClick={handleAdd}
-                    className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium bg-fuchsia-500/20 text-fuchsia-400 hover:bg-fuchsia-500/40 transition-colors"
-                    title="Add to Library"
-                  >
-                    <Plus className="w-2.5 h-2.5" />
-                    Track
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
-    </div>
-  );
-});
+  return {
+    id: releaseToGameId(release),
+    title: release.name,
+    developer: '',
+    publisher: '',
+    genre: release.genres,
+    platform: platformArr,
+    metacriticScore: null,
+    releaseDate: release.releaseDate,
+    coverUrl: release.image || undefined,
+    store: release.store,
+    steamAppId: appId ?? undefined,
+    comingSoon: release.comingSoon,
+    availableOn: availableOn.length > 0 ? availableOn : undefined,
+    status: 'Want to Play' as GameStatus,
+    priority: 'Medium' as any,
+    publicReviews: '',
+    recommendationSource: '',
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+    isInLibrary: inLibrary,
+  } as Game;
+}
 
 // ─── Filter Chips ────────────────────────────────────────────────────────────
+
+type StoreFilter = 'all' | 'steam' | 'epic' | 'both';
+
+const STORE_FILTER_OPTIONS: { id: StoreFilter; label: string; icon?: typeof FaSteam }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'steam', label: 'Steam', icon: FaSteam },
+  { id: 'epic', label: 'Epic', icon: SiEpicgames },
+  { id: 'both', label: 'Both' },
+];
 
 const FilterChips = memo(function FilterChips({
   platformFilter,
   setPlatformFilter,
+  storeFilter,
+  setStoreFilter,
   genreFilter,
   setGenreFilter,
   topGenres,
@@ -553,6 +367,8 @@ const FilterChips = memo(function FilterChips({
 }: {
   platformFilter: string;
   setPlatformFilter: (v: string) => void;
+  storeFilter: StoreFilter;
+  setStoreFilter: (v: StoreFilter) => void;
   genreFilter: string | null;
   setGenreFilter: (v: string | null) => void;
   topGenres: string[];
@@ -561,11 +377,10 @@ const FilterChips = memo(function FilterChips({
 }) {
   return (
     <div className="flex items-center gap-1.5 mb-2 flex-wrap">
-      {/* My Radar toggle */}
       <button
         onClick={() => setRadarActive(!radarActive)}
         className={cn(
-          'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all',
+          'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
           radarActive
             ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
             : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
@@ -577,13 +392,32 @@ const FilterChips = memo(function FilterChips({
 
       <div className="w-px h-4 bg-white/10" />
 
-      {/* Platform filters */}
+      {/* Store filter */}
+      {STORE_FILTER_OPTIONS.map(({ id, label, icon: Icon }) => (
+        <button
+          key={id}
+          onClick={() => setStoreFilter(id)}
+          className={cn(
+            'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
+            storeFilter === id
+              ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
+              : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
+          )}
+        >
+          {Icon && <Icon className="w-3 h-3" />}
+          {label}
+        </button>
+      ))}
+
+      <div className="w-px h-4 bg-white/10" />
+
+      {/* Platform filter */}
       {(['all', 'windows', 'mac', 'linux'] as const).map((p) => (
         <button
           key={p}
           onClick={() => setPlatformFilter(p)}
           className={cn(
-            'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all',
+            'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
             platformFilter === p
               ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
               : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
@@ -601,7 +435,7 @@ const FilterChips = memo(function FilterChips({
               key={g}
               onClick={() => setGenreFilter(genreFilter === g ? null : g)}
               className={cn(
-                'px-2 py-1 rounded-md text-[10px] font-medium transition-all',
+                'px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
                 genreFilter === g
                   ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
                   : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
@@ -616,80 +450,335 @@ const FilterChips = memo(function FilterChips({
   );
 });
 
-// ─── This Week Banner ────────────────────────────────────────────────────────
+// ─── Grouped Feed ────────────────────────────────────────────────────────────
+// A scrolling feed of FeedGroups. Each group has a sticky header and a
+// responsive grid of GameCard (reused from browse/library). Groups with many
+// releases show a "Show all" button.
 
-const ThisWeekBanner = memo(function ThisWeekBanner({
-  releases,
+const NOOP_EDIT = () => {};
+const NOOP_DELETE = () => {};
+
+const GroupedFeed = memo(function GroupedFeed({
+  groups,
   libraryIds,
-  goToGame,
+  onAddToLibrary,
 }: {
-  releases: ParsedRelease[];
+  groups: FeedGroup[];
   libraryIds: Set<string>;
-  goToGame: (id: string | number) => void;
+  onAddToLibrary: (game: ParsedRelease) => void;
 }) {
-  const thisWeekGames = useMemo(() => {
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-    const weekEnd = new Date(now);
-    weekEnd.setDate(weekEnd.getDate() + 7);
-    return releases
-      .filter((r) => r.parsedDate && r.parsedDate >= now && r.parsedDate < weekEnd)
-      .sort((a, b) => (a.parsedDate!.getTime() - b.parsedDate!.getTime()));
-  }, [releases]);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
-  if (thisWeekGames.length === 0) return null;
+  const toggleGroup = useCallback((key: string) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  // Build a lookup map so the gameId-only onAddToLibrary from GameCard
+  // can find the original ParsedRelease for the full add-to-library flow.
+  const releaseMap = useMemo(() => {
+    const map = new Map<string, ParsedRelease>();
+    for (const g of groups) {
+      for (const r of g.releases) {
+        map.set(releaseToGameId(r), r);
+      }
+    }
+    return map;
+  }, [groups]);
+
+  const handleAddToLibrary = useCallback((gameId: string) => {
+    const release = releaseMap.get(gameId);
+    if (release) onAddToLibrary(release);
+  }, [releaseMap, onAddToLibrary]);
+
+  const hasAnyReleases = groups.some(g => g.releases.length > 0);
+
+  if (!hasAnyReleases) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-center">
+        <CalendarDays className="w-10 h-10 text-white/[0.06] mb-3" />
+        <p className="text-sm text-white/20">No releases match your filters</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="mb-3 p-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02]">
-      <div className="flex items-center gap-2 mb-2">
-        <CalendarDays className="w-3.5 h-3.5 text-fuchsia-400/60" />
-        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-wider">This Week</span>
-        <span className="text-[9px] text-fuchsia-400/80 bg-fuchsia-500/15 px-1.5 py-0.5 rounded-full font-medium">
-          {thisWeekGames.length}
-        </span>
-      </div>
-      <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10">
-        {thisWeekGames.slice(0, 20).map((game) => {
-          const owned = isReleaseInLibrary(game.id, libraryIds);
-          const label = getCountdownLabel(game.parsedDate);
-          const dayName = game.parsedDate ? DAY_NAMES_SHORT[game.parsedDate.getDay()] : '';
-          return (
-            <button
-              key={game.id}
-              onClick={() => goToGame(game.id)}
+    <div className="overflow-y-auto h-full pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10">
+      {groups.map((group) => {
+        const isExpanded = expandedGroups.has(group.key);
+        const hasMore = group.releases.length > INITIAL_CARD_COUNT;
+        const visible = isExpanded ? group.releases : group.releases.slice(0, INITIAL_CARD_COUNT);
+        const remaining = group.releases.length - INITIAL_CARD_COUNT;
+        const density = Math.min(group.releases.length / 10, 1);
+
+        return (
+          <div key={group.key} className="mb-6 last:mb-2">
+            {/* Sticky section header — opaque bg avoids GPU-heavy backdrop-blur */}
+            <div
               className={cn(
-                'flex items-center gap-1.5 px-2 py-1 rounded-lg flex-shrink-0 transition-all',
-                owned
-                  ? 'bg-fuchsia-500/15 ring-1 ring-fuchsia-500/30 hover:bg-fuchsia-500/25'
-                  : 'bg-white/[0.04] hover:bg-white/10',
+                'sticky top-0 z-10 flex items-center gap-3 py-2 px-1 -mx-1',
+                group.isCurrentPeriod ? 'bg-[#0d0b10]' : 'bg-[#0a0a0c]',
               )}
             >
-              <div className={cn('w-5 h-5 rounded-sm overflow-hidden flex-shrink-0', owned ? 'bg-fuchsia-500/10' : 'bg-white/5')}>
-                {game.image ? (
-                  <LazyFadeImage src={game.image} fallbackChain={buildImageFallbackChain(game)} className="w-full h-full object-cover" />
-                ) : (
-                  <CalendarDays className="w-2.5 h-2.5 m-auto text-white/20" />
+              <h3 className={cn(
+                'text-sm font-semibold flex-shrink-0',
+                group.isCurrentPeriod ? 'text-fuchsia-400' : 'text-white/60',
+              )}>
+                {group.label}
+              </h3>
+              {group.sublabel && (
+                <span className="text-[10px] text-white/25 flex-shrink-0">{group.sublabel}</span>
+              )}
+              {group.releases.length > 0 && (
+                <span className={cn(
+                  'text-[10px] px-2 py-0.5 rounded-full font-medium flex-shrink-0',
+                  group.isCurrentPeriod
+                    ? 'bg-fuchsia-500/20 text-fuchsia-400'
+                    : 'bg-white/[0.06] text-white/40',
+                )}>
+                  {group.releases.length}
+                </span>
+              )}
+              {/* Heat bar */}
+              <div className="flex-1 h-px relative">
+                <div className="absolute inset-0 bg-white/[0.06]" />
+                {density > 0 && (
+                  <div
+                    className="absolute left-0 top-0 h-full bg-fuchsia-500/40 rounded-full"
+                    style={{ width: `${density * 100}%` }}
+                  />
                 )}
               </div>
-              <span className={cn('text-[10px] truncate max-w-[100px]', owned ? 'text-fuchsia-300/90 font-medium' : 'text-white/60')}>
-                {game.name}
-              </span>
-              <span className={cn(
-                'text-[8px] px-1 py-px rounded font-bold flex-shrink-0',
-                label === 'Today!' ? 'bg-green-500/25 text-green-300' :
-                label === 'Tomorrow' ? 'bg-amber-500/25 text-amber-300' :
-                'bg-white/10 text-white/40',
-              )}>
-                {label || dayName}
-              </span>
-            </button>
-          );
-        })}
-        {thisWeekGames.length > 20 && (
-          <span className="text-[9px] text-white/30 self-center px-2 flex-shrink-0">+{thisWeekGames.length - 20} more</span>
-        )}
-      </div>
+            </div>
+
+            {/* Card grid — reuses the same GameCard as browse/library for visual consistency */}
+            {group.releases.length === 0 ? (
+              <div className="py-6 text-center">
+                <p className="text-[11px] text-white/15">No releases</p>
+              </div>
+            ) : (
+              <div style={{ contentVisibility: 'auto', containIntrinsicBlockSize: '400px' }}>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 mt-2">
+                  <AnimatePresence mode="popLayout">
+                    {visible.map((release) => {
+                      const owned = isReleaseInLibrary(release.id, libraryIds);
+                      const gameObj = releaseToGame(release, owned);
+                      return (
+                        <motion.div
+                          key={release.id}
+                          layout="position"
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.95 }}
+                          transition={{
+                            opacity: { duration: 0.18 },
+                            scale: { duration: 0.18 },
+                            layout: { duration: 0.25, type: 'spring', bounce: 0.12 },
+                          }}
+                          className="min-w-0"
+                        >
+                          <GameCard
+                            game={gameObj}
+                            isInLibrary={owned}
+                            onEdit={NOOP_EDIT}
+                            onDelete={NOOP_DELETE}
+                            onAddToLibrary={handleAddToLibrary}
+                            hideLibraryBadge={false}
+                          />
+                        </motion.div>
+                      );
+                    })}
+                  </AnimatePresence>
+                </div>
+                {hasMore && !isExpanded && (
+                  <button
+                    onClick={() => toggleGroup(group.key)}
+                    className="mt-3 flex items-center gap-1.5 mx-auto px-4 py-1.5 rounded-lg text-[11px] font-medium bg-white/[0.04] text-white/40 hover:bg-white/[0.08] hover:text-white/70 transition-colors"
+                  >
+                    <ChevronDown className="w-3 h-3" />
+                    Show all {group.releases.length} releases
+                    <span className="text-white/20">(+{remaining})</span>
+                  </button>
+                )}
+                {hasMore && isExpanded && (
+                  <button
+                    onClick={() => toggleGroup(group.key)}
+                    className="mt-3 flex items-center gap-1.5 mx-auto px-4 py-1.5 rounded-lg text-[11px] font-medium bg-white/[0.04] text-white/40 hover:bg-white/[0.08] hover:text-white/70 transition-colors"
+                  >
+                    Show less
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
+  );
+});
+
+// ─── Year Feed ───────────────────────────────────────────────────────────────
+// Groups releases by month for the selected year.
+
+const YearFeed = memo(function YearFeed({
+  releases,
+  year,
+  libraryIds,
+  onAddToLibrary,
+}: {
+  releases: ParsedRelease[];
+  year: number;
+  libraryIds: Set<string>;
+  onAddToLibrary: (game: ParsedRelease) => void;
+}) {
+  const groups = useMemo((): FeedGroup[] => {
+    const buckets: ParsedRelease[][] = Array.from({ length: 12 }, () => []);
+    for (const r of releases) {
+      if (!r.parsedDate) continue;
+      if (r.parsedDate.getFullYear() === year) {
+        buckets[r.parsedDate.getMonth()].push(r);
+      }
+    }
+    const nowMonth = new Date().getMonth();
+    const nowYear = new Date().getFullYear();
+    return buckets.map((games, i) => ({
+      key: `month-${i}`,
+      label: MONTH_NAMES[i],
+      isCurrentPeriod: year === nowYear && i === nowMonth,
+      releases: games,
+    }));
+  }, [releases, year]);
+
+  return (
+    <GroupedFeed
+      groups={groups}
+      libraryIds={libraryIds}
+      onAddToLibrary={onAddToLibrary}
+    />
+  );
+});
+
+// ─── Month Feed (by week) ────────────────────────────────────────────────────
+
+const MonthFeed = memo(function MonthFeed({
+  releases,
+  year,
+  month,
+  libraryIds,
+  onAddToLibrary,
+}: {
+  releases: ParsedRelease[];
+  year: number;
+  month: number;
+  libraryIds: Set<string>;
+  onAddToLibrary: (game: ParsedRelease) => void;
+}) {
+  const groups = useMemo((): FeedGroup[] => {
+    const lastDay = new Date(year, month + 1, 0);
+    const weeks: { start: Date; end: Date; releases: ParsedRelease[] }[] = [];
+
+    let ws = new Date(year, month, 1);
+    ws.setDate(ws.getDate() - ws.getDay());
+
+    while (ws <= lastDay) {
+      const we = new Date(ws);
+      we.setDate(we.getDate() + 6);
+      weeks.push({ start: new Date(ws), end: new Date(we), releases: [] });
+      ws = new Date(ws);
+      ws.setDate(ws.getDate() + 7);
+    }
+
+    for (const r of releases) {
+      if (!r.parsedDate || r.parsedDate.getMonth() !== month) continue;
+      for (const w of weeks) {
+        const rd = new Date(r.parsedDate);
+        rd.setHours(12, 0, 0, 0);
+        const wStart = new Date(w.start); wStart.setHours(0, 0, 0, 0);
+        const wEnd = new Date(w.end); wEnd.setHours(23, 59, 59, 999);
+        if (rd >= wStart && rd <= wEnd) {
+          w.releases.push(r);
+          break;
+        }
+      }
+    }
+
+    const today = new Date();
+    today.setHours(12, 0, 0, 0);
+
+    const fmt = (d: Date) => `${MONTH_NAMES_SHORT[d.getMonth()]} ${d.getDate()}`;
+    return weeks.map((w, i) => {
+      const wStart = new Date(w.start); wStart.setHours(0, 0, 0, 0);
+      const wEnd = new Date(w.end); wEnd.setHours(23, 59, 59, 999);
+      return {
+        key: `week-${i}`,
+        label: `Week ${i + 1}`,
+        sublabel: `${fmt(w.start)} – ${fmt(w.end)}`,
+        isCurrentPeriod: today >= wStart && today <= wEnd,
+        releases: w.releases,
+      };
+    });
+  }, [releases, year, month]);
+
+  return (
+    <GroupedFeed
+      groups={groups}
+      libraryIds={libraryIds}
+      onAddToLibrary={onAddToLibrary}
+    />
+  );
+});
+
+// ─── Week Feed (by day) ──────────────────────────────────────────────────────
+
+const WeekFeed = memo(function WeekFeed({
+  weekStart,
+  releases,
+  libraryIds,
+  onAddToLibrary,
+}: {
+  weekStart: Date;
+  releases: ParsedRelease[];
+  libraryIds: Set<string>;
+  onAddToLibrary: (game: ParsedRelease) => void;
+}) {
+  const groups = useMemo((): FeedGroup[] => {
+    const days: { date: Date; releases: ParsedRelease[] }[] = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(weekStart);
+      d.setDate(d.getDate() + i);
+      d.setHours(0, 0, 0, 0);
+      days.push({ date: d, releases: [] });
+    }
+    for (const r of releases) {
+      if (!r.parsedDate) continue;
+      for (const day of days) {
+        if (isSameDay(r.parsedDate, day.date)) {
+          day.releases.push(r);
+          break;
+        }
+      }
+    }
+    return days.map((day, i) => {
+      const d = day.date;
+      return {
+        key: `day-${i}`,
+        label: DAY_NAMES_FULL[d.getDay()],
+        sublabel: `${d.getDate()}${ordinalSuffix(d.getDate())} ${MONTH_NAMES_SHORT[d.getMonth()]}`,
+        isCurrentPeriod: isToday(d),
+        releases: day.releases,
+      };
+    });
+  }, [weekStart, releases]);
+
+  return (
+    <GroupedFeed
+      groups={groups}
+      libraryIds={libraryIds}
+      onAddToLibrary={onAddToLibrary}
+    />
   );
 });
 
@@ -706,7 +795,6 @@ const MiniMonthStrip = memo(function MiniMonthStrip({
   currentMonth: number;
   onNavigate: (year: number, month: number) => void;
 }) {
-  // Compute density for prev, current, next months
   const monthData = useMemo(() => {
     const months: { year: number; month: number; weekDensity: number[] }[] = [];
     for (let offset = -1; offset <= 1; offset++) {
@@ -763,276 +851,6 @@ const MiniMonthStrip = memo(function MiniMonthStrip({
           </button>
         );
       })}
-    </div>
-  );
-});
-
-// ─── Week View ───────────────────────────────────────────────────────────────
-
-const WeekViewGrid = memo(function WeekViewGrid({
-  weekStart,
-  releases,
-  libraryIds,
-  goToGame,
-  onAddToLibrary,
-  radarActive,
-}: {
-  weekStart: Date;
-  releases: ParsedRelease[];
-  libraryIds: Set<string>;
-  goToGame: (id: string | number) => void;
-  onAddToLibrary: (game: ParsedRelease) => void;
-  radarActive: boolean;
-}) {
-  // Group releases by day in this week
-  const dayGroups = useMemo(() => {
-    const groups: ParsedRelease[][] = Array.from({ length: 7 }, () => []);
-    const start = new Date(weekStart);
-    start.setHours(0, 0, 0, 0);
-    for (const r of releases) {
-      if (!r.parsedDate) continue;
-      const d = new Date(r.parsedDate);
-      d.setHours(0, 0, 0, 0);
-      const diff = Math.round((d.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
-      if (diff >= 0 && diff < 7) groups[diff].push(r);
-    }
-    return groups;
-  }, [weekStart, releases]);
-
-  return (
-    <div className="grid grid-cols-7 gap-px flex-1 min-h-0 border border-white/[0.06] rounded-xl overflow-hidden">
-      {dayGroups.map((games, dayIdx) => {
-        const date = new Date(weekStart);
-        date.setDate(date.getDate() + dayIdx);
-        const isTodayCell = isToday(date);
-
-        return (
-          <div
-            key={dayIdx}
-            className={cn(
-              'flex flex-col bg-white/[0.01] overflow-hidden',
-              isTodayCell && 'bg-fuchsia-500/[0.06]',
-            )}
-          >
-            {/* Day header */}
-            <div className={cn(
-              'px-2 py-1.5 border-b border-white/[0.06] flex items-center gap-1.5 flex-shrink-0 bg-white/[0.02]',
-              isTodayCell && 'bg-fuchsia-500/[0.08]',
-            )}>
-              <span className={cn('text-[10px] font-medium', isTodayCell ? 'text-fuchsia-400' : 'text-white/30')}>
-                {DAY_NAMES[date.getDay()]}
-              </span>
-              {isTodayCell ? (
-                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-fuchsia-500 text-white text-[10px] font-bold">
-                  {date.getDate()}
-                </span>
-              ) : (
-                <span className="text-[11px] text-white/50">{date.getDate()}</span>
-              )}
-              {games.length > 0 && (
-                <span className="text-[8px] text-fuchsia-400/70 bg-fuchsia-500/10 px-1 rounded-full ml-auto">{games.length}</span>
-              )}
-            </div>
-            {/* Game list — scrollable */}
-            <div className="flex-1 overflow-y-auto p-1 space-y-0.5">
-              {games.map((game) => {
-                const owned = isReleaseInLibrary(game.id, libraryIds);
-                const countdown = owned ? getCountdownLabel(game.parsedDate) : null;
-                return (
-                  <GameTile
-                    key={game.id}
-                    game={game}
-                    inLibrary={owned}
-                    onNavigate={goToGame}
-                    onAddToLibrary={onAddToLibrary}
-                    radarDimmed={radarActive && !owned}
-                    countdownLabel={countdown}
-                  />
-                );
-              })}
-              {games.length === 0 && (
-                <div className="flex items-center justify-center h-full text-white/10">
-                  <CalendarDays className="w-4 h-4" />
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-});
-
-// ─── Agenda Game Row (extracted from AgendaListView for memoization) ─────────
-
-const AgendaGameRow = memo(function AgendaGameRow({
-  game,
-  libraryIds,
-  goToGame,
-  onAddToLibrary,
-  radarActive,
-}: {
-  game: ParsedRelease;
-  libraryIds: Set<string>;
-  goToGame: (id: string | number) => void;
-  onAddToLibrary: (game: ParsedRelease) => void;
-  radarActive: boolean;
-}) {
-  const owned = isReleaseInLibrary(game.id, libraryIds);
-  const countdown = owned ? getCountdownLabel(game.parsedDate) : null;
-  const dimmed = radarActive && !owned;
-  const chain = useMemo(() => buildImageFallbackChain(game), [game.id, game.image]);
-
-  const handleClick = useCallback(() => goToGame(game.id), [goToGame, game.id]);
-  const handleAdd = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    onAddToLibrary(game);
-  }, [onAddToLibrary, game]);
-
-  return (
-    <div
-      onClick={handleClick}
-      className={cn(
-        'flex items-center gap-2.5 px-3 h-full cursor-pointer transition-all border-b border-white/[0.03]',
-        dimmed && 'opacity-[0.15]',
-        owned
-          ? 'bg-fuchsia-500/[0.04] hover:bg-fuchsia-500/[0.08]'
-          : 'hover:bg-white/[0.04]',
-      )}
-    >
-      <div className={cn('w-9 h-9 rounded overflow-hidden flex-shrink-0', owned ? 'bg-fuchsia-500/10 ring-1 ring-fuchsia-500/20' : 'bg-white/5')}>
-        {game.image ? (
-          <LazyFadeImage src={game.image} fallbackChain={chain} className="w-full h-full object-cover" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center"><CalendarDays className="w-3 h-3 text-white/15" /></div>
-        )}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5">
-          <p className={cn('text-xs font-medium truncate', owned ? 'text-fuchsia-300' : 'text-white/80')}>{game.name}</p>
-          {countdown && (
-            <span className={cn(
-              'text-[7px] px-1 py-px rounded font-bold flex-shrink-0',
-              countdown === 'Today!' ? 'bg-green-500/25 text-green-300' : countdown === 'Tomorrow' ? 'bg-amber-500/25 text-amber-300' : 'bg-fuchsia-500/25 text-fuchsia-300/80',
-            )}>{countdown}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5 mt-0.5">
-          {game.genres.slice(0, 2).map((g) => (
-            <span key={g} className="text-[8px] px-1 py-px bg-white/[0.06] rounded text-white/40">{g}</span>
-          ))}
-          <div className="flex items-center gap-1 ml-auto text-white/30">
-            {game.platforms.windows && <Monitor className="w-2.5 h-2.5" />}
-            {game.platforms.mac && <Apple className="w-2.5 h-2.5" />}
-            {game.platforms.linux && <Terminal className="w-2.5 h-2.5" />}
-            {game.store === 'steam' && <FaSteam className="w-2.5 h-2.5" />}
-            {game.store === 'epic' && <SiEpicgames className="w-2.5 h-2.5" />}
-          </div>
-        </div>
-      </div>
-      {!owned && !dimmed && (
-        <button
-          onClick={handleAdd}
-          className="p-1 rounded-md bg-fuchsia-500/15 text-fuchsia-400 hover:bg-fuchsia-500/30 transition-colors flex-shrink-0"
-          title="Add to Library"
-        >
-          <Plus className="w-3 h-3" />
-        </button>
-      )}
-    </div>
-  );
-});
-
-// ─── Agenda View ─────────────────────────────────────────────────────────────
-
-const AGENDA_ROW_H = 56;
-
-const AgendaListView = memo(function AgendaListView({
-  releases,
-  libraryIds,
-  goToGame,
-  onAddToLibrary,
-  radarActive,
-}: {
-  releases: ParsedRelease[];
-  libraryIds: Set<string>;
-  goToGame: (id: string | number) => void;
-  onAddToLibrary: (game: ParsedRelease) => void;
-  radarActive: boolean;
-}) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  // Group dated releases chronologically
-  const groups = useMemo(() => {
-    const dated = releases
-      .filter((r) => r.parsedDate)
-      .sort((a, b) => a.parsedDate!.getTime() - b.parsedDate!.getTime());
-    const map = new Map<string, ParsedRelease[]>();
-    for (const r of dated) {
-      const key = r.parsedDate!.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(r);
-    }
-    return Array.from(map.entries()).map(([date, games]) => ({ date, games, isToday: games[0]?.parsedDate ? isToday(games[0].parsedDate) : false }));
-  }, [releases]);
-
-  // Flatten into rows: header rows + game rows for the virtualizer
-  const flatRows = useMemo(() => {
-    const rows: { type: 'header'; date: string; count: number; isToday: boolean }[] | { type: 'game'; game: ParsedRelease }[] = [];
-    for (const g of groups) {
-      (rows as any[]).push({ type: 'header', date: g.date, count: g.games.length, isToday: g.isToday });
-      for (const game of g.games) {
-        (rows as any[]).push({ type: 'game', game });
-      }
-    }
-    return rows as ({ type: 'header'; date: string; count: number; isToday: boolean } | { type: 'game'; game: ParsedRelease })[];
-  }, [groups]);
-
-  const virtualizer = useVirtualizer({
-    count: flatRows.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: (idx) => flatRows[idx].type === 'header' ? 32 : AGENDA_ROW_H,
-    overscan: 10,
-  });
-
-  return (
-    <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto border border-white/[0.06] rounded-xl">
-      <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
-        {virtualizer.getVirtualItems().map((vRow) => {
-          const row = flatRows[vRow.index];
-          return (
-            <div
-              key={vRow.index}
-              style={{ position: 'absolute', top: 0, left: 0, right: 0, height: vRow.size, transform: `translateY(${vRow.start}px)` }}
-            >
-              {row.type === 'header' ? (
-                <div className={cn(
-                  'flex items-center gap-2 px-3 h-full border-b border-white/[0.06]',
-                  row.isToday ? 'bg-fuchsia-500/[0.08]' : 'bg-white/[0.02]',
-                )}>
-                  <span className={cn('text-[11px] font-semibold', row.isToday ? 'text-fuchsia-400' : 'text-white/50')}>{row.date}</span>
-                  {row.isToday && <span className="text-[8px] font-bold text-fuchsia-400 bg-fuchsia-500/20 px-1.5 py-0.5 rounded uppercase">Today</span>}
-                  <span className="text-[9px] text-white/30 ml-auto">{row.count} release{row.count !== 1 ? 's' : ''}</span>
-                </div>
-              ) : (
-                <AgendaGameRow
-                  game={row.game}
-                  libraryIds={libraryIds}
-                  goToGame={goToGame}
-                  onAddToLibrary={onAddToLibrary}
-                  radarActive={radarActive}
-                />
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {flatRows.length === 0 && (
-        <div className="flex flex-col items-center justify-center h-full text-center py-12">
-          <CalendarDays className="w-8 h-8 text-white/[0.06] mb-2" />
-          <p className="text-[11px] text-white/20">No dated releases match your filters</p>
-        </div>
-      )}
     </div>
   );
 });
@@ -1126,7 +944,7 @@ const ComingSoonSidebar = memo(function ComingSoonSidebar({
                     <div
                       onClick={() => goToGame(game.id)}
                       className={cn(
-                        'flex items-center gap-1.5 rounded px-1.5 py-1 cursor-pointer transition-all h-full',
+                        'flex items-center gap-1.5 rounded px-1.5 py-1 cursor-pointer transition-colors duration-150 h-full',
                         owned
                           ? 'bg-fuchsia-500/15 ring-1 ring-fuchsia-500/30 hover:bg-fuchsia-500/25 hover:ring-fuchsia-500/50'
                           : 'bg-white/[0.04] hover:bg-white/10 hover:ring-1 hover:ring-fuchsia-500/40',
@@ -1135,7 +953,7 @@ const ComingSoonSidebar = memo(function ComingSoonSidebar({
                     >
                       <div className={cn('w-5 h-5 rounded-sm overflow-hidden flex-shrink-0', owned ? 'bg-fuchsia-500/10' : 'bg-white/5')}>
                         {game.image ? (
-                          <LazyFadeImage src={game.image} fallbackChain={buildImageFallbackChain(game)} className="w-full h-full object-cover" />
+                          <LazyFadeImage src={game.image} fallbackChain={game._fallbackChain} className="w-full h-full object-cover" />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center"><CalendarDays className="w-2.5 h-2.5 text-white/10" /></div>
                         )}
@@ -1161,119 +979,39 @@ const ComingSoonSidebar = memo(function ComingSoonSidebar({
   );
 });
 
-// ─── Day Detail Panel (slide-out) ────────────────────────────────────────────
+// ─── Skeleton Feed ───────────────────────────────────────────────────────────
 
-const DayDetailPanel = memo(function DayDetailPanel({
-  day,
-  month,
-  year,
-  releases,
-  onClose,
-  goToGame,
-  libraryIds,
-}: {
-  day: number;
-  month: number;
-  year: number;
-  releases: ParsedRelease[];
-  onClose: () => void;
-  goToGame: (id: string | number) => void;
-  libraryIds: Set<string>;
-}) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  const dateLabel = `${MONTH_NAMES[month]} ${day}, ${year}`;
-
-  return createPortal(
-    <>
-      <motion.div
-        key="day-detail-backdrop"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.2 }}
-        className="fixed inset-0 z-[9990] bg-black/50"
-        onClick={onClose}
-      />
-      <motion.div
-        key="day-detail-panel"
-        initial={{ x: '100%' }}
-        animate={{ x: 0 }}
-        exit={{ x: '100%' }}
-        transition={{ type: 'spring', damping: 28, stiffness: 300 }}
-        className="fixed top-0 right-0 z-[9991] h-full w-80 max-w-[90vw] bg-zinc-950 border-l border-white/10 shadow-2xl flex flex-col">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06] flex-shrink-0">
-          <div>
-            <p className="text-sm font-semibold text-white">{dateLabel}</p>
-            <p className="text-[10px] text-white/40 mt-0.5">{releases.length} release{releases.length !== 1 ? 's' : ''}</p>
+function SkeletonFeed({ sections }: { sections: number }) {
+  return (
+    <div className="overflow-y-auto h-full pr-1 space-y-6">
+      {Array.from({ length: sections }).map((_, s) => (
+        <div key={s}>
+          <div className="flex items-center gap-3 py-2">
+            <div className="h-4 w-24 rounded bg-white/[0.06] animate-pulse" />
+            <div className="h-4 w-8 rounded-full bg-white/[0.04] animate-pulse" />
+            <div className="flex-1 h-px bg-white/[0.04]" />
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-md hover:bg-white/10 text-white/40 hover:text-white transition-colors">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0 p-3 space-y-1.5">
-          {releases.map((game) => {
-            const chain = buildImageFallbackChain(game);
-            const owned = isReleaseInLibrary(game.id, libraryIds);
-            return (
-              <div
-                key={game.id}
-                onClick={() => goToGame(game.id)}
-                className={cn(
-                  'flex items-center gap-2.5 rounded-lg px-2.5 py-2 cursor-pointer transition-all',
-                  owned
-                    ? 'bg-fuchsia-500/10 ring-1 ring-fuchsia-500/25 hover:bg-fuchsia-500/20 hover:ring-fuchsia-500/40'
-                    : 'bg-white/[0.04] hover:bg-white/10 hover:ring-1 hover:ring-fuchsia-500/40',
-                )}
-              >
-                <div className={cn('w-10 h-10 rounded overflow-hidden flex-shrink-0', owned ? 'bg-fuchsia-500/10 ring-1 ring-fuchsia-500/20' : 'bg-white/5')}>
-                  {game.image ? (
-                    <LazyFadeImage src={game.image} fallbackChain={chain} className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center"><CalendarDays className="w-4 h-4 text-white/15" /></div>
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <p className={cn('text-xs font-medium truncate', owned ? 'text-fuchsia-300' : 'text-white')}>{game.name}</p>
-                    {owned && (
-                      <span className="text-[7px] px-1.5 py-0.5 rounded bg-fuchsia-500/25 text-fuchsia-300 font-bold uppercase tracking-wide flex-shrink-0">In Library</span>
-                    )}
-                  </div>
-                  {game.genres.length > 0 && (
-                    <p className="text-[9px] text-white/40 truncate mt-0.5">{game.genres.slice(0, 3).join(', ')}</p>
-                  )}
-                  <div className="flex items-center gap-1.5 mt-1 text-white/30">
-                    {game.platforms.windows && <Monitor className="w-2.5 h-2.5" />}
-                    {game.platforms.mac && <Apple className="w-2.5 h-2.5" />}
-                    {game.platforms.linux && <Terminal className="w-2.5 h-2.5" />}
-                    <span className="ml-auto">
-                      {game.store === 'steam' ? <FaSteam className="w-3 h-3 text-white/30" /> : game.store === 'epic' ? <SiEpicgames className="w-3 h-3 text-white/30" /> : null}
-                    </span>
-                  </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 mt-2">
+            {Array.from({ length: s === 0 ? 6 : 3 }).map((_, i) => (
+              <div key={i} className="rounded-xl bg-white/[0.03] animate-pulse">
+                <div className="aspect-[3/4]" />
+                <div className="p-3 space-y-2">
+                  <div className="h-4 w-3/4 rounded bg-white/[0.04]" />
+                  <div className="h-3 w-1/2 rounded bg-white/[0.03]" />
                 </div>
               </div>
-            );
-          })}
+            ))}
+          </div>
         </div>
-      </motion.div>
-    </>,
-    document.body,
+      ))}
+    </div>
   );
-});
+}
 
 // ─── Main Calendar Component ────────────────────────────────────────────────
 
 export const ReleaseCalendar = memo(function ReleaseCalendar() {
   const [, navigate] = useLocation();
-  // Use a ref for toast to avoid re-rendering the entire calendar when toasts appear/disappear.
-  // useToast() subscribes to context — each toast addition/removal would trigger a reconciliation.
   const toastCtx = useToast();
   const toastRef = useRef(toastCtx);
   toastRef.current = toastCtx;
@@ -1288,23 +1026,18 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // ── New feature state ────────────────────────────────────────────────────
-  const [calView, setCalView] = useState<CalendarView>('month');
+  const [calView, setCalView] = useState<CalendarView>('year');
   const [radarActive, setRadarActive] = useState(false);
   const [platformFilter, setPlatformFilter] = useState('all');
+  const [storeFilter, setStoreFilter] = useState<StoreFilter>('all');
   const [genreFilter, setGenreFilter] = useState<string | null>(null);
-  const [weekOffset, setWeekOffset] = useState(0); // weeks from start of current month
+  const [weekOffset, setWeekOffset] = useState(0);
 
-  // ── Reactive library IDs ─────────────────────────────────────────────────
   const [libraryIds, setLibraryIds] = useState(() => buildLibraryIdSet());
   useEffect(() => {
     const unsub = libraryStore.subscribe(() => setLibraryIds(buildLibraryIdSet()));
     return unsub;
   }, []);
-
-  // Day detail panel
-  const [dayDetail, setDayDetail] = useState<{ day: number; releases: ParsedRelease[] } | null>(null);
-  const closeDayDetail = useCallback(() => setDayDetail(null), []);
 
   const gridRef = useRef<HTMLDivElement>(null);
   const [gridHeight, setGridHeight] = useState(600);
@@ -1316,8 +1049,6 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     [navigate],
   );
 
-  // ── One-click add to library ─────────────────────────────────────────────
-  // Calls libraryStore directly (avoids useLibrary() hook and its redundant subscription).
   const handleAddToLibrary = useCallback((game: ParsedRelease) => {
     const gameId = releaseToGameId(game);
     if (libraryStore.isInLibrary(gameId)) return;
@@ -1334,7 +1065,6 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     toastRef.current.success(`"${game.name}" added to your library!`);
   }, []);
 
-  // ── Top genres (memoized) ────────────────────────────────────────────────
   const topGenres = useMemo(() => {
     const counts = new Map<string, number>();
     for (const r of releases) {
@@ -1348,19 +1078,30 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       .map(([name]) => name);
   }, [releases]);
 
-  // ── Unified filter pipeline ──────────────────────────────────────────────
   const filteredReleases = useMemo(() => {
     let result = releases;
-    // Platform filter
+    if (storeFilter === 'steam') {
+      result = result.filter((r) => r._stores.has('steam'));
+    } else if (storeFilter === 'epic') {
+      result = result.filter((r) => r._stores.has('epic'));
+    } else if (storeFilter === 'both') {
+      result = result.filter((r) => r._stores.has('steam') && r._stores.has('epic'));
+    }
     if (platformFilter !== 'all') {
       result = result.filter((r) => r.platforms[platformFilter as keyof typeof r.platforms]);
     }
-    // Genre filter
     if (genreFilter) {
       result = result.filter((r) => r.genres.includes(genreFilter));
     }
+    if (radarActive) {
+      result = result.filter((r) => isReleaseInLibrary(r.id, libraryIds));
+    }
     return result;
-  }, [releases, platformFilter, genreFilter]);
+  }, [releases, storeFilter, platformFilter, genreFilter, radarActive, libraryIds]);
+
+  const tbdReleases = useMemo(() => {
+    return filteredReleases.filter(r => !r.parsedDate);
+  }, [filteredReleases]);
 
   // ── Data fetching ─────────────────────────────────────────────────────────
 
@@ -1459,16 +1200,28 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       }
 
       const seen = new Map<string, UpcomingRelease>();
+      const storesByKey = new Map<string, Set<string>>();
       for (let i = 0; i < allReleases.length; i++) {
         const r = allReleases[i];
         const key = r.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!seen.has(key)) seen.set(key, r);
+        if (!seen.has(key)) {
+          seen.set(key, r);
+          storesByKey.set(key, new Set(r.store ? [r.store] : []));
+        } else if (r.store) {
+          storesByKey.get(key)!.add(r.store);
+        }
       }
 
-      const dedupArr = Array.from(seen.values());
+      const dedupArr = Array.from(seen.entries());
       const parsed: ParsedRelease[] = new Array(dedupArr.length);
       for (let i = 0; i < dedupArr.length; i++) {
-        parsed[i] = { ...dedupArr[i], parsedDate: parseReleaseDate(dedupArr[i].releaseDate) };
+        const [key, r] = dedupArr[i];
+        parsed[i] = {
+          ...r,
+          parsedDate: parseReleaseDate(r.releaseDate),
+          _fallbackChain: buildImageFallbackChain(r),
+          _stores: storesByKey.get(key) ?? new Set(),
+        };
       }
       setReleases(parsed);
     } catch (err) {
@@ -1488,10 +1241,8 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   // ── Navigation ────────────────────────────────────────────────────────────
 
   const goNext = useCallback(() => {
-    if (calView === 'week') {
-      setWeekOffset((w) => w + 1);
-      return;
-    }
+    if (calView === 'year') { setCurrentYear(y => y + 1); return; }
+    if (calView === 'week') { setWeekOffset(w => w + 1); return; }
     setCurrentMonth((m) => {
       if (m === 11) { setCurrentYear((y) => y + 1); return 0; }
       return m + 1;
@@ -1499,10 +1250,8 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   }, [calView]);
 
   const goPrev = useCallback(() => {
-    if (calView === 'week') {
-      setWeekOffset((w) => Math.max(w - 1, 0));
-      return;
-    }
+    if (calView === 'year') { if (currentYear <= minYear) return; setCurrentYear(y => y - 1); return; }
+    if (calView === 'week') { setWeekOffset((w) => Math.max(w - 1, 0)); return; }
     if (currentYear === minYear && currentMonth === minMonth) return;
     setCurrentMonth((m) => {
       if (m === 0) { setCurrentYear((y) => y - 1); return 11; }
@@ -1521,32 +1270,21 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     setCurrentMonth(month);
   }, []);
 
-  const canGoPrev = calView === 'week' ? weekOffset > 0 : (currentYear > minYear || currentMonth > minMonth);
-  const isCurrentMonth = currentYear === minYear && currentMonth === minMonth;
+  const canGoPrev = calView === 'year'
+    ? currentYear > minYear
+    : calView === 'week'
+      ? weekOffset > 0
+      : (currentYear > minYear || currentMonth > minMonth);
 
-  // ── Release grouping (uses filteredReleases) ──────────────────────────────
-
-  const { datedReleases, tbdReleases } = useMemo(() => {
-    const dated: Map<number, ParsedRelease[]> = new Map();
-    const tbd: ParsedRelease[] = [];
-    for (const release of filteredReleases) {
-      if (!release.parsedDate) { tbd.push(release); continue; }
-      const d = release.parsedDate;
-      if (d.getFullYear() === currentYear && d.getMonth() === currentMonth) {
-        const day = d.getDate();
-        if (!dated.has(day)) dated.set(day, []);
-        dated.get(day)!.push(release);
-      }
-    }
-    return { datedReleases: dated, tbdReleases: tbd };
-  }, [filteredReleases, currentYear, currentMonth]);
-
-  // ── Week view date range ──────────────────────────────────────────────────
+  const isCurrentPeriod = calView === 'year'
+    ? currentYear === minYear
+    : calView === 'week'
+      ? (currentYear === minYear && currentMonth === minMonth && weekOffset === 0)
+      : (currentYear === minYear && currentMonth === minMonth);
 
   const weekStart = useMemo(() => {
     const d = new Date(currentYear, currentMonth, 1);
     d.setDate(d.getDate() + weekOffset * 7);
-    // Align to Sunday
     d.setDate(d.getDate() - d.getDay());
     return d;
   }, [currentYear, currentMonth, weekOffset]);
@@ -1558,16 +1296,13 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     return `${fmt(weekStart)} – ${fmt(end)}, ${end.getFullYear()}`;
   }, [weekStart]);
 
-  // ── Calendar grid metrics ─────────────────────────────────────────────────
-
-  const daysInMonth = getDaysInMonth(currentYear, currentMonth);
-  const firstDay = getFirstDayOfMonth(currentYear, currentMonth);
-  const totalCells = Math.ceil((firstDay + daysInMonth) / 7) * 7;
+  const headerLabel = useMemo(() => {
+    if (calView === 'year') return String(currentYear);
+    if (calView === 'week') return weekLabel;
+    return `${MONTH_NAMES[currentMonth]} ${currentYear}`;
+  }, [calView, currentYear, currentMonth, weekLabel]);
 
   const isInitialLoading = loading && releases.length === 0;
-  const weekRows = isInitialLoading ? 5 : totalCells / 7;
-
-  // ── Dynamic viewport-fill height ──────────────────────────────────────────
 
   useEffect(() => {
     const measure = () => {
@@ -1600,7 +1335,6 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
           </div>
         ) : (
           <div className="flex items-center gap-3">
-            {/* Month / week navigation */}
             <div className="flex items-center gap-1">
               <button
                 onClick={goPrev}
@@ -1610,20 +1344,19 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <h2 className="text-lg font-semibold text-white min-w-[180px] text-center">
-                {calView === 'week' ? weekLabel : `${MONTH_NAMES[currentMonth]} ${currentYear}`}
+                {headerLabel}
               </h2>
               <button onClick={goNext} className="p-1.5 rounded-md hover:bg-white/10 text-white/60 hover:text-white transition-colors">
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
 
-            {!(isCurrentMonth && weekOffset === 0) && (
+            {!isCurrentPeriod && (
               <button onClick={goToday} className="px-2.5 py-1 text-[10px] font-medium rounded-md bg-fuchsia-500/20 text-fuchsia-400 hover:bg-fuchsia-500/30 transition-colors">
                 Today
               </button>
             )}
 
-            {/* Mini-month strip — only in month view */}
             {calView === 'month' && (
               <MiniMonthStrip
                 releases={releases}
@@ -1636,7 +1369,6 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
         )}
 
         <div className="flex items-center gap-2">
-          {/* View toggle */}
           {!isInitialLoading && (
             <div className="flex items-center rounded-md border border-white/[0.08] overflow-hidden">
               {VIEW_TOGGLE_OPTIONS.map(({ id, icon: Icon, label }) => (
@@ -1658,8 +1390,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
 
           {loading && <Loader2 className="w-3.5 h-3.5 text-white/30 animate-spin" />}
 
-          {/* Toggle Coming Soon sidebar */}
-          {!isInitialLoading && !sidebarOpen && calView === 'month' && (
+          {!isInitialLoading && !sidebarOpen && (
             <button
               onClick={toggleSidebar}
               className="flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors text-white/40 hover:text-white hover:bg-white/10"
@@ -1680,17 +1411,14 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
         <FilterChips
           platformFilter={platformFilter}
           setPlatformFilter={setPlatformFilter}
+          storeFilter={storeFilter}
+          setStoreFilter={setStoreFilter}
           genreFilter={genreFilter}
           setGenreFilter={setGenreFilter}
           topGenres={topGenres}
           radarActive={radarActive}
           setRadarActive={setRadarActive}
         />
-      )}
-
-      {/* ── This Week banner — month view only ────────────────────────── */}
-      {!isInitialLoading && calView === 'month' && (
-        <ThisWeekBanner releases={filteredReleases} libraryIds={libraryIds} goToGame={goToGame} />
       )}
 
       {error && (
@@ -1700,148 +1428,44 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       {/* ── Layout ────────────────────────────────────────────────────── */}
       <div ref={gridRef} className="flex gap-3" style={{ height: gridHeight }}>
 
-        {/* ── Month View ───────────────────────────────────────────────── */}
-        {calView === 'month' && (
-          <div className="border border-white/[0.06] rounded-xl overflow-hidden flex flex-col flex-1 min-w-0 transition-all duration-300 ease-in-out">
-            <div className="grid grid-cols-7 bg-white/[0.03] flex-shrink-0">
-              {DAY_NAMES.map((day) => (
-                <div key={day} className="px-2 py-2 text-center text-[10px] font-medium text-white/30 uppercase tracking-wider border-b border-white/[0.06]">{day}</div>
-              ))}
-            </div>
-            <div className="grid grid-cols-7 flex-1 min-h-0" style={{ gridTemplateRows: `repeat(${weekRows}, 1fr)` }}>
-              {isInitialLoading
-                ? Array.from({ length: 35 }).map((_, idx) => (
-                    <div key={idx} className="border-b border-r border-white/[0.04] p-1.5 overflow-hidden">
-                      <div className="w-4 h-3 rounded bg-white/[0.06] animate-pulse mb-1.5" />
-                      {SKEL_TILE_CELLS.has(idx) && (
-                        <>
-                          <div className="w-full h-8 rounded bg-white/[0.04] animate-pulse mb-1" />
-                          {SKEL_DOUBLE_CELLS.has(idx) && <div className="w-full h-8 rounded bg-white/[0.03] animate-pulse" />}
-                        </>
-                      )}
-                    </div>
-                  ))
-                : Array.from({ length: totalCells }).map((_, idx) => {
-                    const dayNum = idx - firstDay + 1;
-                    const isValidDay = dayNum >= 1 && dayNum <= daysInMonth;
-                    const cellDate = isValidDay ? new Date(currentYear, currentMonth, dayNum) : null;
-                    const isTodayCell = cellDate ? isToday(cellDate) : false;
-                    const dayReleases = isValidDay ? datedReleases.get(dayNum) || [] : [];
-                    const isPast = cellDate !== null && cellDate < today && !isTodayCell;
+        <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
+          {isInitialLoading ? (
+            <SkeletonFeed sections={calView === 'year' ? 4 : calView === 'month' ? 5 : 7} />
+          ) : calView === 'year' ? (
+            <YearFeed
+              releases={filteredReleases}
+              year={currentYear}
+              libraryIds={libraryIds}
+              onAddToLibrary={handleAddToLibrary}
+            />
+          ) : calView === 'month' ? (
+            <MonthFeed
+              releases={filteredReleases}
+              year={currentYear}
+              month={currentMonth}
+              libraryIds={libraryIds}
+              onAddToLibrary={handleAddToLibrary}
+            />
+          ) : (
+            <WeekFeed
+              weekStart={weekStart}
+              releases={filteredReleases}
+              libraryIds={libraryIds}
+              onAddToLibrary={handleAddToLibrary}
+            />
+          )}
+        </div>
 
-                    // Heat-map density
-                    const density = dayReleases.length > 0 && !isPast ? Math.min(dayReleases.length / 8, 1) : 0;
-
-                    return (
-                      <div
-                        key={idx}
-                        className={cn(
-                          'border-b border-r border-white/[0.04] p-1.5 transition-colors overflow-y-auto',
-                          !isValidDay && 'bg-white/[0.01]',
-                          isPast && 'opacity-40',
-                          isTodayCell && 'bg-fuchsia-500/[0.06]',
-                          dayReleases.length > 0 && !isPast && 'hover:bg-white/[0.03]',
-                        )}
-                        style={density > 0 && !isTodayCell ? { backgroundColor: `rgba(217, 70, 239, ${density * 0.08})` } : undefined}
-                      >
-                        {isValidDay && (
-                          <>
-                            <div className={cn('text-[11px] font-medium mb-1 flex items-center gap-1.5', isTodayCell ? 'text-fuchsia-400' : 'text-white/30')}>
-                              {isTodayCell ? (
-                                <>
-                                  <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-fuchsia-500 text-white text-[10px]">{dayNum}</span>
-                                  <span className="text-[9px] font-bold text-fuchsia-400 uppercase tracking-wider">Today</span>
-                                </>
-                              ) : (
-                                dayNum
-                              )}
-                            </div>
-                            <div className="space-y-0.5">
-                              {dayReleases.slice(0, 5).map((game) => {
-                                const owned = isReleaseInLibrary(game.id, libraryIds);
-                                const countdown = owned ? getCountdownLabel(game.parsedDate) : null;
-                                return (
-                                  <GameTile
-                                    key={game.id}
-                                    game={game}
-                                    inLibrary={owned}
-                                    onNavigate={goToGame}
-                                    onAddToLibrary={handleAddToLibrary}
-                                    radarDimmed={radarActive && !owned}
-                                    countdownLabel={countdown}
-                                  />
-                                );
-                              })}
-                              {dayReleases.length > 5 && (
-                                <button
-                                  onClick={() => setDayDetail({ day: dayNum, releases: dayReleases })}
-                                  className="w-full text-[8px] text-fuchsia-400/70 text-center py-0.5 rounded hover:bg-fuchsia-500/10 hover:text-fuchsia-400 transition-colors cursor-pointer"
-                                >
-                                  +{dayReleases.length - 5} more
-                                </button>
-                              )}
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
-            </div>
-          </div>
-        )}
-
-        {/* ── Week View ────────────────────────────────────────────────── */}
-        {calView === 'week' && (
-          <WeekViewGrid
-            weekStart={weekStart}
-            releases={filteredReleases}
-            libraryIds={libraryIds}
-            goToGame={goToGame}
-            onAddToLibrary={handleAddToLibrary}
-            radarActive={radarActive}
-          />
-        )}
-
-        {/* ── Agenda View ──────────────────────────────────────────────── */}
-        {calView === 'agenda' && (
-          <AgendaListView
-            releases={filteredReleases}
-            libraryIds={libraryIds}
-            goToGame={goToGame}
-            onAddToLibrary={handleAddToLibrary}
-            radarActive={radarActive}
-          />
-        )}
-
-        {/* ── Coming Soon sidebar — month view only ────────────────────── */}
-        {calView === 'month' && (
-          <ComingSoonSidebar
-            releases={tbdReleases}
-            loading={isInitialLoading}
-            goToGame={goToGame}
-            open={sidebarOpen}
-            onToggle={toggleSidebar}
-            libraryIds={libraryIds}
-          />
-        )}
+        <ComingSoonSidebar
+          releases={tbdReleases}
+          loading={isInitialLoading}
+          goToGame={goToGame}
+          open={sidebarOpen}
+          onToggle={toggleSidebar}
+          libraryIds={libraryIds}
+        />
       </div>
 
-      {/* Day detail slide-out panel */}
-      <AnimatePresence>
-        {dayDetail && (
-          <DayDetailPanel
-            day={dayDetail.day}
-            month={currentMonth}
-            year={currentYear}
-            releases={dayDetail.releases}
-            onClose={closeDayDetail}
-            goToGame={goToGame}
-            libraryIds={libraryIds}
-          />
-        )}
-      </AnimatePresence>
-
-      {/* Empty state */}
       {!loading && releases.length === 0 && !error && (
         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
           <CalendarDays className="w-10 h-10 text-white/[0.06] mb-3" />

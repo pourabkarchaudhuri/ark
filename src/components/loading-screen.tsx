@@ -112,7 +112,7 @@ export function LoadingScreen({ onComplete, duration = 2500 }: LoadingScreenProp
         await log(`  + ${customCount} custom game${customCount !== 1 ? 's' : ''}`, 'success');
       }
       if (journeyCount > 0) {
-        await log(`✓ Journey history — ${journeyCount} entr${journeyCount !== 1 ? 'ies' : 'y'} loaded`, 'success');
+        await log(`✓ Voyage history — ${journeyCount} entr${journeyCount !== 1 ? 'ies' : 'y'} loaded`, 'success');
       }
 
       // --- 3. Store connections + data prefetch (parallelized) ---
@@ -140,8 +140,8 @@ export function LoadingScreen({ onComplete, duration = 2500 }: LoadingScreenProp
 
         // Fire cache stats + browse data prefetch in parallel.
         const cacheStatsPromise = Promise.allSettled([
-          steamAvailable ? window.steam!.getCacheStats().catch(() => null) : Promise.resolve(null),
-          epicAvailable ? window.epic!.getCacheStats().catch(() => null) : Promise.resolve(null),
+          steamAvailable ? window.steam!.getCacheStats().catch((err) => { console.warn('[Loading] Cache stats (Steam):', err); return null; }) : Promise.resolve(null),
+          epicAvailable ? window.epic!.getCacheStats().catch((err) => { console.warn('[Loading] Cache stats (Epic):', err); return null; }) : Promise.resolve(null),
         ]);
         const browseDataPromise = getCachedBrowseData();
 

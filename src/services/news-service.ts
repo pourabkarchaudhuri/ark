@@ -98,6 +98,15 @@ export function getSteamHeaderUrl(appId: number): string {
  * Simple heuristic to check if a string is likely English.
  * Checks for high ratio of ASCII-latin characters vs non-latin scripts.
  */
+/** Blocklist: non-English or irrelevant news feed sources (matched against feedlabel and URL). */
+const BLOCKED_NEWS_FEEDS = ['gamemag.ru', 'gamemag'];
+
+function isBlockedFeed(feedlabel: string, url: string): boolean {
+  const label = feedlabel.toLowerCase();
+  const link = url.toLowerCase();
+  return BLOCKED_NEWS_FEEDS.some(b => label.includes(b) || link.includes(b));
+}
+
 function isLikelyEnglish(text: string): boolean {
   if (!text || text.length < 3) return true;
   // Remove URLs and common markup
@@ -202,7 +211,8 @@ async function fetchSteamNews(): Promise<NewsItem[]> {
     try {
       const items: SteamNewsItem[] = await steamService.getNewsForApp(appId, NEWS_PER_GAME);
       for (const item of items) {
-        // Filter out non-English articles
+        // Filter out blocked feeds and non-English articles
+        if (isBlockedFeed(item.feedlabel, item.url)) continue;
         if (!isLikelyEnglish(item.title)) continue;
 
         // Prefer extracted image from content, then high-res hero, then header

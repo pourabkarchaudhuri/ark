@@ -30,6 +30,7 @@
 import { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 
 import { motion } from 'framer-motion';
+import DOMPurify from 'dompurify';
 import { Gamepad2, Clock, Calendar, Search, X, Crosshair, ArrowUpDown, ZoomIn } from 'lucide-react';
 import { JourneyEntry, StatusChangeEntry, GameStatus, GameSession } from '@/types/game';
 import { Slider } from '@/components/ui/slider';
@@ -690,7 +691,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
     const isOngoing = new Date(data.endDate).getTime() >= Date.now() - DAY_MS;
     const style = segmentStyles[data.status];
-    el.innerHTML = `
+    // Security: sanitize tooltip HTML to prevent XSS from game titles
+    el.innerHTML = DOMPurify.sanitize(`
       <div class="font-bold text-white text-sm mb-1.5 truncate">${data.title}</div>
       <div class="flex items-center gap-2 mb-2">
         <div class="w-2.5 h-2.5 rounded-full ${style.legendDot}"></div>
@@ -703,7 +705,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
         <span>${formatDuration(data.durationDays)}</span>
         ${data.hoursPlayed > 0 ? `<span>${formatHours(data.hoursPlayed)} played</span>` : ''}
       </div>
-    `;
+    `);
   }, []);
 
   const handleSegmentHover = useCallback(
@@ -908,7 +910,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <Gamepad2 className="w-10 h-10 text-fuchsia-500 mb-4" />
-        <p className="text-white/60">No journey data to display in the Gantt chart.</p>
+        <p className="text-white/60">No voyage data to display in the Gantt chart.</p>
       </div>
     );
   }
@@ -919,7 +921,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       className="relative max-w-[100vw] outline-none"
       tabIndex={0}
       role="grid"
-      aria-label="Gaming journey Gantt chart"
+      aria-label="Gaming voyage Gantt chart"
     >
 
       {/* ── Toolbar: Legend + Search + Sort + Zoom + Span ─────────────── */}

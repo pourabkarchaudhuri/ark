@@ -12,6 +12,7 @@ import { steamAPI } from './steam-api.js';
 import { chatStore } from './chat-store.js';
 import { settingsStore } from './settings-store.js';
 import { needsWebSearch, webSearch, formatSearchContext } from './web-search.js';
+import { logger } from './safe-logger.js';
 
 /**
  * Get the current API key from settings
@@ -20,7 +21,7 @@ import { needsWebSearch, webSearch, formatSearchContext } from './web-search.js'
 function getApiKey(): string {
   const storedKey = settingsStore.getGoogleAIKey();
   if (storedKey) {
-    console.log('[AI Chat] Using API key from settings');
+    logger.log('[AI Chat] Using API key from settings');
     return storedKey;
   }
   throw new Error('No API key configured. Please add your Google AI API key in Settings.');
@@ -75,7 +76,7 @@ function getModel(): ChatGoogleGenerativeAI {
   
   // Re-create model if key changed or model doesn't exist
   if (!cachedModel || cachedApiKey !== currentKey) {
-    console.log('[AI Chat] Initializing Gemini model');
+    logger.log('[AI Chat] Initializing Gemini model');
     cachedModel = new ChatGoogleGenerativeAI({
       apiKey: currentKey,
       model: 'gemini-2.5-flash',
@@ -95,7 +96,7 @@ function getModel(): ChatGoogleGenerativeAI {
  */
 const searchGamesTool = tool(
   async ({ query, limit = 10 }: { query: string; limit?: number }) => {
-    console.log(`[AI Tool] searchGames: "${query}" (limit: ${limit})`);
+    logger.log(`[AI Tool] searchGames: "${query}" (limit: ${limit})`);
     try {
       const results = await steamAPI.searchGames(query, limit);
       return JSON.stringify(results.map(g => ({
@@ -122,7 +123,7 @@ const searchGamesTool = tool(
  */
 const getGameDetailsTool = tool(
   async ({ appId }: { appId: number }) => {
-    console.log(`[AI Tool] getGameDetails: ${appId}`);
+    logger.log(`[AI Tool] getGameDetails: ${appId}`);
     try {
       const details = await steamAPI.getAppDetails(appId);
       if (!details) {
@@ -163,7 +164,7 @@ const getGameDetailsTool = tool(
  */
 const getLibraryGamesTool = tool(
   async () => {
-    console.log('[AI Tool] getLibraryGames');
+    logger.log('[AI Tool] getLibraryGames');
     try {
       if (currentLibraryData.length === 0) {
         return 'The library is empty. No games have been added yet.';
@@ -195,7 +196,7 @@ const getLibraryGamesTool = tool(
  */
 const addToLibraryTool = tool(
   async ({ appId, status = 'Want to Play' }: { appId: number; status?: string }) => {
-    console.log(`[AI Tool] addToLibrary: ${appId} with status "${status}"`);
+    logger.log(`[AI Tool] addToLibrary: ${appId} with status "${status}"`);
     try {
       // Check if already in library
       const stringId = `steam-${appId}`;
@@ -236,7 +237,7 @@ const addToLibraryTool = tool(
  */
 const removeFromLibraryTool = tool(
   async ({ appId }: { appId: number }) => {
-    console.log(`[AI Tool] removeFromLibrary: ${appId}`);
+    logger.log(`[AI Tool] removeFromLibrary: ${appId}`);
     try {
       // Check if in library
       const stringId = `steam-${appId}`;
@@ -275,7 +276,7 @@ const removeFromLibraryTool = tool(
  */
 const getRecommendationsTool = tool(
   async ({ limit = 10 }: { limit?: number }) => {
-    console.log(`[AI Tool] getRecommendations based on library (limit: ${limit})`);
+    logger.log(`[AI Tool] getRecommendations based on library (limit: ${limit})`);
     try {
       if (currentLibraryData.length === 0) {
         return 'Cannot provide recommendations - the library is empty. Please add some games to your library first.';
@@ -359,7 +360,7 @@ function getModelWithTools() {
   
   // Re-create if key changed or doesn't exist
   if (!cachedModelWithTools || cachedModelWithToolsKey !== currentKey) {
-    console.log('[AI Chat] Binding tools to model');
+    logger.log('[AI Chat] Binding tools to model');
     cachedModelWithTools = getModel().bindTools(tools);
     cachedModelWithToolsKey = currentKey;
   }
@@ -404,7 +405,7 @@ function getValidationModel(): ChatGoogleGenerativeAI {
   
   // Re-create if key changed or doesn't exist
   if (!cachedValidationModel || cachedValidationKey !== currentKey) {
-    console.log('[AI Chat] Initializing validation model');
+    logger.log('[AI Chat] Initializing validation model');
     cachedValidationModel = new ChatGoogleGenerativeAI({
       apiKey: currentKey,
       model: 'gemini-2.5-flash',
@@ -442,7 +443,7 @@ If the response needs improvement, reply with: IMPROVE: [your improved version]`
     }
     return { isValid: true }; // Default to valid if unclear
   } catch (error) {
-    console.error('[Validation] Error:', error);
+    logger.error('[Validation] Error:', error);
     return { isValid: true }; // Skip validation on error
   }
 }
@@ -459,7 +460,7 @@ async function processWithOllama(
 ): Promise<{ content: string; model: string }> {
   const ollamaSettings = settingsStore.getOllamaSettings();
   
-  console.log(`[AI Chat] Using Ollama at ${ollamaSettings.url}`);
+  logger.log(`[AI Chat] Using Ollama at ${ollamaSettings.url}`);
   
   // Build a simple prompt for Ollama (without tool support)
   let systemPrompt = `You are a helpful gaming assistant. Be concise and helpful.`;
@@ -487,7 +488,7 @@ async function processWithOllama(
       ? `${gameContext.name} ${userMessage}`
       : userMessage;
 
-    console.log(`[AI Chat] Grounding with web search: "${searchQuery}"`);
+    logger.log(`[AI Chat] Grounding with web search: "${searchQuery}"`);
     chainOfThought.push({
       type: 'tool_call',
       content: `Searching the web for current information: "${searchQuery}"`,
@@ -525,7 +526,7 @@ async function processWithOllama(
   const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
   const port = parseInt(urlObj.port) || 11434;
   
-  console.log(`[AI Chat] Ollama: Connecting to ${hostname}:${port} with model ${ollamaSettings.model}`);
+  logger.log(`[AI Chat] Ollama: Connecting to ${hostname}:${port} with model ${ollamaSettings.model}`);
   
   // Use streaming for real-time response
   const useStreaming = !!onStreamChunk;
@@ -570,7 +571,7 @@ async function processWithOllama(
                 }
               } catch (e) {
                 // Skip malformed JSON lines
-                console.warn('[AI Chat] Ollama: skipping malformed chunk');
+                logger.warn('[AI Chat] Ollama: skipping malformed chunk');
               }
             }
           }
@@ -601,7 +602,7 @@ async function processWithOllama(
               }
             }
             
-            console.log(`[AI Chat] Ollama streaming complete: ${fullContent.length} characters`);
+            logger.log(`[AI Chat] Ollama streaming complete: ${fullContent.length} characters`);
             resolve({
               content: fullContent,
               model: `Ollama ${ollamaSettings.model}`,
@@ -609,7 +610,7 @@ async function processWithOllama(
           } else {
             // Non-streaming: parse complete response
             const parsed = JSON.parse(buffer) as { response: string };
-            console.log(`[AI Chat] Ollama responded with ${parsed.response.length} characters`);
+            logger.log(`[AI Chat] Ollama responded with ${parsed.response.length} characters`);
             
             resolve({
               content: parsed.response,
@@ -623,7 +624,7 @@ async function processWithOllama(
     });
     
     req.on('error', (e) => {
-      console.error('[AI Chat] Ollama request error:', e);
+      logger.error('[AI Chat] Ollama request error:', e);
       const ollamaSettings = settingsStore.getOllamaSettings();
       reject(new Error(
         `Could not connect to Ollama at ${ollamaSettings.url}. ` +
@@ -652,7 +653,7 @@ async function processWithGemini(
   libraryData?: LibraryEntry[],
   _onStreamChunk?: (chunk: string, fullContent: string) => void // Gemini doesn't use streaming currently
 ): Promise<{ content: string; toolsUsed: string[]; actions: LibraryAction[]; model: string }> {
-  console.log('[AI Chat] Using Gemini with full tool support');
+  logger.log('[AI Chat] Using Gemini with full tool support');
   
   // Get conversation history
   const conversation = chatStore.getActiveConversation();
@@ -710,7 +711,7 @@ async function processWithGemini(
   
   while (response.tool_calls && response.tool_calls.length > 0 && iterations < maxIterations) {
     iterations++;
-    console.log(`[AI Chat] Tool calls iteration ${iterations}:`, response.tool_calls.map(tc => tc.name));
+    logger.log(`[AI Chat] Tool calls iteration ${iterations}:`, response.tool_calls.map(tc => tc.name));
     
     // Add AI response to messages
     messages.push(response);
@@ -733,31 +734,39 @@ async function processWithGemini(
       try {
         let result: string = '';
         
+        // Validate LLM-provided args before executing
+        const safeString = (v: unknown, max = 500): string =>
+          typeof v === 'string' ? v.slice(0, max) : '';
+        const safeInt = (v: unknown, fallback = 0): number => {
+          const n = Number(v);
+          return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+        };
+
         // Execute the appropriate tool based on name
         switch (toolName) {
           case 'searchSteamGames':
-            result = await searchGamesTool.invoke(args as { query: string; limit?: number });
+            result = await searchGamesTool.invoke({ query: safeString(args.query), limit: safeInt(args.limit, 10) });
             break;
           case 'getGameDetails':
-            result = await getGameDetailsTool.invoke(args as { appId: number });
+            result = await getGameDetailsTool.invoke({ appId: safeInt(args.appId) });
             break;
           case 'getLibraryGames':
             result = await getLibraryGamesTool.invoke({});
             break;
           case 'addGameToLibrary':
-            result = await addToLibraryTool.invoke(args as { appId: number; status?: string });
+            result = await addToLibraryTool.invoke({ appId: safeInt(args.appId), status: safeString(args.status, 50) || undefined });
             break;
           case 'removeGameFromLibrary':
-            result = await removeFromLibraryTool.invoke(args as { appId: number });
+            result = await removeFromLibraryTool.invoke({ appId: safeInt(args.appId) });
             break;
           case 'getGameRecommendations':
-            result = await getRecommendationsTool.invoke(args as { limit?: number });
+            result = await getRecommendationsTool.invoke({ limit: safeInt(args.limit, 10) });
             break;
           default:
             result = `Unknown tool: ${toolName}`;
         }
         
-        console.log(`[AI Chat] Tool ${toolName} result:`, result.substring(0, 100));
+        logger.log(`[AI Chat] Tool ${toolName} result:`, result.substring(0, 100));
         
         // Log tool result to chain of thought
         chainOfThought.push({
@@ -774,7 +783,7 @@ async function processWithGemini(
           tool_call_id: toolCall.id || '',
         }));
       } catch (error) {
-        console.error(`[AI Chat] Tool ${toolName} error:`, error);
+        logger.error(`[AI Chat] Tool ${toolName} error:`, error);
         
         // Log error to chain of thought
         chainOfThought.push({
@@ -812,7 +821,7 @@ async function processWithGemini(
   
   const validation = await validateResponse(userMessage, content);
   if (!validation.isValid && validation.improvedResponse) {
-    console.log('[AI Chat] Response improved by validation agent');
+    logger.log('[AI Chat] Response improved by validation agent');
     chainOfThought.push({
       type: 'validation',
       content: 'Response was improved by validation agent',
@@ -840,7 +849,7 @@ export async function processMessage(
   libraryData?: LibraryEntry[],
   onStreamChunk?: (chunk: string, fullContent: string) => void
 ): Promise<{ content: string; toolsUsed: string[]; actions: LibraryAction[]; chainOfThought: ThoughtStep[]; model: string }> {
-  console.log(`[AI Chat] Processing message: "${userMessage.substring(0, 50)}..."`);
+  logger.log(`[AI Chat] Processing message: "${userMessage.substring(0, 50)}..."`);
   
   // Update current library data
   currentLibraryData = libraryData || [];
@@ -874,7 +883,7 @@ export async function processMessage(
         timestamp: new Date(),
       });
       
-      console.log(`[AI Chat] Response generated (${result.content.length} chars, ${result.toolsUsed.length} tools used, ${result.actions.length} actions)`);
+      logger.log(`[AI Chat] Response generated (${result.content.length} chars, ${result.toolsUsed.length} tools used, ${result.actions.length} actions)`);
       
       return { ...result, chainOfThought };
     } else {
@@ -887,7 +896,7 @@ export async function processMessage(
         timestamp: new Date(),
       });
       
-      console.log(`[AI Chat] Response generated (${ollamaResponse.content.length} chars) using ${ollamaResponse.model}`);
+      logger.log(`[AI Chat] Response generated (${ollamaResponse.content.length} chars) using ${ollamaResponse.model}`);
       
       return {
         content: ollamaResponse.content,
@@ -898,7 +907,7 @@ export async function processMessage(
       };
     }
   } catch (error) {
-    console.error('[AI Chat] Error processing message:', error);
+    logger.error('[AI Chat] Error processing message:', error);
     
     // Add error to chain of thought
     chainOfThought.push({
@@ -923,7 +932,7 @@ export async function searchGamesForContext(query: string): Promise<GameContext[
       headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${g.id}/header.jpg`,
     }));
   } catch (error) {
-    console.error('[AI Chat] Error searching games for context:', error);
+    logger.error('[AI Chat] Error searching games for context:', error);
     return [];
   }
 }

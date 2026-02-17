@@ -12,6 +12,11 @@ import {
   isPrefetchReady,
 } from '@/services/prefetch-store';
 import { fetchAllNews } from '@/services/news-service';
+
+// Preload the Dashboard chunk so it's already in memory when the user clicks
+// "Enter Ark". Without this the browser has to fetch + parse the JS bundle
+// on transition, adding a visible delay.
+const _dashboardPreload = import('@/pages/dashboard');
 import { MathUtils } from 'three';
 import type { Group, AmbientLight, SpotLight } from 'three';
 
@@ -117,7 +122,7 @@ const BOOT_LINES: BootLine[] = [
     '[  OK  ] Title index rebuilt',
   ], delay: 55, light: 0.35 },
   { variants: [
-    '[  OK  ] Journey logs preserved',
+    '[  OK  ] Voyage logs preserved',
     '[  OK  ] Captain\'s log intact',
     '[  OK  ] Voyage records recovered',
   ], delay: 50, light: 0.38 },
@@ -405,42 +410,81 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
 
   // Boot sequence state
   const [termLines, setTermLines] = useState<string[]>([]);
-  const [showButton, setShowButton] = useState(false);
-  const [bootProgress, setBootProgress] = useState(0); // 0–1 drives scene lights
+  const [bootDone, setBootDone] = useState(false);       // boot animation finished
+  const [dataReady, setDataReady] = useState(() => isPrefetchReady()); // data loaded
+  const [bootProgress, setBootProgress] = useState(0);   // 0–1 drives scene lights
   const terminalEndRef = useRef<HTMLDivElement>(null);
 
-  // ---- Kick off data prefetch silently as soon as splash mounts ----
+  // Button is only shown when BOTH conditions are met:
+  // the boot animation has completed AND the data is in memory.
+  const showButton = bootDone && dataReady;
+
+  // ---- Kick off data prefetch and track readiness ----
   useEffect(() => {
-    if (isPrefetchReady()) return;
+    let cancelled = false;
+
+    // If data is already loaded (e.g. HMR re-mount), nothing to do.
+    if (isPrefetchReady()) {
+      setDataReady(true);
+      return;
+    }
+
+    const markReady = () => { if (!cancelled) setDataReady(true); };
 
     getCachedBrowseData()
       .then(cached => {
+        // getCachedBrowseData() already populates the in-memory prefetch
+        // store when a cache hit occurs, so isPrefetchReady() is now true.
         if (cached) {
           console.log(`[Splash] Cache hit — ${cached.games.length} games (fresh=${cached.isFresh})`);
-          // If the cache is stale (old format version or expired TTL), trigger
-          // a background re-fetch so cross-store metadata gets refreshed.
+          markReady();
+          // If the cache is stale, trigger a silent background refresh
+          // (the dashboard will swap in the fresh data when it arrives).
           if (!cached.isFresh) {
             console.log('[Splash] Cache stale — starting background refresh...');
             prefetchBrowseData().then(games => {
               console.log(`[Splash] Background refresh done — ${games.length} games`);
-            }).catch(() => {});
+            }).catch((err) => { console.warn('[Splash] Background refresh:', err); });
           }
         } else {
+          // Cache miss (first launch) — do a full fetch.
           console.log('[Splash] Cache miss — starting background prefetch...');
           prefetchBrowseData().then(games => {
             console.log(`[Splash] Background prefetch done — ${games.length} games`);
+            markReady();
           }).catch(err => {
             console.warn('[Splash] Background prefetch failed:', err);
+            // Let the user in even if prefetch failed — the dashboard has
+            // its own fallback fetch logic.
+            markReady();
           });
         }
       })
-      .catch(() => {
-        prefetchBrowseData().catch(() => {});
+      .catch((err) => {
+        console.warn('[Splash] Cache load:', err);
+        prefetchBrowseData()
+          .then(() => markReady())
+          .catch(() => markReady()); // fail-open: don't strand the user on splash
       });
 
+    // News is non-critical — fire-and-forget.
     fetchAllNews().then(items => {
       console.log(`[Splash] News preloaded — ${items.length} articles cached`);
-    }).catch(() => {});
+    }).catch((err) => { console.warn('[Splash] News fetch:', err); });
+
+    // Safety timeout: don't strand the user on the splash screen forever.
+    // If data still hasn't arrived after 30s, let them in anyway.
+    const safetyTimer = setTimeout(() => {
+      if (!cancelled && !isPrefetchReady()) {
+        console.warn('[Splash] Safety timeout — allowing entry with partial data');
+        markReady();
+      }
+    }, 30_000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(safetyTimer);
+    };
   }, []);
 
   // Auto-scroll terminal when content changes
@@ -453,15 +497,16 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
   // ---- Run boot terminal animation (fast line-by-line) ----
   useEffect(() => {
     let cancelled = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
     const addLine = (content: string) => {
       if (cancelled) return;
       setTermLines(prev => [...prev, content]);
     };
 
-    const wait = (ms: number) => new Promise<void>(r => {
-      const t = setTimeout(() => r(), ms);
-      if (cancelled) clearTimeout(t);
+    const wait = (ms: number) => new Promise<void>(resolve => {
+      if (cancelled) { resolve(); return; }
+      pendingTimer = setTimeout(() => { pendingTimer = null; resolve(); }, ms);
     });
 
     const runBoot = async () => {
@@ -475,12 +520,15 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
       }
 
       if (cancelled) return;
-      setShowButton(true);
+      setBootDone(true);
     };
 
     runBoot();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (pendingTimer !== null) clearTimeout(pendingTimer);
+    };
   }, []);
 
   const handleEnter = useCallback(() => {
@@ -598,10 +646,12 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
                   className={`tracking-[0.18em] uppercase font-mono text-[0.7rem] font-bold transition-colors duration-700 ${
                     showButton
                       ? 'text-emerald-400'
-                      : 'text-amber-400/70 animate-pulse'
+                      : bootDone
+                        ? 'text-cyan-400/80 animate-pulse'
+                        : 'text-amber-400/70 animate-pulse'
                   }`}
                 >
-                  {showButton ? '● ONLINE' : '◌ BOOTING...'}
+                  {showButton ? '● ONLINE' : bootDone ? '◌ SYNCING DATA...' : '◌ BOOTING...'}
                 </span>
               </div>
             </motion.div>
@@ -621,8 +671,20 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
                 ))}
 
                 {/* Blinking cursor while boot is running */}
-                {!showButton && termLines.length > 0 && (
+                {!bootDone && termLines.length > 0 && (
                   <span className="inline-block w-[7px] h-[13px] bg-white/70 animate-pulse ml-0.5 align-middle" />
+                )}
+
+                {/* Waiting for data — boot finished but data still loading */}
+                {bootDone && !dataReady && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ duration: 0.3 }}
+                    className="text-cyan-400/70 animate-pulse"
+                  >
+                    {'> Synchronising game vault — stand by...'}
+                  </motion.div>
                 )}
 
                 <div ref={terminalEndRef} />
@@ -667,7 +729,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
           </div>
         </motion.div>
       ) : (
-        /* Fade-to-black transition before loading screen */
+        /* Fade-to-black transition before dashboard */
         <motion.div
           key="splash-exit"
           initial={{ opacity: 0 }}

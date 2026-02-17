@@ -4,20 +4,17 @@ const BASE_URL = "https://fitgirl-repacks.site/";
  * Fetch HTML from a URL.
  *
  * In Electron, routes the request through the main process via IPC so it
- * bypasses CORS entirely (Node.js fetch has no same-origin restrictions).
+ * bypasses CORS entirely (uses Chromium's network stack via electron.net.fetch).
  *
  * Falls back to a direct renderer `fetch()` (works in dev with proxy or
- * when CORS headers happen to be present) and finally to a third-party
- * CORS proxy as a last resort.
+ * when CORS headers happen to be present).
  */
 async function fetchHTMLWithFallback(url: string, _retries: number = 3): Promise<string> {
     // Strategy 1 (preferred): Electron main-process fetch — bypasses CORS entirely.
     if (typeof window !== 'undefined' && window.electron?.fetchHtml) {
         const html = await window.electron.fetchHtml(url);
         if (html) return html;
-        // Main-process fetch returned null (SSL / network error).
-        // Do NOT fall through to a renderer-side fetch — it will always fail
-        // with CORS for external sites like fitgirl-repacks.site.
+        // Main-process fetch returned null (network error).
         throw new Error(`Main-process fetch returned null for ${url}`);
     }
 
@@ -42,18 +39,11 @@ async function getRepackDownloadLink(pageUrl: string): Promise<string | null> {
     try {
         const html = await fetchHTMLWithFallback(pageUrl);
         
-        // Common patterns for FitGirl download links
-        // Pattern 1: Direct download links (magnet, torrent, or direct download)
         const patterns = [
-            // Magnet link pattern
             /href="(magnet:\?xt=urn:btih:[^"]+)"/i,
-            // Torrent file link pattern
             /href="([^"]*\.torrent)"/i,
-            // Direct download link pattern (common FitGirl patterns)
             /href="(https?:\/\/[^"]*download[^"]*)"/i,
-            // Alternative: Look for download buttons/links with specific classes
             /<a[^>]*class="[^"]*download[^"]*"[^>]*href="([^"]+)"/i,
-            // Pattern for FitGirl's specific download section
             /<a[^>]*href="([^"]+)"[^>]*>.*?(?:Download|Magnet|Torrent).*?<\/a>/is,
         ];
 
@@ -61,7 +51,6 @@ async function getRepackDownloadLink(pageUrl: string): Promise<string | null> {
             const match = html.match(pattern);
             if (match && match[1]) {
                 const link = match[1];
-                // Validate that it's a valid download link
                 if (link.startsWith('magnet:') || 
                     link.endsWith('.torrent') || 
                     link.includes('download') ||
@@ -71,11 +60,9 @@ async function getRepackDownloadLink(pageUrl: string): Promise<string | null> {
             }
         }
 
-        // Alternative: Look for download section in the post content
         const postContentMatch = html.match(/<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
         if (postContentMatch) {
             const postContent = postContentMatch[1];
-            // Look for links in the post content
             const linkPattern = /<a[^>]*href="([^"]+)"[^>]*>.*?(?:Download|Magnet|Torrent|Mirror).*?<\/a>/is;
             const linkMatch = postContent.match(linkPattern);
             if (linkMatch && linkMatch[1]) {
@@ -90,6 +77,82 @@ async function getRepackDownloadLink(pageUrl: string): Promise<string | null> {
     }
 }
 
+// ── Title normalisation helpers ──────────────────────────────────────────────
+
+/** Normalise a title for fuzzy comparison. */
+function normalise(s: string): string {
+    return s
+        .replace(/&amp;/g, '&')
+        .replace(/&#8217;/g, "'")
+        .replace(/&#8211;/g, '-')
+        .replace(/&#8212;/g, '-')
+        .replace(/&#?\w+;/g, '')        // strip remaining HTML entities
+        .replace(/<[^>]*>/g, '')         // strip any HTML tags
+        .replace(/['']/g, "'")
+        .replace(/[""]/g, '"')
+        .replace(/[\u2013\u2014]/g, '-')
+        .replace(/[^\w\s'-]/g, '')       // keep letters, digits, spaces, hyphens, apostrophes
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+/** Remove common repack suffixes FitGirl appends to titles. */
+function stripRepackSuffix(s: string): string {
+    return s
+        .replace(/\s*[-–—]\s*v[\d.]+.*$/i, '')        // " – v1.2.3 + 4 DLCs"
+        .replace(/\s*\+\s*\d+\s*DLC.*$/i, '')          // " + 3 DLCs"
+        .replace(/\s*\(.*?\)\s*$/g, '')                 // trailing parenthesised text
+        .replace(/\s*[-–—]\s*(?:repack|fitgirl).*$/i, '')
+        .trim();
+}
+
+/** Strip common edition suffixes for looser matching. */
+function stripEdition(s: string): string {
+    return s
+        .replace(/\s*[-:–]\s*(game of the year|goty|definitive|ultimate|complete|deluxe|gold|enhanced|legendary|special|premium|anniversary|remastered|remake)\s*(?:edition|version)?.*$/i, '')
+        .replace(/\s*(game of the year|goty|definitive|ultimate|complete|deluxe|gold|enhanced|legendary|special|premium|anniversary|remastered|remake)\s*(?:edition|version)?.*$/i, '')
+        .trim();
+}
+
+/**
+ * Score how well a search result title matches the query.
+ * Higher is better. Returns 0 for no match.
+ */
+function scoreMatch(query: string, resultTitle: string): number {
+    const normQuery = normalise(query);
+    const rawResult = stripRepackSuffix(resultTitle);
+    const normResult = normalise(rawResult);
+
+    // Exact match after normalisation
+    if (normResult === normQuery) return 100;
+
+    // Exact match after stripping edition suffixes
+    const strippedQuery = normalise(stripEdition(query));
+    const strippedResult = normalise(stripEdition(rawResult));
+    if (strippedResult === strippedQuery) return 90;
+
+    // One contains the other fully
+    if (normResult.includes(normQuery)) return 80;
+    if (normQuery.includes(normResult)) return 70;
+
+    // Word-level overlap (Jaccard-ish)
+    const qWords = new Set(normQuery.split(/\s+/).filter(w => w.length > 1));
+    const rWords = new Set(normResult.split(/\s+/).filter(w => w.length > 1));
+    if (qWords.size === 0 || rWords.size === 0) return 0;
+
+    let overlap = 0;
+    for (const w of qWords) {
+        if (rWords.has(w)) overlap++;
+    }
+
+    const ratio = overlap / Math.max(qWords.size, rWords.size);
+    // Require at least 60% word overlap to consider it a match
+    if (ratio < 0.6) return 0;
+
+    return Math.round(ratio * 60); // max 60 for partial matches
+}
+
 // Function to search for repacks with a query and optional page number
 export async function searchFitGirlRepacks(query: string, page: number = 1): Promise<{
     results: Array<{ url: string; title: string; imageurl: string }> | { message: string };
@@ -98,14 +161,12 @@ export async function searchFitGirlRepacks(query: string, page: number = 1): Pro
 }> {
     const searchUrl = `${BASE_URL}page/${page}/?s=${encodeURIComponent(query)}`;
 
-    // Fetch the main search page HTML
     const html = await fetchHTMLWithFallback(searchUrl);
 
-    // Extract titles and URLs using regex
     const regex = /<h1 class="entry-title"><a href="(.+?)" rel="bookmark">(.+?)<\/a><\/h1>/g;
     const matches = [...html.matchAll(regex)];
 
-    // Build the search result list and fetch images
+    // Fetch images for display (only used when browsing search results, not for auto-match)
     const results = await Promise.all(
         matches.map(async (match) => {
             const imageUrl = await fetchImageFromPage(match[1]);
@@ -117,12 +178,10 @@ export async function searchFitGirlRepacks(query: string, page: number = 1): Pro
         })
     );
 
-    // Extract the total number of pages by finding the pagination section
     const paginationRegex = /<a class="page-numbers" href="[^"]+\/page\/(\d+)\/\?s=[^"]+">(\d+)<\/a>/g;
     const paginationMatches = [...html.matchAll(paginationRegex)];
     const lastPage = paginationMatches.length > 0 ? Math.max(...paginationMatches.map(match => parseInt(match[1], 10))) : page;
 
-    // Return the results along with pagination data
     return {
         results: results.length > 0 ? results : { message: "No results found" },
         currentPage: page,
@@ -130,25 +189,41 @@ export async function searchFitGirlRepacks(query: string, page: number = 1): Pro
     };
 }
 
-// Function to get repack download link for a game by searching and extracting from the first result
+/**
+ * Search for a game and return the best-matching repack link.
+ * Uses title scoring to avoid returning wrong results.
+ */
 export async function getRepackLinkForGame(gameName: string): Promise<{ url: string; downloadLink: string | null } | null> {
     try {
-        // Search for the game
-        const searchResults = await searchFitGirlRepacks(gameName, 1);
-        
-        if (!searchResults.results || Array.isArray(searchResults.results) === false || 
-            (Array.isArray(searchResults.results) && searchResults.results.length === 0)) {
+        const searchUrl = `${BASE_URL}?s=${encodeURIComponent(gameName)}`;
+        const html = await fetchHTMLWithFallback(searchUrl);
+
+        // Extract titles and URLs (lightweight — no image fetching)
+        const regex = /<h1 class="entry-title"><a href="(.+?)" rel="bookmark">(.+?)<\/a><\/h1>/g;
+        const matches = [...html.matchAll(regex)];
+
+        if (matches.length === 0) return null;
+
+        // Score each result against the game name
+        let bestMatch: { url: string; title: string; score: number } | null = null;
+        for (const m of matches) {
+            const url = m[1];
+            const title = m[2];
+            const score = scoreMatch(gameName, title);
+            if (score > 0 && (!bestMatch || score > bestMatch.score)) {
+                bestMatch = { url, title, score };
+            }
+        }
+
+        if (!bestMatch) {
+            // No result scored above threshold
             return null;
         }
 
-        const results = searchResults.results as Array<{ url: string; title: string; imageurl: string }>;
-        
-        // Get the first result's download link
-        const firstResult = results[0];
-        const downloadLink = await getRepackDownloadLink(firstResult.url);
+        const downloadLink = await getRepackDownloadLink(bestMatch.url);
         
         return {
-            url: firstResult.url,
+            url: bestMatch.url,
             downloadLink: downloadLink
         };
     } catch (error) {

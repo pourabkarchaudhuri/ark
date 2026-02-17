@@ -407,7 +407,7 @@ export function useSteamGames(category: GameCategory = 'trending') {
             fetchedGames = prefetched;
             console.log(`[useSteamGames] Using ${prefetched.length} pre-fetched games (instant, no API calls)`);
           } else {
-            // Fallback: loading screen didn't prefetch (edge case / error).
+            // Fallback: splash screen didn't prefetch (edge case / error).
             // Do a full fetch now — same logic as prefetch-store.
             console.warn('[useSteamGames] No pre-fetched data — fetching now (slow path)');
             setIsSyncing(true);

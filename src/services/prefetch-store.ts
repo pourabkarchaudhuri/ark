@@ -2,11 +2,11 @@
  * Prefetch Store — Pre-fetches, deduplicates, and caches browse data.
  *
  * This module-level singleton orchestrates fetching game data from both
- * Steam and Epic during the loading screen, so the dashboard can display
- * games instantly without any API calls or card reorganization.
+ * Steam and Epic during the splash screen, so the dashboard can display
+ * games instantly without any API calls or card reorganisation.
  *
  * Architecture:
- *   LoadingScreen → prefetchBrowseData() → IndexedDB + memory
+ *   SplashScreen → prefetchBrowseData() → IndexedDB + memory
  *   useSteamGames → getPrefetchedGames() (sync, instant)
  *                 → background silent refresh later
  */
@@ -134,7 +134,7 @@ export function saveBrowseCache(games: Game[]): Promise<void> {
 
 /**
  * Fetch all game data from Steam + Epic, deduplicate, sort, cache, and
- * store in memory. Reports progress via callback for the loading screen.
+ * store in memory. Reports progress via optional callback.
  *
  * Safe to call multiple times — concurrent calls share the same promise.
  */
@@ -240,7 +240,7 @@ async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
   buildSearchIndex(deduplicated);
 
   // Save to IndexedDB (non-blocking)
-  saveBrowseCache(deduplicated).catch(() => {});
+  saveBrowseCache(deduplicated).catch((err) => { console.warn('[Prefetch] Cache save:', err); });
 
   console.log(
     `[PrefetchStore] Prefetch complete: ${deduplicated.length} games ` +
@@ -353,7 +353,7 @@ export function setPrefetchedGames(games: Game[]): void {
   _hmr.ready = prefetchReady;
   buildSearchIndex(games);
   // Persist to IndexedDB silently
-  saveBrowseCache(games).catch(() => {});
+  saveBrowseCache(games).catch((err) => { console.warn('[Prefetch] Cache save:', err); });
 }
 
 /**

@@ -8,6 +8,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { createRequire } from 'node:module';
+import { logger } from './safe-logger.js';
+import { atomicWriteFileSync, atomicWriteFile } from './safe-write.js';
 
 const require = createRequire(import.meta.url);
 const electron = require('electron');
@@ -75,10 +77,10 @@ export class PersistentCache {
             loadedCount++;
           }
         }
-        console.log(`[Cache:${this.label}] Loaded ${loadedCount} entries from disk`);
+        logger.log(`[Cache:${this.label}] Loaded ${loadedCount} entries from disk`);
       }
     } catch (error) {
-      console.warn(`[Cache:${this.label}] Failed to load disk cache:`, error);
+      logger.warn(`[Cache:${this.label}] Failed to load disk cache:`, error);
     }
   }
 
@@ -102,16 +104,17 @@ export class PersistentCache {
         }
 
         const json = JSON.stringify(obj);
-        fs.writeFile(this.cacheFilePath, json, 'utf-8', (err) => {
+        atomicWriteFile(this.cacheFilePath, json, (err) => {
           if (err) {
-            console.error(`[Cache:${this.label}] Failed to save disk cache:`, err);
+            logger.error(`[Cache:${this.label}] Failed to save disk cache:`, err);
+            this.isDirty = true; // Ensure retry on next saveToDisk call
           } else {
-            console.log(`[Cache:${this.label}] Saved ${entries.length} entries to disk`);
+            this.isDirty = false;
+            logger.log(`[Cache:${this.label}] Saved ${entries.length} entries to disk`);
           }
         });
-        this.isDirty = false;
       } catch (error) {
-        console.error(`[Cache:${this.label}] Failed to save disk cache:`, error);
+        logger.error(`[Cache:${this.label}] Failed to save disk cache:`, error);
       }
     }, 5000);
   }
@@ -191,6 +194,30 @@ export class PersistentCache {
     this.memoryStore.clear();
     this.isDirty = true;
     this.saveToDisk();
+  }
+
+  /**
+   * Synchronously flush dirty cache to disk (for use in before-quit).
+   * Bypasses the debounce timer so nothing is lost on shutdown.
+   */
+  flushSync(): void {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
+    if (!this.isDirty && this.memoryStore.size === 0) return;
+    try {
+      const entries = Array.from(this.memoryStore.entries())
+        .filter(([, entry]) => Date.now() - entry.timestamp < STALE_TTL)
+        .slice(-MAX_CACHE_SIZE);
+      const obj: Record<string, CacheEntry<unknown>> = {};
+      for (const [key, value] of entries) obj[key] = value;
+      atomicWriteFileSync(this.cacheFilePath, JSON.stringify(obj));
+      this.isDirty = false;
+      logger.log(`[Cache:${this.label}] flushSync — saved ${entries.length} entries`);
+    } catch (err) {
+      logger.error(`[Cache:${this.label}] flushSync failed:`, err);
+    }
   }
 
   /** Get cache statistics */

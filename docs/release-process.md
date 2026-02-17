@@ -102,16 +102,16 @@ npm run clean && tsc -p tsconfig.node.json && cp electron/preload.cjs dist-elect
 **Step 2 — Run electron-builder with local NSIS:**
 
 ```bash
-export ELECTRON_BUILDER_NSIS_DIR=".nsis-cache/nsis-3.0.4.1"
-export ELECTRON_BUILDER_NSIS_RESOURCES_DIR=".nsis-cache/nsis-resources-3.4.1"
+export ELECTRON_BUILDER_NSIS_DIR="$(pwd)/.nsis-cache/nsis-3.0.4.1"
+export ELECTRON_BUILDER_NSIS_RESOURCES_DIR="$(pwd)/.nsis-cache/nsis-resources-3.4.1"
 npx electron-builder --win nsis --publish never
 ```
 
-Or as a single command:
+Or as a single command (**use absolute paths** — relative paths cause ENOENT on Windows):
 
 ```bash
-ELECTRON_BUILDER_NSIS_DIR=".nsis-cache/nsis-3.0.4.1" \
-ELECTRON_BUILDER_NSIS_RESOURCES_DIR=".nsis-cache/nsis-resources-3.4.1" \
+ELECTRON_BUILDER_NSIS_DIR="$(pwd)/.nsis-cache/nsis-3.0.4.1" \
+ELECTRON_BUILDER_NSIS_RESOURCES_DIR="$(pwd)/.nsis-cache/nsis-resources-3.4.1" \
 npx electron-builder --win nsis --publish never
 ```
 
@@ -223,6 +223,8 @@ curl -X POST \
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.0.30 | 2026-02-17 | UI rebrand, release calendar redesign, IPC refactor, Metacritic rewrite, loading screen removal |
+| 1.0.29 | 2026-02-12 | Fix splash screen crash in packaged builds, asset path hardening |
 | 1.0.28 | 2026-02-12 | Epic Games Store, game details overhaul, 3D splash, perf fixes |
 | 1.0.27 | 2026-02-11 | Browse game count fix, custom game status, spinner z-order |
 | 1.0.26 | 2026-02-11 | Calendar overhaul, consistent modals, custom game navigation |

@@ -13,6 +13,7 @@
 
 import electron from 'electron';
 import { PersistentCache } from './persistent-cache.js';
+import { logger } from './safe-logger.js';
 
 // ---------------------------------------------------------------------------
 // Rate Limiter (conservative for Epic/Cloudflare)
@@ -21,12 +22,17 @@ import { PersistentCache } from './persistent-cache.js';
 const RATE_LIMIT_DELAY = 300; // ms between requests
 const MAX_CONCURRENT = 2;
 
+const MAX_QUEUE_SIZE = 500; // Prevent unbounded queue growth
+
 class RateLimiter {
   private queue: Array<() => void> = [];
   private active = 0;
   private lastRequestTime = 0;
 
   async acquire(): Promise<void> {
+    if (this.queue.length >= MAX_QUEUE_SIZE) {
+      throw new Error('Epic rate limiter queue full — too many pending requests');
+    }
     return new Promise((resolve) => {
       this.queue.push(resolve);
       this.processQueue();
@@ -463,7 +469,7 @@ class EpicAPIClient {
       const { BrowserWindow, session: electronSession } = electron;
       if (!BrowserWindow || !electronSession) return false;
 
-      console.log('[EpicAPI] Solving Cloudflare challenge (hidden browser)...');
+      logger.log('[EpicAPI] Solving Cloudflare challenge (hidden browser)...');
 
       const win = new BrowserWindow({
         show: false,
@@ -477,7 +483,7 @@ class EpicAPIClient {
 
       try {
         // Navigate to Epic store — Chromium will handle the CF JS challenge
-        win.loadURL('https://store.epicgames.com/en-US/').catch(() => {});
+        win.loadURL('https://store.epicgames.com/en-US/').catch((err: any) => { logger.warn('[Epic] Cloudflare loadURL Non-fatal:', err); });
 
         // Poll for cf_clearance cookie (set by CF after challenge solved)
         const deadline = Date.now() + 25_000; // 25s max
@@ -485,11 +491,10 @@ class EpicAPIClient {
           await new Promise(r => setTimeout(r, 1500));
 
           try {
-            const cookies = await electronSession.defaultSession.cookies.get({});
+            // Security: scope cookie query to Epic's domain (avoid reading entire cookie jar)
+            const cookies = await electronSession.defaultSession.cookies.get({ domain: '.epicgames.com' });
             const hasCf = cookies.some(
-              c =>
-                (c.name === 'cf_clearance' || c.name === '__cf_bm') &&
-                (c.domain || '').includes('epicgames.com'),
+              c => c.name === 'cf_clearance' || c.name === '__cf_bm',
             );
 
             if (hasCf) {
@@ -497,7 +502,7 @@ class EpicAPIClient {
               this.gqlCircuitOpen = false;
               // Invalidate REST-fallback cache so fresh GQL data is fetched
               this.cache.clear();
-              console.log('[EpicAPI] Cloudflare clearance obtained — cache cleared, GraphQL should work now');
+              logger.log('[EpicAPI] Cloudflare clearance obtained — cache cleared, GraphQL should work now');
               return true;
             }
           } catch {
@@ -505,7 +510,7 @@ class EpicAPIClient {
           }
         }
 
-        console.warn('[EpicAPI] Cloudflare clearance timed out after 25s — REST fallback remains active');
+        logger.warn('[EpicAPI] Cloudflare clearance timed out after 25s — REST fallback remains active');
         return false;
       } finally {
         try {
@@ -514,7 +519,7 @@ class EpicAPIClient {
         this.cfInitPromise = null;
       }
     } catch (err) {
-      console.error('[EpicAPI] Cloudflare init error:', (err as Error).message);
+      logger.error('[EpicAPI] Cloudflare init error:', (err as Error).message);
       this.cfInitPromise = null;
       return false;
     }
@@ -524,20 +529,27 @@ class EpicAPIClient {
   // Fetch helper — uses Electron net.fetch with CF cookies
   // -----------------------------------------------------------------------
 
-  private async doFetch(url: string, init?: RequestInit): Promise<Response> {
+  private async doFetch(url: string, init?: RequestInit, timeoutMs = 30000): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const merged: RequestInit = { ...init, signal: controller.signal };
+
     try {
-      if (electron?.net?.fetch) {
-        // net.fetch uses Chromium's networking stack + session cookies.
-        // credentials: 'include' sends cf_clearance and other session cookies.
-        return await electron.net.fetch(url, {
-          ...(init as any),
-          credentials: 'include',
-        });
+      try {
+        if (electron?.net?.fetch) {
+          return await electron.net.fetch(url, {
+            ...(merged as any),
+            credentials: 'include',
+          });
+        }
+      } catch (err: any) {
+        if (err?.name === 'AbortError') throw err;
+        // net not available — fall through to global fetch
       }
-    } catch {
-      // net not available (e.g. app not yet ready) — fall through to global fetch
+      return await fetch(url, merged);
+    } finally {
+      clearTimeout(timer);
     }
-    return fetch(url, init);
   }
 
   // -----------------------------------------------------------------------
@@ -550,14 +562,14 @@ class EpicAPIClient {
       // If CF clearance has been obtained, close the circuit and retry
       if (this.cfInitialized) {
         this.gqlCircuitOpen = false;
-        console.log('[EpicAPI] Circuit closed — Cloudflare clearance ready, retrying GQL');
+        logger.log('[EpicAPI] Circuit closed — Cloudflare clearance ready, retrying GQL');
       } else if (Date.now() - this.gqlCircuitOpenedAt > this.GQL_CIRCUIT_RESET_MS) {
         this.gqlCircuitOpen = false;
-        console.log('[EpicAPI] GQL circuit breaker reset — retrying GraphQL');
+        logger.log('[EpicAPI] GQL circuit breaker reset — retrying GraphQL');
       } else {
         // Circuit still open, CF not ready — kick off solver if not running
         if (!this.cfInitPromise) {
-          this.initCloudflare().catch(() => {});
+          this.initCloudflare().catch((err: any) => { logger.warn('[Epic] initCloudflare Non-fatal:', err); });
         }
         throw new Error('GQL circuit open (Cloudflare blocked — solver running)');
       }
@@ -598,13 +610,13 @@ class EpicAPIClient {
             if (response.status === 403) {
               this.gqlCircuitOpen = true;
               this.gqlCircuitOpenedAt = Date.now();
-              console.warn('[EpicAPI] Cloudflare 403 — opening circuit breaker (REST fallback will be used)');
+              logger.warn('[EpicAPI] Cloudflare 403 — opening circuit breaker (REST fallback will be used)');
             }
             // Log response body for debugging non-403 errors
             if (response.status !== 403) {
               try {
                 const errBody = await response.text();
-                console.debug(`[EpicAPI] ${response.status} response body (first 500 chars):`, errBody.slice(0, 500));
+                logger.debug(`[EpicAPI] ${response.status} response body (first 500 chars):`, errBody.slice(0, 500));
               } catch { /* ignore */ }
             }
             throw new Error(`Epic GQL request failed: ${response.status} ${response.statusText}`);
@@ -620,7 +632,7 @@ class EpicAPIClient {
           const idx = this.GQL_ENDPOINTS.indexOf(endpoint);
           if (idx >= 0) this.lastWorkingEndpointIndex = idx;
           if (i > 0) {
-            console.log(`[EpicAPI] Fallback endpoint succeeded: ${endpoint}`);
+            logger.log(`[EpicAPI] Fallback endpoint succeeded: ${endpoint}`);
           }
 
           return json.data as T;
@@ -628,7 +640,7 @@ class EpicAPIClient {
           lastError = err instanceof Error ? err : new Error(String(err));
           // Only log non-circuit-breaker errors (avoid spamming)
           if (!this.gqlCircuitOpen) {
-            console.debug(`[EpicAPI] Endpoint ${endpoint} failed: ${lastError.message}`);
+            logger.debug(`[EpicAPI] Endpoint ${endpoint} failed: ${lastError.message}`);
           }
           // If there's another endpoint to try, add a small delay before retrying
           if (i < endpoints.length - 1 && !this.gqlCircuitOpen) {
@@ -677,7 +689,7 @@ class EpicAPIClient {
     }
 
     this.cache.set(cacheKey, elements, FREE_GAMES_CACHE_TTL);
-    console.log(`[EpicAPI] Promotional catalog loaded: ${elements.length} items`);
+    logger.log(`[EpicAPI] Promotional catalog loaded: ${elements.length} items`);
     return elements;
   }
 
@@ -710,7 +722,7 @@ class EpicAPIClient {
       if (cached) return cached;
       return results;
     } catch (error) {
-      console.debug('[EpicAPI] GQL search unavailable, using REST fallback');
+      logger.debug('[EpicAPI] GQL search unavailable, using REST fallback');
     }
 
     // 2. Fallback: filter promotional catalog by keyword
@@ -723,12 +735,12 @@ class EpicAPIClient {
         g.developer?.toLowerCase().includes(kw)
       ).slice(0, limit);
       if (filtered.length > 0) {
-        console.log(`[EpicAPI] REST fallback found ${filtered.length} results for "${keyword}"`);
+        logger.log(`[EpicAPI] REST fallback found ${filtered.length} results for "${keyword}"`);
         this.cache.set(cacheKey, filtered, SEARCH_CACHE_TTL);
         return filtered;
       }
     } catch (restErr) {
-      console.error('[EpicAPI] REST search fallback also failed:', (restErr as Error).message);
+      logger.error('[EpicAPI] REST search fallback also failed:', (restErr as Error).message);
     }
 
     if (cached) return cached; // Return stale on error
@@ -762,7 +774,7 @@ class EpicAPIClient {
         return item;
       }
     } catch (error) {
-      console.debug(`[EpicAPI] GQL getGameDetails(${namespace}:${offerId}) failed, trying REST fallback`);
+      logger.debug(`[EpicAPI] GQL getGameDetails(${namespace}:${offerId}) failed, trying REST fallback`);
     }
 
     // 2. REST fallback: search the promotional catalog by namespace/offerId
@@ -772,17 +784,17 @@ class EpicAPIClient {
         g => g.namespace === namespace && g.id === offerId,
       );
       if (match) {
-        console.log(`[EpicAPI] REST fallback: found ${match.title} in promotional catalog`);
+        logger.log(`[EpicAPI] REST fallback: found ${match.title} in promotional catalog`);
         this.cache.set(cacheKey, match, CACHE_TTL);
         return match;
       }
     } catch (restErr) {
-      console.debug('[EpicAPI] Promotional catalog fallback also failed:', (restErr as Error).message);
+      logger.debug('[EpicAPI] Promotional catalog fallback also failed:', (restErr as Error).message);
     }
 
     // 3. Return stale cache if available
     if (cached) {
-      console.log(`[EpicAPI] Returning stale cache for ${namespace}:${offerId}`);
+      logger.log(`[EpicAPI] Returning stale cache for ${namespace}:${offerId}`);
       return cached;
     }
     return null;
@@ -814,7 +826,7 @@ class EpicAPIClient {
       this.cache.set(cacheKey, results, RELEASES_CACHE_TTL);
       return results;
     } catch (error) {
-      console.debug('[EpicAPI] GQL new-releases unavailable, using REST fallback');
+      logger.debug('[EpicAPI] GQL new-releases unavailable, using REST fallback');
     }
 
     // 2. Fallback: promotional catalog, filter for released games, sort newest first
@@ -826,12 +838,12 @@ class EpicAPIClient {
         .sort((a, b) => new Date(b.effectiveDate!).getTime() - new Date(a.effectiveDate!).getTime())
         .slice(0, limit);
       if (released.length > 0) {
-        console.log(`[EpicAPI] REST fallback: ${released.length} new releases from promotional catalog`);
+        logger.log(`[EpicAPI] REST fallback: ${released.length} new releases from promotional catalog`);
         this.cache.set(cacheKey, released, RELEASES_CACHE_TTL);
         return released;
       }
     } catch (restErr) {
-      console.error('[EpicAPI] REST new-releases fallback also failed:', (restErr as Error).message);
+      logger.error('[EpicAPI] REST new-releases fallback also failed:', (restErr as Error).message);
     }
 
     if (cached) return cached;
@@ -864,7 +876,7 @@ class EpicAPIClient {
       this.cache.set(cacheKey, results, RELEASES_CACHE_TTL);
       return results;
     } catch (error) {
-      console.debug('[EpicAPI] GQL coming-soon unavailable, using REST fallback');
+      logger.debug('[EpicAPI] GQL coming-soon unavailable, using REST fallback');
     }
 
     // 2. Fallback: promotional catalog items with upcoming promotions or future dates
@@ -883,12 +895,12 @@ class EpicAPIClient {
         )
         .slice(0, limit);
       if (upcoming.length > 0) {
-        console.log(`[EpicAPI] REST fallback: ${upcoming.length} coming-soon items from promotional catalog`);
+        logger.log(`[EpicAPI] REST fallback: ${upcoming.length} coming-soon items from promotional catalog`);
         this.cache.set(cacheKey, upcoming, RELEASES_CACHE_TTL);
         return upcoming;
       }
     } catch (restErr) {
-      console.error('[EpicAPI] REST coming-soon fallback also failed:', (restErr as Error).message);
+      logger.error('[EpicAPI] REST coming-soon fallback also failed:', (restErr as Error).message);
     }
 
     if (cached) return cached;
@@ -921,11 +933,11 @@ class EpicAPIClient {
         );
       });
 
-      console.log(`[EpicAPI] Free games: ${freeGames.length} currently free out of ${elements.length} promotional`);
+      logger.log(`[EpicAPI] Free games: ${freeGames.length} currently free out of ${elements.length} promotional`);
       this.cache.set(cacheKey, freeGames, FREE_GAMES_CACHE_TTL);
       return freeGames;
     } catch (error) {
-      console.error('[EpicAPI] GetFreeGames failed:', error);
+      logger.error('[EpicAPI] GetFreeGames failed:', error);
       if (cached) return cached;
       return [];
     }
@@ -972,7 +984,7 @@ class EpicAPIClient {
         });
 
         if (!response.ok) {
-          console.debug(`[EpicAPI] Product content ${response.status} for slug "${slug}"`);
+          logger.debug(`[EpicAPI] Product content ${response.status} for slug "${slug}"`);
           return null;
         }
 
@@ -1044,13 +1056,13 @@ class EpicAPIClient {
           gallery: gallery.length > 0 ? gallery : undefined,
         };
         this.cache.set(cacheKey, result, CACHE_TTL);
-        console.log(`[EpicAPI] Product content loaded for "${slug}" (about: ${!!about}, reqs: ${!!requirements}, gallery: ${gallery.length})`);
+        logger.log(`[EpicAPI] Product content loaded for "${slug}" (about: ${!!about}, reqs: ${!!requirements}, gallery: ${gallery.length})`);
         return result;
       } finally {
         this.rateLimiter.release();
       }
     } catch (error) {
-      console.error(`[EpicAPI] GetProductContent("${slug}") failed:`, (error as Error).message);
+      logger.error(`[EpicAPI] GetProductContent("${slug}") failed:`, (error as Error).message);
       if (cached) return cached;
       return null;
     }
@@ -1084,7 +1096,7 @@ class EpicAPIClient {
 
       // If both returned empty (complete failure), do a last-resort direct REST pull
       if (all.length === 0) {
-        console.log('[EpicAPI] Both new/coming-soon empty — direct REST fallback for upcoming');
+        logger.log('[EpicAPI] Both new/coming-soon empty — direct REST fallback for upcoming');
         try {
           all = await this.getPromotionalCatalog();
         } catch {
@@ -1131,7 +1143,7 @@ class EpicAPIClient {
       this.cache.set(cacheKey, releases, RELEASES_CACHE_TTL);
       return releases;
     } catch (error) {
-      console.error('[EpicAPI] GetUpcomingReleases failed:', error);
+      logger.error('[EpicAPI] GetUpcomingReleases failed:', error);
       if (cached) return cached;
       return [];
     }
@@ -1167,14 +1179,14 @@ class EpicAPIClient {
         country: 'US',
         sortBy: 'releaseDate',
         sortDir: 'DESC',
-      }).catch(() => null);
+      }).catch((err: any) => { logger.warn('[Epic] browseCatalog first page Non-fatal:', err); return null; });
 
       if (firstResult?.Catalog?.searchStore) {
         const { elements, paging } = firstResult.Catalog.searchStore;
         allElements.push(...elements);
         totalAvailable = paging.total;
         currentPage = 1;
-        console.log(`[EpicAPI] Catalog total available: ${totalAvailable} games`);
+        logger.log(`[EpicAPI] Catalog total available: ${totalAvailable} games`);
       }
 
       // Calculate remaining pages needed
@@ -1200,7 +1212,7 @@ class EpicAPIClient {
                 country: 'US',
                 sortBy: 'releaseDate',
                 sortDir: 'DESC',
-              }).catch(() => null),
+              }).catch((err: any) => { logger.warn('[Epic] browseCatalog batch page Non-fatal:', err); return null; }),
             );
           }
 
@@ -1216,7 +1228,7 @@ class EpicAPIClient {
           // Stop if a whole batch returned nothing (we've hit the end)
           if (batchEmpty) break;
 
-          console.log(`[EpicAPI] Catalog progress: ${allElements.length}/${effectiveLimit} games`);
+          logger.log(`[EpicAPI] Catalog progress: ${allElements.length}/${effectiveLimit} games`);
         }
       }
 
@@ -1237,11 +1249,11 @@ class EpicAPIClient {
 
       if (uniqueItems.length > 0) {
         this.cache.set(cacheKey, uniqueItems, RELEASES_CACHE_TTL);
-        console.log(`[EpicAPI] Catalog browse complete: ${uniqueItems.length} unique games from ${totalAvailable} total`);
+        logger.log(`[EpicAPI] Catalog browse complete: ${uniqueItems.length} unique games from ${totalAvailable} total`);
         return uniqueItems;
       }
     } catch (error) {
-      console.error('[EpicAPI] browseCatalog failed:', error);
+      logger.error('[EpicAPI] browseCatalog failed:', error);
     }
 
     // Fall back to promotional catalog if GQL fails
@@ -1324,9 +1336,18 @@ class EpicAPIClient {
               body.toLowerCase().includes(kw) ||
               slug.toLowerCase().includes(kw.replace(/\s+/g, '-'))
             ) {
+              // Ensure we always have an absolute URL — the CMS often returns relative paths
+              let articleUrl = post?.url || post?.externalLink || '';
+              if (articleUrl && !articleUrl.startsWith('http')) {
+                articleUrl = `https://store.epicgames.com${articleUrl.startsWith('/') ? '' : '/'}${articleUrl}`;
+              }
+              if (!articleUrl && slug) {
+                articleUrl = `https://store.epicgames.com/en-US/news/${slug}`;
+              }
+
               results.push({
                 title,
-                url: post?.url || post?.externalLink || (slug ? `https://store.epicgames.com/en-US/news/${slug}` : ''),
+                url: articleUrl,
                 date: post?.date || post?.lastModified || post?._activeDate || '',
                 image: post?.image?.src || post?.image || post?.featuredImage?.src || undefined,
                 body: body.slice(0, 500),
@@ -1341,7 +1362,7 @@ class EpicAPIClient {
         this.rateLimiter.release();
       }
     } catch (error) {
-      console.debug(`[EpicAPI] News feed fetch failed:`, (error as Error).message);
+      logger.debug(`[EpicAPI] News feed fetch failed:`, (error as Error).message);
     }
 
     // Also try the product-specific CMS endpoint for news
@@ -1366,9 +1387,16 @@ class EpicAPIClient {
             for (const page of pages) {
               const news = page?.data?.news?.articles || page?.data?.news?.items || [];
               for (const article of (Array.isArray(news) ? news : [])) {
+                let artUrl = article?.url || article?.link || '';
+                if (artUrl && !artUrl.startsWith('http')) {
+                  artUrl = `https://store.epicgames.com${artUrl.startsWith('/') ? '' : '/'}${artUrl}`;
+                }
+                if (!artUrl) {
+                  artUrl = `https://store.epicgames.com/en-US/p/${slug}`;
+                }
                 results.push({
                   title: article?.title || article?.name || 'News Update',
-                  url: article?.url || article?.link || `https://store.epicgames.com/en-US/p/${slug}`,
+                  url: artUrl,
                   date: article?.date || article?.publishDate || '',
                   image: article?.image?.src || article?.image || undefined,
                   body: (article?.body || article?.content || '').slice(0, 500),
@@ -1388,7 +1416,7 @@ class EpicAPIClient {
 
     if (results.length > 0) {
       this.cache.set(cacheKey, results, RELEASES_CACHE_TTL);
-      console.log(`[EpicAPI] News feed: ${results.length} articles for "${keyword}"`);
+      logger.log(`[EpicAPI] News feed: ${results.length} articles for "${keyword}"`);
     }
     return results;
   }
@@ -1466,7 +1494,7 @@ class EpicAPIClient {
               };
 
               this.cache.set(cacheKey, result, CACHE_TTL);
-              console.log(`[EpicAPI] Product reviews for "${slug}": ${totalCount} reviews, avg ${avgRating}`);
+              logger.log(`[EpicAPI] Product reviews for "${slug}": ${totalCount} reviews, avg ${avgRating}`);
               return result;
             }
           }
@@ -1474,7 +1502,7 @@ class EpicAPIClient {
           this.rateLimiter.release();
         }
       } catch (error) {
-        console.debug(`[EpicAPI] Reviews fetch failed for SKU "${sku}":`, (error as Error).message);
+        logger.debug(`[EpicAPI] Reviews fetch failed for SKU "${sku}":`, (error as Error).message);
       }
     }
 
@@ -1492,7 +1520,7 @@ class EpicAPIClient {
             }
           }
         }
-      `, { sandboxId: slug }).catch(() => null);
+      `, { sandboxId: slug }).catch((err: any) => { logger.warn('[Epic] getProductReviews OpenCritic Non-fatal:', err); return null; });
 
       if (data?.OpenCritic?.productReviews) {
         const oc = data.OpenCritic.productReviews;
@@ -1510,7 +1538,7 @@ class EpicAPIClient {
           recentReviews: [],
         };
         this.cache.set(cacheKey, result, CACHE_TTL);
-        console.log(`[EpicAPI] OpenCritic reviews for "${slug}": score ${result.averageRating}, ${pctRec}% recommended`);
+        logger.log(`[EpicAPI] OpenCritic reviews for "${slug}": score ${result.averageRating}, ${pctRec}% recommended`);
         return result;
       }
     } catch {
@@ -1548,6 +1576,18 @@ class EpicAPIClient {
               type
               url
             }
+            urlSlug
+            productSlug
+            offerMappings {
+              pageSlug
+              pageType
+            }
+            catalogNs {
+              mappings(pageType: "productHome") {
+                pageSlug
+                pageType
+              }
+            }
             effectiveDate
             price(country: $country) {
               totalPrice {
@@ -1577,6 +1617,7 @@ class EpicAPIClient {
     price?: string;
     isFree: boolean;
     releaseDate?: string;
+    slug?: string;
   }>> {
     if (!namespace) return [];
 
@@ -1600,23 +1641,31 @@ class EpicAPIClient {
       });
 
       const elements = data.Catalog.searchStore.elements || [];
-      const addons = elements.map(el => ({
-        id: el.id,
-        title: el.title,
-        description: el.description || '',
-        image: resolveEpicImage(el.keyImages),
-        price: el.price?.totalPrice.fmtPrice?.discountPrice,
-        isFree: el.price?.totalPrice.discountPrice === 0,
-        releaseDate: el.effectiveDate,
-      }));
+      const addons = elements.map(el => {
+        const catalogSlug = el.catalogNs?.mappings?.[0]?.pageSlug;
+        const offerSlug = el.offerMappings?.[0]?.pageSlug;
+        const isUuid = /^[0-9a-f]{32}$/i.test(el.urlSlug || '');
+        const safeUrlSlug = el.urlSlug && !isUuid ? el.urlSlug : undefined;
+        const slug = catalogSlug || offerSlug || el.productSlug || safeUrlSlug || undefined;
+        return {
+          id: el.id,
+          title: el.title,
+          description: el.description || '',
+          image: resolveEpicImage(el.keyImages),
+          price: el.price?.totalPrice.fmtPrice?.discountPrice,
+          isFree: el.price?.totalPrice.discountPrice === 0,
+          releaseDate: el.effectiveDate,
+          slug,
+        };
+      });
 
       if (addons.length > 0) {
         this.cache.set(cacheKey, addons, RELEASES_CACHE_TTL);
-        console.log(`[EpicAPI] Addons for namespace "${namespace}": ${addons.length} found (total available: ${data.Catalog.searchStore.paging.total})`);
+        logger.log(`[EpicAPI] Addons for namespace "${namespace}": ${addons.length} found (total available: ${data.Catalog.searchStore.paging.total})`);
       }
       return addons;
     } catch (error) {
-      console.debug(`[EpicAPI] Addons query failed for "${namespace}":`, (error as Error).message);
+      logger.debug(`[EpicAPI] Addons query failed for "${namespace}":`, (error as Error).message);
     }
 
     if (cached) return cached;
@@ -1635,6 +1684,11 @@ class EpicAPIClient {
    */
   getCacheStats(): { total: number; fresh: number; stale: number } {
     return this.cache.getStats();
+  }
+
+  /** Synchronously flush the disk cache (for use in before-quit). */
+  flushCache(): void {
+    this.cache.flushSync();
   }
 }
 

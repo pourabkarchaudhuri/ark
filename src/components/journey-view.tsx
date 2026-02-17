@@ -11,7 +11,7 @@
 import { useMemo, useState, useEffect, memo, useCallback, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { motion } from 'framer-motion';
-import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, List, PieChart, X } from 'lucide-react';
+import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, List, PieChart, X, Box } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Timeline, TimelineEntry } from '@/components/ui/timeline';
@@ -25,8 +25,9 @@ import { JourneyGanttView } from '@/components/journey-gantt-view';
 import { JourneyAnalyticsView } from '@/components/journey-analytics-view';
 import { generateMockGanttData } from '@/components/journey-gantt-mock-data';
 import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
+import { ShowcaseView } from '@/components/showcase-view';
 
-type JourneyViewStyle = 'noob' | 'ocd' | 'analytics';
+type JourneyViewStyle = 'noob' | 'ocd' | 'analytics' | 'ark';
 type GanttDataSource = 'live' | 'mock';
 
 /**
@@ -258,7 +259,7 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
 
 export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
   // View style toggle: "Noob" (vertical timeline) vs "OCD" (Gantt chart)
-  const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('noob');
+  const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('ark');
   // Data source for OCD view: live store data vs mock data for dev/demo
   const [dataSource, setDataSource] = useState<GanttDataSource>('live');
 
@@ -373,6 +374,47 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     });
   }, [entries, playerCounts]);
 
+  // Total stats
+  const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
+  const completedCount = entries.filter((e) => e.status === 'Completed').length;
+
+  // Cache store snapshots to avoid creating new array references on every render.
+  // Only recalculate when the view actually needs it and dependencies change.
+  const statusHistoryRef = useRef(statusHistoryStore.getAll());
+  const sessionsRef = useRef(sessionStore.getAll());
+  const libraryEntriesRef = useRef(libraryStore.getAllEntries());
+
+  // Subscribe once and update refs (no state, so no re-render from here)
+  useEffect(() => {
+    const unsubHistory = statusHistoryStore.subscribe(() => {
+      statusHistoryRef.current = statusHistoryStore.getAll();
+    });
+    const unsubSessions = sessionStore.subscribe(() => {
+      sessionsRef.current = sessionStore.getAll();
+    });
+    const unsubLibrary = libraryStore.subscribe(() => {
+      libraryEntriesRef.current = libraryStore.getAllEntries();
+    });
+    return () => { unsubHistory(); unsubSessions(); unsubLibrary(); };
+  }, []);
+
+  // Prepare Gantt/analytics data (only when OCD or Analytics view is active)
+  const ganttData = useMemo(() => {
+    if (viewStyle !== 'ocd' && viewStyle !== 'analytics') return null;
+
+    if ((viewStyle === 'ocd' || viewStyle === 'analytics') && dataSource === 'mock') {
+      return generateMockGanttData();
+    }
+
+    // Live data from cached store snapshots
+    return {
+      journeyEntries: entries,
+      statusHistory: statusHistoryRef.current,
+      sessions: sessionsRef.current,
+      libraryEntries: libraryEntriesRef.current,
+    };
+  }, [viewStyle, dataSource, entries]);
+
   // Loading state
   if (loading) {
     return (
@@ -419,9 +461,9 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         <div className="w-20 h-20 rounded-full bg-white/5 flex items-center justify-center mb-6 shadow-lg shadow-fuchsia-500/10">
           <Gamepad2 className="w-10 h-10 text-fuchsia-500" />
         </div>
-        <h2 className="text-2xl font-bold mb-2 font-['Orbitron']">Your Journey Awaits</h2>
+        <h2 className="text-2xl font-bold mb-2 font-['Orbitron']">Your Voyage Awaits</h2>
         <p className="text-white/60 mb-6 max-w-md">
-          Start adding games to your library to see your gaming journey unfold as a timeline.
+          Start adding games to your library to see your gaming voyage unfold as a timeline.
         </p>
         {onSwitchToBrowse && (
           <Button
@@ -435,47 +477,6 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     );
   }
 
-  // Total stats
-  const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
-  const completedCount = entries.filter((e) => e.status === 'Completed').length;
-
-  // Cache store snapshots to avoid creating new array references on every render.
-  // Only recalculate when the view actually needs it and dependencies change.
-  const statusHistoryRef = useRef(statusHistoryStore.getAll());
-  const sessionsRef = useRef(sessionStore.getAll());
-  const libraryEntriesRef = useRef(libraryStore.getAllEntries());
-
-  // Subscribe once and update refs (no state, so no re-render from here)
-  useEffect(() => {
-    const unsubHistory = statusHistoryStore.subscribe(() => {
-      statusHistoryRef.current = statusHistoryStore.getAll();
-    });
-    const unsubSessions = sessionStore.subscribe(() => {
-      sessionsRef.current = sessionStore.getAll();
-    });
-    const unsubLibrary = libraryStore.subscribe(() => {
-      libraryEntriesRef.current = libraryStore.getAllEntries();
-    });
-    return () => { unsubHistory(); unsubSessions(); unsubLibrary(); };
-  }, []);
-
-  // Prepare Gantt/analytics data (only when OCD or Analytics view is active)
-  const ganttData = useMemo(() => {
-    if (viewStyle !== 'ocd' && viewStyle !== 'analytics') return null;
-
-    if ((viewStyle === 'ocd' || viewStyle === 'analytics') && dataSource === 'mock') {
-      return generateMockGanttData();
-    }
-
-    // Live data from cached store snapshots
-    return {
-      journeyEntries: entries,
-      statusHistory: statusHistoryRef.current,
-      sessions: sessionsRef.current,
-      libraryEntries: libraryEntriesRef.current,
-    };
-  }, [viewStyle, dataSource, entries]);
-
   return (
     <div className="relative w-full overflow-clip">
       {/* Header */}
@@ -483,7 +484,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h2 className="text-lg md:text-3xl mb-2 text-white font-bold font-['Orbitron']">
-              Your Gaming Journey
+              Your Gaming Voyage
             </h2>
             <p className="text-white/60 text-sm md:text-base max-w-lg">
               {entries.length} game{entries.length !== 1 ? 's' : ''} in your history
@@ -496,6 +497,18 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
           <div className="flex items-center gap-3">
             {/* Noob / OCD / Analytics toggle */}
             <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
+              <button
+                onClick={() => setViewStyle('ark')}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                  viewStyle === 'ark'
+                    ? 'bg-fuchsia-500 text-white'
+                    : 'text-white/60 hover:text-white'
+                )}
+              >
+                <Box className="w-3 h-3" />
+                Your Ark
+              </button>
               <button
                 onClick={() => setViewStyle('noob')}
                 className={cn(
@@ -566,7 +579,9 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
       </div>
 
       {/* Conditional view rendering */}
-      {viewStyle === 'ocd' && ganttData ? (
+      {viewStyle === 'ark' ? (
+        <ShowcaseView entries={entries} />
+      ) : viewStyle === 'ocd' && ganttData ? (
         <div className="px-0 md:px-4 lg:px-6">
           <JourneyGanttView
             journeyEntries={ganttData.journeyEntries}

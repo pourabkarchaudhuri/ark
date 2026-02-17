@@ -521,6 +521,7 @@ class SteamService {
         const items = data?.appnews?.newsitems;
         if (!Array.isArray(items) || items.length === 0) continue;
         console.log(`[Steam Service] Got ${items.length} news via fetch for appId ${appId}`);
+        const BLOCKED = ['gamemag.ru', 'gamemag'];
         return items.map((item: Record<string, unknown>) => ({
           gid: String(item.gid ?? ''),
           title: String(item.title ?? ''),
@@ -529,7 +530,7 @@ class SteamService {
           feedlabel: String(item.feedlabel ?? ''),
           date: Number(item.date ?? 0),
           contents: String(item.contents ?? ''),
-        }));
+        })).filter(n => !BLOCKED.some(b => n.feedlabel.toLowerCase().includes(b) || n.url.toLowerCase().includes(b)));
       } catch {
         // Try next URL
       }

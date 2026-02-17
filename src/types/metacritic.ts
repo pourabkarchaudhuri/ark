@@ -17,6 +17,7 @@ export interface MetacriticGameResponse {
   title: string;
   poster: string;
   score: number;
+  user_score: number;
   release_date: string;
   reviews: MetacriticReview[];
 }

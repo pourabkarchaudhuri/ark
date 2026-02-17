@@ -99,7 +99,7 @@ describe('JourneyView', () => {
   it('renders empty state when no entries', () => {
     render(<JourneyView entries={[]} loading={false} />);
 
-    expect(screen.getByText('Your Journey Awaits')).toBeInTheDocument();
+    expect(screen.getByText('Your Voyage Awaits')).toBeInTheDocument();
     expect(screen.getByText(/Start adding games/)).toBeInTheDocument();
   });
 

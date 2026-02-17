@@ -9,6 +9,7 @@ const { BrowserWindow, ipcMain, Notification, nativeImage, app: electronApp } = 
 import * as fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'node:url';
+import { logger } from './safe-logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -62,9 +63,9 @@ function resolveNotificationIcon(): Electron.NativeImage | null {
   const found = candidates.find((p) => fs.existsSync(p));
   if (found) {
     notificationIcon = nativeImage.createFromPath(found);
-    console.log('[AutoUpdater] Notification icon resolved:', found);
+    logger.log('[AutoUpdater] Notification icon resolved:', found);
   } else {
-    console.warn('[AutoUpdater] No icon found for notifications');
+    logger.warn('[AutoUpdater] No icon found for notifications');
   }
 
   return notificationIcon;
@@ -94,12 +95,12 @@ export function initAutoUpdater(window: BrowserWindowType) {
 
   // Set up event handlers
   autoUpdater.on('checking-for-update', () => {
-    console.log('[AutoUpdater] Checking for updates...');
+    logger.log('[AutoUpdater] Checking for updates...');
     sendToRenderer('updater:checking');
   });
 
   autoUpdater.on('update-available', (info: UpdateInfo) => {
-    console.log('[AutoUpdater] Update available:', info.version);
+    logger.log('[AutoUpdater] Update available:', info.version);
     const updatePayload = {
       version: info.version,
       releaseDate: info.releaseDate,
@@ -138,22 +139,22 @@ export function initAutoUpdater(window: BrowserWindowType) {
 
         notification.show();
         lastNotifiedVersion = info.version;
-        console.log('[AutoUpdater] Native notification shown for update', info.version);
+        logger.log('[AutoUpdater] Native notification shown for update', info.version);
       } catch (err) {
-        console.warn('[AutoUpdater] Failed to show native notification:', err);
+        logger.warn('[AutoUpdater] Failed to show native notification:', err);
       }
     }
   });
 
   autoUpdater.on('update-not-available', (info: UpdateInfo) => {
-    console.log('[AutoUpdater] No updates available. Current version:', info.version);
+    logger.log('[AutoUpdater] No updates available. Current version:', info.version);
     sendToRenderer('updater:update-not-available', {
       version: info.version,
     });
   });
 
   autoUpdater.on('download-progress', (progress: ProgressInfo) => {
-    console.log(`[AutoUpdater] Download progress: ${progress.percent.toFixed(1)}%`);
+    logger.log(`[AutoUpdater] Download progress: ${progress.percent.toFixed(1)}%`);
     isDownloading = true;
     sendToRenderer('updater:download-progress', {
       percent: progress.percent,
@@ -164,7 +165,7 @@ export function initAutoUpdater(window: BrowserWindowType) {
   });
 
   autoUpdater.on('update-downloaded', (info: UpdateInfo) => {
-    console.log('[AutoUpdater] Update downloaded:', info.version);
+    logger.log('[AutoUpdater] Update downloaded:', info.version);
     isDownloading = false;
     updateAlreadyDownloaded = true;
     sendToRenderer('updater:update-downloaded', {
@@ -199,15 +200,15 @@ export function initAutoUpdater(window: BrowserWindowType) {
         });
 
         notification.show();
-        console.log('[AutoUpdater] "Update ready" notification shown for', info.version);
+        logger.log('[AutoUpdater] "Update ready" notification shown for', info.version);
       } catch (err) {
-        console.warn('[AutoUpdater] Failed to show "update ready" notification:', err);
+        logger.warn('[AutoUpdater] Failed to show "update ready" notification:', err);
       }
     }
   });
 
   autoUpdater.on('error', (error: Error) => {
-    console.error('[AutoUpdater] Error:', error.message);
+    logger.error('[AutoUpdater] Error:', error.message);
     isDownloading = false;
     sendToRenderer('updater:error', {
       message: error.message,
@@ -224,12 +225,12 @@ export function initAutoUpdater(window: BrowserWindowType) {
     clearInterval(pollingInterval);
   }
   setTimeout(() => {
-    console.log('[AutoUpdater] Delayed first-poll update check...');
+    logger.log('[AutoUpdater] Delayed first-poll update check...');
     checkForUpdates();
 
     // Start periodic polling for updates (every 30 minutes)
     pollingInterval = setInterval(() => {
-      console.log('[AutoUpdater] Periodic update check...');
+      logger.log('[AutoUpdater] Periodic update check...');
       checkForUpdates();
     }, UPDATE_POLL_INTERVAL_MS);
   }, FIRST_POLL_DELAY_MS);
@@ -251,23 +252,23 @@ function sendToRenderer(channel: string, data?: unknown) {
  */
 async function checkForUpdates() {
   if (isDownloading) {
-    console.log('[AutoUpdater] Skipping update check — download already in progress');
+    logger.log('[AutoUpdater] Skipping update check — download already in progress');
     return;
   }
   if (updateAlreadyDownloaded) {
-    console.log('[AutoUpdater] Skipping update check — update already downloaded');
+    logger.log('[AutoUpdater] Skipping update check — update already downloaded');
     return;
   }
   if (isCheckingForUpdate) {
-    console.log('[AutoUpdater] Skipping update check — check already in progress');
+    logger.log('[AutoUpdater] Skipping update check — check already in progress');
     return;
   }
   try {
     isCheckingForUpdate = true;
-    console.log('[AutoUpdater] Initiating update check...');
+    logger.log('[AutoUpdater] Initiating update check...');
     await autoUpdater.checkForUpdates();
   } catch (error) {
-    console.error('[AutoUpdater] Failed to check for updates:', error);
+    logger.error('[AutoUpdater] Failed to check for updates:', error);
   } finally {
     isCheckingForUpdate = false;
   }
@@ -295,16 +296,20 @@ function isVersionGreater(a: string, b: string): boolean {
  */
 async function fetchLatestGitHubRelease(): Promise<{ tag: string; url: string } | null> {
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
     const res = await fetch('https://api.github.com/repos/pourabkarchaudhuri/ark/releases/latest', {
       headers: { Accept: 'application/vnd.github.v3+json' },
+      signal: controller.signal,
     });
+    clearTimeout(timer);
     if (!res.ok) return null;
     const data = await res.json() as { tag_name: string; html_url: string };
     // tag_name is typically "v1.0.15" — strip the leading "v" if present
     const tag = data.tag_name.replace(/^v/, '');
     return { tag, url: data.html_url };
   } catch (err) {
-    console.warn('[AutoUpdater] GitHub release fetch failed:', err);
+    logger.warn('[AutoUpdater] GitHub release fetch failed:', err);
     return null;
   }
 }
@@ -324,17 +329,16 @@ function registerIpcHandlers() {
 
     // Skip full check if download is already in progress or complete
     if (isDownloading || updateAlreadyDownloaded) {
-      console.log('[AutoUpdater] Check skipped (downloading or already downloaded)');
+      logger.log('[AutoUpdater] Check skipped (downloading or already downloaded)');
       return { updateAvailable: true, currentVersion, latestVersion: currentVersion };
     }
 
     // If electron-updater is initialized, use it (handles download flow)
     if (isInitialized) {
-      console.log('[AutoUpdater] Manual update check requested');
+      logger.log('[AutoUpdater] Manual update check requested');
       try {
         isCheckingForUpdate = true;
         const result = await autoUpdater.checkForUpdates();
-        isCheckingForUpdate = false;
         const latestVersion = result?.updateInfo?.version || currentVersion;
         const updateAvailable = isVersionGreater(latestVersion, currentVersion);
         return {
@@ -343,17 +347,18 @@ function registerIpcHandlers() {
           latestVersion,
         };
       } catch (error) {
+        logger.error('[AutoUpdater] electron-updater check failed, falling back to GitHub API:', error);
+      } finally {
         isCheckingForUpdate = false;
-        console.error('[AutoUpdater] electron-updater check failed, falling back to GitHub API:', error);
       }
     }
 
     // Fallback / dev mode: query GitHub releases API directly
-    console.log('[AutoUpdater] Checking latest GitHub release tag...');
+    logger.log('[AutoUpdater] Checking latest GitHub release tag...');
     const release = await fetchLatestGitHubRelease();
     if (release) {
       const updateAvailable = isVersionGreater(release.tag, currentVersion);
-      console.log(`[AutoUpdater] GitHub latest: ${release.tag}, current: ${currentVersion}, update: ${updateAvailable}`);
+      logger.log(`[AutoUpdater] GitHub latest: ${release.tag}, current: ${currentVersion}, update: ${updateAvailable}`);
       return { updateAvailable, currentVersion, latestVersion: release.tag };
     }
 
@@ -366,29 +371,36 @@ function registerIpcHandlers() {
       return { success: false };
     }
     if (isDownloading) {
-      console.log('[AutoUpdater] Download already in progress, ignoring duplicate request');
+      logger.log('[AutoUpdater] Download already in progress, ignoring duplicate request');
       return { success: true };
     }
     if (updateAlreadyDownloaded) {
-      console.log('[AutoUpdater] Update already downloaded, skipping re-download');
+      logger.log('[AutoUpdater] Update already downloaded, skipping re-download');
       return { success: true };
     }
-    console.log('[AutoUpdater] Download requested');
+    logger.log('[AutoUpdater] Download requested');
     isDownloading = true;
-    try {
-      await autoUpdater.downloadUpdate();
-      return { success: true };
-    } catch (error) {
-      isDownloading = false;
-      console.error('[AutoUpdater] Download failed:', error);
-      throw error;
+    const MAX_RETRIES = 2;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        await autoUpdater.downloadUpdate();
+        return { success: true };
+      } catch (error) {
+        logger.error(`[AutoUpdater] Download attempt ${attempt}/${MAX_RETRIES} failed:`, error);
+        if (attempt === MAX_RETRIES) {
+          isDownloading = false;
+          throw error;
+        }
+        // Wait before retry
+        await new Promise(r => setTimeout(r, 3000));
+      }
     }
   });
 
   // Install the update (quit and install)
   ipcMain.handle('updater:install', () => {
     if (!isInitialized) return;
-    console.log('[AutoUpdater] Install requested - quitting and installing...');
+    logger.log('[AutoUpdater] Install requested - quitting and installing...');
     autoUpdater.quitAndInstall(false, true);
   });
 

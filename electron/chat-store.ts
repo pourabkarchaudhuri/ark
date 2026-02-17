@@ -1,7 +1,17 @@
 /**
- * Chat History In-Memory Store
- * Stores chat conversations in memory (cleared on app restart)
+ * Chat History Store — persisted to disk
+ * Conversations survive app restarts via a JSON file in userData.
  */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const electron = require('electron');
+const { app } = electron;
+import { logger } from './safe-logger.js';
+import { atomicWriteFileSync } from './safe-write.js';
 
 // Types (duplicated here for Electron main process)
 interface GameContext {
@@ -48,23 +58,88 @@ interface ChatHistory {
   lastActiveConversationId?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Date-aware JSON reviver — converts ISO-8601 strings back to Date objects
+// ---------------------------------------------------------------------------
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+function dateReviver(_key: string, value: unknown): unknown {
+  if (typeof value === 'string' && ISO_DATE_RE.test(value)) {
+    const d = new Date(value);
+    if (!isNaN(d.getTime())) return d;
+  }
+  return value;
+}
+
+/** Maximum number of conversations to persist (keep most recent) */
+const MAX_PERSISTED_CONVERSATIONS = 50;
+
 class ChatStore {
   private history: ChatHistory;
+  private filePath: string;
+  private saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
-    // Initialize with empty in-memory storage
-    this.history = {
-      conversations: [],
-      lastActiveConversationId: undefined,
-    };
-    console.log('[ChatStore] Initialized in-memory chat store');
+    this.filePath = path.join(app.getPath('userData'), 'chat-history.json');
+    this.history = this.loadFromDisk();
+    logger.log(
+      `[ChatStore] Initialized — ${this.history.conversations.length} conversation(s) loaded from disk`,
+    );
   }
+
+  // ---- Persistence helpers ------------------------------------------------
+
+  private loadFromDisk(): ChatHistory {
+    try {
+      if (fs.existsSync(this.filePath)) {
+        const raw = fs.readFileSync(this.filePath, 'utf-8');
+        const parsed = JSON.parse(raw, dateReviver) as ChatHistory;
+        if (parsed && Array.isArray(parsed.conversations)) {
+          return parsed;
+        }
+      }
+    } catch (err) {
+      logger.warn('[ChatStore] Failed to load chat history from disk:', err);
+    }
+    return { conversations: [], lastActiveConversationId: undefined };
+  }
+
+  private scheduleSave(): void {
+    if (this.saveTimeout) clearTimeout(this.saveTimeout);
+    this.saveTimeout = setTimeout(() => {
+      this.saveTimeout = null;
+      this.writeToDisk();
+    }, 5000);
+  }
+
+  private writeToDisk(): void {
+    try {
+      // Keep only the most recent conversations to avoid unbounded growth
+      const trimmed: ChatHistory = {
+        ...this.history,
+        conversations: this.history.conversations.slice(-MAX_PERSISTED_CONVERSATIONS),
+      };
+      atomicWriteFileSync(this.filePath, JSON.stringify(trimmed));
+    } catch (err) {
+      logger.error('[ChatStore] Failed to save chat history:', err);
+    }
+  }
+
+  /** Synchronously flush pending writes to disk (call in before-quit). */
+  flushSync(): void {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
+    this.writeToDisk();
+  }
+
+  // ---- Public API (unchanged signatures) ----------------------------------
 
   /**
    * Generate a unique ID
    */
   private generateId(): string {
-    return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    return `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
   }
 
   /**
@@ -100,9 +175,14 @@ class ChatStore {
     };
     
     this.history.conversations.push(conversation);
+    // Cap in-memory conversations to prevent unbounded growth
+    if (this.history.conversations.length > MAX_PERSISTED_CONVERSATIONS) {
+      this.history.conversations = this.history.conversations.slice(-MAX_PERSISTED_CONVERSATIONS);
+    }
     this.history.lastActiveConversationId = conversation.id;
     
-    console.log(`[ChatStore] Created new conversation: ${conversation.id}`);
+    logger.log(`[ChatStore] Created new conversation: ${conversation.id}`);
+    this.scheduleSave();
     return conversation;
   }
 
@@ -112,6 +192,7 @@ class ChatStore {
   setActiveConversation(conversationId: string): void {
     if (this.history.conversations.some(c => c.id === conversationId)) {
       this.history.lastActiveConversationId = conversationId;
+      this.scheduleSave();
     }
   }
 
@@ -134,6 +215,7 @@ class ChatStore {
     conversation.messages.push(fullMessage);
     conversation.updatedAt = new Date();
     
+    this.scheduleSave();
     return fullMessage;
   }
 
@@ -145,6 +227,7 @@ class ChatStore {
     if (conversation) {
       conversation.gameContext = gameContext;
       conversation.updatedAt = new Date();
+      this.scheduleSave();
     }
   }
 
@@ -156,7 +239,8 @@ class ChatStore {
       conversations: [],
       lastActiveConversationId: undefined,
     };
-    console.log('[ChatStore] Cleared all chat history');
+    logger.log('[ChatStore] Cleared all chat history');
+    this.scheduleSave();
   }
 
   /**
@@ -170,6 +254,7 @@ class ChatStore {
     if (this.history.lastActiveConversationId === conversationId) {
       this.history.lastActiveConversationId = this.history.conversations[0]?.id;
     }
+    this.scheduleSave();
   }
 }
 

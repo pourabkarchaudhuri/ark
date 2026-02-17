@@ -9,6 +9,23 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.30': {
+    title: "What's New in Ark 1.0.30",
+    changes: [
+      'UI Rebrand — Renamed "Buzz" to "Transmissions" and "Journey" to "Voyage" across all views, navigation, empty states, and changelog entries for a sharper identity',
+      'Release Calendar Redesign — Replaced custom poster cards with the shared GameCard component used in Browse and Library for visual consistency; poster-card feed grouped by year/month/week with store filters (Steam / Epic / Both) and smooth Framer Motion layout animations',
+      'IPC Architecture Overhaul — Extracted ~1,200 lines from the monolithic electron/main.ts into 12 dedicated handler modules (AI, dialogs, Epic, Metacritic, proxy, RSS, sessions, settings, Steam, webview, window) for maintainability and faster startup',
+      'Metacritic Scraper Rewrite — Replaced raw HTTPS + regex scraping with cheerio-based HTML parsing; added user score support, 5 MB response-size guard, and Electron net.fetch for reliable connectivity',
+      'Loading Screen Elimination — Streamlined boot sequence from Splash → Loading → Dashboard to Splash → Dashboard; splash screen now preloads game data and the dashboard chunk, gating the "Enter Ark" button until data is ready',
+      'Browse ↔ Library Flash Fix — Fixed stale-data flash when switching view modes by synchronously recomputing filters before paint via useLayoutEffect instead of the deferred rAF path',
+      'Game Details Refactor — Major restructure of the game details page with improved layout, better error handling, and cleaner component decomposition',
+      'Responsive Dashboard — Panel open/close toggles, responsive padding for split-screen and smaller viewports, icon-only nav buttons below lg breakpoint',
+      'Safe Logger & Safe Write — New crash-resistant utility modules for structured logging and atomic file writes across the Electron main process',
+      'App Icons Refresh — Updated all icon sizes (16–256 px, ICO, and PNG) with the new Ark branding',
+      'Online Status Guard — Added unmount safety ref to the useOnlineStatus hook to prevent state updates after teardown',
+      'Unhandled Rejection Handler — Main process now catches unhandled promise rejections gracefully instead of crashing',
+    ],
+  },
   '1.0.29': {
     title: "What's New in Ark 1.0.29",
     changes: [
@@ -61,10 +78,10 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
       'Diff-Based Library Refresh — useLibraryGames now caches fetched game details and only makes API calls for newly added games; status/priority updates are applied locally without network requests',
       'Pre-Computed Search Index — Prefetch store builds a parallel lowercase index on load, eliminating thousands of .toLowerCase() calls per keystroke during Browse search',
       'Release Calendar Overhaul — "+X more" button opens a slide-out side panel with smooth framer-motion enter/exit animation; multi-step Steam CDN fallback chain (cover → header → capsule) for thumbnails; fixed popover positioning bug (viewport-relative fix) and added debounced hover timing to prevent flicker',
-      'Journey Thumbnail Fallbacks — All three Journey views (Noob timeline, OCD Gantt, Analytics) now use a shared buildGameImageChain() utility that walks through Steam CDN URL variants on error instead of showing blank placeholders',
-      'Journey CoverUrl Backfill — Library refresh now patches older journey entries that have missing coverUrl fields with freshly fetched image URLs',
+      'Voyage Thumbnail Fallbacks — All three Voyage views (Noob timeline, OCD Gantt, Analytics) now use a shared buildGameImageChain() utility that walks through Steam CDN URL variants on error instead of showing blank placeholders',
+      'Voyage CoverUrl Backfill — Library refresh now patches older voyage entries that have missing coverUrl fields with freshly fetched image URLs',
       'Epic System Requirements Fix — Epic CMS requirements are now handled for all data shapes (string, array, object) instead of breaking when Object.entries() was called on a plain string',
-      'Epic Library Bug Fix — Fixed broken GraphQL schema (removed deprecated releaseInfo field), added REST fallback for getGameDetails, and introduced multi-tier offline fallback (cachedMeta → journeyStore → placeholder) so Epic games always appear in Library',
+      'Epic Library Bug Fix — Fixed broken GraphQL schema (removed deprecated releaseInfo field), added REST fallback for getGameDetails, and introduced multi-tier offline fallback (cachedMeta → voyageStore → placeholder) so Epic games always appear in Library',
       'Stable View-Mode Handlers — Extracted 5 inline onClick closures to useCallback; memoized hasActiveFilters and activeFilterCount to reduce unnecessary re-renders',
       'Filter Sidebar Type Fix — Added missing "calendar" to ViewMode union, resolving TypeScript compilation error; cleaned up unused Filter import',
     ],
@@ -75,17 +92,17 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
       'Improved Notifications — Native Windows notifications now show the Ark icon, fire regardless of window visibility (not only when minimised), de-duplicate per version so the same toast is not repeated every 30 minutes, and a second "Update Ready" notification appears once the download completes',
       'Faster First Update Check — A 2-minute delayed first poll replaces the previous 30-minute wait, so users who minimise to tray still get an early update check',
       'System Tray Icon Fix — Icons are now bundled via extraResources instead of asarUnpack (which was silently failing), and the tray prefers the pre-made 16×16 PNG to avoid blank icons from ICO resize issues',
-      'Human-Readable Playtime — Playtime now displays as "X Hrs Y Mins" with proper singular/plural labels across all views (Journey, Analytics, Gantt, Progress, Reviews, Sessions)',
+      'Human-Readable Playtime — Playtime now displays as "X Hrs Y Mins" with proper singular/plural labels across all views (Voyage, Analytics, Gantt, Progress, Reviews, Sessions)',
       'Custom Game Click Fix — Clicking a custom game card now correctly opens the progress dialog instead of navigating to a non-existent game details page; fixed React.memo comparator that was suppressing onClick updates',
       'Custom Game Edit Fix — "Edit Entry" on a custom game now opens the dedicated progress dialog instead of the generic library dialog, so the executable path and all custom fields are properly shown',
-      'Journey View Custom Games — Custom game cards in the Journey timeline now open the progress dialog instead of navigating to a broken game details route',
+      'Voyage View Custom Games — Custom game cards in the Voyage timeline now open the progress dialog instead of navigating to a broken game details route',
     ],
   },
   '1.0.23': {
     title: "What's New in Ark 1.0.23",
     changes: [
       'Custom Game Progress — Clicking a custom game card now opens a dedicated progress dialog with playtime stats, session history, status/hours/rating editing, and executable path management',
-      'Human-Readable Playtime — All hour displays across Journey, Analytics, OCD Gantt, and My Progress now show "Xh Ym" format instead of raw decimals (e.g. "2h 15m" instead of "2.25")',
+      'Human-Readable Playtime — All hour displays across Voyage, Analytics, OCD Gantt, and My Progress now show "Xh Ym" format instead of raw decimals (e.g. "2h 15m" instead of "2.25")',
       'System Tray Icon Fix — Generated proper PNG/ICO icon files from the SVG source; tray now shows the Ark gamepad icon instead of a blank square',
       'Auto-Updater Double-Download Fix — Added guard flags to prevent overlapping update checks and duplicate downloads; removed redundant 5-second initial check that conflicted with the snackbar mount check',
       'Custom Game Dialog Overflow Fix — Restructured the Add Custom Game modal with a scrollable body and pinned footer to prevent UI overflow on smaller screens',
@@ -115,9 +132,9 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
       'Recent Activity Fade — Scrollable activity list now has a fade-out gradient at the bottom to signal more content',
       'Custom Game Session Tracking — Custom games with executable paths are now tracked by the session monitor (previously only library games were tracked)',
       'Custom Game Hours — Play hours from tracked sessions are now written back to custom game entries (new hoursPlayed field on CustomGameEntry)',
-      'Performance — JourneyGameCard and AnimatedValue wrapped with React.memo; StarRating array extracted to module-level constant; store snapshots cached via useRef to prevent new-array-reference re-renders',
+      'Performance — VoyageGameCard and AnimatedValue wrapped with React.memo; StarRating array extracted to module-level constant; store snapshots cached via useRef to prevent new-array-reference re-renders',
       'OCD View — Sticky sidebar with synchronised vertical scroll for game labels; improved hover highlighting across sidebar and timeline',
-      'Buzz View — Webview opens on card click (removed separate View button); portrait cards restored; viewport height adjusted to prevent scrolling',
+      'Transmissions View — Webview opens on card click (removed separate View button); portrait cards restored; viewport height adjusted to prevent scrolling',
       'Removed Platform Breakdown chart from Analytics',
     ],
   },
@@ -129,7 +146,7 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
       'Animated Chart Components — Count-up numbers, draw-on sparklines, sweep-in donuts, radial gauges, completion funnel, and staggered card entry animations',
       'Gantt Chart Redesign — Interactive timeline bars with status-colored segments, session overlays, and improved scrolling',
       'OCD View Performance — Throttled scroll updates, ref-driven hover/tooltip (zero re-renders), memoized footer stats',
-      'Buzz View — Switched news cards from portrait (9:16) to square (1:1) to reduce image clipping; removed Reddit as a news source',
+      'Transmissions View — Switched news cards from portrait (9:16) to square (1:1) to reduce image clipping; removed Reddit as a news source',
       'Battlefield 6 Cover Fix — Hardcoded local cover image across all views since API images were broken',
       'Bug Fix — "Clear All" now also removes custom games (previously only cleared library entries)',
     ],
@@ -157,13 +174,13 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
     changes: [
       'Steam News & Updates — Game details page now shows a carousel of the latest news articles from Steam with thumbnails, auto-scroll, and source labels',
       'Recommended by Steam — Similar games section redesigned with content-based recommendations specific to each game',
-      'Journey View — New timeline view that persists your entire gaming history, even after removing games from the library',
+      'Voyage View — New timeline view that persists your entire gaming history, even after removing games from the library',
       'AI Chat with Web Search — Ollama-powered chat now uses DuckDuckGo grounding for real-time answers about awards, releases, and current events',
-      'Live Player Counts — Real-time "playing now" counts shown on dashboard cards, game details, and journey cards, consistent across all views',
+      'Live Player Counts — Real-time "playing now" counts shown on dashboard cards, game details, and voyage cards, consistent across all views',
       'My Progress Skeleton — Dedicated skeleton loader for the progress tab eliminates flicker when navigating to game details',
       'Status Change History — Every status transition is now persisted with game, previous/new state, and timestamp for future tracking features',
       'Image Fallback Overhaul — Robust multi-step fallback chains with placeholder detection for game thumbnails across all views',
-      'Performance Audit — Reduced re-renders in game cards, journey view, and game store; optimized memo comparators and batch state updates',
+      'Performance Audit — Reduced re-renders in game cards, voyage view, and game store; optimized memo comparators and batch state updates',
       'Test Suite Reorganization — All 18 test files consolidated into src/test/ with consistent folder structure mirroring source',
     ],
   },
@@ -272,18 +289,29 @@ export function ChangelogModal() {
 
   useEffect(() => {
     // Check if we should show the changelog
-    const lastSeenVersion = localStorage.getItem(STORAGE_KEY);
-    
-    if (lastSeenVersion !== APP_VERSION && CHANGELOG[APP_VERSION]) {
-      // New version detected, show changelog
-      setChangelogData(CHANGELOG[APP_VERSION]);
-      setIsOpen(true);
+    try {
+      const lastSeenVersion = localStorage.getItem(STORAGE_KEY);
+      if (lastSeenVersion !== APP_VERSION && CHANGELOG[APP_VERSION]) {
+        setChangelogData(CHANGELOG[APP_VERSION]);
+        setIsOpen(true);
+      }
+    } catch {
+      // localStorage may be unavailable (private browsing, storage full, etc.)
     }
   }, []);
 
+  // Close on Escape key
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') handleClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
+
   const handleClose = () => {
-    // Mark this version as seen
-    localStorage.setItem(STORAGE_KEY, APP_VERSION);
+    try { localStorage.setItem(STORAGE_KEY, APP_VERSION); } catch { /* ignore */ }
     setIsOpen(false);
   };
 

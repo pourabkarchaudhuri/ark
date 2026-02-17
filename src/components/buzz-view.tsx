@@ -530,6 +530,7 @@ export const BuzzView = memo(function BuzzView() {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const progressInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const abortedRef = useRef(false);
 
   const stories = useMemo(() => news.slice(0, 30), [news]);
   const total = stories.length;
@@ -548,21 +549,27 @@ export const BuzzView = memo(function BuzzView() {
       }
       setError(null);
       const items = await fetchAllNews(force);
+      if (abortedRef.current) return;
       setNews(items);
     } catch (err) {
+      if (abortedRef.current) return;
       console.error('[BuzzView] Failed to fetch news:', err);
       setError('Failed to load gaming news. Check your connection and try again.');
     } finally {
-      setLoading(false);
+      if (!abortedRef.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    abortedRef.current = false;
     loadNews();
+    return () => { abortedRef.current = true; };
   }, [loadNews]);
 
   useEffect(() => {
-    const interval = setInterval(() => loadNews(true), AUTO_REFRESH_INTERVAL);
+    const interval = setInterval(() => {
+      if (!abortedRef.current) loadNews(true);
+    }, AUTO_REFRESH_INTERVAL);
     return () => clearInterval(interval);
   }, [loadNews]);
 

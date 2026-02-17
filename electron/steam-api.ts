@@ -286,9 +286,17 @@ class RateLimiter {
 
 // PersistentCache — imported from shared module
 import { PersistentCache } from './persistent-cache.js';
+import { logger } from './safe-logger.js';
 
 // Alias for backwards compatibility
 const Cache = PersistentCache;
+
+/** Fetch with a timeout (default 30s). Aborts the request if it exceeds the limit. */
+function fetchWithTimeout(url: string, timeoutMs: number = 30000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+}
 
 // Steam API Client
 class SteamAPIClient {
@@ -305,17 +313,17 @@ class SteamAPIClient {
     // Check for fresh cache
     const freshCached = this.cache.get<SteamMostPlayedGame[]>(cacheKey);
     if (freshCached) {
-      console.log('[Steam] getMostPlayedGames: returning fresh cache');
+      logger.log('[Steam] getMostPlayedGames: returning fresh cache');
       return freshCached;
     }
     
     // Check for stale cache - return it but also refresh in background
     const staleCached = this.cache.get<SteamMostPlayedGame[]>(cacheKey, true);
     if (staleCached) {
-      console.log('[Steam] getMostPlayedGames: returning stale cache, refreshing in background');
+      logger.log('[Steam] getMostPlayedGames: returning stale cache, refreshing in background');
       // Fire and forget background refresh
       this.refreshMostPlayedGames().catch(err => 
-        console.warn('[Steam] Background refresh failed:', err)
+        logger.warn('[Steam] Background refresh failed:', err)
       );
       return staleCached;
     }
@@ -332,14 +340,14 @@ class SteamAPIClient {
     const url = `${STEAM_WEB_API_BASE}/ISteamChartsService/GetMostPlayedGames/v1/?key=${STEAM_API_KEY}`;
     
     const response = await this.rateLimiter.execute(async () => {
-      console.log('[Steam] Fetching fresh most played games...');
-      const res = await fetch(url);
+      logger.log('[Steam] Fetching fresh most played games...');
+      const res = await fetchWithTimeout(url);
       if (!res.ok) throw new Error(`Steam API error: ${res.status}`);
       return res.json() as Promise<SteamMostPlayedResponse>;
     });
 
     const games = response.response?.ranks || [];
-    console.log(`[Steam] Fetched ${games.length} most played games`);
+    logger.log(`[Steam] Fetched ${games.length} most played games`);
     this.cache.set(cacheKey, games);
     return games;
   }
@@ -363,10 +371,10 @@ class SteamAPIClient {
     // Check for stale cache - return it but also refresh in background
     const staleCached = this.cache.get<SteamAppDetails['data']>(cacheKey, true);
     if (staleCached) {
-      console.log(`[Steam] getAppDetails(${appId}): returning stale cache, refreshing in background`);
+      logger.log(`[Steam] getAppDetails(${appId}): returning stale cache, refreshing in background`);
       // Fire and forget background refresh
       this.refreshAppDetails(appId).catch(err => 
-        console.warn(`[Steam] Background refresh for ${appId} failed:`, err)
+        logger.warn(`[Steam] Background refresh for ${appId} failed:`, err)
       );
       return staleCached;
     }
@@ -384,7 +392,7 @@ class SteamAPIClient {
     
     try {
       const response = await this.rateLimiter.execute(async () => {
-        const res = await fetch(url);
+        const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
         return res.json() as Promise<{ [key: string]: SteamAppDetails }>;
       }, `appdetails-${appId}`);
@@ -396,7 +404,7 @@ class SteamAPIClient {
       }
       return null;
     } catch (error) {
-      console.error(`[Steam] Error fetching app details for ${appId}:`, error);
+      logger.error(`[Steam] Error fetching app details for ${appId}:`, error);
       return null;
     }
   }
@@ -420,7 +428,7 @@ class SteamAPIClient {
       }
     }
 
-    console.log(`[Steam] getMultipleAppDetails: ${results.size} cached, ${uncachedIds.length} to fetch`);
+    logger.log(`[Steam] getMultipleAppDetails: ${results.size} cached, ${uncachedIds.length} to fetch`);
 
     // OPTIMIZATION: Increased batch size from 5 to 10 for faster loading
     // Rate limiter handles the actual throttling
@@ -452,8 +460,8 @@ class SteamAPIClient {
     
     try {
       const response = await this.rateLimiter.execute(async () => {
-        console.log(`[Steam] Searching for: ${query}`);
-        const res = await fetch(url);
+        logger.log(`[Steam] Searching for: ${query}`);
+        const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
         return res.json() as Promise<SteamSearchResult>;
       });
@@ -516,11 +524,11 @@ class SteamAPIClient {
       });
       
       const items = filteredItems.slice(0, limit);
-      console.log(`[Steam] Found ${allItems.length} results, filtered to ${items.length} games for: ${query}`);
+      logger.log(`[Steam] Found ${allItems.length} results, filtered to ${items.length} games for: ${query}`);
       this.cache.set(cacheKey, items);
       return items;
     } catch (error) {
-      console.error(`[Steam] Search error:`, error);
+      logger.error(`[Steam] Search error:`, error);
       return [];
     }
   }
@@ -537,8 +545,8 @@ class SteamAPIClient {
     
     try {
       const response = await this.rateLimiter.execute(async () => {
-        console.log('[Steam] Fetching featured categories...');
-        const res = await fetch(url);
+        logger.log('[Steam] Fetching featured categories...');
+        const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
         return res.json() as Promise<SteamFeaturedCategories>;
       }, 'featured-categories');
@@ -546,7 +554,7 @@ class SteamAPIClient {
       this.cache.set(cacheKey, response);
       return response;
     } catch (error) {
-      console.error('[Steam] Featured categories error:', error);
+      logger.error('[Steam] Featured categories error:', error);
       return {};
     }
   }
@@ -611,17 +619,17 @@ class SteamAPIClient {
     
     try {
       const response = await this.rateLimiter.execute(async () => {
-        console.log(`[Steam] Fetching reviews for appId: ${appId}`);
-        const res = await fetch(url);
+        logger.log(`[Steam] Fetching reviews for appId: ${appId}`);
+        const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam Reviews API error: ${res.status}`);
         return res.json() as Promise<SteamReviewsResponse>;
       });
 
-      console.log(`[Steam] Got ${response.reviews?.length || 0} reviews for appId: ${appId}`);
+      logger.log(`[Steam] Got ${response.reviews?.length || 0} reviews for appId: ${appId}`);
       this.cache.set(cacheKey, response, DETAILS_CACHE_TTL);
       return response;
     } catch (error) {
-      console.error(`[Steam] Error fetching reviews for ${appId}:`, error);
+      logger.error(`[Steam] Error fetching reviews for ${appId}:`, error);
       return { success: 0, query_summary: { total_reviews: 0, total_positive: 0, total_negative: 0, review_score: 0, review_score_desc: '' }, reviews: [] };
     }
   }
@@ -638,8 +646,8 @@ class SteamAPIClient {
 
     try {
       const response = await this.rateLimiter.execute(async () => {
-        console.log(`[Steam] Fetching news for appId: ${appId}`);
-        const res = await fetch(url);
+        logger.log(`[Steam] Fetching news for appId: ${appId}`);
+        const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam News API error: ${res.status}`);
         return res.json();
       });
@@ -647,21 +655,30 @@ class SteamAPIClient {
       const items = response?.appnews?.newsitems;
       if (!Array.isArray(items)) return [];
 
-      const news = items.map((item: Record<string, unknown>) => ({
-        gid: String(item.gid ?? ''),
-        title: String(item.title ?? ''),
-        url: String(item.url ?? ''),
-        author: String(item.author ?? ''),
-        feedlabel: String(item.feedlabel ?? ''),
-        date: Number(item.date ?? 0),
-        contents: String(item.contents ?? ''),
-      }));
+      // Blocklist: non-English / irrelevant news feeds
+      const BLOCKED_FEEDS = ['gamemag.ru', 'gamemag'];
+
+      const news = items
+        .map((item: Record<string, unknown>) => ({
+          gid: String(item.gid ?? ''),
+          title: String(item.title ?? ''),
+          url: String(item.url ?? ''),
+          author: String(item.author ?? ''),
+          feedlabel: String(item.feedlabel ?? ''),
+          date: Number(item.date ?? 0),
+          contents: String(item.contents ?? ''),
+        }))
+        .filter(n => {
+          const label = n.feedlabel.toLowerCase();
+          const url = n.url.toLowerCase();
+          return !BLOCKED_FEEDS.some(b => label.includes(b) || url.includes(b));
+        });
 
       this.cache.set(cacheKey, news, DETAILS_CACHE_TTL);
-      console.log(`[Steam] Got ${news.length} news items for appId: ${appId}`);
+      logger.log(`[Steam] Got ${news.length} news items for appId: ${appId}`);
       return news;
     } catch (error) {
-      console.error(`[Steam] Error fetching news for ${appId}:`, error);
+      logger.error(`[Steam] Error fetching news for ${appId}:`, error);
       return [];
     }
   }
@@ -680,7 +697,7 @@ class SteamAPIClient {
     try {
       const url = `https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=${appId}&format=json`;
       const result = await this.rateLimiter.execute(async () => {
-        const res = await fetch(url);
+        const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Player count API error: ${res.status}`);
         return res.json();
       }, `player-count-${appId}`);
@@ -725,7 +742,7 @@ class SteamAPIClient {
    */
   clearCache(): void {
     this.cache.clear();
-    console.log('[Steam] Cache cleared');
+    logger.log('[Steam] Cache cleared');
   }
 
   /**
@@ -751,7 +768,7 @@ class SteamAPIClient {
       }
     }
     
-    console.log(`[Steam] Got ${Object.keys(result).length}/${appIds.length} cached game names`);
+    logger.log(`[Steam] Got ${Object.keys(result).length}/${appIds.length} cached game names`);
     return result;
   }
 
@@ -767,18 +784,18 @@ class SteamAPIClient {
     });
 
     if (uncachedIds.length === 0) {
-      console.log('[Steam] Prefetch: All games already cached');
+      logger.log('[Steam] Prefetch: All games already cached');
       return;
     }
 
-    console.log(`[Steam] Prefetch: Loading ${uncachedIds.length} games in background...`);
+    logger.log(`[Steam] Prefetch: Loading ${uncachedIds.length} games in background...`);
     
     // Low priority fetch - don't await, just fire and forget
     // Process in small batches to not overwhelm the rate limiter
     const batchSize = 5;
     for (let i = 0; i < uncachedIds.length; i += batchSize) {
       const batch = uncachedIds.slice(i, i + batchSize);
-      Promise.all(batch.map(appId => this.getAppDetails(appId).catch(() => null)));
+      Promise.all(batch.map(appId => this.getAppDetails(appId).catch((err: any) => { logger.warn('[Steam] prefetchGameDetails Non-fatal:', err); return null; })));
       // Small delay between batches to give priority to user-initiated requests
       await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -805,19 +822,19 @@ class SteamAPIClient {
     const cached = this.cache.get<Array<{ appId: number; name: string; score: number; reasons: string[] }>>(cacheKey);
     if (cached) return cached;
 
-    console.log(`[Steam] Getting recommendations for appId: ${currentAppId}`);
+    logger.log(`[Steam] Getting recommendations for appId: ${currentAppId}`);
 
     try {
       // 1. Get current game details
       const currentGame = await this.getAppDetails(currentAppId);
       if (!currentGame) {
-        console.log('[Steam] Could not get current game details');
+        logger.log('[Steam] Could not get current game details');
         return [];
       }
 
       // 2. Build taste profile from current game and library
       const tasteProfile = await this.buildTasteProfile(currentGame, libraryAppIds);
-      console.log('[Steam] Taste profile:', {
+      logger.log('[Steam] Taste profile:', {
         genres: tasteProfile.genres.slice(0, 5),
         categories: tasteProfile.categories.slice(0, 5),
         developers: tasteProfile.developers.slice(0, 3)
@@ -825,7 +842,7 @@ class SteamAPIClient {
 
       // 3. Get candidate games from various sources
       const candidates = await this.getCandidateGames(tasteProfile, currentAppId, libraryAppIds);
-      console.log(`[Steam] Found ${candidates.length} candidate games`);
+      logger.log(`[Steam] Found ${candidates.length} candidate games`);
 
       // 4. Score and rank candidates
       const scored = await this.scoreAndRankCandidates(candidates, currentGame, tasteProfile, libraryAppIds);
@@ -834,10 +851,10 @@ class SteamAPIClient {
       const results = scored.slice(0, limit);
       this.cache.set(cacheKey, results, DETAILS_CACHE_TTL);
       
-      console.log(`[Steam] Returning ${results.length} recommendations`);
+      logger.log(`[Steam] Returning ${results.length} recommendations`);
       return results;
     } catch (error) {
-      console.error('[Steam] Error getting recommendations:', error);
+      logger.error('[Steam] Error getting recommendations:', error);
       return [];
     }
   }
@@ -892,7 +909,7 @@ class SteamAPIClient {
     // Add library games with low weight so the current game dominates the profile
     const libraryToFetch = libraryAppIds.slice(0, 5);
     const libraryGames = await Promise.all(
-      libraryToFetch.map(id => this.getAppDetails(id).catch(() => null))
+      libraryToFetch.map(id => this.getAppDetails(id).catch((err: any) => { logger.warn('[Steam] buildTasteProfile getAppDetails Non-fatal:', err); return null; }))
     );
 
     libraryGames.forEach(game => {
@@ -931,9 +948,9 @@ class SteamAPIClient {
 
     // 1. Broad sources (top sellers, new releases, most played) — run in parallel
     const [topSellers, newReleases, mostPlayed] = await Promise.all([
-      this.getTopSellers().catch(() => []),
-      this.getNewReleases().catch(() => []),
-      this.getMostPlayedGames().catch(() => [])
+      this.getTopSellers().catch((err: any) => { logger.warn('[Steam] getCandidateGames getTopSellers Non-fatal:', err); return []; }),
+      this.getNewReleases().catch((err: any) => { logger.warn('[Steam] getCandidateGames getNewReleases Non-fatal:', err); return []; }),
+      this.getMostPlayedGames().catch((err: any) => { logger.warn('[Steam] getCandidateGames getMostPlayedGames Non-fatal:', err); return []; })
     ]);
 
     addCandidates(topSellers.map(g => g.id));
@@ -962,7 +979,7 @@ class SteamAPIClient {
 
     // Run all game-specific searches in parallel
     const searchPromises = searchTerms.map(term =>
-      this.searchGames(term, 50).catch(() => [])
+      this.searchGames(term, 50).catch((err: any) => { logger.warn('[Steam] getCandidateGames searchGames Non-fatal:', err); return []; })
     );
     const searchResults = await Promise.all(searchPromises);
 
@@ -970,7 +987,7 @@ class SteamAPIClient {
       addCandidates(results.map(g => g.id));
     }
 
-    console.log(`[Steam] getCandidateGames: ${candidateSet.size} candidates from ${searchTerms.length} searches + broad sources`);
+    logger.log(`[Steam] getCandidateGames: ${candidateSet.size} candidates from ${searchTerms.length} searches + broad sources`);
     return Array.from(candidateSet);
   }
 
@@ -990,7 +1007,7 @@ class SteamAPIClient {
     
     // Fetch details for candidates (many should be cached from getCandidateGames sources)
     const candidateDetails = await Promise.all(
-      toScore.map(id => this.getAppDetails(id).catch(() => null))
+      toScore.map(id => this.getAppDetails(id).catch((err: any) => { logger.warn('[Steam] scoreAndRankCandidates getAppDetails Non-fatal:', err); return null; }))
     );
 
     const currentGenres = new Set(currentGame.genres?.map(g => g.id) || []);
@@ -1111,16 +1128,16 @@ class SteamAPIClient {
     // Check fresh cache
     const freshCached = this.cache.get<Array<{ appid: number; name: string }>>(cacheKey);
     if (freshCached) {
-      console.log(`[Steam] getAppList: returning fresh cache (${freshCached.length} apps)`);
+      logger.log(`[Steam] getAppList: returning fresh cache (${freshCached.length} apps)`);
       return freshCached;
     }
 
     // Check stale cache — return immediately, refresh in background
     const staleCached = this.cache.get<Array<{ appid: number; name: string }>>(cacheKey, true);
     if (staleCached) {
-      console.log(`[Steam] getAppList: returning stale cache (${staleCached.length} apps), refreshing in background`);
+      logger.log(`[Steam] getAppList: returning stale cache (${staleCached.length} apps), refreshing in background`);
       this.refreshAppList(APP_LIST_TTL).catch(err =>
-        console.warn('[Steam] Background refresh of app list failed:', err)
+        logger.warn('[Steam] Background refresh of app list failed:', err)
       );
       return staleCached;
     }
@@ -1140,7 +1157,7 @@ class SteamAPIClient {
     let lastAppId: number | undefined;
     let page = 0;
 
-    console.log('[Steam] Fetching full game list from IStoreService/GetAppList/v1 (paginated)...');
+    logger.log('[Steam] Fetching full game list from IStoreService/GetAppList/v1 (paginated)...');
 
     while (true) {
       page++;
@@ -1152,8 +1169,8 @@ class SteamAPIClient {
       }
 
       const response = await this.rateLimiter.execute(async () => {
-        console.log(`[Steam] getAppList page ${page}${lastAppId ? ` (after appid ${lastAppId})` : ''}...`);
-        const res = await fetch(url);
+        logger.log(`[Steam] getAppList page ${page}${lastAppId ? ` (after appid ${lastAppId})` : ''}...`);
+        const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam IStoreService API error: ${res.status}`);
         return res.json() as Promise<{
           response: {
@@ -1171,7 +1188,7 @@ class SteamAPIClient {
         }
       }
 
-      console.log(`[Steam] getAppList page ${page}: ${pageApps.length} entries (${allApps.length} total so far)`);
+      logger.log(`[Steam] getAppList page ${page}: ${pageApps.length} entries (${allApps.length} total so far)`);
 
       if (!response.response?.have_more_results) break;
       lastAppId = response.response.last_appid;
@@ -1181,9 +1198,14 @@ class SteamAPIClient {
     // Sort by name (A–Z) for catalog browsing
     allApps.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
-    console.log(`[Steam] getAppList: complete — ${allApps.length} games fetched and sorted`);
+    logger.log(`[Steam] getAppList: complete — ${allApps.length} games fetched and sorted`);
     this.cache.set(cacheKey, allApps, ttl);
     return allApps;
+  }
+
+  /** Synchronously flush the disk cache (for use in before-quit). */
+  flushCache(): void {
+    this.cache.flushSync();
   }
 }
 

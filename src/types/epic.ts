@@ -134,6 +134,7 @@ export interface EpicAddon {
   price?: string;
   isFree: boolean;
   releaseDate?: string;
+  slug?: string;
 }
 
 export {};

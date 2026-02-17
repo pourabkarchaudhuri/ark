@@ -14,6 +14,7 @@
 
 import { execSync } from 'child_process';
 import path from 'path';
+import { logger } from './safe-logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 
@@ -149,7 +150,7 @@ function pollTick() {
       sendToRenderer('session:statusChange', { gameId: game.gameId, status: 'Playing Now' });
       sendToRenderer('session:started', { gameId: game.gameId, startTime: session.startTime.toISOString() });
 
-      console.log(`[SessionTracker] Game ${game.gameId} started (${path.basename(game.executablePath)})`);
+      logger.log(`[SessionTracker] Game ${game.gameId} started (${path.basename(game.executablePath)})`);
 
     } else if (running && existingSession) {
       // ---- Game still running — accumulate idle if applicable ----
@@ -187,7 +188,7 @@ function pollTick() {
       sendToRenderer('session:statusChange', { gameId: game.gameId, status: 'Playing' });
       sendToRenderer('session:ended', { gameId: game.gameId, session: completed });
 
-      console.log(
+      logger.log(
         `[SessionTracker] Game ${game.gameId} ended — ` +
         `active: ${completed.durationMinutes.toFixed(1)}min, idle: ${completed.idleMinutes.toFixed(1)}min`
       );
@@ -206,7 +207,7 @@ function sendToRenderer(channel: string, data: unknown) {
       mainWindowRef.webContents.send(channel, data);
     }
   } catch (err) {
-    console.error(`[SessionTracker] Failed to send ${channel}:`, err);
+    logger.error(`[SessionTracker] Failed to send ${channel}:`, err);
   }
 }
 
@@ -222,7 +223,7 @@ export function startSessionTracker(mainWindow: BrowserWindowType) {
   }
 
   pollTimer = setInterval(pollTick, POLL_INTERVAL_MS);
-  console.log('[SessionTracker] Started (polling every 15s)');
+  logger.log('[SessionTracker] Started (polling every 15s)');
 }
 
 export function stopSessionTracker() {
@@ -253,7 +254,7 @@ export function stopSessionTracker() {
 
   activeSessions.clear();
   mainWindowRef = null;
-  console.log('[SessionTracker] Stopped');
+  logger.log('[SessionTracker] Stopped');
 }
 
 /**
@@ -286,12 +287,12 @@ export function setTrackedGames(games: TrackedGame[]) {
       activeSessions.delete(gameId);
       sendToRenderer('session:statusChange', { gameId, status: 'Playing' });
       sendToRenderer('session:ended', { gameId, session: completed });
-      console.log(`[SessionTracker] Finalized orphaned session for ${gameId}`);
+      logger.log(`[SessionTracker] Finalized orphaned session for ${gameId}`);
     }
   }
 
   trackedGames = games;
-  console.log(`[SessionTracker] Now tracking ${games.length} game(s)`);
+  logger.log(`[SessionTracker] Now tracking ${games.length} game(s)`);
 }
 
 /**

@@ -18,6 +18,8 @@ export function useOnlineStatus() {
   
   // Use ref to track previous online status to avoid stale closures
   const wasOnlineRef = useRef(navigator.onLine);
+  // Gate state updates after unmount
+  const mountedRef = useRef(true);
 
   // Update pending sync count
   const updatePendingCount = useCallback(async () => {
@@ -32,6 +34,7 @@ export function useOnlineStatus() {
   // Set up event listeners - using refs to avoid stale closures
   useEffect(() => {
     const handleOnline = () => {
+      if (!mountedRef.current) return;
       // Check ref for previous state to avoid stale closure
       if (!wasOnlineRef.current) {
         setWasOffline(true);
@@ -41,6 +44,7 @@ export function useOnlineStatus() {
     };
 
     const handleOffline = () => {
+      if (!mountedRef.current) return;
       wasOnlineRef.current = false;
       setIsOnline(false);
     };
@@ -51,9 +55,47 @@ export function useOnlineStatus() {
     // Initial sync queue count
     updatePendingCount();
 
+    // ---- Active network probe ----
+    // navigator.onLine only detects physical disconnection (Wi-Fi off, cable unplugged).
+    // This probe catches "connected but no internet" by pinging a lightweight endpoint.
+    const PROBE_INTERVAL_MS = 30_000; // 30 seconds
+    const PROBE_TIMEOUT_MS = 5_000;   // 5 second timeout
+
+    const probeNetwork = async () => {
+      // Only probe when the browser thinks we're online
+      if (!navigator.onLine) return;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+        await fetch('https://connectivitycheck.gstatic.com/generate_204', {
+          method: 'HEAD',
+          mode: 'no-cors',
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        // If we were marked offline but the probe succeeded, flip back to online
+        if (!wasOnlineRef.current) {
+          handleOnline();
+        }
+      } catch {
+        // Probe failed — mark as offline even though navigator.onLine is true
+        if (wasOnlineRef.current) {
+          handleOffline();
+        }
+      }
+    };
+
+    const probeInterval = setInterval(probeNetwork, PROBE_INTERVAL_MS);
+    // Run an initial probe after a short delay (don't block mount)
+    const initialProbe = setTimeout(probeNetwork, 3000);
+
     return () => {
+      mountedRef.current = false;
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      clearInterval(probeInterval);
+      clearTimeout(initialProbe);
     };
   }, [updatePendingCount]);
 

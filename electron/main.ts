@@ -2,10 +2,9 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, net, session, Tray, Menu, nativeImage } = electron;
+const { app, BrowserWindow, shell, session, Tray, Menu, nativeImage } = electron;
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
-import * as https from 'https';
 import path from 'path';
 
 let tray: any = null;
@@ -38,7 +37,7 @@ function logStartupError(err: unknown) {
   } catch {
     // ignore
   }
-  console.error('[Ark] Startup error:', msg);
+  logger.error('[Ark] Startup error:', msg);
 }
 
 process.on('uncaughtException', (err) => {
@@ -50,13 +49,31 @@ process.on('uncaughtException', (err) => {
   }
 });
 
-import { steamAPI, getSteamCoverUrl, getSteamHeaderUrl } from './steam-api.js';
+process.on('unhandledRejection', (reason) => {
+  logger.error('[Ark] Unhandled promise rejection:', reason);
+  // Don't quit — just log. The rejection is already "handled" once this listener exists.
+});
+
+// ---------------------------------------------------------------------------
+// Startup timeout helper — wraps a promise with a max-wait, returning null on timeout
+// ---------------------------------------------------------------------------
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    promise.then((v) => { clearTimeout(timer); return v; }),
+    new Promise<null>((resolve) => {
+      timer = setTimeout(() => { logger.warn(`[Startup] ${label} timed out after ${ms}ms`); resolve(null); }, ms);
+    }),
+  ]);
+}
+
+import { steamAPI } from './steam-api.js';
 import { epicAPI } from './epic-api.js';
-import { fetchMetacriticReviews, clearMetacriticCache } from './metacritic-api.js';
-import { processMessage, searchGamesForContext, chatStore } from './ai-chat.js';
+import { chatStore } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
 import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
-import { startSessionTracker, stopSessionTracker, setTrackedGames, getActiveSessions } from './session-tracker.js';
+import { startSessionTracker, stopSessionTracker } from './session-tracker.js';
+import { logger } from './safe-logger.js';
 let mainWindow: BrowserWindowType | null = null;
 
 // ---------- Data migration: game-tracker → ark ----------
@@ -69,7 +86,7 @@ let mainWindow: BrowserWindowType | null = null;
     const oldUserData = path.join(path.dirname(newUserData), 'game-tracker');
 
     if (fs.existsSync(oldUserData) && !fs.existsSync(path.join(newUserData, '.migrated'))) {
-      console.log(`[Migration] Migrating user data from ${oldUserData} → ${newUserData}`);
+      logger.log(`[Migration] Migrating user data from ${oldUserData} → ${newUserData}`);
       if (!fs.existsSync(newUserData)) {
         fs.mkdirSync(newUserData, { recursive: true });
       }
@@ -81,16 +98,16 @@ let mainWindow: BrowserWindowType | null = null;
         const dest = path.join(newUserData, file);
         if (fs.statSync(src).isFile() && !fs.existsSync(dest)) {
           fs.copyFileSync(src, dest);
-          console.log(`[Migration] Copied ${file}`);
+          logger.log(`[Migration] Copied ${file}`);
         }
       }
 
       // Write a marker so we only migrate once
       fs.writeFileSync(path.join(newUserData, '.migrated'), 'migrated from game-tracker', 'utf-8');
-      console.log('[Migration] Done');
+      logger.log('[Migration] Done');
     }
   } catch (err) {
-    console.warn('[Migration] Non-fatal error during data migration:', err);
+    logger.warn('[Migration] Non-fatal error during data migration:', err);
   }
 })();
 
@@ -174,8 +191,8 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
-    minWidth: 1024,
-    minHeight: 768,
+    minWidth: 680,
+    minHeight: 500,
     title: 'Ark',
     ...(windowIcon && !windowIcon.isEmpty() ? { icon: windowIcon } : {}),
     webPreferences: {
@@ -212,7 +229,7 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http:') || url.startsWith('https:') || url.startsWith('mailto:')) {
       shell.openExternal(url);
-      console.log(`[Navigation] Redirected new-window request to OS browser: ${url}`);
+      logger.log(`[Navigation] Redirected new-window request to OS browser: ${url}`);
     }
     return { action: 'deny' }; // Never open a child Electron window
   });
@@ -230,7 +247,15 @@ function createWindow() {
     if (!isInternalNav) {
       event.preventDefault();
       shell.openExternal(url);
-      console.log(`[Navigation] Blocked in-window navigation, opened in OS browser: ${url}`);
+      logger.log(`[Navigation] Blocked in-window navigation, opened in OS browser: ${url}`);
+    }
+  });
+
+  // ---- Renderer crash recovery ----
+  mainWindow.webContents.on('render-process-gone', (_event: any, details: any) => {
+    logger.error('[Ark] Renderer process gone:', details.reason, details.exitCode);
+    if (details.reason !== 'clean-exit') {
+      mainWindow?.webContents.reload();
     }
   });
 
@@ -239,7 +264,7 @@ function createWindow() {
     if (!process.argv.includes('--hidden')) {
       mainWindow?.show();
     } else {
-      console.log('[Startup] Launched with --hidden flag, staying in tray');
+      logger.log('[Startup] Launched with --hidden flag, staying in tray');
     }
     
     // Initialize auto-updater in production mode
@@ -267,1201 +292,17 @@ function createWindow() {
   });
 }
 
-// IPC handlers for window controls
-ipcMain.handle('window-minimize', () => {
-  if (mainWindow) {
-    mainWindow.hide();
-  }
-});
-
-ipcMain.handle('window-maximize', () => {
-  if (mainWindow) {
-    if (mainWindow.isMaximized()) {
-      mainWindow.unmaximize();
-    } else {
-      mainWindow.maximize();
-    }
-  }
-});
-
-ipcMain.handle('window-close', () => {
-  if (mainWindow) {
-    mainWindow.close();
-  }
-});
-
-ipcMain.handle('window-is-maximized', () => {
-  return mainWindow ? mainWindow.isMaximized() : false;
-});
-
-// Open external URL in default browser
-ipcMain.handle('shell:openExternal', async (_event, url: string) => {
-  try {
-    // Validate URL to prevent security issues
-    const parsedUrl = new URL(url);
-    const allowedProtocols = ['http:', 'https:', 'mailto:', 'magnet:'];
-    if (!allowedProtocols.includes(parsedUrl.protocol)) {
-      console.warn(`[Shell] Blocked attempt to open URL with disallowed protocol: ${parsedUrl.protocol}`);
-      return { success: false, error: 'Protocol not allowed' };
-    }
-    
-    await shell.openExternal(url);
-    console.log(`[Shell] Opened external URL: ${url}`);
-    return { success: true };
-  } catch (error) {
-    console.error('[Shell] Error opening external URL:', error);
-    return { success: false, error: String(error) };
-  }
-});
-
-// ============================================================================
-// STEAM API IPC HANDLERS
-// ============================================================================
-
-/**
- * Get cover URL for a Steam game
- */
-ipcMain.handle('steam:getCoverUrl', async (_event, appId: number) => {
-  return getSteamCoverUrl(appId);
-});
-
-/**
- * Get header URL for a Steam game
- */
-ipcMain.handle('steam:getHeaderUrl', async (_event, appId: number) => {
-  return getSteamHeaderUrl(appId);
-});
-
-/**
- * Get most played games from Steam Charts
- * Returns top 100 most played games with player counts
- */
-ipcMain.handle('steam:getMostPlayedGames', async () => {
-  try {
-    console.log('[Steam IPC] getMostPlayedGames called');
-    const games = await steamAPI.getMostPlayedGames();
-    console.log(`[Steam IPC] getMostPlayedGames returned ${games.length} games`);
-    return games;
-  } catch (error) {
-    console.error('[Steam IPC] Error fetching most played games:', error);
-    throw error;
-  }
-});
-
-/**
- * Get app details for a specific game
- */
-ipcMain.handle('steam:getAppDetails', async (_event, appId: number) => {
-  try {
-    console.log(`[Steam IPC] getAppDetails for appId: ${appId}`);
-    const details = await steamAPI.getAppDetails(appId);
-    if (details) {
-      console.log(`[Steam IPC] getAppDetails success: ${details.name}`);
-    } else {
-      console.log(`[Steam IPC] getAppDetails returned null for ${appId}`);
-    }
-    return details;
-  } catch (error) {
-    console.error(`[Steam IPC] Error fetching app details for ${appId}:`, error);
-    throw error;
-  }
-});
-
-/**
- * Get app details for multiple games (batched)
- */
-ipcMain.handle('steam:getMultipleAppDetails', async (_event, appIds: number[]) => {
-  try {
-    console.log(`[Steam IPC] getMultipleAppDetails for ${appIds.length} games: [${appIds.slice(0, 5).join(', ')}${appIds.length > 5 ? '...' : ''}]`);
-    const detailsMap = await steamAPI.getMultipleAppDetails(appIds);
-    
-    // Convert Map to array for IPC serialization
-    const results: Array<{ appId: number; details: any }> = [];
-    detailsMap.forEach((details, appId) => {
-      results.push({ appId, details });
-    });
-    
-    console.log(`[Steam IPC] getMultipleAppDetails returned ${results.length} results`);
-    return results;
-  } catch (error) {
-    console.error('[Steam IPC] Error fetching multiple app details:', error);
-    throw error;
-  }
-});
-
-/**
- * Search games on Steam Store
- */
-ipcMain.handle('steam:searchGames', async (_event, query: string, limit: number = 20) => {
-  try {
-    console.log(`[Steam IPC] searchGames for "${query}" (limit: ${limit})`);
-    const results = await steamAPI.searchGames(query, limit);
-    console.log(`[Steam IPC] searchGames returned ${results.length} results`);
-    return results;
-  } catch (error) {
-    console.error('[Steam IPC] Error searching games:', error);
-    throw error;
-  }
-});
-
-/**
- * Get new releases
- */
-ipcMain.handle('steam:getNewReleases', async () => {
-  try {
-    console.log('[Steam] Handler: getNewReleases');
-    const releases = await steamAPI.getNewReleases();
-    return releases;
-  } catch (error) {
-    console.error('Error fetching new releases:', error);
-    throw error;
-  }
-});
-
-/**
- * Get top sellers
- */
-ipcMain.handle('steam:getTopSellers', async () => {
-  try {
-    console.log('[Steam] Handler: getTopSellers');
-    const sellers = await steamAPI.getTopSellers();
-    return sellers;
-  } catch (error) {
-    console.error('Error fetching top sellers:', error);
-    throw error;
-  }
-});
-
-/**
- * Get coming soon games
- */
-ipcMain.handle('steam:getComingSoon', async () => {
-  try {
-    console.log('[Steam] Handler: getComingSoon');
-    const comingSoon = await steamAPI.getComingSoon();
-    return comingSoon;
-  } catch (error) {
-    console.error('Error fetching coming soon games:', error);
-    throw error;
-  }
-});
-
-/**
- * Get featured categories (includes new releases, top sellers, etc.)
- */
-ipcMain.handle('steam:getFeaturedCategories', async () => {
-  try {
-    console.log('[Steam] Handler: getFeaturedCategories');
-    const categories = await steamAPI.getFeaturedCategories();
-    return categories;
-  } catch (error) {
-    console.error('Error fetching featured categories:', error);
-    throw error;
-  }
-});
-
-/**
- * Get game reviews
- */
-ipcMain.handle('steam:getGameReviews', async (_event, appId: number, limit: number = 10) => {
-  try {
-    console.log(`[Steam] Handler: getGameReviews for appId ${appId}`);
-    const reviews = await steamAPI.getGameReviews(appId, limit);
-    return reviews;
-  } catch (error) {
-    console.error('Error fetching game reviews:', error);
-    throw error;
-  }
-});
-
-/**
- * Get news for a specific game
- */
-ipcMain.handle('steam:getNewsForApp', async (_event, appId: number, count: number = 15) => {
-  try {
-    console.log(`[Steam] Handler: getNewsForApp for appId ${appId}`);
-    const news = await steamAPI.getNewsForApp(appId, count);
-    return news;
-  } catch (error) {
-    console.error(`Error fetching news for appId ${appId}:`, error);
-    throw error;
-  }
-});
-
-/**
- * Get current player count for a single game
- */
-ipcMain.handle('steam:getPlayerCount', async (_event, appId: number) => {
-  return steamAPI.getPlayerCount(appId);
-});
-
-/**
- * Get current player counts for multiple games (batched)
- */
-ipcMain.handle('steam:getMultiplePlayerCounts', async (_event, appIds: number[]) => {
-  return steamAPI.getMultiplePlayerCounts(appIds);
-});
-
-/**
- * Get queue status for rate limiting feedback
- */
-ipcMain.handle('steam:getQueueStatus', async () => {
-  return steamAPI.getQueueStatus();
-});
-
-/**
- * Clear Steam API cache
- */
-ipcMain.handle('steam:clearCache', async () => {
-  steamAPI.clearCache();
-  return true;
-});
-
-/**
- * Prefetch game details in background (for faster navigation)
- */
-ipcMain.handle('steam:prefetchGameDetails', async (_event, appIds: number[]) => {
-  console.log(`[Steam IPC] prefetchGameDetails for ${appIds.length} games`);
-  steamAPI.prefetchGameDetails(appIds);
-  return true;
-});
-
-/**
- * Check if a game's details are cached
- */
-ipcMain.handle('steam:isCached', async (_event, appId: number) => {
-  return steamAPI.isCached(appId);
-});
-
-/**
- * Get cache statistics
- */
-ipcMain.handle('steam:getCacheStats', async () => {
-  return steamAPI.getCacheStats();
-});
-
-/**
- * Get cached game names for multiple app IDs
- */
-ipcMain.handle('steam:getCachedGameNames', async (_event, appIds: number[]) => {
-  return steamAPI.getCachedGameNames(appIds);
-});
-
-/**
- * Get full Steam app list (for Catalog A–Z browsing)
- */
-ipcMain.handle('steam:getAppList', async () => {
-  try {
-    console.log('[Steam IPC] getAppList called');
-    const apps = await steamAPI.getAppList();
-    console.log(`[Steam IPC] getAppList returned ${apps.length} apps`);
-    return apps;
-  } catch (error) {
-    console.error('[Steam IPC] Error fetching app list:', error);
-    throw error;
-  }
-});
-
-/**
- * Get game recommendations based on a game and user's library
- */
-ipcMain.handle('steam:getRecommendations', async (_event, currentAppId: number, libraryAppIds: number[], limit: number = 10) => {
-  try {
-    console.log(`[Steam IPC] getRecommendations for appId ${currentAppId} with ${libraryAppIds.length} library games`);
-    const recommendations = await steamAPI.getRecommendations(currentAppId, libraryAppIds, limit);
-    return recommendations;
-  } catch (error) {
-    console.error('Error getting recommendations:', error);
-    return [];
-  }
-});
-
-/**
- * Get upcoming releases: combines Coming Soon + New Releases with enriched details.
- * Batch-fetches getAppDetails for each game to get release_date, genres, platforms.
- * Cached for 1 hour to avoid repeated batch fetches.
- */
-let upcomingReleasesCache: { data: any[]; timestamp: number } | null = null;
-const UPCOMING_CACHE_TTL = 60 * 60 * 1000; // 1 hour
-
-ipcMain.handle('steam:getUpcomingReleases', async () => {
-  try {
-    // Return cached data if still fresh
-    if (upcomingReleasesCache && (Date.now() - upcomingReleasesCache.timestamp < UPCOMING_CACHE_TTL)) {
-      console.log('[Steam IPC] getUpcomingReleases returning cached data');
-      return upcomingReleasesCache.data;
-    }
-
-    console.log('[Steam IPC] getUpcomingReleases called');
-
-    // Fetch coming soon and new releases in parallel
-    const [comingSoon, newReleases] = await Promise.all([
-      steamAPI.getComingSoon().catch(() => []),
-      steamAPI.getNewReleases().catch(() => []),
-    ]);
-
-    // Merge and deduplicate by id
-    const allGamesMap = new Map<number, { id: number; name: string; image: string }>();
-    for (const game of [...comingSoon, ...newReleases]) {
-      if (!allGamesMap.has(game.id)) {
-        allGamesMap.set(game.id, game);
-      }
-    }
-
-    const allGames = Array.from(allGamesMap.values());
-    console.log(`[Steam IPC] getUpcomingReleases: ${comingSoon.length} coming soon, ${newReleases.length} new releases, ${allGames.length} unique`);
-
-    // Batch-fetch details (5 at a time to respect rate limits)
-    const enriched: Array<{
-      id: number;
-      name: string;
-      image: string;
-      releaseDate: string;
-      comingSoon: boolean;
-      genres: string[];
-      platforms: { windows: boolean; mac: boolean; linux: boolean };
-    }> = [];
-
-    const batchSize = 5;
-    for (let i = 0; i < allGames.length; i += batchSize) {
-      const batch = allGames.slice(i, i + batchSize);
-      const detailsResults = await Promise.allSettled(
-        batch.map(async (game) => {
-          try {
-            const details = await steamAPI.getAppDetails(game.id);
-            return {
-              id: game.id,
-              name: details?.name || game.name,
-              image: details?.header_image || game.image,
-              releaseDate: details?.release_date?.date || 'Coming Soon',
-              comingSoon: details?.release_date?.coming_soon ?? true,
-              genres: details?.genres?.map((g: any) => g.description) || [],
-              platforms: details?.platforms || { windows: true, mac: false, linux: false },
-            };
-          } catch {
-            return {
-              id: game.id,
-              name: game.name,
-              image: game.image,
-              releaseDate: 'Coming Soon',
-              comingSoon: true,
-              genres: [] as string[],
-              platforms: { windows: true, mac: false, linux: false },
-            };
-          }
-        })
-      );
-
-      for (const result of detailsResults) {
-        if (result.status === 'fulfilled') {
-          enriched.push(result.value);
-        }
-      }
-
-      // Delay between batches to avoid Steam 429 rate limits
-      if (i + batchSize < allGames.length) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-    }
-
-    // Cache the result for 1 hour
-    upcomingReleasesCache = { data: enriched, timestamp: Date.now() };
-
-    console.log(`[Steam IPC] getUpcomingReleases returning ${enriched.length} enriched games`);
-    return enriched;
-  } catch (error) {
-    console.error('[Steam IPC] Error fetching upcoming releases:', error);
-    return [];
-  }
-});
-
-// ============================================================================
-// EPIC GAMES STORE IPC HANDLERS
-// ============================================================================
-
-/**
- * Search Epic Games Store by keyword
- */
-ipcMain.handle('epic:searchGames', async (_event, query: string, limit: number = 20) => {
-  try {
-    console.log(`[Epic IPC] searchGames: "${query}" (limit ${limit})`);
-    return await epicAPI.searchGames(query, limit);
-  } catch (error) {
-    console.error('[Epic IPC] Error searching games:', error);
-    return [];
-  }
-});
-
-/**
- * Get details for a single Epic game by namespace + offerId
- */
-ipcMain.handle('epic:getGameDetails', async (_event, namespace: string, offerId: string) => {
-  try {
-    console.log(`[Epic IPC] getGameDetails: ${namespace} / ${offerId}`);
-    return await epicAPI.getGameDetails(namespace, offerId);
-  } catch (error) {
-    console.error('[Epic IPC] Error getting game details:', error);
-    return null;
-  }
-});
-
-/**
- * Get new releases from Epic Games Store
- */
-ipcMain.handle('epic:getNewReleases', async () => {
-  try {
-    console.log('[Epic IPC] getNewReleases');
-    return await epicAPI.getNewReleases();
-  } catch (error) {
-    console.error('[Epic IPC] Error fetching new releases:', error);
-    return [];
-  }
-});
-
-/**
- * Get coming soon games from Epic Games Store
- */
-ipcMain.handle('epic:getComingSoon', async () => {
-  try {
-    console.log('[Epic IPC] getComingSoon');
-    return await epicAPI.getComingSoon();
-  } catch (error) {
-    console.error('[Epic IPC] Error fetching coming soon:', error);
-    return [];
-  }
-});
-
-/**
- * Get current free games on Epic Games Store
- */
-ipcMain.handle('epic:getFreeGames', async () => {
-  try {
-    console.log('[Epic IPC] getFreeGames');
-    return await epicAPI.getFreeGames();
-  } catch (error) {
-    console.error('[Epic IPC] Error fetching free games:', error);
-    return [];
-  }
-});
-
-/**
- * Get upcoming releases from Epic (combined new + coming soon, enriched)
- */
-ipcMain.handle('epic:getUpcomingReleases', async () => {
-  try {
-    console.log('[Epic IPC] getUpcomingReleases');
-    return await epicAPI.getUpcomingReleases();
-  } catch (error) {
-    console.error('[Epic IPC] Error fetching upcoming releases:', error);
-    return [];
-  }
-});
-
-/**
- * Browse the full Epic catalog (paginated, no date filter — returns 200+ games)
- */
-ipcMain.handle('epic:browseCatalog', async (_event, limit: number = 0) => {
-  try {
-    console.log(`[Epic IPC] browseCatalog (limit ${limit || 'ALL'})`);
-    return await epicAPI.browseCatalog(limit);
-  } catch (error) {
-    console.error('[Epic IPC] Error browsing catalog:', error);
-    return [];
-  }
-});
-
-/**
- * Get cover URL for an Epic game (returns cached image URL or null)
- */
-ipcMain.handle('epic:getCoverUrl', async (_event, namespace: string, offerId: string) => {
-  return epicAPI.getCoverUrl(namespace, offerId);
-});
-
-/**
- * Clear Epic API cache
- */
-ipcMain.handle('epic:clearCache', async () => {
-  epicAPI.clearCache();
-  return true;
-});
-
-/**
- * Get Epic cache statistics
- */
-ipcMain.handle('epic:getCacheStats', async () => {
-  return epicAPI.getCacheStats();
-});
-
-/**
- * Get rich product page content (full About description + system requirements)
- * from the Epic CMS REST endpoint.
- */
-ipcMain.handle('epic:getProductContent', async (_event, slug: string) => {
-  try {
-    return await epicAPI.getProductContent(slug);
-  } catch (error) {
-    console.error('[Epic IPC] getProductContent error:', error);
-    return null;
-  }
-});
-
-/**
- * Get news/blog articles related to an Epic game.
- */
-ipcMain.handle('epic:getNewsFeed', async (_event, keyword: string, limit: number = 15) => {
-  try {
-    return await epicAPI.getNewsFeed(keyword, limit);
-  } catch (error) {
-    console.error('[Epic IPC] getNewsFeed error:', error);
-    return [];
-  }
-});
-
-/**
- * Get product reviews for an Epic game.
- */
-ipcMain.handle('epic:getProductReviews', async (_event, slug: string) => {
-  try {
-    return await epicAPI.getProductReviews(slug);
-  } catch (error) {
-    console.error('[Epic IPC] getProductReviews error:', error);
-    return null;
-  }
-});
-
-/**
- * Get DLC/add-ons for an Epic game by namespace.
- */
-ipcMain.handle('epic:getAddons', async (_event, namespace: string, limit: number = 50) => {
-  try {
-    return await epicAPI.getAddons(namespace, limit);
-  } catch (error) {
-    console.error('[Epic IPC] getAddons error:', error);
-    return [];
-  }
-});
-
-// ============================================================================
-// RSS FEED IPC HANDLERS (Gaming news sites)
-// ============================================================================
-
-/** RSS feed sources for gaming news. */
-const RSS_FEEDS = [
-  { url: 'https://www.pcgamer.com/rss/', source: 'PC Gamer' },
-  { url: 'https://www.rockpapershotgun.com/feed', source: 'Rock Paper Shotgun' },
-  { url: 'https://www.eurogamer.net/feed', source: 'Eurogamer' },
-  { url: 'https://feeds.feedburner.com/ign/all', source: 'IGN' },
-  { url: 'https://feeds.arstechnica.com/arstechnica/gaming', source: 'Ars Technica' },
-];
-
-/**
- * Minimal RSS/Atom XML parser using regex.
- * Extracts title, link, description, pubDate, and first image from each item.
- */
-function parseRSSItems(xml: string, source: string, limit: number): Array<{
-  id: string;
-  title: string;
-  summary: string;
-  url: string;
-  imageUrl?: string;
-  publishedAt: number;
-  source: string;
-}> {
-  const items: Array<{
-    id: string;
-    title: string;
-    summary: string;
-    url: string;
-    imageUrl?: string;
-    publishedAt: number;
-    source: string;
-  }> = [];
-
-  // Match RSS <item> or Atom <entry> blocks
-  const itemRegex = /<item[\s>]([\s\S]*?)<\/item>|<entry[\s>]([\s\S]*?)<\/entry>/gi;
-  let match: RegExpExecArray | null;
-
-  while ((match = itemRegex.exec(xml)) !== null && items.length < limit) {
-    const block = match[1] || match[2] || '';
-
-    // Title
-    const titleMatch = /<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i.exec(block);
-    const title = (titleMatch?.[1] ?? '').replace(/<[^>]+>/g, '').trim();
-    if (!title) continue;
-
-    // Link — RSS uses <link>url</link>, Atom uses <link href="url"/>
-    let url = '';
-    const linkHrefMatch = /<link[^>]+href=["']([^"']+)["']/i.exec(block);
-    const linkTextMatch = /<link[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/link>/i.exec(block);
-    const guidMatch = /<guid[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/guid>/i.exec(block);
-    url = linkHrefMatch?.[1] || linkTextMatch?.[1]?.trim() || guidMatch?.[1]?.trim() || '';
-    if (!url) continue;
-
-    // Description / summary / content
-    const descMatch =
-      /<description[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/description>/i.exec(block) ||
-      /<summary[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/summary>/i.exec(block) ||
-      /<content[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/content>/i.exec(block);
-    const rawDesc = descMatch?.[1] ?? '';
-
-    // Extract image from description HTML or media tags
-    let imageUrl: string | undefined;
-    const mediaMatch =
-      /<media:content[^>]+url=["']([^"']+)["']/i.exec(block) ||
-      /<media:thumbnail[^>]+url=["']([^"']+)["']/i.exec(block) ||
-      /<enclosure[^>]+url=["']([^"']+\.(?:jpg|jpeg|png|gif|webp)[^"']*)["']/i.exec(block) ||
-      /<img[^>]+src=["']([^"']+)["']/i.exec(rawDesc) ||
-      /<img[^>]+src=["']([^"']+)["']/i.exec(block);
-    if (mediaMatch) imageUrl = mediaMatch[1].replace(/&amp;/g, '&');
-
-    // Strip HTML from description for summary text
-    const summary = rawDesc
-      .replace(/<[^>]+>/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&nbsp;/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 500);
-
-    // Published date
-    const dateMatch =
-      /<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i.exec(block) ||
-      /<published[^>]*>([\s\S]*?)<\/published>/i.exec(block) ||
-      /<updated[^>]*>([\s\S]*?)<\/updated>/i.exec(block) ||
-      /<dc:date[^>]*>([\s\S]*?)<\/dc:date>/i.exec(block);
-    const dateStr = dateMatch?.[1]?.trim() ?? '';
-    const publishedAt = dateStr ? Math.floor(new Date(dateStr).getTime() / 1000) : Math.floor(Date.now() / 1000);
-
-    // Generate a stable ID from URL
-    const id = `rss-${source.toLowerCase().replace(/\s+/g, '-')}-${Buffer.from(url).toString('base64url').slice(0, 16)}`;
-
-    items.push({
-      id,
-      title,
-      summary,
-      url,
-      imageUrl,
-      publishedAt: isNaN(publishedAt) ? Math.floor(Date.now() / 1000) : publishedAt,
-      source,
-    });
-  }
-
-  return items;
-}
-
-/**
- * Fetch RSS feeds from gaming news sites.
- * Runs in the main process to avoid CORS issues.
- */
-ipcMain.handle('news:getRSSFeeds', async () => {
-  try {
-    console.log(`[News] Fetching RSS feeds from ${RSS_FEEDS.length} sources`);
-    const allItems: Array<{
-      id: string;
-      title: string;
-      summary: string;
-      url: string;
-      imageUrl?: string;
-      publishedAt: number;
-      source: string;
-    }> = [];
-
-    const promises = RSS_FEEDS.map(async ({ url, source }) => {
-      try {
-        const response = await net.fetch(url, {
-          headers: {
-            'User-Agent': 'ArkGameTracker/1.0 (Electron Desktop App)',
-            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-          },
-        });
-        if (!response.ok) {
-          console.warn(`[News] RSS ${source} returned ${response.status}`);
-          return;
-        }
-        const xml = await response.text();
-        const items = parseRSSItems(xml, source, 10);
-        allItems.push(...items);
-        console.log(`[News] RSS ${source}: got ${items.length} items`);
-      } catch (err) {
-        console.warn(`[News] RSS ${source} failed:`, err);
-      }
-    });
-
-    await Promise.allSettled(promises);
-    console.log(`[News] RSS total: ${allItems.length} items from all feeds`);
-    return allItems;
-  } catch (error) {
-    console.error('[News] RSS fetch error:', error);
-    return [];
-  }
-});
-
-// ============================================================================
-// METACRITIC API IPC HANDLERS
-// ============================================================================
-
-/**
- * Get game reviews from Metacritic
- */
-ipcMain.handle('metacritic:getGameReviews', async (_event, gameName: string) => {
-  try {
-    console.log(`[Metacritic] Handler: getGameReviews for "${gameName}"`);
-    const reviews = await fetchMetacriticReviews(gameName);
-    return reviews;
-  } catch (error) {
-    console.error('Error fetching Metacritic reviews:', error);
-    return null;
-  }
-});
-
-/**
- * Clear Metacritic cache
- */
-ipcMain.handle('metacritic:clearCache', async () => {
-  clearMetacriticCache();
-  return true;
-});
-
-// ============================================================================
-// PROXY FETCH IPC HANDLER
-// ============================================================================
-// Generic HTML fetcher routed through the main process so renderer-side code
-// is not blocked by CORS.  Restricted to a domain allowlist for security.
-
-const PROXY_FETCH_ALLOWED_DOMAINS = [
-  'fitgirl-repacks.site',
-];
-
-ipcMain.handle('proxy:fetchHtml', async (_event, url: string) => {
-  try {
-    const parsed = new URL(url);
-    const allowed = PROXY_FETCH_ALLOWED_DOMAINS.some(
-      d => parsed.hostname === d || parsed.hostname.endsWith(`.${d}`),
-    );
-    if (!allowed) {
-      console.warn(`[Proxy] Blocked fetch to disallowed domain: ${parsed.hostname}`);
-      return null;
-    }
-
-    // Use Node.js https directly so we can set rejectUnauthorized: false
-    // for sites with self-signed / intermediate certificate issues.
-    const html = await new Promise<string | null>((resolve) => {
-      const req = https.get(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-        rejectUnauthorized: false,
-      }, (res) => {
-        if (!res.statusCode || res.statusCode >= 400) { resolve(null); res.resume(); return; }
-        // Follow redirects (301/302)
-        if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
-          https.get(res.headers.location, { rejectUnauthorized: false }, (rRes) => {
-            let data = '';
-            rRes.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-            rRes.on('end', () => resolve(data));
-            rRes.on('error', () => resolve(null));
-          }).on('error', () => resolve(null));
-          res.resume();
-          return;
-        }
-        let data = '';
-        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-        res.on('end', () => resolve(data));
-        res.on('error', () => resolve(null));
-      });
-      req.on('error', () => resolve(null));
-      req.setTimeout(15000, () => { req.destroy(); resolve(null); });
-    });
-    return html;
-  } catch (error) {
-    console.error('[Proxy] fetchHtml error:', error);
-    return null;
-  }
-});
-
-// ============================================================================
-// AI CHAT IPC HANDLERS
-// ============================================================================
-
-/**
- * Send a message to the AI chat
- * Supports streaming responses via 'ai:streamChunk' event
- */
-ipcMain.handle('ai:sendMessage', async (event, { message, gameContext, libraryData }) => {
-  try {
-    console.log(`[AI IPC] sendMessage: "${message.substring(0, 50)}..."`);
-    
-    // Streaming callback to send chunks to renderer
-    const onStreamChunk = (chunk: string, fullContent: string) => {
-      event.sender.send('ai:streamChunk', { chunk, fullContent });
-    };
-    
-    const result = await processMessage(message, gameContext, libraryData, onStreamChunk);
-    
-    // Store the message in chat history
-    chatStore.addMessage({ role: 'user', content: message, gameContext });
-    chatStore.addMessage({ role: 'assistant', content: result.content, toolCalls: result.toolsUsed.map(name => ({ name, args: {} })) });
-    
-    return result;
-  } catch (error) {
-    console.error('[AI IPC] Error sending message:', error);
-    throw error;
-  }
-});
-
-/**
- * Get chat history
- */
-ipcMain.handle('ai:getHistory', async () => {
-  try {
-    return chatStore.getConversations();
-  } catch (error) {
-    console.error('[AI IPC] Error getting history:', error);
-    return [];
-  }
-});
-
-/**
- * Get active conversation
- */
-ipcMain.handle('ai:getActiveConversation', async () => {
-  try {
-    return chatStore.getActiveConversation();
-  } catch (error) {
-    console.error('[AI IPC] Error getting active conversation:', error);
-    return null;
-  }
-});
-
-/**
- * Create a new conversation
- */
-ipcMain.handle('ai:createNewConversation', async () => {
-  try {
-    return chatStore.createConversation();
-  } catch (error) {
-    console.error('[AI IPC] Error creating conversation:', error);
-    throw error;
-  }
-});
-
-/**
- * Clear chat history
- */
-ipcMain.handle('ai:clearHistory', async () => {
-  try {
-    chatStore.clearHistory();
-    return true;
-  } catch (error) {
-    console.error('[AI IPC] Error clearing history:', error);
-    throw error;
-  }
-});
-
-/**
- * Search games for context selection
- */
-ipcMain.handle('ai:searchGamesForContext', async (_event, query: string) => {
-  try {
-    return await searchGamesForContext(query);
-  } catch (error) {
-    console.error('[AI IPC] Error searching games for context:', error);
-    return [];
-  }
-});
-
-// ============================================================================
-// SETTINGS IPC HANDLERS
-// ============================================================================
-
-ipcMain.handle('settings:getApiKey', async () => {
-  try {
-    return settingsStore.getGoogleAIKey();
-  } catch (error) {
-    console.error('[Settings] Error getting API key:', error);
-    return null;
-  }
-});
-
-ipcMain.handle('settings:setApiKey', async (_event, key: string) => {
-  try {
-    settingsStore.setGoogleAIKey(key);
-    return { success: true };
-  } catch (error) {
-    console.error('[Settings] Error setting API key:', error);
-    throw error;
-  }
-});
-
-ipcMain.handle('settings:removeApiKey', async () => {
-  try {
-    settingsStore.removeGoogleAIKey();
-    return { success: true };
-  } catch (error) {
-    console.error('[Settings] Error removing API key:', error);
-    throw error;
-  }
-});
-
-ipcMain.handle('settings:hasApiKey', async () => {
-  try {
-    return settingsStore.hasGoogleAIKey();
-  } catch (error) {
-    console.error('[Settings] Error checking API key:', error);
-    return false;
-  }
-});
-
-ipcMain.handle('settings:getOllamaSettings', async () => {
-  try {
-    return settingsStore.getOllamaSettings();
-  } catch (error) {
-    console.error('[Settings] Error getting Ollama settings:', error);
-    return { enabled: true, url: 'http://localhost:11434', model: 'gemma3:12b' };
-  }
-});
-
-ipcMain.handle('settings:setOllamaSettings', async (_event, settings: { enabled?: boolean; url?: string; model?: string }) => {
-  try {
-    settingsStore.setOllamaSettings(settings);
-  } catch (error) {
-    console.error('[Settings] Error setting Ollama settings:', error);
-    throw error;
-  }
-});
-
-ipcMain.handle('settings:getAutoLaunch', async () => {
-  try {
-    return settingsStore.getAutoLaunch();
-  } catch (error) {
-    console.error('[Settings] Error getting auto-launch setting:', error);
-    return true; // Default to enabled
-  }
-});
-
-ipcMain.handle('settings:setAutoLaunch', async (_event, enabled: boolean) => {
-  try {
-    settingsStore.setAutoLaunch(enabled);
-    return { success: true };
-  } catch (error) {
-    console.error('[Settings] Error setting auto-launch:', error);
-    throw error;
-  }
-});
-
-// ============================================================================
-// FILE DIALOG IPC HANDLERS
-// ============================================================================
-
-/**
- * Show save file dialog and write content to file
- */
-ipcMain.handle('dialog:saveFile', async (_event, options: { 
-  content: string; 
-  defaultName?: string;
-  filters?: Array<{ name: string; extensions: string[] }>;
-}) => {
-  try {
-    const result = await dialog.showSaveDialog(mainWindow!, {
-      defaultPath: options.defaultName || 'export.json',
-      filters: options.filters || [
-        { name: 'JSON Files', extensions: ['json'] },
-        { name: 'All Files', extensions: ['*'] }
-      ]
-    });
-    
-    if (result.canceled || !result.filePath) {
-      return { success: false, canceled: true };
-    }
-    
-    fs.writeFileSync(result.filePath, options.content, 'utf-8');
-    return { success: true, filePath: result.filePath };
-  } catch (error) {
-    console.error('[Dialog] Error saving file:', error);
-    return { success: false, error: String(error) };
-  }
-});
-
-/**
- * Show open file dialog and read content from file
- */
-ipcMain.handle('dialog:openFile', async (_event, options?: { 
-  filters?: Array<{ name: string; extensions: string[] }>;
-}) => {
-  try {
-    const result = await dialog.showOpenDialog(mainWindow!, {
-      properties: ['openFile'],
-      filters: options?.filters || [
-        { name: 'JSON Files', extensions: ['json'] },
-        { name: 'All Files', extensions: ['*'] }
-      ]
-    });
-    
-    if (result.canceled || result.filePaths.length === 0) {
-      return { success: false, canceled: true };
-    }
-    
-    const filePath = result.filePaths[0];
-    const content = fs.readFileSync(filePath, 'utf-8');
-    return { success: true, filePath, content };
-  } catch (error) {
-    console.error('[Dialog] Error opening file:', error);
-    return { success: false, error: String(error) };
-  }
-});
-
-// ============================================================================
-// SESSION TRACKER IPC HANDLERS
-// ============================================================================
-
-/**
- * Receive the list of games to track from the renderer
- */
-ipcMain.handle('session:setTrackedGames', async (_event, games: Array<{ gameId: string; executablePath: string }>) => {
-  setTrackedGames(games);
-  return { success: true };
-});
-
-/**
- * Get currently active sessions
- */
-ipcMain.handle('session:getActive', async () => {
-  return getActiveSessions();
-});
-
-// ============================================================================
-// FILE DIALOG IPC HANDLERS (continued)
-// ============================================================================
-
-/**
- * Show open file dialog to select a game executable (returns path only, no content)
- */
-ipcMain.handle('dialog:selectExecutable', async () => {
-  try {
-    const result = await dialog.showOpenDialog(mainWindow!, {
-      title: 'Select Game Executable',
-      properties: ['openFile'],
-      filters: [
-        { name: 'Executables', extensions: ['exe', 'lnk', 'bat', 'cmd'] },
-        { name: 'All Files', extensions: ['*'] }
-      ]
-    });
-
-    if (result.canceled || result.filePaths.length === 0) {
-      return { success: false, canceled: true };
-    }
-
-    return { success: true, filePath: result.filePaths[0] };
-  } catch (error) {
-    console.error('[Dialog] Error selecting executable:', error);
-    return { success: false, error: String(error) };
-  }
-});
-
-// ============================================================================
-// WEBCONTENTSVIEW-BASED INLINE WEBVIEW
-// ============================================================================
-
-let activeWebContentsView: any = null;
-
+// ---------------------------------------------------------------------------
+// Register all IPC handlers (extracted to electron/ipc/ modules)
+// ---------------------------------------------------------------------------
+import { registerAllHandlers, webviewHandlers } from './ipc/index.js';
+registerAllHandlers(() => mainWindow);
+
+// Access the webview's destroy function for window cleanup
 function destroyWebContentsView() {
-  if (!activeWebContentsView || !mainWindow) return;
-  try { mainWindow.contentView.removeChildView(activeWebContentsView); } catch { /* already removed */ }
-  try { activeWebContentsView.webContents.close(); } catch { /* ignore */ }
-  activeWebContentsView = null;
+  (webviewHandlers as any).destroyWebContentsView?.();
 }
 
-ipcMain.handle('webview:open', async (_event, url: string, bounds: { x: number; y: number; width: number; height: number }) => {
-  if (!mainWindow) return { success: false };
-  destroyWebContentsView();
-
-  activeWebContentsView = new WebContentsView({
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-    },
-  });
-  mainWindow.contentView.addChildView(activeWebContentsView);
-  activeWebContentsView.setBounds({
-    x: Math.round(bounds.x),
-    y: Math.round(bounds.y),
-    width: Math.round(bounds.width),
-    height: Math.round(bounds.height),
-  });
-
-  const wc = activeWebContentsView.webContents;
-
-  // Forward lifecycle events to the renderer
-  wc.on('did-start-loading', () => mainWindow?.webContents.send('webview:loading', true));
-  wc.on('did-stop-loading', () => mainWindow?.webContents.send('webview:loading', false));
-  wc.on('page-title-updated', (_e: any, title: string) => mainWindow?.webContents.send('webview:title', title));
-  wc.on('did-fail-load', (_e: any, code: number, desc: string, _u: string, isMain: boolean) => {
-    if (!isMain || code === -3) return;
-    mainWindow?.webContents.send('webview:error', desc || 'Failed to load page');
-  });
-  const sendNavState = () => {
-    try {
-      mainWindow?.webContents.send('webview:nav-state', {
-        canGoBack: wc.navigationHistory.canGoBack(),
-        canGoForward: wc.navigationHistory.canGoForward(),
-      });
-    } catch { /* ignore */ }
-  };
-  wc.on('did-navigate', sendNavState);
-  wc.on('did-navigate-in-page', sendNavState);
-
-  // Hide scrollbars on every page load
-  const hideScrollbars = () => {
-    wc.insertCSS('::-webkit-scrollbar { display: none !important; } html, body { scrollbar-width: none !important; }').catch(() => {});
-  };
-  wc.on('dom-ready', hideScrollbars);
-
-  // External links open in OS browser
-  wc.setWindowOpenHandler(({ url: target }: { url: string }) => {
-    if (target.startsWith('http:') || target.startsWith('https:')) {
-      shell.openExternal(target);
-    }
-    return { action: 'deny' as const };
-  });
-
-  wc.loadURL(url);
-  return { success: true };
-});
-
-ipcMain.handle('webview:close', async () => destroyWebContentsView());
-
-ipcMain.handle('webview:resize', async (_event, bounds: { x: number; y: number; width: number; height: number }) => {
-  if (activeWebContentsView) {
-    activeWebContentsView.setBounds({
-      x: Math.round(bounds.x),
-      y: Math.round(bounds.y),
-      width: Math.round(bounds.width),
-      height: Math.round(bounds.height),
-    });
-  }
-});
-
-ipcMain.handle('webview:go-back', async () => {
-  if (activeWebContentsView?.webContents.navigationHistory.canGoBack()) activeWebContentsView.webContents.navigationHistory.goBack();
-});
-
-ipcMain.handle('webview:go-forward', async () => {
-  if (activeWebContentsView?.webContents.navigationHistory.canGoForward()) activeWebContentsView.webContents.navigationHistory.goForward();
-});
-
-ipcMain.handle('webview:reload', async () => {
-  activeWebContentsView?.webContents.reload();
-});
-
-ipcMain.handle('webview:open-external', async (_event, url: string) => {
-  shell.openExternal(url);
-});
 
 // ============================================================================
 // APP LIFECYCLE
@@ -1475,10 +316,17 @@ app.whenReady().then(async () => {
       openAtLogin: autoLaunchEnabled,
       args: autoLaunchEnabled ? ['--hidden'] : [],
     });
-    console.log(`[Startup] Auto-launch is ${autoLaunchEnabled ? 'enabled' : 'disabled'}`);
+    logger.log(`[Startup] Auto-launch is ${autoLaunchEnabled ? 'enabled' : 'disabled'}`);
   } catch (err) {
-    console.warn('[Startup] Failed to apply auto-launch setting:', err);
+    logger.warn('[Startup] Failed to apply auto-launch setting:', err);
   }
+
+  // Security: deny all permission requests the app doesn't need
+  // (camera, microphone, geolocation, notifications, etc.)
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    logger.warn(`[Security] Denied permission request: ${permission}`);
+    callback(false);
+  });
 
   // Show window as early as possible — don't block on ad blocker
   try {
@@ -1490,57 +338,65 @@ app.whenReady().then(async () => {
 
   // Initialize ad blocker in the background (non-blocking — runs after window is shown)
   (async () => {
-    try {
-      const cachePath = path.join(app.getPath('userData'), 'adblocker-engine.bin');
-      let engine: FiltersEngine;
+  try {
+    const cachePath = path.join(app.getPath('userData'), 'adblocker-engine.bin');
+    let engine: FiltersEngine;
 
-      // Try loading from cache first for fast startup
-      if (fs.existsSync(cachePath)) {
-        const buf = await fs.promises.readFile(cachePath);
-        engine = FiltersEngine.deserialize(buf);
-        console.log('[AdBlocker] Loaded engine from cache');
-      } else {
-        // Download filter lists (EasyList + EasyPrivacy)
-        const lists = await Promise.all([
-          fetch('https://easylist.to/easylist/easylist.txt').then((r: any) => r.text()),
-          fetch('https://easylist.to/easylist/easyprivacy.txt').then((r: any) => r.text()),
-        ]);
-        engine = FiltersEngine.parse(lists.join('\n'));
-        // Cache for faster startup next time
-        await fs.promises.writeFile(cachePath, Buffer.from(engine.serialize()));
-        console.log('[AdBlocker] Downloaded filter lists and cached engine');
-      }
-
-      // Block matching network requests via session.webRequest
-      session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
-        const { url, resourceType, referrer } = details;
-        // Don't block the main page navigation itself
-        if (resourceType === 'mainFrame') {
-          callback({ cancel: false });
+    // Try loading from cache first for fast startup
+    if (fs.existsSync(cachePath)) {
+      const buf = await fs.promises.readFile(cachePath);
+      engine = FiltersEngine.deserialize(buf);
+        logger.log('[AdBlocker] Loaded engine from cache');
+    } else {
+        // Download filter lists (EasyList + EasyPrivacy) with a 15 s timeout
+        const lists = await withTimeout(
+          Promise.all([
+        fetch('https://easylist.to/easylist/easylist.txt').then((r: any) => r.text()),
+        fetch('https://easylist.to/easylist/easyprivacy.txt').then((r: any) => r.text()),
+          ]),
+          15000,
+          'Ad blocker filter download',
+        );
+        if (!lists) {
+          logger.warn('[AdBlocker] Skipping — filter download timed out');
           return;
         }
-        const request = Request.fromRawDetails({ url, type: resourceType || 'other', sourceUrl: referrer || '' });
-        const { match } = engine.match(request);
-        if (match) {
-          callback({ cancel: true });
-        } else {
-          callback({ cancel: false });
-        }
-      });
+      engine = FiltersEngine.parse(lists.join('\n'));
+      // Cache for faster startup next time
+      await fs.promises.writeFile(cachePath, Buffer.from(engine.serialize()));
+        logger.log('[AdBlocker] Downloaded filter lists and cached engine');
+    }
 
-      console.log('[AdBlocker] Initialized and enabled');
-    } catch (err) {
-      console.warn('[AdBlocker] Failed to initialize (non-fatal):', err);
+    // Block matching network requests via session.webRequest
+    session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
+        try {
+      const { url, resourceType, referrer } = details;
+      if (resourceType === 'mainFrame') {
+        callback({ cancel: false });
+        return;
+      }
+      const request = Request.fromRawDetails({ url, type: resourceType || 'other', sourceUrl: referrer || '' });
+      const { match } = engine.match(request);
+          callback({ cancel: !!match });
+        } catch {
+          // Never hang a request — allow it through if matching throws
+        callback({ cancel: false });
+      }
+    });
+
+      logger.log('[AdBlocker] Initialized and enabled');
+  } catch (err) {
+      logger.warn('[AdBlocker] Failed to initialize (non-fatal):', err);
     }
   })();
 
   // ---- Epic Cloudflare clearance (background, non-blocking) ----
   // Epic's GraphQL API is behind Cloudflare JS challenge.  We solve it once
   // at startup using a hidden BrowserWindow so all Epic catalog queries work.
-  epicAPI.initCloudflare().then(ok => {
-    if (ok) console.log('[Startup] Epic Cloudflare clearance ready');
-    else console.warn('[Startup] Epic Cloudflare clearance failed — REST fallback active');
-  }).catch(() => {});
+  withTimeout(epicAPI.initCloudflare(), 20000, 'Epic Cloudflare clearance').then(ok => {
+    if (ok) logger.log('[Startup] Epic Cloudflare clearance ready');
+    else logger.warn('[Startup] Epic Cloudflare clearance failed or timed out — REST fallback active');
+  }).catch((err: any) => { logger.warn('[Epic] Cloudflare init Non-fatal:', err); });
 
   // ---- System Tray ----
   try {
@@ -1569,17 +425,17 @@ app.whenReady().then(async () => {
     }
 
     let iconPath = candidates.find((p) => fs.existsSync(p));
-    console.log('[Tray] Icon candidates:', candidates, '| resolved:', iconPath);
+    logger.log('[Tray] Icon candidates:', candidates, '| resolved:', iconPath);
 
     let trayIcon;
     if (iconPath) {
       const raw = nativeImage.createFromPath(iconPath);
       const size = raw.getSize();
-      console.log('[Tray] Loaded icon:', iconPath, '| size:', size.width, 'x', size.height, '| empty:', raw.isEmpty());
+      logger.log('[Tray] Loaded icon:', iconPath, '| size:', size.width, 'x', size.height, '| empty:', raw.isEmpty());
       // Only resize if the image isn't already 16×16
       trayIcon = (size.width === 16 && size.height === 16) ? raw : raw.resize({ width: 16, height: 16 });
     } else {
-      console.warn('[Tray] No icon file found in any candidate path - using empty icon');
+      logger.warn('[Tray] No icon file found in any candidate path - using empty icon');
       trayIcon = nativeImage.createEmpty();
     }
 
@@ -1616,15 +472,19 @@ app.whenReady().then(async () => {
       }
     });
 
-    console.log('[Tray] System tray initialized');
+    logger.log('[Tray] System tray initialized');
   } catch (err) {
-    console.warn('[Tray] Failed to create system tray (non-fatal):', err);
+    logger.warn('[Tray] Failed to create system tray (non-fatal):', err);
   }
 });
 
 // Set isQuitting flag before quit so close interceptor lets through
+// Also flush caches synchronously so no data is lost on shutdown
 app.on('before-quit', () => {
   isQuitting = true;
+  try { steamAPI.flushCache(); } catch (e) { logger.error('[Shutdown] Steam cache flush failed:', e); }
+  try { epicAPI.flushCache(); } catch (e) { logger.error('[Shutdown] Epic cache flush failed:', e); }
+  try { chatStore.flushSync(); } catch (e) { logger.error('[Shutdown] Chat store flush failed:', e); }
 });
 
 app.on('window-all-closed', () => {

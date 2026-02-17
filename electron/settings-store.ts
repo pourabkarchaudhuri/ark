@@ -10,6 +10,8 @@ const { app } = electron;
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { logger } from './safe-logger.js';
+import { atomicWriteFileSync } from './safe-write.js';
 
 interface Settings {
   version: number;
@@ -57,10 +59,10 @@ class SettingsStore {
           return parsed;
         }
         
-        console.warn('[SettingsStore] Settings version mismatch, using defaults');
+        logger.warn('[SettingsStore] Settings version mismatch, using defaults');
       }
     } catch (error) {
-      console.error('[SettingsStore] Failed to load settings:', error);
+      logger.error('[SettingsStore] Failed to load settings:', error);
     }
 
     return {
@@ -80,9 +82,9 @@ class SettingsStore {
 
   private saveSettings(): void {
     try {
-      fs.writeFileSync(getSettingsFilePath(), JSON.stringify(this.settings, null, 2), 'utf-8');
+      atomicWriteFileSync(getSettingsFilePath(), JSON.stringify(this.settings, null, 2));
     } catch (error) {
-      console.error('[SettingsStore] Failed to save settings:', error);
+      logger.error('[SettingsStore] Failed to save settings:', error);
       throw error;
     }
   }
@@ -99,8 +101,16 @@ class SettingsStore {
 
   // Decrypt a value
   private decrypt(encrypted: string): string {
+    if (typeof encrypted !== 'string' || !encrypted.includes(':')) {
+      throw new Error('Malformed encrypted value');
+    }
+    const colonIdx = encrypted.indexOf(':');
+    const ivHex = encrypted.slice(0, colonIdx);
+    const encryptedText = encrypted.slice(colonIdx + 1);
+    if (!/^[0-9a-f]{32}$/i.test(ivHex) || encryptedText.length === 0) {
+      throw new Error('Malformed encrypted value: invalid IV or empty ciphertext');
+    }
     const key = getEncryptionKey();
-    const [ivHex, encryptedText] = encrypted.split(':');
     const iv = Buffer.from(ivHex, 'hex');
     const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
     let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
@@ -116,7 +126,7 @@ class SettingsStore {
     try {
       return this.decrypt(encrypted);
     } catch (error) {
-      console.error('[SettingsStore] Failed to decrypt API key:', error);
+      logger.error('[SettingsStore] Failed to decrypt API key:', error);
       return null;
     }
   }
@@ -124,13 +134,13 @@ class SettingsStore {
   setGoogleAIKey(key: string): void {
     this.settings.apiKeys.googleAI = this.encrypt(key);
     this.saveSettings();
-    console.log('[SettingsStore] Google AI key saved');
+    logger.log('[SettingsStore] Google AI key saved');
   }
 
   removeGoogleAIKey(): void {
     delete this.settings.apiKeys.googleAI;
     this.saveSettings();
-    console.log('[SettingsStore] Google AI key removed');
+    logger.log('[SettingsStore] Google AI key removed');
   }
 
   hasGoogleAIKey(): boolean {
@@ -157,7 +167,7 @@ class SettingsStore {
       ...settings,
     };
     this.saveSettings();
-    console.log('[SettingsStore] Ollama settings updated');
+    logger.log('[SettingsStore] Ollama settings updated');
   }
 
   isOllamaEnabled(): boolean {
@@ -189,10 +199,10 @@ class SettingsStore {
         args: enabled ? ['--hidden'] : [],
       });
     } catch (err) {
-      console.error('[SettingsStore] Failed to set login item settings:', err);
+      logger.error('[SettingsStore] Failed to set login item settings:', err);
     }
 
-    console.log(`[SettingsStore] Auto-launch set to ${enabled}`);
+    logger.log(`[SettingsStore] Auto-launch set to ${enabled}`);
   }
 }
 

@@ -20,7 +20,7 @@
  *    a new one is scheduled.
  */
 
-import { useState, useEffect, useRef, startTransition } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, startTransition } from 'react';
 import type { Game, GameFilters } from '@/types/game';
 
 // ---------------------------------------------------------------------------
@@ -305,6 +305,22 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
   // Track whether the deferred computation has populated at least once.
   // This prevents the auto-reset effect from clearing filters before data arrives.
   const hasPopulated = useRef(output.sortedGames.length > 0);
+
+  // ── Synchronous recompute on viewMode transition ──────────────────────
+  // Without this, switching from browse → library (or vice-versa) would
+  // show one frame of stale data from the previous view because the
+  // deferred rAF + startTransition path runs AFTER the first paint.
+  // useLayoutEffect fires after the DOM commit but BEFORE the browser
+  // paints, so the stale frame is never visible to the user.
+  const prevViewModeRef = useRef(input.viewMode);
+  useLayoutEffect(() => {
+    if (input.viewMode !== prevViewModeRef.current) {
+      prevViewModeRef.current = input.viewMode;
+      const fresh = computeAll(inputRef.current);
+      hasPopulated.current = true;
+      setOutput(fresh);
+    }
+  }, [input.viewMode]);
 
   // Schedule heavy computation after paint using rAF + startTransition.
   // Cancels any in-flight computation when inputs change.

@@ -450,9 +450,9 @@ function GameCardComponent({
       <div className="p-3 space-y-1.5">
         {/* Title Row with Actions */}
         <div className="flex items-start justify-between gap-2">
-          <div className="flex-1 min-w-0 min-h-[5.5rem]">
+          <div className="flex-1 min-w-0">
             <h3 
-              className="font-semibold text-sm text-white leading-tight line-clamp-2 h-[2.5rem]" 
+              className="font-semibold text-sm text-white leading-tight line-clamp-2 min-h-[2.5rem] max-h-[2.5rem] overflow-hidden" 
               title={game.title}
             >
               {game.title}

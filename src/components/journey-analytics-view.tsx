@@ -761,7 +761,7 @@ export function JourneyAnalyticsView({
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <Gamepad2 className="w-10 h-10 text-fuchsia-500 mb-4" />
-        <p className="text-white/60">No journey data to analyse yet.</p>
+        <p className="text-white/60">No voyage data to analyse yet.</p>
       </div>
     );
   }

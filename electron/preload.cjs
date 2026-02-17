@@ -389,4 +389,7 @@ contextBridge.exposeInMainWorld('webviewApi', {
   },
 });
 
-console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi exposed');
+// Only log exposed APIs in development to avoid leaking IPC surface in production
+if (process.env.NODE_ENV !== 'production') {
+  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi exposed');
+}

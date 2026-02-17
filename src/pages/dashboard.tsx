@@ -46,6 +46,7 @@ import {
   Clock,
   Newspaper,
   CalendarDays,
+  Compass,
 } from 'lucide-react';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
@@ -56,6 +57,7 @@ import { useSessionTracker } from '@/hooks/useSessionTracker';
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
 type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar';
+
 
 // Track if cache has been cleared this session
 export function Dashboard() {
@@ -121,19 +123,25 @@ export function Dashboard() {
   // Settings panel state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
-  // Panel handlers - ensure only one panel is open at a time
-  const openAIChat = useCallback(() => {
-    setIsFilterOpen(false);
-    setIsSettingsOpen(false);
-    setIsAIChatOpen(true);
+  // Panel handlers - ensure only one panel is open at a time; toggle if already open
+  const toggleAIChat = useCallback(() => {
+    setIsAIChatOpen(prev => {
+      if (prev) return false;          // already open → close
+      setIsFilterOpen(false);
+      setIsSettingsOpen(false);
+      return true;                     // was closed → open
+    });
   }, []);
 
   const closeAIChat = useCallback(() => setIsAIChatOpen(false), []);
   
-  const openSettings = useCallback(() => {
-    setIsFilterOpen(false);
-    setIsAIChatOpen(false);
-    setIsSettingsOpen(true);
+  const toggleSettings = useCallback(() => {
+    setIsSettingsOpen(prev => {
+      if (prev) return false;
+      setIsFilterOpen(false);
+      setIsAIChatOpen(false);
+      return true;
+    });
   }, []);
 
   const closeSettings = useCallback(() => setIsSettingsOpen(false), []);
@@ -319,6 +327,8 @@ export function Dashboard() {
   const switchToJourney = useCallback(() => { setViewMode('journey'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToBuzz = useCallback(() => { setViewMode('buzz'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToCalendar = useCallback(() => { setViewMode('calendar'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
+
+
 
   // Handle adding game to library
   const handleAddToLibrary = useCallback((game: Game) => {
@@ -589,7 +599,7 @@ export function Dashboard() {
         "sticky top-0 z-40 drag-region",
         buzzBgActive ? 'bg-transparent' : 'bg-black/80 backdrop-blur-xl'
       )}>
-        <div className="px-6 py-2">
+        <div className="px-3 lg:px-6 py-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 no-drag mt-[5px]">
               <div className="h-8 w-8 bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-fuchsia-500/20">
@@ -608,72 +618,78 @@ export function Dashboard() {
       </header>
 
       <main className={cn(
-        "px-6 py-6 transition-all duration-300 relative z-10",
-        (isFilterOpen || isAIChatOpen || isSettingsOpen) && "pr-[424px]"
+        "px-3 lg:px-6 py-4 lg:py-6 transition-all duration-300 relative z-10",
+        (isFilterOpen || isAIChatOpen || isSettingsOpen) && "lg:pr-[424px]"
       )}>
         {/* Results Header */}
         <div className="flex items-center justify-between mb-6 gap-4">
           <div className="flex items-center gap-3 min-w-0 flex-shrink overflow-hidden">
-            {/* View Mode Toggle */}
+            {/* View Mode Toggle — collapses to icon-only below lg for split-screen */}
             <div className="flex items-center bg-white/5 rounded-lg p-1 shrink-0">
               <button
                 onClick={switchToBrowse}
+                title="Browse"
                 className={cn(
-                  "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
+                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'browse' 
                     ? "bg-fuchsia-500 text-white" 
                     : "text-white/60 hover:text-white"
                 )}
               >
-                Browse
+                <Compass className="h-3 w-3 shrink-0" />
+                <span className="hidden lg:inline">Browse</span>
               </button>
               <button
                 onClick={switchToLibrary}
+                title={`Library (${librarySize})`}
                 className={cn(
-                  "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'library' 
                     ? "bg-fuchsia-500 text-white" 
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <Library className="h-3 w-3" />
-                Library ({librarySize})
+                <Library className="h-3 w-3 shrink-0" />
+                <span className="hidden lg:inline">Library ({librarySize})</span>
               </button>
               <button
                 onClick={switchToJourney}
+                title="Voyage"
                 className={cn(
-                  "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'journey' 
                     ? "bg-fuchsia-500 text-white" 
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <Clock className="h-3 w-3" />
-                Journey
+                <Clock className="h-3 w-3 shrink-0" />
+                <span className="hidden lg:inline">Voyage</span>
               </button>
               <button
                 onClick={switchToBuzz}
+                title="Transmissions"
                 className={cn(
-                  "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'buzz' 
                     ? "bg-fuchsia-500 text-white" 
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <Newspaper className="h-3 w-3" />
-                Buzz
+                <Newspaper className="h-3 w-3 shrink-0" />
+                <span className="hidden lg:inline">Transmissions</span>
               </button>
               <button
                 onClick={switchToCalendar}
+                title="Releases"
                 className={cn(
-                  "px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
                   viewMode === 'calendar' 
                     ? "bg-fuchsia-500 text-white" 
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <CalendarDays className="h-3 w-3" />
-                Releases
+                <CalendarDays className="h-3 w-3 shrink-0" />
+                <span className="hidden lg:inline">Releases</span>
               </button>
             </div>
 
@@ -684,15 +700,16 @@ export function Dashboard() {
                 size="sm"
                 onClick={() => setClearLibraryStep(1)}
                 className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/20"
+                title="Clear All"
               >
-                <Trash2 className="h-3 w-3 mr-1" />
-                Clear All
+                <Trash2 className="h-3 w-3 lg:mr-1" />
+                <span className="hidden lg:inline">Clear All</span>
               </Button>
             )}
 
             {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
               <>
-                <p className="text-sm text-white/60 flex items-center gap-1.5 whitespace-nowrap shrink-0">
+                <p className="text-sm text-white/60 items-center gap-1.5 whitespace-nowrap shrink-0 hidden lg:flex">
                   {viewMode === 'library' ? (
                     <><span className="text-white font-medium">{sortedGames.length.toLocaleString()}</span> games</>
                   ) : filters.category === 'catalog' ? (
@@ -762,7 +779,7 @@ export function Dashboard() {
           </div>
           
           <div className="flex items-center gap-3 shrink-0">
-            {/* Search - hidden in journey, buzz, and calendar mode */}
+            {/* Search - hidden in journey, buzz, calendar mode */}
             {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40 z-10" />
@@ -781,7 +798,7 @@ export function Dashboard() {
                       setShowSuggestions(true);
                     }
                   }}
-                  className="w-80 h-9 pl-10 pr-10 bg-white/5 border-white/10 text-white placeholder:text-white/40"
+                  className="w-44 lg:w-80 h-9 pl-10 pr-10 bg-white/5 border-white/10 text-white placeholder:text-white/40"
                   aria-label="Search games"
                 />
                 {searchQuery && (
@@ -825,7 +842,7 @@ export function Dashboard() {
 
             {/* AI Chat Button */}
             <Button
-              onClick={openAIChat}
+              onClick={toggleAIChat}
               variant="ghost"
               size="icon"
               className="h-9 w-9 text-white/70 hover:text-white hover:bg-purple-500/20 border border-white/10 hover:border-purple-500/50 transition-all"
@@ -839,13 +856,14 @@ export function Dashboard() {
               <Button
                 onClick={() => setIsCustomGameDialogOpen(true)}
                 className="h-9 bg-fuchsia-500 hover:bg-fuchsia-600 text-white gap-1.5"
+                title="Add Custom Game"
               >
-                <PlusCircle className="h-4 w-4 pointer-events-none" />
-                Add Custom Game
+                <PlusCircle className="h-4 w-4 pointer-events-none shrink-0" />
+                <span className="hidden lg:inline">Add Custom Game</span>
               </Button>
             )}
 
-            {/* Filter Button - hidden in journey, buzz, and calendar mode */}
+            {/* Filter Button - hidden in journey, buzz, calendar mode */}
             {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
               <FilterTrigger
                 open={isFilterOpen}
@@ -860,7 +878,7 @@ export function Dashboard() {
               variant="ghost"
               size="icon"
               className="h-9 w-9 text-white/60 hover:text-amber-400 hover:bg-white/10"
-              onClick={openSettings}
+              onClick={toggleSettings}
               title="Settings"
               aria-label="Settings"
               data-testid="settings-button"

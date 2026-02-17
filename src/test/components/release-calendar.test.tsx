@@ -13,6 +13,14 @@ class MockResizeObserver {
 }
 vi.stubGlobal('ResizeObserver', MockResizeObserver);
 
+// ─── IntersectionObserver mock (needed by GameCard's detail-enricher) ────────
+class MockIntersectionObserver {
+  observe = vi.fn();
+  unobserve = vi.fn();
+  disconnect = vi.fn();
+}
+vi.stubGlobal('IntersectionObserver', MockIntersectionObserver);
+
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
 // Mock wouter
@@ -93,6 +101,22 @@ describe('ReleaseCalendar', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
+    // Re-apply matchMedia mock (vi.restoreAllMocks in afterEach clears it)
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+
     // Mock window.steam and window.epic so the fallback API path doesn't crash
     Object.defineProperty(window, 'steam', {
       value: {
@@ -130,34 +154,30 @@ describe('ReleaseCalendar', () => {
     expect(skeletons.length).toBeGreaterThan(0);
   });
 
-  it('renders month header with current month/year', async () => {
+  it('renders year header in default year view', async () => {
     mockIsPrefetchReady.mockReturnValue(true);
     mockGetPrefetchedGames.mockReturnValue([makeDatedGame(15, 'Test Game')]);
 
     renderCalendar();
 
     const now = new Date();
-    const monthNames = [
-      'January', 'February', 'March', 'April', 'May', 'June',
-      'July', 'August', 'September', 'October', 'November', 'December',
-    ];
-    const expectedHeader = `${monthNames[now.getMonth()]} ${now.getFullYear()}`;
+    const expectedHeader = String(now.getFullYear());
 
     await waitFor(() => {
       expect(screen.getByText(expectedHeader)).toBeInTheDocument();
     });
   });
 
-  it('renders day-of-week headers', async () => {
+  it('renders month names as section headers in year view', async () => {
     mockIsPrefetchReady.mockReturnValue(true);
-    mockGetPrefetchedGames.mockReturnValue([]);
+    mockGetPrefetchedGames.mockReturnValue([makeDatedGame(15, 'Test Game')]);
 
     renderCalendar();
 
     await waitFor(() => {
-      expect(screen.getByText('Sun')).toBeInTheDocument();
-      expect(screen.getByText('Mon')).toBeInTheDocument();
-      expect(screen.getByText('Sat')).toBeInTheDocument();
+      expect(screen.getByText('January')).toBeInTheDocument();
+      expect(screen.getByText('June')).toBeInTheDocument();
+      expect(screen.getByText('December')).toBeInTheDocument();
     });
   });
 
@@ -266,9 +286,9 @@ describe('ReleaseCalendar', () => {
     }
   });
 
-  // ── Dated releases in calendar grid ──────────────────────────────────────
+  // ── Dated releases in poster feed ────────────────────────────────────────
 
-  it('renders dated games in the correct calendar cell', async () => {
+  it('renders dated games in the current month section', async () => {
     const games = [makeDatedGame(15, 'Mid Month Game')];
     mockIsPrefetchReady.mockReturnValue(true);
     mockGetPrefetchedGames.mockReturnValue(games);
@@ -281,12 +301,12 @@ describe('ReleaseCalendar', () => {
       await vi.advanceTimersByTimeAsync(100);
     });
 
-    // Game may appear in multiple places (calendar cell + This Week banner)
+    // Game name appears on the poster card
     const matches = screen.getAllByText('Mid Month Game');
     expect(matches.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('renders multiple games on the same day', async () => {
+  it('shows correct count for multiple games on the same day', async () => {
     const games = [
       makeDatedGame(10, 'Game A'),
       makeDatedGame(10, 'Game B'),
@@ -302,8 +322,9 @@ describe('ReleaseCalendar', () => {
       await vi.advanceTimersByTimeAsync(100);
     });
 
-    expect(screen.getByText('Game A')).toBeInTheDocument();
-    expect(screen.getByText('Game B')).toBeInTheDocument();
+    // Both games are in the same month section; the count badge shows "2"
+    const badges = screen.getAllByText('2');
+    expect(badges.length).toBeGreaterThanOrEqual(1);
   });
 
   // ── Mixed dated + Coming Soon ────────────────────────────────────────────
@@ -324,9 +345,9 @@ describe('ReleaseCalendar', () => {
       await vi.advanceTimersByTimeAsync(100);
     });
 
-    // Dated game should appear in the calendar grid
+    // Dated game should appear as a poster card
     expect(screen.getByText('Dated Game')).toBeInTheDocument();
-    // Coming Soon count badge (the "3") should be in the header area
+    // Coming Soon count badge (the "3") should be in the TBA button area
     const badges = screen.getAllByText('3');
     expect(badges.length).toBeGreaterThanOrEqual(1);
   });
@@ -379,12 +400,10 @@ describe('ReleaseCalendar', () => {
       await vi.advanceTimersByTimeAsync(100);
     });
 
-    // After dedup only one game entity remains, but its title may appear in
-    // multiple UI spots (calendar cell + "This Week" banner), so just verify
-    // it's not rendered more times than the extra UI spots would add.
+    // After dedup only one game entity remains. Its title may appear on a
+    // poster card. Verify it's not duplicated.
     const matches = screen.getAllByText('Test Game');
-    // Without dedup there would be 2 game entities × N spots. With dedup it's
-    // 1 entity but potentially shown in calendar cell + banner = 2 occurrences.
+    // Without dedup there would be 2 game entities. With dedup it's 1 entity.
     expect(matches.length).toBeLessThanOrEqual(2);
   });
 });

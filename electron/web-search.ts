@@ -5,6 +5,9 @@
  */
 
 import https from 'https';
+import { logger } from './safe-logger.js';
+
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024; // 2 MB — search results pages are small
 
 export interface WebSearchResult {
   title: string;
@@ -59,8 +62,10 @@ export function needsWebSearch(message: string): boolean {
  */
 function fetchUrl(
   url: string,
-  options: { method?: string; body?: string; headers?: Record<string, string> } = {}
+  options: { method?: string; body?: string; headers?: Record<string, string> } = {},
+  _redirectDepth = 0,
 ): Promise<{ status: number; data: string }> {
+  if (_redirectDepth > 5) return Promise.reject(new Error('Too many redirects'));
   return new Promise((resolve, reject) => {
     const isPost = options.method === 'POST';
     const urlObj = new URL(url);
@@ -80,19 +85,36 @@ function fetchUrl(
     };
 
     const req = https.request(reqOpts, (res) => {
-      // Follow redirects
+      // Follow redirects — only to HTTPS URLs on public hosts
       if (
         res.statusCode &&
         res.statusCode >= 300 &&
         res.statusCode < 400 &&
         res.headers.location
       ) {
-        fetchUrl(res.headers.location, options).then(resolve).catch(reject);
+        try {
+          const redirectUrl = new URL(res.headers.location, url);
+          if (redirectUrl.protocol !== 'https:') {
+            reject(new Error(`Redirect to non-HTTPS URL blocked: ${redirectUrl.href}`));
+            return;
+          }
+          fetchUrl(redirectUrl.href, options, _redirectDepth + 1).then(resolve).catch(reject);
+        } catch {
+          reject(new Error(`Invalid redirect URL: ${res.headers.location}`));
+        }
         return;
       }
 
       let data = '';
-      res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+      let bytes = 0;
+      res.on('data', (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (bytes > MAX_RESPONSE_BYTES) {
+          req.destroy(new Error(`Response exceeded ${MAX_RESPONSE_BYTES} bytes limit`));
+          return;
+        }
+        data += chunk.toString();
+      });
       res.on('end', () => resolve({ status: res.statusCode ?? 0, data }));
     });
 
@@ -171,7 +193,7 @@ export async function webSearch(
   maxResults: number = 5
 ): Promise<WebSearchResult[]> {
   try {
-    console.log(`[Web Search] Searching DuckDuckGo for: "${query}"`);
+    logger.log(`[Web Search] Searching DuckDuckGo for: "${query}"`);
 
     const body = `q=${encodeURIComponent(query)}`;
     const response = await fetchUrl('https://html.duckduckgo.com/html/', {
@@ -180,17 +202,17 @@ export async function webSearch(
     });
 
     if (response.status !== 200) {
-      console.error(`[Web Search] DuckDuckGo returned status ${response.status}`);
+      logger.error(`[Web Search] DuckDuckGo returned status ${response.status}`);
       return [];
     }
 
     const results = parseDDGHtml(response.data).slice(0, maxResults);
 
-    console.log(`[Web Search] Found ${results.length} results`);
+    logger.log(`[Web Search] Found ${results.length} results`);
     return results;
   } catch (error: unknown) {
     const errMsg = error instanceof Error ? error.message : String(error);
-    console.error(`[Web Search] Search failed: ${errMsg}`);
+    logger.error(`[Web Search] Search failed: ${errMsg}`);
     return [];
   }
 }
