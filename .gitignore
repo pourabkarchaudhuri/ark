@@ -47,3 +47,6 @@ splash screen.zip
 
 # Local NSIS cache for offline electron-builder builds
 .nsis-cache/
+
+# Temporary release payload (generated during release process)
+release/release-payload.json
