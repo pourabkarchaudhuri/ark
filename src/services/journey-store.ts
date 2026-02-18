@@ -18,9 +18,34 @@ class JourneyStore {
   private entries: Map<string, JourneyEntry> = new Map(); // keyed by universal gameId string
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
+  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private _sortedCache: JourneyEntry[] | null = null;
 
   constructor() {
     this.initialize();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('beforeunload', () => this.flushSave());
+    }
+  }
+
+  private scheduleSave() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.save();
+    }, 300);
+  }
+
+  private flushSave() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+      this.save();
+    }
+  }
+
+  private invalidateSortedCache() {
+    this._sortedCache = null;
   }
 
   private initialize() {
@@ -95,12 +120,14 @@ class JourneyStore {
     const addedAt = existing?.addedAt ?? entry.addedAt ?? new Date().toISOString();
 
     this.entries.set(entry.gameId, {
-      ...entry,
+      ...existing,  // preserve existing fields (firstPlayedAt, lastPlayedAt, etc.)
+      ...entry,     // caller-provided fields override
       addedAt,
       removedAt: undefined, // clear removedAt — the game is (back) in library
     });
 
-    this.save();
+    this.invalidateSortedCache();
+    this.scheduleSave();
     this.notifyListeners();
   }
 
@@ -112,22 +139,26 @@ class JourneyStore {
     if (!existing) return;
 
     existing.removedAt = new Date().toISOString();
-    this.save();
+    this.invalidateSortedCache();
+    this.scheduleSave();
     this.notifyListeners();
   }
 
   /**
-   * Sync status / hours / rating for a game already in the journey.
+   * Sync status / hours / rating / lastPlayedAt for a game already in the journey.
    */
-  syncProgress(gameId: string, fields: { status?: GameStatus; hoursPlayed?: number; rating?: number }) {
+  syncProgress(gameId: string, fields: { status?: GameStatus; hoursPlayed?: number; rating?: number; firstPlayedAt?: string; lastPlayedAt?: string }) {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
     if (fields.status !== undefined) existing.status = fields.status;
     if (fields.hoursPlayed !== undefined) existing.hoursPlayed = fields.hoursPlayed;
     if (fields.rating !== undefined) existing.rating = fields.rating;
+    if (fields.firstPlayedAt !== undefined) existing.firstPlayedAt = fields.firstPlayedAt;
+    if (fields.lastPlayedAt !== undefined) existing.lastPlayedAt = fields.lastPlayedAt;
 
-    this.save();
+    this.invalidateSortedCache();
+    this.scheduleSave();
     this.notifyListeners();
   }
 
@@ -138,12 +169,34 @@ class JourneyStore {
   }
 
   /**
-   * Returns all journey entries sorted newest-first by addedAt.
+   * Returns all journey entries sorted newest-first by addedAt (cached sort).
    */
   getAllEntries(): JourneyEntry[] {
-    return Array.from(this.entries.values()).sort(
+    if (this._sortedCache) return this._sortedCache;
+    this._sortedCache = Array.from(this.entries.values()).sort(
       (a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime()
     );
+    return this._sortedCache;
+  }
+
+  /**
+   * Returns entries that have firstPlayedAt or lastPlayedAt, for Ark and Captain's Log.
+   * Sort: Playing/Playing Now first, then by latest activity (lastPlayedAt ?? firstPlayedAt) descending.
+   */
+  getEntriesForArkAndLog(): JourneyEntry[] {
+    const playingStatuses: GameStatus[] = ['Playing', 'Playing Now'];
+    const withActivity = Array.from(this.entries.values()).filter(
+      (e) => e.firstPlayedAt || e.lastPlayedAt
+    );
+    const latest = (e: JourneyEntry) =>
+      new Date(e.lastPlayedAt ?? e.firstPlayedAt ?? e.addedAt).getTime();
+    return withActivity.sort((a, b) => {
+      const aPlaying = playingStatuses.includes(a.status);
+      const bPlaying = playingStatuses.includes(b.status);
+      if (aPlaying && !bPlaying) return -1;
+      if (!aPlaying && bPlaying) return 1;
+      return latest(b) - latest(a);
+    });
   }
 
   getSize(): number {
@@ -195,7 +248,18 @@ class JourneyStore {
           removedAt,
         };
 
-        if (JSON.stringify(existing) !== JSON.stringify(merged)) {
+        const isDifferent =
+          existing.status !== merged.status ||
+          existing.hoursPlayed !== merged.hoursPlayed ||
+          existing.rating !== merged.rating ||
+          existing.lastPlayedAt !== merged.lastPlayedAt ||
+          existing.firstPlayedAt !== merged.firstPlayedAt ||
+          existing.removedAt !== merged.removedAt ||
+          existing.addedAt !== merged.addedAt ||
+          existing.title !== merged.title ||
+          existing.coverUrl !== merged.coverUrl ||
+          existing.releaseDate !== merged.releaseDate;
+        if (isDifferent) {
           this.entries.set(migratedId, merged);
           updated++;
         } else {
@@ -204,8 +268,19 @@ class JourneyStore {
       }
     }
 
-    if (added > 0 || updated > 0) {
-      this.save();
+    // Backfill firstPlayedAt for entries that were played but lack timing data,
+    // so they appear in Ark and Log views (which filter on firstPlayedAt/lastPlayedAt).
+    const noTimingStatuses: GameStatus[] = ['Want to Play'];
+    let backfilled = 0;
+    for (const entry of this.entries.values()) {
+      if (!entry.firstPlayedAt && !entry.lastPlayedAt && !noTimingStatuses.includes(entry.status)) {
+        entry.firstPlayedAt = entry.addedAt;
+        backfilled++;
+      }
+    }
+    if (added > 0 || updated > 0 || backfilled > 0) {
+      this.invalidateSortedCache();
+      this.save(); // direct save for bulk import
       this.notifyListeners();
     }
 
@@ -219,7 +294,8 @@ class JourneyStore {
   deleteEntry(gameId: string): boolean {
     const existed = this.entries.delete(gameId);
     if (existed) {
-      this.save();
+      this.invalidateSortedCache();
+      this.scheduleSave();
       this.notifyListeners();
     }
     return existed;
@@ -228,6 +304,8 @@ class JourneyStore {
   /** Clear all journey data (mainly for testing / reset). */
   clear() {
     this.entries.clear();
+    this.invalidateSortedCache();
+    this.flushSave();
     localStorage.removeItem(STORAGE_KEY);
     this.notifyListeners();
   }

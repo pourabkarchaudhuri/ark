@@ -39,6 +39,7 @@ import {
   List,
   Grid3X3,
   Calendar,
+  RotateCcw,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useLocation } from 'wouter';
@@ -47,6 +48,7 @@ import { SiEpicgames } from 'react-icons/si';
 import { getPrefetchedGames, isPrefetchReady } from '@/services/prefetch-store';
 import { getSteamHeaderUrl } from '@/types/steam';
 import { libraryStore } from '@/services/library-store';
+import { getCanonicalGenres, toCanonicalGenres } from '@/data/canonical-genres';
 import { useToast } from '@/components/ui/toast';
 import { GameCard } from '@/components/game-card';
 import type { CachedGameMeta, Game, GameStatus } from '@/types/game';
@@ -136,16 +138,29 @@ function extractSteamAppId(id: string | number): number | null {
   return null;
 }
 
-function buildImageFallbackChain(game: { id: string | number; image: string }): string[] {
+function buildImageFallbackChain(game: UpcomingRelease): string[] {
+  // For Steam games: use CDN URL variants
   const appId = extractSteamAppId(game.id);
-  if (!appId) return [];
+  if (appId) {
   const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
   return [
+      game.headerImage,
     `${cdnBase}/${appId}/library_600x900.jpg`,
     `${cdnBase}/${appId}/header.jpg`,
     `${cdnBase}/${appId}/capsule_616x353.jpg`,
     `${cdnBase}/${appId}/capsule_231x87.jpg`,
-  ].filter(url => url !== game.image);
+    ].filter((url): url is string => !!url && url !== game.image);
+  }
+
+  // For Epic games: use headerImage + screenshots as fallbacks
+  const chain: string[] = [];
+  if (game.headerImage && game.headerImage !== game.image) chain.push(game.headerImage);
+  if (game.screenshots) {
+    for (const s of game.screenshots) {
+      if (s && s !== game.image && !chain.includes(s)) chain.push(s);
+    }
+  }
+  return chain;
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -154,6 +169,11 @@ interface UpcomingRelease {
   id: number | string;
   name: string;
   image: string;
+  headerImage?: string;
+  screenshots?: string[];
+  epicNamespace?: string;
+  epicOfferId?: string;
+  epicSlug?: string;
   releaseDate: string;
   comingSoon: boolean;
   genres: string[];
@@ -216,15 +236,15 @@ function parseReleaseDate(dateStr: string): Date | null {
   if (!isNaN(parsed.getTime())) {
     result = parsed;
   } else {
-    const dmyMatch = dateStr.match(/(\d{1,2})\s+(\w+),?\s+(\d{4})/);
-    if (dmyMatch) {
-      const attempt = new Date(`${dmyMatch[2]} ${dmyMatch[1]}, ${dmyMatch[3]}`);
+  const dmyMatch = dateStr.match(/(\d{1,2})\s+(\w+),?\s+(\d{4})/);
+  if (dmyMatch) {
+    const attempt = new Date(`${dmyMatch[2]} ${dmyMatch[1]}, ${dmyMatch[3]}`);
       if (!isNaN(attempt.getTime())) result = attempt;
-    }
+  }
   }
 
   if (result && result.getTime() - Date.now() > MAX_REASONABLE_MS) {
-    return null;
+  return null;
   }
   return result;
 }
@@ -329,6 +349,11 @@ function releaseToGame(release: ParsedRelease, inLibrary: boolean): Game {
     metacriticScore: null,
     releaseDate: release.releaseDate,
     coverUrl: release.image || undefined,
+    headerImage: release.headerImage || undefined,
+    screenshots: release.screenshots,
+    epicNamespace: release.epicNamespace,
+    epicOfferId: release.epicOfferId,
+    epicSlug: release.epicSlug,
     store: release.store,
     steamAppId: appId ?? undefined,
     comingSoon: release.comingSoon,
@@ -375,8 +400,31 @@ const FilterChips = memo(function FilterChips({
   radarActive: boolean;
   setRadarActive: (v: boolean) => void;
 }) {
+  const hasActiveFilters = storeFilter !== 'all' || platformFilter !== 'all' || genreFilter !== null;
+
+  const handleResetFilters = useCallback(() => {
+    setStoreFilter('all');
+    setPlatformFilter('all');
+    setGenreFilter(null);
+    setRadarActive(false);
+  }, []);
+
   return (
     <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+      {hasActiveFilters && (
+        <>
+          <button
+            onClick={handleResetFilters}
+            className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium text-white/50 hover:text-white/80 hover:bg-white/10 transition-colors"
+            title="Reset all filters"
+            aria-label="Reset all filters"
+          >
+            <RotateCcw className="w-3 h-3" />
+            Reset
+          </button>
+          <div className="w-px h-4 bg-white/10" />
+        </>
+      )}
       <button
         onClick={() => setRadarActive(!radarActive)}
         className={cn(
@@ -432,7 +480,7 @@ const FilterChips = memo(function FilterChips({
           <div className="w-px h-4 bg-white/10" />
           {topGenres.map((g) => (
             <button
-              key={g}
+                        key={g}
               onClick={() => setGenreFilter(genreFilter === g ? null : g)}
               className={cn(
                 'px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
@@ -446,7 +494,7 @@ const FilterChips = memo(function FilterChips({
           ))}
         </>
       )}
-    </div>
+                  </div>
   );
 });
 
@@ -497,7 +545,7 @@ const GroupedFeed = memo(function GroupedFeed({
   const hasAnyReleases = groups.some(g => g.releases.length > 0);
 
   if (!hasAnyReleases) {
-    return (
+  return (
       <div className="flex flex-col items-center justify-center h-full text-center">
         <CalendarDays className="w-10 h-10 text-white/[0.06] mb-3" />
         <p className="text-sm text-white/20">No releases match your filters</p>
@@ -505,7 +553,7 @@ const GroupedFeed = memo(function GroupedFeed({
     );
   }
 
-  return (
+          return (
     <div className="overflow-y-auto h-full pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10">
       {groups.map((group) => {
         const isExpanded = expandedGroups.has(group.key);
@@ -533,14 +581,14 @@ const GroupedFeed = memo(function GroupedFeed({
                 <span className="text-[10px] text-white/25 flex-shrink-0">{group.sublabel}</span>
               )}
               {group.releases.length > 0 && (
-                <span className={cn(
+              <span className={cn(
                   'text-[10px] px-2 py-0.5 rounded-full font-medium flex-shrink-0',
                   group.isCurrentPeriod
                     ? 'bg-fuchsia-500/20 text-fuchsia-400'
                     : 'bg-white/[0.06] text-white/40',
                 )}>
                   {group.releases.length}
-                </span>
+              </span>
               )}
               {/* Heat bar */}
               <div className="flex-1 h-px relative">
@@ -589,8 +637,8 @@ const GroupedFeed = memo(function GroupedFeed({
                             hideLibraryBadge={false}
                           />
                         </motion.div>
-                      );
-                    })}
+          );
+        })}
                   </AnimatePresence>
                 </div>
                 {hasMore && !isExpanded && (
@@ -610,8 +658,8 @@ const GroupedFeed = memo(function GroupedFeed({
                   >
                     Show less
                   </button>
-                )}
-              </div>
+        )}
+      </div>
             )}
           </div>
         );
@@ -982,7 +1030,7 @@ const ComingSoonSidebar = memo(function ComingSoonSidebar({
 // ─── Skeleton Feed ───────────────────────────────────────────────────────────
 
 function SkeletonFeed({ sections }: { sections: number }) {
-  return (
+            return (
     <div className="overflow-y-auto h-full pr-1 space-y-6">
       {Array.from({ length: sections }).map((_, s) => (
         <div key={s}>
@@ -990,7 +1038,7 @@ function SkeletonFeed({ sections }: { sections: number }) {
             <div className="h-4 w-24 rounded bg-white/[0.06] animate-pulse" />
             <div className="h-4 w-8 rounded-full bg-white/[0.04] animate-pulse" />
             <div className="flex-1 h-px bg-white/[0.04]" />
-          </div>
+                </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 mt-2">
             {Array.from({ length: s === 0 ? 6 : 3 }).map((_, i) => (
               <div key={i} className="rounded-xl bg-white/[0.03] animate-pulse">
@@ -998,13 +1046,13 @@ function SkeletonFeed({ sections }: { sections: number }) {
                 <div className="p-3 space-y-2">
                   <div className="h-4 w-3/4 rounded bg-white/[0.04]" />
                   <div className="h-3 w-1/2 rounded bg-white/[0.03]" />
+                  </div>
+                  </div>
+            ))}
                 </div>
               </div>
-            ))}
-          </div>
-        </div>
       ))}
-    </div>
+        </div>
   );
 }
 
@@ -1065,18 +1113,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     toastRef.current.success(`"${game.name}" added to your library!`);
   }, []);
 
-  const topGenres = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const r of releases) {
-      for (const g of r.genres) {
-        counts.set(g, (counts.get(g) || 0) + 1);
-      }
-    }
-    return Array.from(counts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6)
-      .map(([name]) => name);
-  }, [releases]);
+  const topGenres = useMemo(() => getCanonicalGenres(), []);
 
   const filteredReleases = useMemo(() => {
     let result = releases;
@@ -1091,7 +1128,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       result = result.filter((r) => r.platforms[platformFilter as keyof typeof r.platforms]);
     }
     if (genreFilter) {
-      result = result.filter((r) => r.genres.includes(genreFilter));
+      result = result.filter((r) => toCanonicalGenres(r.genres).includes(genreFilter));
     }
     if (radarActive) {
       result = result.filter((r) => isReleaseInLibrary(r.id, libraryIds));
@@ -1140,9 +1177,16 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       }
       const platforms = { windows, mac, linux };
 
+      // Extra image fields for GameCard's fallback chain
+      const headerImage = game.headerImage || undefined;
+      const screenshots = game.screenshots && game.screenshots.length > 0 ? game.screenshots : undefined;
+      const epicNamespace = game.epicNamespace;
+      const epicOfferId = game.epicOfferId;
+      const epicSlug = game.epicSlug;
+
       if (game.comingSoon && game.releaseDate === 'Coming Soon') {
         if (comingSoonCount < COMING_SOON_CAP) {
-          results.push({ id: game.id, name: game.title, image, releaseDate: 'Coming Soon', comingSoon: true, genres, platforms, store });
+          results.push({ id: game.id, name: game.title, image, headerImage, screenshots, epicNamespace, epicOfferId, epicSlug, releaseDate: 'Coming Soon', comingSoon: true, genres, platforms, store });
           comingSoonCount++;
         }
         continue;
@@ -1152,7 +1196,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       if (isNaN(ts) || ts === 0) continue;
       if (ts < pastCutoff || ts > futureCutoff) continue;
 
-      results.push({ id: game.id, name: game.title, image, releaseDate: game.releaseDate, comingSoon: ts > now, genres, platforms, store });
+      results.push({ id: game.id, name: game.title, image, headerImage, screenshots, epicNamespace, epicOfferId, epicSlug, releaseDate: game.releaseDate, comingSoon: ts > now, genres, platforms, store });
     }
     return results.length > 0 ? results : null;
   }, []);
@@ -1175,27 +1219,29 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
         ]);
 
         for (const r of steamResult as any[]) {
-          allReleases.push({ ...r, store: 'steam' });
-        }
+            allReleases.push({ ...r, store: 'steam' });
+          }
         for (const r of epicResult as any[]) {
-          const releaseDate = r.date ? new Date(r.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Coming Soon';
-          const comingSoon = r.date ? new Date(r.date).getTime() > Date.now() : true;
-          allReleases.push({
-            id: `epic-${r.namespace}:${r.offerId}`,
-            name: r.title,
-            image: r.capsule,
-            releaseDate,
-            comingSoon,
-            genres: [],
-            platforms: { windows: true, mac: false, linux: false },
-            store: 'epic',
-          });
-        }
+            const releaseDate = r.date ? new Date(r.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Coming Soon';
+            const comingSoon = r.date ? new Date(r.date).getTime() > Date.now() : true;
+            allReleases.push({
+              id: `epic-${r.namespace}:${r.offerId}`,
+              name: r.title,
+              image: r.capsule,
+            epicNamespace: r.namespace,
+            epicOfferId: r.offerId,
+              releaseDate,
+              comingSoon,
+              genres: [],
+              platforms: { windows: true, mac: false, linux: false },
+              store: 'epic',
+            });
+      }
 
-        if (allReleases.length === 0 && !window.steam?.getUpcomingReleases && !window.epic?.getUpcomingReleases) {
-          setError('Store APIs not available');
-          setLoading(false);
-          return;
+      if (allReleases.length === 0 && !window.steam?.getUpcomingReleases && !window.epic?.getUpcomingReleases) {
+        setError('Store APIs not available');
+        setLoading(false);
+        return;
         }
       }
 
@@ -1372,7 +1418,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
           {!isInitialLoading && (
             <div className="flex items-center rounded-md border border-white/[0.08] overflow-hidden">
               {VIEW_TOGGLE_OPTIONS.map(({ id, icon: Icon, label }) => (
-                <button
+            <button
                   key={id}
                   onClick={() => { setCalView(id); setWeekOffset(0); }}
                   className={cn(
@@ -1436,35 +1482,35 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
               releases={filteredReleases}
               year={currentYear}
               libraryIds={libraryIds}
-              onAddToLibrary={handleAddToLibrary}
+                                    onAddToLibrary={handleAddToLibrary}
             />
           ) : calView === 'month' ? (
             <MonthFeed
-              releases={filteredReleases}
+            releases={filteredReleases}
               year={currentYear}
               month={currentMonth}
-              libraryIds={libraryIds}
-              onAddToLibrary={handleAddToLibrary}
+            libraryIds={libraryIds}
+            onAddToLibrary={handleAddToLibrary}
             />
           ) : (
             <WeekFeed
               weekStart={weekStart}
-              releases={filteredReleases}
-              libraryIds={libraryIds}
-              onAddToLibrary={handleAddToLibrary}
-            />
-          )}
+            releases={filteredReleases}
+            libraryIds={libraryIds}
+            onAddToLibrary={handleAddToLibrary}
+          />
+        )}
         </div>
 
-        <ComingSoonSidebar
-          releases={tbdReleases}
-          loading={isInitialLoading}
-          goToGame={goToGame}
-          open={sidebarOpen}
-          onToggle={toggleSidebar}
-          libraryIds={libraryIds}
-        />
-      </div>
+          <ComingSoonSidebar
+            releases={tbdReleases}
+            loading={isInitialLoading}
+            goToGame={goToGame}
+            open={sidebarOpen}
+            onToggle={toggleSidebar}
+            libraryIds={libraryIds}
+          />
+                    </div>
 
       {!loading && releases.length === 0 && !error && (
         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">

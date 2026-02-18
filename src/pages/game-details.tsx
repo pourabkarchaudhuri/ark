@@ -151,7 +151,7 @@ function epicToSteamDetails(
     developers: game.developer && game.developer !== 'Unknown Developer' ? [game.developer] : undefined,
     publishers: game.publisher && game.publisher !== 'Unknown Publisher' ? [game.publisher] : undefined,
     price_overview: game.price && !game.price.isFree && game.price.finalFormatted ? {
-      currency: 'USD',
+      currency: 'INR',
       initial: 0,
       final: 0,
       discount_percent: game.price.discountPercent || 0,
@@ -518,13 +518,20 @@ function NewsCard({
   );
 }
 
+/** Return the dashboard URL with the view we came from (for Back button). */
+function getBackToDashboardUrl(): string {
+  const from = typeof window !== 'undefined' ? sessionStorage.getItem('ark-return-view') : null;
+  const view = from && ['browse', 'library', 'journey', 'buzz', 'calendar', 'oracle'].includes(from) ? from : 'browse';
+  return `/?view=${view}`;
+}
+
 /**
  * Error / "game not found" fallback with auto-redirect to dashboard.
  * Prevents the app from getting stuck on a broken details page on cold-start.
  */
 function ErrorFallback({ error, navigate }: { error: string | null; navigate: (to: string) => void }) {
   useEffect(() => {
-    const timer = setTimeout(() => navigate('/'), 5000);
+    const timer = setTimeout(() => navigate(getBackToDashboardUrl()), 5000);
     return () => clearTimeout(timer);
   }, [navigate]);
 
@@ -538,7 +545,7 @@ function ErrorFallback({ error, navigate }: { error: string | null; navigate: (t
         <div className="flex flex-col items-center gap-4 text-center">
           <p className="text-red-400 text-xl">{error || 'Game not found'}</p>
           <p className="text-white/40 text-sm">Redirecting to dashboard in 5 seconds...</p>
-          <Button onClick={() => navigate('/')} variant="outline">
+          <Button onClick={() => navigate(getBackToDashboardUrl())} variant="outline">
             <ArrowLeft className="w-4 h-4 mr-2 pointer-events-none" />
             Back to Dashboard
           </Button>
@@ -1135,13 +1142,11 @@ export function GameDetailsPage() {
             ? window.steam!.getGameReviews(appId, 10).catch((err) => { console.warn('[GameDetails] Steam reviews:', err); return null; })
             : Promise.resolve(null);
           // If cross-store and we don't have a usable Epic price yet, fetch it live.
-          // Check for finalFormatted specifically — the epicPrice object can exist
-          // with finalFormatted: undefined if the Epic catalog API didn't return price data.
           const resolvedEpicNs = prefetched?.epicNamespace || epicMeta?.epicNamespace;
           const resolvedEpicOid = prefetched?.epicOfferId || epicMeta?.epicOfferId;
           const hasUsableEpicPrice = !!(
-            (prefetched?.epicPrice?.finalFormatted) ||
-            (epicMeta?.epicPrice && typeof epicMeta.epicPrice === 'object' && 'finalFormatted' in epicMeta.epicPrice && (epicMeta.epicPrice as any).finalFormatted)
+            prefetched?.epicPrice?.finalFormatted ||
+            (epicMeta?.epicPrice as Game['epicPrice'])?.finalFormatted
           );
           const epicPricePromise = (isCrossStoreEpic && !hasUsableEpicPrice && resolvedEpicNs && resolvedEpicOid && window.epic?.getGameDetails)
             ? epicService.getGameDetails(resolvedEpicNs, resolvedEpicOid).catch((err) => { console.warn('[GameDetails] Epic details (cross-store):', err); return null; })
@@ -1719,9 +1724,9 @@ export function GameDetailsPage() {
 
         {/* Top Navigation Bar */}
         <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-3 app-drag-region">
-          {/* Back Button */}
+          {/* Back Button — return to the view we came from (library, journey, browse, etc.) */}
           <Button
-            onClick={() => navigate('/')}
+            onClick={() => navigate(getBackToDashboardUrl())}
             variant="ghost"
             className="bg-black/50 hover:bg-black/70 backdrop-blur-sm no-drag"
           >
@@ -2875,11 +2880,20 @@ const GameDetailsContent = memo(function GameDetailsContent({
                   ? `https://store.epicgames.com/en-US/p/${epicSlug}`
                   : null;
 
-                const epicPriceObj = isEpicPrimary
-                  ? (epicGame as Game).price
-                  : crossStoreGame?.store === 'epic'
-                    ? crossStoreGame.price
-                    : null;
+                // Resolve Epic price — try the direct price field first, then
+                // fall back to the preserved epicPrice field from dedup.
+                const epicPriceObj = (() => {
+                  if (isEpicPrimary) return (epicGame as Game).price ?? null;
+                  if (crossStoreGame?.store === 'epic') {
+                    const direct = crossStoreGame.price;
+                    if (direct?.finalFormatted) return direct;
+                    // Fall back to the epicPrice field preserved during dedup
+                    const fallback = (crossStoreGame as Game).epicPrice;
+                    if (fallback?.finalFormatted) return fallback;
+                    return direct ?? fallback ?? null;
+                  }
+                  return null;
+                })();
                 const epicIsFree = details.is_free || epicPriceObj?.isFree;
                 const epicPrice = epicIsFree
                   ? 'Free to Play'
@@ -2941,7 +2955,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
                     </Badge>
                   )}
                     <div className="text-xl font-bold text-white">
-                      {price || 'Coming Soon'}
+                      {price || (details.release_date?.coming_soon ? 'Coming Soon' : 'View Store')}
                   </div>
                     <div className="flex items-center gap-1.5 text-xs text-white/50">
                       {icon}

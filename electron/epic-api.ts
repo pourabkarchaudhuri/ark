@@ -668,7 +668,7 @@ class EpicAPIClient {
     const cached = this.cache.get<EpicCatalogItem[]>(cacheKey, true);
     if (cached && !this.cache.isStale(cacheKey)) return cached;
 
-    const url = `${this.FREE_GAMES_ENDPOINT}?locale=en-US&country=US&allowCountries=US`;
+    const url = `${this.FREE_GAMES_ENDPOINT}?locale=en-US&country=IN&allowCountries=IN`;
     const response = await this.doFetch(url, {
       headers: {
         'Accept': 'application/json',
@@ -713,7 +713,7 @@ class EpicAPIClient {
         keyword,
         count: limit,
         locale: 'en-US',
-        country: 'US',
+        country: 'IN',
       });
 
       const results = data.Catalog.searchStore.elements || [];
@@ -765,7 +765,7 @@ class EpicAPIClient {
         namespace,
         id: offerId,
         locale: 'en-US',
-        country: 'US',
+        country: 'IN',
       });
 
       const item = data.Catalog.catalogOffer;
@@ -816,7 +816,7 @@ class EpicAPIClient {
         count: limit,
         start: 0,
         locale: 'en-US',
-        country: 'US',
+        country: 'IN',
         sortBy: 'releaseDate',
         sortDir: 'DESC',
         releaseDate: `[,${new Date().toISOString()}]`,
@@ -866,7 +866,7 @@ class EpicAPIClient {
         count: limit,
         start: 0,
         locale: 'en-US',
-        country: 'US',
+        country: 'IN',
         sortBy: 'releaseDate',
         sortDir: 'ASC',
         releaseDate: `[${new Date().toISOString()},]`,
@@ -1176,7 +1176,7 @@ class EpicAPIClient {
         count: PAGE_SIZE,
         start: 0,
         locale: 'en-US',
-        country: 'US',
+        country: 'IN',
         sortBy: 'releaseDate',
         sortDir: 'DESC',
       }).catch((err: any) => { logger.warn('[Epic] browseCatalog first page Non-fatal:', err); return null; });
@@ -1209,7 +1209,7 @@ class EpicAPIClient {
                 count: PAGE_SIZE,
                 start: pageIdx * PAGE_SIZE,
                 locale: 'en-US',
-                country: 'US',
+                country: 'IN',
                 sortBy: 'releaseDate',
                 sortDir: 'DESC',
               }).catch((err: any) => { logger.warn('[Epic] browseCatalog batch page Non-fatal:', err); return null; }),
@@ -1637,7 +1637,7 @@ class EpicAPIClient {
         namespace,
         count: limit,
         locale: 'en-US',
-        country: 'US',
+        country: 'IN',
       });
 
       const elements = data.Catalog.searchStore.elements || [];

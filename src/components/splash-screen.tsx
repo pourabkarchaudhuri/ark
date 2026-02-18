@@ -12,11 +12,15 @@ import {
   isPrefetchReady,
 } from '@/services/prefetch-store';
 import { fetchAllNews } from '@/services/news-service';
+import { embeddingService } from '@/services/embedding-service';
+import { ensureArkBackfill } from '@/hooks/useGameStore';
 
 // Preload the Dashboard chunk so it's already in memory when the user clicks
 // "Enter Ark". Without this the browser has to fetch + parse the JS bundle
 // on transition, adding a visible delay.
 const _dashboardPreload = import('@/pages/dashboard');
+// Preload Voyage (Journey) view so it opens instantly when user switches to it.
+const _journeyPreload = import('@/components/journey-view');
 import { MathUtils } from 'three';
 import type { Group, AmbientLight, SpotLight } from 'three';
 
@@ -161,28 +165,54 @@ const BOOT_LINES: BootLine[] = [
   ], delay: 50, light: 0.72 },
   { variants: [''], delay: 40, light: 0.72 },
 
-  // ── Section 4: Final diagnostics (72→100%) ─────────────────────────
+  // ── Section 4: Oracle AI diagnostics (72→88%) ─────────────────────
+  { variants: [
+    '> Initialising Oracle recommendation engine...',
+    '> Warming up Oracle neural pathways...',
+    '> Engaging Oracle taste analysis system...',
+  ], delay: 150, light: 0.74 },
+  { variants: [
+    '[  OK  ] Taste profile vectors loaded',
+    '[  OK  ] Engagement curve analyser online',
+    '[  OK  ] Feature vectoriser calibrated',
+  ], delay: 70, light: 0.78 },
+  { variants: [
+    '[  OK  ] Similarity graph traversal ready',
+    '[  OK  ] Co-occurrence matrix compiled',
+    '[  OK  ] Graph traversal engine primed',
+  ], delay: 60, light: 0.82 },
+  { variants: [
+    '[  OK  ] Shelf bandit — Thompson sampler warmed',
+    '[  OK  ] Shelf ordering — prior distributions loaded',
+    '[  OK  ] Multi-armed bandit — arms initialised',
+  ], delay: 55, light: 0.85 },
+  { variants: [''], delay: 40, light: 0.85 },
+
+  // ── Section 5: Ollama / Embedding check (88→95%) ──────────────────
+  { variants: [
+    '> Scanning for local AI accelerator...',
+    '> Probing for Ollama embedding node...',
+    '> Checking for neural embedding subsystem...',
+  ], delay: 130, light: 0.88 },
+  { variants: [
+    '[  OK  ] Embedding pipeline — standby mode',
+    '[  OK  ] Semantic layer — ready when available',
+    '[  OK  ] Neural substrate — graceful fallback armed',
+  ], delay: 60, light: 0.92 },
+  { variants: [''], delay: 40, light: 0.92 },
+
+  // ── Section 6: Final launch (95→100%) ─────────────────────────────
   { variants: [
     '> Running final diagnostics...',
     '> Executing pre-launch checks...',
     '> Performing system-wide validation...',
-  ], delay: 150, light: 0.76 },
+  ], delay: 130, light: 0.95 },
   { variants: [
     '[  OK  ] Subsystem checksums valid',
     '[  OK  ] Module hashes cross-referenced',
     '[  OK  ] Kernel signatures audited',
-  ], delay: 70, light: 0.82 },
-  { variants: [
-    '[  OK  ] Memory bus stress test passed',
-    '[  OK  ] I/O throughput nominal',
-    '[  OK  ] Render pipeline profiled',
-  ], delay: 60, light: 0.90 },
-  { variants: [
-    '[  OK  ] Navigation firmware certified',
-    '[  OK  ] Heading calibration locked',
-    '[  OK  ] Gyroscope drift within tolerance',
-  ], delay: 50, light: 0.95 },
-  { variants: [''], delay: 60, light: 0.95 },
+  ], delay: 60, light: 0.97 },
+  { variants: [''], delay: 50, light: 0.97 },
 
   // ── Finale ─────────────────────────────────────────────────────────
   { variants: [
@@ -423,6 +453,9 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
   useEffect(() => {
     let cancelled = false;
 
+    // Prewarm Voyage: backfill journey store so Your Ark / Logs are ready when user opens Voyage.
+    ensureArkBackfill();
+
     // If data is already loaded (e.g. HMR re-mount), nothing to do.
     if (isPrefetchReady()) {
       setDataReady(true);
@@ -472,6 +505,17 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
       console.log(`[Splash] News preloaded — ${items.length} articles cached`);
     }).catch((err) => { console.warn('[Splash] News fetch:', err); });
 
+    // Ollama setup is non-critical — fire-and-forget.
+    // Loads cached embeddings (instant) and checks if Ollama is available
+    // for future embedding generation. Never blocks boot.
+    embeddingService.loadCachedEmbeddings().then(count => {
+      if (count > 0) console.log(`[Splash] Loaded ${count} cached embeddings`);
+      // Check availability in background (won't pull models here — just detect)
+      return embeddingService.isAvailable();
+    }).then(available => {
+      console.log(`[Splash] Embedding engine: ${available ? 'Ollama detected' : 'running without embeddings'}`);
+    }).catch((err) => { console.warn('[Splash] Embedding check:', err); });
+
     // Safety timeout: don't strand the user on the splash screen forever.
     // If data still hasn't arrived after 30s, let them in anyway.
     const safetyTimer = setTimeout(() => {
@@ -510,7 +554,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     });
 
     const runBoot = async () => {
-      await wait(1200); // let ARK title animate in first
+      await wait(400); // let ARK title animate in first
 
       for (const line of BOOT_LINES) {
         if (cancelled) return;
@@ -578,7 +622,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
                   maxPolarAngle={Math.PI / 2}
                   minPolarAngle={Math.PI / 2}
                 />
-                <Stars radius={500} depth={50} count={1000} factor={10} />
+                <Stars radius={500} depth={50} count={500} factor={10} />
               </Canvas>
             </CanvasErrorBoundary>
           </div>

@@ -57,14 +57,15 @@ export function transformEpicGame(
 ): Game {
   const gameId = `epic-${item.namespace}:${item.id}`;
 
-  // Extract genres from tags
-  const genres: string[] = [];
+  // Extract genres from tags (Set for O(1) dedup)
+  const genreSet = new Set<string>();
   if (item.tags) {
     for (const tag of item.tags) {
       const name = tag.name || EPIC_GENRE_MAP[tag.id];
-      if (name && !genres.includes(name)) genres.push(name);
+      if (name) genreSet.add(name);
     }
   }
+  const genres = Array.from(genreSet);
 
   // Extract platforms from customAttributes or categories; default to Windows
   const platforms: string[] = [];
@@ -101,8 +102,40 @@ export function transformEpicGame(
   }
 
   // Price
+  // The Epic GraphQL API can return price in several incomplete states:
+  //   • price: null                          — no pricing data at all
+  //   • fmtPrice.discountPrice: ""           — formatted string empty
+  //   • discountPrice: 0  + originalPrice: 0 — genuinely free OR pricing not set
+  // We build a robust fallback chain to handle all cases.
   const tp = item.price?.totalPrice;
-  const isFree = tp ? tp.discountPrice === 0 : false;
+  const fmtDiscount = tp?.fmtPrice?.discountPrice || '';
+  const fmtOriginal = tp?.fmtPrice?.originalPrice || '';
+
+  // A game is truly free when the current price is 0 AND we can confirm it's
+  // intentionally free (not just missing pricing data):
+  //   (a) positive original price → 100% discount / free promo, OR
+  //   (b) formatted original price is "0" or "Free" → genuinely F2P
+  const isFree = tp
+    ? tp.discountPrice === 0 && (
+        tp.originalPrice > 0
+        || fmtOriginal === '0'
+        || fmtOriginal.toLowerCase() === 'free'
+      )
+    : false;
+
+  // Formatted price: prefer discountPrice (current price after any sale),
+  // fall back to originalPrice string, then compute from numeric cents.
+  const finalFormatted =
+    (fmtDiscount && fmtDiscount !== '0' ? fmtDiscount : null)
+    || (fmtOriginal && fmtOriginal !== '0' ? fmtOriginal : null)
+    || (tp && tp.discountPrice > 0
+      ? `₹${(tp.discountPrice / 100).toFixed(0)}`
+      : null)
+    || (tp && tp.originalPrice > 0
+      ? `₹${(tp.originalPrice / 100).toFixed(0)}`
+      : null)
+    || undefined;  // leave undefined when truly unknown
+
   const discountPercent = tp && tp.originalPrice > 0
     ? Math.round(((tp.originalPrice - tp.discountPrice) / tp.originalPrice) * 100)
     : 0;
@@ -155,9 +188,15 @@ export function transformEpicGame(
   }
 
   // Coming soon?
-  const comingSoon = item.effectiveDate
+  // Epic's effectiveDate is when the *offer* was published, which can differ
+  // from the actual consumer release date.  If the game already has a real
+  // price (finalFormatted is a currency string like "$69.99"), it's clearly
+  // purchasable → override comingSoon to false regardless of effectiveDate.
+  const effectiveDateFuture = item.effectiveDate
     ? new Date(item.effectiveDate).getTime() > Date.now()
     : false;
+  const hasPurchasablePrice = !!finalFormatted && !isFree;
+  const comingSoon = hasPurchasablePrice ? false : effectiveDateFuture;
 
   // Epic slug for store URL generation (e.g. https://store.epicgames.com/en-US/p/{slug})
   //
@@ -204,7 +243,7 @@ export function transformEpicGame(
     // Price
     price: {
       isFree,
-      finalFormatted: tp?.fmtPrice?.discountPrice,
+      finalFormatted: finalFormatted || undefined,
       discountPercent: discountPercent > 0 ? discountPercent : undefined,
     },
     comingSoon,

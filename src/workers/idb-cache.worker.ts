@@ -27,7 +27,8 @@ const CACHE_STALE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days stale-usable (hourly 
 const CACHE_FORMAT_VERSION = 2;
 
 // Heavy fields that are only needed on the detail page (not browse cards)
-const STRIP_KEYS = ['screenshots', 'videos', 'summary', 'movies', 'detailedDescription', 'aboutTheGame'];
+// Heavy fields stripped from browse cache (summary kept for reco engine embeddings)
+const STRIP_KEYS = ['screenshots', 'videos', 'movies', 'detailedDescription', 'aboutTheGame'];
 
 interface BrowseCacheEntry {
   key: string;

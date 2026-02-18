@@ -49,7 +49,7 @@ const categoryOptions: { value: GameCategory; label: string }[] = [
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle';
 
 const sortOptions: { value: SortOption; label: string }[] = [
   { value: 'rating', label: 'Rating' },

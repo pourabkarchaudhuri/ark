@@ -39,10 +39,21 @@ function getIdbWorker(): Worker {
 // During development, Vite HMR re-executes this module on every save, which
 // would wipe the in-memory game cache and break the browse grid.  We stash
 // the state on globalThis so it survives module re-initialization.
+interface SearchIndexEntry {
+  titleLower: string;
+  /** Title stripped of all non-alphanumeric characters for fuzzy/token matching */
+  titleNorm: string;
+  /** Individual lowercase words from the title */
+  titleWords: string[];
+  devLower: string;
+  pubLower: string;
+  genresLower: string[];
+}
+
 interface PrefetchHmrState {
   games: Game[] | null;
   ready: boolean;
-  searchIndex: Array<{ titleLower: string; devLower: string }> | null;
+  searchIndex: SearchIndexEntry[] | null;
 }
 const _hmr: PrefetchHmrState = ((globalThis as any).__ARK_PREFETCH_STATE__ ??= {
   games: null,
@@ -55,14 +66,212 @@ let prefetchReady = _hmr.ready;
 let prefetchPromise: Promise<Game[]> | null = null;
 // Pre-computed lowercase search strings — avoids calling .toLowerCase() on
 // every game during every keystroke. Built once when games are set.
-let searchIndex: Array<{ titleLower: string; devLower: string }> | null = _hmr.searchIndex;
+let searchIndex: SearchIndexEntry[] | null = _hmr.searchIndex;
 
 function buildSearchIndex(games: Game[]): void {
-  searchIndex = games.map(g => ({
-    titleLower: g.title.toLowerCase(),
+  // Build in chunks via requestIdleCallback/setTimeout to avoid blocking main thread
+  const CHUNK_SIZE = 500;
+  const result: SearchIndexEntry[] = new Array(games.length);
+  let offset = 0;
+
+  const processChunk = () => {
+    const end = Math.min(offset + CHUNK_SIZE, games.length);
+    for (let i = offset; i < end; i++) {
+      const g = games[i];
+      const titleLower = g.title.toLowerCase();
+      result[i] = {
+        titleLower,
+        titleNorm: titleLower.replace(/[^a-z0-9\s]/g, ''),
+        titleWords: titleLower.split(/\s+/).filter(Boolean),
+        devLower: (g.developer || '').toLowerCase(),
+        pubLower: (g.publisher || '').toLowerCase(),
+        genresLower: (g.genre || []).map(genre => genre.toLowerCase()),
+      };
+    }
+    offset = end;
+
+    if (offset < games.length) {
+      // Yield to the main thread between chunks
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(processChunk);
+      } else {
+        setTimeout(processChunk, 0);
+      }
+    } else {
+      // Done — commit
+      searchIndex = result;
+      _hmr.searchIndex = searchIndex;
+    }
+  };
+
+  // If dataset is small, build synchronously to avoid search-before-ready gaps
+  if (games.length <= CHUNK_SIZE) {
+    for (let i = 0; i < games.length; i++) {
+      const g = games[i];
+      const titleLower = g.title.toLowerCase();
+      result[i] = {
+        titleLower,
+        titleNorm: titleLower.replace(/[^a-z0-9\s]/g, ''),
+        titleWords: titleLower.split(/\s+/).filter(Boolean),
+        devLower: (g.developer || '').toLowerCase(),
+        pubLower: (g.publisher || '').toLowerCase(),
+        genresLower: (g.genre || []).map(genre => genre.toLowerCase()),
+      };
+    }
+    searchIndex = result;
+    _hmr.searchIndex = searchIndex;
+    return;
+  }
+
+  processChunk();
+}
+
+// ---------------------------------------------------------------------------
+// Scoring helpers — used by searchPrefetchedGames and exported for library
+// ---------------------------------------------------------------------------
+
+/**
+ * Simple edit-distance check: returns true if `a` and `b` are within
+ * `maxDist` Levenshtein edits.  Uses an early-exit bounded algorithm
+ * so it stays fast even on long strings (O(n * maxDist) instead of O(n*m)).
+ */
+function isWithinEditDistance(a: string, b: string, maxDist: number): boolean {
+  const la = a.length;
+  const lb = b.length;
+  if (Math.abs(la - lb) > maxDist) return false;
+  if (la === 0) return lb <= maxDist;
+  if (lb === 0) return la <= maxDist;
+
+  // Bounded Levenshtein using two rows
+  let prev = new Uint16Array(lb + 1);
+  let curr = new Uint16Array(lb + 1);
+  for (let j = 0; j <= lb; j++) prev[j] = j;
+
+  for (let i = 1; i <= la; i++) {
+    curr[0] = i;
+    let minVal = curr[0];
+    const jStart = Math.max(1, i - maxDist);
+    const jEnd = Math.min(lb, i + maxDist);
+    // Fill out-of-band cells with maxDist+1 so they're never picked
+    if (jStart > 1) curr[jStart - 1] = maxDist + 1;
+    for (let j = jStart; j <= jEnd; j++) {
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,        // deletion
+        curr[j - 1] + 1,    // insertion
+        prev[j - 1] + cost, // substitution
+      );
+      if (curr[j] < minVal) minVal = curr[j];
+    }
+    // Fill remaining out-of-band
+    if (jEnd < lb) curr[jEnd + 1] = maxDist + 1;
+    if (minVal > maxDist) return false; // early exit
+    [prev, curr] = [curr, prev];
+  }
+  return prev[lb] <= maxDist;
+}
+
+/**
+ * Score a game against a set of query tokens.  Higher is more relevant.
+ * Returns 0 if no match.
+ *
+ * Scoring tiers (cumulative across tokens):
+ *   200 — exact full-title match
+ *   100 — title starts with the full query
+ *    60 — every token starts a word boundary in the title
+ *    40 — every token is a substring of the title
+ *    20 — token matches developer or publisher
+ *    10 — token matches a genre
+ *     5 — fuzzy match (within 1-2 edit distance of a title word)
+ *
+ * Bonus:  +1 per 1000 metacriticScore (subtle tiebreaker for popular games)
+ */
+export function scoreGame(
+  idx: SearchIndexEntry,
+  tokens: string[],
+  fullQuery: string,
+  game?: Game | null,
+): number {
+  let score = 0;
+
+  // Exact full-title match
+  if (idx.titleLower === fullQuery) return 200 + (game?.metacriticScore ?? 0) / 1000;
+  // Title starts with full query
+  if (idx.titleLower.startsWith(fullQuery)) score = Math.max(score, 100);
+
+  let allTokensMatchTitle = true;
+  let allTokensWordBoundary = true;
+
+  for (const token of tokens) {
+    const tLen = token.length;
+    let tokenMatchedTitle = false;
+    let tokenWordBoundary = false;
+
+    // Word-boundary check: does a title word start with this token?
+    for (const word of idx.titleWords) {
+      if (word.startsWith(token)) {
+        tokenWordBoundary = true;
+        tokenMatchedTitle = true;
+        break;
+      }
+    }
+
+    // Substring check
+    if (!tokenMatchedTitle && idx.titleLower.includes(token)) {
+      tokenMatchedTitle = true;
+    }
+
+    if (!tokenMatchedTitle) allTokensMatchTitle = false;
+    if (!tokenWordBoundary) allTokensWordBoundary = false;
+
+    // Developer / publisher substring
+    if (idx.devLower.includes(token) || idx.pubLower.includes(token)) {
+      score += 20;
+    }
+
+    // Genre match
+    if (idx.genresLower.some(g => g.includes(token))) {
+      score += 10;
+    }
+
+    // Fuzzy match against title words (only for tokens of 4+ chars to avoid false positives)
+    if (!tokenMatchedTitle && tLen >= 4) {
+      const maxDist = tLen <= 5 ? 1 : 2;
+      for (const word of idx.titleWords) {
+        if (isWithinEditDistance(token, word, maxDist)) {
+          score += 5;
+          tokenMatchedTitle = true; // count it for the "all tokens" check
+          break;
+        }
+      }
+    }
+  }
+
+  if (allTokensMatchTitle && allTokensWordBoundary) score = Math.max(score, 60);
+  else if (allTokensMatchTitle) score = Math.max(score, 40);
+
+  // Small tiebreaker for popular games
+  if (score > 0 && game) {
+    score += (game.metacriticScore ?? 0) / 1000;
+    if (game.playerCount) score += Math.min(game.playerCount / 100_000, 0.5);
+  }
+
+  return score;
+}
+
+/**
+ * Build search index entry for a single game (used by library search).
+ */
+export function buildSingleSearchIndex(g: Game): SearchIndexEntry {
+  const titleLower = g.title.toLowerCase();
+  return {
+    titleLower,
+    titleNorm: titleLower.replace(/[^a-z0-9\s]/g, ''),
+    titleWords: titleLower.split(/\s+/).filter(Boolean),
     devLower: (g.developer || '').toLowerCase(),
-  }));
-  _hmr.searchIndex = searchIndex;
+    pubLower: (g.publisher || '').toLowerCase(),
+    genresLower: (g.genre || []).map(genre => genre.toLowerCase()),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +290,12 @@ export type ProgressCallback = (progress: PrefetchProgress) => void;
 // Public API
 // ---------------------------------------------------------------------------
 
+// A healthy prefetch (Steam + Epic) should produce well over 1000 games.
+// If the cache holds fewer, it was likely written after a partial fetch
+// (e.g. the Epic catalog timed out).  Treat it as stale so a full refresh
+// runs and recovers the missing data.
+const MIN_HEALTHY_CACHE_SIZE = 500;
+
 /**
  * Read cached browse data from IndexedDB (via worker).
  * Returns the games array + freshness flag if cache exists and is within stale TTL.
@@ -98,14 +313,31 @@ export async function getCachedBrowseData(): Promise<{
           w.removeEventListener('message', handler);
           const data = e.data.data;
           if (data?.games) {
+            // If the cached set is suspiciously small, force a refresh even
+            // if the timestamp says "fresh".  This self-heals after a partial
+            // initial fetch (e.g. Epic catalog timed out on first launch).
+            const tooSmall = data.games.length < MIN_HEALTHY_CACHE_SIZE;
+            if (tooSmall) {
+              console.warn(
+                `[PrefetchStore] IDB cache has only ${data.games.length} games (< ${MIN_HEALTHY_CACHE_SIZE}) — marking stale to trigger recovery`,
+              );
+            }
+            const effectiveFresh = data.isFresh && !tooSmall;
+
+            console.log(
+              `[PrefetchStore] IDB cache loaded: ${data.games.length} games (isFresh=${effectiveFresh}${tooSmall ? ', forced stale — too few games' : ''})`,
+            );
             // Store in memory for sync access
             prefetchedGames = data.games;
             prefetchReady = true;
             _hmr.games = prefetchedGames;
             _hmr.ready = prefetchReady;
             buildSearchIndex(data.games);
+            resolve({ games: data.games, isFresh: effectiveFresh });
+          } else {
+            console.log('[PrefetchStore] IDB cache: miss (no data or empty)');
+            resolve(data);
           }
-          resolve(data);
         }
       };
       w.addEventListener('message', handler);
@@ -198,6 +430,7 @@ async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
   };
 
   // Parallel fetch from all sources
+  const t0 = performance.now();
   const [
     mostPlayed,
     newReleases,
@@ -210,9 +443,16 @@ async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
     wrapSource(steamService.getNewReleases(), 'Steam new releases'),
     wrapSource(steamService.getTopSellers(), 'Steam top sellers'),
     wrapSource(steamService.getComingSoon(), 'Steam coming soon'),
-    wrapSource(epicService.browseCatalog(0), 'Epic full catalog', 60_000),
+    wrapSource(epicService.browseCatalog(0), 'Epic full catalog', 180_000),
     wrapSource(epicService.getFreeGames(), 'Epic free games'),
   ]);
+
+  console.log(
+    `[PrefetchStore] Source counts after ${((performance.now() - t0) / 1000).toFixed(1)}s: ` +
+      `mostPlayed=${mostPlayed.length}, newReleases=${newReleases.length}, ` +
+      `topSellers=${topSellers.length}, comingSoon=${comingSoon.length}, ` +
+      `epicCatalog=${epicCatalog.length}, epicFreeGames=${epicFreeGames.length}`,
+  );
 
   // Deduplicate
   report('Deduplicating across stores...');
@@ -300,7 +540,10 @@ export function setNavigatingGame(game: Game): void {
 }
 
 /**
- * Search prefetched games in-memory by title (case-insensitive substring).
+ * Search prefetched games in-memory with tokenized, relevance-scored matching.
+ * Searches title, developer, publisher, and genre.  Supports multi-word
+ * queries ("assassin creed") and typo tolerance via bounded edit distance.
+ * Results are sorted by relevance score (highest first).
  * Instant, no API calls needed. Falls back to null if no prefetched data.
  */
 export function searchPrefetchedGames(
@@ -309,31 +552,28 @@ export function searchPrefetchedGames(
 ): Game[] | null {
   if (!prefetchedGames || !query.trim()) return null;
   const q = query.toLowerCase().trim();
-  const results: Game[] = [];
+  const tokens = q.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
 
-  // Use the pre-computed lowercase index if available (avoids thousands
-  // of .toLowerCase() calls on every keystroke).
+  const scored: Array<{ game: Game; score: number }> = [];
+
   if (searchIndex && searchIndex.length === prefetchedGames.length) {
     for (let i = 0; i < searchIndex.length; i++) {
-      const idx = searchIndex[i];
-      if (idx.titleLower.includes(q) || idx.devLower.includes(q)) {
-        results.push(prefetchedGames[i]);
-        if (results.length >= limit) break;
-      }
+      const s = scoreGame(searchIndex[i], tokens, q, prefetchedGames[i]);
+      if (s > 0) scored.push({ game: prefetchedGames[i], score: s });
     }
   } else {
     // Fallback if index is stale or not built yet
     for (const game of prefetchedGames) {
-      if (
-        game.title.toLowerCase().includes(q) ||
-        game.developer?.toLowerCase().includes(q)
-      ) {
-        results.push(game);
-        if (results.length >= limit) break;
-      }
+      const idx = buildSingleSearchIndex(game);
+      const s = scoreGame(idx, tokens, q, game);
+      if (s > 0) scored.push({ game, score: s });
     }
   }
-  return results;
+
+  // Sort by score descending, then take top N
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map(s => s.game);
 }
 
 /**

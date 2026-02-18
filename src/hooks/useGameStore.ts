@@ -143,6 +143,11 @@ export function extractCachedMeta(game: Game): CachedGameMeta {
     epicNamespace: game.epicNamespace,
     epicOfferId: game.epicOfferId,
     steamAppId: game.steamAppId,
+    // v3: extended metadata for recommendation engine
+    themes: game.themes,
+    gameModes: game.gameModes,
+    playerPerspectives: game.playerPerspectives,
+    similarGames: game.similarGames?.map(sg => ({ id: sg.id, name: sg.name })),
   };
 }
 
@@ -465,22 +470,26 @@ export function useSteamGames(category: GameCategory = 'trending') {
               _bgRefreshRunning = true;
               if (isMountedRef.current) setIsSyncing(true);
 
+              // Fetch fresh data from ALL sources.  The Epic catalog call
+              // goes to the main process which keeps its own in-memory cache,
+              // so after the very first successful fetch it returns instantly
+              // via IPC (no 60+ second pagination delay).  Previously we
+              // re-used existing Epic data from memory, but if the initial
+              // prefetch timed out, the Epic set was empty and the background
+              // refresh could never recover — locking the browse grid at
+              // ~138 Steam-only games forever.
               Promise.all([
                 steamService.getMostPlayedGames(500),
                 steamService.getNewReleases(),
                 steamService.getTopSellers(),
                 steamService.getComingSoon(),
-                // Re-use existing Epic-originating data from the prefetch store
-                // instead of re-fetching the full catalog (saves ~60+ seconds
-                // of API calls).  Include both Epic-primary games AND cross-store
-                // games that the dedup worker merged into Steam entries — those
-                // have store:'steam' but availableOn includes 'epic'.  Without
-                // this, the refresh silently drops hundreds of catalog games.
-                Promise.resolve(
-                  getPrefetchedGames()?.filter(g =>
+                epicService.browseCatalog(0).catch(() => {
+                  // If the fresh catalog call fails, fall back to whatever
+                  // Epic data we already have in memory so we don't regress.
+                  return (getPrefetchedGames()?.filter(g =>
                     g.store === 'epic' || g.availableOn?.includes('epic')
-                  ) ?? []
-                ),
+                  ) ?? []) as Game[];
+                }),
                 epicService.getFreeGames().catch(() => [] as Game[]),
               ]).then(async ([mp, nr, ts, cs, ec, ef]) => {
                 if (!isMountedRef.current) return;
@@ -756,11 +765,14 @@ export function useSteamGames(category: GameCategory = 'trending') {
     const slice = allGames.slice(0, displayCount);
     let anyDiff = slice.length !== prevGamesRef.current.length;
 
+    // Pre-build library lookup to avoid per-item method calls on 6000+ games
+    const libraryIdSet = new Set(libraryStore.getAllGameIds());
+
     const result = slice.map((game, idx) => {
       // Determine what enrichment data is available
       const enrichment = enrichmentMapRef.current.get(game.id);
       const pc = game.steamAppId ? playerCountMapRef.current.get(game.steamAppId) : undefined;
-      const libraryEntry = libraryStore.getEntry(game.id);
+      const libraryEntry = libraryIdSet.has(game.id) ? libraryStore.getEntry(game.id) : undefined;
 
       // Fast path: nothing to merge — return the original object
       if (!enrichment && pc === undefined && !libraryEntry) {
@@ -1223,10 +1235,22 @@ export function useLibraryGames() {
   // On subsequent library changes we only fetch NEW games and reuse
   // existing data for unchanged ones (avoids N IPC calls per change).
   const gameDetailsCacheRef = useRef<Map<string, Game>>(new Map());
+  const prevGameIdsRef = useRef<string>('');
 
-  // Subscribe to library changes
+  // Subscribe to library changes (debounced to coalesce rapid mutations)
   useEffect(() => {
-    return libraryStore.subscribe(() => setUpdateCount((c) => c + 1));
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsub = libraryStore.subscribe(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        setUpdateCount((c) => c + 1);
+      }, 200);
+    });
+    return () => {
+      unsub();
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   // Fetch library game details
@@ -1235,10 +1259,31 @@ export function useLibraryGames() {
 
     const fetchLibraryGames = async () => {
       const gameIds = libraryStore.getAllGameIds();
+      const idsKey = gameIds.join(',');
+
       if (gameIds.length === 0) {
-        if (isMounted) { setGames([]); gameDetailsCacheRef.current.clear(); }
+        if (isMounted) { setGames([]); gameDetailsCacheRef.current.clear(); prevGameIdsRef.current = ''; }
         return;
       }
+
+      // If the game IDs haven't changed, only refresh mutable fields from cache
+      if (idsKey === prevGameIdsRef.current && gameDetailsCacheRef.current.size > 0) {
+        const cache = gameDetailsCacheRef.current;
+        const refreshed: Game[] = [];
+        for (const id of gameIds) {
+          const cached = cache.get(id);
+          if (!cached) continue;
+          const entry = libraryStore.getEntry(id);
+          if (entry) {
+            refreshed.push({ ...cached, status: entry.status, priority: entry.priority, isInLibrary: true });
+          } else {
+            refreshed.push(cached);
+          }
+        }
+        if (isMounted && refreshed.length > 0) setGames(refreshed);
+        return;
+      }
+      prevGameIdsRef.current = idsKey;
 
       // Diff: only fetch details for game IDs we haven't seen before.
       // For existing games, update library-specific fields (status, priority)
@@ -1395,9 +1440,19 @@ export function useLibraryGames() {
             }
           }
 
-          // Seed journey history with full game metadata (only for new games)
+          // Backfill journey entries for library games that are Playing, Playing Now, or Completed (so they appear in Your Ark / Logs)
+          const arkStatuses: GameStatus[] = ['Playing', 'Playing Now', 'Completed'];
           for (const game of newGames) {
+            if (!arkStatuses.includes(game.status) || journeyStore.has(game.id)) continue;
             const libEntry = libraryStore.getEntry(game.id);
+            const addedAtIso = libEntry?.addedAt
+              ? new Date(libEntry.addedAt).toISOString()
+              : game.createdAt
+                ? new Date(game.createdAt).toISOString()
+                : undefined;
+            const sortDate = game.status === 'Completed'
+              ? (libEntry?.lastPlayedAt ?? addedAtIso ?? new Date().toISOString())
+              : addedAtIso;
             journeyStore.record({
               gameId: game.id,
               title: game.title,
@@ -1408,11 +1463,22 @@ export function useLibraryGames() {
               status: game.status,
               hoursPlayed: libEntry?.hoursPlayed ?? 0,
               rating: libEntry?.rating ?? 0,
-              addedAt: libEntry?.addedAt
-                ? new Date(libEntry.addedAt).toISOString()
-                : game.createdAt
-                  ? new Date(game.createdAt).toISOString()
-                  : undefined,
+              firstPlayedAt: sortDate,
+              lastPlayedAt: libEntry?.lastPlayedAt ?? (game.status === 'Completed' ? sortDate : undefined),
+              addedAt: addedAtIso,
+            });
+          }
+
+          // Sync journey progress for all in-library games that have a journey entry
+          for (const game of validGames) {
+            const jEntry = journeyStore.getEntry(game.id);
+            if (!jEntry) continue;
+            const libEntry = libraryStore.getEntry(game.id);
+            journeyStore.syncProgress(game.id, {
+              status: game.status,
+              hoursPlayed: libEntry?.hoursPlayed ?? jEntry.hoursPlayed,
+              rating: libEntry?.rating ?? jEntry.rating,
+              lastPlayedAt: libEntry?.lastPlayedAt ?? jEntry.lastPlayedAt,
             });
           }
 
@@ -1432,6 +1498,8 @@ export function useLibraryGames() {
                 status: jEntry.status,
                 hoursPlayed: jEntry.hoursPlayed,
                 rating: jEntry.rating,
+                firstPlayedAt: jEntry.firstPlayedAt,
+                lastPlayedAt: jEntry.lastPlayedAt,
                 addedAt: jEntry.addedAt,
               });
             }
@@ -1453,15 +1521,80 @@ export function useLibraryGames() {
   return { games, loading, error };
 }
 
+const ARK_STATUSES: GameStatus[] = ['Playing', 'Playing Now', 'Completed'];
+
 /**
- * Custom hook for reading journey history.
- * Returns all journey entries (persisted even after library removal).
+ * Ensures every library + custom game with Playing/Playing Now/Completed has a journey
+ * entry with firstPlayedAt or lastPlayedAt so it appears in Your Ark and Logs.
+ * Run on app load (e.g. splash screen) so Voyage opens instantly.
+ */
+export function ensureArkBackfill() {
+  const addedAtIso = (d: Date | string) => (d instanceof Date ? d.toISOString() : String(d));
+
+  // Library (Steam/Epic)
+  for (const lib of libraryStore.getAllEntries()) {
+    if (!ARK_STATUSES.includes(lib.status)) continue;
+    const existing = journeyStore.getEntry(lib.gameId);
+    const needsActivity = !existing || (!existing.firstPlayedAt && !existing.lastPlayedAt);
+    if (!needsActivity) continue;
+
+    const sortDate = lib.lastPlayedAt ?? addedAtIso(lib.addedAt);
+    const meta = lib.cachedMeta;
+    journeyStore.record({
+      gameId: lib.gameId,
+      title: meta?.title ?? existing?.title ?? 'Unknown',
+      coverUrl: meta?.coverUrl ?? existing?.coverUrl,
+      genre: meta?.genre ?? existing?.genre ?? [],
+      platform: meta?.platform ?? existing?.platform ?? [],
+      releaseDate: meta?.releaseDate ?? existing?.releaseDate,
+      status: lib.status,
+      hoursPlayed: lib.hoursPlayed ?? existing?.hoursPlayed ?? 0,
+      rating: lib.rating ?? existing?.rating ?? 0,
+      firstPlayedAt: sortDate,
+      lastPlayedAt: lib.lastPlayedAt ?? (lib.status === 'Completed' ? sortDate : undefined),
+      addedAt: existing?.addedAt ?? addedAtIso(lib.addedAt),
+    });
+  }
+
+  // Custom games
+  for (const entry of customGameStore.getAllGames()) {
+    if (!ARK_STATUSES.includes(entry.status)) continue;
+    const existing = journeyStore.getEntry(entry.id);
+    const needsActivity = !existing || (!existing.firstPlayedAt && !existing.lastPlayedAt);
+    if (!needsActivity) continue;
+
+    const addedAtStr = addedAtIso(entry.addedAt);
+    const sortDate = entry.lastPlayedAt ?? addedAtStr;
+    journeyStore.record({
+      gameId: entry.id,
+      title: entry.title,
+      coverUrl: existing?.coverUrl,
+      genre: existing?.genre ?? [],
+      platform: entry.platform ?? existing?.platform ?? [],
+      releaseDate: existing?.releaseDate,
+      status: entry.status,
+      hoursPlayed: entry.hoursPlayed ?? 0,
+      rating: entry.rating ?? 0,
+      firstPlayedAt: sortDate,
+      lastPlayedAt: entry.lastPlayedAt ?? (entry.status === 'Completed' ? sortDate : undefined),
+      addedAt: existing?.addedAt ?? addedAtStr,
+    });
+  }
+}
+
+/**
+ * Custom hook for reading journey history (all entries; Ark/Log filter in JourneyView).
  */
 export function useJourneyHistory() {
   const [entries, setEntries] = useState(journeyStore.getAllEntries());
 
+  // Run backfill once on mount so Your Ark / Logs show library + custom games with Playing/Completed
   useEffect(() => {
-    // Refresh on any journey store change
+    ensureArkBackfill();
+    setEntries(journeyStore.getAllEntries());
+  }, []);
+
+  useEffect(() => {
     return journeyStore.subscribe(() => {
       setEntries(journeyStore.getAllEntries());
     });

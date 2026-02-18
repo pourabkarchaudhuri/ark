@@ -36,6 +36,58 @@ vi.mock('@/services/session-store', () => ({
   },
 }));
 
+// Mock @tanstack/react-virtual (jsdom has no layout, virtualizer renders 0 rows)
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getTotalSize: () => count * 48,
+    getVirtualItems: () =>
+      Array.from({ length: count }, (_, i) => ({
+        index: i,
+        start: i * 48,
+        size: 48,
+        key: i,
+      })),
+    scrollToIndex: vi.fn(),
+  }),
+}));
+
+// Mock ShowcaseView (uses Three.js which doesn't work in jsdom)
+vi.mock('@/components/showcase-view', () => ({
+  ShowcaseView: ({ entries }: { entries: unknown[] }) => (
+    <div data-testid="showcase-view">Showcase ({(entries as unknown[]).length} entries)</div>
+  ),
+}));
+
+// Mock useBadgeProgress (used by MedalsView)
+vi.mock('@/hooks/useBadgeProgress', () => ({
+  useBadgeProgress: () => ({
+    badges: [],
+    tasteDna: [],
+    genomePurity: 0,
+    totalPoints: 0,
+    rank: { name: 'Novice', threshold: 0, color: '#888' },
+  }),
+}));
+
+// Mock medal sub-components
+vi.mock('@/components/medals/taste-dna', () => ({
+  DnaRadar: () => <div data-testid="dna-radar" />,
+}));
+vi.mock('@/components/medals/badge-vault', () => ({
+  BadgeVault: () => <div data-testid="badge-vault" />,
+}));
+vi.mock('@/components/medals/overview-charts', () => ({
+  computeOverviewAnalytics: () => ({ genreRadar: [], activityArea: [], recSources: [] }),
+  GenreRadarChart: () => <div data-testid="genre-radar-chart" />,
+  ActivityAreaChart: () => <div data-testid="activity-area-chart" />,
+}));
+vi.mock('@/components/ui/evervault-card', () => ({
+  Icon: () => <div data-testid="icon" />,
+}));
+vi.mock('@/components/ui/database-with-rest-api', () => ({
+  default: () => <div data-testid="database-rest" />,
+}));
+
 // Mock framer-motion
 vi.mock('framer-motion', () => {
   const motionHandler = {
@@ -59,6 +111,7 @@ vi.mock('framer-motion', () => {
   };
   return {
     motion: new Proxy({}, motionHandler),
+    AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
     useScroll: () => ({ scrollYProgress: { get: () => 0 } }),
     useTransform: () => ({ get: () => 0 }),
     useMotionValue: () => ({ get: () => 0, set: () => {}, on: () => () => {} }),
@@ -68,6 +121,7 @@ vi.mock('framer-motion', () => {
 });
 
 function createMockEntry(overrides: Partial<JourneyEntry> = {}): JourneyEntry {
+  const addedAt = overrides.addedAt ?? '2025-03-15T00:00:00.000Z';
   return {
     gameId: 'steam-730',
     title: 'Counter-Strike 2',
@@ -78,7 +132,9 @@ function createMockEntry(overrides: Partial<JourneyEntry> = {}): JourneyEntry {
     status: 'Playing',
     hoursPlayed: 120,
     rating: 4,
-    addedAt: '2025-03-15T00:00:00.000Z',
+    addedAt,
+    firstPlayedAt: addedAt,
+    lastPlayedAt: addedAt,
     ...overrides,
   };
 }
@@ -137,8 +193,8 @@ describe('JourneyView', () => {
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
 
-    // Both year labels should appear (Timeline renders them as headings)
     expect(screen.getAllByText('2025').length).toBeGreaterThan(0);
     expect(screen.getAllByText('2024').length).toBeGreaterThan(0);
   });
@@ -150,6 +206,7 @@ describe('JourneyView', () => {
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
 
     expect(screen.getByText('Counter-Strike 2')).toBeInTheDocument();
     expect(screen.getByText('Dota 2')).toBeInTheDocument();
@@ -167,6 +224,7 @@ describe('JourneyView', () => {
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
 
     expect(screen.getByText('Playing')).toBeInTheDocument();
     expect(screen.getByText('Completed')).toBeInTheDocument();
@@ -178,6 +236,7 @@ describe('JourneyView', () => {
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
 
     expect(screen.getByText('120 Hrs')).toBeInTheDocument();
   });
@@ -201,11 +260,7 @@ describe('JourneyView', () => {
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    // Header should show game count and completed count
-    expect(screen.getByText(/2 games in your history/)).toBeInTheDocument();
-    // "1 completed" appears in header and year summary, so use getAllByText
-    const completedTexts = screen.getAllByText(/1 completed/);
-    expect(completedTexts.length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/played/)).toBeInTheDocument();
   });
 
   it('navigates to game details on card click', () => {
@@ -214,9 +269,9 @@ describe('JourneyView', () => {
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
 
     const textEl = screen.getByText('Counter-Strike 2');
-    // Walk up to the nearest clickable card container (rendered as a plain div by the mock)
     const card = textEl.closest('div[class]');
     expect(card).toBeInTheDocument();
     if (card) fireEvent.click(card);
@@ -236,13 +291,12 @@ describe('JourneyView', () => {
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
 
-    // Should show "2 games added" in the year summary
-    expect(screen.getByText(/2 games added/)).toBeInTheDocument();
+    expect(screen.getByText(/2 titles registered/)).toBeInTheDocument();
   });
 
   it('shows "Removed" badge for removed games', async () => {
-    // Game was removed, so it's no longer in the library
     const { libraryStore } = await import('@/services/library-store');
     (libraryStore.isInLibrary as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
@@ -255,6 +309,7 @@ describe('JourneyView', () => {
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
 
     expect(screen.getByText('Removed')).toBeInTheDocument();
     expect(screen.queryByText('In Library')).not.toBeInTheDocument();
@@ -272,33 +327,37 @@ describe('JourneyView', () => {
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
 
     expect(screen.getByText('In Library')).toBeInTheDocument();
     expect(screen.queryByText('Removed')).not.toBeInTheDocument();
   });
 
-  // ── Noob / OCD / Analytics tab toggle tests ──
+  // ── Log / OCD / Medals tab toggle tests ──
 
-  it('renders Noob, OCD, and Analytics tab buttons', () => {
+  it('renders Log, OCD, and Medals tab buttons', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    expect(screen.getByText('Noob')).toBeInTheDocument();
+    expect(screen.getByText('Log')).toBeInTheDocument();
     expect(screen.getByText('OCD')).toBeInTheDocument();
-    expect(screen.getByText('Analytics')).toBeInTheDocument();
+    expect(screen.getByText('Medals')).toBeInTheDocument();
   });
 
-  it('defaults to Noob view (timeline renders)', () => {
+  it('defaults to Ark view, switches to Log view with timeline', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    // Noob view shows year labels via the Timeline component
+    // Click Log tab to switch to Captain's Log view
+    fireEvent.click(screen.getByText('Log'));
+
+    // Log view shows year labels via the Timeline component
     expect(screen.getAllByText('2025').length).toBeGreaterThan(0);
   });
 
@@ -324,7 +383,7 @@ describe('JourneyView', () => {
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    // In Noob view, Mock/Live should NOT be visible
+    // In Ark view, Mock/Live should NOT be visible
     expect(screen.queryByText('Mock')).not.toBeInTheDocument();
     expect(screen.queryByText('Live')).not.toBeInTheDocument();
 
@@ -353,49 +412,16 @@ describe('JourneyView', () => {
     expect(eldenRings.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('switches to Analytics view when Analytics tab is clicked', () => {
-    const entries = [
-      createMockEntry({
-        gameId: 'steam-730',
-        title: 'Counter-Strike 2',
-        addedAt: '2025-01-01T00:00:00.000Z',
-        hoursPlayed: 120,
-        status: 'Completed',
-        genre: ['Action', 'FPS'],
-      }),
-      createMockEntry({
-        gameId: 'steam-570',
-        title: 'Dota 2',
-        addedAt: '2025-02-01T00:00:00.000Z',
-        hoursPlayed: 50,
-        status: 'Playing',
-        genre: ['Strategy', 'MOBA'],
-      }),
-    ];
-
-    render(<JourneyView entries={entries} loading={false} />);
-
-    // Click Analytics tab
-    fireEvent.click(screen.getByText('Analytics'));
-
-    // Analytics view shows StatCard sections
-    expect(screen.getByText('Overview')).toBeInTheDocument();
-    expect(screen.getByText('Activity')).toBeInTheDocument();
-  });
-
-  it('shows Mock/Live toggle in both OCD and Analytics views', () => {
+  it('switches to Medals view when Medals tab is clicked', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    // In Noob view, Mock/Live should NOT be visible
-    expect(screen.queryByText('Mock')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Medals'));
 
-    // Switch to Analytics — Mock/Live should be visible
-    fireEvent.click(screen.getByText('Analytics'));
-    expect(screen.getByText('Mock')).toBeInTheDocument();
-    expect(screen.getByText('Live')).toBeInTheDocument();
+    expect(screen.getByText('Overview')).toBeInTheDocument();
+    expect(screen.getByText('Badge Vault')).toBeInTheDocument();
   });
 });

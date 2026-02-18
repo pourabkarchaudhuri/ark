@@ -9,6 +9,24 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.31': {
+    title: "What's New in Ark 1.0.31",
+    changes: [
+      'Medals System — Gamified progression with Taste DNA radar, badge vault, skill tree, genre/activity analytics, and commander XP; 40+ badges across Explorer, Completionist, Collector, Analyst, and Veteran branches with Bronze → Diamond tiers',
+      'Oracle Recommendations — 17-layer scoring pipeline running in a Web Worker produces themed shelves (Hidden Gems, Genre Deep Dives, Comfort Picks, etc.) with match-score breakdowns; shelf ordering optimized via Thompson Sampling bandit',
+      'Ollama Embedding Integration — Auto-detects local Ollama, pulls the required model, and generates semantic embeddings for richer recommendation matching; all orchestrated through new IPC handlers',
+      'Year Wrapped — Spotify-Wrapped-style gaming recap accessible from Settings with animated slides showing top games, genre breakdown, and session stats',
+      'Showcase View Overhaul — 3D card carousel for "Your Ark" with tilt interaction, status rings, and smooth transitions; replaces the old flat grid default',
+      'Voyage View Refactor — Renamed Noob → Captain\'s Log with per-month grouping; new Medals tab alongside Log/OCD; removed standalone Analytics view in favour of Medals Overview',
+      'Gantt Virtualization — OCD timeline now uses @tanstack/react-virtual for vertical row virtualization, dramatically reducing DOM nodes for large libraries',
+      'Performance Tier 1 — Debounced localStorage writes (300 ms coalescing) in library, journey, and custom-game stores with beforeunload flush; cached sorted arrays invalidated on mutation',
+      'Performance Tier 2 — Fingerprint-based early exit in useDeferredFilterSort, stable isPlayingNow ref in dashboard renderGameCard, useCallback for card click/heart handlers, Set-based genre dedup in Epic transform',
+      'Performance Tier 3 — Chunked search-index build with requestIdleCallback yielding, splash-screen star count halved (1000 → 500), cold-start wait reduced (1200 → 400 ms), library enrichment guarded by Set lookup',
+      'Import/Export Overhaul — Import now performs a full wipe-and-replace across library, journey, session, and status-history stores for deterministic results; merge import option added',
+      'UI Components — 3D tilt card, Evervault animated card, database REST badge, BlurText, CountUp, GradientText, and ShinyText animation primitives',
+      'Test Fixes — Updated journey-view, library-store, and epic-service tests for new view defaults, mock completeness, and isFree pricing edge case',
+    ],
+  },
   '1.0.30': {
     title: "What's New in Ark 1.0.30",
     changes: [
@@ -78,7 +96,7 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
       'Diff-Based Library Refresh — useLibraryGames now caches fetched game details and only makes API calls for newly added games; status/priority updates are applied locally without network requests',
       'Pre-Computed Search Index — Prefetch store builds a parallel lowercase index on load, eliminating thousands of .toLowerCase() calls per keystroke during Browse search',
       'Release Calendar Overhaul — "+X more" button opens a slide-out side panel with smooth framer-motion enter/exit animation; multi-step Steam CDN fallback chain (cover → header → capsule) for thumbnails; fixed popover positioning bug (viewport-relative fix) and added debounced hover timing to prevent flicker',
-      'Voyage Thumbnail Fallbacks — All three Voyage views (Noob timeline, OCD Gantt, Analytics) now use a shared buildGameImageChain() utility that walks through Steam CDN URL variants on error instead of showing blank placeholders',
+      "Voyage Thumbnail Fallbacks — All three Voyage views (Captain's Log timeline, OCD Gantt, Analytics) now use a shared buildGameImageChain() utility that walks through Steam CDN URL variants on error instead of showing blank placeholders",
       'Voyage CoverUrl Backfill — Library refresh now patches older voyage entries that have missing coverUrl fields with freshly fetched image URLs',
       'Epic System Requirements Fix — Epic CMS requirements are now handled for all data shapes (string, array, object) instead of breaking when Object.entries() was called on a plain string',
       'Epic Library Bug Fix — Fixed broken GraphQL schema (removed deprecated releaseInfo field), added REST fallback for getGameDetails, and introduced multi-tier offline fallback (cachedMeta → voyageStore → placeholder) so Epic games always appear in Library',

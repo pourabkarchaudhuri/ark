@@ -15,6 +15,7 @@ import { register as registerSettingsHandlers } from './settings-handlers.js';
 import { register as registerDialogHandlers } from './dialog-handlers.js';
 import { register as registerSessionHandlers } from './session-handlers.js';
 import { register as registerWebviewHandlers } from './webview-handlers.js';
+import { register as registerOllamaHandlers } from './ollama-handlers.js';
 
 export function registerAllHandlers(getMainWindow: () => BrowserWindowType | null): void {
   registerWindowHandlers(getMainWindow);
@@ -28,6 +29,7 @@ export function registerAllHandlers(getMainWindow: () => BrowserWindowType | nul
   registerDialogHandlers(getMainWindow);
   registerSessionHandlers();
   registerWebviewHandlers(getMainWindow);
+  registerOllamaHandlers();
 }
 
 // Re-export webview handler's destroy function for window cleanup

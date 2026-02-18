@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { Canvas, useFrame, extend } from '@react-three/fiber';
 import { Stars, Html } from '@react-three/drei';
 import { easing, geometry } from 'maath';
+import { motion, AnimatePresence } from 'framer-motion';
 import { Clock, Calendar, Star, Library } from 'lucide-react';
 import type { JourneyEntry, GameStatus } from '@/types/game';
 import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
@@ -309,6 +310,7 @@ function GenreArc({
             key={entry.gameId}
             urls={urls}
             isActive={entry.gameId === activeGameId}
+            hoursPlayed={entry.hoursPlayed}
             position={[Math.sin(angle) * radius, 0, Math.cos(angle) * radius]}
             rotation={[0, Math.PI / 2 + angle, 0]}
             onClick={(e: any) => {
@@ -413,6 +415,42 @@ function GenreFloorArc({ from, len, radius }: { from: number; len: number; radiu
   return <primitive ref={lineRef} object={new THREE.Line(lineGeometry, lineMaterial)} />;
 }
 
+/** Typewriter text effect for the hours stamp on the active card. */
+function TypedHoursStamp({ text }: { text: string }) {
+  const fullText = `// Hours Logged : ${text}`;
+  const [count, setCount] = useState(0);
+  const done = count >= fullText.length;
+
+  useEffect(() => {
+    setCount(0);
+    let i = 0;
+    const timer = setInterval(() => {
+      i++;
+      setCount(i);
+      if (i >= fullText.length) clearInterval(timer);
+    }, 22);
+    return () => clearInterval(timer);
+  }, [fullText]);
+
+  return (
+    <span style={{
+      color: 'rgba(255,255,255,0.85)',
+      fontSize: '45px',
+      fontWeight: 600,
+      letterSpacing: '0.04em',
+      fontFamily: 'monospace',
+      lineHeight: 1,
+    }}>
+      {fullText.slice(0, count)}
+      <span style={{
+        opacity: done ? 0 : 1,
+        transition: done ? 'opacity 0.4s' : 'none',
+        animation: done ? 'none' : 'arkCursorBlink 0.6s step-end infinite',
+      }}>▌</span>
+    </span>
+  );
+}
+
 /**
  * A single card on the wheel. Manages its own texture loading with automatic
  * fallback through the URL chain using THREE.TextureLoader.
@@ -423,12 +461,14 @@ function GenreFloorArc({ from, len, radius }: { from: number; len: number; radiu
 function Card({
   urls,
   isActive,
+  hoursPlayed,
   position: cardPos,
   rotation: cardRot,
   onClick,
 }: {
   urls: string[];
   isActive: boolean;
+  hoursPlayed: number;
   position: [number, number, number];
   rotation: [number, number, number];
   onClick: (e: any) => void;
@@ -442,6 +482,17 @@ function Card({
   const mounted = useRef(false);
 
   const texture = useFallbackTexture(urls);
+
+  // Track active state transitions for the floating label
+  const [showLabel, setShowLabel] = useState(false);
+  useEffect(() => {
+    if (isActive) {
+      // Delay label appearance so the card has time to arrive at center
+      const timer = setTimeout(() => setShowLabel(true), 200);
+      return () => clearTimeout(timer);
+    }
+    setShowLabel(false);
+  }, [isActive]);
 
   useFrame((_state, delta) => {
     if (!slabRef.current || !groupRef.current) return;
@@ -459,7 +510,7 @@ function Card({
       delta,
     );
 
-    const f = isActive ? 1.8 : 1;
+    const f = isActive ? 2.6 : 1;
     easing.damp3(
       slabRef.current.scale,
       [f, f, f] as unknown as THREE.Vector3,
@@ -467,7 +518,7 @@ function Card({
       delta,
     );
 
-    const colorTarget = isActive ? '#ffffff' : '#555555';
+    const colorTarget = isActive ? '#ffffff' : '#999999';
     const colorSpeed = isActive ? 0.3 : 0.1;
     if (frontMatRef.current) {
       easing.dampC(frontMatRef.current.color, colorTarget, colorSpeed, delta);
@@ -479,6 +530,8 @@ function Card({
     const targetY = isActive ? faceForwardY : defaultY;
     easing.damp(groupRef.current.rotation, 'y', targetY, CARD_DAMP, delta);
   });
+
+  const hoursText = hoursPlayed > 0 ? formatHours(hoursPlayed) : '0 Mins';
 
   return (
     <group ref={groupRef} onClick={onClick}>
@@ -516,12 +569,51 @@ function Card({
             />
           </mesh>
         )}
+
+        {/* Floating hours label — appears above the card when active */}
+        {showLabel && (
+          <Html
+            position={[0, CARD_H / 2 + 0.12, CARD_DEPTH / 2 + 0.01]}
+            center
+            zIndexRange={[10, 10]}
+            style={{ pointerEvents: 'none', userSelect: 'none' }}
+            distanceFactor={4}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                whiteSpace: 'nowrap',
+                background: 'none',
+                padding: 0,
+                border: 'none',
+                animation: 'arkHoursIn 0.45s cubic-bezier(0.16,1,0.3,1) forwards',
+              }}
+            >
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="rgba(217,70,239,0.9)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+              </svg>
+              <TypedHoursStamp text={hoursText} />
+            </div>
+            <style>{`
+              @keyframes arkHoursIn {
+                0% { opacity: 0; transform: translateY(8px) scale(0.7); filter: blur(4px); }
+                60% { opacity: 1; transform: translateY(-2px) scale(1.04); filter: blur(0px); }
+                100% { opacity: 1; transform: translateY(0px) scale(1); filter: blur(0px); }
+              }
+              @keyframes arkCursorBlink {
+                50% { opacity: 0; }
+              }
+            `}</style>
+          </Html>
+        )}
       </group>
     </group>
   );
 }
 
-// ─── Metadata helpers (matching Voyage Noob mode) ────────────────────────────
+// ─── Metadata helpers (matching Voyage Log mode) ─────────────────────────────
 
 const statusColors: Record<GameStatus, string> = {
   'Completed': 'bg-green-500/20 text-green-400 border-green-500/30',
@@ -548,6 +640,90 @@ const ArkStarRating = memo(function ArkStarRating({ rating }: { rating: number }
     </div>
   );
 });
+
+// ─── Frequency-wave metadata bar ─────────────────────────────────────────────
+// Each label is a "bar" in the spectrum. On card swap they exit downward in a
+// fast staggered wave, then the new set rises upward with a spring bounce —
+// resembling an audio frequency visualizer reacting to a beat.
+
+/** Spring config shared by all wave items — punchy with a short settle. */
+const WAVE_SPRING = { type: 'spring' as const, stiffness: 600, damping: 28, mass: 0.7 };
+const WAVE_STAGGER = 0.035; // seconds between each bar
+const EXIT_DURATION = 0.12;
+
+/** A single "frequency bar" — wraps one metadata chip / label. */
+function WaveItem({ index, children }: { index: number; children: React.ReactNode }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 14, scaleY: 0.3, filter: 'blur(4px)' }}
+      animate={{
+        opacity: 1,
+        y: 0,
+        scaleY: 1,
+        filter: 'blur(0px)',
+        transition: {
+          ...WAVE_SPRING,
+          delay: index * WAVE_STAGGER,
+          // Opacity and blur resolve slightly faster than the bounce
+          opacity: { duration: 0.18, delay: index * WAVE_STAGGER },
+          filter: { duration: 0.22, delay: index * WAVE_STAGGER },
+        },
+      }}
+      exit={{
+        opacity: 0,
+        y: -10,
+        scaleY: 0.4,
+        filter: 'blur(3px)',
+        transition: {
+          duration: EXIT_DURATION,
+          delay: index * (WAVE_STAGGER * 0.6),
+          ease: 'easeIn',
+        },
+      }}
+      style={{ originY: 0.5 }}
+      className="inline-flex items-center"
+    >
+      {children}
+    </motion.div>
+  );
+}
+
+/** Thin separator bar that participates in the wave but is just a visual tick. */
+function WaveSep({ index }: { index: number }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, scaleY: 0 }}
+      animate={{
+        opacity: 1,
+        scaleY: 1,
+        transition: { ...WAVE_SPRING, delay: index * WAVE_STAGGER },
+      }}
+      exit={{
+        opacity: 0,
+        scaleY: 0,
+        transition: { duration: EXIT_DURATION, delay: index * (WAVE_STAGGER * 0.6) },
+      }}
+      style={{ originY: 0.5 }}
+      className="w-px h-3.5 bg-white/10 mx-0.5"
+    />
+  );
+}
+
+/** Horizontal glow line that sweeps during transitions. */
+function SweepLine() {
+  return (
+    <motion.div
+      initial={{ scaleX: 0, opacity: 0 }}
+      animate={{
+        scaleX: [0, 1, 1, 0],
+        opacity: [0, 0.7, 0.7, 0],
+        transition: { duration: 0.5, times: [0, 0.3, 0.7, 1], ease: 'easeInOut' },
+      }}
+      className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-fuchsia-500 to-transparent"
+      style={{ originX: 0 }}
+    />
+  );
+}
 
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
@@ -626,83 +802,137 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)] bg-black rounded-lg overflow-hidden">
-      {/* Active card metadata — rendered ABOVE the Canvas (Canvas blocks siblings below/overlaid) */}
-      {entry && (
-        <div className="flex-shrink-0 border-b border-white/10 bg-black/90 backdrop-blur-sm px-6 py-2.5">
-          <div className="flex items-center justify-center gap-4 flex-wrap">
-            {/* Title */}
-            <span className="text-white text-sm font-semibold tracking-wide">
-              {entry.title}
-            </span>
+      {/* Active card metadata — frequency-wave animated bar */}
+      <div className="flex-shrink-0 border-b border-white/10 bg-black/90 backdrop-blur-sm px-6 py-2.5 relative overflow-hidden min-h-[40px]">
+        <AnimatePresence mode="wait">
+          {entry && (
+            <motion.div
+              key={entry.gameId}
+              className="flex items-center justify-center gap-3 flex-wrap"
+              initial="hidden"
+              animate="visible"
+              exit="exit"
+            >
+              <SweepLine />
+              {(() => {
+                // Build ordered list of metadata elements so each gets a wave index
+                let idx = 0;
+                const els: React.ReactNode[] = [];
 
-            <span className="text-white/10 text-xs">|</span>
+                // Title
+                els.push(
+                  <WaveItem key="title" index={idx++}>
+                    <span className="text-white text-sm font-semibold tracking-wide">
+                      {entry.title}
+                    </span>
+                  </WaveItem>
+                );
 
-            {/* Genre */}
-            <span className="text-fuchsia-400 text-[11px] font-medium uppercase tracking-widest">
-              {activeCard!.genre}
-            </span>
+                // Sep + Genre
+                els.push(<WaveSep key="sep1" index={idx++} />);
+                els.push(
+                  <WaveItem key="genre" index={idx++}>
+                    <span className="text-fuchsia-400 text-[11px] font-medium uppercase tracking-widest">
+                      {activeCard!.genre}
+                    </span>
+                  </WaveItem>
+                );
 
-            {/* Status badge */}
-            {entry.status && (
-              <span className={cn(
-                'text-[10px] px-1.5 py-0.5 rounded-full border font-medium',
-                statusColors[entry.status]
-              )}>
-                {entry.status}
-              </span>
-            )}
+                // Status badge
+                if (entry.status) {
+                  els.push(
+                    <WaveItem key="status" index={idx++}>
+                      <span className={cn(
+                        'text-[10px] px-1.5 py-0.5 rounded-full border font-medium',
+                        statusColors[entry.status]
+                      )}>
+                        {entry.status}
+                      </span>
+                    </WaveItem>
+                  );
+                }
 
-            {/* In Library badge */}
-            {inLibrary && !isRemoved && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-fuchsia-500/10 text-fuchsia-400 border-fuchsia-500/30 font-medium inline-flex items-center gap-0.5">
-                <Library className="w-2.5 h-2.5" />
-                In Library
-              </span>
-            )}
+                // In Library / Removed
+                if (inLibrary && !isRemoved) {
+                  els.push(
+                    <WaveItem key="lib" index={idx++}>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-fuchsia-500/10 text-fuchsia-400 border-fuchsia-500/30 font-medium inline-flex items-center gap-0.5">
+                        <Library className="w-2.5 h-2.5" />
+                        In Library
+                      </span>
+                    </WaveItem>
+                  );
+                }
+                if (isRemoved) {
+                  els.push(
+                    <WaveItem key="removed" index={idx++}>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-red-500/10 text-red-400/70 border-red-500/20 font-medium">
+                        Removed
+                      </span>
+                    </WaveItem>
+                  );
+                }
 
-            {isRemoved && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-red-500/10 text-red-400/70 border-red-500/20 font-medium">
-                Removed
-              </span>
-            )}
+                // Sep + Hours
+                els.push(<WaveSep key="sep2" index={idx++} />);
+                els.push(
+                  <WaveItem key="hours" index={idx++}>
+                    <div className="flex items-center gap-1 text-xs text-white/50">
+                      <Clock className="w-3 h-3" />
+                      <span>{entry.hoursPlayed > 0 ? formatHours(entry.hoursPlayed) : '0 Mins'}</span>
+                    </div>
+                  </WaveItem>
+                );
 
-            <span className="text-white/10 text-xs">|</span>
+                // Rating
+                if (entry.rating > 0) {
+                  els.push(
+                    <WaveItem key="rating" index={idx++}>
+                      <ArkStarRating rating={entry.rating} />
+                    </WaveItem>
+                  );
+                }
 
-            {/* Hours */}
-            <div className="flex items-center gap-1 text-xs text-white/50">
-              <Clock className="w-3 h-3" />
-              <span>{entry.hoursPlayed > 0 ? formatHours(entry.hoursPlayed) : '0 Mins'}</span>
-            </div>
+                // Added date
+                if (addedDate) {
+                  els.push(
+                    <WaveItem key="date" index={idx++}>
+                      <div className="flex items-center gap-1 text-xs text-white/40">
+                        <Calendar className="w-3 h-3" />
+                        <span>{addedDate}</span>
+                      </div>
+                    </WaveItem>
+                  );
+                }
 
-            {/* Rating */}
-            {entry.rating > 0 && <ArkStarRating rating={entry.rating} />}
+                // Platform
+                if (entry.platform?.length > 0) {
+                  els.push(<WaveSep key="sep3" index={idx++} />);
+                  els.push(
+                    <WaveItem key="platform" index={idx++}>
+                      <span className="text-white/30 text-[10px] uppercase tracking-wider">
+                        {entry.platform.join(' · ')}
+                      </span>
+                    </WaveItem>
+                  );
+                }
 
-            {/* Added date */}
-            {addedDate && (
-              <div className="flex items-center gap-1 text-xs text-white/40">
-                <Calendar className="w-3 h-3" />
-                <span>{addedDate}</span>
-              </div>
-            )}
+                // Nav hint
+                els.push(<WaveSep key="sep4" index={idx++} />);
+                els.push(
+                  <WaveItem key="nav" index={idx++}>
+                    <span className="text-white/20 text-[10px] uppercase tracking-wider">
+                      ← → browse
+                    </span>
+                  </WaveItem>
+                );
 
-            {/* Platform */}
-            {entry.platform?.length > 0 && (
-              <>
-                <span className="text-white/10 text-xs">|</span>
-                <span className="text-white/30 text-[10px] uppercase tracking-wider">
-                  {entry.platform.join(' · ')}
-                </span>
-              </>
-            )}
-
-            {/* Nav hint */}
-            <span className="text-white/10 text-xs">|</span>
-            <span className="text-white/20 text-[10px] uppercase tracking-wider">
-              ← → browse
-            </span>
-          </div>
-        </div>
-      )}
+                return els;
+              })()}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
 
       {/* 3D Canvas — fills remaining space */}
       <div ref={containerRef} className="flex-1 min-h-0 relative">

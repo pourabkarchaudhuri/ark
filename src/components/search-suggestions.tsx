@@ -240,13 +240,8 @@ function SearchSuggestionsComponent({
 
       {!loading && results.length > 0 && (
         <ul className="py-1">
-          {/* Sort by release date (newest first) */}
-          {[...results]
-            .sort((a, b) => {
-              const dateA = a.releaseDate ? new Date(a.releaseDate).getTime() : 0;
-              const dateB = b.releaseDate ? new Date(b.releaseDate).getTime() : 0;
-              return dateB - dateA;
-            })
+          {/* Results arrive pre-sorted by relevance from the search algorithm */}
+          {results
             .slice(0, 8)
             .map((game) => (
             <li key={game.id}>

@@ -5,12 +5,13 @@
 
 import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Merge, Replace } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
 import { APP_VERSION } from '@/components/changelog-modal';
+import { YearWrapped } from '@/components/year-wrapped';
 
 // Declare settings API type
 declare global {
@@ -59,6 +60,10 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+
+
+  // Year Wrapped state
+  const [showWrapped, setShowWrapped] = useState(false);
 
   // Check if API key exists on mount
   useEffect(() => {
@@ -271,98 +276,61 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
     }
   }, []);
 
-  // Import library data
+  // Import library data — wipes existing data and replaces with the imported file
   const handleImportLibrary = useCallback(async () => {
     setImportStatus('loading');
     setImportMessage(null);
-    
+
+    const processContent = (content: string) => {
+      const result = libraryStore.importData(content);
+      if (result.success) {
+        setImportStatus('success');
+        setImportMessage(`Imported ${result.count} games`);
+      } else {
+        setImportStatus('error');
+        setImportMessage(result.error || 'Failed to import');
+      }
+    };
+
     try {
       if (window.fileDialog) {
-        // Use native file dialog in Electron
         const result = await window.fileDialog.openFile({
-          filters: [{ name: 'JSON Files', extensions: ['json'] }]
+          filters: [{ name: 'JSON Files', extensions: ['json'] }],
         });
-        
-        if (result.canceled) {
-          setImportStatus('idle');
-          return;
-        }
-        
+        if (result.canceled) { setImportStatus('idle'); return; }
         if (!result.success || !result.content) {
           setImportStatus('error');
           setImportMessage(result.error || 'Failed to read file');
-          setTimeout(() => {
-            setImportStatus('idle');
-            setImportMessage(null);
-          }, 3000);
-          return;
-        }
-        
-        // Use delta import
-        const importResult = libraryStore.importDataWithDelta(result.content);
-        
-        if (importResult.success) {
-          setImportStatus('success');
-          const parts = [];
-          if (importResult.added > 0) parts.push(`${importResult.added} added`);
-          if (importResult.updated > 0) parts.push(`${importResult.updated} updated`);
-          if (importResult.skipped > 0) parts.push(`${importResult.skipped} unchanged`);
-          setImportMessage(parts.length > 0 ? parts.join(', ') : 'No changes');
         } else {
-          setImportStatus('error');
-          setImportMessage(importResult.error || 'Failed to import library');
+          processContent(result.content);
         }
       } else {
-        // Fallback for browser: use file input
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.json';
         input.onchange = async (e) => {
           const file = (e.target as HTMLInputElement).files?.[0];
-          if (!file) {
-            setImportStatus('idle');
-            return;
-          }
-          
+          if (!file) { setImportStatus('idle'); return; }
           try {
-            const content = await file.text();
-            const importResult = libraryStore.importDataWithDelta(content);
-            
-            if (importResult.success) {
-              setImportStatus('success');
-              const parts = [];
-              if (importResult.added > 0) parts.push(`${importResult.added} added`);
-              if (importResult.updated > 0) parts.push(`${importResult.updated} updated`);
-              if (importResult.skipped > 0) parts.push(`${importResult.skipped} unchanged`);
-              setImportMessage(parts.length > 0 ? parts.join(', ') : 'No changes');
-            } else {
-              setImportStatus('error');
-              setImportMessage(importResult.error || 'Failed to import library');
-            }
-          } catch (err) {
+            processContent(await file.text());
+          } catch {
             setImportStatus('error');
             setImportMessage('Failed to read file');
           }
         };
         input.click();
       }
-      
-      setTimeout(() => {
-        setImportStatus('idle');
-        setImportMessage(null);
-      }, 3000);
     } catch (err) {
       console.error('Failed to import library:', err);
       setImportStatus('error');
       setImportMessage('Failed to import library');
-      setTimeout(() => {
-        setImportStatus('idle');
-        setImportMessage(null);
-      }, 3000);
     }
+
+    setTimeout(() => { setImportStatus('idle'); setImportMessage(null); }, 3000);
   }, []);
 
   return (
+    <>
     <AnimatePresence>
       {isOpen && (
         <motion.aside
@@ -726,6 +694,31 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   <li>• Your API key is stored securely and encrypted on your device</li>
                 </ul>
               </div>
+
+              {/* Year Wrapped / Year in Review */}
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="h-4 w-4 text-amber-400" />
+                  <h3 className="text-sm font-semibold text-white">Year in Review</h3>
+                </div>
+                <div className="bg-gradient-to-r from-fuchsia-500/10 via-purple-500/10 to-indigo-500/10 border border-fuchsia-500/20 rounded-lg p-4 space-y-3">
+                  <div>
+                    <p className="text-sm font-medium text-white">Ark Wrapped</p>
+                    <p className="text-xs text-white/40 mt-0.5">
+                      Relive your gaming year — stats, top games, genre DNA, and more in a cinematic experience.
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowWrapped(true)}
+                    className="w-full h-10 bg-gradient-to-r from-fuchsia-600/20 to-purple-600/20 hover:from-fuchsia-600/30 hover:to-purple-600/30 border border-fuchsia-500/20 text-fuchsia-300 font-semibold gap-2"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    Launch Ark Wrapped
+                  </Button>
+                </div>
+              </div>
             </div>
 
             {/* Footer */}
@@ -738,5 +731,8 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         </motion.aside>
       )}
     </AnimatePresence>
+
+    <YearWrapped isOpen={showWrapped} onClose={() => setShowWrapped(false)} />
+    </>
   );
 });

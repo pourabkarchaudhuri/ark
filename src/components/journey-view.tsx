@@ -4,14 +4,16 @@
  * Uses the journey store which persists entries even after library removal.
  * Scrolls from latest (top) to oldest (bottom).
  *
- * Two view styles:
- *  - "Noob" (default): vertical timeline grouped by year
+ * Four view styles:
+ *  - "Ark": 3D card showcase
+ *  - "Log" (Captain's Log): vertical timeline grouped by year and month
  *  - "OCD": horizontally scrollable Gantt chart with status-colored bars
+ *  - "Medals": gamified progression with Taste DNA and badge vault (analytics in Overview)
  */
 import { useMemo, useState, useEffect, memo, useCallback, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { motion } from 'framer-motion';
-import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, List, PieChart, X, Box } from 'lucide-react';
+import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, ScrollText, X, Box, Award } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Timeline, TimelineEntry } from '@/components/ui/timeline';
@@ -22,12 +24,12 @@ import { journeyStore } from '@/services/journey-store';
 import { statusHistoryStore } from '@/services/status-history-store';
 import { sessionStore } from '@/services/session-store';
 import { JourneyGanttView } from '@/components/journey-gantt-view';
-import { JourneyAnalyticsView } from '@/components/journey-analytics-view';
 import { generateMockGanttData } from '@/components/journey-gantt-mock-data';
 import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
 import { ShowcaseView } from '@/components/showcase-view';
+import { MedalsView } from '@/components/medals-view';
 
-type JourneyViewStyle = 'noob' | 'ocd' | 'analytics' | 'ark';
+type JourneyViewStyle = 'log' | 'ocd' | 'ark' | 'medals';
 type GanttDataSource = 'live' | 'mock';
 
 /**
@@ -136,6 +138,8 @@ const JourneyCoverImage = memo(function JourneyCoverImage({ entry }: { entry: Jo
     </div>
   );
 });
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCount?: number }) {
   const [, navigate] = useLocation();
@@ -258,7 +262,6 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
 });
 
 export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
-  // View style toggle: "Noob" (vertical timeline) vs "OCD" (Gantt chart)
   const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('ark');
   // Data source for OCD view: live store data vs mock data for dev/demo
   const [dataSource, setDataSource] = useState<GanttDataSource>('live');
@@ -320,64 +323,6 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entryIdsKey]);
 
-  // Group entries by year from addedAt, sorted newest-first (top → bottom = latest → oldest)
-  const timelineData: TimelineEntry[] = useMemo(() => {
-    if (entries.length === 0) return [];
-
-    const byYear = new Map<number, JourneyEntry[]>();
-    for (const entry of entries) {
-      const year = new Date(entry.addedAt).getFullYear();
-      if (!byYear.has(year)) byYear.set(year, []);
-      byYear.get(year)!.push(entry);
-    }
-
-    // Sort years newest first (latest at top)
-    const sortedYears = Array.from(byYear.keys()).sort((a, b) => b - a);
-
-    return sortedYears.map((year) => {
-      const yearEntries = byYear.get(year)!;
-      // Sort entries within year by addedAt, newest first
-      yearEntries.sort(
-        (a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime()
-      );
-
-      // Count stats for this year
-      const completed = yearEntries.filter((e) => e.status === 'Completed').length;
-      const playing = yearEntries.filter((e) => e.status === 'Playing').length;
-      const removed = yearEntries.filter((e) => !!e.removedAt).length;
-
-      return {
-        title: String(year),
-        content: (
-          <div>
-            {/* Year summary */}
-            <p className="mb-4 text-sm text-white/60">
-              {yearEntries.length} game{yearEntries.length !== 1 ? 's' : ''} added
-              {completed > 0 && ` · ${completed} completed`}
-              {playing > 0 && ` · ${playing} playing`}
-              {removed > 0 && ` · ${removed} removed`}
-            </p>
-
-            {/* Game cards grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              {yearEntries.map((entry) => (
-                <JourneyGameCard
-                  key={entry.gameId}
-                  entry={entry}
-                  playerCount={playerCounts[entry.gameId]}
-                />
-              ))}
-            </div>
-          </div>
-        ),
-      };
-    });
-  }, [entries, playerCounts]);
-
-  // Total stats
-  const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
-  const completedCount = entries.filter((e) => e.status === 'Completed').length;
-
   // Cache store snapshots to avoid creating new array references on every render.
   // Only recalculate when the view actually needs it and dependencies change.
   const statusHistoryRef = useRef(statusHistoryStore.getAll());
@@ -398,15 +343,156 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     return () => { unsubHistory(); unsubSessions(); unsubLibrary(); };
   }, []);
 
-  // Prepare Gantt/analytics data (only when OCD or Analytics view is active)
-  const ganttData = useMemo(() => {
-    if (viewStyle !== 'ocd' && viewStyle !== 'analytics') return null;
+  // Ark and Log: entries with firstPlayedAt or lastPlayedAt; sort: Playing first, then by latest activity (lastPlayedAt ?? firstPlayedAt) desc
+  const arkAndLogEntries = useMemo(() => {
+    const playingStatuses: GameStatus[] = ['Playing', 'Playing Now'];
+    const withActivity = entries.filter((e) => e.firstPlayedAt || e.lastPlayedAt);
+    const latest = (e: JourneyEntry) =>
+      new Date(e.lastPlayedAt ?? e.firstPlayedAt ?? e.addedAt).getTime();
+    return withActivity.sort((a, b) => {
+      const aPlaying = playingStatuses.includes(a.status);
+      const bPlaying = playingStatuses.includes(b.status);
+      if (aPlaying && !bPlaying) return -1;
+      if (!aPlaying && bPlaying) return 1;
+      return latest(b) - latest(a);
+    });
+  }, [entries]);
 
-    if ((viewStyle === 'ocd' || viewStyle === 'analytics') && dataSource === 'mock') {
-      return generateMockGanttData();
+  // Captain's Log: per-month grouping. An entry appears in a month if firstPlayedAt or lastPlayedAt falls in that month (same game can appear in Jan and March).
+  // Within each month, sort by the date that applies to that month (lastPlayedAt if in month, else firstPlayedAt), desc.
+  const timelineData: TimelineEntry[] = useMemo(() => {
+    if (arkAndLogEntries.length === 0) return [];
+
+    const monthToEntries = new Map<string, Array<{ entry: JourneyEntry; sortDate: string }>>();
+
+    for (const entry of arkAndLogEntries) {
+      const addToMonth = (year: number, month: number, sortDate: string) => {
+        const key = `${year}-${month}`;
+        if (!monthToEntries.has(key)) monthToEntries.set(key, []);
+        monthToEntries.get(key)!.push({ entry, sortDate });
+      };
+      if (entry.firstPlayedAt) {
+        const d = new Date(entry.firstPlayedAt);
+        addToMonth(d.getFullYear(), d.getMonth(), entry.firstPlayedAt);
+      }
+      if (entry.lastPlayedAt) {
+        const d = new Date(entry.lastPlayedAt);
+        const key = `${d.getFullYear()}-${d.getMonth()}`;
+        const existing = monthToEntries.get(key);
+        if (existing?.some((x) => x.entry.gameId === entry.gameId)) {
+          const cell = existing.find((x) => x.entry.gameId === entry.gameId)!;
+          cell.sortDate = entry.lastPlayedAt;
+        } else {
+          addToMonth(d.getFullYear(), d.getMonth(), entry.lastPlayedAt);
+        }
+      }
     }
 
-    // Live data from cached store snapshots
+    // Group by year: year -> list of { month, list }
+    const byYear = new Map<number, Array<{ month: number; list: Array<{ entry: JourneyEntry; sortDate: string }> }>>();
+    for (const [key, list] of monthToEntries) {
+      const [y, m] = key.split('-').map(Number);
+      if (!byYear.has(y)) byYear.set(y, []);
+      list.sort((a, b) => new Date(b.sortDate).getTime() - new Date(a.sortDate).getTime());
+      byYear.get(y)!.push({ month: m, list });
+    }
+    for (const arr of byYear.values()) {
+      arr.sort((a, b) => b.month - a.month);
+    }
+    const sortedYears = Array.from(byYear.keys()).sort((a, b) => b - a);
+
+    return sortedYears.map((year) => {
+      const monthsWithEntries = byYear.get(year)!;
+      const yearEntriesUnique = Array.from(
+        new Map(
+          monthsWithEntries.flatMap(({ list }) => list.map((x) => x.entry)).map((e) => [e.gameId, e])
+        ).values()
+      );
+      const completed = yearEntriesUnique.filter((e) => e.status === 'Completed').length;
+      const playing = yearEntriesUnique.filter((e) => e.status === 'Playing').length;
+      const removed = yearEntriesUnique.filter((e) => !!e.removedAt).length;
+      const yearHours = yearEntriesUnique.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
+
+      return {
+        title: String(year),
+        content: (
+          <div>
+            {viewStyle === 'log' ? (
+              <p className="mb-4 font-mono text-xs text-white/40">
+                // CYCLE {year} — {yearEntriesUnique.length} title{yearEntriesUnique.length !== 1 ? 's' : ''} registered
+                {completed > 0 && ` · ${completed} mission${completed !== 1 ? 's' : ''} complete`}
+                {playing > 0 && ` · ${playing} active`}
+                {removed > 0 && ` · ${removed} decommissioned`}
+                {yearHours > 0 && ` · ${formatHours(yearHours)}`}
+              </p>
+            ) : (
+              <p className="mb-4 text-sm text-white/60">
+                {yearEntriesUnique.length} game{yearEntriesUnique.length !== 1 ? 's' : ''} in history
+                {completed > 0 && ` · ${completed} completed`}
+                {playing > 0 && ` · ${playing} playing`}
+                {removed > 0 && ` · ${removed} removed`}
+              </p>
+            )}
+
+            {viewStyle === 'log' ? (
+              <div className="space-y-6">
+                {monthsWithEntries.map(({ month: m, list }) => {
+                  const monthEntries = list.map((x) => x.entry);
+                  const monthCompleted = monthEntries.filter((e) => e.status === 'Completed').length;
+                  const monthHours = monthEntries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
+                  return (
+                    <div key={`${year}-${m}`}>
+                      <div className="flex items-center gap-3 mb-3">
+                        <h4 className="text-sm font-semibold text-white/70">
+                          {MONTH_NAMES[m]}
+                        </h4>
+                        <div className="flex-1 h-px bg-white/10" />
+                        <span className="text-[11px] text-white/30 font-mono shrink-0">
+                          {monthEntries.length} title{monthEntries.length !== 1 ? 's' : ''}
+                          {monthCompleted > 0 && ` · ${monthCompleted} done`}
+                          {monthHours > 0 && ` · ${formatHours(monthHours)}`}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        {monthEntries.map((entry) => (
+                          <JourneyGameCard
+                            key={`${entry.gameId}-${year}-${m}`}
+                            entry={entry}
+                            playerCount={playerCounts[entry.gameId]}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {yearEntriesUnique.map((entry) => (
+                  <JourneyGameCard
+                    key={entry.gameId}
+                    entry={entry}
+                    playerCount={playerCounts[entry.gameId]}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        ),
+      };
+    });
+  }, [arkAndLogEntries, playerCounts, viewStyle]);
+
+  // Total stats
+  const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
+  const completedCount = entries.filter((e) => e.status === 'Completed').length;
+
+  // Prepare Gantt data (only when OCD view is active)
+  const ganttData = useMemo(() => {
+    if (viewStyle !== 'ocd') return null;
+
+    if (dataSource === 'mock') return generateMockGanttData();
+
     return {
       journeyEntries: entries,
       statusHistory: statusHistoryRef.current,
@@ -415,40 +501,38 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     };
   }, [viewStyle, dataSource, entries]);
 
-  // Loading state
+  // Loading state — skeleton matches Voyage header + content (Your Ark / Log / OCD / Medals)
   if (loading) {
     return (
-      <div className="max-w-7xl mx-auto py-10 px-4 md:px-10">
-        <div className="mb-8">
-          <div className="h-8 w-48 bg-white/10 rounded animate-pulse mb-2" />
-          <div className="h-4 w-72 bg-white/5 rounded animate-pulse" />
-        </div>
-        <div className="space-y-16">
-          {Array.from({ length: 2 }).map((_, yearIdx) => (
-            <div key={yearIdx} className="flex gap-10">
-              <div className="w-32 flex-shrink-0">
-                <div className="h-10 w-20 bg-white/10 rounded animate-pulse" />
-              </div>
-              <div className="flex-1 space-y-3">
-                <div className="h-4 w-40 bg-white/5 rounded animate-pulse" />
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                  {Array.from({ length: 3 }).map((_, i) => (
-                    <div
-                      key={i}
-                      className="rounded-lg bg-white/5 border border-white/10 p-3 flex gap-3 animate-pulse"
-                    >
-                      <div className="w-16 h-24 bg-white/10 rounded" />
-                      <div className="flex-1 space-y-2">
-                        <div className="h-4 w-3/4 bg-white/10 rounded" />
-                        <div className="h-3 w-1/2 bg-white/5 rounded" />
-                        <div className="h-3 w-1/3 bg-white/5 rounded" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
+      <div className="relative w-full overflow-clip">
+        {/* Header skeleton */}
+        <div className="max-w-7xl mx-auto py-10 px-4 md:px-8 lg:px-10">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div>
+              <div className="h-8 md:h-9 w-48 md:w-64 bg-white/10 rounded animate-pulse mb-2" />
+              <div className="h-4 w-40 bg-white/5 rounded animate-pulse" />
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10 gap-0.5">
+                {[1, 2, 3, 4].map((i) => (
+                  <div key={i} className="h-9 w-16 md:w-20 bg-white/10 rounded-md animate-pulse" />
+                ))}
               </div>
             </div>
-          ))}
+          </div>
+        </div>
+        {/* Content skeleton — suggests Ark / showcase area */}
+        <div className="max-w-7xl mx-auto px-4 md:px-8 lg:px-10 pb-16">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] overflow-hidden min-h-[320px] md:min-h-[380px] flex items-center justify-center animate-pulse">
+            <div className="flex flex-wrap justify-center gap-4 p-6">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div
+                  key={i}
+                  className="w-24 h-36 md:w-28 md:h-40 rounded-lg bg-white/10 border border-white/10"
+                />
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -484,18 +568,15 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h2 className="text-lg md:text-3xl mb-2 text-white font-bold font-['Orbitron']">
-              Your Gaming Voyage
+              {viewStyle === 'log' ? "Captain's Log" : 'Your Gaming Voyage'}
             </h2>
             <p className="text-white/60 text-sm md:text-base max-w-lg">
-              {entries.length} game{entries.length !== 1 ? 's' : ''} in your history
-              {completedCount > 0 && ` · ${completedCount} completed`}
-              {totalHours > 0 && ` · ${formatHours(totalHours)} played`}
+              {formatHours(totalHours)} played
             </p>
           </div>
 
           {/* View style toggle + data source toggle */}
           <div className="flex items-center gap-3">
-            {/* Noob / OCD / Analytics toggle */}
             <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
               <button
                 onClick={() => setViewStyle('ark')}
@@ -510,16 +591,17 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
                 Your Ark
               </button>
               <button
-                onClick={() => setViewStyle('noob')}
+                onClick={() => setViewStyle('log')}
+                title="Captain's Log"
                 className={cn(
                   'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                  viewStyle === 'noob'
+                  viewStyle === 'log'
                     ? 'bg-fuchsia-500 text-white'
                     : 'text-white/60 hover:text-white'
                 )}
               >
-                <List className="w-3 h-3" />
-                Noob
+                <ScrollText className="w-3 h-3" />
+                Log
               </button>
               <button
                 onClick={() => setViewStyle('ocd')}
@@ -534,21 +616,21 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
                 OCD
               </button>
               <button
-                onClick={() => setViewStyle('analytics')}
+                onClick={() => setViewStyle('medals')}
                 className={cn(
                   'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                  viewStyle === 'analytics'
+                  viewStyle === 'medals'
                     ? 'bg-fuchsia-500 text-white'
                     : 'text-white/60 hover:text-white'
                 )}
               >
-                <PieChart className="w-3 h-3" />
-                Analytics
+                <Award className="w-3 h-3" />
+                Medals
               </button>
             </div>
 
-            {/* Mock / Live toggle (visible in OCD and Analytics views) */}
-            {(viewStyle === 'ocd' || viewStyle === 'analytics') && (
+            {/* Mock / Live toggle (visible in OCD view) */}
+            {viewStyle === 'ocd' && (
               <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
                 <button
                   onClick={() => setDataSource('live')}
@@ -580,7 +662,9 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
 
       {/* Conditional view rendering */}
       {viewStyle === 'ark' ? (
-        <ShowcaseView entries={entries} />
+        <ShowcaseView entries={arkAndLogEntries} />
+      ) : viewStyle === 'medals' ? (
+        <MedalsView entries={entries} />
       ) : viewStyle === 'ocd' && ganttData ? (
         <div className="px-0 md:px-4 lg:px-6">
           <JourneyGanttView
@@ -589,13 +673,6 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
             sessions={ganttData.sessions}
           />
         </div>
-      ) : viewStyle === 'analytics' && ganttData ? (
-        <JourneyAnalyticsView
-          journeyEntries={ganttData.journeyEntries}
-          statusHistory={ganttData.statusHistory}
-          sessions={ganttData.sessions}
-          libraryEntries={ganttData.libraryEntries}
-        />
       ) : (
         <Timeline data={timelineData} />
       )}

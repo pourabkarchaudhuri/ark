@@ -112,6 +112,11 @@ export interface CachedGameMeta {
   epicNamespace?: string;
   epicOfferId?: string;
   steamAppId?: number;
+  // v3: extended metadata for recommendation engine
+  themes?: string[];
+  gameModes?: string[];
+  playerPerspectives?: string[];
+  similarGames?: { id: number; name: string }[];
 }
 
 // Library-specific game entry (stored in localStorage)
@@ -128,6 +133,7 @@ export interface LibraryGameEntry {
   executablePath?: string; // Path to game executable for session tracking
   secondaryGameId?: string; // ID on another store (for dedup-linked games)
   cachedMeta?: CachedGameMeta; // Snapshot of game metadata at add-time (fallback when API unavailable)
+  lastPlayedAt?: string; // ISO date — last time the game was played (from sessions or Steam)
   addedAt: Date;
   updatedAt: Date;
 }
@@ -148,6 +154,7 @@ export interface CustomGameEntry {
   executablePath?: string; // Path to game executable for session tracking
   hoursPlayed?: number; // Total hours played (updated from session tracker)
   rating?: number; // User rating 1-5 stars (0 = not rated)
+  lastPlayedAt?: string; // ISO date — last time the game was played
   publicReviews?: string; // Personal notes / reviews
   recommendationSource?: string; // How the user discovered this game
   addedAt: Date;
@@ -217,6 +224,8 @@ export interface JourneyEntry {
   status: GameStatus;         // Status at time of capture (updated on library changes)
   hoursPlayed: number;        // Synced while in library
   rating: number;             // Synced while in library
+  firstPlayedAt?: string;     // ISO date — when status first became Playing (entry shows in that month)
+  lastPlayedAt?: string;      // ISO date — last time the game was played (entry also shows in that month)
   addedAt: string;            // ISO date — when the game was first added to the library
   removedAt?: string;         // ISO date — set when the game is removed from the library
 }

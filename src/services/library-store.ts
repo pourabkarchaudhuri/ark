@@ -27,9 +27,34 @@ class LibraryStore {
   private entries: Map<string, LibraryGameEntry> = new Map(); // keyed by universal gameId string
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
+  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private _sortedCache: LibraryGameEntry[] | null = null;
 
   constructor() {
     this.initialize();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('beforeunload', () => this.flushSave());
+    }
+  }
+
+  private scheduleSave() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.saveToStorage();
+    }, 300);
+  }
+
+  private flushSave() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+      this.saveToStorage();
+    }
+  }
+
+  private invalidateSortedCache() {
+    this._sortedCache = null;
   }
 
   private initialize() {
@@ -157,7 +182,8 @@ class LibraryStore {
     };
 
     this.entries.set(gameId, entry);
-    this.saveToStorage();
+    this.invalidateSortedCache();
+    this.scheduleSave();
     this.notifyListeners();
 
     // Record initial status in status history
@@ -172,7 +198,8 @@ class LibraryStore {
   removeFromLibrary(gameId: string): boolean {
     const deleted = this.entries.delete(gameId);
     if (deleted) {
-      this.saveToStorage();
+      this.invalidateSortedCache();
+      this.scheduleSave();
       this.notifyListeners();
       // Mark in journey history (entry persists, just flagged as removed)
       journeyStore.markRemoved(gameId);
@@ -187,6 +214,9 @@ class LibraryStore {
 
     // Detect status change before merging
     const statusChanged = input.status !== undefined && input.status !== existing.status;
+    const updatedStatus = input.status ?? existing.status;
+    const isNowPlaying = updatedStatus === 'Playing' || updatedStatus === 'Playing Now';
+    const isCompleted = updatedStatus === 'Completed';
 
     const updated: LibraryGameEntry = {
       ...existing,
@@ -195,15 +225,57 @@ class LibraryStore {
     };
 
     this.entries.set(gameId, updated);
-    this.saveToStorage();
+    this.invalidateSortedCache();
+    this.scheduleSave();
     this.notifyListeners();
 
-    // Sync progress to journey history
-    journeyStore.syncProgress(gameId, {
-      status: updated.status,
-      hoursPlayed: updated.hoursPlayed,
-      rating: updated.rating,
-    });
+    const hasJourney = journeyStore.has(gameId);
+    const addedAtIso = existing.addedAt instanceof Date ? existing.addedAt.toISOString() : String(existing.addedAt);
+    const nowIso = new Date().toISOString();
+
+    // Create journey entry when game first reaches Playing (or Playing Now) so it appears in Your Ark / Logs
+    if (statusChanged && isNowPlaying && !hasJourney) {
+      const meta = existing.cachedMeta;
+      journeyStore.record({
+        gameId,
+        title: meta?.title ?? 'Unknown',
+        coverUrl: meta?.coverUrl,
+        genre: meta?.genre ?? [],
+        platform: meta?.platform ?? [],
+        releaseDate: meta?.releaseDate,
+        status: updated.status,
+        hoursPlayed: updated.hoursPlayed,
+        rating: updated.rating,
+        firstPlayedAt: nowIso, // so it appears in this month (when user set Playing)
+        lastPlayedAt: updated.lastPlayedAt,
+        addedAt: addedAtIso,
+      });
+    } else if (statusChanged && isCompleted && !hasJourney) {
+      // Completed games also appear in Your Ark / Logs (with firstPlayedAt so they show)
+      const meta = existing.cachedMeta;
+      journeyStore.record({
+        gameId,
+        title: meta?.title ?? 'Unknown',
+        coverUrl: meta?.coverUrl,
+        genre: meta?.genre ?? [],
+        platform: meta?.platform ?? [],
+        releaseDate: meta?.releaseDate,
+        status: updated.status,
+        hoursPlayed: updated.hoursPlayed,
+        rating: updated.rating,
+        firstPlayedAt: updated.lastPlayedAt ?? addedAtIso ?? nowIso,
+        lastPlayedAt: updated.lastPlayedAt ?? nowIso,
+        addedAt: addedAtIso,
+      });
+    } else {
+      // Sync progress to journey history
+      journeyStore.syncProgress(gameId, {
+        status: updated.status,
+        hoursPlayed: updated.hoursPlayed,
+        rating: updated.rating,
+        lastPlayedAt: updated.lastPlayedAt,
+      });
+    }
 
     // Record status transition in status history
     if (statusChanged) {
@@ -225,11 +297,13 @@ class LibraryStore {
     return this.entries.get(gameId);
   }
 
-  // Get all library entries
+  // Get all library entries (cached sort — invalidated on mutation)
   getAllEntries(): LibraryGameEntry[] {
-    return Array.from(this.entries.values()).sort(
+    if (this._sortedCache) return this._sortedCache;
+    this._sortedCache = Array.from(this.entries.values()).sort(
       (a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime()
     );
+    return this._sortedCache;
   }
 
   // Get all game IDs in library
@@ -290,17 +364,19 @@ class LibraryStore {
   }
 
   // Update hoursPlayed from session tracking totals
-  updateHoursFromSessions(gameId: string, totalHours: number) {
+  updateHoursFromSessions(gameId: string, totalHours: number, lastPlayedAt?: string) {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
     existing.hoursPlayed = totalHours;
+    if (lastPlayedAt !== undefined) existing.lastPlayedAt = lastPlayedAt;
     existing.updatedAt = new Date();
-    this.saveToStorage();
+    this.invalidateSortedCache();
+    this.scheduleSave();
     this.notifyListeners();
 
     // Sync to journey store
-    journeyStore.syncProgress(gameId, { hoursPlayed: totalHours });
+    journeyStore.syncProgress(gameId, { hoursPlayed: totalHours, lastPlayedAt });
   }
 
   // Get all entries that have an executablePath set
@@ -313,6 +389,8 @@ class LibraryStore {
   // Clear all library data
   clear() {
     this.entries.clear();
+    this.invalidateSortedCache();
+    this.flushSave();
     localStorage.removeItem(STORAGE_KEY);
     this.notifyListeners();
   }
@@ -332,7 +410,7 @@ class LibraryStore {
     );
   }
 
-  // Import library data (replaces existing), also imports journey history if present
+  // Import library data — wipes all existing data and replaces with the import
   importData(jsonData: string): { success: boolean; count: number; error?: string } {
     try {
       const parsed = JSON.parse(jsonData);
@@ -341,6 +419,12 @@ class LibraryStore {
       if (!Array.isArray(entries)) {
         return { success: false, count: 0, error: 'Invalid data format' };
       }
+
+      // Clear all existing data across all stores
+      this.entries.clear();
+      journeyStore.clear();
+      sessionStore.clear();
+      statusHistoryStore.clear();
 
       let importCount = 0;
       entries.forEach((entry) => {
@@ -395,7 +479,7 @@ class LibraryStore {
     );
   }
 
-  // Import library data with delta logic (add new, update changed, skip identical)
+  // Import library data — wipes all existing data and replaces with the import
   importDataWithDelta(jsonData: string): { 
     success: boolean; 
     added: number; 
@@ -411,46 +495,31 @@ class LibraryStore {
         return { success: false, added: 0, updated: 0, skipped: 0, error: 'Invalid data format' };
       }
 
+      // Clear all existing data across all stores
+      this.entries.clear();
+      journeyStore.clear();
+      sessionStore.clear();
+      statusHistoryStore.clear();
+
       let added = 0;
-      let updated = 0;
-      let skipped = 0;
 
       entries.forEach((entry) => {
         const id = migrateGameId(entry as any);
         if (!id) return;
 
-        const existing = this.entries.get(id);
-        const normalizedEntry: LibraryGameEntry = {
+        this.entries.set(id, {
           ...entry,
           gameId: id,
           hoursPlayed: entry.hoursPlayed ?? 0,
           rating: entry.rating ?? 0,
           addedAt: new Date(entry.addedAt || new Date()),
           updatedAt: new Date(entry.updatedAt || new Date()),
-        };
-
-        if (!existing) {
-          // New entry - add it
-          this.entries.set(id, normalizedEntry);
-          added++;
-        } else if (!this.areEntriesEqual(existing, normalizedEntry)) {
-          // Entry exists but is different - update it
-          this.entries.set(id, {
-            ...normalizedEntry,
-            addedAt: existing.addedAt, // Preserve original addedAt
-            updatedAt: new Date(), // Update the updatedAt timestamp
-          });
-          updated++;
-        } else {
-          // Entry exists and is identical - skip
-          skipped++;
-        }
+        });
+        added++;
       });
 
-      if (added > 0 || updated > 0) {
-        this.saveToStorage();
-        this.notifyListeners();
-      }
+      this.saveToStorage();
+      this.notifyListeners();
 
       // Import journey history if present
       if (Array.isArray(parsed.journeyHistory)) {
@@ -467,7 +536,7 @@ class LibraryStore {
         sessionStore.importData(parsed.sessionHistory);
       }
 
-      return { success: true, added, updated, skipped };
+      return { success: true, added, updated: 0, skipped: 0 };
     } catch (error) {
       return { success: false, added: 0, updated: 0, skipped: 0, error: 'Failed to parse import data' };
     }

@@ -41,6 +41,7 @@ interface GameCardProps {
   /** Callback receives (gameId, status) so parent can use a single stable function */
   onStatusChange?: (gameId: string, status: GameStatus) => void;
   hideLibraryBadge?: boolean; // Hide heart button and library badge (e.g., when already in library view)
+  footer?: React.ReactNode; // Extra content rendered inside the card after the info section
 }
 
 // Steam platforms (Steam is primarily PC)
@@ -152,6 +153,7 @@ function GameCardComponent({
   onRemoveFromLibrary,
   onStatusChange,
   hideLibraryBadge,
+  footer,
 }: GameCardProps) {
   const [, navigate] = useLocation();
   const [imageError, setImageError] = useState(false);
@@ -217,34 +219,23 @@ function GameCardComponent({
     return () => { detailEnricher.unobserve(el); };
   }, [game.steamAppId, game.developer, game.store]);
 
-  const handleCardClick = () => {
-    // Navigate to game details page using the universal string ID
-    // All game types (Steam, Epic, custom) use the same /game/:id route
+  const handleCardClick = useCallback(() => {
     if (game.id) {
-      // Stash the full game object so the details page gets all cross-store
-      // metadata (availableOn, epicSlug, etc.) even if the prefetch store
-      // hasn't been refreshed with the latest dedup output.
       setNavigatingGame(game);
       navigate(`/game/${encodeURIComponent(game.id)}`);
     } else if (onClick) {
       onClick();
     }
-  };
+  }, [game, navigate, onClick]);
 
-  const handleHeartClick = (e: React.MouseEvent) => {
+  const handleHeartClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     if (inLibrary) {
-      // Already in library - trigger remove
-      if (onRemoveFromLibrary) {
-        onRemoveFromLibrary(game.id);
-      }
+      if (onRemoveFromLibrary) onRemoveFromLibrary(game.id);
     } else {
-      // Not in library - trigger add
-      if (onAddToLibrary) {
-        onAddToLibrary(game.id);
-      }
+      if (onAddToLibrary) onAddToLibrary(game.id);
     }
-  };
+  }, [game.id, inLibrary, onAddToLibrary, onRemoveFromLibrary]);
   
   // Build a deduplicated list of fallback URLs.
   // Consecutive duplicates (e.g. headerImage == old CDN header.jpg) are removed
@@ -401,21 +392,6 @@ function GameCardComponent({
               {game.isCustom ? 'Custom' : 'Library'}
             </Badge>
           )}
-
-          {/* Rating Badge (visible on hover only) */}
-          {game.metacriticScore !== null && game.metacriticScore !== undefined && game.metacriticScore > 0 && (
-            <div 
-              className={cn(
-                "px-2 py-1 rounded bg-black/70 backdrop-blur-sm text-xs font-bold shadow-lg transition-opacity duration-200",
-                isHovered ? "opacity-100" : "opacity-0"
-              )}
-              aria-label={`Rating: ${game.metacriticScore}`}
-            >
-              <span className="text-white">
-                Rating: {game.metacriticScore}
-              </span>
-            </div>
-          )}
         </div>
 
         {/* Store badges — bottom-left over the gradient */}
@@ -511,6 +487,9 @@ function GameCardComponent({
           </div>
         </div>
         
+        {/* Optional extra footer content (e.g., Oracle match badge) — above platform row */}
+        {footer}
+
         {/* Platform Icons and Status Badge Row */}
         <div className="flex items-center justify-between text-xs min-h-[1.5rem]">
           {/* Platform Icons - Show only unique platform types */}
@@ -648,6 +627,7 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.onDelete === nextProps.onDelete &&
     prevProps.onAddToLibrary === nextProps.onAddToLibrary &&
     prevProps.onRemoveFromLibrary === nextProps.onRemoveFromLibrary &&
-    prevProps.onStatusChange === nextProps.onStatusChange
+    prevProps.onStatusChange === nextProps.onStatusChange &&
+    prevProps.footer === nextProps.footer
   );
 });

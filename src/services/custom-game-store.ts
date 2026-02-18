@@ -25,9 +25,29 @@ class CustomGameStore {
   private nextCounter: number = 1; // Start from 1, increment for each new game
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
+  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.initialize();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('beforeunload', () => this.flushSave());
+    }
+  }
+
+  private scheduleSave() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.saveToStorage();
+    }, 300);
+  }
+
+  private flushSave() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+      this.saveToStorage();
+    }
   }
 
   private initialize() {
@@ -71,22 +91,26 @@ class CustomGameStore {
       console.log('[CustomGameStore] Migrated entries to v2 (string id)');
     }
 
-    // Backfill: ensure all existing custom games are in the journey store
+    // Backfill: ensure custom games that are Playing, Playing Now, or Completed have a journey entry (so they appear in Your Ark / Logs)
+    const arkStatuses: Array<'Playing' | 'Playing Now' | 'Completed'> = ['Playing', 'Playing Now', 'Completed'];
     for (const entry of this.entries.values()) {
-      if (!journeyStore.has(entry.id)) {
-        journeyStore.record({
-          gameId: entry.id,
-          title: entry.title,
-          coverUrl: undefined,
-          genre: [],
-          platform: entry.platform,
-          releaseDate: undefined,
-          status: entry.status,
-          hoursPlayed: entry.hoursPlayed ?? 0,
-          rating: 0,
-          addedAt: entry.addedAt instanceof Date ? entry.addedAt.toISOString() : String(entry.addedAt),
-        });
-      }
+      if (!arkStatuses.includes(entry.status as any) || journeyStore.has(entry.id)) continue;
+      const addedAtIso = entry.addedAt instanceof Date ? entry.addedAt.toISOString() : String(entry.addedAt);
+      const sortDate = entry.lastPlayedAt ?? addedAtIso;
+      journeyStore.record({
+        gameId: entry.id,
+        title: entry.title,
+        coverUrl: undefined,
+        genre: [],
+        platform: entry.platform,
+        releaseDate: undefined,
+        status: entry.status,
+        hoursPlayed: entry.hoursPlayed ?? 0,
+        rating: entry.rating ?? 0,
+        firstPlayedAt: sortDate,
+        lastPlayedAt: entry.lastPlayedAt ?? (entry.status === 'Completed' ? sortDate : undefined),
+        addedAt: addedAtIso,
+      });
     }
   }
 
@@ -163,21 +187,30 @@ class CustomGameStore {
     };
 
     this.entries.set(id, entry);
-    this.saveToStorage();
+    this.scheduleSave();
     this.notifyListeners();
 
-    // Sync to journey store so custom games appear in OCD/Analytics views
-    journeyStore.record({
-      gameId: id,
-      title: entry.title,
-      coverUrl: undefined,
-      genre: [],
-      platform: entry.platform,
-      releaseDate: undefined,
-      status: entry.status,
-      hoursPlayed: entry.hoursPlayed ?? 0,
-      rating: 0,
-    });
+    // Create journey entry when status is Playing, Playing Now, or Completed (so they appear in Your Ark / Logs)
+    const showInArk = entry.status === 'Playing' || entry.status === 'Playing Now' || entry.status === 'Completed';
+    if (showInArk) {
+      const nowIso = new Date().toISOString();
+      const addedAtIso = entry.addedAt instanceof Date ? entry.addedAt.toISOString() : String(entry.addedAt);
+      const sortDate = entry.status === 'Completed' ? (entry.lastPlayedAt ?? addedAtIso ?? nowIso) : nowIso;
+      journeyStore.record({
+        gameId: id,
+        title: entry.title,
+        coverUrl: undefined,
+        genre: [],
+        platform: entry.platform,
+        releaseDate: undefined,
+        status: entry.status,
+        hoursPlayed: entry.hoursPlayed ?? 0,
+        rating: 0,
+        firstPlayedAt: sortDate,
+        lastPlayedAt: entry.lastPlayedAt ?? (entry.status === 'Completed' ? sortDate : undefined),
+        addedAt: addedAtIso,
+      });
+    }
 
     return entry;
   }
@@ -188,7 +221,7 @@ class CustomGameStore {
     
     const deleted = this.entries.delete(id);
     if (deleted) {
-      this.saveToStorage();
+      this.scheduleSave();
       this.notifyListeners();
 
       // Mark as removed in journey store (preserves history)
@@ -200,9 +233,13 @@ class CustomGameStore {
   // Update a custom game
   updateGame(id: string, input: UpdateCustomGameEntry): CustomGameEntry | undefined {
     if (!this.isCustomGame(id)) return undefined;
-    
+
     const existing = this.entries.get(id);
     if (!existing) return undefined;
+
+    const statusChanged = input.status !== undefined && input.status !== existing.status;
+    const updatedStatus = input.status ?? existing.status;
+    const isNowPlaying = updatedStatus === 'Playing' || updatedStatus === 'Playing Now';
 
     const updated: CustomGameEntry = {
       ...existing,
@@ -211,15 +248,53 @@ class CustomGameStore {
     };
 
     this.entries.set(id, updated);
-    this.saveToStorage();
+    this.scheduleSave();
     this.notifyListeners();
 
-    // Sync progress to journey store
-    journeyStore.syncProgress(id, {
-      status: updated.status,
-      hoursPlayed: updated.hoursPlayed ?? 0,
-      rating: updated.rating ?? 0,
-    });
+    const hasJourney = journeyStore.has(id);
+    const addedAtIso = existing.addedAt instanceof Date ? existing.addedAt.toISOString() : String(existing.addedAt);
+    const nowIso = new Date().toISOString();
+
+    // Create journey entry when status first becomes Playing, Playing Now, or Completed (so they appear in Your Ark / Logs)
+    if (statusChanged && isNowPlaying && !hasJourney) {
+      journeyStore.record({
+        gameId: id,
+        title: updated.title,
+        coverUrl: undefined,
+        genre: [],
+        platform: updated.platform,
+        releaseDate: undefined,
+        status: updated.status,
+        hoursPlayed: updated.hoursPlayed ?? 0,
+        rating: updated.rating ?? 0,
+        firstPlayedAt: nowIso,
+        lastPlayedAt: updated.lastPlayedAt,
+        addedAt: addedAtIso,
+      });
+    } else if (statusChanged && updatedStatus === 'Completed' && !hasJourney) {
+      const sortDate = updated.lastPlayedAt ?? addedAtIso ?? nowIso;
+      journeyStore.record({
+        gameId: id,
+        title: updated.title,
+        coverUrl: undefined,
+        genre: [],
+        platform: updated.platform,
+        releaseDate: undefined,
+        status: updated.status,
+        hoursPlayed: updated.hoursPlayed ?? 0,
+        rating: updated.rating ?? 0,
+        firstPlayedAt: sortDate,
+        lastPlayedAt: updated.lastPlayedAt ?? sortDate,
+        addedAt: addedAtIso,
+      });
+    } else {
+      journeyStore.syncProgress(id, {
+        status: updated.status,
+        hoursPlayed: updated.hoursPlayed ?? 0,
+        rating: updated.rating ?? 0,
+        lastPlayedAt: updated.lastPlayedAt,
+      });
+    }
 
     return updated;
   }
@@ -282,6 +357,7 @@ class CustomGameStore {
   clear() {
     this.entries.clear();
     this.nextCounter = 1;
+    this.flushSave();
     localStorage.removeItem(STORAGE_KEY);
     this.notifyListeners();
   }

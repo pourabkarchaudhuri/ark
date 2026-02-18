@@ -22,6 +22,7 @@
 
 import { useState, useEffect, useLayoutEffect, useRef, startTransition } from 'react';
 import type { Game, GameFilters } from '@/types/game';
+import { scoreGame, buildSingleSearchIndex } from '@/services/prefetch-store';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,13 +69,14 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
   if (viewMode === 'library') {
     let libraryGames = currentGames;
     if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
-      libraryGames = libraryGames.filter(g =>
-        g.title.toLowerCase().includes(query) ||
-        g.developer.toLowerCase().includes(query) ||
-        g.genre.some((genre: string) => genre.toLowerCase().includes(query)) ||
-        g.platform.some((platform: string) => platform.toLowerCase().includes(query))
-      );
+      const q = searchQuery.toLowerCase().trim();
+      const tokens = q.split(/\s+/).filter(Boolean);
+      const scored = libraryGames.map(g => ({
+        game: g,
+        score: scoreGame(buildSingleSearchIndex(g), tokens, q, g),
+      })).filter(s => s.score > 0);
+      scored.sort((a, b) => b.score - a.score);
+      libraryGames = scored.map(s => s.game);
     }
     games = libraryGames;
   } else if (viewMode === 'browse' && isSearching) {
@@ -145,13 +147,9 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
   if (viewMode === 'library') {
     let lib = currentGames;
     if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
-      lib = lib.filter(g =>
-        g.title.toLowerCase().includes(query) ||
-        g.developer.toLowerCase().includes(query) ||
-        g.genre.some((genre: string) => genre.toLowerCase().includes(query)) ||
-        g.platform.some((platform: string) => platform.toLowerCase().includes(query))
-      );
+      const q2 = searchQuery.toLowerCase().trim();
+      const tokens2 = q2.split(/\s+/).filter(Boolean);
+      lib = lib.filter(g => scoreGame(buildSingleSearchIndex(g), tokens2, q2, g) > 0);
     }
     baseGames = lib;
   } else if (viewMode === 'browse' && isSearching) {
@@ -246,7 +244,23 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
     const indexMap = new Map<string, number>();
     displayedGames.forEach((g, i) => indexMap.set(g.id, i));
 
+    // Status priority for Library when filter is "All": Playing/Playing Now → On Hold → Want to Play → Completed
+    const statusPriority = (status: string) => {
+      if (status === 'Playing' || status === 'Playing Now') return 0;
+      if (status === 'On Hold') return 1;
+      if (status === 'Want to Play') return 2;
+      if (status === 'Completed') return 3;
+      return 4;
+    };
+
     sortedGames = [...displayedGames].sort((a, b) => {
+      // Library + All: primary sort by status priority
+      if (viewMode === 'library' && filters.status === 'All') {
+        const aStatus = a.isInLibrary ? statusPriority(a.status) : 4;
+        const bStatus = b.isInLibrary ? statusPriority(b.status) : 4;
+        if (aStatus !== bStatus) return aStatus - bStatus;
+      }
+
       let comparison = 0;
       switch (sortBy) {
         case 'title':
@@ -322,9 +336,19 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
     }
   }, [input.viewMode]);
 
+  // Stable fingerprint to avoid re-scheduling when array references change
+  // but actual content is identical (e.g. enrichment epoch bumps that don't
+  // change the games slice thanks to prevGamesRef stability upstream).
+  const prevFingerprintRef = useRef('');
+  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${input.filters.store.length}|${input.filters.category}|${input.sortBy}|${input.sortDirection}`;
+
   // Schedule heavy computation after paint using rAF + startTransition.
   // Cancels any in-flight computation when inputs change.
   useEffect(() => {
+    // Skip if fingerprint is identical (content unchanged despite new references)
+    if (fingerprint === prevFingerprintRef.current) return;
+    prevFingerprintRef.current = fingerprint;
+
     const version = ++versionRef.current;
     let rafId = 0;
 
@@ -344,16 +368,8 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
     });
 
     return () => cancelAnimationFrame(rafId);
-  }, [
-    input.currentGames,
-    input.searchResults,
-    input.isSearching,
-    input.viewMode,
-    input.searchQuery,
-    input.filters,
-    input.sortBy,
-    input.sortDirection,
-  ]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fingerprint]);
 
   return output;
 }

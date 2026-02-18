@@ -389,7 +389,26 @@ contextBridge.exposeInMainWorld('webviewApi', {
   },
 });
 
+// Expose Ollama API to renderer (embeddings + setup)
+contextBridge.exposeInMainWorld('ollama', {
+  // Check if Ollama is running
+  healthCheck: () =>
+    ipcRenderer.invoke('ollama:healthCheck'),
+
+  // Run the full setup sequence (check + pull missing models)
+  setup: () =>
+    ipcRenderer.invoke('ollama:setup'),
+
+  // Generate embedding for a single text
+  generateEmbedding: (text) =>
+    ipcRenderer.invoke('ollama:generateEmbedding', text),
+
+  // Generate embeddings for multiple texts (batched)
+  generateEmbeddings: (items) =>
+    ipcRenderer.invoke('ollama:generateEmbeddings', items),
+});
+
 // Only log exposed APIs in development to avoid leaking IPC surface in production
 if (process.env.NODE_ENV !== 'production') {
-  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi exposed');
+  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama exposed');
 }

@@ -28,14 +28,15 @@
  *  - Accessibility (ARIA roles + labels)
  */
 import { useMemo, useRef, useState, useCallback, useEffect } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 
 import { motion } from 'framer-motion';
 import DOMPurify from 'dompurify';
-import { Gamepad2, Clock, Calendar, Search, X, Crosshair, ArrowUpDown, ZoomIn } from 'lucide-react';
+import { Gamepad2, Clock, Calendar, Search, X, Crosshair, ArrowUpDown, Library } from 'lucide-react';
 import { JourneyEntry, StatusChangeEntry, GameStatus, GameSession } from '@/types/game';
-import { Slider } from '@/components/ui/slider';
 import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
 import { libraryStore } from '@/services/library-store';
+import { customGameStore } from '@/services/custom-game-store';
 
 // ─── Fallback cover image ────────────────────────────────────────────────────
 // Walks through a chain of URLs on error (Steam CDN cover → header → capsule).
@@ -174,9 +175,8 @@ const segmentStyles: Record<GameStatus, SegmentStyle> = {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const DAY_MS = 86_400_000;
-const DAY_WIDTH_DEFAULT = 4;
-const DAY_WIDTH_MIN = 1;
-const DAY_WIDTH_MAX = 12;
+/** Minimum px per day so timeline can scroll when range is large */
+const MIN_DAY_WIDTH = 8;
 
 function daysBetween(a: string | Date, b: string | Date): number {
   return Math.max(1, Math.round((new Date(b).getTime() - new Date(a).getTime()) / DAY_MS));
@@ -193,6 +193,36 @@ function startOfMonth(date: Date): Date {
 function addMonths(date: Date, n: number): Date {
   const d = new Date(date);
   d.setMonth(d.getMonth() + n);
+  return d;
+}
+
+/** Monday 00:00 of the week containing the given date (ISO week) */
+function startOfWeek(date: Date): Date {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  const day = d.getDay();
+  const diff = day === 0 ? 6 : day - 1;
+  d.setDate(d.getDate() - diff);
+  return d;
+}
+
+/** First day of next month (exclusive end for month range) */
+function endOfMonth(date: Date): Date {
+  return addMonths(startOfMonth(date), 1);
+}
+
+function startOfYear(date: Date): Date {
+  return new Date(date.getFullYear(), 0, 1);
+}
+
+/** Jan 1 next year (exclusive end for year range) */
+function endOfYear(date: Date): Date {
+  return new Date(date.getFullYear() + 1, 0, 1);
+}
+
+function addDays(date: Date, n: number): Date {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
   return d;
 }
 
@@ -218,6 +248,11 @@ function formatMonthLabel(date: Date): string {
   return date.toLocaleDateString('en-US', { month: 'short' });
 }
 
+/** e.g. "Mon 17" for week view day headers */
+function formatDayLabel(date: Date): string {
+  return date.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
+}
+
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
@@ -226,10 +261,12 @@ function clamp(v: number, min: number, max: number): number {
 
 const GANTT_PREFS_KEY = 'ark-gantt-prefs';
 
+export type RangePreset = 'week' | 'month' | 'year';
+
 interface GanttPrefs {
-  dayWidth: number;
   sortBy: SortKey;
   hiddenStatuses: string[];
+  rangePreset?: RangePreset;
 }
 
 function loadPrefs(): Partial<GanttPrefs> {
@@ -248,7 +285,7 @@ const _savedPrefs = loadPrefs();
 
 // ─── Build rows from store data ─────────────────────────────────────────────
 
-export function buildGanttRows(
+function buildGanttRows(
   journeyEntries: JourneyEntry[],
   statusHistory: StatusChangeEntry[],
 ): GanttGameRow[] {
@@ -301,6 +338,49 @@ export function buildGanttRows(
       segments,
     };
   });
+}
+
+/** Split a single "Playing" segment into Playing Now (session) and Playing (gap) sub-segments. */
+function splitPlayingSegmentBySessions(
+  segStart: string,
+  segEnd: string,
+  sessions: GameSession[],
+): GanttSegment[] {
+  if (!sessions?.length) return [{ status: 'Playing', startDate: segStart, endDate: segEnd }];
+  const segStartMs = new Date(segStart).getTime();
+  const segEndMs = new Date(segEnd).getTime();
+  const sorted = [...sessions].sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+  const result: GanttSegment[] = [];
+  let pos = segStartMs;
+  for (const s of sorted) {
+    const sStart = new Date(s.startTime).getTime();
+    const sEnd = new Date(s.endTime).getTime();
+    const ovStart = Math.max(pos, sStart);
+    const ovEnd = Math.min(segEndMs, sEnd);
+    if (ovStart < ovEnd) {
+      if (ovStart > pos) {
+        result.push({
+          status: 'Playing',
+          startDate: new Date(pos).toISOString(),
+          endDate: new Date(ovStart).toISOString(),
+        });
+      }
+      result.push({
+        status: 'Playing Now',
+        startDate: new Date(ovStart).toISOString(),
+        endDate: new Date(ovEnd).toISOString(),
+      });
+      pos = ovEnd;
+    }
+  }
+  if (pos < segEndMs) {
+    result.push({
+      status: 'Playing',
+      startDate: new Date(pos).toISOString(),
+      endDate: segEnd,
+    });
+  }
+  return result.length ? result : [{ status: 'Playing', startDate: segStart, endDate: segEnd }];
 }
 
 // ─── Tooltip (with edge clamping) ───────────────────────────────────────────
@@ -440,10 +520,10 @@ const GAME_PILL_MIN_WIDTH = 70;
 const DURATION_BADGE_MIN_WIDTH = 56;
 const GAP_THRESHOLD_DAYS = 14;
 
-const ALL_STATUSES: GameStatus[] = ['Playing Now', 'Playing'];
+const ALL_STATUSES: GameStatus[] = ['Playing Now', 'Playing', 'Completed'];
 
-/** Statuses excluded from OCD view — these indicate no active play */
-const EXCLUDED_STATUSES: Set<GameStatus> = new Set(['On Hold', 'Completed', 'Want to Play']);
+/** Statuses excluded from OCD view — no play timeline (Want to Play never played; On Hold paused) */
+const EXCLUDED_STATUSES: Set<GameStatus> = new Set(['On Hold', 'Want to Play']);
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'addedAt', label: 'Date' },
@@ -451,11 +531,13 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'status', label: 'Status' },
 ];
 
-const ZOOM_PRESETS: { label: string; title: string; value: number }[] = [
-  { label: 'W', title: 'Week view', value: 10 },
-  { label: 'M', title: 'Month view', value: 4 },
-  { label: 'Y', title: 'Year view', value: 1 },
+const RANGE_PRESETS: { id: RangePreset; label: string; title: string }[] = [
+  { id: 'week', label: 'W', title: 'This week' },
+  { id: 'month', label: 'M', title: 'This month' },
+  { id: 'year', label: 'Y', title: 'This year' },
 ];
+
+const VALID_RANGE_PRESETS: RangePreset[] = ['week', 'month', 'year'];
 
 export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: JourneyGanttViewProps) {
 
@@ -464,11 +546,6 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
   const sidebarBodyRef = useRef<HTMLDivElement>(null);
 
   // ── Feature state (hydrated from localStorage) ────────────────────────
-  const [dayWidth, setDayWidth] = useState(() =>
-    typeof _savedPrefs.dayWidth === 'number'
-      ? clamp(_savedPrefs.dayWidth, DAY_WIDTH_MIN, DAY_WIDTH_MAX)
-      : DAY_WIDTH_DEFAULT
-  );
   const [hiddenStatuses, setHiddenStatuses] = useState<Set<GameStatus>>(() => {
     if (Array.isArray(_savedPrefs.hiddenStatuses)) {
       return new Set(_savedPrefs.hiddenStatuses as GameStatus[]);
@@ -479,6 +556,11 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     (['addedAt', 'hours', 'status'] as SortKey[]).includes(_savedPrefs.sortBy as SortKey)
       ? (_savedPrefs.sortBy as SortKey)
       : 'addedAt'
+  );
+  const [rangePreset, setRangePreset] = useState<RangePreset>(() =>
+    _savedPrefs.rangePreset && VALID_RANGE_PRESETS.includes(_savedPrefs.rangePreset)
+      ? _savedPrefs.rangePreset
+      : 'week'
   );
   const [searchQuery, setSearchQuery] = useState('');
   const [focusedRowIdx, setFocusedRowIdx] = useState(-1);
@@ -523,19 +605,36 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
   // ── Persist preferences to localStorage ───────────────────────────────
   useEffect(() => {
     savePrefs({
-      dayWidth,
       sortBy,
       hiddenStatuses: Array.from(hiddenStatuses),
+      rangePreset,
     });
-  }, [dayWidth, sortBy, hiddenStatuses]);
+  }, [sortBy, hiddenStatuses, rangePreset]);
 
   // ── Build + filter + sort rows ─────────────────────────────────────────
-  const allRows = useMemo(
-    () => buildGanttRows(journeyEntries, statusHistory).filter(
-      (r) => !EXCLUDED_STATUSES.has(r.currentStatus)
-    ),
-    [journeyEntries, statusHistory]
-  );
+  const allRows = useMemo(() => {
+    const sessionsByGame = new Map<string, GameSession[]>();
+    if (sessions) {
+      for (const s of sessions) {
+        if (!sessionsByGame.has(s.gameId)) sessionsByGame.set(s.gameId, []);
+        sessionsByGame.get(s.gameId)!.push(s);
+      }
+    }
+    const base = buildGanttRows(journeyEntries, statusHistory);
+    const expanded = base.map((row) => {
+      const gameSessions = sessionsByGame.get(row.gameId) ?? [];
+      const newSegments: GanttSegment[] = [];
+      for (const seg of row.segments) {
+        if (seg.status === 'Playing') {
+          newSegments.push(...splitPlayingSegmentBySessions(seg.startDate, seg.endDate, gameSessions));
+        } else {
+          newSegments.push(seg);
+        }
+      }
+      return { ...row, segments: newSegments };
+    });
+    return expanded.filter((r) => !EXCLUDED_STATUSES.has(r.currentStatus));
+  }, [journeyEntries, statusHistory, sessions]);
 
   const rows = useMemo(() => {
     let result = allRows;
@@ -584,44 +683,83 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     return map;
   }, [sessions]);
 
-  // ── Compute time range (uses allRows so filtering doesn't shift timeline) ─
-  const { timelineStart, timelineEnd, totalDays, months, spanDays } = useMemo(() => {
-    if (allRows.length === 0) {
-      const now = new Date();
-      const start = startOfMonth(new Date(now.getFullYear(), now.getMonth() - 3, 1));
-      return { timelineStart: start, timelineEnd: now, totalDays: 90, months: [] as Date[], spanDays: 90 };
+  // ── Compute time range: data-driven (earliest segment/added to latest/now) so user can scroll back ─
+  const { timelineStart, timelineEnd, totalDays, months, dayMarkers, spanDays } = useMemo(() => {
+    const now = new Date();
+
+    let minDate: Date;
+    let maxDate: Date;
+    if (allRows.length > 0) {
+      const allDates = allRows.flatMap((r) => [
+        new Date(r.addedAt),
+        ...r.segments.flatMap((s) => [new Date(s.startDate), new Date(s.endDate)]),
+      ]);
+      minDate = new Date(Math.min(...allDates.map((d) => d.getTime())));
+      maxDate = new Date(Math.max(...allDates.map((d) => d.getTime()), now.getTime()));
+    } else {
+      minDate = now;
+      maxDate = now;
     }
 
-    const allDates = allRows.flatMap((r) =>
-      r.segments.flatMap((s) => [new Date(s.startDate), new Date(s.endDate)])
-    );
-    const minDate = new Date(Math.min(...allDates.map((d) => d.getTime())));
-    const maxDate = new Date(Math.max(...allDates.map((d) => d.getTime()), Date.now()));
-    const dataSpan = daysBetween(minDate.toISOString(), maxDate.toISOString());
+    if (rangePreset === 'week') {
+      const start = startOfWeek(minDate);
+      const endOfDataWeek = addDays(startOfWeek(maxDate), 7);
+      const endOfCurrentWeek = addDays(startOfWeek(now), 7);
+      const end = endOfDataWeek > endOfCurrentWeek ? endOfDataWeek : endOfCurrentWeek;
+      const total = daysBetween(start.toISOString(), end.toISOString());
+      const monthMarkers: Date[] = [];
+      let cursor = new Date(startOfMonth(start));
+      while (cursor < end) {
+        monthMarkers.push(new Date(cursor));
+        cursor = addMonths(cursor, 1);
+      }
+      const dayMarkersList: Date[] = [];
+      for (let i = 0; i < total; i++) {
+        dayMarkersList.push(addDays(start, i));
+      }
+      return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: dayMarkersList, spanDays: total };
+    }
 
-    const start = startOfMonth(addMonths(minDate, -1));
-    const end = addMonths(startOfMonth(maxDate), 2);
+    if (rangePreset === 'month') {
+      const start = startOfMonth(minDate);
+      const end = endOfMonth(maxDate > now ? maxDate : now);
+      const total = daysBetween(start.toISOString(), end.toISOString());
+      const dayMarkersList: Date[] = [];
+      for (let i = 0; i < total; i++) {
+        dayMarkersList.push(addDays(start, i));
+      }
+      return { timelineStart: start, timelineEnd: end, totalDays: total, months: [new Date(start)], dayMarkers: dayMarkersList, spanDays: total };
+    }
+
+    // rangePreset === 'year'
+    const start = startOfYear(minDate);
+    const end = endOfYear(maxDate > now ? maxDate : now);
     const total = daysBetween(start.toISOString(), end.toISOString());
-
     const monthMarkers: Date[] = [];
     let cursor = new Date(start);
-    while (cursor <= end) {
+    while (cursor < end) {
       monthMarkers.push(new Date(cursor));
       cursor = addMonths(cursor, 1);
     }
+    return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: undefined, spanDays: total };
+  }, [rangePreset, allRows]);
 
-    return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, spanDays: dataSpan };
-  }, [allRows]);
+  // Scale: fill viewport when range is small; otherwise min px/day so timeline is scrollable
+  const effectiveDayWidth = useMemo(() => {
+    if (viewportWidth <= 0 || totalDays <= 0) return 4;
+    const fillWidth = viewportWidth / totalDays;
+    return Math.max(MIN_DAY_WIDTH, fillWidth);
+  }, [viewportWidth, totalDays]);
 
-  const timelineWidth = totalDays * dayWidth;
+  const timelineWidth = totalDays * effectiveDayWidth;
 
   // Position helper
   const dateToX = useCallback(
     (iso: string) => {
       const days = daysBetween(timelineStart.toISOString(), iso);
-      return Math.max(0, (days - 1) * dayWidth);
+      return Math.max(0, (days - 1) * effectiveDayWidth);
     },
-    [timelineStart, dayWidth]
+    [timelineStart, effectiveDayWidth]
   );
 
   // Info segment index
@@ -726,42 +864,16 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
   const handleSegmentLeave = useCallback(() => updateTooltipEl(null), [updateTooltipEl]);
 
-  // ── Ctrl+Wheel zoom ───────────────────────────────────────────────────
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    const handler = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return;
-      e.preventDefault();
-
-      const rect = el.getBoundingClientRect();
-      const cursorX = e.clientX - rect.left + el.scrollLeft;
-      const dateFraction = cursorX / (totalDays * dayWidth);
-
-      setDayWidth((prev) => {
-        const next = clamp(prev + (e.deltaY < 0 ? 1 : -1), DAY_WIDTH_MIN, DAY_WIDTH_MAX);
-        requestAnimationFrame(() => {
-          const newCursorX = dateFraction * totalDays * next;
-          el.scrollLeft = newCursorX - (e.clientX - rect.left);
-        });
-        return next;
-      });
-    };
-
-    el.addEventListener('wheel', handler, { passive: false });
-    return () => el.removeEventListener('wheel', handler);
-  }, [totalDays, dayWidth]);
-
   // ── Sync sidebar vertical scroll with timeline ─────────────────────────
+  // Since both sidebar and timeline use the same virtualizer items (positioned
+  // absolutely), we sync by adjusting the sidebar's scrollTop to match the
+  // timeline's scrollTop offset (minus the sticky header).
   useEffect(() => {
     const timeline = scrollRef.current;
     const sidebar = sidebarBodyRef.current;
     if (!timeline || !sidebar) return;
-    const inner = sidebar.firstElementChild as HTMLElement | null;
-    if (!inner) return;
     const syncScroll = () => {
-      inner.style.transform = `translateY(-${timeline.scrollTop}px)`;
+      sidebar.scrollTop = timeline.scrollTop - HEADER_HEIGHT;
     };
     timeline.addEventListener('scroll', syncScroll, { passive: true });
     return () => timeline.removeEventListener('scroll', syncScroll);
@@ -841,13 +953,6 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
           break;
         case 'Enter':
           break;
-        case '+':
-        case '=':
-          setDayWidth((prev) => clamp(prev + 1, DAY_WIDTH_MIN, DAY_WIDTH_MAX));
-          break;
-        case '-':
-          setDayWidth((prev) => clamp(prev - 1, DAY_WIDTH_MIN, DAY_WIDTH_MAX));
-          break;
         case 'Escape':
           setSearchQuery('');
           setFocusedRowIdx(-1);
@@ -859,12 +964,20 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     return () => el.removeEventListener('keydown', handler);
   }, [focusedRowIdx, rows]);
 
+  // ── Row virtualizer (only renders visible rows in the timeline) ──────
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 5,
+    scrollPaddingStart: HEADER_HEIGHT,
+  });
+
   // ── Focused row auto-scroll ───────────────────────────────────────────
   useEffect(() => {
     if (focusedRowIdx < 0) return;
-    const el = wrapperRef.current?.querySelector(`[data-row-index="${focusedRowIdx}"]`);
-    if (el) (el as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }, [focusedRowIdx]);
+    rowVirtualizer.scrollToIndex(focusedRowIdx, { align: 'auto', behavior: 'smooth' });
+  }, [focusedRowIdx, rowVirtualizer]);
 
   // ── Scroll-to-Now helper ──────────────────────────────────────────────
   const nowX = useMemo(() => dateToX(new Date().toISOString()), [dateToX]);
@@ -1006,35 +1119,23 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
             ))}
           </div>
 
-          {/* Zoom: presets + slider */}
-          <div className="flex items-center gap-2 ml-auto">
-            <ZoomIn className="w-3.5 h-3.5 text-white/30" />
-            <div className="flex items-center gap-0.5">
-              {ZOOM_PRESETS.map((p) => (
-                <button
-                  key={p.label}
-                  onClick={() => setDayWidth(p.value)}
-                  title={p.title}
-                  className={cn(
-                    'px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors',
-                    dayWidth === p.value
-                      ? 'bg-fuchsia-500 text-white'
-                      : 'text-white/30 hover:text-white/60 bg-white/5',
-                  )}
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-            <Slider
-              value={[dayWidth]}
-              onValueChange={([v]) => setDayWidth(v)}
-              min={DAY_WIDTH_MIN}
-              max={DAY_WIDTH_MAX}
-              step={1}
-              className="w-24"
-            />
-            <span className="text-[10px] text-white/25 tabular-nums w-5 text-center">{dayWidth}x</span>
+          {/* Range presets: Week / Month / Year */}
+          <div className="flex items-center gap-0.5 ml-auto">
+            {RANGE_PRESETS.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setRangePreset(p.id)}
+                title={p.title}
+                className={cn(
+                  'px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors',
+                  rangePreset === p.id
+                    ? 'bg-fuchsia-500 text-white'
+                    : 'text-white/30 hover:text-white/60 bg-white/5',
+                )}
+              >
+                {p.label}
+              </button>
+            ))}
           </div>
         </div>
       </div>
@@ -1057,25 +1158,26 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
           {/* Sidebar rows — synced scroll with timeline */}
           <div
-            className="overflow-hidden"
+            className="overflow-y-auto scrollbar-hide"
             ref={sidebarBodyRef}
-            style={{ height: chartHeight - HEADER_HEIGHT }}
+            style={{ height: chartHeight - HEADER_HEIGHT, scrollbarWidth: 'none' }}
           >
-            <div style={{ height: rows.length * ROW_HEIGHT + 24 }}>
-              {rows.map((row, rowIndex) => {
+            <div style={{ height: rowVirtualizer.getTotalSize() + 24, position: 'relative' }}>
+              {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+                const rowIndex = virtualItem.index;
+                const row = rows[rowIndex];
                 const isFocused = focusedRowIdx === rowIndex;
                 return (
                   <div
                     key={row.gameId}
                     className={cn(
-                      'flex items-center gap-2.5 px-3 border-b border-white/[0.03] transition-[opacity] duration-200',
+                      'absolute left-0 right-0 flex items-center gap-2.5 px-3 border-b border-white/[0.03] transition-[opacity] duration-200',
                       isFocused && 'bg-fuchsia-500/5',
                     )}
-                    style={{ height: ROW_HEIGHT }}
+                    style={{ height: ROW_HEIGHT, top: virtualItem.start }}
                     onMouseEnter={() => handleRowEnter(row.gameId)}
                     onMouseLeave={handleRowLeave}
                     ref={(el) => {
-                      // Register sidebar rows for hover dim effect
                       const key = `sb:${row.gameId}`;
                       if (el) rowEls.current.set(key, el);
                       else rowEls.current.delete(key);
@@ -1099,6 +1201,23 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                       <div className="text-[9px] text-white/30 mt-0.5">
                         {formatHours(row.hoursPlayed)} played
                       </div>
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                        <span
+                          className={cn(
+                            'inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-medium flex-shrink-0',
+                            segmentStyles[row.currentStatus]?.badgeBg ?? 'bg-white/10',
+                            segmentStyles[row.currentStatus]?.badgeText ?? 'text-white/60',
+                          )}
+                        >
+                          {row.currentStatus}
+                        </span>
+                        {(libraryStore.isInLibrary(row.gameId) || customGameStore.getGame(row.gameId)) && (
+                          <span className="inline-flex items-center gap-0.5 text-[8px] text-emerald-400/90" title="In library">
+                            <Library className="w-3 h-3 flex-shrink-0" />
+                            In library
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -1116,55 +1235,90 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
           )}
           onMouseDown={handleDragStart}
         >
-          <div className="relative" style={{ width: timelineWidth, minWidth: '100%', height: HEADER_HEIGHT + rows.length * ROW_HEIGHT + 24 }}>
+          <div className="relative" style={{ width: timelineWidth, minWidth: '100%', height: HEADER_HEIGHT + rowVirtualizer.getTotalSize() + 24 }}>
 
-            {/* ── Date header ──────────────────────────────────────────── */}
+            {/* ── Date header: day markers (Week/Month) or month markers (Year) ─ */}
             <div
               className="sticky top-0 z-20 border-b border-white/[0.06]"
               style={{ height: HEADER_HEIGHT }}
             >
               <div className="absolute inset-0 bg-black/60 backdrop-blur-md" />
 
-            {months.map((month, i) => {
-              const x = dateToX(month.toISOString());
-              const nextMonth = i < months.length - 1 ? months[i + 1] : timelineEnd;
-              const monthWidth = dateToX(nextMonth.toISOString()) - x;
-              const showYear = i === 0 || month.getMonth() === 0;
-              const mid = new Date(month.getFullYear(), month.getMonth(), 15);
-              const midX = dateToX(mid.toISOString());
+            {dayMarkers && dayMarkers.length > 0 ? (
+              /* Week / Month: one column per day with day label and vertical line */
+              <>
+                {dayMarkers.map((day, i) => {
+                  const x = dateToX(day.toISOString());
+                  const nextDay = i < dayMarkers.length - 1 ? dayMarkers[i + 1] : timelineEnd;
+                  const cellWidth = dateToX(nextDay.toISOString()) - x;
+                  const showLabel = cellWidth > 20;
+                  return (
+                    <div key={i}>
+                      <div
+                        className="absolute top-0 w-px bg-white/[0.06]"
+                        style={{ left: x, height: HEADER_HEIGHT }}
+                      />
+                      {showLabel && (
+                        <div
+                          className="absolute flex flex-col items-start justify-end pb-2 pl-1"
+                          style={{ left: x, width: cellWidth, height: HEADER_HEIGHT }}
+                        >
+                          <span className="text-[10px] text-white/50 font-medium truncate max-w-full">
+                            {rangePreset === 'week' ? formatDayLabel(day) : day.getDate()}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                <div
+                  className="absolute top-0 w-px bg-white/[0.06]"
+                  style={{ left: dateToX(timelineEnd.toISOString()), height: HEADER_HEIGHT }}
+                />
+              </>
+            ) : (
+              /* Year: month columns with month name and 15th */
+              months.map((month, i) => {
+                const x = dateToX(month.toISOString());
+                const nextMonth = i < months.length - 1 ? months[i + 1] : timelineEnd;
+                const monthWidth = dateToX(nextMonth.toISOString()) - x;
+                const showYear = i === 0 || month.getMonth() === 0;
+                const mid = new Date(month.getFullYear(), month.getMonth(), 15);
+                const midX = dateToX(mid.toISOString());
 
-              return (
-                <div key={i}>
-                  <div
-                    className="absolute flex flex-col items-start justify-end pb-2 pl-2"
-                    style={{ left: x, width: monthWidth, height: HEADER_HEIGHT }}
-                  >
-                    {showYear && (
-                      <span className="text-[10px] text-fuchsia-400/70 font-bold font-display tracking-wider">
-                        {month.getFullYear()}
-                      </span>
-                    )}
-                    <span className="text-xs text-white/50 font-medium">
-                      {formatMonthLabel(month)}
-                    </span>
-                  </div>
-                  <div
-                    className="absolute top-0 w-px bg-white/[0.06]"
-                    style={{ left: x, height: HEADER_HEIGHT }}
-                  />
-                  {monthWidth > 50 && (
+                return (
+                  <div key={i}>
                     <div
-                      className="absolute flex items-end pb-2 pl-1"
-                      style={{ left: midX, height: HEADER_HEIGHT }}
+                      className="absolute flex flex-col items-start justify-end pb-2 pl-2"
+                      style={{ left: x, width: monthWidth, height: HEADER_HEIGHT }}
                     >
-                      <span className="text-[10px] text-white/25 font-medium">
-                        15
+                      {showYear && (
+                        <span className="text-[10px] text-fuchsia-400/70 font-bold font-display tracking-wider">
+                          {month.getFullYear()}
+                        </span>
+                      )}
+                      <span className="text-xs text-white/50 font-medium">
+                        {formatMonthLabel(month)}
                       </span>
                     </div>
-                  )}
-                </div>
-              );
-            })}
+                    <div
+                      className="absolute top-0 w-px bg-white/[0.06]"
+                      style={{ left: x, height: HEADER_HEIGHT }}
+                    />
+                    {monthWidth > 50 && (
+                      <div
+                        className="absolute flex items-end pb-2 pl-1"
+                        style={{ left: midX, height: HEADER_HEIGHT }}
+                      >
+                        <span className="text-[10px] text-white/25 font-medium">
+                          15
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
 
             {/* "Now" pill badge */}
             <div
@@ -1184,7 +1338,9 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
             </div>
           )}
 
-          {rows.map((row, rowIndex) => {
+          {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+            const rowIndex = virtualItem.index;
+            const row = rows[rowIndex];
             const infoSegIdx = getInfoSegmentIndex(row);
             const isFocused = focusedRowIdx === rowIndex;
             const gameSessions = sessionsByGame.get(row.gameId);
@@ -1200,24 +1356,30 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                 role="row"
                 aria-label={`${row.title}: ${row.currentStatus}, ${formatHours(row.hoursPlayed)} played`}
                 className={cn(
-                  'relative group/row transition-[opacity] duration-200',
+                  'absolute left-0 right-0 group/row transition-[opacity] duration-200',
                   isFocused && 'border-l-2 border-l-fuchsia-500/50',
                 )}
-                style={{ height: ROW_HEIGHT }}
+                style={{ height: ROW_HEIGHT, top: HEADER_HEIGHT + virtualItem.start }}
                 onClick={() => {
                   if (hasDragged.current) { hasDragged.current = false; return; }
                 }}
                 onMouseEnter={() => handleRowEnter(row.gameId)}
                 onMouseLeave={handleRowLeave}
               >
-                {/* Vertical month gridlines */}
-                {months.map((month, mi) => (
+                {/* Vertical gridlines: day boundaries (Week/Month) or month boundaries (Year) */}
+                {(dayMarkers ?? months).map((marker, mi) => (
                   <div
                     key={mi}
                     className="absolute top-0 bottom-0 w-px bg-white/[0.04]"
-                    style={{ left: dateToX(month.toISOString()) }}
+                    style={{ left: dateToX(marker.toISOString()) }}
                   />
                 ))}
+                {dayMarkers && dayMarkers.length > 0 && (
+                  <div
+                    className="absolute top-0 bottom-0 w-px bg-white/[0.04]"
+                    style={{ left: dateToX(timelineEnd.toISOString()) }}
+                  />
+                )}
 
                 {/* "Now" dashed vertical line */}
                 <div
@@ -1252,7 +1414,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                   );
                 })}
 
-                {/* ── Segment bars ───────────────────────────────────── */}
+                {/* ── Segment bars (one per status period; separators between different statuses) ── */}
                 {row.segments.map((seg, i) => {
                   const left = dateToX(seg.startDate);
                   const right = dateToX(seg.endDate);
@@ -1262,6 +1424,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                   const isTealBar = seg.status === 'Playing Now';
                   const segDays = daysBetween(seg.startDate, seg.endDate);
                   const isOngoing = new Date(seg.endDate).getTime() >= Date.now() - DAY_MS;
+                  const prevStatus = i > 0 ? row.segments[i - 1].status : null;
+                  const showSegmentSeparator = i > 0 && prevStatus !== seg.status;
 
                   const animProps = !hasAnimated.current
                     ? {
@@ -1293,16 +1457,26 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                         height: ROW_HEIGHT - BAR_V_PADDING,
                         transformOrigin: 'left center',
                       }}
-                      onMouseMove={(e) => {
-                        e.stopPropagation();
-                        handleSegmentHover(e, seg, row);
-                      }}
-                      onMouseLeave={handleSegmentLeave}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (hasDragged.current) { hasDragged.current = false; return; }
-                      }}
                     >
+                      {/* Separator at left edge when status changes (Playing Now vs Playing vs Completed) */}
+                      {showSegmentSeparator && (
+                        <div
+                          className="absolute left-0 top-0 bottom-0 w-px bg-black/40 z-10 pointer-events-none"
+                          aria-hidden
+                        />
+                      )}
+                      <div
+                        className="absolute inset-0 rounded-full cursor-pointer"
+                        onMouseMove={(e) => {
+                          e.stopPropagation();
+                          handleSegmentHover(e, seg, row);
+                        }}
+                        onMouseLeave={handleSegmentLeave}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (hasDragged.current) { hasDragged.current = false; return; }
+                        }}
+                      >
                       {/* Shimmer overlay */}
                       <div className={cn(
                         'absolute inset-0 rounded-full pointer-events-none',
@@ -1353,6 +1527,12 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                               <span className={cn('text-[11px] font-semibold truncate', style.text)}>
                                 {row.title}
                               </span>
+                              <span className={cn('flex-shrink-0 text-[8px] font-medium px-1.5 py-0.5 rounded', style.badgeBg, style.badgeText)}>
+                                {row.currentStatus}
+                              </span>
+                              {(libraryStore.isInLibrary(row.gameId) || customGameStore.getGame(row.gameId)) && (
+                                <Library className="w-3.5 h-3.5 flex-shrink-0 opacity-90" title="In library" />
+                              )}
                             </>
                           )}
 
@@ -1385,6 +1565,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                           className="absolute top-1/2 -translate-y-1/2 right-0 w-1 h-4 rounded-full bg-emerald-400 gantt-live-pulse"
                         />
                       )}
+                      </div>
                     </motion.div>
                   );
                 })}

@@ -24,6 +24,7 @@ import { EmptyState } from '@/components/empty-state';
 import { JourneyView } from '@/components/journey-view';
 import { BuzzView } from '@/components/buzz-view';
 import { ReleaseCalendar } from '@/components/release-calendar';
+import { OracleView } from '@/components/oracle-view';
 import { useToast } from '@/components/ui/toast';
 
 const DarkVeil = lazy(() => import('@/components/ui/dark-veil'));
@@ -47,6 +48,7 @@ import {
   Newspaper,
   CalendarDays,
   Compass,
+  Eye,
 } from 'lucide-react';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
@@ -56,20 +58,62 @@ import { useSessionTracker } from '@/hooks/useSessionTracker';
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle';
 
+
+const RETURN_VIEW_KEY = 'ark-return-view';
+const VALID_VIEW_MODES: ViewMode[] = ['browse', 'library', 'journey', 'buzz', 'calendar', 'oracle'];
+
+function getScrollStorageKey(view: ViewMode): string {
+  return `ark-dashboard-scroll-${view}`;
+}
 
 // Track if cache has been cleared this session
 export function Dashboard() {
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
   
   // Local filter state
   const { filters, updateFilter, resetFilters } = useFilteredGames();
   
-  // View mode state
-  const [viewMode, setViewMode] = useState<ViewMode>('browse');
+  // View mode state — restore from ?view= when returning from game details
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    if (typeof window === 'undefined') return 'browse';
+    const params = new URLSearchParams(window.location.search);
+    const view = params.get('view');
+    return (view && VALID_VIEW_MODES.includes(view as ViewMode)) ? (view as ViewMode) : 'browse';
+  });
   // Tracks whether the DarkVeil bg is active (stays true during exit animation)
   const [buzzBgActive, setBuzzBgActive] = useState(false);
+
+  // Persist current view when on dashboard so Back from game details can restore it
+  useEffect(() => {
+    if (location === '/') {
+      sessionStorage.setItem(RETURN_VIEW_KEY, viewMode);
+    }
+  }, [location, viewMode]);
+
+  // Pending scroll restore when returning to a view whose content loads async (e.g. Library)
+  const pendingScrollRestoreRef = useRef<{ view: ViewMode; pos: number } | null>(null);
+
+  // Restore view and scroll position when landing on dashboard (e.g. Back from game details)
+  useEffect(() => {
+    if (location !== '/') return;
+    const params = new URLSearchParams(window.location.search);
+    const view = params.get('view');
+    if (view && VALID_VIEW_MODES.includes(view as ViewMode)) {
+      setViewMode(view as ViewMode);
+      window.history.replaceState(null, '', '/');
+      const saved = sessionStorage.getItem(getScrollStorageKey(view as ViewMode));
+      const pos = saved ? parseInt(saved, 10) : 0;
+      if (!isNaN(pos) && pos > 0) {
+        pendingScrollRestoreRef.current = { view: view as ViewMode, pos };
+        // Try immediate restore (works when content is already there, e.g. Browse from cache)
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => window.scrollTo({ top: pos, left: 0 }));
+        });
+      }
+    }
+  }, [location]);
 
   useEffect(() => {
     if (viewMode === 'buzz') {
@@ -78,7 +122,7 @@ export function Dashboard() {
     // Close the filter panel when switching to a view that doesn't support it
     // (journey, buzz, calendar have no filterable grid).  This prevents the
     // panel from reserving space / staying visible after a tab switch.
-    if (viewMode === 'journey' || viewMode === 'buzz' || viewMode === 'calendar') {
+    if (viewMode === 'journey' || viewMode === 'buzz' || viewMode === 'calendar' || viewMode === 'oracle') {
       setIsFilterOpen(false);
     }
   }, [viewMode]);
@@ -179,6 +223,15 @@ export function Dashboard() {
 
   const currentLoading = viewMode === 'browse' ? steamLoading : libraryLoading;
   const currentError = steamError;
+
+  // Deferred scroll restore when grid content finishes loading (Library fetches async; without this we'd restore while skeleton is shown and scroll would clamp to top)
+  useEffect(() => {
+    if (location !== '/' || !pendingScrollRestoreRef.current || currentLoading) return;
+    const pending = pendingScrollRestoreRef.current;
+    if (viewMode !== pending.view) return;
+    window.scrollTo({ top: pending.pos, left: 0 });
+    pendingScrollRestoreRef.current = null;
+  }, [location, viewMode, currentLoading]);
   // Epic store filter: Epic data is a finite curated set (new releases + coming
   // soon + free games), not backed by the 155k+ Steam catalog.  The catalog
   // infinite-scroll fallback only loads Steam titles, so when the user filters
@@ -305,15 +358,24 @@ export function Dashboard() {
     };
   }, [hasMore, currentLoading, loadingMore, loadMore, viewMode, isSearching]);
 
-  // Scroll-to-top visibility
+  // Scroll-to-top visibility and persist scroll position (for Back-from-details restore)
   useEffect(() => {
+    let scrollSaveTimeout: ReturnType<typeof setTimeout>;
     function handleScroll() {
       setShowScrollTop(window.scrollY > 500);
+      if (location !== '/') return;
+      clearTimeout(scrollSaveTimeout);
+      scrollSaveTimeout = setTimeout(() => {
+        sessionStorage.setItem(getScrollStorageKey(viewMode), String(Math.round(window.scrollY)));
+      }, 150);
     }
 
-    window.addEventListener('scroll', handleScroll);
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, []);
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+      clearTimeout(scrollSaveTimeout);
+    };
+  }, [location, viewMode]);
 
   const scrollToTop = useCallback(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -327,6 +389,7 @@ export function Dashboard() {
   const switchToJourney = useCallback(() => { setViewMode('journey'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToBuzz = useCallback(() => { setViewMode('buzz'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToCalendar = useCallback(() => { setViewMode('calendar'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
+  const switchToOracle = useCallback(() => { setViewMode('oracle'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
 
 
 
@@ -461,6 +524,8 @@ export function Dashboard() {
 
   // Stable render callback for VirtualGameGrid
   const hideLibBadge = viewMode === 'library';
+  const isPlayingNowRef = useRef(isPlayingNow);
+  isPlayingNowRef.current = isPlayingNow;
   const renderGameCard = useCallback((game: Game) => {
     return (
       <GameCard
@@ -468,7 +533,7 @@ export function Dashboard() {
         onEdit={handleCardEdit}
         onDelete={handleCardDelete}
         isInLibrary={game.isInLibrary}
-        isPlayingNow={isPlayingNow(game.steamAppId ?? game.id)}
+        isPlayingNow={isPlayingNowRef.current(game.steamAppId ?? game.id)}
         onAddToLibrary={handleCardAddToLibrary}
         onRemoveFromLibrary={handleCardRemoveFromLibrary}
         onStatusChange={handleCardStatusChange}
@@ -691,6 +756,19 @@ export function Dashboard() {
                 <CalendarDays className="h-3 w-3 shrink-0" />
                 <span className="hidden lg:inline">Releases</span>
               </button>
+              <button
+                onClick={switchToOracle}
+                title="Oracle"
+                className={cn(
+                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                  viewMode === 'oracle' 
+                    ? "bg-fuchsia-500 text-white" 
+                    : "text-white/60 hover:text-white"
+                )}
+              >
+                <Eye className="h-3 w-3 shrink-0" />
+                <span className="hidden lg:inline">Oracle</span>
+              </button>
             </div>
 
             {/* Clear Library Button - only visible in library mode */}
@@ -707,7 +785,7 @@ export function Dashboard() {
               </Button>
             )}
 
-            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
+            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && (
               <>
                 <p className="text-sm text-white/60 items-center gap-1.5 whitespace-nowrap shrink-0 hidden lg:flex">
                   {viewMode === 'library' ? (
@@ -779,8 +857,8 @@ export function Dashboard() {
           </div>
           
           <div className="flex items-center gap-3 shrink-0">
-            {/* Search - hidden in journey, buzz, calendar mode */}
-            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
+            {/* Search - hidden in journey, buzz, calendar, oracle mode */}
+            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && (
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40 z-10" />
                 <Input
@@ -863,8 +941,8 @@ export function Dashboard() {
               </Button>
             )}
 
-            {/* Filter Button - hidden in journey, buzz, calendar mode */}
-            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && (
+            {/* Filter Button - hidden in journey, buzz, calendar, oracle mode */}
+            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && (
               <FilterTrigger
                 open={isFilterOpen}
                 onToggle={() => handleFilterOpenChange(!isFilterOpen)}
@@ -899,6 +977,8 @@ export function Dashboard() {
           <BuzzView />
         ) : viewMode === 'calendar' ? (
           <ReleaseCalendar />
+        ) : viewMode === 'oracle' ? (
+          <OracleView onSwitchToBrowse={switchToBrowse} />
         ) : (
           <>
             {/* Loading State - Skeleton Grid */}

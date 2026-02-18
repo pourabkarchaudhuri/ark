@@ -8,8 +8,17 @@ vi.mock('@/services/journey-store', () => ({
     markRemoved: vi.fn(),
     syncProgress: vi.fn(),
     getEntry: vi.fn(),
+    has: vi.fn().mockReturnValue(false),
     exportData: vi.fn().mockReturnValue([]),
     importData: vi.fn().mockReturnValue({ added: 0, updated: 0, skipped: 0 }),
+    clear: vi.fn(),
+  },
+}));
+
+vi.mock('@/services/session-store', () => ({
+  sessionStore: {
+    exportData: vi.fn().mockReturnValue([]),
+    importData: vi.fn().mockReturnValue({ added: 0, skipped: 0 }),
     clear: vi.fn(),
   },
 }));

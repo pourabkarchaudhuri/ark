@@ -103,17 +103,18 @@ export function useSessionTracker() {
       // Record the session
       sessionStore.record(session);
 
-      // Update hoursPlayed — route to correct store based on ID prefix
+      // Update hoursPlayed and lastPlayedAt — route to correct store based on ID prefix
       const totalHours = sessionStore.getTotalHours(session.gameId);
+      const lastPlayedAt = session.endTime;
       if (session.gameId.startsWith('custom-')) {
-        // Custom game — update custom game store
+        // Custom game — update custom game store and journey lastPlayedAt
         const existing = customGameStore.getGame(session.gameId);
         if (existing) {
-          customGameStore.updateGame(session.gameId, { hoursPlayed: totalHours });
+          customGameStore.updateGame(session.gameId, { hoursPlayed: totalHours, lastPlayedAt });
         }
       } else {
-        // Library game — update library store
-        libraryStore.updateHoursFromSessions(session.gameId, totalHours);
+        // Library game — update library store (and journey via sync)
+        libraryStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
       }
     });
 
