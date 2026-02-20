@@ -278,6 +278,38 @@ export function register(): void {
   });
 
   /**
+   * Get Steam tag list (tagid → name) for catalog metadata enrichment
+   */
+  ipcMain.handle('steam:getTagList', async () => {
+    try {
+      return await steamAPI.getTagList();
+    } catch (error) {
+      logger.error('[Steam IPC] Error fetching tag list:', error);
+      return [];
+    }
+  });
+
+  /**
+   * Fetch rich metadata for a batch of Steam app IDs.
+   * Runs main-process-side to avoid renderer CORS restrictions.
+   */
+  let _catalogBatchCount = 0;
+  ipcMain.handle('steam:fetchCatalogBatch', async (_event: any, appIds: number[]) => {
+    try {
+      const items = await steamAPI.fetchCatalogBatch(appIds);
+      _catalogBatchCount++;
+      if (_catalogBatchCount % 50 === 1 || _catalogBatchCount <= 3) {
+        logger.log(`[Steam IPC] fetchCatalogBatch #${_catalogBatchCount}: ${appIds.length} ids → ${items.length} items`);
+      }
+      return items;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.warn(`[Steam IPC] fetchCatalogBatch #${++_catalogBatchCount} failed (${appIds.length} ids):`, msg);
+      return [];
+    }
+  });
+
+  /**
    * Get game recommendations based on a game and user's library
    */
   ipcMain.handle('steam:getRecommendations', async (_event: any, currentAppId: number, libraryAppIds: number[], limit: number = 10) => {

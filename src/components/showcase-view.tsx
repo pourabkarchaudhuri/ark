@@ -15,10 +15,11 @@ import { Canvas, useFrame, extend } from '@react-three/fiber';
 import { Stars, Html } from '@react-three/drei';
 import { easing, geometry } from 'maath';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Clock, Calendar, Star, Library } from 'lucide-react';
+import { Clock, Calendar, Star, Library, ChevronLeft, ChevronRight, Mouse } from 'lucide-react';
 import type { JourneyEntry, GameStatus } from '@/types/game';
 import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
 import { libraryStore } from '@/services/library-store';
+import { journeyStore } from '@/services/journey-store';
 
 extend(geometry);
 
@@ -950,6 +951,81 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
           setActiveIndex={setActiveIndex}
         />
         </Canvas>
+
+        {/* Terminal-style floating data panel — overlaid on canvas right side */}
+        <AnimatePresence mode="wait">
+          {entry && (
+            <motion.div
+              key={entry.gameId}
+              initial={{ opacity: 0, x: 12 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 12 }}
+              transition={{ duration: 0.35, ease: 'easeOut' }}
+              className="absolute right-4 top-4 hidden lg:flex flex-col gap-[3px] font-mono text-[10px] leading-none tracking-wider text-fuchsia-400/30 pointer-events-none select-none"
+            >
+              <span className="text-fuchsia-400/20">// ARK REGISTRY</span>
+              {(() => {
+                const libEntry = libraryStore.getEntry(entry.gameId);
+                const meta = libEntry?.cachedMeta;
+                const steamId = libEntry?.steamAppId ?? meta?.steamAppId;
+                const store = meta?.store ?? (entry.gameId.startsWith('epic-') ? 'Epic' : entry.gameId.startsWith('steam-') ? 'Steam' : 'Custom');
+                const metacritic = meta?.metacriticScore;
+                const relDate = entry.releaseDate ?? meta?.releaseDate;
+                const techDate = relDate ? new Date(relDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short' }) : null;
+                const je = journeyStore.getEntry(entry.gameId);
+                const lastPlayed = je?.lastPlayedAt ?? libEntry?.lastPlayedAt;
+
+                const statusMap: Record<string, string> = {
+                  'Completed': 'DONE', 'Playing': 'ACTV', 'Playing Now': 'LIVE',
+                  'On Hold': 'HOLD', 'Want to Play': 'WISH',
+                };
+
+                return (
+                  <>
+                    <span className="mt-1">SYS::APPID</span>
+                    <span className="text-fuchsia-400/50">{steamId || entry.gameId.slice(0, 14).toUpperCase()}</span>
+                    <span className="mt-1">STORE::{store.toUpperCase()}</span>
+                    {metacritic != null && metacritic > 0 && (
+                      <span className="mt-1">META::{metacritic}</span>
+                    )}
+                    <span className="mt-1">HRS::{entry.hoursPlayed > 0 ? formatHours(entry.hoursPlayed) : '0m'}</span>
+                    {techDate && <span className="mt-1">REL::{techDate}</span>}
+                    {entry.genre?.length > 0 && entry.genre.slice(0, 2).map(g => (
+                      <span key={g} className="text-fuchsia-400/40">{g.length > 14 ? g.slice(0, 13) + '…' : g}</span>
+                    ))}
+                    {entry.rating > 0 && (
+                      <span className="mt-1 text-amber-400/40">RAT::{'★'.repeat(entry.rating)}{'·'.repeat(5 - entry.rating)}</span>
+                    )}
+                    {entry.status && (
+                      <span className="mt-1 text-emerald-400/40">STS::{statusMap[entry.status] ?? entry.status.toUpperCase()}</span>
+                    )}
+                    {lastPlayed && (
+                      <span className="mt-1 text-white/15">LAST::{new Date(lastPlayed).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                    )}
+                  </>
+                );
+              })()}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Controls hint — bottom-right */}
+        <div className="absolute bottom-3 right-4 flex flex-col gap-1.5 pointer-events-none select-none">
+          <div className="flex items-center gap-2 text-[10px] text-white/20 font-mono">
+            <ChevronLeft className="w-3 h-3 flex-shrink-0" />
+            <ChevronRight className="w-3 h-3 flex-shrink-0 -ml-1.5" />
+            <span>Arrow keys to cycle</span>
+          </div>
+          <div className="flex items-center gap-2 text-[10px] text-white/20 font-mono">
+            <Mouse className="w-3 h-3 flex-shrink-0" />
+            <span>Scroll to browse</span>
+          </div>
+        </div>
+
+        {/* View mode label — terminal-style, bottom-left */}
+        <div className="absolute bottom-3 left-4 pointer-events-none">
+          <span className="font-mono text-[10px] tracking-wider text-fuchsia-400/25">// MY ARK</span>
+        </div>
       </div>
 
     </div>

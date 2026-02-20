@@ -49,7 +49,7 @@ const categoryOptions: { value: GameCategory; label: string }[] = [
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle' | 'ann-graph';
 
 const sortOptions: { value: SortOption; label: string }[] = [
   { value: 'rating', label: 'Rating' },
@@ -110,6 +110,7 @@ export const FilterTrigger = memo(function FilterTrigger({
 
   return (
     <Button
+      data-tour="filter-trigger"
       variant="outline"
       size="icon"
       className="h-9 w-9 relative"

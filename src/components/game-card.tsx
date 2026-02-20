@@ -24,6 +24,7 @@ import { FaWindows, FaApple, FaLinux, FaSteam } from 'react-icons/fa';
 import { SiEpicgames } from 'react-icons/si';
 import { cn, getHardcodedCover } from '@/lib/utils';
 import { detailEnricher } from '@/services/detail-enricher';
+import { AnimateIcon } from '@/components/ui/animate-icon';
 
 interface GameCardProps {
   game: Game;
@@ -41,6 +42,7 @@ interface GameCardProps {
   /** Callback receives (gameId, status) so parent can use a single stable function */
   onStatusChange?: (gameId: string, status: GameStatus) => void;
   hideLibraryBadge?: boolean; // Hide heart button and library badge (e.g., when already in library view)
+  showTerminalPanel?: boolean; // Show terminal-style floating data panel (My Ark view only)
   footer?: React.ReactNode; // Extra content rendered inside the card after the info section
 }
 
@@ -103,15 +105,34 @@ function formatDisplayDate(isoDate: string): string {
   if (!isoDate) return '';
   try {
     const date = new Date(isoDate);
-    if (isNaN(date.getTime())) return '';
+    if (isNaN(date.getTime())) return isoDate;
     return date.toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
     });
   } catch {
+    return isoDate;
+  }
+}
+
+// Format date in terminal style: 2025.01.18
+function formatTechDate(isoDate: string): string {
+  if (!isoDate) return '';
+  try {
+    const d = new Date(isoDate);
+    if (isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
+  } catch {
     return '';
   }
+}
+
+// Format count with K/M suffixes for terminal display
+function formatCompact(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
+  return count.toString();
 }
 
 // Format player count with K/M suffixes for large numbers
@@ -153,6 +174,7 @@ function GameCardComponent({
   onRemoveFromLibrary,
   onStatusChange,
   hideLibraryBadge,
+  showTerminalPanel,
   footer,
 }: GameCardProps) {
   const [, navigate] = useLocation();
@@ -312,16 +334,22 @@ function GameCardComponent({
   const fallbackGradient = getGameFallbackGradient(game.title);
   const initials = getGameInitials(game.title);
 
+  const statusCode = game.status ? game.status.toUpperCase().replace(/\s+/g, '_') : '';
+  const storeLabel = game.store === 'epic' ? 'EPIC' : game.steamAppId ? 'STEAM' : game.isCustom ? 'CUSTOM' : 'UNKNOWN';
+  const techDate = formatTechDate(game.releaseDate);
+
   return (
-    <div 
+    <div
       ref={cardRef}
       data-appid={game.steamAppId}
-      className="group relative flex flex-col rounded-xl overflow-hidden bg-card/30 hover:bg-card/50 border border-transparent hover:border-white/10 transition-all duration-300 w-full cursor-pointer"
+      className={cn("group relative w-full", showTerminalPanel && isHovered && "z-30")}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       onClick={handleCardClick}
       onContextMenu={handleContextMenu}
     >
+      {/* Inner card — overflow-hidden for border-radius clipping */}
+      <div className="flex flex-col rounded-xl overflow-hidden bg-card/30 group-hover:bg-card/50 border border-transparent group-hover:border-white/10 transition-all duration-300 w-full cursor-pointer">
       {/* Cover Image Container - 3:4 aspect ratio like game covers */}
       <div 
         className="relative aspect-[3/4] overflow-hidden"
@@ -371,12 +399,14 @@ function GameCardComponent({
             )}
             aria-label={inLibrary ? "Remove from library" : "Add to library"}
           >
-            <Heart 
-              className={cn(
-                "h-4 w-4 transition-colors",
-                inLibrary ? "fill-white text-white" : "text-white/70"
-              )} 
-            />
+            <AnimateIcon tap="beat">
+              <Heart 
+                className={cn(
+                  "h-4 w-4 transition-colors",
+                  inLibrary ? "fill-white text-white" : "text-white/70"
+                )} 
+              />
+            </AnimateIcon>
           </button>
         )}
 
@@ -470,7 +500,7 @@ function GameCardComponent({
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="bg-card border-white/10 whitespace-nowrap">
                   <DropdownMenuItem onClick={() => onEdit(game.id)} className="cursor-pointer">
-                    <Edit className="h-4 w-4 mr-2" />
+                    <AnimateIcon hover="pulse" className="mr-2"><Edit className="h-4 w-4" /></AnimateIcon>
                     Edit Entry
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
@@ -478,7 +508,7 @@ function GameCardComponent({
                     onClick={() => onDelete(game.id)} 
                     className="cursor-pointer text-red-400 focus:text-red-300 focus:bg-red-500/10"
                   >
-                    <Trash2 className="h-4 w-4 mr-2" />
+                    <AnimateIcon hover="lift" className="mr-2"><Trash2 className="h-4 w-4" /></AnimateIcon>
                     Remove from Library
                   </DropdownMenuItem>
                 </DropdownMenuContent>
@@ -557,6 +587,41 @@ function GameCardComponent({
           })()}
         </div>
       </div>
+      </div>{/* close inner card */}
+
+      {/* Terminal-style floating data panel — only in My Ark (library) view, lg+ */}
+      {showTerminalPanel && (
+        <div className={cn(
+          "absolute left-full top-0 bottom-0 ml-2 hidden lg:flex flex-col justify-between py-1 select-none pointer-events-none transition-opacity duration-300",
+          isHovered ? "opacity-100" : "opacity-0"
+        )} style={{ width: 150 }}>
+          <div className="flex flex-col gap-[3px] font-mono text-[10px] leading-none tracking-wider text-fuchsia-400/30">
+            <span className="text-fuchsia-400/20">// ARK REGISTRY</span>
+            <span className="mt-1">SYS::APPID</span>
+            <span className="text-fuchsia-400/50">{game.steamAppId || game.id.slice(0, 12).toUpperCase()}</span>
+            <span className="mt-1">STORE::{storeLabel}</span>
+            {game.metacriticScore != null && game.metacriticScore > 0 && (
+              <span className="mt-1">META::{game.metacriticScore}</span>
+            )}
+            {game.playerCount != null && game.playerCount > 0 && (
+              <span className="mt-1 text-cyan-400/40">POP::{formatCompact(game.playerCount)}</span>
+            )}
+            {techDate && <span className="mt-1">REL::{techDate}</span>}
+            {game.genre?.length > 0 && game.genre.slice(0, 2).map(g => (
+              <span key={g} className="text-fuchsia-400/40">{g.length > 14 ? g.slice(0, 13) + '…' : g}</span>
+            ))}
+            {game.achievements != null && game.achievements > 0 && (
+              <span className="mt-1">ACH::{game.achievements}</span>
+            )}
+            {game.recommendations != null && game.recommendations > 0 && (
+              <span className="mt-1">REC::{formatCompact(game.recommendations)}</span>
+            )}
+            {statusCode && (
+              <span className="mt-1 text-emerald-400/40">STS::{statusCode}</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Right-click context menu — rendered via portal at exact cursor position */}
       {ctxMenu && createPortal(
@@ -572,7 +637,7 @@ function GameCardComponent({
                 className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-white/10 cursor-pointer"
                 onClick={() => { setCtxMenu(null); onEdit(game.id); }}
               >
-                <Edit className="h-4 w-4 mr-2" />
+                <AnimateIcon hover="pulse" className="mr-2"><Edit className="h-4 w-4" /></AnimateIcon>
                 Edit Entry
               </button>
               <div className="my-1 h-px bg-white/10" />
@@ -580,7 +645,7 @@ function GameCardComponent({
                 className="flex w-full items-center rounded-sm px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 cursor-pointer"
                 onClick={() => { setCtxMenu(null); onDelete(game.id); }}
               >
-                <Trash2 className="h-4 w-4 mr-2" />
+                <AnimateIcon hover="lift" className="mr-2"><Trash2 className="h-4 w-4" /></AnimateIcon>
                 Remove from Library
               </button>
             </>
@@ -589,7 +654,7 @@ function GameCardComponent({
               className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-white/10 cursor-pointer"
               onClick={() => { setCtxMenu(null); if (onAddToLibrary) onAddToLibrary(game.id); }}
             >
-              <Plus className="h-4 w-4 mr-2" />
+              <AnimateIcon hover="pulse" className="mr-2"><Plus className="h-4 w-4" /></AnimateIcon>
               Add to Library
             </button>
           )}
@@ -622,6 +687,7 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.isInLibrary === nextProps.isInLibrary &&
     prevProps.isPlayingNow === nextProps.isPlayingNow &&
     prevProps.hideLibraryBadge === nextProps.hideLibraryBadge &&
+    prevProps.showTerminalPanel === nextProps.showTerminalPanel &&
     prevProps.onClick === nextProps.onClick &&
     prevProps.onEdit === nextProps.onEdit &&
     prevProps.onDelete === nextProps.onDelete &&

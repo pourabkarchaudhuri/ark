@@ -8,90 +8,14 @@
 import { memo, useMemo, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, Filter, ChevronDown, X, Lock } from 'lucide-react';
-import type { BadgeProgress, BadgeBranch, BadgeTier, MedalShape } from '@/data/badge-types';
+import type { BadgeProgress, BadgeBranch, BadgeTier } from '@/data/badge-types';
 import {
-  TIER_POINTS, MEDAL_PATHS, TIER_GRADIENTS,
-  BRANCH_MOTIFS, TIER_NEON, TIER_COLORS, BRANCH_META,
+  TIER_POINTS, MEDAL_PATHS,
+  BRANCH_MOTIFS, TIER_NEON, BRANCH_META,
 } from '@/data/badge-types';
 import { cn } from '@/lib/utils';
 import { Icon } from '@/components/ui/evervault-card';
 import { ensureUnlockedAt } from '@/services/badge-unlock-timestamps';
-
-// ─── Neon Medal SVG ─────────────────────────────────────────────────────────
-
-const MedalIcon = memo(function MedalIcon({
-  shape, tier, branch, unlocked, size = 110,
-}: {
-  shape: MedalShape; tier: BadgeTier; branch: BadgeBranch; unlocked: boolean; size?: number;
-}) {
-  const uid = `nm-${tier}-${shape}-${branch}-${size}`;
-  const [c1, c2, c3] = TIER_GRADIENTS[tier];
-  const neon = TIER_NEON[tier];
-  const motif = BRANCH_MOTIFS[branch];
-
-  return (
-    <svg width={size} height={size} viewBox="0 0 100 116" className="flex-shrink-0">
-      <defs>
-        <linearGradient id={`${uid}-fill`} x1="0" y1="0" x2="0.7" y2="1">
-          <stop offset="0%" stopColor={unlocked ? c1 : '#1a1a1a'} />
-          <stop offset="50%" stopColor={unlocked ? c2 : '#2a2a2a'} />
-          <stop offset="100%" stopColor={unlocked ? c3 : '#111'} />
-        </linearGradient>
-        <clipPath id={`${uid}-clip`}>
-          <path d={MEDAL_PATHS[shape]} />
-        </clipPath>
-        <filter id={`${uid}-neon`}>
-          <feGaussianBlur in="SourceGraphic" stdDeviation={unlocked ? 5 : 2} />
-        </filter>
-      </defs>
-
-      {/* Neon glow outline — always present, brighter when unlocked */}
-      <path d={MEDAL_PATHS[shape]} fill="none"
-        stroke={neon.color} strokeWidth={unlocked ? 3.5 : 1.5}
-        opacity={unlocked ? 0.5 : 0.12}
-        filter={`url(#${uid}-neon)`} />
-
-      {/* Second glow pass for unlocked — wider diffuse */}
-      {unlocked && (
-        <path d={MEDAL_PATHS[shape]} fill="none"
-          stroke={neon.color} strokeWidth={6}
-          opacity={0.15}
-          filter={`url(#${uid}-neon)`} />
-      )}
-
-      {/* Medal body */}
-      <path d={MEDAL_PATHS[shape]} fill={`url(#${uid}-fill)`}
-        stroke={unlocked ? neon.color : '#333'} strokeWidth={1.2}
-        strokeLinejoin="round" opacity={unlocked ? 1 : 0.5} />
-
-      {/* Inner edge highlight */}
-      {unlocked && (
-        <path d={MEDAL_PATHS[shape]} fill="none"
-          stroke="rgba(255,255,255,0.1)" strokeWidth={0.5}
-          transform="translate(2,2) scale(0.96)" />
-      )}
-
-      {/* Branch motif, clipped to medal */}
-      <g clipPath={`url(#${uid}-clip)`}>
-        <path d={motif}
-          transform="translate(26,28) scale(2)"
-          fill="none"
-          stroke={unlocked ? `${neon.color}55` : 'rgba(255,255,255,0.03)'}
-          strokeWidth={unlocked ? 0.7 : 0.5}
-          strokeLinecap="round" strokeLinejoin="round" />
-      </g>
-
-      {/* Lock overlay */}
-      {!unlocked && (
-        <g transform="translate(35,35)" opacity={0.25}>
-          <rect x="4" y="14" width="22" height="17" rx="3" fill="none" stroke="#888" strokeWidth="1.5" />
-          <path d="M9 14 V9 A6 6 0 0 1 21 9 V14" fill="none" stroke="#888" strokeWidth="1.5" />
-          <circle cx="15" cy="22.5" r="2" fill="#888" />
-        </g>
-      )}
-    </svg>
-  );
-});
 
 // Shield: almost background, just visible. Lock: neon purple, centered.
 const SHIELD_FILL = 'rgba(255,255,255,0.06)'; // subtle on dark cards; use class for light if needed

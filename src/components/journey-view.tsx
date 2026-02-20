@@ -485,7 +485,6 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
 
   // Total stats
   const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
-  const completedCount = entries.filter((e) => e.status === 'Completed').length;
 
   // Prepare Gantt data (only when OCD view is active)
   const ganttData = useMemo(() => {

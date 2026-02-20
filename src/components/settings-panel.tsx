@@ -5,8 +5,9 @@
 
 import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Merge, Replace } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { AnimateIcon } from '@/components/ui/animate-icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
@@ -345,7 +346,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
             <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-lg flex items-center justify-center">
-                  <Settings className="h-5 w-5 text-white" />
+                  <AnimateIcon hover="spin"><Settings className="h-5 w-5 text-white" /></AnimateIcon>
                 </div>
                 <div>
                   <h2 className="text-lg font-semibold text-white">Settings</h2>
@@ -358,7 +359,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                 onClick={onClose}
                 className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
               >
-                <X className="h-4 w-4 pointer-events-none" />
+                <AnimateIcon hover="shrink"><X className="h-4 w-4 pointer-events-none" /></AnimateIcon>
               </Button>
             </div>
 
@@ -367,7 +368,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
               {/* Application Section */}
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
-                  <Power className="h-4 w-4 text-emerald-400" />
+                  <AnimateIcon hover="pulse"><Power className="h-4 w-4 text-emerald-400" /></AnimateIcon>
                   <h3 className="text-sm font-semibold text-white">Application</h3>
                 </div>
                 
@@ -401,7 +402,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
               {/* Ollama Settings Section (Main / Default AI Provider) */}
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
-                  <Bot className="h-4 w-4 text-purple-400" />
+                  <AnimateIcon hover="pulse"><Bot className="h-4 w-4 text-purple-400" /></AnimateIcon>
                   <h3 className="text-sm font-semibold text-white">AI Assistant (Ollama)</h3>
                   {!useGeminiInstead && (
                     <span className="text-xs text-purple-400 bg-purple-500/20 px-2 py-0.5 rounded">Default</span>
@@ -594,7 +595,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                             disabled={isLoading}
                             className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10"
                           >
-                            <Trash2 className="h-3 w-3 mr-1" />
+                            <AnimateIcon hover="lift" className="mr-1"><Trash2 className="h-3 w-3" /></AnimateIcon>
                             Remove
                           </Button>
                         )}
@@ -642,7 +643,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       {exportStatus === 'loading' ? (
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                       ) : (
-                        <Download className="h-4 w-4 mr-2" />
+                        <AnimateIcon hover="float" className="mr-2"><Download className="h-4 w-4" /></AnimateIcon>
                       )}
                       Export Library
                     </Button>
@@ -657,7 +658,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       {importStatus === 'loading' ? (
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                       ) : (
-                        <Upload className="h-4 w-4 mr-2" />
+                        <AnimateIcon hover="float-up" className="mr-2"><Upload className="h-4 w-4" /></AnimateIcon>
                       )}
                       Import Library
                     </Button>
@@ -698,7 +699,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
               {/* Year Wrapped / Year in Review */}
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
-                  <Sparkles className="h-4 w-4 text-amber-400" />
+                  <AnimateIcon hover="sparkle"><Sparkles className="h-4 w-4 text-amber-400" /></AnimateIcon>
                   <h3 className="text-sm font-semibold text-white">Year in Review</h3>
                 </div>
                 <div className="bg-gradient-to-r from-fuchsia-500/10 via-purple-500/10 to-indigo-500/10 border border-fuchsia-500/20 rounded-lg p-4 space-y-3">
@@ -714,7 +715,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                     onClick={() => setShowWrapped(true)}
                     className="w-full h-10 bg-gradient-to-r from-fuchsia-600/20 to-purple-600/20 hover:from-fuchsia-600/30 hover:to-purple-600/30 border border-fuchsia-500/20 text-fuchsia-300 font-semibold gap-2"
                   >
-                    <Sparkles className="h-4 w-4" />
+                    <AnimateIcon hover="sparkle"><Sparkles className="h-4 w-4" /></AnimateIcon>
                     Launch Ark Wrapped
                   </Button>
                 </div>

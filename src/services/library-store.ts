@@ -217,6 +217,7 @@ class LibraryStore {
     const updatedStatus = input.status ?? existing.status;
     const isNowPlaying = updatedStatus === 'Playing' || updatedStatus === 'Playing Now';
     const isCompleted = updatedStatus === 'Completed';
+    const isWantToPlay = updatedStatus === 'Want to Play';
 
     const updated: LibraryGameEntry = {
       ...existing,
@@ -251,7 +252,6 @@ class LibraryStore {
         addedAt: addedAtIso,
       });
     } else if (statusChanged && isCompleted && !hasJourney) {
-      // Completed games also appear in Your Ark / Logs (with firstPlayedAt so they show)
       const meta = existing.cachedMeta;
       journeyStore.record({
         gameId,
@@ -265,6 +265,20 @@ class LibraryStore {
         rating: updated.rating,
         firstPlayedAt: updated.lastPlayedAt ?? addedAtIso ?? nowIso,
         lastPlayedAt: updated.lastPlayedAt ?? nowIso,
+        addedAt: addedAtIso,
+      });
+    } else if (statusChanged && isWantToPlay && !hasJourney) {
+      const meta = existing.cachedMeta;
+      journeyStore.record({
+        gameId,
+        title: meta?.title ?? 'Unknown',
+        coverUrl: meta?.coverUrl,
+        genre: meta?.genre ?? [],
+        platform: meta?.platform ?? [],
+        releaseDate: meta?.releaseDate,
+        status: updated.status,
+        hoursPlayed: updated.hoursPlayed,
+        rating: updated.rating,
         addedAt: addedAtIso,
       });
     } else {
@@ -466,18 +480,6 @@ class LibraryStore {
     }
   }
 
-  // Compare two entries for equality (excluding timestamps)
-  private areEntriesEqual(a: LibraryGameEntry, b: LibraryGameEntry): boolean {
-    return (
-      a.status === b.status &&
-      a.priority === b.priority &&
-      a.publicReviews === b.publicReviews &&
-      a.recommendationSource === b.recommendationSource &&
-      a.hoursPlayed === b.hoursPlayed &&
-      a.rating === b.rating &&
-      a.executablePath === b.executablePath
-    );
-  }
 
   // Import library data — wipes all existing data and replaces with the import
   importDataWithDelta(jsonData: string): { 

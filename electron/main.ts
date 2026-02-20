@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { config as loadEnv } from 'dotenv';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { app, BrowserWindow, shell, session, Tray, Menu, nativeImage } = electron;
@@ -14,6 +15,12 @@ import fetch from 'cross-fetch';
 
 // ESM has no __dirname; required for loadFile/preload paths when run as module
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Load .env — project root in dev, installation directory when packaged
+const envPath = app.isPackaged
+  ? path.join(path.dirname(process.execPath), '.env')
+  : path.resolve(__dirname, '..', '..', '.env');
+loadEnv({ path: envPath });
 
 // Set Node.js process title — visible in system monitors and some task managers
 process.title = 'Ark';
@@ -71,6 +78,7 @@ import { steamAPI } from './steam-api.js';
 import { epicAPI } from './epic-api.js';
 import { chatStore } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
+import { trackAppLaunch } from './analytics.js';
 import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
 import { startSessionTracker, stopSessionTracker } from './session-tracker.js';
 import { logger } from './safe-logger.js';
@@ -331,6 +339,7 @@ app.whenReady().then(async () => {
   // Show window as early as possible — don't block on ad blocker
   try {
     createWindow();
+    trackAppLaunch();
   } catch (err) {
     logStartupError(err);
     app.quit();

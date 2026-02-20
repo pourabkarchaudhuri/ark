@@ -78,6 +78,40 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
   });
 
   /**
+   * Save a base64-encoded image (from canvas.toDataURL) to disk via native save dialog
+   */
+  ipcMain.handle('dialog:saveImage', async (_event: any, options: {
+    dataUrl: string;
+    defaultName?: string;
+  }) => {
+    try {
+      const { app } = electron;
+      const downloadsDir = app.getPath('downloads');
+      const defaultName = options.defaultName || `ark-screenshot-${Date.now()}.png`;
+
+      const result = await dialog.showSaveDialog(getMainWindow()!, {
+        defaultPath: path.join(downloadsDir, defaultName),
+        filters: [
+          { name: 'PNG Image', extensions: ['png'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true };
+      }
+
+      const base64 = options.dataUrl.replace(/^data:image\/\w+;base64,/, '');
+      const buffer = Buffer.from(base64, 'base64');
+      fs.writeFileSync(result.filePath, buffer);
+      return { success: true, filePath: result.filePath };
+    } catch (error) {
+      logger.error('[Dialog] Error saving image:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  /**
    * Show open file dialog to select a game executable (returns path only, no content)
    */
   ipcMain.handle('dialog:selectExecutable', async () => {

@@ -33,10 +33,16 @@ interface FileDialogSelectExecutableResult {
   error?: string;
 }
 
+interface FileDialogSaveImageOptions {
+  dataUrl: string;
+  defaultName?: string;
+}
+
 interface FileDialogAPI {
   saveFile: (options: FileDialogSaveOptions) => Promise<FileDialogSaveResult>;
   openFile: (options?: FileDialogOpenOptions) => Promise<FileDialogOpenResult>;
   selectExecutable: () => Promise<FileDialogSelectExecutableResult>;
+  saveImage: (options: FileDialogSaveImageOptions) => Promise<FileDialogSaveResult>;
 }
 
 // Electron API types (exposed via Electron preload)
@@ -98,6 +104,11 @@ interface WebviewAPI {
   onNavState: (callback: (state: { canGoBack: boolean; canGoForward: boolean }) => void) => () => void;
 }
 
+interface AnalyticsAPI {
+  trackEvent: (name: string, params?: Record<string, string | number | boolean>) => Promise<boolean>;
+  trackPageView: (page: string) => Promise<boolean>;
+}
+
 declare global {
   // Build-time constant injected by Vite from package.json (see vite.config.ts `define`)
   const __APP_VERSION__: string;
@@ -108,6 +119,7 @@ declare global {
     sessionTracker?: SessionTrackerAPI;
     newsApi?: NewsAPI;
     webviewApi?: WebviewAPI;
+    analytics?: AnalyticsAPI;
   }
 }
 

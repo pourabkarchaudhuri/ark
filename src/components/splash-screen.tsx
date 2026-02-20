@@ -11,16 +11,27 @@ import {
   prefetchBrowseData,
   isPrefetchReady,
 } from '@/services/prefetch-store';
-import { fetchAllNews } from '@/services/news-service';
 import { embeddingService } from '@/services/embedding-service';
+import { catalogStore } from '@/services/catalog-store';
+import { recoStore } from '@/services/reco-store';
+import { annIndex } from '@/services/ann-index';
+import { scheduleBackgroundPrecompute } from '@/services/galaxy-cache';
 import { ensureArkBackfill } from '@/hooks/useGameStore';
+import {
+  systemStatus,
+  reportPrefetchStart,
+  reportPrefetchStep,
+  reportPrefetchDone,
+  reportPrefetchError,
+} from '@/services/system-status';
+import { SplashStatusPanel } from '@/components/system-status-panel';
 
 // Preload the Dashboard chunk so it's already in memory when the user clicks
 // "Enter Ark". Without this the browser has to fetch + parse the JS bundle
 // on transition, adding a visible delay.
-const _dashboardPreload = import('@/pages/dashboard');
+void import('@/pages/dashboard');
 // Preload Voyage (Journey) view so it opens instantly when user switches to it.
-const _journeyPreload = import('@/components/journey-view');
+void import('@/components/journey-view');
 import { MathUtils } from 'three';
 import type { Group, AmbientLight, SpotLight } from 'three';
 
@@ -453,16 +464,31 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
   useEffect(() => {
     let cancelled = false;
 
+    systemStatus.init();
+    annIndex.load();
+    scheduleBackgroundPrecompute();
+
     // Prewarm Voyage: backfill journey store so Your Ark / Logs are ready when user opens Voyage.
-    ensureArkBackfill();
+    // Deferred to avoid blocking the splash animation.
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => ensureArkBackfill());
+    } else {
+      setTimeout(() => ensureArkBackfill(), 100);
+    }
 
     // If data is already loaded (e.g. HMR re-mount), nothing to do.
     if (isPrefetchReady()) {
       setDataReady(true);
+      recoStore.compute();
       return;
     }
 
-    const markReady = () => { if (!cancelled) setDataReady(true); };
+    const markReady = () => {
+      if (!cancelled) {
+        setDataReady(true);
+        recoStore.compute();
+      }
+    };
 
     getCachedBrowseData()
       .then(cached => {
@@ -475,46 +501,55 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
           // (the dashboard will swap in the fresh data when it arrives).
           if (!cached.isFresh) {
             console.log('[Splash] Cache stale — starting background refresh...');
-            prefetchBrowseData().then(games => {
+            reportPrefetchStart();
+            prefetchBrowseData(({ step, current, total, sourceGameCount }) => reportPrefetchStep(step, current, total, sourceGameCount)).then(games => {
               console.log(`[Splash] Background refresh done — ${games.length} games`);
-            }).catch((err) => { console.warn('[Splash] Background refresh:', err); });
+              reportPrefetchDone(games.length);
+            }).catch((err) => { console.warn('[Splash] Background refresh:', err); reportPrefetchError(String(err)); });
+          } else {
+            reportPrefetchDone(cached.games.length);
           }
         } else {
-          // Cache miss (first launch) — do a full fetch.
           console.log('[Splash] Cache miss — starting background prefetch...');
-          prefetchBrowseData().then(games => {
+          reportPrefetchStart();
+          prefetchBrowseData(({ step, current, total, sourceGameCount }) => reportPrefetchStep(step, current, total, sourceGameCount)).then(games => {
             console.log(`[Splash] Background prefetch done — ${games.length} games`);
+            reportPrefetchDone(games.length);
             markReady();
           }).catch(err => {
             console.warn('[Splash] Background prefetch failed:', err);
-            // Let the user in even if prefetch failed — the dashboard has
-            // its own fallback fetch logic.
+            reportPrefetchError(String(err));
             markReady();
           });
         }
       })
       .catch((err) => {
         console.warn('[Splash] Cache load:', err);
-        prefetchBrowseData()
-          .then(() => markReady())
-          .catch(() => markReady()); // fail-open: don't strand the user on splash
+        reportPrefetchStart();
+        prefetchBrowseData(({ step, current, total, sourceGameCount }) => reportPrefetchStep(step, current, total, sourceGameCount))
+          .then((games) => { reportPrefetchDone(games.length); markReady(); })
+          .catch(() => { reportPrefetchError('Failed'); markReady(); });
       });
-
-    // News is non-critical — fire-and-forget.
-    fetchAllNews().then(items => {
-      console.log(`[Splash] News preloaded — ${items.length} articles cached`);
-    }).catch((err) => { console.warn('[Splash] News fetch:', err); });
 
     // Ollama setup is non-critical — fire-and-forget.
     // Loads cached embeddings (instant) and checks if Ollama is available
     // for future embedding generation. Never blocks boot.
     embeddingService.loadCachedEmbeddings().then(count => {
       if (count > 0) console.log(`[Splash] Loaded ${count} cached embeddings`);
-      // Check availability in background (won't pull models here — just detect)
       return embeddingService.isAvailable();
     }).then(available => {
       console.log(`[Splash] Embedding engine: ${available ? 'Ollama detected' : 'running without embeddings'}`);
     }).catch((err) => { console.warn('[Splash] Embedding check:', err); });
+
+    // Steam catalog sync — download full game metadata in background.
+    // Non-blocking, skips if data is fresh (< 24h). Runs via IPC to main
+    // process so it's immune to renderer CORS restrictions.
+    catalogStore.sync().then(() => {
+      const p = catalogStore.syncProgress;
+      if (p.gamesStored > 0) {
+        console.log(`[Splash] Catalog ready: ${p.gamesStored.toLocaleString()} games`);
+      }
+    }).catch((err) => { console.warn('[Splash] Catalog sync:', err); });
 
     // Safety timeout: don't strand the user on the splash screen forever.
     // If data still hasn't arrived after 30s, let them in anyway.
@@ -647,6 +682,11 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
               <WindowControls />
             </div>
           </motion.div>
+
+          {/* ---- Bottom-right: status panel ---- */}
+          <div className="absolute bottom-4 right-4 z-20 pointer-events-none">
+            <SplashStatusPanel />
+          </div>
 
           {/* ---- Left-side black fade behind text area ---- */}
           <div

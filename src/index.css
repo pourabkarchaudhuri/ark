@@ -35,6 +35,12 @@
   
   --font-sans: 'JetBrains Mono', monospace;
   --font-display: 'Orbitron', sans-serif;
+
+  --chart-1: 280 100% 60%;
+  --chart-2: 180 100% 50%;
+  --chart-3: 330 100% 65%;
+  --chart-4: 142 70% 45%;
+  --chart-5: 30 80% 55%;
 }
 
 .dark {
@@ -59,6 +65,12 @@
   --neon-magenta: 280 100% 60%;
   --neon-cyan: 180 100% 50%;
   --neon-pink: 330 100% 65%;
+
+  --chart-1: 280 100% 60%;
+  --chart-2: 180 100% 50%;
+  --chart-3: 330 100% 65%;
+  --chart-4: 142 70% 45%;
+  --chart-5: 30 80% 55%;
 }
 
 @layer base {
@@ -129,13 +141,13 @@
     -webkit-app-region: no-drag;
   }
 
-  /* Gantt chart — live session pulse on right edge of "Playing Now" bars */
-  @keyframes gantt-pulse {
-    0%, 100% { opacity: 0.4; box-shadow: 0 0 4px hsl(160 80% 50% / 0.3); }
-    50% { opacity: 1; box-shadow: 0 0 12px hsl(160 80% 50% / 0.6); }
+  /* Skeleton shimmer — GPU-composited so it doesn't block the JS thread */
+  @keyframes skeleton-shimmer {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(200%); }
   }
-  .gantt-live-pulse {
-    animation: gantt-pulse 2s ease-in-out infinite;
+  .skeleton-shimmer {
+    animation: skeleton-shimmer 1.4s linear infinite;
   }
 
   /* Data source / database flow — moving lights along paths */
@@ -164,4 +176,27 @@
     100% { offset-distance: 100%; }
   }
 }
+
+/* Embedding Space control hint animations — scoped to .embedding-space-view */
+@keyframes hint-orbit {
+  0%, 100% { transform: rotate(-20deg); }
+  50%      { transform: rotate(20deg); }
+}
+@keyframes hint-pan {
+  0%, 100% { transform: translateX(-3px); }
+  50%      { transform: translateX(3px); }
+}
+@keyframes hint-zoom {
+  0%, 100% { transform: scale(0.8); }
+  50%      { transform: scale(1.2); }
+}
+@keyframes hint-tap {
+  0%, 80%  { transform: scale(1); opacity: 0.35; }
+  90%      { transform: scale(0.75); opacity: 0.7; }
+  100%     { transform: scale(1); opacity: 0.35; }
+}
+.embedding-space-view .hint-orbit  { animation: hint-orbit 2.4s ease-in-out infinite; }
+.embedding-space-view .hint-pan    { animation: hint-pan 2s ease-in-out infinite; }
+.embedding-space-view .hint-zoom   { animation: hint-zoom 2.2s ease-in-out infinite; }
+.embedding-space-view .hint-tap    { animation: hint-tap 2.6s ease-in-out infinite; }
 

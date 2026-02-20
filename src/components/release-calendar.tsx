@@ -42,6 +42,7 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { AnimateIcon } from '@/components/ui/animate-icon';
 import { useLocation } from 'wouter';
 import { FaSteam } from 'react-icons/fa';
 import { SiEpicgames } from 'react-icons/si';
@@ -194,6 +195,7 @@ interface FeedGroup {
   label: string;
   sublabel?: string;
   isCurrentPeriod: boolean;
+  isPast?: boolean;
   releases: ParsedRelease[];
 }
 
@@ -339,6 +341,10 @@ function releaseToGame(release: ParsedRelease, inLibrary: boolean): Game {
   if (release._stores.has('steam')) availableOn.push('steam');
   if (release._stores.has('epic')) availableOn.push('epic');
 
+  const displayDate = release.parsedDate && isToday(release.parsedDate)
+    ? 'Today'
+    : release.releaseDate;
+
   return {
     id: releaseToGameId(release),
     title: release.name,
@@ -347,7 +353,7 @@ function releaseToGame(release: ParsedRelease, inLibrary: boolean): Game {
     genre: release.genres,
     platform: platformArr,
     metacriticScore: null,
-    releaseDate: release.releaseDate,
+    releaseDate: displayDate,
     coverUrl: release.image || undefined,
     headerImage: release.headerImage || undefined,
     screenshots: release.screenshots,
@@ -396,7 +402,7 @@ const FilterChips = memo(function FilterChips({
   setStoreFilter: (v: StoreFilter) => void;
   genreFilter: string | null;
   setGenreFilter: (v: string | null) => void;
-  topGenres: string[];
+  topGenres: readonly string[];
   radarActive: boolean;
   setRadarActive: (v: boolean) => void;
 }) {
@@ -419,7 +425,7 @@ const FilterChips = memo(function FilterChips({
             title="Reset all filters"
             aria-label="Reset all filters"
           >
-            <RotateCcw className="w-3 h-3" />
+            <AnimateIcon hover="spin"><RotateCcw className="w-3 h-3" /></AnimateIcon>
             Reset
           </button>
           <div className="w-px h-4 bg-white/10" />
@@ -554,7 +560,7 @@ const GroupedFeed = memo(function GroupedFeed({
   }
 
           return (
-    <div className="overflow-y-auto h-full pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10">
+    <div data-calendar-feed className="overflow-y-auto h-full pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10">
       {groups.map((group) => {
         const isExpanded = expandedGroups.has(group.key);
         const hasMore = group.releases.length > INITIAL_CARD_COUNT;
@@ -604,9 +610,11 @@ const GroupedFeed = memo(function GroupedFeed({
 
             {/* Card grid — reuses the same GameCard as browse/library for visual consistency */}
             {group.releases.length === 0 ? (
-              <div className="py-6 text-center">
-                <p className="text-[11px] text-white/15">No releases</p>
-              </div>
+              group.isPast ? null : (
+                <div className="py-6 text-center">
+                  <p className="text-[11px] text-white/15">No releases</p>
+                </div>
+              )
             ) : (
               <div style={{ contentVisibility: 'auto', containIntrinsicBlockSize: '400px' }}>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 mt-2">
@@ -696,6 +704,7 @@ const YearFeed = memo(function YearFeed({
       key: `month-${i}`,
       label: MONTH_NAMES[i],
       isCurrentPeriod: year === nowYear && i === nowMonth,
+      isPast: year < nowYear || (year === nowYear && i < nowMonth),
       releases: games,
     }));
   }, [releases, year]);
@@ -765,6 +774,7 @@ const MonthFeed = memo(function MonthFeed({
         label: `Week ${i + 1}`,
         sublabel: `${fmt(w.start)} – ${fmt(w.end)}`,
         isCurrentPeriod: today >= wStart && today <= wEnd,
+        isPast: today > wEnd,
         releases: w.releases,
       };
     });
@@ -811,11 +821,13 @@ const WeekFeed = memo(function WeekFeed({
     }
     return days.map((day, i) => {
       const d = day.date;
+      const isPast = (() => { const t = new Date(); t.setHours(0, 0, 0, 0); return d < t; })();
       return {
         key: `day-${i}`,
         label: DAY_NAMES_FULL[d.getDay()],
         sublabel: `${d.getDate()}${ordinalSuffix(d.getDate())} ${MONTH_NAMES_SHORT[d.getMonth()]}`,
         isCurrentPeriod: isToday(d),
+        isPast,
         releases: day.releases,
       };
     });
@@ -1073,13 +1085,23 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isInitialLoading = loading && releases.length === 0;
 
-  const [calView, setCalView] = useState<CalendarView>('year');
+  const [calView, setCalView] = useState<CalendarView>(() => {
+    const saved = sessionStorage.getItem('ark-calendar-view');
+    if (saved && ['year', 'month', 'week'].includes(saved)) return saved as CalendarView;
+    return 'year';
+  });
   const [radarActive, setRadarActive] = useState(false);
   const [platformFilter, setPlatformFilter] = useState('all');
   const [storeFilter, setStoreFilter] = useState<StoreFilter>('all');
   const [genreFilter, setGenreFilter] = useState<string | null>(null);
   const [weekOffset, setWeekOffset] = useState(0);
+
+  // Persist calendar navigation state for scroll restore after back-navigation
+  useEffect(() => {
+    sessionStorage.setItem('ark-calendar-view', calView);
+  }, [calView]);
 
   const [libraryIds, setLibraryIds] = useState(() => buildLibraryIdSet());
   useEffect(() => {
@@ -1097,6 +1119,39 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     [navigate],
   );
 
+  // Continuously persist feed scroll position so it survives navigation to game details
+  useEffect(() => {
+    if (isInitialLoading) return;
+    let saveTimer: ReturnType<typeof setTimeout>;
+    const onScroll = () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        const feed = document.querySelector('[data-calendar-feed]');
+        if (feed) {
+          sessionStorage.setItem('ark-calendar-scroll', String(Math.round(feed.scrollTop)));
+        }
+      }, 150);
+    };
+    const flushSave = () => {
+      const feed = document.querySelector('[data-calendar-feed]');
+      if (feed) {
+        sessionStorage.setItem('ark-calendar-scroll', String(Math.round(feed.scrollTop)));
+      }
+    };
+    // Defer attachment so the feed DOM is available after the render
+    const raf = requestAnimationFrame(() => {
+      const feed = document.querySelector('[data-calendar-feed]');
+      if (feed) feed.addEventListener('scroll', onScroll, { passive: true });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(saveTimer);
+      flushSave();
+      const feed = document.querySelector('[data-calendar-feed]');
+      if (feed) feed.removeEventListener('scroll', onScroll);
+    };
+  }, [isInitialLoading, calView]);
+
   const handleAddToLibrary = useCallback((game: ParsedRelease) => {
     const gameId = releaseToGameId(game);
     if (libraryStore.isInLibrary(gameId)) return;
@@ -1113,10 +1168,16 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     toastRef.current.success(`"${game.name}" added to your library!`);
   }, []);
 
-  const topGenres = useMemo(() => getCanonicalGenres(), []);
+  const topGenres = useMemo(() => [...getCanonicalGenres()] as string[], []);
 
   const filteredReleases = useMemo(() => {
-    let result = releases;
+    const now = new Date();
+    const tY = now.getFullYear(), tM = now.getMonth(), tD = now.getDate();
+    let result = releases.filter((r) => {
+      if (!r.parsedDate) return true;
+      const y = r.parsedDate.getFullYear(), m = r.parsedDate.getMonth(), d = r.parsedDate.getDate();
+      return y > tY || (y === tY && (m > tM || (m === tM && d >= tD)));
+    });
     if (storeFilter === 'steam') {
       result = result.filter((r) => r._stores.has('steam'));
     } else if (storeFilter === 'epic') {
@@ -1128,7 +1189,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       result = result.filter((r) => r.platforms[platformFilter as keyof typeof r.platforms]);
     }
     if (genreFilter) {
-      result = result.filter((r) => toCanonicalGenres(r.genres).includes(genreFilter));
+      result = result.filter((r) => (toCanonicalGenres(r.genres) as string[]).includes(genreFilter));
     }
     if (radarActive) {
       result = result.filter((r) => isReleaseInLibrary(r.id, libraryIds));
@@ -1348,7 +1409,31 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     return `${MONTH_NAMES[currentMonth]} ${currentYear}`;
   }, [calView, currentYear, currentMonth, weekLabel]);
 
-  const isInitialLoading = loading && releases.length === 0;
+  // Restore feed scroll position after returning from game details
+  useEffect(() => {
+    if (isInitialLoading) return;
+    const saved = sessionStorage.getItem('ark-calendar-scroll');
+    if (!saved) return;
+    sessionStorage.removeItem('ark-calendar-scroll');
+    const pos = parseInt(saved, 10);
+    if (isNaN(pos) || pos <= 0) return;
+    // Wait for the feed DOM to render, then restore scroll
+    let attempts = 0;
+    const tryRestore = () => {
+      const feed = document.querySelector('[data-calendar-feed]');
+      if (feed) {
+        feed.scrollTop = pos;
+        if (Math.abs(feed.scrollTop - pos) > 10 && attempts < 10) {
+          attempts++;
+          requestAnimationFrame(tryRestore);
+        }
+      } else if (attempts < 10) {
+        attempts++;
+        requestAnimationFrame(tryRestore);
+      }
+    };
+    requestAnimationFrame(tryRestore);
+  }, [isInitialLoading]);
 
   useEffect(() => {
     const measure = () => {

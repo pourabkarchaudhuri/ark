@@ -39,7 +39,7 @@ function getIdbWorker(): Worker {
 // During development, Vite HMR re-executes this module on every save, which
 // would wipe the in-memory game cache and break the browse grid.  We stash
 // the state on globalThis so it survives module re-initialization.
-interface SearchIndexEntry {
+export interface SearchIndexEntry {
   titleLower: string;
   /** Title stripped of all non-alphanumeric characters for fuzzy/token matching */
   titleNorm: string;
@@ -282,6 +282,8 @@ export interface PrefetchProgress {
   step: string;
   current: number;
   total: number;
+  /** Number of games this particular source returned (only on "Fetched …" steps) */
+  sourceGameCount?: number;
 }
 
 export type ProgressCallback = (progress: PrefetchProgress) => void;
@@ -390,8 +392,8 @@ const TOTAL_STEPS = 7;
 async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
   let completed = 0;
 
-  const report = (step: string) => {
-    onProgress?.({ step, current: completed, total: TOTAL_STEPS });
+  const report = (step: string, sourceGameCount?: number) => {
+    onProgress?.({ step, current: completed, total: TOTAL_STEPS, sourceGameCount });
   };
 
   report('Connecting to game stores...');
@@ -403,7 +405,6 @@ async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
     timeoutMs?: number,
   ): Promise<T> => {
     let p = promise;
-    // Optional timeout: resolve with empty array rather than block forever
     if (timeoutMs) {
       p = Promise.race([
         promise,
@@ -418,13 +419,14 @@ async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
     return p
       .then((result) => {
         completed++;
-        report(`Fetched ${name}`);
+        const count = Array.isArray(result) ? result.length : 0;
+        report(`Fetched ${name}`, count);
         return result;
       })
       .catch((err) => {
         completed++;
         console.warn(`[PrefetchStore] ${name} failed:`, err);
-        report(`${name} unavailable`);
+        report(`${name} unavailable`, 0);
         return [] as unknown as T;
       });
   };
