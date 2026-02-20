@@ -241,6 +241,10 @@ declare global {
       getNewsForApp: (appId: number, count?: number) => Promise<SteamNewsItem[]>;
       // Full app list for Catalog browsing
       getAppList: () => Promise<SteamAppListItem[]>;
+      // Tag list (tagid → name)
+      getTagList: () => Promise<Array<{ tagid: number; name: string }>>;
+      // Fetch catalog metadata batch (runs main-process to bypass CORS)
+      fetchCatalogBatch: (appIds: number[]) => Promise<any[]>;
       // Player counts
       getPlayerCount: (appId: number) => Promise<number>;
       getMultiplePlayerCounts: (appIds: number[]) => Promise<Record<number, number>>;

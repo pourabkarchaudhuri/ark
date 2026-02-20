@@ -32,6 +32,7 @@ import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { AnimateIcon } from '@/components/ui/animate-icon';
 import type { 
   ChatMessage, 
   GameContext, 
@@ -79,7 +80,7 @@ function CopyButton({ text }: { text: string }) {
       className="p-1 rounded hover:bg-white/10 text-white/40 hover:text-white/60 transition-colors"
       title="Copy"
     >
-      {copied ? <Check className="h-3 w-3 text-green-400" /> : <Copy className="h-3 w-3" />}
+      {copied ? <Check className="h-3 w-3 text-green-400" /> : <AnimateIcon tap="pop"><Copy className="h-3 w-3" /></AnimateIcon>}
     </button>
   );
 }
@@ -829,7 +830,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
             <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-fuchsia-500 to-purple-600 flex items-center justify-center">
-                  <Bot className="h-4 w-4 text-white" />
+                  <AnimateIcon hover="pulse"><Bot className="h-4 w-4 text-white" /></AnimateIcon>
                 </div>
                 <h2 className="text-sm font-medium text-zinc-200">AI Assistant</h2>
               </div>
@@ -841,7 +842,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
                   title="New conversation"
                 >
-                  <Plus className="h-4 w-4 pointer-events-none" />
+                  <AnimateIcon hover="pulse"><Plus className="h-4 w-4 pointer-events-none" /></AnimateIcon>
                 </Button>
                 <Button
                   variant="ghost"
@@ -850,7 +851,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
                   title="Clear history"
                 >
-                  <Trash2 className="h-4 w-4 pointer-events-none" />
+                  <AnimateIcon hover="lift"><Trash2 className="h-4 w-4 pointer-events-none" /></AnimateIcon>
                 </Button>
                 <Button
                   variant="ghost"
@@ -858,7 +859,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   onClick={onClose}
                   className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
                 >
-                  <X className="h-4 w-4 pointer-events-none" />
+                  <AnimateIcon hover="shrink"><X className="h-4 w-4 pointer-events-none" /></AnimateIcon>
                 </Button>
               </div>
             </div>
@@ -960,7 +961,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   {isLoading ? (
                     <Loader2 className="h-4 w-4 animate-spin pointer-events-none" />
                   ) : (
-                    <Send className="h-4 w-4 pointer-events-none" />
+                    <AnimateIcon tap="send"><Send className="h-4 w-4 pointer-events-none" /></AnimateIcon>
                   )}
                 </Button>
               </div>

@@ -40,12 +40,15 @@ import {
   X,
   Check,
   Loader2,
+  Globe,
 } from 'lucide-react';
 import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
+import { AnimateIcon } from '@/components/ui/animate-icon';
 import { recoStore } from '@/services/reco-store';
 import { shelfBanditStore } from '@/services/shelf-bandit-store';
 import { recoHistoryStore } from '@/services/reco-history-store';
 import { embeddingService } from '@/services/embedding-service';
+import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
 import { GameCard } from '@/components/game-card';
@@ -53,6 +56,32 @@ import { Badge } from '@/components/ui/badge';
 import type { Game } from '@/types/game';
 import type { RecoShelf, ScoredGame, TasteProfile, ShelfType } from '@/types/reco';
 import { getCanonicalGenres } from '@/data/canonical-genres';
+
+// ─── Background catalog embedding pipeline (persists across navigation) ──────
+
+let _pipelineStarted = false;
+
+function startCatalogEmbeddingPipeline() {
+  if (_pipelineStarted) return;
+  _pipelineStarted = true;
+
+  (async () => {
+    try {
+      await catalogStore.sync();
+    } catch { /* non-fatal */ }
+
+    const available = await embeddingService.isAvailable();
+    if (!available) { _pipelineStarted = false; return; }
+
+    const entryCount = await catalogStore.getEntryCount();
+    if (entryCount === 0) { _pipelineStarted = false; return; }
+
+    await embeddingService.generateCatalogEmbeddings(
+      (onBatch) => catalogStore.getAllEntries(onBatch),
+    );
+    _pipelineStarted = false;
+  })();
+}
 
 // ─── Hook to subscribe to the reco store ───────────────────────────────────────
 
@@ -234,21 +263,31 @@ function OracleLoadingOverlay({
   embeddingStatus: string;
   embeddingProgress: { completed: number; total: number } | null;
 }) {
-  // Accumulate completed stages for the log
-  const [completedStages, setCompletedStages] = useState<string[]>([]);
+  // Accumulate completed stages with their associated percent for the log.
+  // Stages that only differ by a parenthetical suffix (e.g. "Scoring candidates... (1/28k)")
+  // are treated as in-place updates of the same step rather than new entries.
+  const [completedStages, setCompletedStages] = useState<{ stage: string; percent: number }[]>([]);
 
   useEffect(() => {
     if (stage) {
       setCompletedStages(prev => {
-        if (prev[prev.length - 1] === stage) return prev;
-        return [...prev, stage];
+        const last = prev[prev.length - 1];
+        const baseOf = (s: string) => s.replace(/\s*\(.*\)\s*$/, '');
+        const sameStep = last && baseOf(last.stage) === baseOf(stage);
+        if (sameStep) {
+          if (last.stage === stage && last.percent === percent) return prev;
+          const updated = [...prev];
+          updated[updated.length - 1] = { stage, percent };
+          return updated;
+        }
+        return [...prev, { stage, percent }];
       });
     }
-  }, [stage]);
+  }, [stage, percent]);
 
   // Reset on fresh compute (percent drops back to low)
   useEffect(() => {
-    if (percent <= 5) setCompletedStages(stage ? [stage] : []);
+    if (percent <= 5) setCompletedStages(stage ? [{ stage, percent }] : []);
   }, [percent <= 5]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const currentStageInfo = STAGE_DETAILS[stage] || { label: stage, detail: '' };
@@ -281,28 +320,18 @@ function OracleLoadingOverlay({
         <div className="rounded-2xl border border-white/[0.08] bg-black/70 backdrop-blur-xl shadow-2xl shadow-fuchsia-500/5 p-7">
           {/* Header row: Oracle icon + title + percent */}
           <div className="flex items-center gap-5 mb-6">
-            {/* Animated Oracle eye */}
-            <div className="relative w-14 h-14 flex-shrink-0">
+            {/* AI icon */}
+            <div className="relative w-14 h-14 flex-shrink-0 flex items-center justify-center">
               <motion.div
-                className="absolute inset-0"
-                animate={{ rotate: 360 }}
-                transition={{ duration: 3, ease: 'linear', repeat: Infinity }}
+                animate={{ scale: [1, 1.1, 1] }}
+                transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
               >
-                <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-0.5 w-2.5 h-2.5 rounded-full bg-fuchsia-400 shadow-lg shadow-fuchsia-500/50" />
+                <Sparkles className="w-7 h-7 text-fuchsia-400/70" />
               </motion.div>
-              <div className="absolute inset-1 rounded-full border border-fuchsia-500/20" />
-              <div className="absolute inset-0 flex items-center justify-center">
-                <motion.div
-                  animate={{ scale: [1, 1.1, 1] }}
-                  transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
-                >
-                  <Eye className="w-6 h-6 text-fuchsia-400/70" />
-                </motion.div>
-              </div>
             </div>
 
             <div className="flex-1 min-w-0">
-              <h3 className="text-base font-semibold text-white/80">Oracle is analyzing</h3>
+              <h3 className="text-base font-semibold text-white/80">Recommendation Engine</h3>
               <p className="text-xs text-white/25 mt-0.5">
                 17-layer pipeline
                 {libraryCount > 0 && <> · {libraryCount} games</>}
@@ -361,11 +390,10 @@ function OracleLoadingOverlay({
               className="mb-5"
             >
               <div className="flex items-center gap-2.5 mb-1">
-                <Loader2 className="w-4 h-4 text-fuchsia-400 animate-spin" />
                 <span className="text-sm font-medium text-white/70">{currentStageInfo.label}</span>
               </div>
               {currentStageInfo.detail && (
-                <p className="text-xs text-white/30 leading-relaxed pl-[26px]">
+                <p className="text-xs text-white/30 leading-relaxed">
                   {currentStageInfo.detail}
                 </p>
               )}
@@ -380,7 +408,7 @@ function OracleLoadingOverlay({
                 <div className="w-2 h-2 rounded-full bg-yellow-500/40" />
                 <div className="w-2 h-2 rounded-full bg-green-500/40" />
               </div>
-              <span className="text-[10px] text-white/15 font-mono">oracle.pipeline.v3</span>
+              <span className="text-[10px] text-white/15 font-mono">reco.engine.v3</span>
             </div>
 
             <div className="space-y-1.5 font-mono text-xs">
@@ -420,12 +448,12 @@ function OracleLoadingOverlay({
               </div>
 
               {/* Pipeline stages */}
-              {completedStages.map((s, i) => {
-                const info = STAGE_DETAILS[s];
-                const isCurrent = s === stage;
+              {completedStages.map((entry, i) => {
+                const info = STAGE_DETAILS[entry.stage];
+                const isCurrent = entry.stage === stage;
                 return (
                   <motion.div
-                    key={`${s}-${i}`}
+                    key={`${entry.stage}-${i}`}
                     initial={{ opacity: 0, x: -6 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ duration: 0.15 }}
@@ -437,10 +465,18 @@ function OracleLoadingOverlay({
                       <Check className="w-3.5 h-3.5 text-fuchsia-400/50 flex-shrink-0" />
                     )}
                     <span className={cn(
-                      'transition-colors',
+                      'transition-colors flex-1 min-w-0 truncate',
                       isCurrent ? 'text-fuchsia-300/70' : 'text-white/25',
                     )}>
-                      {info?.label || s}
+                      {entry.stage === 'Generating semantic embeddings...' && embeddingProgress && embeddingProgress.total > 0
+                        ? `Generating embeddings ${embeddingProgress.completed.toLocaleString()} / ${embeddingProgress.total.toLocaleString()}`
+                        : (info?.label || entry.stage)}
+                    </span>
+                    <span className={cn(
+                      'text-[10px] tabular-nums flex-shrink-0',
+                      isCurrent ? 'text-fuchsia-400/50' : 'text-white/15',
+                    )}>
+                      {entry.percent}%
                     </span>
                   </motion.div>
                 );
@@ -474,6 +510,9 @@ function ReasonPills({ game }: { game: ScoredGame }) {
   }
   if (game.price?.isFree) {
     pills.push('Free');
+  }
+  if (game.reasons.semanticRetrieved) {
+    pills.push('Taste Match');
   }
   if (game.reasons.isHiddenGem) {
     pills.push('Hidden Gem');
@@ -1092,13 +1131,55 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
 
   const [embeddingStatus, setEmbeddingStatus] = useState<'idle' | 'loading' | 'generating' | 'ready' | 'unavailable'>(() => {
     if (state.status === 'done') {
-      // Restore: embeddings are loaded in the singleton service across mounts
       return embeddingService.loadedCount > 0 ? 'ready' : 'unavailable';
     }
-    return 'idle';
+    // Restore from service if pipeline is mid-flight (e.g. navigated back)
+    return embeddingService.libraryStatus;
   });
-  const [embeddingProgress, setEmbeddingProgress] = useState<{ completed: number; total: number } | null>(null);
+  const [embeddingProgress, setEmbeddingProgress] = useState<{ completed: number; total: number } | null>(() => {
+    const s = embeddingService.libraryStatus;
+    if (s === 'generating' && embeddingService.libraryProgress.total > 0) {
+      return { ...embeddingService.libraryProgress };
+    }
+    return null;
+  });
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set(recoHistoryStore.getDismissedIds()));
+  const [dnaOpen, setDnaOpen] = useState(false);
+  const [catalogSync, setCatalogSync] = useState<CatalogSyncProgress>(catalogStore.syncProgress);
+  const [catalogEmbeddingProgress, setCatalogEmbeddingProgress] = useState<{ completed: number; total: number } | null>(
+    () => embeddingService.isCatalogRunning ? { ...embeddingService.catalogProgress } : null,
+  );
+  
+
+  // Subscribe to catalog sync + library/catalog embedding progress (survives unmount)
+  useEffect(() => {
+    const unsubCatalog = catalogStore.subscribe(() => setCatalogSync({ ...catalogStore.syncProgress }));
+    const unsubEmbed = embeddingService.subscribe(() => {
+      // Library embedding progress
+      const ls = embeddingService.libraryStatus;
+      setEmbeddingStatus(ls);
+      if (ls === 'generating' && embeddingService.libraryProgress.total > 0) {
+        setEmbeddingProgress({ ...embeddingService.libraryProgress });
+      } else if (ls !== 'generating') {
+        setEmbeddingProgress(null);
+      }
+
+      // Catalog embedding progress
+      if (embeddingService.isCatalogRunning) {
+        setCatalogEmbeddingProgress({ ...embeddingService.catalogProgress });
+      } else {
+        setCatalogEmbeddingProgress(null);
+      }
+    });
+    return () => { unsubCatalog(); unsubEmbed(); };
+  }, []);
+
+  // Fire-and-forget: kick off catalog sync + embedding gen once pipeline is done.
+  // The work runs in the singleton service and persists across page navigation.
+  useEffect(() => {
+    if (state.status !== 'done') return;
+    startCatalogEmbeddingPipeline();
+  }, [state.status]);
 
   // Load cached embeddings, generate missing ones via Ollama, then compute
   useEffect(() => {
@@ -1120,22 +1201,25 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
 
         if (cachedCount > 0) setEmbeddingStatus('ready');
 
-        recoStore.compute(async (games) => {
-          const available = await embeddingService.isAvailable();
-          if (!available) {
-            if (cachedCount === 0) setEmbeddingStatus('unavailable');
-            return 0;
-          }
+        recoStore.compute(
+          async (games) => {
+            const available = await embeddingService.isAvailable();
+            if (!available) {
+              if (cachedCount === 0) setEmbeddingStatus('unavailable');
+              return 0;
+            }
 
-          setEmbeddingStatus('generating');
-          setEmbeddingProgress({ completed: 0, total: 0 });
-          const generated = await embeddingService.generateMissing(games, (completed, total) => {
-            setEmbeddingProgress({ completed, total });
-          });
-          setEmbeddingProgress(null);
-          setEmbeddingStatus((generated > 0 || cachedCount > 0) ? 'ready' : 'unavailable');
-          return generated;
-        });
+            setEmbeddingStatus('generating');
+            setEmbeddingProgress({ completed: 0, total: 0 });
+            const generated = await embeddingService.generateMissing(games, (completed, total) => {
+              setEmbeddingProgress({ completed, total });
+            });
+            setEmbeddingProgress(null);
+            setEmbeddingStatus((generated > 0 || cachedCount > 0) ? 'ready' : 'unavailable');
+            return generated;
+          },
+          (candidateIds) => embeddingService.enrichWithCatalogEmbeddings(candidateIds),
+        );
       })();
     }
   }, [state.status]);
@@ -1146,8 +1230,8 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
 
   const handleRefresh = useCallback(() => {
     hasTriggered.current = false;
-    setEmbeddingStatus('idle');
-    setEmbeddingProgress(null);
+    embeddingService.resetLibraryStatus();
+    _pipelineStarted = false;
     recoStore.refresh();
   }, []);
 
@@ -1170,7 +1254,8 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
   );
 
   return (
-    <div className="h-[calc(100vh-10rem)] overflow-y-auto overflow-x-hidden scrollbar-hide">
+    <div className="relative h-[calc(100vh-10rem)] overflow-hidden">
+      <div className="h-full overflow-y-auto overflow-x-hidden scrollbar-hide">
       <AnimatePresence mode="wait" initial={!alreadyDone.current}>
         {/* Computing state — skeleton background + detailed progress overlay */}
         {state.status === 'computing' && (
@@ -1231,6 +1316,8 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                 <Eye className="w-4 h-4 text-fuchsia-400/60" />
                 <span className="text-xs text-white/30">
                   {state.shelves.reduce((s, shelf) => s + shelf.games.length, 0)} recommendations
+                  {state.candidateCount > 0 && ` from ${state.candidateCount.toLocaleString()} candidates`}
+                  {state.libraryCount > 0 && ` · ${state.libraryCount} in library`}
                   {state.computeTimeMs > 0 && ` · ${
                     state.computeTimeMs >= 60000
                       ? `${Math.floor(state.computeTimeMs / 60000)}m ${Math.round((state.computeTimeMs % 60000) / 1000)}s`
@@ -1245,19 +1332,51 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                     Semantic
                   </span>
                 )}
+                {(catalogSync.stage === 'fetching-ids' || catalogSync.stage === 'fetching-tags') && (
+                  <span className="flex items-center gap-1 text-[9px] text-cyan-400/40">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {catalogSync.stage === 'fetching-ids' ? 'Fetching Steam catalog...' : 'Resolving tags...'}
+                  </span>
+                )}
+                {catalogSync.stage === 'fetching-metadata' && catalogSync.batchesTotal > 0 && (
+                  <span className="flex items-center gap-1 text-[9px] text-cyan-400/40">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Syncing catalog {Math.round((catalogSync.batchesCompleted / catalogSync.batchesTotal) * 100)}%
+                  </span>
+                )}
+                {catalogSync.stage === 'done' && catalogEmbeddingProgress && catalogEmbeddingProgress.total > 0 && (
+                  <span className="flex items-center gap-1 text-xs text-fuchsia-400/50">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Updating Taste DNA {Math.round((catalogEmbeddingProgress.completed / catalogEmbeddingProgress.total) * 100)}%
+                  </span>
+                )}
+                {catalogSync.stage === 'done' && !catalogEmbeddingProgress && catalogSync.gamesStored > 0 && (
+                  <span className="flex items-center gap-1 text-xs text-cyan-400/50">
+                    <Globe className="w-4 h-4" />
+                    {catalogSync.gamesStored.toLocaleString()} Steam
+                  </span>
+                )}
+                {catalogSync.stage === 'error' && (
+                  <span className="flex items-center gap-1 text-[9px] text-red-400/40" title={catalogSync.error}>
+                    <X className="w-3 h-3" />
+                    Catalog sync failed
+                  </span>
+                )}
                 {dismissedIds.size > 0 && (
                   <span className="text-[9px] text-white/20">
                     {dismissedIds.size} dismissed
                   </span>
                 )}
               </div>
-              <button
-                onClick={handleRefresh}
-                className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] text-white/30 hover:text-fuchsia-400 hover:bg-white/5 rounded-md transition-colors"
-              >
-                <RefreshCw className="w-3 h-3" />
-                Refresh
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={handleRefresh}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] text-white/30 hover:text-fuchsia-400 hover:bg-white/5 rounded-md transition-colors"
+                >
+                  <AnimateIcon hover="spin"><RefreshCw className="w-3 h-3" /></AnimateIcon>
+                  Refresh
+                </button>
+              </div>
             </div>
 
             {/* Hero card */}
@@ -1265,143 +1384,22 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
               <HeroCard game={heroShelf.games[0]} onNavigate={handleNavigate} />
             )}
 
-            {/* Taste DNA + Shelves layout */}
-            <div className="flex flex-col lg:flex-row gap-6">
-              {/* Shelves — main content (or cold start if no shelves) */}
-              <div className="flex-1 min-w-0">
-                {otherShelves.length > 0 ? (
-                  otherShelves.map((shelf, idx) => (
-                    <ShelfCarousel
-                      key={`${shelf.type}-${shelf.seedGameTitle || ''}-${idx}`}
-                      shelf={shelf}
-                      onDismiss={handleDismiss}
-                    />
-                  ))
-                ) : (
-                  <ColdStart
-                    onSwitchToBrowse={onSwitchToBrowse}
-                    libraryCount={state.libraryCount}
-                    candidateCount={state.candidateCount}
+            {/* Shelves */}
+            <div>
+              {otherShelves.length > 0 ? (
+                otherShelves.map((shelf, idx) => (
+                  <ShelfCarousel
+                    key={`${shelf.type}-${shelf.seedGameTitle || ''}-${idx}`}
+                    shelf={shelf}
+                    onDismiss={handleDismiss}
                   />
-                )}
-              </div>
-
-              {/* Taste DNA sidebar — shown even when shelves are empty */}
-              {state.tasteProfile && state.tasteProfile.genres.length >= 3 && (
-                <div className="lg:w-[280px] flex-shrink-0">
-                  <div className="lg:sticky lg:top-0">
-                    <TasteDNA profile={state.tasteProfile} />
-
-                    {/* Quick stats */}
-                    <div className="flex flex-col gap-2 mt-4 px-4">
-                      <div className="flex items-center justify-between text-[10px]">
-                        <span className="text-white/30">Games Analyzed</span>
-                        <span className="text-fuchsia-400/70 font-medium">{state.tasteProfile.totalGames}</span>
-                      </div>
-                      <div className="flex items-center justify-between text-[10px]">
-                        <span className="text-white/30">Total Hours</span>
-                        <span className="text-fuchsia-400/70 font-medium">{formatHours(state.tasteProfile.totalHours)}</span>
-                      </div>
-                      <div className="flex items-center justify-between text-[10px]">
-                        <span className="text-white/30">Avg Rating</span>
-                        <span className="text-fuchsia-400/70 font-medium">
-                          {state.tasteProfile.avgRating > 0 ? state.tasteProfile.avgRating.toFixed(1) : '—'} / 5
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between text-[10px]">
-                        <span className="text-white/30">Top Genre</span>
-                        <span className="text-fuchsia-400/70 font-medium capitalize">{state.tasteProfile.topGenre || '—'}</span>
-                      </div>
-                    </div>
-
-                    {/* Taste Clusters — shown if detected */}
-                    {state.tasteProfile.clusters.length > 0 && (
-                      <div className="mt-5 px-4 pt-4 border-t border-white/[0.06]">
-                        <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">Taste Clusters</h4>
-                        <div className="space-y-2">
-                          {state.tasteProfile.clusters.map(cluster => (
-                            <div key={cluster.id} className="flex items-center justify-between text-[10px]">
-                              <div className="flex items-center gap-2">
-                                <div className="w-2 h-2 rounded-full bg-fuchsia-400/60" />
-                                <span className="text-white/50 capitalize">{cluster.label}</span>
-                              </div>
-                              <span className="text-white/25">{cluster.gameCount} games</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Loyal Studios */}
-                    {state.tasteProfile.loyalDevelopers && state.tasteProfile.loyalDevelopers.length > 0 && (
-                      <div className="mt-5 px-4 pt-4 border-t border-white/[0.06]">
-                        <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">Loyal Studios</h4>
-                        <div className="flex flex-wrap gap-1.5">
-                          {state.tasteProfile.loyalDevelopers.slice(0, 6).map(dev => (
-                            <span key={dev} className="text-[9px] px-2 py-0.5 rounded-full border border-purple-500/30 text-purple-400/70 capitalize">
-                              {dev}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* How it works — transparency section */}
-                    <div className="mt-6 px-4 pt-5 border-t border-white/[0.06]">
-                      <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">How Oracle v3 Works</h4>
-                      <div className="space-y-2.5 text-[10px] text-white/30 leading-relaxed">
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">1. Taste Profile</span> — Your library is analyzed by hours played, ratings, completion status, session patterns, and recency. Weighted into a multi-dimensional taste vector across genres, themes, modes, developers, and release eras.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">2. Engagement Curves</span> — Each game's session pattern is classified (long-tail, slow-burn, binge-drop, honeymoon). Games you sustainably played boost similar recommendations more.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">3. Negative Signals</span> — Games you dropped fast, removed, or left in "Want to Play" for 6+ months penalize similar candidates. Games you dismissed are fully excluded.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">4. Content Matching</span> — Cosine similarity against your taste vector, plus status trajectory scoring (Completed &gt; Playing &gt; On Hold).
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">5. Semantic Similarity</span> — When Ollama is available, embeddings capture deep meaning beyond tags. Without it, the engine gracefully falls back to tag-based matching.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">6. Co-Occurrence Graph</span> — Candidates sharing 3+ tags are linked with Jaccard similarity, extending the graph beyond explicit "similar" metadata.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">7. Quality Signal</span> — Multi-factor: Metacritic, user recommendations, Steam review sentiment, achievement depth, and maintenance recency.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">8. Time-of-Day Context</span> — Analyzes what genres you play at different times and boosts matching candidates for the current session.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">9. Franchise Intelligence</span> — Detects game series (The Witcher, Dark Souls, etc.) by title analysis. Unplayed sequels/prequels from franchises you love get a significant boost.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">10. Studio Loyalty</span> — Developers you've played 2+ games from with high ratings get a loyalty boost across their catalog.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">11. Session Sequencing</span> — Analyzes what games you tend to play after one another. If you always follow RPGs with puzzle games, those transitions are learned.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">12. Diversity Filter</span> — MMR re-ranking balances relevance with variety so you see breadth, not just depth.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">13. Taste Clusters</span> — K-means detects distinct "moods" in your library (e.g. RPG Explorer, Horror Fan, Puzzle Solver), powering per-mood shelf recommendations.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">14. Self-Improving Shelves</span> — Thompson Sampling (multi-armed bandit) reorders shelves based on which ones you engage with most over time.
-                        </p>
-                        <p>
-                          <span className="text-fuchsia-400/50 font-medium">15. Conversion Tracking</span> — Recommendations you click, add, play, or rate are tracked locally to validate and improve future accuracy.
-                        </p>
-                        <p className="text-white/20 pt-1">
-                          17-layer pipeline running locally in a Web Worker — no data leaves your machine.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                ))
+              ) : (
+                <ColdStart
+                  onSwitchToBrowse={onSwitchToBrowse}
+                  libraryCount={state.libraryCount}
+                  candidateCount={state.candidateCount}
+                />
               )}
             </div>
           </motion.div>
@@ -1419,6 +1417,111 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
           </motion.div>
         )}
       </AnimatePresence>
+      </div>
+
+      {/* Taste DNA collapsible right panel */}
+      {state.status === 'done' && state.tasteProfile && state.tasteProfile.genres.length >= 3 && (
+        <>
+          {/* Toggle tab — vertical bookmark on right edge */}
+          <button
+            onClick={() => setDnaOpen(v => !v)}
+            className={cn(
+              'absolute z-40 right-0 top-1/3 transition-all duration-300 cursor-pointer',
+              dnaOpen
+                ? 'translate-x-full opacity-0 pointer-events-none'
+                : 'flex flex-col items-center gap-1.5 px-1.5 py-3 rounded-l-lg bg-fuchsia-500/15 border border-r-0 border-fuchsia-500/25 text-fuchsia-400 hover:bg-fuchsia-500/25 backdrop-blur-sm',
+            )}
+          >
+            <Zap className="w-3.5 h-3.5" />
+            <span className="text-[9px] font-bold tracking-wider" style={{ writingMode: 'vertical-rl' }}>
+              TASTE DNA
+            </span>
+          </button>
+
+          {/* Slide-out panel */}
+          <AnimatePresence>
+            {dnaOpen && (
+              <motion.div
+                initial={{ x: '100%' }}
+                animate={{ x: 0 }}
+                exit={{ x: '100%' }}
+                transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                className="absolute right-0 top-0 bottom-0 w-[310px] z-30 overflow-y-auto scrollbar-hide bg-black/90 backdrop-blur-xl border-l border-white/[0.08] shadow-2xl shadow-black/60"
+              >
+                {/* Sticky header with close */}
+                <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-3 bg-black/80 backdrop-blur-md border-b border-white/[0.06]">
+                  <div className="flex items-center gap-2">
+                    <Zap className="w-3.5 h-3.5 text-fuchsia-400" />
+                    <span className="text-xs font-semibold text-white/70">Taste DNA</span>
+                  </div>
+                  <button
+                    onClick={() => setDnaOpen(false)}
+                    className="p-1 rounded-md text-white/30 hover:text-white/60 hover:bg-white/5 transition-colors cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <TasteDNA profile={state.tasteProfile} />
+
+                {/* Quick stats */}
+                <div className="flex flex-col gap-2 px-4 pb-2">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-white/30">Games Analyzed</span>
+                    <span className="text-fuchsia-400/70 font-medium">{state.tasteProfile.totalGames}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-white/30">Total Hours</span>
+                    <span className="text-fuchsia-400/70 font-medium">{formatHours(state.tasteProfile.totalHours)}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-white/30">Avg Rating</span>
+                    <span className="text-fuchsia-400/70 font-medium">
+                      {state.tasteProfile.avgRating > 0 ? state.tasteProfile.avgRating.toFixed(1) : '—'} / 5
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-white/30">Top Genre</span>
+                    <span className="text-fuchsia-400/70 font-medium capitalize">{state.tasteProfile.topGenre || '—'}</span>
+                  </div>
+                </div>
+
+                {/* Taste Clusters */}
+                {state.tasteProfile.clusters.length > 0 && (
+                  <div className="mx-4 mt-3 pt-4 border-t border-white/[0.06]">
+                    <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">Taste Clusters</h4>
+                    <div className="space-y-2">
+                      {state.tasteProfile.clusters.map(cluster => (
+                        <div key={cluster.id} className="flex items-center justify-between text-[10px]">
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-fuchsia-400/60" />
+                            <span className="text-white/50 capitalize">{cluster.label}</span>
+                          </div>
+                          <span className="text-white/25">{cluster.gameCount} games</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Loyal Studios */}
+                {state.tasteProfile.loyalDevelopers && state.tasteProfile.loyalDevelopers.length > 0 && (
+                  <div className="mx-4 mt-4 pt-4 pb-6 border-t border-white/[0.06]">
+                    <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">Loyal Studios</h4>
+                    <div className="flex flex-wrap gap-1.5">
+                      {state.tasteProfile.loyalDevelopers.slice(0, 6).map(dev => (
+                        <span key={dev} className="text-[9px] px-2 py-0.5 rounded-full border border-purple-500/30 text-purple-400/70 capitalize">
+                          {dev}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </>
+      )}
     </div>
   );
 }

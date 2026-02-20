@@ -30,6 +30,8 @@ export interface TasteCluster {
   profile: TasteProfile;
   gameCount: number;
   topGames: string[];   // titles of top-engagement games in cluster
+  /** Semantic centroid of member games' embeddings (768-dim). Null when no embeddings available. */
+  semanticCentroid?: number[];
 }
 
 /** The full user taste profile computed from their library + journey. */
@@ -94,6 +96,10 @@ export interface MatchReasons {
   isFranchiseEntry: boolean;
   /** Whether this game is on sale. */
   isOnSale: boolean;
+  /** Whether this game was surfaced via ANN embedding retrieval. */
+  semanticRetrieved: boolean;
+  /** Label of the taste cluster this game matched best (from cluster centroid scoring). */
+  bestClusterLabel?: string;
   /** Natural-language explanation of why this game was recommended. */
   explanation: string;
 }
@@ -118,7 +124,8 @@ export interface ScoredGame {
   /** Individual layer scores for debugging / display. */
   layerScores: {
     contentSimilarity: number;
-    semanticSimilarity: number;  // 0 when embeddings unavailable
+    semanticSimilarity: number;       // 0 when embeddings unavailable
+    clusterSemanticSim: number;       // max cosine to any cluster centroid
     graphSignal: number;
     qualitySignal: number;
     popularitySignal: number;
@@ -250,6 +257,8 @@ export interface CandidateGame {
   };
   /** Embedding vector (optional). */
   embedding?: number[];
+  /** True if surfaced via ANN embedding retrieval, not metadata filter. */
+  semanticRetrieved?: boolean;
 }
 
 /** Payload posted to the worker. */
@@ -259,10 +268,12 @@ export interface RecoWorkerInput {
   now: number; // Date.now() for temporal decay
   /** Current hour (0–23) for time-of-day contextual scoring. */
   currentHour: number;
-  /** Whether embeddings are available in this run. */
-  hasEmbeddings: boolean;
+  /** Fraction of candidates with embeddings (0.0–1.0). Drives proportional semantic weight. */
+  embeddingCoverage: number;
   /** Dismissed game IDs — filtered from results. */
   dismissedGameIds: string[];
+  /** Precomputed taste centroid (768-dim). Undefined if no library embeddings. */
+  tasteCentroid?: number[];
 }
 
 /** Progress updates from the worker. */

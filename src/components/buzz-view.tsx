@@ -14,6 +14,7 @@ import { Newspaper, RefreshCw, ExternalLink, Clock, ChevronLeft, ChevronRight, X
 import { Button } from '@/components/ui/button';
 import { fetchAllNews, clearNewsCache, NewsItem } from '@/services/news-service';
 import { cn } from '@/lib/utils';
+import { AnimateIcon } from '@/components/ui/animate-icon';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -336,7 +337,7 @@ function WebviewPanel({
             className="w-7 h-7 rounded-lg flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-colors"
             title="Reload"
           >
-            <RotateCw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} />
+            <AnimateIcon hover="spin"><RotateCw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} /></AnimateIcon>
           </button>
         </div>
 
@@ -722,7 +723,7 @@ export const BuzzView = memo(function BuzzView() {
             onClick={() => loadNews(true)}
             className="bg-fuchsia-500 hover:bg-fuchsia-600 text-white gap-1.5"
           >
-            <RefreshCw className="w-4 h-4" />
+            <AnimateIcon hover="spin"><RefreshCw className="w-4 h-4" /></AnimateIcon>
             Try Again
           </Button>
         </div>

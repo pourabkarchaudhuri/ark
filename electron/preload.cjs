@@ -94,6 +94,14 @@ contextBridge.exposeInMainWorld('steam', {
   getAppList: () =>
     ipcRenderer.invoke('steam:getAppList'),
 
+  // Get Steam tag list (tagid → name)
+  getTagList: () =>
+    ipcRenderer.invoke('steam:getTagList'),
+
+  // Fetch catalog metadata batch (main-process to avoid CORS)
+  fetchCatalogBatch: (appIds) =>
+    ipcRenderer.invoke('steam:fetchCatalogBatch', appIds),
+
   // Get game recommendations based on current game and library
   getRecommendations: (currentAppId, libraryAppIds, limit) => 
     ipcRenderer.invoke('steam:getRecommendations', currentAppId, libraryAppIds, limit),
@@ -303,6 +311,10 @@ contextBridge.exposeInMainWorld('fileDialog', {
   // Open native file explorer to select a game executable (returns path only)
   selectExecutable: () =>
     ipcRenderer.invoke('dialog:selectExecutable'),
+
+  // Save a base64 image (from canvas.toDataURL) via native save dialog
+  saveImage: (options) =>
+    ipcRenderer.invoke('dialog:saveImage', options),
 });
 
 // Expose Session Tracker API to renderer
@@ -408,7 +420,24 @@ contextBridge.exposeInMainWorld('ollama', {
     ipcRenderer.invoke('ollama:generateEmbeddings', items),
 });
 
+// Expose ANN Index API to renderer (HNSW nearest-neighbor search)
+contextBridge.exposeInMainWorld('ann', {
+  load: () => ipcRenderer.invoke('ann:load'),
+  save: () => ipcRenderer.invoke('ann:save'),
+  addVectors: (entries) => ipcRenderer.invoke('ann:addVectors', entries),
+  query: (centroid, k) => ipcRenderer.invoke('ann:query', centroid, k),
+  queryBatch: (entries, k) => ipcRenderer.invoke('ann:queryBatch', entries, k),
+  status: () => ipcRenderer.invoke('ann:status'),
+  clear: () => ipcRenderer.invoke('ann:clear'),
+});
+
+// Google Analytics (Measurement Protocol via main process)
+contextBridge.exposeInMainWorld('analytics', {
+  trackEvent: (name, params) => ipcRenderer.invoke('analytics:trackEvent', name, params),
+  trackPageView: (page) => ipcRenderer.invoke('analytics:trackPageView', page),
+});
+
 // Only log exposed APIs in development to avoid leaking IPC surface in production
 if (process.env.NODE_ENV !== 'production') {
-  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama exposed');
+  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.ann, window.analytics exposed');
 }

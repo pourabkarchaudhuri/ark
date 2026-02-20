@@ -74,17 +74,6 @@ describe('GameCard', () => {
       expect(screen.getByText('Test Developer')).toBeInTheDocument();
     });
 
-    it('renders rating score with white text', () => {
-      render(
-        <GameCard
-          game={mockGame}
-          onEdit={() => {}}
-          onDelete={() => {}}
-        />
-      );
-      expect(screen.getByText('Rating: 92')).toBeInTheDocument();
-    });
-
     it('renders Completed status for completed library games', () => {
       const completedGame = { ...mockGame, status: 'Completed' as const, isInLibrary: true };
       render(

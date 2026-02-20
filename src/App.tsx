@@ -1,4 +1,4 @@
-import { useState, useCallback, lazy, Suspense } from 'react';
+import { useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Router, Route, Switch, useLocation } from 'wouter';
 import { useHashLocation } from 'wouter/use-hash-location';
@@ -6,6 +6,7 @@ import { ErrorBoundary } from '@/components/error-boundary';
 import { ToastProvider } from '@/components/ui/toast';
 import { UpdateSnackbar } from '@/components/update-snackbar';
 import { ChangelogModal } from '@/components/changelog-modal';
+import { trackPageView } from '@/services/analytics';
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded heavy components — split into separate chunks for faster initial load
@@ -21,6 +22,7 @@ type AppState = 'splash' | 'ready';
 
 function AppRoutes() {
   const [location] = useLocation();
+  useEffect(() => { trackPageView(location); }, [location]);
   return (
     <ErrorBoundary key={location}>
       <Suspense fallback={<ChunkFallback />}>

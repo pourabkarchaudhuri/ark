@@ -25,6 +25,7 @@ import { JourneyView } from '@/components/journey-view';
 import { BuzzView } from '@/components/buzz-view';
 import { ReleaseCalendar } from '@/components/release-calendar';
 import { OracleView } from '@/components/oracle-view';
+import { AnnGraphView } from '@/components/ann-graph-view';
 import { useToast } from '@/components/ui/toast';
 
 const DarkVeil = lazy(() => import('@/components/ui/dark-veil'));
@@ -49,20 +50,26 @@ import {
   CalendarDays,
   Compass,
   Eye,
+  Network,
+  HelpCircle,
 } from 'lucide-react';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
 import { SettingsPanel } from '@/components/settings-panel';
+import { GuidedTour, useTourState } from '@/components/guided-tour';
+import { AnimateIcon, MagneticWrap } from '@/components/ui/animate-icon';
 import { useSessionTracker } from '@/hooks/useSessionTracker';
+import { NavbarStatusIndicator } from '@/components/system-status-panel';
+import { scheduleBackgroundPrecompute } from '@/services/galaxy-cache';
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle' | 'ann-graph';
 
 
 const RETURN_VIEW_KEY = 'ark-return-view';
-const VALID_VIEW_MODES: ViewMode[] = ['browse', 'library', 'journey', 'buzz', 'calendar', 'oracle'];
+const VALID_VIEW_MODES: ViewMode[] = ['browse', 'library', 'journey', 'buzz', 'calendar', 'oracle', 'ann-graph'];
 
 function getScrollStorageKey(view: ViewMode): string {
   return `ark-dashboard-scroll-${view}`;
@@ -75,17 +82,19 @@ export function Dashboard() {
   // Local filter state
   const { filters, updateFilter, resetFilters } = useFilteredGames();
   
-  // View mode state — restore from ?view= when returning from game details
+  // View mode state — restore from sessionStorage when returning from game details
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     if (typeof window === 'undefined') return 'browse';
-    const params = new URLSearchParams(window.location.search);
-    const view = params.get('view');
-    return (view && VALID_VIEW_MODES.includes(view as ViewMode)) ? (view as ViewMode) : 'browse';
+    const saved = sessionStorage.getItem(RETURN_VIEW_KEY);
+    return (saved && VALID_VIEW_MODES.includes(saved as ViewMode)) ? (saved as ViewMode) : 'browse';
   });
   // Tracks whether the DarkVeil bg is active (stays true during exit animation)
   const [buzzBgActive, setBuzzBgActive] = useState(false);
 
-  // Persist current view when on dashboard so Back from game details can restore it
+  // Guided tour state
+  const { tourRunning, tourKey, startTour, stopTour } = useTourState();
+
+  // Persist current view so it survives navigation to game details and back
   useEffect(() => {
     if (location === '/') {
       sessionStorage.setItem(RETURN_VIEW_KEY, viewMode);
@@ -95,25 +104,16 @@ export function Dashboard() {
   // Pending scroll restore when returning to a view whose content loads async (e.g. Library)
   const pendingScrollRestoreRef = useRef<{ view: ViewMode; pos: number } | null>(null);
 
-  // Restore view and scroll position when landing on dashboard (e.g. Back from game details)
+  // Seed the pending scroll restore on mount
   useEffect(() => {
     if (location !== '/') return;
-    const params = new URLSearchParams(window.location.search);
-    const view = params.get('view');
-    if (view && VALID_VIEW_MODES.includes(view as ViewMode)) {
-      setViewMode(view as ViewMode);
-      window.history.replaceState(null, '', '/');
-      const saved = sessionStorage.getItem(getScrollStorageKey(view as ViewMode));
-      const pos = saved ? parseInt(saved, 10) : 0;
-      if (!isNaN(pos) && pos > 0) {
-        pendingScrollRestoreRef.current = { view: view as ViewMode, pos };
-        // Try immediate restore (works when content is already there, e.g. Browse from cache)
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => window.scrollTo({ top: pos, left: 0 }));
-        });
-      }
+    const saved = sessionStorage.getItem(getScrollStorageKey(viewMode));
+    const pos = saved ? parseInt(saved, 10) : 0;
+    if (!isNaN(pos) && pos > 0) {
+      pendingScrollRestoreRef.current = { view: viewMode, pos };
     }
-  }, [location]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (viewMode === 'buzz') {
@@ -156,6 +156,9 @@ export function Dashboard() {
   
   // Session tracking (live "Playing Now" status)
   const { isPlayingNow } = useSessionTracker();
+
+  // Background precompute for Embedding Space galaxy data (runs once, 20s after mount)
+  useEffect(() => { scheduleBackgroundPrecompute(); }, []);
 
   // Custom game dialog state
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
@@ -224,14 +227,33 @@ export function Dashboard() {
   const currentLoading = viewMode === 'browse' ? steamLoading : libraryLoading;
   const currentError = steamError;
 
-  // Deferred scroll restore when grid content finishes loading (Library fetches async; without this we'd restore while skeleton is shown and scroll would clamp to top)
+  // Deferred scroll restore when grid content finishes loading.
+  // Fires when currentLoading flips OR when currentGames arrive.
+  // Only clears the ref once the scroll actually lands close to the target
+  // so that earlier premature runs (loading starts as false before data
+  // fetching begins) don't consume and discard the pending position.
+  const gameCount = currentGames.length;
   useEffect(() => {
-    if (location !== '/' || !pendingScrollRestoreRef.current || currentLoading) return;
     const pending = pendingScrollRestoreRef.current;
+    if (location !== '/' || !pending || currentLoading) return;
     if (viewMode !== pending.view) return;
-    window.scrollTo({ top: pending.pos, left: 0 });
-    pendingScrollRestoreRef.current = null;
-  }, [location, viewMode, currentLoading]);
+
+    // If the page isn't tall enough yet, bail and wait for more content
+    if (document.documentElement.scrollHeight < pending.pos + 200) return;
+
+    let attempts = 0;
+    const maxAttempts = 20;
+    const tryRestore = () => {
+      window.scrollTo({ top: pending.pos, left: 0 });
+      attempts++;
+      if (Math.abs(window.scrollY - pending.pos) <= 10) {
+        pendingScrollRestoreRef.current = null;
+      } else if (attempts < maxAttempts) {
+        requestAnimationFrame(tryRestore);
+      }
+    };
+    requestAnimationFrame(tryRestore);
+  }, [location, viewMode, currentLoading, gameCount]);
   // Epic store filter: Epic data is a finite curated set (new releases + coming
   // soon + free games), not backed by the 155k+ Steam catalog.  The catalog
   // infinite-scroll fallback only loads Steam titles, so when the user filters
@@ -287,7 +309,7 @@ export function Dashboard() {
   // The first render uses a fast synchronous path (initial ~120 item batch),
   // then a rAF-deferred effect computes the full result and applies it via
   // startTransition so the browser stays responsive.
-  const { displayedGames, sortedGames, dynamicGenres, dynamicPlatforms, dynamicYears } =
+  const { sortedGames, dynamicGenres, dynamicPlatforms, dynamicYears } =
     useDeferredFilterSort({
       currentGames,
       searchResults,
@@ -359,6 +381,8 @@ export function Dashboard() {
   }, [hasMore, currentLoading, loadingMore, loadMore, viewMode, isSearching]);
 
   // Scroll-to-top visibility and persist scroll position (for Back-from-details restore)
+  const viewModeRef = useRef(viewMode);
+  viewModeRef.current = viewMode;
   useEffect(() => {
     let scrollSaveTimeout: ReturnType<typeof setTimeout>;
     function handleScroll() {
@@ -366,7 +390,7 @@ export function Dashboard() {
       if (location !== '/') return;
       clearTimeout(scrollSaveTimeout);
       scrollSaveTimeout = setTimeout(() => {
-        sessionStorage.setItem(getScrollStorageKey(viewMode), String(Math.round(window.scrollY)));
+        sessionStorage.setItem(getScrollStorageKey(viewModeRef.current), String(Math.round(window.scrollY)));
       }, 150);
     }
 
@@ -374,6 +398,8 @@ export function Dashboard() {
     return () => {
       window.removeEventListener('scroll', handleScroll);
       clearTimeout(scrollSaveTimeout);
+      // Flush one final save so the position isn't lost when navigating away
+      sessionStorage.setItem(getScrollStorageKey(viewModeRef.current), String(Math.round(window.scrollY)));
     };
   }, [location, viewMode]);
 
@@ -390,6 +416,7 @@ export function Dashboard() {
   const switchToBuzz = useCallback(() => { setViewMode('buzz'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToCalendar = useCallback(() => { setViewMode('calendar'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToOracle = useCallback(() => { setViewMode('oracle'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
+  const switchToAnnGraph = useCallback(() => { setViewMode('ann-graph'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
 
 
 
@@ -523,7 +550,7 @@ export function Dashboard() {
   }, [handleStatusChange, resolveGame]);
 
   // Stable render callback for VirtualGameGrid
-  const hideLibBadge = viewMode === 'library';
+  const isLibraryView = viewMode === 'library';
   const isPlayingNowRef = useRef(isPlayingNow);
   isPlayingNowRef.current = isPlayingNow;
   const renderGameCard = useCallback((game: Game) => {
@@ -537,11 +564,12 @@ export function Dashboard() {
         onAddToLibrary={handleCardAddToLibrary}
         onRemoveFromLibrary={handleCardRemoveFromLibrary}
         onStatusChange={handleCardStatusChange}
-        hideLibraryBadge={hideLibBadge}
+        hideLibraryBadge={isLibraryView}
+        showTerminalPanel={false}
       />
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hideLibBadge, handleCardEdit, handleCardDelete, handleCardAddToLibrary, handleCardRemoveFromLibrary, handleCardStatusChange]);
+  }, [isLibraryView, handleCardEdit, handleCardDelete, handleCardAddToLibrary, handleCardRemoveFromLibrary, handleCardStatusChange]);
 
   const handleDeleteConfirm = useCallback(() => {
     if (deleteConfirm.game) {
@@ -667,7 +695,7 @@ export function Dashboard() {
         <div className="px-3 lg:px-6 py-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 no-drag mt-[5px]">
-              <div className="h-8 w-8 bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-fuchsia-500/20">
+              <div data-tour="app-logo" className="h-8 w-8 bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-fuchsia-500/20">
                 <Gamepad2 className="h-4 w-4 text-white" />
               </div>
               <div className="flex items-center gap-2">
@@ -675,9 +703,11 @@ export function Dashboard() {
                 <span className="text-xs text-white/50">v{APP_VERSION}</span>
               </div>
             </div>
-            
-            {/* Window Controls */}
-            <WindowControls />
+
+            <div className="flex items-center gap-2 no-drag">
+              <NavbarStatusIndicator />
+              <WindowControls />
+            </div>
           </div>
         </div>
       </header>
@@ -690,8 +720,9 @@ export function Dashboard() {
         <div className="flex items-center justify-between mb-6 gap-4">
           <div className="flex items-center gap-3 min-w-0 flex-shrink overflow-hidden">
             {/* View Mode Toggle — collapses to icon-only below lg for split-screen */}
-            <div className="flex items-center bg-white/5 rounded-lg p-1 shrink-0">
+            <div data-tour="view-toggle" className="flex items-center bg-white/5 rounded-lg p-1 shrink-0">
               <button
+                data-tour="browse-button"
                 onClick={switchToBrowse}
                 title="Browse"
                 className={cn(
@@ -701,10 +732,11 @@ export function Dashboard() {
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <Compass className="h-3 w-3 shrink-0" />
+                <AnimateIcon hover="swing" className="shrink-0"><Compass className="h-3 w-3" /></AnimateIcon>
                 <span className="hidden lg:inline">Browse</span>
               </button>
               <button
+                data-tour="library-button"
                 onClick={switchToLibrary}
                 title={`Library (${librarySize})`}
                 className={cn(
@@ -714,10 +746,11 @@ export function Dashboard() {
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <Library className="h-3 w-3 shrink-0" />
+                <AnimateIcon hover="pulse" className="shrink-0"><Library className="h-3 w-3" /></AnimateIcon>
                 <span className="hidden lg:inline">Library ({librarySize})</span>
               </button>
               <button
+                data-tour="journey-button"
                 onClick={switchToJourney}
                 title="Voyage"
                 className={cn(
@@ -727,10 +760,11 @@ export function Dashboard() {
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <Clock className="h-3 w-3 shrink-0" />
+                <AnimateIcon hover="pulse" className="shrink-0"><Clock className="h-3 w-3" /></AnimateIcon>
                 <span className="hidden lg:inline">Voyage</span>
               </button>
               <button
+                data-tour="buzz-button"
                 onClick={switchToBuzz}
                 title="Transmissions"
                 className={cn(
@@ -740,10 +774,11 @@ export function Dashboard() {
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <Newspaper className="h-3 w-3 shrink-0" />
+                <AnimateIcon hover="pulse" className="shrink-0"><Newspaper className="h-3 w-3" /></AnimateIcon>
                 <span className="hidden lg:inline">Transmissions</span>
               </button>
               <button
+                data-tour="calendar-button"
                 onClick={switchToCalendar}
                 title="Releases"
                 className={cn(
@@ -753,10 +788,11 @@ export function Dashboard() {
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <CalendarDays className="h-3 w-3 shrink-0" />
+                <AnimateIcon hover="pulse" className="shrink-0"><CalendarDays className="h-3 w-3" /></AnimateIcon>
                 <span className="hidden lg:inline">Releases</span>
               </button>
               <button
+                data-tour="oracle-button"
                 onClick={switchToOracle}
                 title="Oracle"
                 className={cn(
@@ -766,7 +802,7 @@ export function Dashboard() {
                     : "text-white/60 hover:text-white"
                 )}
               >
-                <Eye className="h-3 w-3 shrink-0" />
+                <AnimateIcon hover="pulse" className="shrink-0"><Eye className="h-3 w-3" /></AnimateIcon>
                 <span className="hidden lg:inline">Oracle</span>
               </button>
             </div>
@@ -780,7 +816,7 @@ export function Dashboard() {
                 className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/20"
                 title="Clear All"
               >
-                <Trash2 className="h-3 w-3 lg:mr-1" />
+                <AnimateIcon hover="lift"><Trash2 className="h-3 w-3 lg:mr-1" /></AnimateIcon>
                 <span className="hidden lg:inline">Clear All</span>
               </Button>
             )}
@@ -805,29 +841,11 @@ export function Dashboard() {
                       </span>
                     )
                   ) : (
-                    /* Other browse categories: "X games populated" + catalog sync status */
+                    /* Other browse categories: "X games of {filter}" */
                     <>
                       <span className="text-white font-medium">
                         {sortedGames.length.toLocaleString()}
-                      </span> games populated
-                      <span className="text-white/20 mx-0.5">·</span>
-                      {catalogTotalCount > 0 ? (
-                        <button
-                          onClick={() => updateFilter('category', 'catalog')}
-                          className="text-sm text-fuchsia-400/70 hover:text-fuchsia-400 transition-colors cursor-pointer"
-                        >
-                          Synced Global Catalog
-                        </button>
-                      ) : (
-                        /* Catalog still syncing — inline spinner + text at same font size */
-                        <span className="inline-flex items-center gap-1.5 text-white/40">
-                          <svg className="h-3 w-3 animate-spin text-fuchsia-400/60 shrink-0" viewBox="0 0 24 24" fill="none">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                          </svg>
-                          <span className="text-sm">Syncing Global Catalog</span>
-                        </span>
-                      )}
+                      </span> games of <button onClick={openFilters} className="text-white/80 hover:text-fuchsia-400 transition-colors cursor-pointer underline decoration-white/20 hover:decoration-fuchsia-400/50 underline-offset-2">{{ trending: 'Top Sellers', 'most-played': 'Most Played', free: 'Free Games', recent: 'New Releases', 'award-winning': 'Coming Soon', catalog: 'Catalog', all: 'All' }[filters.category] ?? filters.category}</button>
                     </>
                   )}
                 </p>
@@ -859,8 +877,8 @@ export function Dashboard() {
           <div className="flex items-center gap-3 shrink-0">
             {/* Search - hidden in journey, buzz, calendar, oracle mode */}
             {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && (
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40 z-10" />
+              <div data-tour="search-input" className="relative">
+                <AnimateIcon hover="wiggle" className="absolute left-3 top-1/2 -translate-y-1/2 z-10"><Search className="h-4 w-4 text-white/40" /></AnimateIcon>
                 <Input
                   ref={searchInputRef}
                   placeholder={viewMode === 'library' ? "Search your library..." : "Search games..."}
@@ -918,16 +936,44 @@ export function Dashboard() {
               </div>
             )}
 
-            {/* AI Chat Button */}
+            {/* Enter Embedding Space Button */}
             <Button
-              onClick={toggleAIChat}
+              data-tour="embedding-space"
+              onClick={switchToAnnGraph}
               variant="ghost"
-              size="icon"
-              className="h-9 w-9 text-white/70 hover:text-white hover:bg-purple-500/20 border border-white/10 hover:border-purple-500/50 transition-all"
-              title="Open AI Assistant"
+              className="h-9 px-3 text-white/60 hover:text-fuchsia-400 hover:bg-fuchsia-500/10 border border-white/10 hover:border-fuchsia-500/50 transition-all gap-1.5"
+              title="Enter Embedding Space"
             >
-              <Sparkles className="h-4 w-4 text-purple-400 pointer-events-none" />
+              <AnimateIcon hover="pulse"><Network className="h-4 w-4 pointer-events-none" /></AnimateIcon>
+              <span className="text-xs font-medium hidden lg:inline">Enter Embedding Space</span>
             </Button>
+
+            {/* Tour Help Button */}
+            <MagneticWrap strength={0.25}>
+              <Button
+                onClick={startTour}
+                variant="ghost"
+                size="icon"
+                className="h-9 w-9 text-white/70 hover:text-white hover:bg-cyan-500/20 border border-white/10 hover:border-cyan-500/50 transition-all"
+                title="Take a tour"
+              >
+                <AnimateIcon hover="wiggle"><HelpCircle className="h-4 w-4 text-cyan-400 pointer-events-none" /></AnimateIcon>
+              </Button>
+            </MagneticWrap>
+
+            {/* AI Chat Button */}
+            <MagneticWrap strength={0.25}>
+              <Button
+                data-tour="ai-chat"
+                onClick={toggleAIChat}
+                variant="ghost"
+                size="icon"
+                className="h-9 w-9 text-white/70 hover:text-white hover:bg-purple-500/20 border border-white/10 hover:border-purple-500/50 transition-all"
+                title="Open AI Assistant"
+              >
+                <AnimateIcon hover="sparkle"><Sparkles className="h-4 w-4 text-purple-400 pointer-events-none" /></AnimateIcon>
+              </Button>
+            </MagneticWrap>
 
             {/* Add Custom Game Button - only show in library mode */}
             {viewMode === 'library' && (
@@ -936,7 +982,7 @@ export function Dashboard() {
                 className="h-9 bg-fuchsia-500 hover:bg-fuchsia-600 text-white gap-1.5"
                 title="Add Custom Game"
               >
-                <PlusCircle className="h-4 w-4 pointer-events-none shrink-0" />
+                <AnimateIcon hover="pulse" className="shrink-0"><PlusCircle className="h-4 w-4 pointer-events-none" /></AnimateIcon>
                 <span className="hidden lg:inline">Add Custom Game</span>
               </Button>
             )}
@@ -953,6 +999,7 @@ export function Dashboard() {
 
             {/* Settings Button */}
             <Button
+              data-tour="settings-button"
               variant="ghost"
               size="icon"
               className="h-9 w-9 text-white/60 hover:text-amber-400 hover:bg-white/10"
@@ -961,7 +1008,7 @@ export function Dashboard() {
               aria-label="Settings"
               data-testid="settings-button"
             >
-              <Settings className="h-4 w-4 pointer-events-none" />
+              <AnimateIcon hover="spin"><Settings className="h-4 w-4 pointer-events-none" /></AnimateIcon>
             </Button>
           </div>
         </div>
@@ -979,8 +1026,12 @@ export function Dashboard() {
           <ReleaseCalendar />
         ) : viewMode === 'oracle' ? (
           <OracleView onSwitchToBrowse={switchToBrowse} />
+        ) : viewMode === 'ann-graph' ? (
+          <div key="ann-graph-shell" className="fixed inset-0 top-[52px] z-30 bg-black">
+            <AnnGraphView onBack={switchToOracle} />
+          </div>
         ) : (
-          <>
+          <div data-tour="game-grid">
             {/* Loading State - Skeleton Grid */}
             {(currentLoading && currentGames.length === 0) && (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 auto-rows-fr">
@@ -1069,8 +1120,9 @@ export function Dashboard() {
                 footer={infiniteScrollSentinel}
               />
             )}
-          </>
+          </div>
         )}
+
       </main>
 
       {/* Game Dialog — Add or Edit library entry */}
@@ -1186,6 +1238,9 @@ export function Dashboard() {
         isOpen={isSettingsOpen}
         onClose={closeSettings}
       />
+
+      {/* Guided Tour */}
+      <GuidedTour run={tourRunning} tourKey={tourKey} onFinish={stopTour} />
 
     </div>
   );

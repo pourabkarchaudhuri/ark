@@ -518,11 +518,9 @@ function NewsCard({
   );
 }
 
-/** Return the dashboard URL with the view we came from (for Back button). */
+/** Return the dashboard URL. View is restored from sessionStorage on mount. */
 function getBackToDashboardUrl(): string {
-  const from = typeof window !== 'undefined' ? sessionStorage.getItem('ark-return-view') : null;
-  const view = from && ['browse', 'library', 'journey', 'buzz', 'calendar', 'oracle'].includes(from) ? from : 'browse';
-  return `/?view=${view}`;
+  return '/';
 }
 
 /**

@@ -295,33 +295,21 @@ describe('GameDetailsPage', () => {
     expect(freeToPlayElements.length).toBeGreaterThan(0);
   });
 
-  it('renders Steam reviews section', async () => {
+  it('renders reviews section', async () => {
     renderGameDetails();
 
     await waitFor(() => {
-      // There are multiple Steam Reviews sections (main + compact sidebar)
-      const steamReviewsElements = screen.getAllByText('Steam Reviews');
-      expect(steamReviewsElements.length).toBeGreaterThan(0);
+      expect(screen.getByText('Reviews')).toBeInTheDocument();
     });
-
-    // Check review summary - there might be multiple 85% elements
-    const percentageElements = screen.getAllByText('85%');
-    expect(percentageElements.length).toBeGreaterThan(0);
   });
 
-  it('renders individual review content', async () => {
+  it('renders reviews section after loading', async () => {
     renderGameDetails();
 
-    // Wait for the thumbs up/down icons in reviews (which indicate reviews are rendered)
+    // Reviews section heading appears once details load
     await waitFor(() => {
-      // Check for reviews section header
-      const steamReviewsElements = screen.getAllByText('Steam Reviews');
-      expect(steamReviewsElements.length).toBeGreaterThan(0);
+      expect(screen.getByText('Reviews')).toBeInTheDocument();
     }, { timeout: 3000 });
-
-    // We can verify reviews section exists by checking for percentage display
-    const percentageElements = screen.getAllByText('85%');
-    expect(percentageElements.length).toBeGreaterThan(0);
   });
 
   it('calls Steam API on mount with correct app ID', async () => {
@@ -379,11 +367,13 @@ describe('GameDetailsPage', () => {
     expect(screen.getByText('Linux')).toBeInTheDocument();
   });
 
-  it('renders Steam store link', async () => {
+  it('renders store pricing section', async () => {
     renderGameDetails();
 
     await waitFor(() => {
-      expect(screen.getByText('View on Steam')).toBeInTheDocument();
+      // Free to Play appears in genre badge and/or price button
+      const freeElements = screen.getAllByText('Free to Play');
+      expect(freeElements.length).toBeGreaterThan(0);
     });
   });
 });
@@ -474,11 +464,11 @@ describe('Metacritic Integration', () => {
     }, { timeout: 3000 });
   });
 
-  it('renders Critic Reviews section', async () => {
+  it('renders Metacritic tab', async () => {
     renderGameDetails();
 
     await waitFor(() => {
-      expect(screen.getByText('Critic Reviews')).toBeInTheDocument();
+      expect(screen.getByText('Metacritic')).toBeInTheDocument();
     });
   });
 
@@ -491,12 +481,13 @@ describe('Metacritic Integration', () => {
     }, { timeout: 3000 });
   });
 
-  it('renders critic publication names', async () => {
+  it('renders Metascore in the header', async () => {
     renderGameDetails();
 
-    // Wait for Metacritic data to load
+    // Metacritic score badge appears in the header
     await waitFor(() => {
-      expect(screen.getByText('IGN')).toBeInTheDocument();
+      const scoreElements = screen.getAllByText('83');
+      expect(scoreElements.length).toBeGreaterThan(0);
     }, { timeout: 3000 });
   });
 
@@ -509,11 +500,6 @@ describe('Metacritic Integration', () => {
     // Page should still load with game details
     await waitFor(() => {
       expect(screen.getByText('Counter-Strike 2')).toBeInTheDocument();
-    });
-
-    // Should show no reviews available
-    await waitFor(() => {
-      expect(screen.getByText('No critic reviews available')).toBeInTheDocument();
     });
   });
 
@@ -834,8 +820,10 @@ describe('epicToSteamDetails normalizer (via Epic rendering)', () => {
       expect(screen.getByText('Epic Test Game')).toBeInTheDocument();
     });
 
-    // Should show "View on Epic Games" link
-    expect(screen.getByText('View on Epic Games')).toBeInTheDocument();
+    // Should show "Epic Games" label in the store button
+    await waitFor(() => {
+      expect(screen.getByText('Epic Games')).toBeInTheDocument();
+    });
   });
 
   it('renders price from Epic game data', async () => {

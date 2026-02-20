@@ -343,28 +343,18 @@ function cosineSimilarity(a: FeatureVector, b: FeatureVector): number {
 // ─── Layer 6: Semantic Similarity (Embedding cosine — optional) ─────────────────
 
 function computeSemanticSimilarity(
-  userEmbeddings: { embedding: number[]; weight: number }[],
+  tasteCentroid: Float64Array | null,
   candidateEmbedding: number[] | undefined,
 ): number {
-  if (!candidateEmbedding || candidateEmbedding.length === 0 || userEmbeddings.length === 0) return 0;
+  if (!tasteCentroid || !candidateEmbedding || candidateEmbedding.length === 0) return 0;
 
   const dim = candidateEmbedding.length;
-  const tasteVec = new Float64Array(dim);
-  let totalWeight = 0;
-
-  for (const { embedding, weight } of userEmbeddings) {
-    if (embedding.length !== dim) continue;
-    for (let i = 0; i < dim; i++) tasteVec[i] += embedding[i] * weight;
-    totalWeight += weight;
-  }
-
-  if (totalWeight === 0) return 0;
-  for (let i = 0; i < dim; i++) tasteVec[i] /= totalWeight;
+  if (tasteCentroid.length !== dim) return 0;
 
   let dot = 0, magA = 0, magB = 0;
   for (let i = 0; i < dim; i++) {
-    dot += tasteVec[i] * candidateEmbedding[i];
-    magA += tasteVec[i] * tasteVec[i];
+    dot += tasteCentroid[i] * candidateEmbedding[i];
+    magA += tasteCentroid[i] * tasteCentroid[i];
     magB += candidateEmbedding[i] * candidateEmbedding[i];
   }
   if (magA === 0 || magB === 0) return 0;
@@ -375,6 +365,7 @@ function computeSemanticSimilarity(
 
 function buildCoOccurrenceEdges(
   candidates: CandidateGame[],
+  onProgress?: (fraction: number) => void,
 ): Map<string, Map<string, number>> {
   const tagSets = new Map<string, Set<string>>();
   for (const c of candidates) {
@@ -400,9 +391,11 @@ function buildCoOccurrenceEdges(
   }
 
   const edges = new Map<string, Map<string, number>>();
-  const MAX_NEIGHBORS = 150; // cap to avoid O(n²) explosion on popular genres
+  const MAX_NEIGHBORS = 150;
+  const progressStep = Math.max(1, Math.floor(candidates.length / 10));
 
-  for (const c of candidates) {
+  for (let ci = 0; ci < candidates.length; ci++) {
+    const c = candidates[ci];
     const myTags = tagSets.get(c.gameId)!;
     const neighborIds = new Set<string>();
 
@@ -419,20 +412,22 @@ function buildCoOccurrenceEdges(
       const otherTags = tagSets.get(otherId);
       if (!otherTags) continue;
 
-      // Inline intersection count — avoids array + filter allocation per pair
       let intersection = 0;
       for (const t of myTags) {
         if (otherTags.has(t)) intersection++;
       }
       if (intersection < 3) continue;
 
-      // Union via inclusion-exclusion — avoids new Set allocation
       const union = myTags.size + otherTags.size - intersection;
       const jaccard = union > 0 ? intersection / union : 0;
 
       if (!edges.has(c.gameId)) edges.set(c.gameId, new Map());
       edges.get(c.gameId)!.set(otherId, jaccard);
       neighborCount++;
+    }
+
+    if (onProgress && ci % progressStep === 0) {
+      onProgress(ci / candidates.length);
     }
   }
 
@@ -683,6 +678,7 @@ function extractFranchiseBase(title: string): string {
 function detectFranchises(
   userGames: UserGameSnapshot[],
   candidates: CandidateGame[],
+  onProgress?: (fraction: number) => void,
 ): FranchiseCluster[] {
   // Build base name → entries map
   const baseMap = new Map<string, {
@@ -727,8 +723,13 @@ function detectFranchises(
     addToMap(ug.gameId, ug.title, ug.releaseDate, true, ug.developer, ug.rating, ug.hoursPlayed);
   }
 
-  for (const c of candidates) {
+  const franchiseProgressStep = Math.max(1, Math.floor(candidates.length / 5));
+  for (let fi = 0; fi < candidates.length; fi++) {
+    const c = candidates[fi];
     addToMap(c.gameId, c.title, c.releaseDate, false, c.developer, 0, 0);
+    if (onProgress && fi % franchiseProgressStep === 0) {
+      onProgress(fi / candidates.length);
+    }
   }
 
   // Build franchise clusters: must have ≥2 entries total AND ≥1 user entry
@@ -862,7 +863,7 @@ function buildSequencingContext(userGames: UserGameSnapshot[]): SequencingContex
   const allSessions: { gameId: string; timestamp: number; genres: string[] }[] = [];
 
   for (const ug of userGames) {
-    const canonNorm = ug.genres.map(g => toCanonicalGenre(g)).filter(Boolean).map((c: string) => norm(c));
+    const canonNorm = ug.genres.map(g => toCanonicalGenre(g)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c));
     for (const ts of ug.sessionTimestamps) {
       allSessions.push({
         gameId: ug.gameId,
@@ -909,7 +910,7 @@ function buildSequencingContext(userGames: UserGameSnapshot[]): SequencingContex
   return {
     transitions,
     transitionTotals,
-    recentGameGenres: recentGames.map(g => g.genres.map(x => toCanonicalGenre(x)).filter(Boolean).map((c: string) => norm(c))),
+    recentGameGenres: recentGames.map(g => g.genres.map(x => toCanonicalGenre(x)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c))),
     hasSufficientData: recentGames.length > 0,
   };
 }
@@ -917,7 +918,7 @@ function buildSequencingContext(userGames: UserGameSnapshot[]): SequencingContex
 function computeSequencingBoost(candidate: CandidateGame, ctx: SequencingContext): number {
   if (!ctx.hasSufficientData) return 0;
 
-  const candidateGenresNorm = candidate.genres.map(g => toCanonicalGenre(g)).filter(Boolean).map((c: string) => norm(c));
+  const candidateGenresNorm = candidate.genres.map(g => toCanonicalGenre(g)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c));
   let totalAffinity = 0;
   let affinityCount = 0;
 
@@ -941,13 +942,13 @@ function computeSequencingBoost(candidate: CandidateGame, ctx: SequencingContext
 
 // ─── Layer 14: MMR Diversity Re-Ranking ─────────────────────────────────────────
 
-function mmrRerank(scored: ScoredGame[], lambda: number, limit: number): ScoredGame[] {
+function mmrRerank(scored: ScoredGame[], lambda: number, limit: number, onProgress?: (fraction: number) => void): ScoredGame[] {
   if (scored.length <= 1) return scored.slice(0, limit);
 
   // Pre-compute normalized canonical genre sets — avoids creating them in the O(n²) loop
   const genreSets = new Map<string, Set<string>>();
   for (const s of scored) {
-    const canonNorm = new Set(s.genres.map(g => toCanonicalGenre(g)).filter(Boolean).map((c: string) => norm(c)));
+    const canonNorm = new Set(s.genres.map(g => toCanonicalGenre(g)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c)));
     genreSets.set(s.gameId, canonNorm);
   }
 
@@ -986,6 +987,9 @@ function mmrRerank(scored: ScoredGame[], lambda: number, limit: number): ScoredG
     }
 
     selected.push(remaining.splice(bestIdx, 1)[0]);
+    if (onProgress && selected.length % 10 === 0) {
+      onProgress(selected.length / limit);
+    }
   }
 
   return selected;
@@ -993,12 +997,18 @@ function mmrRerank(scored: ScoredGame[], lambda: number, limit: number): ScoredG
 
 // ─── Layer 15: Taste Cluster Detection ──────────────────────────────────────────
 
+/** Adaptive K: sqrt(N/2) clamped to [2, 6] — scales with library size without fragmenting small collections. */
+function adaptiveK(n: number): number {
+  return Math.max(2, Math.min(6, Math.floor(Math.sqrt(n / 2))));
+}
+
 function detectTasteClusters(
   userGames: UserGameSnapshot[],
   now: number,
-  k: number = 3,
+  k?: number,
 ): TasteCluster[] {
-  if (userGames.length < k * 2) return [];
+  const effectiveK = k ?? adaptiveK(userGames.length);
+  if (userGames.length < effectiveK * 2) return [];
 
   type GameVec = { gameId: string; title: string; vec: Map<string, number>; engagement: number };
   const gameVecs: GameVec[] = userGames.map(g => {
@@ -1025,7 +1035,7 @@ function detectTasteClusters(
 
   const used = new Set<number>();
   const centroids: number[][] = [];
-  for (let i = 0; i < k; i++) {
+  for (let i = 0; i < effectiveK; i++) {
     let idx: number;
     do { idx = Math.floor(Math.random() * vectors.length); } while (used.has(idx) && used.size < vectors.length);
     used.add(idx);
@@ -1038,7 +1048,7 @@ function detectTasteClusters(
     for (let i = 0; i < vectors.length; i++) {
       let bestDist = Infinity;
       let bestC = 0;
-      for (let c = 0; c < k; c++) {
+      for (let c = 0; c < effectiveK; c++) {
         let dist = 0;
         for (let d = 0; d < dim; d++) {
           const diff = vectors[i][d] - centroids[c][d];
@@ -1049,7 +1059,7 @@ function detectTasteClusters(
       assignments[i] = bestC;
     }
 
-    for (let c = 0; c < k; c++) {
+    for (let c = 0; c < effectiveK; c++) {
       const members = vectors.filter((_, i) => assignments[i] === c);
       if (members.length === 0) continue;
       for (let d = 0; d < dim; d++) {
@@ -1059,7 +1069,7 @@ function detectTasteClusters(
   }
 
   const clusters: TasteCluster[] = [];
-  for (let c = 0; c < k; c++) {
+  for (let c = 0; c < effectiveK; c++) {
     const memberGames = userGames.filter((_, i) => assignments[i] === c);
     if (memberGames.length < 2) continue;
 
@@ -1073,12 +1083,35 @@ function detectTasteClusters(
       ? profile.topGenre.charAt(0).toUpperCase() + profile.topGenre.slice(1)
       : `Cluster ${c + 1}`;
 
+    // Compute semantic centroid from member games that have embeddings
+    let semanticCentroid: number[] | undefined;
+    const embeddedMembers = memberGames.filter(g => g.embedding && g.embedding.length > 0);
+    if (embeddedMembers.length >= 2) {
+      const embDim = embeddedMembers[0].embedding!.length;
+      const centroid = new Float64Array(embDim);
+      for (const g of embeddedMembers) {
+        const emb = g.embedding!;
+        for (let d = 0; d < embDim; d++) centroid[d] += emb[d];
+      }
+      const invN = 1 / embeddedMembers.length;
+      for (let d = 0; d < embDim; d++) centroid[d] *= invN;
+      // L2-normalize for cosine comparisons
+      let mag = 0;
+      for (let d = 0; d < embDim; d++) mag += centroid[d] * centroid[d];
+      if (mag > 0) {
+        const invMag = 1 / Math.sqrt(mag);
+        semanticCentroid = new Array(embDim);
+        for (let d = 0; d < embDim; d++) semanticCentroid[d] = centroid[d] * invMag;
+      }
+    }
+
     clusters.push({
       id: c,
       label,
       profile,
       gameCount: memberGames.length,
       topGames,
+      semanticCentroid,
     });
   }
 
@@ -1098,6 +1131,16 @@ function generateExplanation(
   // Franchise entry callout (top priority)
   if (scored.reasons.isFranchiseEntry && scored.reasons.franchiseOf) {
     parts.push(`part of the ${scored.reasons.franchiseOf} series you love`);
+  }
+
+  // Semantic discovery callout (ANN-sourced games)
+  if (scored.reasons.semanticRetrieved && scored.layerScores.semanticSimilarity > 0.15) {
+    parts.push('discovered through your taste profile');
+  }
+
+  // Cluster centroid match — game resonates with a specific taste niche
+  if (scored.layerScores.clusterSemanticSim > 0.25 && scored.reasons.bestClusterLabel) {
+    parts.push(`fits your ${scored.reasons.bestClusterLabel} taste`);
   }
 
   // Top reason: similar to a loved game
@@ -1150,7 +1193,7 @@ function generateExplanation(
 // ─── Full Pipeline ─────────────────────────────────────────────────────────────
 
 function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shelves: RecoShelf[] } {
-  const { userGames, candidates, now, currentHour, hasEmbeddings, dismissedGameIds } = input;
+  const { userGames, candidates, now, currentHour, embeddingCoverage, dismissedGameIds } = input;
   const dismissedSet = new Set(dismissedGameIds);
 
   // Reset per-run caches
@@ -1184,22 +1227,40 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
   const profileVec = profileToVector(tasteProfile);
 
   // ── 5. Build co-occurrence graph ──
-  progress('Building similarity graph...', 20);
-  const coOccurrence = buildCoOccurrenceEdges(filteredCandidates);
+  progress('Building similarity graph...', 18);
+  const coOccurrence = buildCoOccurrenceEdges(filteredCandidates, (f) => {
+    progress('Building similarity graph...', 18 + Math.floor(f * 4));
+  });
 
-  // ── 6. Pre-compute user embeddings for semantic similarity ──
-  const userEmbeddings = hasEmbeddings
-    ? userGames
-        .filter(ug => ug.embedding && ug.embedding.length > 0)
-        .map(ug => ({ embedding: ug.embedding!, weight: computeEngagementScore(ug, now) }))
-    : [];
+  // ── 6. Use precomputed taste centroid for semantic similarity ──
+  const useSemantics = embeddingCoverage > 0;
+  const tasteCentroid: Float64Array | null = useSemantics && input.tasteCentroid
+    ? new Float64Array(input.tasteCentroid)
+    : null;
 
   // ── 7. Detect franchises ──
-  progress('Detecting game franchises...', 24);
-  const franchises = detectFranchises(userGames, filteredCandidates);
+  progress('Detecting game franchises...', 23);
+  const franchises = detectFranchises(userGames, filteredCandidates, (f) => {
+    progress('Detecting game franchises...', 23 + Math.floor(f * 2));
+  });
   const userGameIds = new Set(userGames.map(g => g.gameId));
 
-  // ── 8. Build hoisted contexts (PERF: built once, not per candidate) ──
+  // ── 8. Early taste cluster detection (needed for cluster centroid scoring) ──
+  progress('Detecting taste clusters...', 24);
+  const clusters = detectTasteClusters(userGames, now);
+  tasteProfile.clusters = clusters;
+
+  // Pre-extract cluster semantic centroids for per-candidate scoring
+  const clusterCentroids: Array<{ centroid: Float64Array; label: string }> = [];
+  if (useSemantics) {
+    for (const cl of clusters) {
+      if (cl.semanticCentroid) {
+        clusterCentroids.push({ centroid: new Float64Array(cl.semanticCentroid), label: cl.label });
+      }
+    }
+  }
+
+  // ── 9. Build hoisted contexts (PERF: built once, not per candidate) ──
   progress('Building scoring contexts...', 26);
   const graphCtx = buildGraphUserContext(userGames, now);
   const todCtx = buildTimeOfDayContext(userGames, currentHour);
@@ -1222,13 +1283,21 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
   const maxPlayerCount = Math.max(1, ...filteredCandidates.map(c => c.playerCount ?? 0));
   const maxRecommendations = Math.max(1, ...filteredCandidates.map(c => c.recommendations ?? 0));
   const maxReviewVolume = Math.max(1, ...filteredCandidates.map(c => c.reviewVolume ?? 0));
+  const totalCandidates = filteredCandidates.length;
   const currentYear = new Date(now).getFullYear();
   const logMaxPlayerCount = Math.log(maxPlayerCount + 1);
 
-  // v3 dynamic weight table — 17 layers
-  const W_CONTENT      = hasEmbeddings ? 0.15 : 0.23;
-  const W_SEMANTIC     = hasEmbeddings ? 0.12 : 0.00;
-  const W_GRAPH        = hasEmbeddings ? 0.14 : 0.19;
+  // v3 dynamic weight table — 18 layers (proportional semantic scaling)
+  // Cluster semantic signal draws from the semantic budget, rewarding
+  // candidates that match any niche taste cluster (not just the global centroid).
+  const hasClusterCentroids = clusterCentroids.length >= 2;
+  const clusterLabels = clusterCentroids.map(c => c.label);
+  const semanticBudget = 0.12 * embeddingCoverage;
+  const W_SEMANTIC     = hasClusterCentroids ? semanticBudget * 0.65 : semanticBudget;
+  const W_CLUSTER_SEM  = hasClusterCentroids ? semanticBudget * 0.35 : 0;
+  const residual       = 0.12 * (1 - embeddingCoverage);
+  const W_CONTENT      = 0.15 + residual * 0.58;
+  const W_GRAPH        = 0.14 + residual * 0.42;
   const W_QUALITY      = 0.11;
   const W_POPULARITY   = 0.06;
   const W_RECENCY      = 0.06;
@@ -1242,7 +1311,7 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
 
   const maxGenreWeight = tasteProfile.genres[0]?.weight ?? 1;
   const scored: ScoredGame[] = [];
-  const progressStep = Math.max(1, Math.floor(filteredCandidates.length / 5));
+  const scoringProgressStep = Math.max(1, Math.floor(totalCandidates / 20));
 
   for (let i = 0; i < filteredCandidates.length; i++) {
     const c = filteredCandidates[i];
@@ -1251,10 +1320,25 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
     const candidateVec = candidateToVector(c);
     const contentSimilarity = cosineSimilarity(profileVec, candidateVec);
 
-    // Layer 6: Semantic similarity
-    const semanticSimilarity = hasEmbeddings
-      ? computeSemanticSimilarity(userEmbeddings, c.embedding)
+    // Layer 6: Semantic similarity (proportional to embedding coverage)
+    const semanticSimilarity = useSemantics
+      ? computeSemanticSimilarity(tasteCentroid, c.embedding)
       : 0;
+
+    // Layer 6b: Cluster centroid semantic similarity — max across all cluster centroids.
+    // Captures niche taste signals that get averaged out in the global centroid.
+    let clusterSemanticSim = 0;
+    let bestClusterIdx = -1;
+    if (W_CLUSTER_SEM > 0 && c.embedding && c.embedding.length > 0) {
+      for (let ci = 0; ci < clusterCentroids.length; ci++) {
+        const sim = computeSemanticSimilarity(clusterCentroids[ci].centroid, c.embedding);
+        if (sim > clusterSemanticSim) {
+          clusterSemanticSim = sim;
+          bestClusterIdx = ci;
+        }
+      }
+    }
+    const bestClusterLabel = bestClusterIdx >= 0 ? clusterLabels[bestClusterIdx] : undefined;
 
     // Layer 7: Graph traversal (uses pre-built context — no per-candidate Set allocations)
     const graph = computeGraphSignal(c, userGames, coOccurrence, graphCtx);
@@ -1306,7 +1390,7 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
 
     // Engagement curve bonus (uses pre-computed canonical genre norm sets)
     let engagementCurveBonus = 0;
-    const cGenresNorm = new Set(c.genres.map(g => toCanonicalGenre(g)).filter(Boolean).map((can: string) => norm(can)));
+    const cGenresNorm = new Set(c.genres.map(g => toCanonicalGenre(g)).filter((x): x is NonNullable<typeof x> => x !== null).map(x => norm(x)));
     for (const ug of userGames) {
       const curveMult = CURVE_MULTIPLIERS[ug.engagementPattern || 'unknown'];
       if (curveMult > 1.1) {
@@ -1323,7 +1407,7 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
     engagementCurveBonus = clamp01(engagementCurveBonus);
 
     // Shared features for reasons (canonical genres that match profile)
-    const sharedGenres = [...new Set(c.genres.map(g => toCanonicalGenre(g)).filter(Boolean).filter((can: string) => profileGenresNorm.has(norm(can))))];
+    const sharedGenres: string[] = [...new Set(c.genres.map(g => toCanonicalGenre(g)).filter((x): x is NonNullable<typeof x> => x !== null).filter(x => profileGenresNorm.has(norm(x))))];
     const sharedThemes = c.themes.filter(t => profileThemes.has(norm(t)));
     const sharedModes = c.gameModes.filter(m => profileModes.has(norm(m)));
 
@@ -1336,6 +1420,7 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
     const score = clamp01(
       contentSimilarity * W_CONTENT +
       semanticSimilarity * W_SEMANTIC +
+      clusterSemanticSim * W_CLUSTER_SEM +
       graphSignal * W_GRAPH +
       qualitySignal * W_QUALITY +
       popularitySignal * W_POPULARITY +
@@ -1367,6 +1452,7 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
       layerScores: {
         contentSimilarity,
         semanticSimilarity,
+        clusterSemanticSim,
         graphSignal,
         qualitySignal,
         popularitySignal,
@@ -1392,25 +1478,27 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
         franchiseOf: franchise.franchiseName,
         isFranchiseEntry: franchise.isFranchiseEntry,
         isOnSale,
+        semanticRetrieved: c.semanticRetrieved === true,
+        bestClusterLabel,
         explanation: '',
       },
       ...(c.price ? { price: c.price } : {}),
     });
 
-    if (i % progressStep === 0) {
-      progress('Scoring candidates...', 28 + Math.floor((i / filteredCandidates.length) * 30));
+    if (i % scoringProgressStep === 0) {
+      const pct = 28 + Math.floor((i / totalCandidates) * 30);
+      progress(`Scoring candidates... (${i.toLocaleString()}/${totalCandidates.toLocaleString()})`, pct);
     }
   }
 
   // ── 14. Diversity re-ranking (MMR) ──
-  progress('Applying diversity filter...', 62);
+  progress('Applying diversity filter...', 60);
   scored.sort((a, b) => b.score - a.score);
-  const reranked = mmrRerank(scored, 0.7, 80);
+  const reranked = mmrRerank(scored, 0.7, 80, (f) => {
+    progress('Applying diversity filter...', 60 + Math.floor(f * 8));
+  });
 
-  // ── 15. Taste cluster detection ──
-  progress('Detecting taste clusters...', 70);
-  const clusters = detectTasteClusters(userGames, now, 3);
-  tasteProfile.clusters = clusters;
+  // (Clusters already detected at step 8 for centroid scoring)
 
   // ── 16. Generate explanations ──
   progress('Generating insights...', 76);
@@ -1704,7 +1792,7 @@ function buildShelvesFromScored(
   const onHoldGames = userGames.filter(g => g.status === 'On Hold');
   if (onHoldGames.length > 0) {
     const topOnHold = onHoldGames.sort((a, b) => b.hoursPlayed - a.hoursPlayed)[0];
-    const topOnHoldCanonNorm = new Set(topOnHold.genres.map(g => toCanonicalGenre(g)).filter(Boolean).map((c: string) => norm(c)));
+    const topOnHoldCanonNorm = new Set(topOnHold.genres.map(g => toCanonicalGenre(g)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c)));
     const finishAndTry = reranked
       .filter(s => !usedGameIds.has(s.gameId) &&
         (s.reasons.similarTo.some(t => norm(t) === norm(topOnHold.title)) ||
@@ -1748,8 +1836,8 @@ function buildShelvesFromScored(
       releaseDate: g.releaseDate,
       score: 0,
       layerScores: {
-        contentSimilarity: 0, semanticSimilarity: 0, graphSignal: 0,
-        qualitySignal: 0, popularitySignal: 0, recencyBoost: 0,
+        contentSimilarity: 0, semanticSimilarity: 0, clusterSemanticSim: 0,
+        graphSignal: 0, qualitySignal: 0, popularitySignal: 0, recencyBoost: 0,
         diversityBonus: 0, trajectoryMultiplier: 0, negativeSignal: 0,
         timeOfDayBoost: 0, engagementCurveBonus: 0,
         franchiseBoost: 0, studioLoyaltyBoost: 0, sequencingBoost: 0,
@@ -1759,6 +1847,7 @@ function buildShelvesFromScored(
         similarTo: [], metacriticScore: null, popularityRank: null,
         isHiddenGem: false, isStretchPick: false,
         isFranchiseEntry: false, isOnSale: false,
+        semanticRetrieved: false,
         explanation: `You've been playing this — pick it back up!`,
       },
     }));

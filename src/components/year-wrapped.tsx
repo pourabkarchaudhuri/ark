@@ -171,21 +171,39 @@ function computeStats(year: number): WrappedStats {
     { month: 'Jan', count: 0 },
   );
 
-  // Play time of day
-  const hourBuckets = [0, 0, 0, 0]; // night (0-6), morning (6-12), afternoon (12-18), evening (18-24)
+  // Play time of day — distribute actual minutes across the buckets each
+  // session spans (night 0-6, morning 6-12, afternoon 12-18, evening 18-24).
+  const minuteBuckets = [0, 0, 0, 0];
+  const BUCKET_BOUNDARIES = [0, 6, 12, 18, 24]; // hour boundaries
   for (const s of yearSessions) {
-    const h = new Date(s.startTime).getHours();
-    if (h < 6) hourBuckets[0]++;
-    else if (h < 12) hourBuckets[1]++;
-    else if (h < 18) hourBuckets[2]++;
-    else hourBuckets[3]++;
+    const start = new Date(s.startTime);
+    const end = new Date(s.endTime);
+    if (end <= start) continue;
+
+    let cursor = new Date(start);
+    while (cursor < end) {
+      const h = cursor.getHours();
+      const bucketIdx = h < 6 ? 0 : h < 12 ? 1 : h < 18 ? 2 : 3;
+      const nextBoundaryHour = BUCKET_BOUNDARIES[bucketIdx + 1];
+
+      const nextBoundary = new Date(cursor);
+      nextBoundary.setHours(nextBoundaryHour, 0, 0, 0);
+      if (nextBoundaryHour === 24) {
+        nextBoundary.setDate(nextBoundary.getDate() + 1);
+        nextBoundary.setHours(0, 0, 0, 0);
+      }
+
+      const segmentEnd = nextBoundary < end ? nextBoundary : end;
+      minuteBuckets[bucketIdx] += (segmentEnd.getTime() - cursor.getTime()) / 60_000;
+      cursor = segmentEnd;
+    }
   }
-  const totalBuckets = hourBuckets.reduce((s, c) => s + c, 0) || 1;
+  const totalBuckets = minuteBuckets.reduce((s, c) => s + c, 0) || 1;
   const playTimeOfDay = [
-    { period: 'Night', percentage: Math.round((hourBuckets[0] / totalBuckets) * 100), icon: 'moon' as const },
-    { period: 'Morning', percentage: Math.round((hourBuckets[1] / totalBuckets) * 100), icon: 'sunrise' as const },
-    { period: 'Afternoon', percentage: Math.round((hourBuckets[2] / totalBuckets) * 100), icon: 'sun' as const },
-    { period: 'Evening', percentage: Math.round((hourBuckets[3] / totalBuckets) * 100), icon: 'sunset' as const },
+    { period: 'Night', percentage: Math.round((minuteBuckets[0] / totalBuckets) * 100), icon: 'moon' as const },
+    { period: 'Morning', percentage: Math.round((minuteBuckets[1] / totalBuckets) * 100), icon: 'sunrise' as const },
+    { period: 'Afternoon', percentage: Math.round((minuteBuckets[2] / totalBuckets) * 100), icon: 'sun' as const },
+    { period: 'Evening', percentage: Math.round((minuteBuckets[3] / totalBuckets) * 100), icon: 'sunset' as const },
   ];
   const nightPercentage = playTimeOfDay[0].percentage + playTimeOfDay[3].percentage;
   const isNightOwl = nightPercentage > 50;

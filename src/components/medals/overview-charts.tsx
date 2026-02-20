@@ -1,11 +1,26 @@
 /**
- * Overview charts — genre radar and activity area chart.
- * Logic and visuals inspired by Journey Analytics view.
+ * Overview charts — recharts-based shadcn activity area chart & genre radar.
  * Uses canonical genres so FPS/Shooter and Sport/Sports etc. merge.
  */
-import { memo } from 'react';
+import { memo, useState, useMemo } from 'react';
+import { Area, AreaChart, CartesianGrid, XAxis, PolarAngleAxis, PolarGrid, Radar, RadarChart } from 'recharts';
 import type { JourneyEntry, StatusChangeEntry, GameSession, LibraryGameEntry } from '@/types/game';
 import { toCanonicalGenre, getCanonicalGenres } from '@/data/canonical-genres';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  ChartLegend,
+  ChartLegendContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 // ─── Compute analytics for overview sections ─────────────────────────────────
 
@@ -17,31 +32,23 @@ export function computeOverviewAnalytics(
 ) {
   const now = new Date();
 
-  const monthlyActivity: { label: string; count: number }[] = [];
+  const monthlyActivity: { date: string; label: string; added: number; completed: number }[] = [];
   for (let i = 11; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const label = d.toLocaleDateString('en-US', { month: 'short' });
     const year = d.getFullYear();
     const month = d.getMonth();
-    const count = journeyEntries.filter((e) => {
+    const date = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+    const addedCount = journeyEntries.filter((e) => {
       const added = new Date(e.addedAt);
       return added.getFullYear() === year && added.getMonth() === month;
     }).length;
-    monthlyActivity.push({ label, count });
-  }
-
-  const monthlyCompletions: { label: string; count: number }[] = [];
-  for (let i = 11; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const label = d.toLocaleDateString('en-US', { month: 'short' });
-    const year = d.getFullYear();
-    const month = d.getMonth();
-    const count = statusHistory.filter((h) => {
+    const completedCount = statusHistory.filter((h) => {
       if (h.newStatus !== 'Completed') return false;
       const ts = new Date(h.timestamp);
       return ts.getFullYear() === year && ts.getMonth() === month;
     }).length;
-    monthlyCompletions.push({ label, count });
+    monthlyActivity.push({ date, label, added: addedCount, completed: completedCount });
   }
 
   const genreCounts: Record<string, number> = {};
@@ -51,12 +58,12 @@ export function computeOverviewAnalytics(
       if (can) genreCounts[can] = (genreCounts[can] || 0) + 1;
     }
   }
-  // Use all canonical genres for radar (same axes as Taste DNA); 0 for genres with no plays
   const canonical = getCanonicalGenres();
   const maxGenreCount = Math.max(1, ...Object.values(genreCounts));
   const genreRadar = canonical.map((genre) => ({
     label: genre,
-    value: (genreCounts[genre] ?? 0) / maxGenreCount,
+    value: Math.round(((genreCounts[genre] ?? 0) / maxGenreCount) * 100),
+    count: genreCounts[genre] ?? 0,
   }));
 
   const sessionDays = new Set<string>();
@@ -121,7 +128,6 @@ export function computeOverviewAnalytics(
 
   return {
     monthlyActivity,
-    monthlyCompletions,
     genreRadar,
     currentStreak,
     longestStreak,
@@ -132,164 +138,200 @@ export function computeOverviewAnalytics(
   };
 }
 
-// ─── Genre radar chart (SVG) ─────────────────────────────────────────────────
+// ─── Activity area chart (interactive, recharts) ──────────────────────────────
 
-export const GenreRadarChart = memo(function GenreRadarChart({
-  data,
-  size = 180,
-  levels = 4,
-  color = '#06b6d4',
-}: {
-  data: { label: string; value: number }[];
-  size?: number;
-  levels?: number;
-  color?: string;
-}) {
-  const cx = size / 2;
-  const cy = size / 2;
-  const radius = (size - 40) / 2;
-  const n = data.length;
-  if (n < 3) return null;
-
-  function getPoint(index: number, r: number): { x: number; y: number } {
-    const angle = (index * 2 * Math.PI) / n - Math.PI / 2;
-    return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
-  }
-
-  const gridRings = Array.from({ length: levels }, (_, i) => {
-    const r = (radius * (i + 1)) / levels;
-    return Array.from({ length: n }, (_, j) => getPoint(j, r)).map((p) => `${p.x},${p.y}`).join(' ');
-  });
-  const dataPoints = data.map((d, i) => getPoint(i, d.value * radius));
-  const dataPolygon = dataPoints.map((p) => `${p.x},${p.y}`).join(' ');
-  const axisEndpoints = Array.from({ length: n }, (_, i) => getPoint(i, radius));
-  const labelPositions = data.map((d, i) => {
-    const angle = (i * 2 * Math.PI) / n - Math.PI / 2;
-    const labelR = radius + 18;
-    return { x: cx + labelR * Math.cos(angle), y: cy + labelR * Math.sin(angle), label: d.label };
-  });
-
-  const gradId = `overview-radar-${color.replace('#', '')}`;
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="mx-auto">
-      <defs>
-        <radialGradient id={gradId}>
-          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
-          <stop offset="100%" stopColor={color} stopOpacity="0.08" />
-        </radialGradient>
-      </defs>
-      {gridRings.map((points, i) => (
-        <polygon key={i} points={points} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="0.5" />
-      ))}
-      {axisEndpoints.map((pt, i) => (
-        <line key={i} x1={cx} y1={cy} x2={pt.x} y2={pt.y} stroke="rgba(255,255,255,0.06)" strokeWidth="0.5" />
-      ))}
-      <polygon points={dataPolygon} fill={`url(#${gradId})`} stroke={color} strokeWidth="1.5" strokeLinejoin="round" opacity="0.9" />
-      {dataPoints.map((p, i) => (
-        <circle key={i} cx={p.x} cy={p.y} r="2.5" fill={color} stroke="rgba(0,0,0,0.3)" strokeWidth="0.5" />
-      ))}
-      {labelPositions.map((lp, i) => (
-        <text key={i} x={lp.x} y={lp.y} textAnchor="middle" dominantBaseline="central" fill="rgba(255,255,255,0.6)" fontSize="8" fontWeight="500">
-          {lp.label}
-        </text>
-      ))}
-    </svg>
-  );
-});
-
-// ─── Activity area chart (monthly added + completed) ──────────────────────────
+const activityChartConfig = {
+  added: {
+    label: 'Added',
+    color: 'hsl(292, 84%, 61%)',
+  },
+  completed: {
+    label: 'Completed',
+    color: 'hsl(142, 71%, 45%)',
+  },
+} satisfies ChartConfig;
 
 export const ActivityAreaChart = memo(function ActivityAreaChart({
   data,
-  data2,
-  className,
 }: {
-  data: { label: string; count: number }[];
-  data2?: { label: string; count: number }[];
-  className?: string;
+  data: { date: string; label: string; added: number; completed: number }[];
 }) {
-  const width = 380;
-  const height = 120;
-  const px = 8;
-  const ptop = 8;
-  const pb = 18;
-  const chartW = width - px * 2;
-  const chartH = height - ptop - pb;
+  const [timeRange, setTimeRange] = useState('12m');
 
-  const allValues = [...data.map((d) => d.count), ...(data2?.map((d) => d.count) ?? [])];
-  const maxVal = Math.max(1, ...allValues);
-
-  function toPoints(values: number[]): { x: number; y: number }[] {
-    return values.map((v, i) => ({
-      x: px + (i / Math.max(values.length - 1, 1)) * chartW,
-      y: ptop + chartH - (v / maxVal) * chartH,
-    }));
-  }
-  function smoothPath(pts: { x: number; y: number }[]): string {
-    if (pts.length === 0) return '';
-    if (pts.length === 1) return `M ${pts[0].x},${pts[0].y}`;
-    let d = `M ${pts[0].x},${pts[0].y}`;
-    for (let i = 0; i < pts.length - 1; i++) {
-      const cpx = (pts[i].x + pts[i + 1].x) / 2;
-      d += ` C ${cpx},${pts[i].y} ${cpx},${pts[i + 1].y} ${pts[i + 1].x},${pts[i + 1].y}`;
-    }
-    return d;
-  }
-  function areaPath(values: number[]): string {
-    const pts = toPoints(values);
-    if (pts.length === 0) return '';
-    const line = smoothPath(pts);
-    const baseY = ptop + chartH;
-    return `${line} L ${pts[pts.length - 1].x},${baseY} L ${pts[0].x},${baseY} Z`;
-  }
-
-  const pts1 = data.map((d) => d.count);
-  const pts2 = data2?.map((d) => d.count);
-  const pts1Points = toPoints(pts1);
+  const filteredData = useMemo(() => {
+    if (timeRange === '12m') return data;
+    const months = timeRange === '6m' ? 6 : 3;
+    return data.slice(-months);
+  }, [data, timeRange]);
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className={className ?? 'w-full h-auto'}>
-      <defs>
-        <linearGradient id="overview-area-1" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#d946ef" stopOpacity="0.5" />
-          <stop offset="100%" stopColor="#d946ef" stopOpacity="0.05" />
-        </linearGradient>
-        <linearGradient id="overview-area-2" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#22c55e" stopOpacity="0.4" />
-          <stop offset="100%" stopColor="#22c55e" stopOpacity="0.05" />
-        </linearGradient>
-      </defs>
-      {[0.25, 0.5, 0.75].map((pct) => (
-        <line key={pct} x1={px} y1={ptop + chartH * (1 - pct)} x2={px + chartW} y2={ptop + chartH * (1 - pct)} stroke="rgba(255,255,255,0.04)" strokeWidth="0.5" />
-      ))}
-      <line x1={px} y1={ptop + chartH} x2={px + chartW} y2={ptop + chartH} stroke="rgba(255,255,255,0.06)" strokeWidth="0.5" />
-      <path d={areaPath(pts1)} fill="url(#overview-area-1)" />
-      <path d={smoothPath(pts1Points)} fill="none" stroke="#d946ef" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
-      {pts1Points.map((p, i) => {
-        const baseY = ptop + chartH;
-        const val = pts1[i];
-        return (
-          <g key={`a-${i}`}>
-            {val > 0 && <line x1={p.x} y1={p.y} x2={p.x} y2={baseY} stroke="#d946ef" strokeWidth="0.5" strokeDasharray="2 2" opacity="0.25" />}
-            <circle cx={p.x} cy={p.y} r={val > 0 ? 2 : 1} fill={val > 0 ? '#d946ef' : 'rgba(255,255,255,0.15)'} />
-          </g>
-        );
-      })}
-      {pts2 && (() => {
-        const pts2Points = toPoints(pts2);
-        return (
-          <>
-            <path d={areaPath(pts2)} fill="url(#overview-area-2)" />
-            <path d={smoothPath(pts2Points)} fill="none" stroke="#22c55e" strokeWidth="0.8" strokeDasharray="3 2" strokeLinecap="round" strokeLinejoin="round" />
-            {pts2Points.map((p, i) => pts2[i] > 0 && <circle key={i} cx={p.x} cy={p.y} r="1.5" fill="#22c55e" />)}
-          </>
-        );
-      })()}
-      {data.map((d, i) => (i % 2 === 0 ? (
-        <text key={i} x={px + (i / Math.max(data.length - 1, 1)) * chartW} y={height - 2} textAnchor="middle" fill="rgba(255,255,255,0.3)" fontSize="5">
-          {d.label}
-        </text>
-      ) : null))}
-    </svg>
+    <div className="flex flex-col h-full w-full">
+      <div className="flex items-center justify-between mb-1 shrink-0">
+        <p className="text-[9px] text-white/30 font-mono uppercase tracking-widest">
+          Activity
+        </p>
+        <Select value={timeRange} onValueChange={setTimeRange}>
+          <SelectTrigger
+            className="h-5 w-[90px] rounded text-[9px] font-mono bg-white/[0.04] border-white/10 text-white/60 px-1.5 py-0"
+            aria-label="Select time range"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent className="rounded-lg bg-black/90 border-white/10 min-w-[90px]">
+            <SelectItem value="12m" className="text-[10px] font-mono">12 months</SelectItem>
+            <SelectItem value="6m" className="text-[10px] font-mono">6 months</SelectItem>
+            <SelectItem value="3m" className="text-[10px] font-mono">3 months</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="flex-1 min-h-0">
+        <ChartContainer config={activityChartConfig} className="h-full w-full aspect-auto">
+          <AreaChart data={filteredData}>
+            <defs>
+              <linearGradient id="fillAdded" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-added)" stopOpacity={0.7} />
+                <stop offset="95%" stopColor="var(--color-added)" stopOpacity={0.05} />
+              </linearGradient>
+              <linearGradient id="fillCompleted" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-completed)" stopOpacity={0.6} />
+                <stop offset="95%" stopColor="var(--color-completed)" stopOpacity={0.05} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.04)" />
+            <XAxis
+              dataKey="label"
+              tickLine={false}
+              axisLine={false}
+              tickMargin={4}
+              tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+            />
+            <ChartTooltip
+              cursor={false}
+              content={
+                <ChartTooltipContent
+                  labelFormatter={(value) => String(value)}
+                  indicator="dot"
+                />
+              }
+            />
+            <Area
+              dataKey="completed"
+              type="natural"
+              fill="url(#fillCompleted)"
+              stroke="var(--color-completed)"
+              strokeWidth={1.5}
+              stackId="a"
+            />
+            <Area
+              dataKey="added"
+              type="natural"
+              fill="url(#fillAdded)"
+              stroke="var(--color-added)"
+              strokeWidth={1.5}
+              stackId="a"
+            />
+            <ChartLegend content={<ChartLegendContent />} />
+          </AreaChart>
+        </ChartContainer>
+      </div>
+    </div>
+  );
+});
+
+// ─── Genre radar chart (recharts) ────────────────────────────────────────────
+
+const genreRadarConfig = {
+  value: {
+    label: 'Affinity',
+    color: 'hsl(187, 96%, 42%)',
+  },
+} satisfies ChartConfig;
+
+export const GenreRadarChart = memo(function GenreRadarChart({
+  data,
+}: {
+  data: { label: string; value: number; count: number }[];
+}) {
+  const top = useMemo(() => {
+    const sorted = [...data].sort((a, b) => b.value - a.value);
+    return sorted.filter(d => d.value > 0).slice(0, 8);
+  }, [data]);
+
+  if (top.length < 3) return null;
+
+  return (
+    <ChartContainer config={genreRadarConfig} className="mx-auto aspect-square h-full w-full">
+      <RadarChart data={top}>
+        <ChartTooltip
+          cursor={false}
+          content={<ChartTooltipContent hideLabel />}
+        />
+        <PolarGrid gridType="circle" stroke="rgba(255,255,255,0.08)" />
+        <PolarAngleAxis
+          dataKey="label"
+          tick={{ fontSize: 9, fill: 'rgba(255,255,255,0.55)', fontFamily: 'JetBrains Mono, monospace' }}
+        />
+        <Radar
+          dataKey="value"
+          fill="hsl(187, 96%, 42%)"
+          fillOpacity={0.4}
+          stroke="hsl(187, 96%, 42%)"
+          strokeWidth={1.5}
+          dot={{ r: 3, fillOpacity: 1 }}
+        />
+      </RadarChart>
+    </ChartContainer>
+  );
+});
+
+// ─── Data Sources radar chart (recharts) ─────────────────────────────────────
+
+const dataSourcesConfig = {
+  count: {
+    label: 'Games',
+    color: 'hsl(187, 100%, 50%)',
+  },
+} satisfies ChartConfig;
+
+function TruncatedTick({ x, y, payload, textAnchor }: { x: number; y: number; payload: { value: string }; textAnchor: 'start' | 'middle' | 'end' | 'inherit' }) {
+  const label = payload.value.length > 10 ? payload.value.slice(0, 9) + '…' : payload.value;
+  return (
+    <text x={x} y={y} textAnchor={textAnchor} fontSize={9} fill="rgba(255,255,255,0.55)" fontFamily="JetBrains Mono, monospace">
+      {label}
+    </text>
+  );
+}
+
+export const DataSourcesRadar = memo(function DataSourcesRadar({
+  data,
+}: {
+  data: { source: string; count: number }[];
+}) {
+  const top = useMemo(() => data.slice(0, 8), [data]);
+
+  if (top.length < 3) return null;
+
+  return (
+    <ChartContainer config={dataSourcesConfig} className="mx-auto aspect-square h-full w-full">
+      <RadarChart data={top} outerRadius="60%">
+        <ChartTooltip
+          cursor={false}
+          content={<ChartTooltipContent hideLabel />}
+        />
+        <PolarGrid gridType="circle" stroke="rgba(255,255,255,0.08)" />
+        <PolarAngleAxis
+          dataKey="source"
+          tick={TruncatedTick as never}
+        />
+        <Radar
+          dataKey="count"
+          fill="hsl(187, 100%, 50%)"
+          fillOpacity={0.4}
+          stroke="hsl(187, 100%, 50%)"
+          strokeWidth={1.5}
+          dot={{ r: 3, fillOpacity: 1 }}
+        />
+      </RadarChart>
+    </ChartContainer>
   );
 });

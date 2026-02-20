@@ -26,6 +26,9 @@ import { journeyStore } from './journey-store';
 import { sessionStore } from './session-store';
 import { statusHistoryStore } from './status-history-store';
 import { recoHistoryStore } from './reco-history-store';
+import { catalogStore } from './catalog-store';
+import { annIndex } from './ann-index';
+import { embeddingService } from './embedding-service';
 
 // ─── Embedding cache (populated externally by embedding-service) ────────────
 
@@ -34,6 +37,11 @@ let embeddingCache: Map<string, number[]> = new Map();
 /** Called by the embedding service to inject cached vectors. */
 export function setEmbeddingCache(cache: Map<string, number[]>) {
   embeddingCache = cache;
+}
+
+/** Returns the current embedding cache (for visualization/debug). */
+export function getEmbeddingCache(): ReadonlyMap<string, number[]> {
+  return embeddingCache;
 }
 
 // ─── State ─────────────────────────────────────────────────────────────────────
@@ -149,6 +157,7 @@ class RecoStore {
     embeddingGenerator?: (
       games: Array<{ id: string; title: string; genres?: string[]; themes?: string[]; developer?: string }>,
     ) => Promise<number>,
+    catalogEmbeddingEnricher?: (candidateIds: Set<string>) => Promise<number>,
   ) {
     if (this.state.status === 'computing') return; // prevent double-fire
 
@@ -181,9 +190,13 @@ class RecoStore {
 
     try {
       // 1. Build user game snapshots from library + journey
+      this.state = { ...this.state, progress: { stage: 'Building user profile...', percent: 3 } };
+      this.notify();
       const userGames = this.buildUserGameSnapshots();
 
       // 2. Build candidate pool (from cached browse data + similar games)
+      this.state = { ...this.state, progress: { stage: 'Loading candidate pool...', percent: 5 } };
+      this.notify();
       const candidates = await this.buildCandidatePool(userGames);
 
       // Store counts for the UI
@@ -226,8 +239,36 @@ class RecoStore {
         }
       }
 
-      // 3. Check if we have any embeddings available
-      const hasEmbeddings = embeddingCache.size > 0;
+      // 2.7. Enrich candidates with catalog embeddings
+      this.state = { ...this.state, progress: { stage: 'Enriching catalog embeddings...', percent: 12 } };
+      this.notify();
+      if (catalogEmbeddingEnricher) {
+        const catalogCandidateIds = new Set(
+          candidates.filter(c => !c.embedding && c.gameId.startsWith('steam-')).map(c => c.gameId),
+        );
+        if (catalogCandidateIds.size > 0) {
+          const enriched = await catalogEmbeddingEnricher(catalogCandidateIds);
+          if (enriched > 0) {
+            for (const c of candidates) {
+              c.embedding ??= embeddingCache.get(c.gameId);
+            }
+          }
+        }
+      }
+
+      // 3. Compute embedding coverage
+      this.state = { ...this.state, progress: { stage: 'Preparing scoring engine...', percent: 14 } };
+      this.notify();
+      const candidatesWithEmbeddings = candidates.filter(c => c.embedding && c.embedding.length > 0).length;
+      const embeddingCoverage = candidates.length > 0
+        ? candidatesWithEmbeddings / candidates.length
+        : 0;
+
+      // 3.5. Precompute taste centroid for the worker
+      const userEmbs = userGames
+        .filter(ug => ug.embedding && ug.embedding.length > 0)
+        .map(ug => ({ embedding: ug.embedding!, weight: this.computeEngagementWeight(ug) }));
+      const tasteCentroid = embeddingService.computeTasteCentroid(userEmbs);
 
       // 4. Get dismissed game IDs
       const dismissedGameIds = recoHistoryStore.getDismissedIds();
@@ -238,8 +279,9 @@ class RecoStore {
         candidates,
         now: Date.now(),
         currentHour: new Date().getHours(),
-        hasEmbeddings,
+        embeddingCoverage,
         dismissedGameIds,
+        tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
       };
 
       this.runWorker(input);
@@ -274,6 +316,7 @@ class RecoStore {
     }
 
     const snapshots: UserGameSnapshot[] = [];
+    const snapshotIds = new Set<string>();
 
     for (const entry of journeyEntries) {
       const libEntry = libraryStore.getEntry(entry.gameId);
@@ -312,6 +355,7 @@ class RecoStore {
         ? meta.similarGames.map(sg => sg.name).filter(Boolean)
         : [];
 
+      snapshotIds.add(entry.gameId);
       snapshots.push({
         gameId: entry.gameId,
         title: entry.title,
@@ -336,6 +380,47 @@ class RecoStore {
         engagementPattern,
         sessionTimestamps,
         sessionDurations,
+        ...(embedding ? { embedding } : {}),
+      });
+    }
+
+    // Include library entries that have no journey entry yet (e.g. "Want to Play"
+    // games added via addToLibrary, which doesn't create a journey record).
+    // This ensures the recommendation engine sees wishlist intent as a signal and
+    // excludes these games from candidates.
+    for (const libEntry of libraryStore.getAllEntries()) {
+      if (snapshotIds.has(libEntry.gameId)) continue;
+      const meta = libEntry.cachedMeta;
+      const embedding = embeddingCache.get(libEntry.gameId);
+      const addedAt = libEntry.addedAt instanceof Date
+        ? libEntry.addedAt.toISOString()
+        : String(libEntry.addedAt);
+
+      snapshotIds.add(libEntry.gameId);
+      snapshots.push({
+        gameId: libEntry.gameId,
+        title: meta?.title ?? `Game ${libEntry.gameId}`,
+        genres: meta?.genre ?? [],
+        themes: meta?.themes ?? [],
+        gameModes: meta?.gameModes ?? [],
+        perspectives: meta?.playerPerspectives ?? [],
+        developer: meta?.developer ?? '',
+        publisher: meta?.publisher ?? '',
+        releaseDate: meta?.releaseDate ?? '',
+        status: libEntry.status,
+        hoursPlayed: libEntry.hoursPlayed ?? 0,
+        rating: libEntry.rating ?? 0,
+        addedAt,
+        removedAt: undefined,
+        sessionCount: 0,
+        avgSessionMinutes: 0,
+        lastSessionDate: null,
+        activeToIdleRatio: 1,
+        statusTrajectory: [libEntry.status],
+        similarGameTitles: meta?.similarGames?.map(sg => sg.name).filter(Boolean) ?? [],
+        engagementPattern: 'unknown',
+        sessionTimestamps: [],
+        sessionDurations: [],
         ...(embedding ? { embedding } : {}),
       });
     }
@@ -387,11 +472,15 @@ class RecoStore {
    * operations from the prefetch store.
    */
   private async buildCandidatePool(userGames: UserGameSnapshot[]): Promise<CandidateGame[]> {
+    // Exclude both journey-derived snapshots AND all library entries (covers
+    // "Want to Play" and other statuses that may not yet have journey records).
     const userGameIds = new Set(userGames.map(g => g.gameId));
+    for (const id of libraryStore.getAllGameIds()) userGameIds.add(id);
+
     const candidates: CandidateGame[] = [];
     const seenIds = new Set<string>();
 
-    // Read raw game array from the browse-cache IDB
+    // ── Source 1: Browse cache (existing path — 3K–6K games) ──
     let rawGames: Record<string, any>[] = [];
     try {
       rawGames = await this.loadBrowseCacheGames();
@@ -404,7 +493,6 @@ class RecoStore {
       if (!id || userGameIds.has(id) || seenIds.has(id)) continue;
       seenIds.add(id);
 
-      // Attach embedding if available
       const embedding = embeddingCache.get(id);
 
       candidates.push({
@@ -428,7 +516,6 @@ class RecoStore {
         recommendations: typeof g.recommendations === 'number' ? g.recommendations : undefined,
         achievements: typeof g.achievements === 'number' ? g.achievements : undefined,
         comingSoon: g.comingSoon === true,
-        // v3: review sentiment
         reviewPositivity: typeof g.reviewPositivity === 'number' ? g.reviewPositivity
           : (typeof g.totalPositive === 'number' && typeof g.totalReviews === 'number' && g.totalReviews > 0)
             ? g.totalPositive / g.totalReviews
@@ -436,7 +523,6 @@ class RecoStore {
         reviewVolume: typeof g.reviewVolume === 'number' ? g.reviewVolume
           : typeof g.totalReviews === 'number' ? g.totalReviews
           : undefined,
-        // v3: price info
         price: g.price ? {
           isFree: g.price.isFree === true || g.price.final === 0,
           finalFormatted: g.price.finalFormatted || undefined,
@@ -446,7 +532,201 @@ class RecoStore {
       });
     }
 
+    // ── Source 2: Full Steam catalog (pre-filtered to ~5–8K) ──
+    const browseCount = candidates.length;
+    try {
+      const catalogCandidates = await this.loadCatalogCandidates(userGames, userGameIds, seenIds);
+      candidates.push(...catalogCandidates);
+    } catch (err) {
+      console.warn('[RecoStore] Catalog candidate loading failed (non-fatal):', err);
+    }
+    const catalogCount = candidates.length - browseCount;
+
+    // ── Source 3: ANN embedding retrieval (top 5K by taste centroid) ──
+    let annCount = 0;
+    try {
+      if (annIndex.isReady) {
+        const annCandidates = await this.retrieveByANN(userGames, userGameIds, seenIds);
+        candidates.push(...annCandidates);
+        annCount = annCandidates.length;
+      }
+    } catch (err) {
+      console.warn('[RecoStore] ANN retrieval failed (non-fatal):', err);
+    }
+
+    console.log(`[RecoStore] Candidate pool: ${candidates.length} (browse: ${browseCount}, catalog: ${catalogCount}, ann: ${annCount})`);
     return candidates;
+  }
+
+  /**
+   * Pre-filter the full Steam catalog down to a manageable candidate set.
+   * Criteria: genre overlap with user profile, developer loyalty, or popularity.
+   */
+  private async loadCatalogCandidates(
+    userGames: UserGameSnapshot[],
+    userGameIds: Set<string>,
+    seenIds: Set<string>,
+  ): Promise<CandidateGame[]> {
+    const entryCount = await catalogStore.getEntryCount();
+    if (entryCount === 0) return [];
+
+    // Build filter criteria from user library
+    const genreCounts = new Map<string, number>();
+    const devSet = new Set<string>();
+    for (const ug of userGames) {
+      for (const g of ug.genres) {
+        genreCounts.set(g, (genreCounts.get(g) || 0) + 1);
+      }
+      if (ug.developer && ug.rating >= 3.5) {
+        devSet.add(ug.developer);
+      }
+    }
+    const topGenres = [...genreCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 15)
+      .map(([g]) => g);
+
+    const catalogEntries = await catalogStore.queryForCandidates({
+      topGenres,
+      loyalDevelopers: [...devSet],
+      excludeIds: userGameIds,
+      minReviews: 10,
+      minPositivity: 0.5,
+      maxResults: 25_000,
+    });
+
+    const results: CandidateGame[] = [];
+    for (const entry of catalogEntries) {
+      const id = `steam-${entry.appid}`;
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+
+      const embedding = embeddingCache.get(id);
+      const releaseStr = entry.releaseDate
+        ? new Date(entry.releaseDate * 1000).toISOString().slice(0, 10)
+        : '';
+
+      results.push({
+        gameId: id,
+        title: entry.name,
+        developer: entry.developer,
+        publisher: entry.publisher,
+        genres: entry.genres,
+        themes: entry.themes,
+        gameModes: entry.modes,
+        perspectives: [],
+        platforms: [
+          ...(entry.windows ? ['Windows'] : []),
+          ...(entry.mac ? ['Mac'] : []),
+          ...(entry.linux ? ['Linux'] : []),
+        ],
+        metacriticScore: null,
+        playerCount: null,
+        releaseDate: releaseStr,
+        similarGameTitles: [],
+        reviewPositivity: entry.reviewPositivity,
+        reviewVolume: entry.reviewCount,
+        price: {
+          isFree: entry.isFree,
+          finalFormatted: entry.priceFormatted,
+          discountPercent: entry.discountPercent,
+        },
+        ...(embedding ? { embedding } : {}),
+      });
+    }
+
+    console.log(`[RecoStore] Catalog pre-filter: ${entryCount} total → ${catalogEntries.length} matched → ${results.length} new candidates`);
+    return results;
+  }
+
+  /**
+   * Retrieve semantically similar games from the ANN index using a
+   * weighted taste centroid derived from the user's library embeddings.
+   */
+  private async retrieveByANN(
+    userGames: UserGameSnapshot[],
+    userGameIds: Set<string>,
+    seenIds: Set<string>,
+  ): Promise<CandidateGame[]> {
+    const userEmbs = userGames
+      .filter(ug => ug.embedding && ug.embedding.length > 0)
+      .map(ug => ({
+        embedding: ug.embedding!,
+        weight: this.computeEngagementWeight(ug),
+      }));
+
+    const centroid = embeddingService.computeTasteCentroid(userEmbs);
+    if (!centroid) return [];
+
+    const TOP_K = 5_000;
+    const nearestIds = await annIndex.query(centroid, TOP_K);
+
+    const newAppIds: number[] = [];
+    const newIdSet = new Set<string>();
+    for (const id of nearestIds) {
+      if (userGameIds.has(id) || seenIds.has(id)) continue;
+      const appid = parseInt(id.replace('steam-', ''), 10);
+      if (!isNaN(appid)) {
+        newAppIds.push(appid);
+        newIdSet.add(id);
+        seenIds.add(id);
+      }
+    }
+
+    if (newAppIds.length === 0) return [];
+
+    const entries = await catalogStore.getEntries(newAppIds);
+    const results: CandidateGame[] = [];
+
+    for (const entry of entries) {
+      const id = `steam-${entry.appid}`;
+      if (!newIdSet.has(id)) continue;
+
+      const embedding = embeddingCache.get(id);
+      const releaseStr = entry.releaseDate
+        ? new Date(entry.releaseDate * 1000).toISOString().slice(0, 10)
+        : '';
+
+      results.push({
+        gameId: id,
+        title: entry.name,
+        developer: entry.developer,
+        publisher: entry.publisher,
+        genres: entry.genres,
+        themes: entry.themes,
+        gameModes: entry.modes,
+        perspectives: [],
+        platforms: [
+          ...(entry.windows ? ['Windows'] : []),
+          ...(entry.mac ? ['Mac'] : []),
+          ...(entry.linux ? ['Linux'] : []),
+        ],
+        metacriticScore: null,
+        playerCount: null,
+        releaseDate: releaseStr,
+        similarGameTitles: [],
+        reviewPositivity: entry.reviewPositivity,
+        reviewVolume: entry.reviewCount,
+        price: {
+          isFree: entry.isFree,
+          finalFormatted: entry.priceFormatted,
+          discountPercent: entry.discountPercent,
+        },
+        semanticRetrieved: true,
+        ...(embedding ? { embedding } : {}),
+      });
+    }
+
+    console.log(`[RecoStore] ANN retrieval: ${nearestIds.length} queried → ${newAppIds.length} new → ${results.length} loaded`);
+    return results;
+  }
+
+  private computeEngagementWeight(ug: UserGameSnapshot): number {
+    let w = 1;
+    w += Math.min(ug.hoursPlayed / 20, 3);
+    w += (ug.rating / 5) * 2;
+    if (ug.status === 'Completed') w += 1;
+    return w;
   }
 
   /**
@@ -534,10 +814,23 @@ class RecoStore {
   }
 
   private workerTimeout: ReturnType<typeof setTimeout> | null = null;
-  private static readonly WORKER_TIMEOUT_MS = 60_000; // 60s safety net
+  private static readonly WORKER_IDLE_TIMEOUT_MS = 600_000; // 10 min — large catalog pools can take several minutes
+
+  private resetWorkerTimeout() {
+    if (this.workerTimeout) clearTimeout(this.workerTimeout);
+    this.workerTimeout = setTimeout(() => {
+      console.error('[RecoStore] Worker idle for 10 min — killing');
+      this.killWorker();
+      this.state = {
+        ...this.state,
+        status: 'error',
+        error: 'Recommendation engine stalled — try again',
+      };
+      this.notify();
+    }, RecoStore.WORKER_IDLE_TIMEOUT_MS);
+  }
 
   private runWorker(input: RecoWorkerInput) {
-    // Terminate any existing worker + clear stale timeout
     this.killWorker();
 
     try {
@@ -546,22 +839,13 @@ class RecoStore {
         { type: 'module', name: 'Ark Oracle Worker' },
       );
 
-      // Safety timeout: if the worker hangs for 60s, kill it and error out
-      this.workerTimeout = setTimeout(() => {
-        console.error('[RecoStore] Worker timed out after 60s');
-        this.killWorker();
-        this.state = {
-          ...this.state,
-          status: 'error',
-          error: 'Recommendation engine timed out — try again',
-        };
-        this.notify();
-      }, RecoStore.WORKER_TIMEOUT_MS);
+      this.resetWorkerTimeout();
 
       this.worker.onmessage = (e: MessageEvent<RecoWorkerMessage>) => {
         const msg = e.data;
 
         if (msg.type === 'progress') {
+          this.resetWorkerTimeout();
           this.state = {
             ...this.state,
             progress: { stage: msg.stage, percent: msg.percent },

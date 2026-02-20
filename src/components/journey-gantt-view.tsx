@@ -82,6 +82,7 @@ export interface GanttSegment {
   status: GameStatus;
   startDate: string; // ISO
   endDate: string;   // ISO (or "now")
+  sessionMinutes?: number; // Active play minutes (only for session-derived Playing Now segments)
 }
 
 export interface GanttGameRow {
@@ -177,6 +178,8 @@ const segmentStyles: Record<GameStatus, SegmentStyle> = {
 const DAY_MS = 86_400_000;
 /** Minimum px per day so timeline can scroll when range is large */
 const MIN_DAY_WIDTH = 8;
+/** Minimum px per day in Day view so each of the 24 hour columns is readable */
+const MIN_HOURLY_DAY_WIDTH = 720;
 
 function daysBetween(a: string | Date, b: string | Date): number {
   return Math.max(1, Math.round((new Date(b).getTime() - new Date(a).getTime()) / DAY_MS));
@@ -234,18 +237,67 @@ function formatDuration(days: number): string {
   return `${years} yr`;
 }
 
+/** Format a segment's duration intelligently: hours/mins for sessions, days for longer periods */
+function formatSegmentDuration(seg: GanttSegment): string {
+  if (seg.sessionMinutes != null) {
+    return formatMinutes(seg.sessionMinutes);
+  }
+  const ms = new Date(seg.endDate).getTime() - new Date(seg.startDate).getTime();
+  if (ms < DAY_MS) {
+    return formatMinutes(Math.round(ms / 60_000));
+  }
+  return formatDuration(Math.max(1, Math.round(ms / DAY_MS)));
+}
+
+function formatMinutes(mins: number): string {
+  const rounded = Math.round(mins);
+  if (rounded <= 0) return '< 1 min';
+  const h = Math.floor(rounded / 60);
+  const m = rounded % 60;
+  if (h === 0) return `${m} min`;
+  if (m === 0) return `${h} hr${h !== 1 ? 's' : ''}`;
+  return `${h}h ${m}m`;
+}
+
+function formatTimeOfDay(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+
+function formatDateWithTime(iso: string): string {
+  return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+}
+
+/** Smart gap label: hours for < 1 day, days for longer */
+function formatGapDuration(startIso: string, endIso: string): string {
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (ms < DAY_MS) {
+    const hours = Math.round(ms / 3_600_000);
+    if (hours <= 0) return '< 1 hr';
+    return `${hours} hr${hours !== 1 ? 's' : ''}`;
+  }
+  const days = Math.round(ms / DAY_MS);
+  return formatDuration(days);
+}
+
 function formatTimelineSpan(days: number): string {
+  if (days <= 1) return '24 hours';
   if (days < 60) return `${days} days`;
   if (days < 365) {
     const months = (days / 30.44).toFixed(1).replace(/\.0$/, '');
-    return `${months} month`;
+    return `${months} month${months === '1' ? '' : 's'}`;
   }
   const years = (days / 365.25).toFixed(1).replace(/\.0$/, '');
-  return `${years} years`;
+  return `${years} year${years === '1' ? '' : 's'}`;
 }
 
 function formatMonthLabel(date: Date): string {
   return date.toLocaleDateString('en-US', { month: 'short' });
+}
+
+function startOfDay(date: Date): Date {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
 }
 
 /** e.g. "Mon 17" for week view day headers */
@@ -253,15 +305,16 @@ function formatDayLabel(date: Date): string {
   return date.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
 }
 
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v));
+/** e.g. "12 AM", "1 PM" */
+function formatHourLabel(date: Date): string {
+  return date.toLocaleTimeString('en-US', { hour: 'numeric', hour12: true });
 }
 
 // ─── Preferences persistence ────────────────────────────────────────────────
 
 const GANTT_PREFS_KEY = 'ark-gantt-prefs';
 
-export type RangePreset = 'week' | 'month' | 'year';
+export type RangePreset = 'day' | 'week' | 'month' | 'year';
 
 interface GanttPrefs {
   sortBy: SortKey;
@@ -369,6 +422,7 @@ function splitPlayingSegmentBySessions(
         status: 'Playing Now',
         startDate: new Date(ovStart).toISOString(),
         endDate: new Date(ovEnd).toISOString(),
+        sessionMinutes: s.durationMinutes,
       });
       pos = ovEnd;
     }
@@ -392,6 +446,8 @@ interface TooltipData {
   endDate: string;
   durationDays: number;
   hoursPlayed: number;
+  sessionMinutes?: number;
+  isSession: boolean;
   x: number;
   y: number;
 }
@@ -514,6 +570,7 @@ const ROW_HEIGHT = 72;
 const HEADER_HEIGHT = 56;
 const SIDEBAR_WIDTH = 200;
 const MIN_BAR_WIDTH = 8;
+const THIN_BAR_THRESHOLD = 32;
 const BAR_V_PADDING = 16;
 const GAME_INFO_MIN_WIDTH = 130;
 const GAME_PILL_MIN_WIDTH = 70;
@@ -532,12 +589,13 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
 ];
 
 const RANGE_PRESETS: { id: RangePreset; label: string; title: string }[] = [
+  { id: 'day', label: 'D', title: 'Today (hourly)' },
   { id: 'week', label: 'W', title: 'This week' },
   { id: 'month', label: 'M', title: 'This month' },
   { id: 'year', label: 'Y', title: 'This year' },
 ];
 
-const VALID_RANGE_PRESETS: RangePreset[] = ['week', 'month', 'year'];
+const VALID_RANGE_PRESETS: RangePreset[] = ['day', 'week', 'month', 'year'];
 
 export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: JourneyGanttViewProps) {
 
@@ -597,8 +655,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     };
   }, []);
 
-  // ── Drag-to-scroll state ──────────────────────────────────────────────
-  const [isDragging, setIsDragging] = useState(false);
+  // ── Drag-to-scroll state (refs only — no re-renders during drag) ─────
+  const isDraggingRef = useRef(false);
   const dragStart = useRef({ x: 0, scrollLeft: 0 });
   const hasDragged = useRef(false);
 
@@ -684,7 +742,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
   }, [sessions]);
 
   // ── Compute time range: data-driven (earliest segment/added to latest/now) so user can scroll back ─
-  const { timelineStart, timelineEnd, totalDays, months, dayMarkers, spanDays } = useMemo(() => {
+  const { timelineStart, timelineEnd, totalDays, months, dayMarkers, hourMarkers, spanDays } = useMemo(() => {
     const now = new Date();
 
     let minDate: Date;
@@ -699,6 +757,23 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     } else {
       minDate = now;
       maxDate = now;
+    }
+
+    if (rangePreset === 'day') {
+      const start = startOfDay(minDate);
+      const endDay = startOfDay(maxDate > now ? maxDate : now);
+      const end = addDays(endDay, 1);
+      const total = daysBetween(start.toISOString(), end.toISOString());
+      const hourMarkersList: Date[] = [];
+      for (let d = 0; d < total; d++) {
+        const dayStart = addDays(start, d);
+        for (let h = 0; h < 24; h++) {
+          const hd = new Date(dayStart);
+          hd.setHours(h, 0, 0, 0);
+          hourMarkersList.push(hd);
+        }
+      }
+      return { timelineStart: start, timelineEnd: end, totalDays: total, months: [] as Date[], dayMarkers: undefined as Date[] | undefined, hourMarkers: hourMarkersList, spanDays: total };
     }
 
     if (rangePreset === 'week') {
@@ -717,7 +792,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       for (let i = 0; i < total; i++) {
         dayMarkersList.push(addDays(start, i));
       }
-      return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: dayMarkersList, spanDays: total };
+      return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: dayMarkersList, hourMarkers: undefined as Date[] | undefined, spanDays: total };
     }
 
     if (rangePreset === 'month') {
@@ -728,7 +803,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       for (let i = 0; i < total; i++) {
         dayMarkersList.push(addDays(start, i));
       }
-      return { timelineStart: start, timelineEnd: end, totalDays: total, months: [new Date(start)], dayMarkers: dayMarkersList, spanDays: total };
+      return { timelineStart: start, timelineEnd: end, totalDays: total, months: [new Date(start)], dayMarkers: dayMarkersList, hourMarkers: undefined as Date[] | undefined, spanDays: total };
     }
 
     // rangePreset === 'year'
@@ -741,23 +816,24 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       monthMarkers.push(new Date(cursor));
       cursor = addMonths(cursor, 1);
     }
-    return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: undefined, spanDays: total };
+    return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: undefined, hourMarkers: undefined as Date[] | undefined, spanDays: total };
   }, [rangePreset, allRows]);
 
   // Scale: fill viewport when range is small; otherwise min px/day so timeline is scrollable
   const effectiveDayWidth = useMemo(() => {
     if (viewportWidth <= 0 || totalDays <= 0) return 4;
     const fillWidth = viewportWidth / totalDays;
-    return Math.max(MIN_DAY_WIDTH, fillWidth);
-  }, [viewportWidth, totalDays]);
+    const minWidth = rangePreset === 'day' ? MIN_HOURLY_DAY_WIDTH : MIN_DAY_WIDTH;
+    return Math.max(minWidth, fillWidth);
+  }, [viewportWidth, totalDays, rangePreset]);
 
   const timelineWidth = totalDays * effectiveDayWidth;
 
-  // Position helper
+  // Position helper — fractional-day precision for sub-day accuracy (critical for Day view)
   const dateToX = useCallback(
     (iso: string) => {
-      const days = daysBetween(timelineStart.toISOString(), iso);
-      return Math.max(0, (days - 1) * effectiveDayWidth);
+      const ms = new Date(iso).getTime() - timelineStart.getTime();
+      return Math.max(0, (ms / DAY_MS) * effectiveDayWidth);
     },
     [timelineStart, effectiveDayWidth]
   );
@@ -829,25 +905,40 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
     const isOngoing = new Date(data.endDate).getTime() >= Date.now() - DAY_MS;
     const style = segmentStyles[data.status];
-    // Security: sanitize tooltip HTML to prevent XSS from game titles
+
+    let dateRangeHtml: string;
+    let durationHtml: string;
+
+    if (data.isSession) {
+      const sameDay = new Date(data.startDate).toDateString() === new Date(data.endDate).toDateString();
+      dateRangeHtml = sameDay
+        ? `${formatShortDate(data.startDate)}, ${formatTimeOfDay(data.startDate)} — ${formatTimeOfDay(data.endDate)}`
+        : `${formatDateWithTime(data.startDate)} — ${formatDateWithTime(data.endDate)}`;
+      const sessionLabel = data.sessionMinutes != null ? formatMinutes(data.sessionMinutes) : formatMinutes(Math.round((new Date(data.endDate).getTime() - new Date(data.startDate).getTime()) / 60_000));
+      durationHtml = `<span>${sessionLabel} session</span>`;
+    } else {
+      dateRangeHtml = `${formatShortDate(data.startDate)} — ${isOngoing ? 'Present' : formatShortDate(data.endDate)}`;
+      durationHtml = `<span>${formatDuration(data.durationDays)}</span>${data.hoursPlayed > 0 ? `<span>${formatHours(data.hoursPlayed)} played</span>` : ''}`;
+    }
+
     el.innerHTML = DOMPurify.sanitize(`
       <div class="font-bold text-white text-sm mb-1.5 truncate">${data.title}</div>
       <div class="flex items-center gap-2 mb-2">
         <div class="w-2.5 h-2.5 rounded-full ${style.legendDot}"></div>
-        <span class="text-white/80 font-medium">${data.status}</span>
+        <span class="text-white/80 font-medium">${data.isSession ? 'Session' : data.status}</span>
       </div>
       <div class="text-white/50 text-[11px]">
-        ${formatShortDate(data.startDate)} — ${isOngoing ? 'Present' : formatShortDate(data.endDate)}
+        ${dateRangeHtml}
       </div>
       <div class="flex items-center gap-3 mt-2 text-white/40 text-[11px]">
-        <span>${formatDuration(data.durationDays)}</span>
-        ${data.hoursPlayed > 0 ? `<span>${formatHours(data.hoursPlayed)} played</span>` : ''}
+        ${durationHtml}
       </div>
     `);
   }, []);
 
   const handleSegmentHover = useCallback(
     (e: React.MouseEvent, seg: GanttSegment, row: GanttGameRow) => {
+      const isSession = seg.status === 'Playing Now' && seg.sessionMinutes != null;
       updateTooltipEl({
         title: row.title,
         status: seg.status,
@@ -855,6 +946,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
         endDate: seg.endDate,
         durationDays: daysBetween(seg.startDate, seg.endDate),
         hoursPlayed: row.hoursPlayed,
+        sessionMinutes: seg.sessionMinutes,
+        isSession,
         x: e.clientX,
         y: e.clientY,
       });
@@ -879,27 +972,31 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     return () => timeline.removeEventListener('scroll', syncScroll);
   }, []);
 
-  // ── Drag-to-scroll ────────────────────────────────────────────────────
+  // ── Drag-to-scroll (ref-driven, zero re-renders) ─────────────────────
   const handleDragStart = useCallback((e: React.MouseEvent) => {
-    // Only start drag on the scroll container background, not on bars
     const el = scrollRef.current;
     if (!el) return;
-    setIsDragging(true);
+    isDraggingRef.current = true;
     hasDragged.current = false;
     dragStart.current = { x: e.clientX, scrollLeft: el.scrollLeft };
+    el.style.cursor = 'grabbing';
   }, []);
 
   useEffect(() => {
-    if (!isDragging) return;
-
     const handleMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current) return;
       const el = scrollRef.current;
       if (!el) return;
       const dx = e.clientX - dragStart.current.x;
       if (Math.abs(dx) > 3) hasDragged.current = true;
       el.scrollLeft = dragStart.current.scrollLeft - dx;
     };
-    const handleUp = () => setIsDragging(false);
+    const handleUp = () => {
+      if (!isDraggingRef.current) return;
+      isDraggingRef.current = false;
+      const el = scrollRef.current;
+      if (el) el.style.cursor = '';
+    };
 
     document.addEventListener('mousemove', handleMove);
     document.addEventListener('mouseup', handleUp);
@@ -907,7 +1004,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       document.removeEventListener('mousemove', handleMove);
       document.removeEventListener('mouseup', handleUp);
     };
-  }, [isDragging]);
+  }, []);
 
   // ── Track viewport width + scroll position for minimap (RAF-throttled) ──
   useEffect(() => {
@@ -969,7 +1066,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
-    overscan: 5,
+    overscan: 8,
     scrollPaddingStart: HEADER_HEIGHT,
   });
 
@@ -1002,6 +1099,21 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       return next;
     });
   }, []);
+
+  // ── Pre-computed gridline positions (avoids dateToX calls per row) ────
+  const gridlinePositions = useMemo(() => {
+    const markers = hourMarkers ?? dayMarkers ?? months;
+    return markers.map((marker) => {
+      const x = dateToX(marker.toISOString());
+      const h = hourMarkers ? (marker as Date).getHours() : -1;
+      return { x, h };
+    });
+  }, [hourMarkers, dayMarkers, months, dateToX]);
+
+  const timelineEndX = useMemo(
+    () => dateToX(timelineEnd.toISOString()),
+    [dateToX, timelineEnd],
+  );
 
   // ── Memoized footer stats (avoid recalculating on every render) ────────
   const footerStats = useMemo(() => ({
@@ -1057,7 +1169,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                 >
                   <div className={cn('w-2.5 h-2.5 rounded-full', segmentStyles[s].legendDot)} />
                   <span className="text-[11px] text-white/45 font-medium">{s}</span>
-                  <span className="text-[9px] text-white/25">{statusCounts[s]}</span>
+                  <span className="text-[11px] text-white/25">{statusCounts[s]}</span>
                 </button>
               );
             })}
@@ -1229,10 +1341,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
         {/* ── Scrollable timeline area ────────────────────────────── */}
         <div
           ref={scrollRef}
-          className={cn(
-            'relative flex-1 overflow-x-auto overflow-y-auto select-none',
-            isDragging ? 'cursor-grabbing' : 'cursor-grab',
-          )}
+          className="relative flex-1 overflow-x-auto overflow-y-auto select-none cursor-grab"
+          style={{ willChange: 'scroll-position' }}
           onMouseDown={handleDragStart}
         >
           <div className="relative" style={{ width: timelineWidth, minWidth: '100%', height: HEADER_HEIGHT + rowVirtualizer.getTotalSize() + 24 }}>
@@ -1244,7 +1354,50 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
             >
               <div className="absolute inset-0 bg-black/60 backdrop-blur-md" />
 
-            {dayMarkers && dayMarkers.length > 0 ? (
+            {hourMarkers && hourMarkers.length > 0 ? (
+              /* Day: one column per hour with day labels at midnight boundaries */
+              <>
+                {hourMarkers.map((hour, i) => {
+                  const x = dateToX(hour.toISOString());
+                  const nextHour = i < hourMarkers.length - 1 ? hourMarkers[i + 1] : timelineEnd;
+                  const cellWidth = dateToX(nextHour.toISOString()) - x;
+                  const showLabel = cellWidth > 24;
+                  const h = hour.getHours();
+                  const isMidnight = h === 0;
+                  const isMajor = h % 6 === 0;
+                  return (
+                    <div key={i}>
+                      <div
+                        className={cn('absolute top-0 w-px', isMidnight ? 'bg-white/[0.15]' : isMajor ? 'bg-white/[0.1]' : 'bg-white/[0.04]')}
+                        style={{ left: x, height: HEADER_HEIGHT }}
+                      />
+                      {isMidnight && (
+                        <div
+                          className="absolute top-1 z-10 text-[10px] text-fuchsia-400/70 font-bold font-display tracking-wider"
+                          style={{ left: x + 4 }}
+                        >
+                          {formatDayLabel(hour)}
+                        </div>
+                      )}
+                      {showLabel && (
+                        <div
+                          className="absolute flex flex-col items-start justify-end pb-2 pl-1"
+                          style={{ left: x, width: cellWidth, height: HEADER_HEIGHT }}
+                        >
+                          <span className={cn('text-[10px] font-medium truncate max-w-full', isMajor ? 'text-white/60' : 'text-white/30')}>
+                            {formatHourLabel(hour)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                <div
+                  className="absolute top-0 w-px bg-white/[0.06]"
+                  style={{ left: dateToX(timelineEnd.toISOString()), height: HEADER_HEIGHT }}
+                />
+              </>
+            ) : dayMarkers && dayMarkers.length > 0 ? (
               /* Week / Month: one column per day with day label and vertical line */
               <>
                 {dayMarkers.map((day, i) => {
@@ -1331,6 +1484,37 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
             </div>
           </div>
 
+          {/* ── Shared gridlines layer (single set behind all rows) ───── */}
+          <div
+            className="absolute left-0 pointer-events-none"
+            style={{ top: HEADER_HEIGHT, width: timelineWidth, height: rowVirtualizer.getTotalSize() + 24 }}
+            aria-hidden
+          >
+            {gridlinePositions.map(({ x, h }, mi) => (
+              <div
+                key={mi}
+                className={cn(
+                  'absolute top-0 bottom-0',
+                  hourMarkers
+                    ? (h === 0 ? 'w-[2px] bg-white/[0.12]' : h % 6 === 0 ? 'w-px bg-white/[0.08]' : 'w-px bg-white/[0.03]')
+                    : 'w-px bg-white/[0.04]',
+                )}
+                style={{ left: x }}
+              />
+            ))}
+            {(dayMarkers || hourMarkers) && (
+              <div
+                className="absolute top-0 bottom-0 w-px bg-white/[0.04]"
+                style={{ left: timelineEndX }}
+              />
+            )}
+            {/* "Now" dashed vertical line */}
+            <div
+              className="absolute top-0 bottom-0 w-[2px] border-l-2 border-dashed border-red-500/50"
+              style={{ left: nowX }}
+            />
+          </div>
+
           {/* ── Row area ─────────────────────────────────────────────── */}
           {rows.length === 0 && allRows.length > 0 && (
             <div className="flex items-center justify-center py-16 text-white/40 text-sm">
@@ -1359,41 +1543,21 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                   'absolute left-0 right-0 group/row transition-[opacity] duration-200',
                   isFocused && 'border-l-2 border-l-fuchsia-500/50',
                 )}
-                style={{ height: ROW_HEIGHT, top: HEADER_HEIGHT + virtualItem.start }}
+                style={{ height: ROW_HEIGHT, top: HEADER_HEIGHT + virtualItem.start, contain: 'layout style' }}
                 onClick={() => {
                   if (hasDragged.current) { hasDragged.current = false; return; }
                 }}
                 onMouseEnter={() => handleRowEnter(row.gameId)}
                 onMouseLeave={handleRowLeave}
               >
-                {/* Vertical gridlines: day boundaries (Week/Month) or month boundaries (Year) */}
-                {(dayMarkers ?? months).map((marker, mi) => (
-                  <div
-                    key={mi}
-                    className="absolute top-0 bottom-0 w-px bg-white/[0.04]"
-                    style={{ left: dateToX(marker.toISOString()) }}
-                  />
-                ))}
-                {dayMarkers && dayMarkers.length > 0 && (
-                  <div
-                    className="absolute top-0 bottom-0 w-px bg-white/[0.04]"
-                    style={{ left: dateToX(timelineEnd.toISOString()) }}
-                  />
-                )}
-
-                {/* "Now" dashed vertical line */}
-                <div
-                  className="absolute top-0 bottom-0 w-px border-l border-dashed border-red-500/30"
-                  style={{ left: nowX }}
-                />
 
                 {/* ── Gap indicators between segments ────────────────── */}
                 {row.segments.map((seg, i) => {
                   if (i === 0) return null;
                   const prevEnd = row.segments[i - 1].endDate;
                   const curStart = seg.startDate;
-                  const gapDays = daysBetween(prevEnd, curStart);
-                  if (gapDays <= GAP_THRESHOLD_DAYS) return null;
+                  const gapMs = new Date(curStart).getTime() - new Date(prevEnd).getTime();
+                  if (gapMs < GAP_THRESHOLD_DAYS * DAY_MS) return null;
 
                   const gapLeft = dateToX(prevEnd);
                   const gapRight = dateToX(curStart);
@@ -1409,7 +1573,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                         transform: 'translateX(-50%)',
                       }}
                     >
-                      {formatDuration(gapDays)}
+                      {formatGapDuration(prevEnd, curStart)}
                     </span>
                   );
                 })}
@@ -1422,33 +1586,36 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                   const style = segmentStyles[seg.status];
                   const isInfoSegment = i === infoSegIdx;
                   const isTealBar = seg.status === 'Playing Now';
-                  const segDays = daysBetween(seg.startDate, seg.endDate);
                   const isOngoing = new Date(seg.endDate).getTime() >= Date.now() - DAY_MS;
                   const prevStatus = i > 0 ? row.segments[i - 1].status : null;
                   const showSegmentSeparator = i > 0 && prevStatus !== seg.status;
+                  const isThin = isTealBar && width < THIN_BAR_THRESHOLD;
 
-                  const animProps = !hasAnimated.current
+                  const shouldAnimate = !hasAnimated.current;
+
+                  const BarEl = shouldAnimate ? motion.div : 'div';
+
+                  const barProps = shouldAnimate
                     ? {
                         initial: { scaleX: 0, opacity: 0 } as const,
                         animate: { scaleX: 1, opacity: 1 } as const,
                         transition: { duration: 0.4, delay: rowIndex * 0.03 + i * 0.02, ease: 'easeOut' as const },
                       }
-                    : {
-                        initial: false as const,
-                      };
+                    : {};
 
                   return (
-                    <motion.div
+                    <BarEl
                       key={i}
-                      {...animProps}
+                      {...barProps}
                       role="gridcell"
-                      aria-label={`${row.title}: ${seg.status} from ${formatShortDate(seg.startDate)} to ${isOngoing ? 'Present' : formatShortDate(seg.endDate)}, ${formatDuration(segDays)}`}
+                      aria-label={`${row.title}: ${seg.status} from ${formatShortDate(seg.startDate)} to ${isOngoing ? 'Present' : formatShortDate(seg.endDate)}, ${formatSegmentDuration(seg)}`}
                       className={cn(
                         'absolute rounded-full transition-[filter,box-shadow] duration-200',
                         'hover:brightness-110 hover:shadow-lg hover:scale-y-[1.04]',
                         style.bar,
                         style.glow,
                         style.border,
+                        isThin && 'overflow-visible',
                       )}
                       style={{
                         left,
@@ -1527,11 +1694,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                               <span className={cn('text-[11px] font-semibold truncate', style.text)}>
                                 {row.title}
                               </span>
-                              <span className={cn('flex-shrink-0 text-[8px] font-medium px-1.5 py-0.5 rounded', style.badgeBg, style.badgeText)}>
-                                {row.currentStatus}
-                              </span>
                               {(libraryStore.isInLibrary(row.gameId) || customGameStore.getGame(row.gameId)) && (
-                                <Library className="w-3.5 h-3.5 flex-shrink-0 opacity-90" title="In library" />
+                                <span title="In library"><Library className="w-3.5 h-3.5 flex-shrink-0 opacity-90" /></span>
                               )}
                             </>
                           )}
@@ -1544,7 +1708,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
                           {!isInfoSegment && width > 60 && (
                             <span className={cn('text-[10px] font-medium truncate', style.text, !isTealBar && 'opacity-70')}>
-                              {seg.status}
+                              {isTealBar ? formatSegmentDuration(seg) : seg.status}
                             </span>
                           )}
                         </div>
@@ -1554,19 +1718,56 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                             'flex-shrink-0 text-[9px] font-semibold px-2 py-0.5 rounded-full',
                             style.badgeBg, style.badgeText,
                           )}>
-                            {formatDuration(segDays)}
+                            {formatSegmentDuration(seg)}
                           </span>
                         )}
                       </div>
 
-                      {/* Live session pulse (Playing Now only) */}
+                      {/* Live session indicator (Playing Now only) */}
                       {isTealBar && (
                         <div
-                          className="absolute top-1/2 -translate-y-1/2 right-0 w-1 h-4 rounded-full bg-emerald-400 gantt-live-pulse"
+                          className="absolute top-1/2 -translate-y-1/2 right-0 w-1 h-4 rounded-full bg-emerald-400"
                         />
                       )}
                       </div>
-                    </motion.div>
+
+                      {/* Extended invisible hit zone for thin Playing Now sessions */}
+                      {isThin && (
+                        <div
+                          className="absolute cursor-pointer z-10"
+                          style={{ left: -12, right: -12, top: -14, bottom: -14 }}
+                          onMouseMove={(e) => {
+                            e.stopPropagation();
+                            handleSegmentHover(e, seg, row);
+                          }}
+                          onMouseLeave={handleSegmentLeave}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (hasDragged.current) { hasDragged.current = false; return; }
+                          }}
+                        />
+                      )}
+
+                      {/* Visual bookmark flag for thin Playing Now sessions */}
+                      {isThin && (
+                        <div
+                          className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center z-50 cursor-pointer"
+                          style={{ bottom: '100%', marginBottom: 2 }}
+                          onMouseMove={(e) => {
+                            e.stopPropagation();
+                            handleSegmentHover(e, seg, row);
+                          }}
+                          onMouseLeave={handleSegmentLeave}
+                        >
+                          <div className="relative">
+                            <div className="px-1.5 py-0.5 rounded bg-emerald-500/90 text-[7px] font-bold text-white leading-none tracking-wide whitespace-nowrap shadow-[0_0_8px_2px_rgba(52,211,153,0.4)]">
+                              ▶
+                            </div>
+                            <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-[3px] border-l-transparent border-r-[3px] border-r-transparent border-t-[3px] border-t-emerald-500/90" />
+                          </div>
+                        </div>
+                      )}
+                    </BarEl>
                   );
                 })}
 

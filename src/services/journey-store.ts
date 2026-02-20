@@ -132,6 +132,31 @@ class JourneyStore {
   }
 
   /**
+   * Batch-record multiple entries without triggering intermediate saves/notifications.
+   * Fires a single save + notify at the end if any entries were written.
+   */
+  recordBatch(entries: Array<Omit<JourneyEntry, 'addedAt' | 'removedAt'> & { addedAt?: string }>) {
+    if (entries.length === 0) return;
+    let changed = false;
+    for (const entry of entries) {
+      const existing = this.entries.get(entry.gameId);
+      const addedAt = existing?.addedAt ?? entry.addedAt ?? new Date().toISOString();
+      this.entries.set(entry.gameId, {
+        ...existing,
+        ...entry,
+        addedAt,
+        removedAt: undefined,
+      });
+      changed = true;
+    }
+    if (changed) {
+      this.invalidateSortedCache();
+      this.scheduleSave();
+      this.notifyListeners();
+    }
+  }
+
+  /**
    * Mark a game as removed (sets removedAt but does NOT delete).
    */
   markRemoved(gameId: string) {

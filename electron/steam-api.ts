@@ -5,8 +5,10 @@
  * Note: Uses native fetch available in Node.js 18+ (Electron 28+)
  */
 
-// Steam API Configuration
-const STEAM_API_KEY = 'C6DCACDE5866D149A7E3A9B59646164A';
+// Steam API Configuration — key loaded from .env via dotenv in main.ts
+// Read lazily: ESM imports hoist above dotenv's loadEnv() call, so
+// process.env isn't populated yet at module-scope evaluation time.
+function steamApiKey() { return process.env.STEAM_API_KEY || ''; }
 const STEAM_WEB_API_BASE = 'https://api.steampowered.com';
 const STEAM_STORE_API_BASE = 'https://store.steampowered.com/api';
 const STEAM_CDN_BASE = 'https://cdn.akamai.steamstatic.com/steam/apps';
@@ -337,7 +339,7 @@ class SteamAPIClient {
    */
   private async refreshMostPlayedGames(): Promise<SteamMostPlayedGame[]> {
     const cacheKey = 'most-played-games';
-    const url = `${STEAM_WEB_API_BASE}/ISteamChartsService/GetMostPlayedGames/v1/?key=${STEAM_API_KEY}`;
+    const url = `${STEAM_WEB_API_BASE}/ISteamChartsService/GetMostPlayedGames/v1/?key=${steamApiKey()}`;
     
     const response = await this.rateLimiter.execute(async () => {
       logger.log('[Steam] Fetching fresh most played games...');
@@ -1161,7 +1163,7 @@ class SteamAPIClient {
 
     while (true) {
       page++;
-      let url = `${STEAM_WEB_API_BASE}/IStoreService/GetAppList/v1/?key=${STEAM_API_KEY}`
+      let url = `${STEAM_WEB_API_BASE}/IStoreService/GetAppList/v1/?key=${steamApiKey()}`
         + `&max_results=${PAGE_SIZE}`
         + `&include_games=true&include_dlc=false&include_software=false&include_videos=false&include_hardware=false`;
       if (lastAppId !== undefined) {
@@ -1201,6 +1203,61 @@ class SteamAPIClient {
     logger.log(`[Steam] getAppList: complete — ${allApps.length} games fetched and sorted`);
     this.cache.set(cacheKey, allApps, ttl);
     return allApps;
+  }
+
+  /**
+   * Fetch rich metadata for a batch of app IDs via IStoreBrowseService/GetItems/v1.
+   * Used by the catalog sync to download game data in batches of ~200.
+   * No API key required for this endpoint, but runs main-process-side to avoid CORS.
+   */
+  async fetchCatalogBatch(appIds: number[]): Promise<any[]> {
+    const inputJson = JSON.stringify({
+      ids: appIds.map(id => ({ appid: id })),
+      context: { language: 'english', country_code: 'US' },
+      data_request: {
+        include_assets: false,
+        include_release: true,
+        include_platforms: true,
+        include_all_purchase_options: false,
+        include_screenshots: false,
+        include_trailers: false,
+        include_ratings: true,
+        include_tag_count: 20,
+        include_reviews: true,
+        include_basic_info: true,
+        include_supported_languages: false,
+      },
+    });
+    const url = `${STEAM_WEB_API_BASE}/IStoreBrowseService/GetItems/v1/?input_json=${encodeURIComponent(inputJson)}`;
+    const res = await fetchWithTimeout(url, 15000);
+    if (!res.ok) throw new Error(`IStoreBrowseService ${res.status}`);
+    const data = await res.json() as { response?: { store_items?: any[] } };
+    return data.response?.store_items ?? [];
+  }
+
+  /**
+   * Fetch the full Steam tag list (tagid → name) from IStoreService/GetTagList/v1.
+   * Cached on disk for 7 days — tags rarely change.
+   */
+  async getTagList(): Promise<Array<{ tagid: number; name: string }>> {
+    const cacheKey = 'steam-tag-list';
+    const TAG_TTL = 7 * 24 * 60 * 60 * 1000;
+
+    const cached = this.cache.get<Array<{ tagid: number; name: string }>>(cacheKey);
+    if (cached) {
+      logger.log(`[Steam] getTagList: returning cache (${cached.length} tags)`);
+      return cached;
+    }
+
+    const url = `${STEAM_WEB_API_BASE}/IStoreService/GetTagList/v1/?key=${steamApiKey()}&language=english`;
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) throw new Error(`GetTagList API error: ${res.status}`);
+    const data = await res.json() as { response?: { tags?: Array<{ tagid: number; name: string }> } };
+    const tags = data.response?.tags ?? [];
+
+    logger.log(`[Steam] getTagList: fetched ${tags.length} tags`);
+    this.cache.set(cacheKey, tags, TAG_TTL);
+    return tags;
   }
 
   /** Synchronously flush the disk cache (for use in before-quit). */

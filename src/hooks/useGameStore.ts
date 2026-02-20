@@ -442,15 +442,15 @@ export function useSteamGames(category: GameCategory = 'trending') {
           if (!_catalogPreloaded) {
             _catalogPreloaded = true;
             const catalogPromise = loadCatalogAppList().then(appList => {
-              if (isMountedRef.current) {
-                catalogAppListRef.current = appList;
-                catalogListReadyRef.current = true;
-                catalogOffsetRef.current = 0;
-                setCatalogTotalCount(appList.length);
-                console.log(`[useSteamGames] Background catalog preload: ${appList.length} apps ready`);
-              }
+              if (!isMountedRef.current) return;
+              if (appList.length === 0) { _catalogPreloaded = false; return; }
+              catalogAppListRef.current = appList;
+              catalogListReadyRef.current = true;
+              catalogOffsetRef.current = 0;
+              setCatalogTotalCount(appList.length);
+              console.log(`[useSteamGames] Background catalog preload: ${appList.length} apps ready`);
             }).catch(err => {
-              _catalogPreloaded = false; // allow retry on next mount
+              _catalogPreloaded = false;
               console.warn('[useSteamGames] Background catalog preload failed:', err);
             });
             void catalogPromise;
@@ -589,16 +589,25 @@ export function useSteamGames(category: GameCategory = 'trending') {
   // for the "X of 155K" display in the toolbar.  Also primes the list for
   // when the user switches to Catalog (A–Z) mode.
   useEffect(() => {
-    if (_catalogPreloaded || catalogTotalCount > 0) return;
+    if (catalogTotalCount > 0) return;
+    if (_catalogPreloaded && _catalogMemCache && _catalogMemCache.length > 0) {
+      setCatalogTotalCount(_catalogMemCache.length);
+      catalogAppListRef.current = _catalogMemCache;
+      catalogListReadyRef.current = true;
+      return;
+    }
     _catalogPreloaded = true;
     loadCatalogAppList().then(appList => {
-      if (isMountedRef.current) {
-        catalogAppListRef.current = appList;
-        catalogListReadyRef.current = true;
-        catalogOffsetRef.current = 0;
-        setCatalogTotalCount(appList.length);
-        console.log(`[useSteamGames] Background catalog count: ${appList.length} games`);
+      if (!isMountedRef.current) return;
+      if (appList.length === 0) {
+        _catalogPreloaded = false;
+        return;
       }
+      catalogAppListRef.current = appList;
+      catalogListReadyRef.current = true;
+      catalogOffsetRef.current = 0;
+      setCatalogTotalCount(appList.length);
+      console.log(`[useSteamGames] Background catalog count: ${appList.length} games`);
     }).catch(err => {
       _catalogPreloaded = false;
       console.warn('[useSteamGames] Background catalog count failed:', err);
@@ -1530,6 +1539,7 @@ const ARK_STATUSES: GameStatus[] = ['Playing', 'Playing Now', 'Completed'];
  */
 export function ensureArkBackfill() {
   const addedAtIso = (d: Date | string) => (d instanceof Date ? d.toISOString() : String(d));
+  const batch: Array<Parameters<typeof journeyStore.record>[0]> = [];
 
   // Library (Steam/Epic)
   for (const lib of libraryStore.getAllEntries()) {
@@ -1540,7 +1550,7 @@ export function ensureArkBackfill() {
 
     const sortDate = lib.lastPlayedAt ?? addedAtIso(lib.addedAt);
     const meta = lib.cachedMeta;
-    journeyStore.record({
+    batch.push({
       gameId: lib.gameId,
       title: meta?.title ?? existing?.title ?? 'Unknown',
       coverUrl: meta?.coverUrl ?? existing?.coverUrl,
@@ -1565,7 +1575,7 @@ export function ensureArkBackfill() {
 
     const addedAtStr = addedAtIso(entry.addedAt);
     const sortDate = entry.lastPlayedAt ?? addedAtStr;
-    journeyStore.record({
+    batch.push({
       gameId: entry.id,
       title: entry.title,
       coverUrl: existing?.coverUrl,
@@ -1579,6 +1589,10 @@ export function ensureArkBackfill() {
       lastPlayedAt: entry.lastPlayedAt ?? (entry.status === 'Completed' ? sortDate : undefined),
       addedAt: existing?.addedAt ?? addedAtStr,
     });
+  }
+
+  if (batch.length > 0) {
+    journeyStore.recordBatch(batch);
   }
 }
 

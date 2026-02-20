@@ -77,15 +77,13 @@ vi.mock('@/components/medals/badge-vault', () => ({
   BadgeVault: () => <div data-testid="badge-vault" />,
 }));
 vi.mock('@/components/medals/overview-charts', () => ({
-  computeOverviewAnalytics: () => ({ genreRadar: [], activityArea: [], recSources: [] }),
+  computeOverviewAnalytics: () => ({ genreRadar: [], monthlyActivity: [], recSources: [], currentStreak: 0, longestStreak: 0, statusCounts: {}, totalGames: 0, totalHours: 0 }),
   GenreRadarChart: () => <div data-testid="genre-radar-chart" />,
   ActivityAreaChart: () => <div data-testid="activity-area-chart" />,
+  DataSourcesRadar: () => <div data-testid="data-sources-radar" />,
 }));
 vi.mock('@/components/ui/evervault-card', () => ({
   Icon: () => <div data-testid="icon" />,
-}));
-vi.mock('@/components/ui/database-with-rest-api', () => ({
-  default: () => <div data-testid="database-rest" />,
 }));
 
 // Mock framer-motion
