@@ -1,8 +1,6 @@
-import { Component, Suspense, useState, useRef, useCallback, useEffect } from 'react';
+import { Component, Suspense, useState, useRef, useCallback, useEffect, lazy } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Canvas, useFrame } from '@react-three/fiber';
-import { useGLTF, OrbitControls, PerspectiveCamera, Stars } from '@react-three/drei';
 import { Gamepad2 } from 'lucide-react';
 import { WindowControls } from '@/components/window-controls';
 import { APP_VERSION } from '@/components/changelog-modal';
@@ -13,6 +11,7 @@ import {
 } from '@/services/prefetch-store';
 import { embeddingService } from '@/services/embedding-service';
 import { catalogStore } from '@/services/catalog-store';
+import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { recoStore } from '@/services/reco-store';
 import { annIndex } from '@/services/ann-index';
 import { scheduleBackgroundPrecompute } from '@/services/galaxy-cache';
@@ -23,22 +22,32 @@ import {
   reportPrefetchStep,
   reportPrefetchDone,
   reportPrefetchError,
+  reportOllamaProgress,
+  reportOllamaDone,
 } from '@/services/system-status';
 import { SplashStatusPanel } from '@/components/system-status-panel';
+import { useDevMode } from '@/hooks/useDevMode';
 
-// Preload the Dashboard chunk so it's already in memory when the user clicks
-// "Enter Ark". Without this the browser has to fetch + parse the JS bundle
-// on transition, adding a visible delay.
-void import('@/pages/dashboard');
-// Preload Voyage (Journey) view so it opens instantly when user switches to it.
-void import('@/components/journey-view');
-import { MathUtils } from 'three';
-import type { Group, AmbientLight, SpotLight } from 'three';
+// Preload Dashboard and Voyage chunks — deferred until after the splash boot
+// animation has started to avoid competing with the main thread during init.
+let _preloadScheduled = false;
+function scheduleChunkPreload() {
+  if (_preloadScheduled) return;
+  _preloadScheduled = true;
+  const load = () => { void import('@/pages/dashboard'); void import('@/components/journey-view'); };
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(load, { timeout: 4000 });
+  } else {
+    setTimeout(load, 2000);
+  }
+}
 
-/* ------------------------------------------------------------------ */
-/*  Error boundary — prevents a WebGL / Three.js crash from taking     */
-/*  down the entire splash screen.  Falls back to a plain background.  */
-/* ------------------------------------------------------------------ */
+// Lazy-load the Three.js 3D scene so the splash shell renders instantly.
+// Three.js + fiber + drei are ~700KB and take time to parse; deferring
+// them lets the gradient, title, and terminal animation appear immediately.
+const Splash3DScene = lazy(() =>
+  import('@/components/splash-3d-scene').then(m => ({ default: m.Splash3DScene }))
+);
 
 class CanvasErrorBoundary extends Component<
   { children: ReactNode },
@@ -55,7 +64,7 @@ class CanvasErrorBoundary extends Component<
   }
 
   render() {
-    if (this.state.hasError) return null; // parent already has gradient bg
+    if (this.state.hasError) return null;
     return this.props.children;
   }
 }
@@ -235,189 +244,6 @@ const BOOT_LINES: BootLine[] = [
 ];
 
 /* ------------------------------------------------------------------ */
-/*  Scene lights                                                        */
-/*                                                                      */
-/*  Driven by `progress` (0–1) that maps to the boot sequence.          */
-/*  0.00–0.70 : gradual ramp — ambient leads, spot trails behind        */
-/*  0.70–1.00 : flicker ignition — both lights stutter to full power    */
-/*  The split between ambient/spot gives a cascading "circuits          */
-/*  powering on" feel rather than a single switch.                      */
-/* ------------------------------------------------------------------ */
-
-/** Threshold where the dramatic flicker-ignition phase begins. */
-const FLICKER_THRESHOLD = 0.72;
-
-function SceneLights({ progress }: { progress: number }) {
-  const ambientRef = useRef<AmbientLight>(null);
-  const spotRef = useRef<SpotLight>(null);
-
-  // Target intensities (match the original static values)
-  const AMBIENT_TARGET = 0.75 * Math.PI;
-  const SPOT_TARGET = 2.25 * Math.PI;
-
-  // ── Flicker ignition state (the final push to 100%) ────────────
-  const phaseRef = useRef<'ramp' | 'flicker' | 'on'>('ramp');
-  const flickerStartRef = useRef(0);
-  const prevProgressRef = useRef(0);
-
-  type Keyframe = [time: number, brightness: number];
-
-  // Ambient catches first — diffuse glow spreading through the Ark
-  const AMBIENT_FLICKER: Keyframe[] = [
-    [0.00, 0.00],
-    [0.05, 0.55],   // initial surge from ramp level
-    [0.12, 0.30],   // dips
-    [0.22, 0.70],   // glow spreads
-    [0.30, 0.45],   // wavers
-    [0.40, 0.82],   // most of the way
-    [0.48, 0.60],   // small dip
-    [0.58, 0.90],   // nearly there
-    [0.70, 0.95],   // settling
-    [0.82, 1.00],   // full ambient
-  ];
-
-  // Spot kicks in later — the directional beam finding its mark
-  const SPOT_FLICKER: Keyframe[] = [
-    [0.00, 0.00],
-    [0.08, 0.00],   // stays dark while ambient surges first
-    [0.14, 0.25],   // first glimmer
-    [0.20, 0.05],   // fades back
-    [0.30, 0.45],   // stronger flash
-    [0.36, 0.12],   // dies back
-    [0.46, 0.60],   // catching
-    [0.52, 0.30],   // dip
-    [0.60, 0.75],   // almost locked
-    [0.66, 0.50],   // last stutter
-    [0.76, 0.88],   // beam stabilising
-    [0.88, 1.00],   // full spot
-  ];
-
-  const FLICKER_DURATION = Math.max(
-    AMBIENT_FLICKER[AMBIENT_FLICKER.length - 1][0],
-    SPOT_FLICKER[SPOT_FLICKER.length - 1][0],
-  );
-
-  /** Smooth-step sample through a keyframe array. */
-  function samplePattern(pattern: Keyframe[], elapsed: number): number {
-    if (elapsed <= pattern[0][0]) return pattern[0][1];
-    if (elapsed >= pattern[pattern.length - 1][0]) return pattern[pattern.length - 1][1];
-
-    let prev = pattern[0];
-    for (let i = 1; i < pattern.length; i++) {
-      const cur = pattern[i];
-      if (elapsed < cur[0]) {
-        const t = (elapsed - prev[0]) / (cur[0] - prev[0]);
-        const s = t * t * (3 - 2 * t); // smooth-step
-        return MathUtils.lerp(prev[1], cur[1], s);
-      }
-      prev = cur;
-    }
-    return prev[1];
-  }
-
-  useFrame(({ clock }) => {
-    // Detect when progress crosses the flicker threshold → start ignition
-    if (
-      phaseRef.current === 'ramp' &&
-      progress >= FLICKER_THRESHOLD &&
-      prevProgressRef.current < FLICKER_THRESHOLD
-    ) {
-      phaseRef.current = 'flicker';
-      flickerStartRef.current = clock.elapsedTime;
-    }
-    prevProgressRef.current = progress;
-
-    let ambientBri: number;
-    let spotBri: number;
-
-    if (phaseRef.current === 'flicker') {
-      const elapsed = clock.elapsedTime - flickerStartRef.current;
-      if (elapsed >= FLICKER_DURATION) {
-        phaseRef.current = 'on';
-        ambientBri = 1;
-        spotBri = 1;
-      } else {
-        // Blend: base ramp level + flicker on top
-        const rampA = progress * 0.65; // ambient leads during ramp
-        const rampS = Math.max(0, progress - 0.15) * 0.55; // spot trails
-        const flickA = samplePattern(AMBIENT_FLICKER, elapsed);
-        const flickS = samplePattern(SPOT_FLICKER, elapsed);
-        ambientBri = Math.min(1, Math.max(rampA, flickA));
-        spotBri = Math.min(1, Math.max(rampS, flickS));
-      }
-    } else if (phaseRef.current === 'on') {
-      // Hold at full — smooth out any residual gap
-      const curA = ambientRef.current ? ambientRef.current.intensity / AMBIENT_TARGET : 0;
-      const curS = spotRef.current ? spotRef.current.intensity / SPOT_TARGET : 0;
-      ambientBri = MathUtils.lerp(curA, 1, 0.06);
-      spotBri = MathUtils.lerp(curS, 1, 0.06);
-    } else {
-      // Ramp phase — gradual brightening synced to boot progress.
-      // Ambient leads, spot trails behind by ~0.15 progress units.
-      const targetA = progress * 0.65; // ambient reaches ~65% by flicker threshold
-      const targetS = Math.max(0, progress - 0.15) * 0.55; // spot delayed & dimmer
-
-      // Smooth lerp so transitions feel organic, not steppy
-      const curA = ambientRef.current ? ambientRef.current.intensity / AMBIENT_TARGET : 0;
-      const curS = spotRef.current ? spotRef.current.intensity / SPOT_TARGET : 0;
-      ambientBri = MathUtils.lerp(curA, targetA, 0.04);
-      spotBri = MathUtils.lerp(curS, targetS, 0.04);
-    }
-
-    if (ambientRef.current) {
-      ambientRef.current.intensity = ambientBri * AMBIENT_TARGET;
-    }
-    if (spotRef.current) {
-      spotRef.current.intensity = spotBri * SPOT_TARGET;
-    }
-  });
-
-  return (
-    <>
-      <ambientLight ref={ambientRef} intensity={0} />
-      <spotLight
-        ref={spotRef}
-        castShadow
-        intensity={0}
-        decay={0}
-        angle={0.2}
-        penumbra={1}
-        position={[-25, 20, -15]}
-        shadow-mapSize={[1024, 1024]}
-        shadow-bias={-0.0001}
-      />
-    </>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  3D Planet model                                                    */
-/* ------------------------------------------------------------------ */
-
-/** Resolve a public-dir asset path that works under both dev (http) and production (file://) */
-const assetUrl = (name: string) => `${import.meta.env.BASE_URL}${name}`;
-
-function Planet({ url }: { url: string }) {
-  const { nodes } = useGLTF(url) as any;
-  const groupRef = useRef<Group>(null);
-
-  useFrame(({ clock }) => {
-    if (groupRef.current) {
-      groupRef.current.position.y = -7 + Math.sin(clock.elapsedTime * 0.4) * 0.35;
-    }
-  });
-
-  return (
-    <group ref={groupRef} rotation={[-Math.PI / 2, 0, 0]} position={[0, -7, 0]} scale={7}>
-      <group rotation={[Math.PI / 13.5, -Math.PI / 5.8, Math.PI / 5.6]}>
-        <mesh receiveShadow castShadow geometry={nodes.planet002.geometry} material={nodes.planet002.material} />
-        <mesh geometry={nodes.planet003.geometry} material={nodes.planet003.material} />
-      </group>
-    </group>
-  );
-}
-
-/* ------------------------------------------------------------------ */
 /*  Splash Screen                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -448,13 +274,16 @@ interface SplashScreenProps {
 export function SplashScreen({ onEnter }: SplashScreenProps) {
   const [leaving, setLeaving] = useState(false);
   const hasClickedRef = useRef(false);
+  const [devMode] = useDevMode();
 
   // Boot sequence state
   const [termLines, setTermLines] = useState<string[]>([]);
   const [bootDone, setBootDone] = useState(false);       // boot animation finished
   const [dataReady, setDataReady] = useState(() => isPrefetchReady()); // data loaded
-  const [bootProgress, setBootProgress] = useState(0);   // 0–1 drives scene lights
-  const terminalEndRef = useRef<HTMLDivElement>(null);
+  const bootProgressRef = useRef(0);                     // 0–1 drives scene lights — ref to avoid re-renders
+  const [ollamaLine, setOllamaLine] = useState<string | null>(null);  // live Ollama/arctic download line
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const unsubOllamaRef = useRef<(() => void) | null>(null);
 
   // Button is only shown when BOTH conditions are met:
   // the boot animation has completed AND the data is in memory.
@@ -464,33 +293,77 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
   useEffect(() => {
     let cancelled = false;
 
-    systemStatus.init();
-    annIndex.load();
-    scheduleBackgroundPrecompute();
+    // Defer heavy init work so the boot animation can paint without contention.
+    // IDB reads, IPC calls, and catalog syncs starve setTimeout callbacks
+    // when scheduled too early; 1500ms gives the first ~15 boot lines a
+    // clear runway on the main thread.
+    const initTimer = setTimeout(() => {
+      systemStatus.init();
+      annIndex.load();
+      scheduleBackgroundPrecompute();
+      scheduleChunkPreload();
+    }, 1500);
 
     // Prewarm Voyage: backfill journey store so Your Ark / Logs are ready when user opens Voyage.
     // Deferred to avoid blocking the splash animation.
     if (typeof requestIdleCallback === 'function') {
       requestIdleCallback(() => ensureArkBackfill());
     } else {
-      setTimeout(() => ensureArkBackfill(), 100);
+      setTimeout(() => ensureArkBackfill(), 500);
     }
+
+    // Kick off embedding cache load immediately — the promise is awaited
+    // inside computeWithEmbeddings to ensure cached vectors are in memory
+    // before the reco engine runs (prevents redundant Ollama calls and
+    // ensures tasteCentroid is computed from existing embeddings).
+    const embeddingLoadPromise = embeddingService.loadCachedEmbeddings().then(count => {
+      if (count > 0) console.log(`[Splash] Loaded ${count} cached embeddings`);
+      return count;
+    }).catch(() => 0);
+
+    // Embedding-aware compute: pass callbacks so the reco engine generates
+    // missing embeddings (Tier 1 library + Tier 2 catalog enrichment) during
+    // its first run. Without these, Layer 6 (semantic similarity) is always 0.
+    const computeWithEmbeddings = async () => {
+      await embeddingLoadPromise;
+      recoStore.compute(
+        async (games) => {
+          const available = await embeddingService.isAvailable();
+          if (!available) return 0;
+          return embeddingService.generateMissing(games);
+        },
+        (candidateIds) => embeddingService.enrichWithCatalogEmbeddings(candidateIds),
+      );
+    };
 
     // If data is already loaded (e.g. HMR re-mount), nothing to do.
     if (isPrefetchReady()) {
       setDataReady(true);
-      recoStore.compute();
+      computeWithEmbeddings();
       return;
     }
 
     const markReady = () => {
       if (!cancelled) {
         setDataReady(true);
-        recoStore.compute();
+        try {
+          computeWithEmbeddings();
+        } catch (err) {
+          console.warn('[Splash] recoStore.compute failed:', err);
+        }
       }
     };
 
-    getCachedBrowseData()
+    const CACHE_LOAD_TIMEOUT_MS = 8000;
+    let cacheTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    const cacheLoadPromise = Promise.race([
+      getCachedBrowseData(),
+      new Promise<null>((_, reject) => {
+        cacheTimeoutId = setTimeout(() => reject(new Error('Cache load timeout')), CACHE_LOAD_TIMEOUT_MS);
+      }),
+    ]).catch(() => null);
+
+    cacheLoadPromise
       .then(cached => {
         // getCachedBrowseData() already populates the in-memory prefetch
         // store when a cache hit occurs, so isPrefetchReady() is now true.
@@ -531,15 +404,59 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
           .catch(() => { reportPrefetchError('Failed'); markReady(); });
       });
 
-    // Ollama setup is non-critical — fire-and-forget.
-    // Loads cached embeddings (instant) and checks if Ollama is available
-    // for future embedding generation. Never blocks boot.
-    embeddingService.loadCachedEmbeddings().then(count => {
-      if (count > 0) console.log(`[Splash] Loaded ${count} cached embeddings`);
+    // Ollama setup — subscribe to IPC progress so both the terminal line and
+    // the status panel show arctic model detection / download progress.
+    if (typeof window !== 'undefined' && window.ollama?.onSetupProgress) {
+      unsubOllamaRef.current = window.ollama.onSetupProgress(({ status, pct }: { status: string; pct: number }) => {
+        if (cancelled) return;
+        reportOllamaProgress(status, pct);
+        const isOk = /ready|model already installed/i.test(status) || (pct >= 100 && status.length > 0);
+        const suffix = pct > 0 && pct < 100 ? ` ${pct}%` : '';
+        setOllamaLine(isOk ? `[  OK  ] ${status}` : `> ${status}${suffix}`);
+      });
+    }
+
+    embeddingLoadPromise.then(() => {
       return embeddingService.isAvailable();
     }).then(available => {
       console.log(`[Splash] Embedding engine: ${available ? 'Ollama detected' : 'running without embeddings'}`);
-    }).catch((err) => { console.warn('[Splash] Embedding check:', err); });
+      setOllamaLine(null);
+      reportOllamaDone(available);
+      unsubOllamaRef.current?.();
+      unsubOllamaRef.current = null;
+
+      // Start catalog embedding pipeline in background — populates the
+      // catalog-embeddings IDB store and ANN index so the galaxy map,
+      // embedding space, and ANN-based recommendation retrieval all work.
+      // Previously this only ran when the Oracle tab was opened.
+      if (available) {
+        catalogStore.getEntryCount().then(count => {
+          if (count > 0) {
+            console.log(`[Splash] Starting catalog embedding pipeline (${count.toLocaleString()} entries)`);
+            embeddingService.generateCatalogEmbeddings(
+              (onBatch) => catalogStore.getAllEntries(onBatch),
+            ).then(() => {
+              // Chain Epic catalog embeddings after Steam finishes
+              return epicCatalogStore.getEntryCount().then(epicCount => {
+                if (epicCount > 0) {
+                  console.log(`[Splash] Starting Epic catalog embeddings (${epicCount.toLocaleString()} entries)`);
+                  return embeddingService.generateEpicCatalogEmbeddings(
+                    (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+                  );
+                }
+                return 0;
+              });
+            }).catch(err => console.warn('[Splash] Catalog embeddings:', err));
+          }
+        }).catch(() => {});
+      }
+    }).catch((err) => {
+      console.warn('[Splash] Embedding check:', err);
+      setOllamaLine(null);
+      reportOllamaDone(false);
+      unsubOllamaRef.current?.();
+      unsubOllamaRef.current = null;
+    });
 
     // Steam catalog sync — download full game metadata in background.
     // Non-blocking, skips if data is fresh (< 24h). Runs via IPC to main
@@ -550,6 +467,14 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
         console.log(`[Splash] Catalog ready: ${p.gamesStored.toLocaleString()} games`);
       }
     }).catch((err) => { console.warn('[Splash] Catalog sync:', err); });
+
+    // Epic catalog sync — download Epic Games Store catalog in background.
+    epicCatalogStore.sync().then(() => {
+      const p = epicCatalogStore.syncProgress;
+      if (p.itemsStored > 0) {
+        console.log(`[Splash] Epic catalog ready: ${p.itemsStored.toLocaleString()} games`);
+      }
+    }).catch((err) => { console.warn('[Splash] Epic catalog sync:', err); });
 
     // Safety timeout: don't strand the user on the splash screen forever.
     // If data still hasn't arrived after 30s, let them in anyway.
@@ -562,21 +487,28 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
 
     return () => {
       cancelled = true;
+      clearTimeout(initTimer);
       clearTimeout(safetyTimer);
+      if (cacheTimeoutId !== null) clearTimeout(cacheTimeoutId);
+      unsubOllamaRef.current?.();
+      unsubOllamaRef.current = null;
     };
   }, []);
 
-  // Auto-scroll terminal when content changes
+  // Auto-scroll terminal when content changes — use direct scrollTop for perf
   useEffect(() => {
-    requestAnimationFrame(() => {
-      terminalEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    });
+    const el = scrollContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [termLines]);
 
   // ---- Run boot terminal animation (fast line-by-line) ----
+  // Uses requestAnimationFrame + setTimeout to guarantee the browser paints
+  // each line before scheduling the next, even when the main thread is busy
+  // with IDB reads or IPC calls during initialization.
   useEffect(() => {
     let cancelled = false;
     let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingRaf = 0;
 
     const addLine = (content: string) => {
       if (cancelled) return;
@@ -585,16 +517,22 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
 
     const wait = (ms: number) => new Promise<void>(resolve => {
       if (cancelled) { resolve(); return; }
-      pendingTimer = setTimeout(() => { pendingTimer = null; resolve(); }, ms);
+      // Schedule on next animation frame THEN wait the delay — this ensures
+      // the browser commits a paint before the timer starts counting down.
+      pendingRaf = requestAnimationFrame(() => {
+        pendingRaf = 0;
+        if (cancelled) { resolve(); return; }
+        pendingTimer = setTimeout(() => { pendingTimer = null; resolve(); }, ms);
+      });
     });
 
     const runBoot = async () => {
-      await wait(400); // let ARK title animate in first
+      await wait(400);
 
       for (const line of BOOT_LINES) {
         if (cancelled) return;
         addLine(pick(line.variants));
-        setBootProgress(line.light);
+        bootProgressRef.current = line.light;
         await wait(line.delay);
       }
 
@@ -607,6 +545,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     return () => {
       cancelled = true;
       if (pendingTimer !== null) clearTimeout(pendingTimer);
+      if (pendingRaf) cancelAnimationFrame(pendingRaf);
     };
   }, []);
 
@@ -638,27 +577,12 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
             }}
           />
 
-          {/* Three.js Canvas — wrapped in error boundary so a WebGL / GLB
-              failure doesn't crash the entire application */}
+          {/* Three.js 3D scene — lazy-loaded so the splash shell paints instantly */}
           <div className="absolute inset-0">
             <CanvasErrorBoundary>
-              <Canvas dpr={[1.5, 2]} linear shadows>
-                <fog attach="fog" args={['#0a0010', 16, 30]} />
-                <SceneLights progress={bootProgress} />
-                <PerspectiveCamera makeDefault position={[0, 0, 16]} fov={75} />
-                <Suspense fallback={null}>
-                  <Planet url={assetUrl('scene.glb')} />
-                </Suspense>
-                <OrbitControls
-                  autoRotate
-                  autoRotateSpeed={0.5}
-                  enablePan={false}
-                  enableZoom={false}
-                  maxPolarAngle={Math.PI / 2}
-                  minPolarAngle={Math.PI / 2}
-                />
-                <Stars radius={500} depth={50} count={500} factor={10} />
-              </Canvas>
+              <Suspense fallback={null}>
+                <Splash3DScene progressRef={bootProgressRef} />
+              </Suspense>
             </CanvasErrorBoundary>
           </div>
 
@@ -683,10 +607,12 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
             </div>
           </motion.div>
 
-          {/* ---- Bottom-right: status panel ---- */}
-          <div className="absolute bottom-4 right-4 z-20 pointer-events-none">
-            <SplashStatusPanel />
-          </div>
+          {/* ---- Bottom-right: status panel (dev mode only) ---- */}
+          {devMode && (
+            <div className="absolute bottom-4 right-4 z-20 pointer-events-none">
+              <SplashStatusPanel />
+            </div>
+          )}
 
           {/* ---- Left-side black fade behind text area ---- */}
           <div
@@ -741,18 +667,20 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
             </motion.div>
 
             {/* Boot terminal — scrollable, fills remaining space */}
-            <div className="flex-1 overflow-y-auto pl-10 pr-[50%] pb-8 pt-2 scrollbar-hide">
+            <div ref={scrollContainerRef} className="flex-1 overflow-y-auto pl-10 pr-[50%] pb-8 pt-2 scrollbar-hide">
               <div className="font-mono text-[11px] leading-[1.6] text-white/70 whitespace-pre select-none">
                 {termLines.map((line, i) => (
-                  <motion.div
-                    key={i}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ duration: 0.05 }}
-                  >
+                  <div key={i} className="boot-line-fade">
                     {renderTextLine(line)}
-                  </motion.div>
+                  </div>
                 ))}
+
+                {/* Live Ollama / arctic model download progress */}
+                {ollamaLine != null && (
+                  <div className="boot-line-fade" style={{ animationDuration: '0.15s' }}>
+                    {renderTextLine(ollamaLine)}
+                  </div>
+                )}
 
                 {/* Blinking cursor while boot is running */}
                 {!bootDone && termLines.length > 0 && (
@@ -761,17 +689,12 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
 
                 {/* Waiting for data — boot finished but data still loading */}
                 {bootDone && !dataReady && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ duration: 0.3 }}
-                    className="text-cyan-400/70 animate-pulse"
-                  >
+                  <div className="boot-line-fade text-cyan-400/70 animate-pulse" style={{ animationDuration: '0.3s' }}>
                     {'> Synchronising game vault — stand by...'}
-                  </motion.div>
+                  </div>
                 )}
 
-                <div ref={terminalEndRef} />
+                {/* scroll anchor — scrollTop driven by scrollContainerRef */}
               </div>
 
               {/* Prominent CTA button — appears after boot completes */}
@@ -826,6 +749,3 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
   );
 }
 
-// Eagerly start fetching the GLB model as soon as this module is imported,
-// so it's (likely) cached by the time the Canvas mounts the Planet component.
-useGLTF.preload(assetUrl('scene.glb'));

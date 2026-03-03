@@ -14,7 +14,41 @@ const RSS_FEEDS = [
   { url: 'https://www.eurogamer.net/feed', source: 'Eurogamer' },
   { url: 'https://feeds.feedburner.com/ign/all', source: 'IGN' },
   { url: 'https://feeds.arstechnica.com/arstechnica/gaming', source: 'Ars Technica' },
+  { url: 'https://www.polygon.com/rss/index.xml', source: 'Polygon' },
+  { url: 'https://kotaku.com/rss', source: 'Kotaku' },
+  { url: 'https://www.gamesindustry.biz/feed', source: 'GamesIndustry.biz' },
+  { url: 'https://www.nintendolife.com/feeds/latest', source: 'Nintendo Life' },
+  { url: 'https://www.gamespot.com/feeds/news', source: 'GameSpot' },
+  { url: 'https://www.vg247.com/feed', source: 'VG247' },
+  { url: 'https://www.destructoid.com/feed/', source: 'Destructoid' },
+  { url: 'https://www.siliconera.com/feed/', source: 'Siliconera' },
+  { url: 'https://www.gematsu.com/feed', source: 'Gematsu' },
+  { url: 'https://www.pushsquare.com/feeds/latest', source: 'Push Square' },
+  { url: 'https://www.pcgamesn.com/feed', source: 'PCGamesN' },
+  { url: 'https://news.xbox.com/en-us/feed/', source: 'Xbox Wire' },
+  { url: 'https://www.gameinformer.com/rss.xml', source: 'Game Informer' },
+  { url: 'https://www.theverge.com/rss/index.xml', source: 'The Verge' },
 ];
+
+/** Decode all HTML entities (named + numeric decimal/hex). */
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&#x([0-9a-fA-F]+);/g, (m, hex: string) => { const cp = parseInt(hex, 16); return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m; })
+    .replace(/&#(\d+);/g, (m, dec: string) => { const cp = Number(dec); return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m; })
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&rsquo;/g, '\u2019')
+    .replace(/&lsquo;/g, '\u2018')
+    .replace(/&rdquo;/g, '\u201C')
+    .replace(/&ldquo;/g, '\u201D')
+    .replace(/&mdash;/g, '\u2014')
+    .replace(/&ndash;/g, '\u2013')
+    .replace(/&hellip;/g, '\u2026');
+}
 
 /**
  * Minimal RSS/Atom XML parser using regex.
@@ -48,7 +82,7 @@ function parseRSSItems(xml: string, source: string, limit: number): Array<{
 
     // Title
     const titleMatch = /<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i.exec(block);
-    const title = (titleMatch?.[1] ?? '').replace(/<[^>]+>/g, '').trim();
+    const title = decodeEntities((titleMatch?.[1] ?? '').replace(/<[^>]+>/g, '').trim());
     if (!title) continue;
 
     // Link — RSS uses <link>url</link>, Atom uses <link href="url"/>
@@ -77,14 +111,7 @@ function parseRSSItems(xml: string, source: string, limit: number): Array<{
     if (mediaMatch) imageUrl = mediaMatch[1].replace(/&amp;/g, '&');
 
     // Strip HTML from description for summary text
-    const summary = rawDesc
-      .replace(/<[^>]+>/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&nbsp;/g, ' ')
+    const summary = decodeEntities(rawDesc.replace(/<[^>]+>/g, ''))
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 500);

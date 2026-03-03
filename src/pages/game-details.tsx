@@ -2048,6 +2048,18 @@ const GameDetailsContent = memo(function GameDetailsContent({
 }: GameDetailsContentProps) {
   const [reviewsExpanded, setReviewsExpanded] = useState(false);
   const [reviewTab, setReviewTab] = useState<'metacritic' | 'steam' | 'epic'>('metacritic');
+
+  // Auto-switch away from Metacritic tab when it finishes loading with no data
+  useEffect(() => {
+    if (metacriticLoading || metacriticReviews) return;
+    if (reviewTab !== 'metacritic') return;
+    if (reviews && reviews.reviews.length > 0) {
+      setReviewTab('steam');
+    } else if (epicReviews && (epicReviews.totalReviews > 0 || epicReviews.averageRating > 0)) {
+      setReviewTab('epic');
+    }
+  }, [metacriticLoading, metacriticReviews, reviewTab, reviews, epicReviews]);
+
   // Determine whether Epic is the primary store for this game
   const isEpicPrimary = !!epicGame;
 

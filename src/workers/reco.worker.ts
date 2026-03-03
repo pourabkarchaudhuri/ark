@@ -58,8 +58,8 @@ const STATUS_WEIGHTS: Record<string, number> = {
   'Completed': 1.0,
   'Playing Now': 0.9,
   'Playing': 0.7,
+  'Want to Play': 0.5,
   'On Hold': 0.3,
-  'Want to Play': 0.1,
 };
 
 // ─── Layer 2: Engagement Curve Analysis ────────────────────────────────────────
@@ -135,13 +135,17 @@ function computeEngagementScore(game: UserGameSnapshot, now: number): number {
   const curvePattern = game.engagementPattern || classifyEngagementCurve(game);
   const curveMult = CURVE_MULTIPLIERS[curvePattern];
 
-  const baseScore =
+  let baseScore =
     normalizedHours * 0.28 +
     normalizedRating * 0.25 +
     statusScore * 0.18 +
     sessionDepth * 0.14 +
     temporalDecay * 0.10 +
     (curveMult - 1) * 0.05;
+
+  if (game.status === 'Want to Play' && game.hoursPlayed === 0) {
+    baseScore = Math.max(baseScore, 0.25 * temporalDecay + 0.10);
+  }
 
   const result = clamp01(baseScore * curveMult);
   _engagementCache.set(game.gameId, result);
@@ -187,7 +191,8 @@ function buildFeatureMap(
 function getReleaseBucket(dateStr: string): string {
   const year = new Date(dateStr).getFullYear();
   if (isNaN(year)) return 'unknown';
-  if (year >= 2023) return '2023+';
+  if (year >= 2025) return '2025+';
+  if (year >= 2023) return '2023-2024';
   if (year >= 2020) return '2020-2022';
   if (year >= 2015) return '2015-2019';
   if (year >= 2010) return '2010-2014';
@@ -219,6 +224,10 @@ function buildTasteProfile(games: UserGameSnapshot[], now: number): TasteProfile
     .filter(d => d.gameCount >= 2 && (d.avgRating >= 3.5 || d.totalHours >= 20))
     .map(d => d.name);
 
+  const loyalPublishers = publishers
+    .filter(p => p.gameCount >= 2 && (p.avgRating >= 3.5 || p.totalHours >= 20))
+    .map(p => p.name);
+
   return {
     genres,
     themes,
@@ -234,6 +243,7 @@ function buildTasteProfile(games: UserGameSnapshot[], now: number): TasteProfile
     topTheme: themes[0]?.name ?? '',
     clusters: [],
     loyalDevelopers,
+    loyalPublishers,
   };
 }
 
@@ -241,17 +251,11 @@ function buildTasteProfile(games: UserGameSnapshot[], now: number): TasteProfile
 
 function buildNegativeProfile(
   games: UserGameSnapshot[],
-  now: number,
+  _now: number,
 ): { vec: FeatureVector; strength: number } {
-  const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
-
   const negativeGames = games.filter(g => {
     if (g.removedAt) return true;
     if (g.status === 'On Hold' && g.hoursPlayed < 2) return true;
-    if (g.status === 'Want to Play') {
-      const age = now - new Date(g.addedAt).getTime();
-      if (age > SIX_MONTHS_MS && g.sessionCount === 0) return true;
-    }
     return false;
   });
 
@@ -282,7 +286,7 @@ const TRAJECTORY_MULTIPLIERS: Record<string, number> = {
   'playing now|completed': 1.4,
   'want to play|playing': 1.1,
   'playing|on hold': 0.6,
-  'want to play': 0.3,
+  'want to play': 0.8,
 };
 
 function getTrajectoryMultiplier(game: UserGameSnapshot): number {
@@ -294,51 +298,113 @@ function getTrajectoryMultiplier(game: UserGameSnapshot): number {
   if (game.status === 'Completed') return 1.3;
   if (game.status === 'On Hold') return 0.6;
   if (game.status === 'Playing' || game.status === 'Playing Now') return 1.0;
+  if (game.status === 'Want to Play') return 0.8;
   if (game.removedAt) return 0.2;
   return 0.5;
 }
 
-// ─── Layer 5: Content Similarity (Cosine — tag-based) ──────────────────────────
+// ─── Layer 5: Content Similarity (Dense Float32Array — tag-based) ───────────────
 
+// Map-based type retained for buildNegativeProfile (small, built once per run)
 type FeatureVector = Map<string, number>;
 
-function profileToVector(profile: TasteProfile): FeatureVector {
-  const vec: FeatureVector = new Map();
-  const add = (features: FeatureWeight[], prefix: string) => {
-    for (const f of features) vec.set(`${prefix}:${f.name}`, f.weight);
-  };
-  add(profile.genres, 'g');
-  add(profile.themes, 't');
-  add(profile.gameModes, 'm');
-  add(profile.perspectives, 'p');
-  add(profile.developers.slice(0, 20), 'd');
-  return vec;
+/**
+ * Dense feature space for fast cosine similarity.
+ * Built once per pipeline run from all features in the profile + candidates.
+ * Replaces Map<string, number> vectors with compact Float32Arrays and
+ * index-based dot products.
+ */
+class DenseFeatureSpace {
+  private dict = new Map<string, number>();
+  private _size = 0;
+
+  get size() { return this._size; }
+
+  /** Normalize key to lowercase to avoid case mismatches between profile/candidate. */
+  private static nk(key: string): string { return key.toLowerCase(); }
+
+  /** Register a feature key, returning its dense index. */
+  register(key: string): number {
+    const nk = DenseFeatureSpace.nk(key);
+    let idx = this.dict.get(nk);
+    if (idx === undefined) {
+      idx = this._size++;
+      this.dict.set(nk, idx);
+    }
+    return idx;
+  }
+
+  /** Build a dense vector from a profile. */
+  profileToDense(profile: TasteProfile): { vec: Float32Array; mag: number } {
+    const vec = new Float32Array(this._size);
+    const nk = DenseFeatureSpace.nk;
+    const add = (features: FeatureWeight[], prefix: string) => {
+      for (const f of features) {
+        const idx = this.dict.get(nk(`${prefix}:${f.name}`));
+        if (idx !== undefined) vec[idx] = f.weight;
+      }
+    };
+    add(profile.genres, 'g');
+    add(profile.themes, 't');
+    add(profile.gameModes, 'm');
+    add(profile.perspectives, 'p');
+    add(profile.developers.slice(0, 20), 'd');
+    add(profile.publishers.slice(0, 15), 'pub');
+
+    let mag = 0;
+    for (let i = 0; i < this._size; i++) mag += vec[i] * vec[i];
+    return { vec, mag: Math.sqrt(mag) };
+  }
+
+  /**
+   * Extract the non-zero feature indices for a candidate (binary vector).
+   * Deduplicates indices — duplicate genres/themes from the source data
+   * would otherwise inflate the dot product and break cosine correctness.
+   * Returns unique indices array and magnitude (sqrt of count).
+   */
+  candidateToIndices(c: CandidateGame): { indices: number[]; mag: number } {
+    const seen = new Set<number>();
+    const push = (idx: number | undefined) => {
+      if (idx !== undefined) seen.add(idx);
+    };
+    for (const g of c.genres) {
+      const can = toCanonicalGenre(g);
+      if (can) push(this.dict.get(`g:${norm(can)}`));
+    }
+    for (const t of c.themes) push(this.dict.get(`t:${norm(t)}`));
+    for (const m of c.gameModes) push(this.dict.get(`m:${norm(m)}`));
+    for (const p of c.perspectives) push(this.dict.get(`p:${norm(p)}`));
+    if (c.developer) push(this.dict.get(`d:${norm(c.developer)}`));
+    if (c.publisher) push(this.dict.get(`pub:${norm(c.publisher)}`));
+    const indices = [...seen];
+    return { indices, mag: Math.sqrt(indices.length) };
+  }
+
+  /** Convert a legacy Map-based vector to a dense Float32Array. */
+  mapToDense(map: FeatureVector): { vec: Float32Array; mag: number } {
+    const nk = DenseFeatureSpace.nk;
+    const vec = new Float32Array(this._size);
+    for (const [key, val] of map) {
+      const idx = this.dict.get(nk(key));
+      if (idx !== undefined) vec[idx] = val;
+    }
+    let mag = 0;
+    for (let i = 0; i < this._size; i++) mag += vec[i] * vec[i];
+    return { vec, mag: Math.sqrt(mag) };
+  }
 }
 
-function candidateToVector(c: CandidateGame): FeatureVector {
-  const vec: FeatureVector = new Map();
-  for (const g of c.genres) {
-    const can = toCanonicalGenre(g);
-    if (can) vec.set(`g:${norm(can)}`, 1);
-  }
-  for (const t of c.themes) vec.set(`t:${norm(t)}`, 1);
-  for (const m of c.gameModes) vec.set(`m:${norm(m)}`, 1);
-  for (const p of c.perspectives) vec.set(`p:${norm(p)}`, 1);
-  if (c.developer) vec.set(`d:${norm(c.developer)}`, 1);
-  return vec;
+/** Cosine similarity between a dense profile vector and a binary candidate (index-based). */
+function fastCosineProfileVsCandidate(
+  profileVec: Float32Array, profileMag: number,
+  candidateIndices: number[], candidateMag: number,
+): number {
+  if (candidateIndices.length === 0 || profileMag === 0 || candidateMag === 0) return 0;
+  let dot = 0;
+  for (let i = 0; i < candidateIndices.length; i++) dot += profileVec[candidateIndices[i]];
+  return dot / (profileMag * candidateMag);
 }
 
-function cosineSimilarity(a: FeatureVector, b: FeatureVector): number {
-  let dot = 0, magA = 0, magB = 0;
-  for (const [key, valA] of a) {
-    magA += valA * valA;
-    const valB = b.get(key);
-    if (valB !== undefined) dot += valA * valB;
-  }
-  for (const [, valB] of b) magB += valB * valB;
-  if (magA === 0 || magB === 0) return 0;
-  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
-}
 
 // ─── Layer 6: Semantic Similarity (Embedding cosine — optional) ─────────────────
 
@@ -363,10 +429,10 @@ function computeSemanticSimilarity(
 
 // ─── Layer 7: Co-Occurrence Graph + Similar-Games Graph ──────────────────────────
 
-function buildCoOccurrenceEdges(
+async function buildCoOccurrenceEdges(
   candidates: CandidateGame[],
   onProgress?: (fraction: number) => void,
-): Map<string, Map<string, number>> {
+): Promise<Map<string, Map<string, number>>> {
   const tagSets = new Map<string, Set<string>>();
   for (const c of candidates) {
     const tags = new Set<string>();
@@ -429,6 +495,7 @@ function buildCoOccurrenceEdges(
     if (onProgress && ci % progressStep === 0) {
       onProgress(ci / candidates.length);
     }
+    if (ci % 5000 === 0 && ci > 0) await new Promise(r => setTimeout(r, 4));
   }
 
   return edges;
@@ -645,8 +712,12 @@ function computeTimeOfDayBoost(candidate: CandidateGame, ctx: TimeOfDayContext):
 const FRANCHISE_STRIP_PATTERNS = [
   // Numbered sequels: "Game 2", "Game II", "Game III", "Game IV"
   /\s+([\divxlc]+|\d+)$/i,
-  // Common suffixes
+  // Colon-prefixed edition/remaster suffixes: "Game: Remastered"
   /\s*:\s*(remastered|goty|game of the year|deluxe|ultimate|definitive|complete|enhanced|anniversary|remake|hd|collection|gold|premium|special|digital|standard)(\s+edition)?$/i,
+  // Standalone edition/remaster suffixes (no colon): "Game Remastered", "Game Definitive Edition"
+  /\s+(remastered|remake|definitive|enhanced|anniversary|hd|complete|ultimate|deluxe|goty|gold|premium|special|digital|standard)(\s+edition)?$/i,
+  // "Game of the Year" as trailing phrase (with or without "Edition")
+  /\s+game\s+of\s+the\s+year(\s+edition)?$/i,
   /\s+edition$/i,
   // Parenthetical year/platform markers
   /\s*\([^)]*\)$/,
@@ -659,6 +730,7 @@ const FRANCHISE_STRIP_PATTERNS = [
 /** Extract the base franchise name from a game title. */
 function extractFranchiseBase(title: string): string {
   let base = title.trim();
+  const original = base;
   // Apply patterns iteratively (some titles have multiple suffixes)
   for (let round = 0; round < 3; round++) {
     let changed = false;
@@ -670,6 +742,18 @@ function extractFranchiseBase(title: string): string {
       }
     }
     if (!changed) break;
+  }
+  // Fallback: strip trailing word for 4+-word titles where no pattern matched
+  // (catches "Assassin's Creed Valhalla" → "Assassin's Creed")
+  // Requires 4+ words to avoid false positives like "Grand Theft Auto" → "Grand Theft"
+  if (base === original) {
+    const words = base.split(/\s+/);
+    if (words.length >= 4) {
+      const candidate = words.slice(0, -1).join(' ');
+      const newLast = candidate.split(/\s+/).pop()?.toLowerCase() ?? '';
+      const stopWords = new Set(['of', 'the', 'and', 'in', 'on', 'at', 'for', 'to', 'a', 'an']);
+      if (candidate.length >= 3 && !stopWords.has(newLast)) base = candidate;
+    }
   }
   return norm(base);
 }
@@ -807,10 +891,14 @@ function computeFranchiseBoost(
     const userPlayed = franchise.userPlayedIds.length;
     const totalEntries = franchise.entries.length;
 
-    // Higher boost if user rated the franchise entries highly
+    // Higher boost if user rated the franchise entries highly.
+    // When no ratings exist, infer satisfaction from hours played
+    // (unrated games shouldn't be penalized — playing 10+ hours signals interest).
     const ratingMult = franchise.userAvgRating >= 4 ? 1.5
       : franchise.userAvgRating >= 3 ? 1.0
-      : 0.5;
+      : franchise.userAvgRating > 0 ? 0.5
+      : franchise.userTotalHours >= 10 ? 1.2
+      : 1.0;
 
     // Higher boost for completing more of the series
     const completionFactor = Math.min(userPlayed / totalEntries, 0.8);
@@ -833,16 +921,20 @@ function computeFranchiseBoost(
 function computeStudioLoyaltyBoost(
   candidate: CandidateGame,
   loyalDevelopers: string[],
-  _profile: TasteProfile,
+  profile: TasteProfile,
 ): number {
-  if (loyalDevelopers.length === 0) return 0;
-
   const candDev = norm(candidate.developer);
   const candPub = norm(candidate.publisher);
 
   for (const dev of loyalDevelopers) {
     if (candDev === dev || candPub === dev) {
-      return 0.35; // strong boost for loyal studio
+      return 0.35;
+    }
+  }
+
+  for (const pub of profile.loyalPublishers) {
+    if (candPub === pub || candDev === pub) {
+      return 0.25;
     }
   }
 
@@ -1192,9 +1284,23 @@ function generateExplanation(
 
 // ─── Full Pipeline ─────────────────────────────────────────────────────────────
 
-function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shelves: RecoShelf[] } {
+async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: TasteProfile; shelves: RecoShelf[] }> {
   const { userGames, candidates, now, currentHour, embeddingCoverage, dismissedGameIds } = input;
   const dismissedSet = new Set(dismissedGameIds);
+
+  // Normalize array fields — old DB entries may have undefined for optional arrays
+  for (const c of candidates) {
+    if (!c.genres) c.genres = [];
+    if (!c.themes) c.themes = [];
+    if (!c.gameModes) c.gameModes = [];
+    if (!c.perspectives) c.perspectives = [];
+  }
+  for (const g of userGames) {
+    if (!g.genres) g.genres = [];
+    if (!g.themes) g.themes = [];
+    if (!g.gameModes) g.gameModes = [];
+    if (!g.perspectives) g.perspectives = [];
+  }
 
   // Reset per-run caches
   _engagementCache.clear();
@@ -1207,7 +1313,7 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
   const tasteProfile = buildTasteProfile(userGames, now);
 
   if (filteredCandidates.length === 0) {
-    return { tasteProfile, shelves: buildShelvesFromScored([], [], userGames, tasteProfile, [], []) };
+    return { tasteProfile, shelves: buildShelvesFromScored([], [], userGames, tasteProfile, [], [], null) };
   }
 
   // ── 2. Classify engagement curves ──
@@ -1222,18 +1328,57 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
   progress('Mining negative signals...', 12);
   const negativeProfile = buildNegativeProfile(userGames, now);
 
-  // ── 4. Pre-compute taste vectors ──
+  // ── 4. Pre-compute taste vectors (dense Float32Array) ──
   progress('Building taste vectors...', 16);
-  const profileVec = profileToVector(tasteProfile);
+  const featureSpace = new DenseFeatureSpace();
+
+  // Register all features from profile + candidates + negative games into the dictionary
+  const registerProfile = (p: TasteProfile) => {
+    for (const g of p.genres) featureSpace.register(`g:${g.name}`);
+    for (const t of p.themes) featureSpace.register(`t:${t.name}`);
+    for (const m of p.gameModes) featureSpace.register(`m:${m.name}`);
+    for (const pe of p.perspectives) featureSpace.register(`p:${pe.name}`);
+    for (const d of p.developers.slice(0, 20)) featureSpace.register(`d:${d.name}`);
+    for (const pub of p.publishers.slice(0, 15)) featureSpace.register(`pub:${pub.name}`);
+  };
+  registerProfile(tasteProfile);
+
+  for (const c of filteredCandidates) {
+    for (const g of c.genres) {
+      const can = toCanonicalGenre(g);
+      if (can) featureSpace.register(`g:${norm(can)}`);
+    }
+    for (const t of c.themes) featureSpace.register(`t:${norm(t)}`);
+    for (const m of c.gameModes) featureSpace.register(`m:${norm(m)}`);
+    for (const p of c.perspectives) featureSpace.register(`p:${norm(p)}`);
+    if (c.developer) featureSpace.register(`d:${norm(c.developer)}`);
+    if (c.publisher) featureSpace.register(`pub:${norm(c.publisher)}`);
+  }
+
+  for (const g of userGames) {
+    for (const genre of g.genres) {
+      const can = toCanonicalGenre(genre);
+      if (can) featureSpace.register(`g:${norm(can)}`);
+    }
+    for (const t of g.themes) featureSpace.register(`t:${norm(t)}`);
+    if (g.developer) featureSpace.register(`d:${norm(g.developer)}`);
+  }
+
+  const { vec: profileVecDense, mag: profileMag } = featureSpace.profileToDense(tasteProfile);
+  const { vec: negVecDense, mag: negMag } = featureSpace.mapToDense(negativeProfile.vec);
 
   // ── 5. Build co-occurrence graph ──
   progress('Building similarity graph...', 18);
-  const coOccurrence = buildCoOccurrenceEdges(filteredCandidates, (f) => {
+  const coOccurrence = await buildCoOccurrenceEdges(filteredCandidates, (f) => {
     progress('Building similarity graph...', 18 + Math.floor(f * 4));
   });
 
   // ── 6. Use precomputed taste centroid for semantic similarity ──
   const useSemantics = embeddingCoverage > 0;
+  const hasPrecomputedScores = !!input.precomputedSemanticScores;
+  const precomputedScores = input.precomputedSemanticScores ?? {};
+  // Always build the centroid when available — backlog advisor + cluster detection need it
+  // even when per-candidate scoring uses precomputed scores.
   const tasteCentroid: Float64Array | null = useSemantics && input.tasteCentroid
     ? new Float64Array(input.tasteCentroid)
     : null;
@@ -1250,9 +1395,12 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
   const clusters = detectTasteClusters(userGames, now);
   tasteProfile.clusters = clusters;
 
-  // Pre-extract cluster semantic centroids for per-candidate scoring
+  // Pre-extract cluster semantic centroids for per-candidate scoring.
+  // When precomputed semantic scores are provided, candidate embeddings are
+  // stripped so cluster centroid scoring is skipped — its weight budget
+  // is redistributed to the main semantic layer via hasClusterCentroids=false.
   const clusterCentroids: Array<{ centroid: Float64Array; label: string }> = [];
-  if (useSemantics) {
+  if (useSemantics && !hasPrecomputedScores) {
     for (const cl of clusters) {
       if (cl.semanticCentroid) {
         clusterCentroids.push({ centroid: new Float64Array(cl.semanticCentroid), label: cl.label });
@@ -1265,6 +1413,12 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
   const graphCtx = buildGraphUserContext(userGames, now);
   const todCtx = buildTimeOfDayContext(userGames, currentHour);
   const seqCtx = buildSequencingContext(userGames);
+
+  // Sort user games by engagement weight descending so computeGraphSignal's
+  // early termination (break after 3 matches) picks the strongest signals.
+  userGames.sort((a, b) =>
+    (graphCtx.ugWeights.get(b.gameId) ?? 0) - (graphCtx.ugWeights.get(a.gameId) ?? 0),
+  );
 
   // Pre-compute per-user-game normalized canonical genre sets for engagement curve bonus
   const ugGenreNorms = new Map<string, Set<string>>();
@@ -1309,6 +1463,15 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
   const W_STUDIO       = 0.05;
   const W_SEQUENCING   = 0.04;
 
+  // ML model weight — proportional to coverage. Unused budget goes to content + quality.
+  const mlCoverage = filteredCandidates.filter(c => c.mlScore != null).length / Math.max(1, filteredCandidates.length);
+  const mlBudget       = 0.10;
+  const W_ML           = mlBudget * mlCoverage;
+  const mlResidual     = mlBudget * (1 - mlCoverage);
+  // Redistribute: 60% to content, 40% to quality when ML unavailable
+  const W_CONTENT_ML   = mlResidual * 0.60;
+  const W_QUALITY_ML   = mlResidual * 0.40;
+
   const maxGenreWeight = tasteProfile.genres[0]?.weight ?? 1;
   const scored: ScoredGame[] = [];
   const scoringProgressStep = Math.max(1, Math.floor(totalCandidates / 20));
@@ -1316,17 +1479,20 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
   for (let i = 0; i < filteredCandidates.length; i++) {
     const c = filteredCandidates[i];
 
-    // Layer 5: Content similarity — compute candidate vector ONCE (reused for negative signal)
-    const candidateVec = candidateToVector(c);
-    const contentSimilarity = cosineSimilarity(profileVec, candidateVec);
+    // Layer 5: Content similarity — dense Float32Array cosine
+    const { indices: candidateIndices, mag: candidateMag } = featureSpace.candidateToIndices(c);
+    const contentSimilarity = fastCosineProfileVsCandidate(profileVecDense, profileMag, candidateIndices, candidateMag);
 
     // Layer 6: Semantic similarity (proportional to embedding coverage)
     const semanticSimilarity = useSemantics
-      ? computeSemanticSimilarity(tasteCentroid, c.embedding)
+      ? (hasPrecomputedScores
+          ? (precomputedScores[c.gameId] ?? 0)
+          : computeSemanticSimilarity(tasteCentroid, c.embedding))
       : 0;
 
     // Layer 6b: Cluster centroid semantic similarity — max across all cluster centroids.
-    // Captures niche taste signals that get averaged out in the global centroid.
+    // Skipped when precomputed scores are provided (candidate embeddings are stripped);
+    // the budget is redistributed to the main semantic layer via hasClusterCentroids.
     let clusterSemanticSim = 0;
     let bestClusterIdx = -1;
     if (W_CLUSTER_SEM > 0 && c.embedding && c.embedding.length > 0) {
@@ -1383,9 +1549,9 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
     // Layer 13: Session sequencing (uses hoisted context)
     const sequencingBoost = computeSequencingBoost(c, seqCtx);
 
-    // Layer 3: Negative signal — reuse candidateVec (was computed twice before)
+    // Layer 3: Negative signal — dense cosine between negative profile and candidate indices
     const negativeSignal = negativeProfile.strength > 0
-      ? cosineSimilarity(negativeProfile.vec, candidateVec) * negativeProfile.strength
+      ? fastCosineProfileVsCandidate(negVecDense, negMag, candidateIndices, candidateMag) * negativeProfile.strength
       : 0;
 
     // Engagement curve bonus (uses pre-computed canonical genre norm sets)
@@ -1416,13 +1582,16 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
     const isStretchPick = cCanonGenres.length > 0 && sharedGenres.length === 0;
     const isOnSale = !!c.price?.discountPercent && c.price.discountPercent > 0;
 
+    // ML model signal: P(recommended) from Kaggle-trained LightGBM (0..1)
+    const mlSignal = c.mlScore ?? 0.5;
+
     // Final composite score
     const score = clamp01(
-      contentSimilarity * W_CONTENT +
+      contentSimilarity * (W_CONTENT + W_CONTENT_ML) +
       semanticSimilarity * W_SEMANTIC +
       clusterSemanticSim * W_CLUSTER_SEM +
       graphSignal * W_GRAPH +
-      qualitySignal * W_QUALITY +
+      qualitySignal * (W_QUALITY + W_QUALITY_ML) +
       popularitySignal * W_POPULARITY +
       recencyBoost * W_RECENCY +
       diversityBonus * W_DIVERSITY +
@@ -1430,9 +1599,11 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
       engagementCurveBonus * W_CURVE +
       franchiseBoost * W_FRANCHISE +
       studioLoyaltyBoost * W_STUDIO +
-      sequencingBoost * W_SEQUENCING -
+      sequencingBoost * W_SEQUENCING +
+      mlSignal * W_ML -
       negativeSignal * W_NEGATIVE
     );
+    if (!Number.isFinite(score)) continue;
 
     scored.push({
       gameId: c.gameId,
@@ -1465,6 +1636,7 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
         franchiseBoost,
         studioLoyaltyBoost,
         sequencingBoost,
+        mlSignal,
       },
       reasons: {
         sharedGenres,
@@ -1489,12 +1661,16 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
       const pct = 28 + Math.floor((i / totalCandidates) * 30);
       progress(`Scoring candidates... (${i.toLocaleString()}/${totalCandidates.toLocaleString()})`, pct);
     }
+
+    if (i % 2000 === 0 && i > 0) await new Promise(r => setTimeout(r, 4));
   }
 
   // ── 14. Diversity re-ranking (MMR) ──
   progress('Applying diversity filter...', 60);
   scored.sort((a, b) => b.score - a.score);
-  const reranked = mmrRerank(scored, 0.7, 80, (f) => {
+  const MMR_POOL_SIZE = 500;
+  const mmrPool = scored.slice(0, MMR_POOL_SIZE);
+  const reranked = mmrRerank(mmrPool, 0.7, 80, (f) => {
     progress('Applying diversity filter...', 60 + Math.floor(f * 8));
   });
 
@@ -1508,7 +1684,7 @@ function runPipeline(input: RecoWorkerInput): { tasteProfile: TasteProfile; shel
 
   // ── 17. Shelf assembly ──
   progress('Building shelves...', 84);
-  const shelves = buildShelvesFromScored(reranked, scored, userGames, tasteProfile, clusters, franchises);
+  const shelves = buildShelvesFromScored(reranked, scored, userGames, tasteProfile, clusters, franchises, tasteCentroid);
 
   return { tasteProfile, shelves };
 }
@@ -1522,6 +1698,7 @@ function buildShelvesFromScored(
   profile: TasteProfile,
   clusters: TasteCluster[],
   franchises: FranchiseCluster[],
+  tasteCentroid: Float64Array | null,
 ): RecoShelf[] {
   const shelves: RecoShelf[] = [];
   const usedGameIds = new Set<string>();
@@ -1582,16 +1759,21 @@ function buildShelvesFromScored(
   }
 
   // "From Studios You Love"
-  if (profile.loyalDevelopers.length > 0) {
+  if (profile.loyalDevelopers.length > 0 || profile.loyalPublishers.length > 0) {
     const studioGames = reranked
       .filter(s => !usedGameIds.has(s.gameId) && s.layerScores.studioLoyaltyBoost > 0)
       .slice(0, 12);
 
     if (studioGames.length >= 2) {
+      const titleCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+      const studioNames = [
+        ...profile.loyalDevelopers.slice(0, 2).map(titleCase),
+        ...profile.loyalPublishers.filter(p => !profile.loyalDevelopers.includes(p)).slice(0, 2).map(titleCase),
+      ].slice(0, 3);
       shelves.push({
         type: 'from-studios-you-love',
         title: 'From Studios You Love',
-        subtitle: `Games by ${profile.loyalDevelopers.slice(0, 3).map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', ')}`,
+        subtitle: `Games by ${studioNames.join(', ')}`,
         games: studioGames,
       });
       addToUsed(studioGames);
@@ -1841,6 +2023,7 @@ function buildShelvesFromScored(
         diversityBonus: 0, trajectoryMultiplier: 0, negativeSignal: 0,
         timeOfDayBoost: 0, engagementCurveBonus: 0,
         franchiseBoost: 0, studioLoyaltyBoost: 0, sequencingBoost: 0,
+        mlSignal: 0,
       },
       reasons: {
         sharedGenres: [], sharedThemes: [], sharedModes: [],
@@ -1861,16 +2044,105 @@ function buildShelvesFromScored(
     });
   }
 
+  // ── Backlog Advisor ──
+  // Surface "Want to Play" games, ranked by how well they fit the user's
+  // current taste profile — effectively a prioritized play-next queue.
+  // Uses the same semantic centroid + content similarity as the main pipeline.
+  const backlogCandidates = userGames
+    .filter(g => g.status === 'Want to Play' && g.hoursPlayed === 0)
+    .map((g): ScoredGame => {
+      const genreOverlapCount = g.genres.filter(gn => {
+        const cn = toCanonicalGenre(gn) ?? gn;
+        return profile.genres.some(pg => pg.name.toLowerCase() === cn.toLowerCase());
+      }).length;
+      const themeOverlapCount = g.themes.filter(t =>
+        profile.themes.some(pt => pt.name.toLowerCase() === t.toLowerCase())
+      ).length;
+      const genreOverlap = g.genres.length > 0 ? clamp01(genreOverlapCount / g.genres.length) : 0;
+      const themeOverlap = g.themes.length > 0 ? clamp01(themeOverlapCount / g.themes.length) : 0;
+      const devMatch = profile.loyalDevelopers.some(d => d.toLowerCase() === g.developer.toLowerCase()) ? 1 : 0;
+      const pubMatch = profile.loyalPublishers.some(p => p.toLowerCase() === g.publisher.toLowerCase()) ? 0.5 : 0;
+      const ratingBoost = g.rating > 0 ? g.rating / 5 : 0;
+
+      const semanticSim = computeSemanticSimilarity(tasteCentroid, g.embedding);
+
+      const score = clamp01(tasteCentroid && semanticSim > 0
+        ? genreOverlap * 0.20 + themeOverlap * 0.10 + devMatch * 0.15 + pubMatch * 0.05
+          + ratingBoost * 0.10 + semanticSim * 0.30 + 0.10
+        : genreOverlap * 0.30 + themeOverlap * 0.15 + devMatch * 0.20 + pubMatch * 0.10
+          + ratingBoost * 0.15 + 0.10);
+
+      const reasons: string[] = [];
+      if (semanticSim > 0.3) reasons.push('Strong semantic match to your taste');
+      if (genreOverlapCount > 0) reasons.push(`Matches ${genreOverlapCount} of your top genres`);
+      if (devMatch) reasons.push(`From ${g.developer}, a studio you love`);
+      if (themeOverlapCount > 0) reasons.push(`${themeOverlapCount} shared themes with your favourites`);
+
+      return {
+        gameId: g.gameId,
+        title: g.title,
+        coverUrl: undefined,
+        headerImage: undefined,
+        developer: g.developer,
+        publisher: g.publisher,
+        genres: g.genres,
+        themes: g.themes,
+        gameModes: g.gameModes,
+        platforms: [],
+        metacriticScore: null,
+        playerCount: null,
+        releaseDate: g.releaseDate,
+        score,
+        layerScores: {
+          contentSimilarity: genreOverlap, semanticSimilarity: clamp01(semanticSim), clusterSemanticSim: 0,
+          graphSignal: 0, qualitySignal: 0, popularitySignal: 0, recencyBoost: 0,
+          diversityBonus: 0, trajectoryMultiplier: 0, negativeSignal: 0,
+          timeOfDayBoost: 0, engagementCurveBonus: 0,
+          franchiseBoost: devMatch * 0.2, studioLoyaltyBoost: pubMatch * 0.1, sequencingBoost: 0,
+          mlSignal: 0,
+        },
+        reasons: {
+          sharedGenres: g.genres.filter(gn => profile.genres.some(pg => pg.name.toLowerCase() === gn.toLowerCase())),
+          sharedThemes: g.themes.filter(t => profile.themes.some(pt => pt.name.toLowerCase() === t.toLowerCase())),
+          sharedModes: [],
+          similarTo: [],
+          metacriticScore: null,
+          popularityRank: null,
+          isHiddenGem: false,
+          isStretchPick: false,
+          isFranchiseEntry: false,
+          isOnSale: false,
+          semanticRetrieved: false,
+          explanation: reasons.length > 0 ? reasons.join('. ') : 'In your backlog — matches your current taste',
+        },
+        explanation: reasons,
+      };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+
+  if (backlogCandidates.length >= 1) {
+    shelves.push({
+      type: 'backlog-advisor',
+      title: 'Backlog Advisor',
+      subtitle: 'Your wishlist, ranked by your current taste',
+      games: backlogCandidates,
+    });
+  }
+
   return shelves;
 }
 
 // ─── Worker Entry ──────────────────────────────────────────────────────────────
 
-self.onmessage = (e: MessageEvent<RecoWorkerInput>) => {
+let _running = false;
+self.onmessage = async (e: MessageEvent<RecoWorkerInput>) => {
+  if (_running) return;
+  _running = true;
   const t0 = performance.now();
 
   try {
-    const { tasteProfile, shelves } = runPipeline(e.data);
+    const { tasteProfile, shelves } = await runPipeline(e.data);
     const computeTimeMs = Math.round(performance.now() - t0);
 
     self.postMessage({
@@ -1882,15 +2154,11 @@ self.onmessage = (e: MessageEvent<RecoWorkerInput>) => {
   } catch (err) {
     console.error('[reco.worker] Pipeline failed:', err);
     self.postMessage({
-      type: 'result',
-      tasteProfile: {
-        genres: [], themes: [], gameModes: [], perspectives: [],
-        developers: [], publishers: [], eras: [], clusters: [],
-        totalGames: 0, totalHours: 0, avgRating: 0, topGenre: '', topTheme: '',
-        loyalDevelopers: [],
-      },
-      shelves: [],
+      type: 'error',
+      error: err instanceof Error ? err.message : String(err),
       computeTimeMs: Math.round(performance.now() - t0),
     } satisfies RecoWorkerMessage);
+  } finally {
+    _running = false;
   }
 };

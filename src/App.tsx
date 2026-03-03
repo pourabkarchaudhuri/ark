@@ -7,11 +7,14 @@ import { ToastProvider } from '@/components/ui/toast';
 import { UpdateSnackbar } from '@/components/update-snackbar';
 import { ChangelogModal } from '@/components/changelog-modal';
 import { trackPageView } from '@/services/analytics';
+import { SplashScreen } from '@/components/splash-screen';
 
 // ---------------------------------------------------------------------------
-// Lazy-loaded heavy components — split into separate chunks for faster initial load
+// Lazy-loaded heavy components — split into separate chunks for faster initial load.
+// The splash screen is a direct import (not lazy) because it's the very first
+// thing the user sees — any chunk-loading delay would show a blank black screen.
+// The heavy Three.js 3D scene inside the splash is separately lazy-loaded.
 // ---------------------------------------------------------------------------
-const SplashScreen = lazy(() => import('@/components/splash-screen').then(m => ({ default: m.SplashScreen })));
 const Dashboard = lazy(() => import('@/pages/dashboard').then(m => ({ default: m.Dashboard })));
 const GameDetailsPage = lazy(() => import('@/pages/game-details').then(m => ({ default: m.GameDetailsPage })));
 
@@ -58,9 +61,7 @@ function AppContent() {
       <ErrorBoundary onReset={handleReset}>
         <AnimatePresence mode="wait">
           {appState === 'splash' && (
-            <Suspense fallback={<ChunkFallback />}>
-              <SplashScreen key="splash" onEnter={handleSplashEnter} />
-            </Suspense>
+            <SplashScreen key="splash" onEnter={handleSplashEnter} />
           )}
 
           {appState === 'ready' && (

@@ -62,7 +62,7 @@ export function register(): void {
       return getStatus();
     } catch (err) {
       logger.error('[ANN IPC] status error:', err);
-      return { ready: false, vectorCount: 0, dims: 768 };
+      return { ready: false, vectorCount: 0, dims: 1024 };
     }
   });
 

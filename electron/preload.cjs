@@ -6,6 +6,12 @@ contextBridge.exposeInMainWorld('electron', {
   maximize: () => ipcRenderer.invoke('window-maximize'),
   close: () => ipcRenderer.invoke('window-close'),
   isMaximized: () => ipcRenderer.invoke('window-is-maximized'),
+  onMaximizedChange: (cb) => {
+    ipcRenderer.invoke('window-subscribe-maximize');
+    const handler = (_e, maximized) => cb(maximized);
+    ipcRenderer.on('window-maximized-changed', handler);
+    return () => ipcRenderer.removeListener('window-maximized-changed', handler);
+  },
   // Open URL in default OS browser
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   // Proxy fetch — routes HTTP requests through the main process to bypass CORS.
@@ -418,6 +424,17 @@ contextBridge.exposeInMainWorld('ollama', {
   // Generate embeddings for multiple texts (batched)
   generateEmbeddings: (items) =>
     ipcRenderer.invoke('ollama:generateEmbeddings', items),
+
+  // Get embedding model info (name, size, installed status)
+  getModelInfo: () =>
+    ipcRenderer.invoke('ollama:modelInfo'),
+
+  // Subscribe to setup progress (for splash screen). Returns unsubscribe.
+  onSetupProgress: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('ollama:setup-progress', handler);
+    return () => ipcRenderer.removeListener('ollama:setup-progress', handler);
+  },
 });
 
 // Expose ANN Index API to renderer (HNSW nearest-neighbor search)
@@ -431,13 +448,33 @@ contextBridge.exposeInMainWorld('ann', {
   clear: () => ipcRenderer.invoke('ann:clear'),
 });
 
+// Expose ML Model API to renderer (Kaggle-trained recommendation model)
+contextBridge.exposeInMainWorld('ml', {
+  load: () => ipcRenderer.invoke('ml:load'),
+  status: () => ipcRenderer.invoke('ml:status'),
+  scoreGames: (userProfile, gameIds) => ipcRenderer.invoke('ml:scoreGames', userProfile, gameIds),
+  buildUserProfile: (games) => ipcRenderer.invoke('ml:buildUserProfile', games),
+  getGameRecRates: (gameIds) => ipcRenderer.invoke('ml:getGameRecRates', gameIds),
+});
+
 // Google Analytics (Measurement Protocol via main process)
 contextBridge.exposeInMainWorld('analytics', {
   trackEvent: (name, params) => ipcRenderer.invoke('analytics:trackEvent', name, params),
   trackPageView: (page) => ipcRenderer.invoke('analytics:trackPageView', page),
 });
 
+// Expose DevLog API to renderer (reads docs/dev-journal.json for dev-mode timeline)
+contextBridge.exposeInMainWorld('devlog', {
+  getJournal: () => ipcRenderer.invoke('devlog:getJournal'),
+});
+
+// Expose Event Scraper API to renderer (background scrape of gaming-event websites)
+contextBridge.exposeInMainWorld('eventScraper', {
+  scrapeAll: (events) => ipcRenderer.invoke('events:scrapeAll', events),
+  clearCache: () => ipcRenderer.invoke('events:clearCache'),
+});
+
 // Only log exposed APIs in development to avoid leaking IPC surface in production
 if (process.env.NODE_ENV !== 'production') {
-  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.ann, window.analytics exposed');
+  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.ann, window.analytics, window.devlog exposed');
 }

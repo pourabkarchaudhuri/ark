@@ -33,7 +33,7 @@ const ENTRIES_STORE = 'entries';
 const META_STORE = 'meta';
 
 const BATCH_SIZE = 200;
-const CONCURRENCY = 50;
+const CONCURRENCY = 8;
 const SYNC_STALE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
 // ─── IDB Helpers (connection pooled) ─────────────────────────────────────────
@@ -361,6 +361,7 @@ class CatalogStore {
   async queryForCandidates(opts: {
     topGenres: string[];
     loyalDevelopers: string[];
+    loyalPublishers?: string[];
     excludeIds: Set<string>;
     minReviews?: number;
     minPositivity?: number;
@@ -369,6 +370,7 @@ class CatalogStore {
     const {
       topGenres,
       loyalDevelopers,
+      loyalPublishers = [],
       excludeIds,
     minReviews = 10,
     minPositivity = 0.5,
@@ -377,6 +379,7 @@ class CatalogStore {
 
     const genreSet = new Set(topGenres.map(g => g.toLowerCase()));
     const devSet = new Set(loyalDevelopers.map(d => d.toLowerCase()));
+    const pubSet = new Set(loyalPublishers.map(p => p.toLowerCase()));
 
     const db = await getDB();
     return new Promise((resolve) => {
@@ -408,9 +411,10 @@ class CatalogStore {
 
         const hasGenreMatch = entry.genres.some(g => genreSet.has(g.toLowerCase()));
         const hasDevMatch = entry.developer && devSet.has(entry.developer.toLowerCase());
+        const hasPubMatch = entry.publisher && pubSet.size > 0 && pubSet.has(entry.publisher.toLowerCase());
         const isPopular = entry.reviewCount >= 1000;
 
-        if (hasGenreMatch || hasDevMatch || isPopular) {
+        if (hasGenreMatch || hasDevMatch || hasPubMatch || isPopular) {
           results.push(entry);
         }
 

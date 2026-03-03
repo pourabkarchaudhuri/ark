@@ -52,8 +52,10 @@ export interface TasteProfile {
   topTheme: string;
   /** Detected taste clusters (2–4 distinct moods). */
   clusters: TasteCluster[];
-  /** Developers the user is loyal to (≥3 games, avg rating ≥4). */
+  /** Developers the user is loyal to (≥2 games, avg rating ≥3.5 or ≥20 hours). */
   loyalDevelopers: string[];
+  /** Publishers the user is loyal to (≥2 games, avg rating ≥3.5 or ≥20 hours). */
+  loyalPublishers: string[];
 }
 
 // ─── Franchise Detection ───────────────────────────────────────────────────────
@@ -138,14 +140,26 @@ export interface ScoredGame {
     franchiseBoost: number;
     studioLoyaltyBoost: number;
     sequencingBoost: number;
+    mlSignal?: number;
   };
   reasons: MatchReasons;
+  /** Human-readable explanation of why this was recommended. */
+  explanation?: string[];
   /** Price info (if available). */
   price?: {
     isFree: boolean;
     finalFormatted?: string;
     discountPercent?: number;
   };
+}
+
+// ─── Layer Score Normalization ─────────────────────────────────────────────────
+
+export interface LayerBreakdown {
+  name: string;
+  rawScore: number;
+  normalizedScore: number;
+  percentage: number;
 }
 
 // ─── Shelves ───────────────────────────────────────────────────────────────────
@@ -169,7 +183,9 @@ export type ShelfType =
   | 'upcoming-sequels'
   | 'deals-for-you'
   | 'free-for-you'
-  | 'from-studios-you-love';
+  | 'from-studios-you-love'
+  // v4 shelf types
+  | 'backlog-advisor';
 
 export interface RecoShelf {
   type: ShelfType;
@@ -259,6 +275,8 @@ export interface CandidateGame {
   embedding?: number[];
   /** True if surfaced via ANN embedding retrieval, not metadata filter. */
   semanticRetrieved?: boolean;
+  /** ML model P(recommended) score from the Kaggle-trained LightGBM model. */
+  mlScore?: number;
 }
 
 /** Payload posted to the worker. */
@@ -274,6 +292,12 @@ export interface RecoWorkerInput {
   dismissedGameIds: string[];
   /** Precomputed taste centroid (768-dim). Undefined if no library embeddings. */
   tasteCentroid?: number[];
+  /**
+   * Precomputed per-candidate semantic similarity scores (taste centroid cosine).
+   * Keyed by gameId. When present, candidate embeddings are stripped from the
+   * payload to avoid expensive structured-clone serialization.
+   */
+  precomputedSemanticScores?: Record<string, number>;
 }
 
 /** Progress updates from the worker. */
@@ -291,4 +315,11 @@ export interface RecoWorkerResult {
   computeTimeMs: number;
 }
 
-export type RecoWorkerMessage = RecoWorkerProgress | RecoWorkerResult;
+/** Error from the worker when the pipeline crashes. */
+export interface RecoWorkerError {
+  type: 'error';
+  error: string;
+  computeTimeMs: number;
+}
+
+export type RecoWorkerMessage = RecoWorkerProgress | RecoWorkerResult | RecoWorkerError;

@@ -4,6 +4,7 @@ import { ALL_BADGES } from '@/data/badges';
 import type { BadgeCondition, BadgeProgress, BadgeBranch, TasteDnaAxis, BadgeTier } from '@/data/badge-types';
 import { TIER_POINTS } from '@/data/badge-types';
 import { toCanonicalGenre } from '@/data/canonical-genres';
+import { sessionStore } from '@/services/session-store';
 
 // ─── Derived stats computed once from raw data ────────────────────────────────
 
@@ -32,6 +33,7 @@ interface DerivedStats {
   gamesWithZeroHours: number;
   multiGenreCompletionCount: number;
   longestStreakDays: number;
+  currentStreakDays: number;
 }
 
 function computeDerivedStats(
@@ -169,6 +171,7 @@ function computeDerivedStats(
     gamesWithZeroHours,
     multiGenreCompletionCount: completedGenres.size,
     longestStreakDays,
+    currentStreakDays: sessionStore.getCurrentStreak(),
   };
 }
 
@@ -194,6 +197,8 @@ function evaluateCondition(
       return { met: stats.sessionCount >= cond.min, current: stats.sessionCount, target: cond.min };
     case 'streakDays':
       return { met: stats.longestStreakDays >= cond.min, current: stats.longestStreakDays, target: cond.min };
+    case 'currentStreakDays':
+      return { met: stats.currentStreakDays >= cond.min, current: stats.currentStreakDays, target: cond.min };
     case 'ratingCount':
       return { met: stats.ratingCount >= cond.min, current: stats.ratingCount, target: cond.min };
     case 'reviewCount':

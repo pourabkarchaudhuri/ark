@@ -5,12 +5,13 @@
 
 import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
+import { useDevMode } from '@/hooks/useDevMode';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 
@@ -62,6 +63,9 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
+
+  // Developer mode
+  const [devMode, setDevMode] = useDevMode();
 
   // Year Wrapped state
   const [showWrapped, setShowWrapped] = useState(false);
@@ -339,25 +343,25 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
           animate={{ width: 400, opacity: 1 }}
           exit={{ width: 0, opacity: 0 }}
           transition={{ duration: 0.3, ease: 'easeInOut' }}
-          className="fixed right-0 top-0 bottom-0 bg-zinc-950 border-l border-zinc-800 z-50 overflow-hidden shadow-2xl"
+          className="fixed right-0 top-0 bottom-0 bg-[#0a0a0f] border-l border-white/[0.06] z-50 overflow-hidden shadow-2xl shadow-black/50"
         >
           <div className="w-[400px] h-full flex flex-col">
             {/* Header */}
-            <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800">
+            <div className="flex items-center justify-between px-4 py-4 border-b border-white/[0.06]">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-lg flex items-center justify-center">
-                  <AnimateIcon hover="spin"><Settings className="h-5 w-5 text-white" /></AnimateIcon>
+                <div className="w-9 h-9 bg-white/[0.06] rounded-lg flex items-center justify-center border border-white/[0.08]">
+                  <AnimateIcon hover="spin"><Settings className="h-4 w-4 text-white/50" /></AnimateIcon>
                 </div>
                 <div>
-                  <h2 className="text-lg font-semibold text-white">Settings</h2>
-                  <p className="text-xs text-white/40">Configure your preferences</p>
+                  <h2 className="text-lg font-semibold text-white/90">Settings</h2>
+                  <p className="text-xs text-white/30">Configure your preferences</p>
                 </div>
               </div>
               <Button
                 variant="ghost"
                 size="icon"
                 onClick={onClose}
-                className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+                className="h-7 w-7 text-white/30 hover:text-white/70 hover:bg-white/[0.06]"
               >
                 <AnimateIcon hover="shrink"><X className="h-4 w-4 pointer-events-none" /></AnimateIcon>
               </Button>
@@ -366,18 +370,18 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
             {/* Content */}
             <div className="flex-1 overflow-y-auto p-4 space-y-6">
               {/* Application Section */}
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <AnimateIcon hover="pulse"><Power className="h-4 w-4 text-emerald-400" /></AnimateIcon>
-                  <h3 className="text-sm font-semibold text-white">Application</h3>
+                  <AnimateIcon hover="pulse"><Power className="h-3.5 w-3.5 text-white/40" /></AnimateIcon>
+                  <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">Application</h3>
                 </div>
                 
-                <div className="bg-white/5 rounded-lg p-4 space-y-3">
+                <div className="bg-white/[0.03] rounded-xl p-4 space-y-3 border border-white/[0.06]">
                   {/* Launch on Startup toggle */}
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="text-sm font-medium text-white">Launch on Startup</p>
-                      <p className="text-xs text-white/40 mt-0.5">
+                      <p className="text-sm font-medium text-white/90">Launch on Startup</p>
+                      <p className="text-xs text-white/30 mt-0.5">
                         Automatically start Ark when you log in (minimized to system tray)
                       </p>
                     </div>
@@ -385,7 +389,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       onClick={handleAutoLaunchToggle}
                       className={cn(
                         "relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors",
-                        autoLaunch ? "bg-emerald-600" : "bg-zinc-700"
+                        autoLaunch ? "bg-fuchsia-500/40" : "bg-white/[0.08]"
                       )}
                     >
                       <span
@@ -396,50 +400,77 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       />
                     </button>
                   </div>
+
+                  {/* Developer Mode toggle */}
+                  <div className="flex items-center justify-between pt-2 border-t border-white/[0.04]">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <Code2 className="h-3.5 w-3.5 text-white/40" />
+                        <p className="text-sm font-medium text-white/90">Developer Mode</p>
+                      </div>
+                      <p className="text-xs text-white/30 mt-0.5">
+                        Show Data Flow page, system status panels, and pipeline diagnostics
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setDevMode(!devMode)}
+                      className={cn(
+                        "relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors",
+                        devMode ? "bg-fuchsia-500/40" : "bg-white/[0.08]"
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                          devMode ? "translate-x-6" : "translate-x-1"
+                        )}
+                      />
+                    </button>
+                  </div>
                 </div>
               </div>
 
               {/* Ollama Settings Section (Main / Default AI Provider) */}
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <AnimateIcon hover="pulse"><Bot className="h-4 w-4 text-purple-400" /></AnimateIcon>
-                  <h3 className="text-sm font-semibold text-white">AI Assistant (Ollama)</h3>
+                  <AnimateIcon hover="pulse"><Bot className="h-3.5 w-3.5 text-white/40" /></AnimateIcon>
+                  <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">AI Assistant (Ollama)</h3>
                   {!useGeminiInstead && (
-                    <span className="text-xs text-purple-400 bg-purple-500/20 px-2 py-0.5 rounded">Default</span>
+                    <span className="text-[10px] text-white/40 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.06]">Default</span>
                   )}
                 </div>
                 
                 <div className={cn(
-                  "bg-white/5 rounded-lg p-4 space-y-3",
-                  useGeminiInstead && "opacity-50"
+                  "bg-white/[0.03] rounded-xl p-4 space-y-3 border border-white/[0.06]",
+                  useGeminiInstead && "opacity-40"
                 )}>
                   <div>
-                    <p className="text-sm font-medium text-white">Local AI with Ollama</p>
-                    <p className="text-xs text-white/40 mt-0.5">
+                    <p className="text-sm font-medium text-white/90">Local AI with Ollama</p>
+                    <p className="text-xs text-white/30 mt-0.5">
                       Runs on your computer for privacy. Make sure Ollama is running.
                     </p>
                   </div>
                   
                   <div>
-                    <label className="text-xs text-white/60 mb-1 block">Ollama URL</label>
+                    <label className="text-xs text-white/40 mb-1 block">Ollama URL</label>
                     <Input
                       type="text"
                       value={ollamaUrl}
                       onChange={(e) => setOllamaUrl(e.target.value)}
                       placeholder="http://localhost:11434"
-                      className="bg-white/5 border-white/10 focus:border-fuchsia-500/50"
+                      className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]"
                       disabled={useGeminiInstead}
                     />
                   </div>
                   
                   <div>
-                    <label className="text-xs text-white/60 mb-1 block">Model Name</label>
+                    <label className="text-xs text-white/40 mb-1 block">Model Name</label>
                     <Input
                       type="text"
                       value={ollamaModel}
                       onChange={(e) => setOllamaModel(e.target.value)}
                       placeholder="gemma3:12b"
-                      className="bg-white/5 border-white/10 focus:border-fuchsia-500/50"
+                      className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]"
                       disabled={useGeminiInstead}
                     />
                   </div>
@@ -447,28 +478,28 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   <div className="flex items-center gap-2 text-xs">
                     {ollamaSaveStatus === 'saving' && (
                       <>
-                        <Loader2 className="h-3 w-3 animate-spin text-fuchsia-400" />
-                        <span className="text-fuchsia-400">Saving...</span>
+                        <Loader2 className="h-3 w-3 animate-spin text-white/40" />
+                        <span className="text-white/40">Saving...</span>
                       </>
                     )}
                     {ollamaSaveStatus === 'saved' && (
                       <>
-                        <Check className="h-3 w-3 text-green-400" />
-                        <span className="text-green-400">Saved</span>
+                        <Check className="h-3 w-3 text-emerald-400/60" />
+                        <span className="text-white/40">Saved</span>
                       </>
                     )}
                     {ollamaSaveStatus === 'idle' && (
-                      <span className="text-white/40">Changes save automatically</span>
+                      <span className="text-white/25">Changes save automatically</span>
                     )}
                   </div>
 
-                  <p className="text-xs text-white/30">
+                  <p className="text-xs text-white/25">
                     Don&apos;t have Ollama?{' '}
                     <a
                       href="https://ollama.com/download"
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-purple-400 hover:text-purple-300 underline"
+                      className="text-white/50 hover:text-white/70 underline"
                     >
                       Download Ollama
                     </a>
@@ -477,21 +508,21 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
               </div>
 
               {/* Gemini Cloud AI Toggle + Settings */}
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <Key className="h-4 w-4 text-fuchsia-400" />
-                  <h3 className="text-sm font-semibold text-white">Gemini Cloud AI</h3>
+                  <Key className="h-3.5 w-3.5 text-white/40" />
+                  <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">Gemini Cloud AI</h3>
                   {useGeminiInstead && (
-                    <span className="text-xs text-green-400 bg-green-500/20 px-2 py-0.5 rounded">Active</span>
+                    <span className="text-[10px] text-white/40 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.06]">Active</span>
                   )}
                 </div>
                 
-                <div className="bg-white/5 rounded-lg p-4 space-y-3">
+                <div className="bg-white/[0.03] rounded-xl p-4 space-y-3 border border-white/[0.06]">
                   {/* Toggle */}
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="text-sm font-medium text-white">Use Gemini Instead</p>
-                      <p className="text-xs text-white/40 mt-0.5">
+                      <p className="text-sm font-medium text-white/90">Use Gemini Instead</p>
+                      <p className="text-xs text-white/30 mt-0.5">
                         Switch to Google Gemini for enhanced features (tools, search)
                       </p>
                     </div>
@@ -499,7 +530,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       onClick={() => setUseGeminiInstead(!useGeminiInstead)}
                       className={cn(
                         "relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors",
-                        useGeminiInstead ? "bg-fuchsia-600" : "bg-zinc-700"
+                        useGeminiInstead ? "bg-fuchsia-500/40" : "bg-white/[0.08]"
                       )}
                     >
                       <span
@@ -514,20 +545,20 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   {/* Gemini API key section - only visible when toggle is ON */}
                   {useGeminiInstead && (
                     <>
-                      <div className="bg-fuchsia-500/10 border border-fuchsia-500/20 rounded p-2">
-                        <p className="text-xs text-fuchsia-300">
+                      <div className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-2.5">
+                        <p className="text-xs text-white/50">
                           Gemini is now the default AI provider. It can search Steam, get game details, and manage your library directly.
                         </p>
                       </div>
 
                       <div className="flex items-center justify-between">
                         <div>
-                          <p className="text-sm font-medium text-white">Gemini API Key</p>
-                          <p className="text-xs text-white/40 mt-0.5">Required for Gemini to work</p>
+                          <p className="text-sm font-medium text-white/90">Gemini API Key</p>
+                          <p className="text-xs text-white/30 mt-0.5">Required for Gemini to work</p>
                         </div>
                         {hasExistingKey && (
-                          <span className="flex items-center gap-1 text-xs text-green-400 bg-green-400/10 px-2 py-1 rounded">
-                            <Check className="h-3 w-3" />
+                          <span className="flex items-center gap-1 text-[10px] text-white/40 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.06]">
+                            <Check className="h-2.5 w-2.5" />
                             Configured
                           </span>
                         )}
@@ -539,7 +570,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                           placeholder="Enter your Google AI API key..."
                           value={showApiKey ? apiKey : (hasExistingKey && apiKey ? getMaskedKey(apiKey) : apiKey)}
                           onChange={(e) => setApiKey(e.target.value)}
-                          className="pr-10 bg-white/5 border-white/10 focus:border-fuchsia-500/50"
+                          className="pr-10 bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]"
                           disabled={isLoading}
                         />
                         <button
@@ -556,7 +587,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       </div>
 
                       {error && (
-                        <div className="flex items-center gap-2 text-red-400 text-xs">
+                        <div className="flex items-center gap-2 text-red-400/70 text-xs">
                           <AlertCircle className="h-3 w-3" />
                           {error}
                         </div>
@@ -566,24 +597,24 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                         <div className="flex items-center gap-2 text-xs">
                           {saveStatus === 'saving' && (
                             <>
-                              <Loader2 className="h-3 w-3 animate-spin text-fuchsia-400" />
-                              <span className="text-fuchsia-400">Saving...</span>
+                              <Loader2 className="h-3 w-3 animate-spin text-white/40" />
+                              <span className="text-white/40">Saving...</span>
                             </>
                           )}
                           {saveStatus === 'saved' && (
                             <>
-                              <Check className="h-3 w-3 text-green-400" />
-                              <span className="text-green-400">Saved automatically</span>
+                              <Check className="h-3 w-3 text-emerald-400/60" />
+                              <span className="text-white/40">Saved automatically</span>
                             </>
                           )}
                           {saveStatus === 'idle' && hasExistingKey && (
                             <>
-                              <Check className="h-3 w-3 text-green-400" />
-                              <span className="text-white/40">Key configured</span>
+                              <Check className="h-3 w-3 text-white/30" />
+                              <span className="text-white/30">Key configured</span>
                             </>
                           )}
                           {saveStatus === 'idle' && !hasExistingKey && (
-                            <span className="text-white/40">Changes save automatically</span>
+                            <span className="text-white/25">Changes save automatically</span>
                           )}
                         </div>
                         
@@ -593,7 +624,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                             size="sm"
                             onClick={handleRemoveApiKey}
                             disabled={isLoading}
-                            className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                            className="h-7 text-white/30 hover:text-red-400/70 hover:bg-red-500/10"
                           >
                             <AnimateIcon hover="lift" className="mr-1"><Trash2 className="h-3 w-3" /></AnimateIcon>
                             Remove
@@ -601,13 +632,13 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                         )}
                       </div>
 
-                      <p className="text-xs text-white/30">
+                      <p className="text-xs text-white/25">
                         Get your API key from{' '}
                         <a
                           href="https://aistudio.google.com/apikey"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-fuchsia-400 hover:text-fuchsia-300 underline"
+                          className="text-white/50 hover:text-white/70 underline"
                         >
                           Google AI Studio
                         </a>
@@ -618,16 +649,16 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
               </div>
 
               {/* Library Data Section */}
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <Database className="h-4 w-4 text-cyan-400" />
-                  <h3 className="text-sm font-semibold text-white">Library Data</h3>
+                  <Database className="h-3.5 w-3.5 text-white/40" />
+                  <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">Library Data</h3>
                 </div>
                 
-                <div className="bg-white/5 rounded-lg p-4 space-y-3">
+                <div className="bg-white/[0.03] rounded-xl p-4 space-y-3 border border-white/[0.06]">
                   <div>
-                    <p className="text-sm font-medium text-white">Export & Import</p>
-                    <p className="text-xs text-white/40 mt-0.5">
+                    <p className="text-sm font-medium text-white/90">Export & Import</p>
+                    <p className="text-xs text-white/30 mt-0.5">
                       Backup or restore your library data as JSON
                     </p>
                   </div>
@@ -638,7 +669,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       size="sm"
                       onClick={handleExportLibrary}
                       disabled={exportStatus === 'loading'}
-                      className="flex-1 h-9 bg-white/5 hover:bg-white/10 border border-white/10"
+                      className="flex-1 h-9 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-white/70"
                     >
                       {exportStatus === 'loading' ? (
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -653,7 +684,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       size="sm"
                       onClick={handleImportLibrary}
                       disabled={importStatus === 'loading'}
-                      className="flex-1 h-9 bg-white/5 hover:bg-white/10 border border-white/10"
+                      className="flex-1 h-9 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-white/70"
                     >
                       {importStatus === 'loading' ? (
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -668,7 +699,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   {importMessage && (
                     <div className={cn(
                       "flex items-center gap-2 text-xs",
-                      importStatus === 'success' || exportStatus === 'success' ? "text-green-400" : "text-red-400"
+                      importStatus === 'success' || exportStatus === 'success' ? "text-emerald-400/70" : "text-red-400/70"
                     )}>
                       {(importStatus === 'success' || exportStatus === 'success') ? (
                         <Check className="h-3 w-3" />
@@ -679,33 +710,33 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                     </div>
                   )}
                   
-                  <p className="text-xs text-white/30">
+                  <p className="text-xs text-white/25">
                     Import merges with existing data: new games are added, changed games are updated, unchanged games are skipped.
                   </p>
                 </div>
               </div>
 
               {/* Info Section */}
-              <div className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-4">
-                <h4 className="text-sm font-medium text-purple-300 mb-2">About AI Providers</h4>
-                <ul className="text-xs text-white/50 space-y-1">
-                  <li>• <strong>Ollama</strong> runs locally on your computer (default)</li>
-                  <li>• <strong>Gemini</strong> is optional cloud AI with enhanced features</li>
+              <div className="bg-white/[0.02] border border-white/[0.05] rounded-xl p-4">
+                <h4 className="text-xs font-medium text-white/50 mb-2">About AI Providers</h4>
+                <ul className="text-xs text-white/30 space-y-1">
+                  <li>• <strong className="text-white/40">Ollama</strong> runs locally on your computer (default)</li>
+                  <li>• <strong className="text-white/40">Gemini</strong> is optional cloud AI with enhanced features</li>
                   <li>• Gemini can search games, get details, and manage your library</li>
                   <li>• Your API key is stored securely and encrypted on your device</li>
                 </ul>
               </div>
 
               {/* Year Wrapped / Year in Review */}
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <AnimateIcon hover="sparkle"><Sparkles className="h-4 w-4 text-amber-400" /></AnimateIcon>
-                  <h3 className="text-sm font-semibold text-white">Year in Review</h3>
+                  <AnimateIcon hover="sparkle"><Sparkles className="h-3.5 w-3.5 text-white/40" /></AnimateIcon>
+                  <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">Year in Review</h3>
                 </div>
-                <div className="bg-gradient-to-r from-fuchsia-500/10 via-purple-500/10 to-indigo-500/10 border border-fuchsia-500/20 rounded-lg p-4 space-y-3">
+                <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4 space-y-3">
                   <div>
-                    <p className="text-sm font-medium text-white">Ark Wrapped</p>
-                    <p className="text-xs text-white/40 mt-0.5">
+                    <p className="text-sm font-medium text-white/90">Ark Wrapped</p>
+                    <p className="text-xs text-white/30 mt-0.5">
                       Relive your gaming year — stats, top games, genre DNA, and more in a cinematic experience.
                     </p>
                   </div>
@@ -713,7 +744,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                     variant="ghost"
                     size="sm"
                     onClick={() => setShowWrapped(true)}
-                    className="w-full h-10 bg-gradient-to-r from-fuchsia-600/20 to-purple-600/20 hover:from-fuchsia-600/30 hover:to-purple-600/30 border border-fuchsia-500/20 text-fuchsia-300 font-semibold gap-2"
+                    className="w-full h-10 bg-white/[0.04] hover:bg-white/[0.07] border border-white/[0.08] text-white/60 hover:text-white/80 font-semibold gap-2"
                   >
                     <AnimateIcon hover="sparkle"><Sparkles className="h-4 w-4" /></AnimateIcon>
                     Launch Ark Wrapped
@@ -723,9 +754,9 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
             </div>
 
             {/* Footer */}
-            <div className="px-4 py-3 border-t border-white/10 text-center">
-              <p className="text-xs text-white/30">
-                Ark v{APP_VERSION} • Made with ❤️
+            <div className="px-4 py-3 border-t border-white/[0.05] text-center">
+              <p className="text-xs text-white/20">
+                Ark v{APP_VERSION}
               </p>
             </div>
           </div>

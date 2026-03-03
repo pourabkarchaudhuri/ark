@@ -16,7 +16,7 @@ export interface EpicCatalogItem {
   longDescription?: string;
   keyImages?: EpicKeyImage[];
   categories?: Array<{ path: string }>;
-  tags?: Array<{ id: number; name?: string }>;
+  tags?: Array<{ id: number; name?: string; groupName?: string | null }>;
   effectiveDate?: string;
   developer?: string;
   publisher?: string;

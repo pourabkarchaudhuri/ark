@@ -27,6 +27,7 @@ import { sessionStore } from './session-store';
 import { statusHistoryStore } from './status-history-store';
 import { recoHistoryStore } from './reco-history-store';
 import { catalogStore } from './catalog-store';
+import { epicCatalogStore } from './epic-catalog-store';
 import { annIndex } from './ann-index';
 import { embeddingService } from './embedding-service';
 
@@ -155,7 +156,12 @@ class RecoStore {
    */
   async compute(
     embeddingGenerator?: (
-      games: Array<{ id: string; title: string; genres?: string[]; themes?: string[]; developer?: string }>,
+      games: Array<{
+        id: string; title: string; genres?: string[]; themes?: string[];
+        modes?: string[]; developer?: string; publisher?: string;
+        playerPerspectives?: string[]; summary?: string; description?: string;
+        userNotes?: string; similarGames?: Array<{ name: string }>;
+      }>,
     ) => Promise<number>,
     catalogEmbeddingEnricher?: (candidateIds: Set<string>) => Promise<number>,
   ) {
@@ -199,13 +205,22 @@ class RecoStore {
       this.notify();
       const candidates = await this.buildCandidatePool(userGames);
 
-      // Store counts for the UI
+      // Store counts for the UI (before pre-filter, so the user sees the real pool size)
       this.state = {
         ...this.state,
         libraryCount: userGames.length,
         candidateCount: candidates.length,
       };
       this.notify();
+
+      // 2.1. Pre-filter candidates with shelf-aware quotas (25K → ~3K)
+      this.state = { ...this.state, progress: { stage: 'Pre-filtering candidates...', percent: 6 } };
+      this.notify();
+      const poolSizeBefore = candidates.length;
+      const filtered = this.preFilterCandidates(candidates, userGames);
+      candidates.length = 0;
+      candidates.push(...filtered);
+      console.log(`[RecoStore] Pre-filter: ${poolSizeBefore.toLocaleString()} → ${candidates.length.toLocaleString()} candidates`);
 
       // 2.5. Generate missing semantic embeddings if a generator was provided
       if (embeddingGenerator) {
@@ -216,13 +231,28 @@ class RecoStore {
         this.notify();
 
         const embeddingInput = [
-          ...userGames.map(g => ({
-            id: g.gameId, title: g.title, genres: g.genres,
-            themes: g.themes, developer: g.developer,
-          })),
+          ...userGames.map(g => {
+            const lib = libraryStore.getEntry(g.gameId);
+            const meta = lib?.cachedMeta;
+            return {
+              id: g.gameId, title: g.title, genres: g.genres,
+              themes: g.themes, modes: g.gameModes, developer: g.developer,
+              publisher: g.publisher,
+              playerPerspectives: g.perspectives,
+              summary: meta?.summary,
+              description: meta?.longDescription,
+              similarGames: meta?.similarGames,
+              userNotes: lib?.publicReviews || undefined,
+            };
+          }),
           ...candidates.map(g => ({
             id: g.gameId, title: g.title, genres: g.genres,
-            themes: g.themes, developer: g.developer,
+            themes: g.themes, modes: g.gameModes, developer: g.developer,
+            publisher: g.publisher,
+            playerPerspectives: g.perspectives,
+            similarGames: g.similarGameTitles?.length
+              ? g.similarGameTitles.map(t => ({ name: t }))
+              : undefined,
           })),
         ];
 
@@ -256,19 +286,59 @@ class RecoStore {
         }
       }
 
-      // 3. Compute embedding coverage
-      this.state = { ...this.state, progress: { stage: 'Preparing scoring engine...', percent: 14 } };
+      // 2.9. ML model scoring — Kaggle-trained LightGBM
+      this.state = { ...this.state, progress: { stage: 'ML model scoring...', percent: 14 } };
       this.notify();
-      const candidatesWithEmbeddings = candidates.filter(c => c.embedding && c.embedding.length > 0).length;
-      const embeddingCoverage = candidates.length > 0
-        ? candidatesWithEmbeddings / candidates.length
-        : 0;
+      await this.applyMLScores(userGames, candidates);
+
+      // 3. Compute taste centroid & embedding coverage
+      this.state = { ...this.state, progress: { stage: 'Preparing scoring engine...', percent: 16 } };
+      this.notify();
 
       // 3.5. Precompute taste centroid for the worker
       const userEmbs = userGames
         .filter(ug => ug.embedding && ug.embedding.length > 0)
         .map(ug => ({ embedding: ug.embedding!, weight: this.computeEngagementWeight(ug) }));
       const tasteCentroid = embeddingService.computeTasteCentroid(userEmbs);
+
+      // Embedding coverage: only meaningful when we CAN produce semantic scores
+      // (i.e., tasteCentroid exists). Otherwise the weight budget would be allocated
+      // to a signal that always returns 0, diluting all other scoring layers.
+      const candidatesWithEmbeddings = tasteCentroid
+        ? candidates.filter(c => c.embedding && c.embedding.length > 0).length
+        : 0;
+      const embeddingCoverage = (tasteCentroid && candidates.length > 0)
+        ? candidatesWithEmbeddings / candidates.length
+        : 0;
+
+      // 3.6. Precompute per-candidate semantic similarity & strip candidate embeddings.
+      // The taste centroid cosine is the expensive part; we compute it here to avoid
+      // sending ~25K × 1024-dim embedding arrays through structured clone.
+      let precomputedSemanticScores: Record<string, number> | undefined;
+      if (tasteCentroid) {
+        const scores: Record<string, number> = {};
+        const dim = tasteCentroid.length;
+        let centroidMag = 0;
+        for (let i = 0; i < dim; i++) centroidMag += tasteCentroid[i] * tasteCentroid[i];
+        centroidMag = Math.sqrt(centroidMag);
+
+        for (const c of candidates) {
+          if (c.embedding && c.embedding.length === dim) {
+            let dot = 0, magB = 0;
+            for (let i = 0; i < dim; i++) {
+              dot += tasteCentroid[i] * c.embedding[i];
+              magB += c.embedding[i] * c.embedding[i];
+            }
+            scores[c.gameId] = centroidMag > 0 && magB > 0
+              ? dot / (centroidMag * Math.sqrt(magB))
+              : 0;
+          }
+          delete c.embedding;
+        }
+        precomputedSemanticScores = scores;
+      } else {
+        for (const c of candidates) delete c.embedding;
+      }
 
       // 4. Get dismissed game IDs
       const dismissedGameIds = recoHistoryStore.getDismissedIds();
@@ -282,6 +352,7 @@ class RecoStore {
         embeddingCoverage,
         dismissedGameIds,
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
+        precomputedSemanticScores,
       };
 
       this.runWorker(input);
@@ -491,7 +562,10 @@ class RecoStore {
     for (const g of rawGames) {
       const id = String(g.id ?? '');
       if (!id || userGameIds.has(id) || seenIds.has(id)) continue;
+      const secId = g.secondaryId ? String(g.secondaryId) : '';
+      if (secId && (userGameIds.has(secId) || seenIds.has(secId))) continue;
       seenIds.add(id);
+      if (secId) seenIds.add(secId);
 
       const embedding = embeddingCache.get(id);
 
@@ -542,6 +616,16 @@ class RecoStore {
     }
     const catalogCount = candidates.length - browseCount;
 
+    // ── Source 2b: Epic catalog (genre/developer match) ──
+    let epicCatalogCount = 0;
+    try {
+      const epicCandidates = await this.loadEpicCatalogCandidates(userGames, userGameIds, seenIds);
+      candidates.push(...epicCandidates);
+      epicCatalogCount = epicCandidates.length;
+    } catch (err) {
+      console.warn('[RecoStore] Epic catalog candidate loading failed (non-fatal):', err);
+    }
+
     // ── Source 3: ANN embedding retrieval (top 5K by taste centroid) ──
     let annCount = 0;
     try {
@@ -554,7 +638,7 @@ class RecoStore {
       console.warn('[RecoStore] ANN retrieval failed (non-fatal):', err);
     }
 
-    console.log(`[RecoStore] Candidate pool: ${candidates.length} (browse: ${browseCount}, catalog: ${catalogCount}, ann: ${annCount})`);
+    console.log(`[RecoStore] Candidate pool: ${candidates.length} (browse: ${browseCount}, catalog: ${catalogCount}, epicCatalog: ${epicCatalogCount}, ann: ${annCount})`);
     return candidates;
   }
 
@@ -573,12 +657,16 @@ class RecoStore {
     // Build filter criteria from user library
     const genreCounts = new Map<string, number>();
     const devSet = new Set<string>();
+    const pubSet = new Set<string>();
     for (const ug of userGames) {
       for (const g of ug.genres) {
         genreCounts.set(g, (genreCounts.get(g) || 0) + 1);
       }
       if (ug.developer && ug.rating >= 3.5) {
         devSet.add(ug.developer);
+      }
+      if (ug.publisher && ug.rating >= 3.5) {
+        pubSet.add(ug.publisher);
       }
     }
     const topGenres = [...genreCounts.entries()]
@@ -589,6 +677,7 @@ class RecoStore {
     const catalogEntries = await catalogStore.queryForCandidates({
       topGenres,
       loyalDevelopers: [...devSet],
+      loyalPublishers: [...pubSet],
       excludeIds: userGameIds,
       minReviews: 10,
       minPositivity: 0.5,
@@ -609,11 +698,13 @@ class RecoStore {
       results.push({
         gameId: id,
         title: entry.name,
+        coverUrl: `https://cdn.akamai.steamstatic.com/steam/apps/${entry.appid}/library_600x900.jpg`,
+        headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${entry.appid}/header.jpg`,
         developer: entry.developer,
         publisher: entry.publisher,
-        genres: entry.genres,
-        themes: entry.themes,
-        gameModes: entry.modes,
+        genres: entry.genres || [],
+        themes: entry.themes || [],
+        gameModes: entry.modes || [],
         perspectives: [],
         platforms: [
           ...(entry.windows ? ['Windows'] : []),
@@ -640,6 +731,71 @@ class RecoStore {
   }
 
   /**
+   * Load Epic catalog candidates matching the user's genre/developer profile.
+   * Simpler filtering than Steam (no review scores), but includes Epic's
+   * richer descriptions in the candidate pool.
+   */
+  private async loadEpicCatalogCandidates(
+    userGames: UserGameSnapshot[],
+    userGameIds: Set<string>,
+    seenIds: Set<string>,
+  ): Promise<CandidateGame[]> {
+    const entryCount = await epicCatalogStore.getEntryCount();
+    if (entryCount === 0) return [];
+
+    const genreSet = new Set<string>();
+    const devSet = new Set<string>();
+    for (const ug of userGames) {
+      for (const g of ug.genres) genreSet.add(g.toLowerCase());
+      if (ug.developer && ug.rating >= 3.5) devSet.add(ug.developer.toLowerCase());
+    }
+
+    const results: CandidateGame[] = [];
+    await epicCatalogStore.getAllEntries((batch) => {
+      for (const entry of batch) {
+        const id = `epic-${entry.epicId}`;
+        if (userGameIds.has(id) || seenIds.has(id)) continue;
+
+        const hasGenreMatch = entry.genres.some(g => genreSet.has(g.toLowerCase()));
+        const hasDevMatch = entry.developer && devSet.has(entry.developer.toLowerCase());
+        if (!hasGenreMatch && !hasDevMatch) continue;
+
+        seenIds.add(id);
+        const embedding = embeddingCache.get(id);
+        const releaseStr = entry.releaseDate
+          ? new Date(entry.releaseDate).toISOString().slice(0, 10)
+          : '';
+
+        results.push({
+          gameId: id,
+          title: entry.name,
+          coverUrl: entry.coverUrl || undefined,
+          developer: entry.developer,
+          publisher: entry.publisher,
+          genres: entry.genres || [],
+          themes: entry.themes || [],
+          gameModes: entry.modes || [],
+          perspectives: [],
+          platforms: ['Windows'],
+          metacriticScore: null,
+          playerCount: null,
+          releaseDate: releaseStr,
+          similarGameTitles: [],
+          price: {
+            isFree: entry.isFree,
+            finalFormatted: entry.priceFormatted,
+            discountPercent: entry.discountPercent,
+          },
+          ...(embedding ? { embedding } : {}),
+        });
+      }
+    });
+
+    console.log(`[RecoStore] Epic catalog pre-filter: ${entryCount} total → ${results.length} matched`);
+    return results;
+  }
+
+  /**
    * Retrieve semantically similar games from the ANN index using a
    * weighted taste centroid derived from the user's library embeddings.
    */
@@ -661,63 +817,111 @@ class RecoStore {
     const TOP_K = 5_000;
     const nearestIds = await annIndex.query(centroid, TOP_K);
 
-    const newAppIds: number[] = [];
+    const newSteamAppIds: number[] = [];
+    const newEpicIds: string[] = [];
     const newIdSet = new Set<string>();
     for (const id of nearestIds) {
       if (userGameIds.has(id) || seenIds.has(id)) continue;
-      const appid = parseInt(id.replace('steam-', ''), 10);
-      if (!isNaN(appid)) {
-        newAppIds.push(appid);
+      if (id.startsWith('steam-')) {
+        const appid = parseInt(id.slice(6), 10);
+        if (!isNaN(appid)) {
+          newSteamAppIds.push(appid);
+          newIdSet.add(id);
+          seenIds.add(id);
+        }
+      } else if (id.startsWith('epic-')) {
+        newEpicIds.push(id);
         newIdSet.add(id);
         seenIds.add(id);
       }
     }
 
-    if (newAppIds.length === 0) return [];
+    if (newSteamAppIds.length === 0 && newEpicIds.length === 0) return [];
 
-    const entries = await catalogStore.getEntries(newAppIds);
     const results: CandidateGame[] = [];
 
-    for (const entry of entries) {
-      const id = `steam-${entry.appid}`;
-      if (!newIdSet.has(id)) continue;
+    // Steam catalog entries
+    if (newSteamAppIds.length > 0) {
+      const entries = await catalogStore.getEntries(newSteamAppIds);
+      for (const entry of entries) {
+        const id = `steam-${entry.appid}`;
+        if (!newIdSet.has(id)) continue;
+        const embedding = embeddingCache.get(id);
+        const releaseStr = entry.releaseDate
+          ? new Date(entry.releaseDate * 1000).toISOString().slice(0, 10)
+          : '';
+        results.push({
+          gameId: id,
+          title: entry.name,
+          coverUrl: `https://cdn.akamai.steamstatic.com/steam/apps/${entry.appid}/library_600x900.jpg`,
+          headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${entry.appid}/header.jpg`,
+          developer: entry.developer,
+          publisher: entry.publisher,
+          genres: entry.genres || [],
+          themes: entry.themes || [],
+          gameModes: entry.modes || [],
+          perspectives: [],
+          platforms: [
+            ...(entry.windows ? ['Windows'] : []),
+            ...(entry.mac ? ['Mac'] : []),
+            ...(entry.linux ? ['Linux'] : []),
+          ],
+          metacriticScore: null,
+          playerCount: null,
+          releaseDate: releaseStr,
+          similarGameTitles: [],
+          reviewPositivity: entry.reviewPositivity,
+          reviewVolume: entry.reviewCount,
+          price: {
+            isFree: entry.isFree,
+            finalFormatted: entry.priceFormatted,
+            discountPercent: entry.discountPercent,
+          },
+          semanticRetrieved: true,
+          ...(embedding ? { embedding } : {}),
+        });
+      }
+    }
 
-      const embedding = embeddingCache.get(id);
-      const releaseStr = entry.releaseDate
-        ? new Date(entry.releaseDate * 1000).toISOString().slice(0, 10)
-        : '';
-
-      results.push({
-        gameId: id,
-        title: entry.name,
-        developer: entry.developer,
-        publisher: entry.publisher,
-        genres: entry.genres,
-        themes: entry.themes,
-        gameModes: entry.modes,
-        perspectives: [],
-        platforms: [
-          ...(entry.windows ? ['Windows'] : []),
-          ...(entry.mac ? ['Mac'] : []),
-          ...(entry.linux ? ['Linux'] : []),
-        ],
-        metacriticScore: null,
-        playerCount: null,
-        releaseDate: releaseStr,
-        similarGameTitles: [],
-        reviewPositivity: entry.reviewPositivity,
-        reviewVolume: entry.reviewCount,
-        price: {
-          isFree: entry.isFree,
-          finalFormatted: entry.priceFormatted,
-          discountPercent: entry.discountPercent,
-        },
-        semanticRetrieved: true,
-        ...(embedding ? { embedding } : {}),
+    // Epic catalog entries — stream all and match by ID
+    if (newEpicIds.length > 0) {
+      const epicIdSet = new Set(newEpicIds.map(id => id.slice(5))); // strip "epic-" prefix
+      await epicCatalogStore.getAllEntries((batch) => {
+        for (const entry of batch) {
+          if (!epicIdSet.has(entry.epicId)) continue;
+          const id = `epic-${entry.epicId}`;
+          const embedding = embeddingCache.get(id);
+          const releaseStr = entry.releaseDate
+            ? new Date(entry.releaseDate).toISOString().slice(0, 10)
+            : '';
+          results.push({
+            gameId: id,
+            title: entry.name,
+            coverUrl: entry.coverUrl || undefined,
+            developer: entry.developer,
+            publisher: entry.publisher,
+            genres: entry.genres || [],
+            themes: entry.themes || [],
+            gameModes: entry.modes || [],
+            perspectives: [],
+            platforms: ['Windows'],
+            metacriticScore: null,
+            playerCount: null,
+            releaseDate: releaseStr,
+            similarGameTitles: [],
+            price: {
+              isFree: entry.isFree,
+              finalFormatted: entry.priceFormatted,
+              discountPercent: entry.discountPercent,
+            },
+            semanticRetrieved: true,
+            ...(embedding ? { embedding } : {}),
+          });
+        }
       });
     }
 
-    console.log(`[RecoStore] ANN retrieval: ${nearestIds.length} queried → ${newAppIds.length} new → ${results.length} loaded`);
+    console.log(`[RecoStore] ANN retrieval: ${nearestIds.length} queried → ${newSteamAppIds.length} Steam + ${newEpicIds.length} Epic new → ${results.length} loaded`);
     return results;
   }
 
@@ -726,7 +930,243 @@ class RecoStore {
     w += Math.min(ug.hoursPlayed / 20, 3);
     w += (ug.rating / 5) * 2;
     if (ug.status === 'Completed') w += 1;
+    if (ug.status === 'Want to Play') w = Math.max(w, 1.5);
     return w;
+  }
+
+  /**
+   * Pre-filter candidates using shelf-aware quotas so the expensive worker
+   * pipeline only processes ~3K games instead of 25K+.
+   *
+   * Quotas ensure every shelf type can still populate:
+   *  - Genre overlap (main shelves, deep-in-genre, mood, trending)
+   *  - Franchise name match (complete-the-series, upcoming-sequels)
+   *  - Studio match (from-studios-you-love)
+   *  - High metacritic (hidden-gems, critics-choice)
+   *  - Zero-genre-overlap + good reviews (stretch-picks)
+   *  - Random wildcard (catches combinatorial edge cases)
+   */
+  private preFilterCandidates(
+    candidates: CandidateGame[],
+    userGames: UserGameSnapshot[],
+  ): CandidateGame[] {
+    const MAX_POOL = 3000;
+    if (candidates.length <= MAX_POOL) return candidates;
+
+    // Build user profile signals for scoring
+    const genreWeights = new Map<string, number>();
+    const devSet = new Set<string>();
+    const pubSet = new Set<string>();
+    const franchiseBases = new Set<string>();
+
+    for (const ug of userGames) {
+      const weight = this.computeEngagementWeight(ug);
+      for (const g of ug.genres) {
+        const key = g.toLowerCase();
+        genreWeights.set(key, (genreWeights.get(key) ?? 0) + weight);
+      }
+      if (ug.developer) devSet.add(ug.developer.toLowerCase());
+      if (ug.publisher) pubSet.add(ug.publisher.toLowerCase());
+      // Simplified franchise base: first 2-3 significant words of the title
+      const base = this.extractSimpleFranchiseBase(ug.title);
+      if (base) franchiseBases.add(base);
+    }
+
+    // Score every candidate cheaply
+    const scored: Array<{
+      candidate: CandidateGame;
+      genreScore: number;
+      isFranchise: boolean;
+      isStudio: boolean;
+      metacritic: number;
+      isStretchCandidate: boolean;
+    }> = [];
+
+    for (const c of candidates) {
+      let genreScore = 0;
+      let hasGenreOverlap = false;
+      for (const g of c.genres) {
+        const w = genreWeights.get(g.toLowerCase());
+        if (w !== undefined) {
+          genreScore += w;
+          hasGenreOverlap = true;
+        }
+      }
+      if (c.genres.length > 0) genreScore /= c.genres.length;
+
+      const isFranchise = franchiseBases.has(this.extractSimpleFranchiseBase(c.title));
+      const isStudio = (c.developer ? devSet.has(c.developer.toLowerCase()) : false) ||
+                       (c.publisher ? pubSet.has(c.publisher.toLowerCase()) : false);
+      const metacritic = c.metacriticScore ?? 0;
+      const isStretchCandidate = !hasGenreOverlap &&
+        (c.reviewPositivity ?? 0) >= 0.7 &&
+        (c.reviewVolume ?? 0) >= 50;
+
+      scored.push({ candidate: c, genreScore, isFranchise, isStudio, metacritic, isStretchCandidate });
+    }
+
+    // Fill quotas
+    const selected = new Set<CandidateGame>();
+    const QUOTA_SEMANTIC    = 500;
+    const QUOTA_GENRE       = 2000;
+    const QUOTA_FRANCHISE   = 300;
+    const QUOTA_STUDIO      = 200;
+    const QUOTA_METACRITIC  = 200;
+    const QUOTA_STRETCH     = 300;
+    const QUOTA_WILDCARD    = 200;
+
+    // 0. ANN-retrieved candidates — these were found specifically because they're
+    // semantically similar to the user's taste. They may have zero genre overlap
+    // and would be dropped by all other quotas. Preserve them unconditionally.
+    for (const s of scored) {
+      if (selected.size >= QUOTA_SEMANTIC) break;
+      if (s.candidate.semanticRetrieved && !selected.has(s.candidate)) {
+        selected.add(s.candidate);
+      }
+    }
+
+    // 1. Genre overlap — top N by engagement-weighted genre score
+    scored.sort((a, b) => b.genreScore - a.genreScore);
+    let count = 0;
+    for (const s of scored) {
+      if (count >= QUOTA_GENRE) break;
+      if (s.genreScore > 0 && !selected.has(s.candidate)) {
+        selected.add(s.candidate);
+        count++;
+      }
+    }
+
+    // 2. Franchise name match
+    count = 0;
+    for (const s of scored) {
+      if (count >= QUOTA_FRANCHISE) break;
+      if (s.isFranchise && !selected.has(s.candidate)) {
+        selected.add(s.candidate);
+        count++;
+      }
+    }
+
+    // 3. Studio match
+    count = 0;
+    for (const s of scored) {
+      if (count >= QUOTA_STUDIO) break;
+      if (s.isStudio && !selected.has(s.candidate)) {
+        selected.add(s.candidate);
+        count++;
+      }
+    }
+
+    // 4. High metacritic (genre-agnostic — feeds hidden gems + critics' choice)
+    scored.sort((a, b) => b.metacritic - a.metacritic);
+    count = 0;
+    for (const s of scored) {
+      if (count >= QUOTA_METACRITIC) break;
+      if (s.metacritic >= 75 && !selected.has(s.candidate)) {
+        selected.add(s.candidate);
+        count++;
+      }
+    }
+
+    // 5. Stretch picks — zero genre overlap but well-reviewed
+    count = 0;
+    for (const s of scored) {
+      if (count >= QUOTA_STRETCH) break;
+      if (s.isStretchCandidate && !selected.has(s.candidate)) {
+        selected.add(s.candidate);
+        count++;
+      }
+    }
+
+    // 6. Random wildcard via partial Fisher-Yates shuffle (O(K) not O(K*N))
+    const remaining = scored.filter(s => !selected.has(s.candidate));
+    const wildcardCount = Math.min(QUOTA_WILDCARD, remaining.length);
+    for (let i = 0; i < wildcardCount; i++) {
+      const j = i + Math.floor(Math.random() * (remaining.length - i));
+      [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+      selected.add(remaining[i].candidate);
+    }
+
+    return [...selected];
+  }
+
+  /**
+   * Simplified franchise base extraction for pre-filtering.
+   * Strips trailing numbers, subtitles, and edition suffixes to get
+   * a rough franchise key. Doesn't need to be as precise as the worker's
+   * full detection — false positives are harmless (just increase the pool).
+   */
+  private extractSimpleFranchiseBase(title: string): string {
+    let base = title.trim();
+    // Strip parentheticals
+    base = base.replace(/\s*\([^)]*\)$/g, '').trim();
+    // Strip " - subtitle" and ": subtitle"
+    base = base.replace(/\s*[:\-–]\s+.*$/, '').trim();
+    // Strip trailing Roman/Arabic numerals
+    base = base.replace(/\s+[\dIVXLCivxlc]+$/, '').trim();
+    // Strip common edition suffixes
+    base = base.replace(/\s+(remastered|remake|definitive|enhanced|anniversary|hd|complete|ultimate|deluxe|goty|gold|premium|special|digital|standard)(\s+edition)?$/i, '').trim();
+    base = base.replace(/\s+edition$/i, '').trim();
+    return base.length >= 3 ? base.toLowerCase() : '';
+  }
+
+  /**
+   * Apply ML model scores to candidates via the Kaggle-trained LightGBM model.
+   * Runs inference in the main process (ONNX runtime) and attaches P(recommended)
+   * to each candidate for use as a scoring layer in the worker.
+   */
+  private async applyMLScores(
+    userGames: UserGameSnapshot[],
+    candidates: CandidateGame[],
+  ): Promise<void> {
+    if (!window.ml) return;
+
+    try {
+      const mlStatus = await window.ml.status();
+      if (!mlStatus.loaded) {
+        const loaded = await window.ml.load();
+        if (!loaded) {
+          console.warn('[RecoStore] ML model not available, skipping ML scoring');
+          return;
+        }
+      }
+
+      // Build user profile from library data
+      const profileGames = userGames.map(ug => ({
+        gameId: ug.gameId,
+        hoursPlayed: ug.hoursPlayed,
+        rating: ug.rating,
+        status: ug.status,
+      }));
+      const userProfile = await window.ml.buildUserProfile(profileGames);
+      if (!userProfile) return;
+
+      // Build O(1) lookup map for candidate indices
+      const idToIdx = new Map<string, number>();
+      for (let i = 0; i < candidates.length; i++) {
+        idToIdx.set(candidates[i].gameId, i);
+      }
+
+      // Score all candidates in batches (avoid oversized IPC messages)
+      const BATCH_SIZE = 2000;
+      const gameIds = candidates.map(c => c.gameId);
+
+      for (let start = 0; start < gameIds.length; start += BATCH_SIZE) {
+        const batchIds = gameIds.slice(start, start + BATCH_SIZE);
+        const scores = await window.ml.scoreGames(userProfile, batchIds);
+
+        for (const result of scores) {
+          const idx = idToIdx.get(result.gameId);
+          if (idx !== undefined) {
+            candidates[idx].mlScore = result.score;
+          }
+        }
+      }
+
+      const scored = candidates.filter(c => c.mlScore != null).length;
+      console.log(`[RecoStore] ML scoring: ${scored}/${candidates.length} candidates scored`);
+    } catch (err) {
+      console.warn('[RecoStore] ML scoring failed (non-fatal):', err);
+    }
   }
 
   /**
@@ -851,6 +1291,20 @@ class RecoStore {
             progress: { stage: msg.stage, percent: msg.percent },
           };
           this.notify();
+          return;
+        }
+
+        if (msg.type === 'error') {
+          if (this.workerTimeout) { clearTimeout(this.workerTimeout); this.workerTimeout = null; }
+          console.error('[RecoStore] Worker pipeline error:', msg.error);
+          this.state = {
+            ...this.state,
+            status: 'error',
+            error: `Recommendation engine failed: ${msg.error}`,
+          };
+          this.notify();
+          this.worker?.terminate();
+          this.worker = null;
           return;
         }
 

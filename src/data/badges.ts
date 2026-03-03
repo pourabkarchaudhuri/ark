@@ -244,6 +244,11 @@ const sentinel: BadgeDefinition[] = [
     const tier: BadgeTier = n <= 60 ? 'bronze' : n <= 120 ? 'silver' : n <= 360 ? 'gold' : 'platinum';
     return b(`Session ${n / 60}h`, `Session > ${n / 60} hours`, `${n / 60} hours in one sitting. Your spine has opinions about this.`, 'sentinel', tier, { type: 'singleSessionMinutes', min: n });
   }),
+  // Live streak badges (current streak, not all-time longest)
+  b('Burning Bright',     'Active 3-day streak',   'Three days burning — the corridor sensors keep mistaking you for a plasma leak.',    'sentinel', 'bronze', { type: 'currentStreakDays', min: 3 }),
+  b('Undimmed Flame',     'Active 7-day streak',   'A full week ablaze. The fire suppression system filed a formal complaint.',          'sentinel', 'silver', { type: 'currentStreakDays', min: 7 }),
+  b('Inferno Protocol',   'Active 14-day streak',  'Fourteen days of relentless presence. Command invoked the Inferno Protocol.',        'sentinel', 'gold',   { type: 'currentStreakDays', min: 14 }),
+  b('Living Supernova',   'Active 30-day streak',  'Thirty consecutive days. Astronomers classified you as a stellar event.',            'sentinel', 'platinum', { type: 'currentStreakDays', min: 30 }),
 ];
 
 // ─── Branch 4: THE TIMEKEEPER — Hours & Investment (49) ───────────────────────

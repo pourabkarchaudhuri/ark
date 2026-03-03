@@ -7,10 +7,11 @@
  */
 
 import { catalogStore } from './catalog-store';
+import { epicCatalogStore } from './epic-catalog-store';
 import { recoStore } from './reco-store';
 import { embeddingService } from './embedding-service';
 import { annIndex } from './ann-index';
-import { getBuildStage, getBuildNodeCount, subscribeGalaxy } from './galaxy-cache';
+import { getBuildStage, getBuildNodeCount, getBuildStepIndex, getBuildStepDetail, GALAXY_STEP_LABELS, subscribeGalaxy } from './galaxy-cache';
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
@@ -33,14 +34,33 @@ export interface StorageMetric {
   entryCount: number;
 }
 
+export interface EmbeddingModelStatus {
+  name: string;
+  installed: boolean;
+  sizeBytes: number;
+  parameterSize: string;
+  quantization: string;
+}
+
+export interface MLModelStatus {
+  loaded: boolean;
+  modelCount: number;
+  gameProfileCount: number;
+  tagCount: number;
+}
+
 export interface SystemStatusSnapshot {
   epicSync: SyncStatus;
+  epicCatalogSync: SyncStatus;
   steamBrowseSync: SyncStatus;
   steamCatalogSync: SyncStatus;
   recoPipeline: SyncStatus;
   catalogEmbeddings: SyncStatus;
   annIndexStatus: SyncStatus;
   galaxyBuild: SyncStatus;
+  ollamaSetup: SyncStatus;
+  embeddingModel: EmbeddingModelStatus | null;
+  mlModel: MLModelStatus | null;
   storage: StorageMetric[];
   totalStorageBytes: number;
 }
@@ -51,6 +71,7 @@ type Listener = () => void;
 
 const IDB_DATABASES: Array<{ label: string; subtitle?: string; dbName: string; version: number; stores: string[] }> = [
   { label: 'Steam Catalog', subtitle: 'excl. DLCs, demos & non-game apps', dbName: 'ark-steam-catalog', version: 1, stores: ['entries', 'meta'] },
+  { label: 'Epic Catalog', dbName: 'ark-epic-catalog', version: 1, stores: ['entries', 'meta'] },
   { label: 'Browse Cache', dbName: 'ark-browse-cache', version: 1, stores: ['data'] },
   { label: 'Game Cache', dbName: 'ark-game-cache', version: 2, stores: ['games', 'genres', 'platforms', 'searchResults', 'metadata'] },
   { label: 'Catalog Cache', dbName: 'ark-catalog-cache', version: 1, stores: ['appList', 'meta'] },
@@ -117,6 +138,41 @@ async function measureIdbStore(dbName: string, version: number, stores: string[]
       resolve({ size: 0, count: 0 });
     }
   });
+}
+
+// ─── Ollama setup progress tracking ─────────────────────────────────────────────
+
+let _ollamaSetupStatus: SyncStatus = { label: 'Ollama Setup', stage: 'idle', detail: '', percent: 0, elapsed: 0, itemsDone: 0, itemsTotal: 0 };
+let _ollamaSetupStartTime = 0;
+
+export function reportOllamaProgress(status: string, pct: number) {
+  if (_ollamaSetupStartTime === 0) _ollamaSetupStartTime = performance.now();
+  const elapsed = performance.now() - _ollamaSetupStartTime;
+  const isFailed = /fail|error|not detected|timed? ?out/i.test(status);
+  const isReady = !isFailed && (/ready|already installed|success/i.test(status));
+
+  _ollamaSetupStatus = {
+    ..._ollamaSetupStatus,
+    stage: isReady ? 'done' : isFailed ? 'error' : 'running',
+    detail: status,
+    percent: isReady ? 100 : pct,
+    elapsed,
+  };
+  systemStatus._notify();
+  if (isReady) systemStatus.refreshStorage();
+}
+
+export function reportOllamaDone(available: boolean) {
+  const elapsed = _ollamaSetupStartTime > 0 ? performance.now() - _ollamaSetupStartTime : 0;
+  _ollamaSetupStatus = {
+    ..._ollamaSetupStatus,
+    stage: 'done',
+    detail: available ? 'Model ready' : 'Running without embeddings',
+    percent: 100,
+    elapsed,
+  };
+  systemStatus._notify();
+  systemStatus.refreshStorage();
 }
 
 // ─── Prefetch progress tracking ─────────────────────────────────────────────────
@@ -224,16 +280,44 @@ export function reportPrefetchError(err: string) {
 class SystemStatus {
   private _listeners = new Set<Listener>();
   private _storageCache: StorageMetric[] = [];
+  private _embeddingModelCache: EmbeddingModelStatus | null = null;
+  private _mlModelCache: MLModelStatus | null = null;
   private _catalogSyncStartTime = 0;
   private _recoPipelineStartTime = 0;
   private _initialized = false;
+  private _storageTimer: ReturnType<typeof setInterval> | null = null;
+  private _modelTimer: ReturnType<typeof setInterval> | null = null;
+  private _mlModelTimer: ReturnType<typeof setInterval> | null = null;
 
   subscribe(fn: Listener): () => void {
     this._listeners.add(fn);
-    return () => this._listeners.delete(fn);
+    // Start polling when first subscriber arrives
+    if (this._listeners.size === 1) this._startPolling();
+    return () => {
+      this._listeners.delete(fn);
+      // Stop polling when last subscriber leaves
+      if (this._listeners.size === 0) this._stopPolling();
+    };
   }
 
   _notify() { this._listeners.forEach(fn => fn()); }
+
+  private _startPolling() {
+    if (this._storageTimer) return; // already running
+    this._refreshStorage();
+    this._refreshModelInfo();
+    this._refreshMlModelInfo();
+    this._storageTimer = setInterval(() => this._refreshStorage(), 30_000);
+    this._modelTimer = setInterval(() => this._refreshModelInfo(), 60_000);
+    this._mlModelTimer = setInterval(() => this._refreshMlModelInfo(), 60_000);
+  }
+
+  private _stopPolling() {
+    if (this._storageTimer) { clearInterval(this._storageTimer); this._storageTimer = null; }
+    if (this._modelTimer) { clearInterval(this._modelTimer); this._modelTimer = null; }
+    if (this._mlModelTimer) { clearInterval(this._mlModelTimer); this._mlModelTimer = null; }
+    this._mlLoadAttempts = 0;
+  }
 
   /** Start listening to all sub-services. Call once at app boot. */
   init() {
@@ -241,10 +325,10 @@ class SystemStatus {
     this._initialized = true;
 
     catalogStore.subscribe(() => this._notify());
+    epicCatalogStore.subscribe(() => this._notify());
     recoStore.subscribe(() => this._notify());
     embeddingService.subscribe(() => this._notify());
 
-    // Track when catalog sync starts for duration
     catalogStore.subscribe(() => {
       const p = catalogStore.syncProgress;
       if (p.stage === 'fetching-ids' && this._catalogSyncStartTime === 0) {
@@ -267,10 +351,6 @@ class SystemStatus {
 
     annIndex.subscribe(() => this._notify());
     subscribeGalaxy(() => this._notify());
-
-    // Refresh storage metrics every 30s
-    this._refreshStorage();
-    setInterval(() => this._refreshStorage(), 30_000);
   }
 
   private async _refreshStorage() {
@@ -294,8 +374,39 @@ class SystemStatus {
     this._notify();
   }
 
+  private async _refreshModelInfo() {
+    try {
+      if (!window.ollama?.getModelInfo) return;
+      const info = await window.ollama.getModelInfo();
+      if (info) {
+        this._embeddingModelCache = info;
+        this._notify();
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  private _mlLoadAttempts = 0;
+
+  private async _refreshMlModelInfo() {
+    try {
+      if (!window.ml?.status) return;
+      let info = await window.ml.status();
+      if (info && !info.loaded && this._mlLoadAttempts < 3) {
+        this._mlLoadAttempts++;
+        const ok = await window.ml.load();
+        if (ok) {
+          info = await window.ml.status();
+        }
+      }
+      if (info) {
+        this._mlModelCache = info;
+        this._notify();
+      }
+    } catch { /* non-fatal */ }
+  }
+
   /** Force an immediate storage refresh. */
-  refreshStorage() { this._refreshStorage(); }
+  refreshStorage() { this._refreshStorage(); this._refreshModelInfo(); this._refreshMlModelInfo(); }
 
   getSnapshot(): SystemStatusSnapshot {
     // Steam Catalog Sync
@@ -379,32 +490,94 @@ class SystemStatus {
     // Galaxy Build (Embedding Space)
     const gStage = getBuildStage();
     const gNodeCount = getBuildNodeCount();
+    const gStepIdx = getBuildStepIndex();
+    const gStepDetail = getBuildStepDetail();
+
+    // Map 4 build steps to progress ranges: 0→5%, 1→15%, 2→20-85%, 3→90%
+    // Step 2 (UMAP/PCA projection) is the longest — its internal detail
+    // carries epoch progress like "Optimizing layout... (234/500)".
+    let gPercent = 0;
+    let gDetail = '';
+    if (gStage === 'done') {
+      gPercent = 100;
+      gDetail = `${gNodeCount.toLocaleString()} nodes`;
+    } else if (gStage === 'running' && gStepIdx >= 0) {
+      const stepLabel = GALAXY_STEP_LABELS[gStepIdx] ?? `Step ${gStepIdx}`;
+      gDetail = gStepDetail ? `${stepLabel}: ${gStepDetail}` : stepLabel;
+      // Fine-grained percent from step index + epoch detail
+      if (gStepIdx === 0) {
+        gPercent = 5;
+      } else if (gStepIdx === 1) {
+        gPercent = 15;
+      } else if (gStepIdx === 2) {
+        // Parse epoch progress from detail like "Optimizing layout... (234/500)"
+        const epochMatch = gStepDetail?.match(/\((\d+)\/(\d+)\)/);
+        if (epochMatch) {
+          const epoch = parseInt(epochMatch[1], 10);
+          const total = parseInt(epochMatch[2], 10);
+          gPercent = total > 0 ? 20 + Math.round((epoch / total) * 65) : 30;
+        } else {
+          gPercent = 20;
+        }
+      } else if (gStepIdx === 3) {
+        gPercent = 90;
+      }
+    } else if (gStage === 'running') {
+      gPercent = 10;
+      gDetail = 'Building galaxy map';
+    } else if (gStage === 'waiting') {
+      gPercent = 8;
+      gDetail = 'Waiting for embeddings';
+    } else if (gStage === 'scheduled') {
+      gPercent = 3;
+      gDetail = 'Queued';
+    }
+
     const galaxyBuild: SyncStatus = {
       label: 'Embedding Space',
       stage: gStage === 'running' || gStage === 'waiting' || gStage === 'scheduled' ? 'running' : gStage === 'done' ? 'done' : 'idle',
-      detail: gStage === 'scheduled' ? 'Queued'
-        : gStage === 'waiting' ? 'Waiting for embeddings'
-          : gStage === 'running' ? 'Building galaxy map'
-            : gStage === 'done' ? `${gNodeCount.toLocaleString()} nodes` : '',
-      percent: gStage === 'done' ? 100
-        : gStage === 'running' ? 50
-          : gStage === 'waiting' ? 10
-            : gStage === 'scheduled' ? 5 : 0,
+      detail: gDetail,
+      percent: gPercent,
       elapsed: 0,
       itemsDone: gStage === 'done' ? gNodeCount : 0,
       itemsTotal: gNodeCount,
+    };
+
+    // Epic Catalog Sync
+    const epicCatP = epicCatalogStore.syncProgress;
+    const epicCatalogSync: SyncStatus = {
+      label: 'Epic Catalog',
+      stage: epicCatP.stage === 'done' ? 'done'
+        : epicCatP.stage === 'error' ? 'error'
+          : epicCatP.stage === 'idle' ? 'idle' : 'running',
+      detail: epicCatP.stage === 'fetching' ? 'Fetching catalog...'
+        : epicCatP.stage === 'persisting' ? `Persisting ${epicCatP.itemsFetched.toLocaleString()} games`
+          : epicCatP.stage === 'done' ? `${epicCatP.itemsStored.toLocaleString()} games`
+            : epicCatP.stage === 'error' ? (epicCatP.error ?? 'Failed') : '',
+      percent: epicCatP.stage === 'done' ? 100
+        : epicCatP.stage === 'fetching' ? 30
+          : epicCatP.stage === 'persisting' && epicCatP.itemsFetched > 0
+            ? Math.round((epicCatP.itemsStored / epicCatP.itemsFetched) * 100)
+            : 0,
+      elapsed: 0,
+      itemsDone: epicCatP.itemsStored,
+      itemsTotal: epicCatP.itemsFetched,
     };
 
     const totalStorageBytes = this._storageCache.reduce((s, m) => s + m.sizeBytes, 0);
 
     return {
       epicSync: { ..._prefetchEpicStatus },
+      epicCatalogSync,
       steamBrowseSync: { ..._prefetchSteamStatus },
       steamCatalogSync,
       recoPipeline,
       catalogEmbeddings,
       annIndexStatus,
       galaxyBuild,
+      ollamaSetup: { ..._ollamaSetupStatus },
+      embeddingModel: this._embeddingModelCache ? { ...this._embeddingModelCache } : null,
+      mlModel: this._mlModelCache ? { ...this._mlModelCache } : null,
       storage: [...this._storageCache],
       totalStorageBytes,
     };

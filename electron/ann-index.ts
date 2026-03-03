@@ -26,10 +26,10 @@ try {
   logger.error('[ANN] Failed to load usearch native module:', err);
 }
 
-const DIMS = 768;
-const CONNECTIVITY = 16;
-const EF_CONSTRUCTION = 200;
-const EF_SEARCH = 128;
+const DIMS = 1024;
+const CONNECTIVITY = 48;
+const EF_CONSTRUCTION = 256;
+const EF_SEARCH = 400;
 
 function getIndexPath(): string {
   return path.join(app.getPath('userData'), 'ann-hnsw.usearch');
@@ -57,7 +57,7 @@ function createIndex(): void {
 function rebuildReverseMap(): void {
   reverseMap.clear();
   for (let i = 0; i < idMap.length; i++) {
-    reverseMap.set(idMap[i], i);
+    if (idMap[i]) reverseMap.set(idMap[i], i);
   }
 }
 
@@ -77,6 +77,17 @@ export function loadIndex(): boolean {
 
     createIndex();
     index!.load(indexPath);
+
+    // Verify the loaded index has the expected dimension. A persisted index
+    // from a previous embedding model (e.g. nomic 768-dim) will have the
+    // wrong dimension — discard it so vectors from the current model can be added.
+    const loadedDims = Number(index!.dimensions());
+    if (loadedDims !== DIMS) {
+      logger.warn(`[ANN] Dimension mismatch: index has ${loadedDims}D, expected ${DIMS}D — rebuilding`);
+      clearIndex();
+      return false;
+    }
+
     idMap = meta.gameIds;
     rebuildReverseMap();
 
@@ -101,7 +112,7 @@ export function saveIndex(): boolean {
 
     const meta: IndexMeta = {
       gameIds: idMap,
-      vectorCount: idMap.length,
+      vectorCount: reverseMap.size,
       builtAt: Date.now(),
     };
     fs.writeFileSync(metaPath, JSON.stringify(meta), 'utf-8');
@@ -124,8 +135,19 @@ export function addVectors(entries: Array<{ id: string; vector: number[] }>): nu
 
     const existingSlot = reverseMap.get(entry.id);
     if (existingSlot !== undefined) {
-      try { index!.remove(BigInt(existingSlot)); } catch { /* usearch version without remove */ }
-      index!.add(BigInt(existingSlot), new Float32Array(entry.vector));
+      let removed = false;
+      try { index!.remove(BigInt(existingSlot)); removed = true; } catch { /* usearch version without remove */ }
+      if (removed) {
+        index!.add(BigInt(existingSlot), new Float32Array(entry.vector));
+      } else {
+        // remove() unavailable — append at a fresh slot and vacate the old one
+        // so query results don't return the stale vector under the old slot
+        idMap[existingSlot] = '';
+        const newSlot = idMap.length;
+        idMap.push(entry.id);
+        reverseMap.set(entry.id, newSlot);
+        index!.add(BigInt(newSlot), new Float32Array(entry.vector));
+      }
       continue;
     }
 
@@ -146,12 +168,12 @@ export function query(centroid: number[], k: number): Array<{ id: string; distan
   if (effectiveK <= 0) return [];
 
   const vec = new Float32Array(centroid);
-  const result = index.search(vec, effectiveK, 0);
+  const result = index.search(vec, effectiveK);
 
   const results: Array<{ id: string; distance: number }> = [];
   for (let i = 0; i < result.keys.length; i++) {
     const slot = Number(result.keys[i]);
-    if (slot >= 0 && slot < idMap.length) {
+    if (slot >= 0 && slot < idMap.length && idMap[slot]) {
       results.push({ id: idMap[slot], distance: result.distances[i] });
     }
   }
@@ -161,8 +183,8 @@ export function query(centroid: number[], k: number): Array<{ id: string; distan
 
 export function getStatus(): { ready: boolean; vectorCount: number; dims: number } {
   return {
-    ready: index !== null && idMap.length > 0,
-    vectorCount: idMap.length,
+    ready: index !== null && reverseMap.size > 0,
+    vectorCount: reverseMap.size,
     dims: DIMS,
   };
 }
@@ -183,12 +205,12 @@ export function queryBatch(
   for (const entry of entries) {
     if (entry.vector.length !== DIMS) continue;
     const vec = new Float32Array(entry.vector);
-    const searchResult = index.search(vec, effectiveK, 0);
+    const searchResult = index.search(vec, effectiveK);
 
     const neighbors: Array<{ id: string; distance: number }> = [];
     for (let i = 0; i < searchResult.keys.length; i++) {
       const slot = Number(searchResult.keys[i]);
-      if (slot >= 0 && slot < idMap.length) {
+      if (slot >= 0 && slot < idMap.length && idMap[slot]) {
         const neighborId = idMap[slot];
         if (neighborId !== entry.id) {
           neighbors.push({ id: neighborId, distance: searchResult.distances[i] });

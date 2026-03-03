@@ -62,6 +62,7 @@ function detailsToPartialGame(details: SteamAppDetails): Partial<Game> {
     metacriticScore: details.metacritic?.score || null,
     releaseDate,
     summary: details.short_description || details.about_the_game || '',
+    longDescription: details.detailed_description || undefined,
     coverUrl,
     headerImage: details.header_image || undefined,
     screenshots: allScreenshots,

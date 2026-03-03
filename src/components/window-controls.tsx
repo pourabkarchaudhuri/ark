@@ -16,15 +16,12 @@ export function WindowControls({ className }: WindowControlsProps) {
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
-    const checkMaximized = async () => {
-      if (window.electron) {
-        const maximized = await window.electron.isMaximized();
-        setIsMaximized(maximized);
-      }
-    };
-    checkMaximized();
-    const interval = setInterval(checkMaximized, 500);
-    return () => clearInterval(interval);
+    if (!window.electron) return;
+    // Seed initial state
+    window.electron.isMaximized().then(setIsMaximized);
+    // Subscribe to push events (replaces 500ms polling)
+    const unsub = window.electron.onMaximizedChange?.(setIsMaximized);
+    return () => { unsub?.(); };
   }, []);
 
   const handleMinimize = async () => {

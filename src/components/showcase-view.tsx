@@ -53,8 +53,10 @@ const CARD_DEPTH = 0.04;
 const WHEEL_DAMP = 0.25;
 const CARD_DAMP = 0.15;
 
-// shared texture loader instance
+// shared texture loader instance — use empty crossOrigin to avoid CORS issues
+// in Electron's file:// context where the origin is null
 const textureLoader = new THREE.TextureLoader();
+textureLoader.setCrossOrigin('');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -73,6 +75,10 @@ function buildGenreGroups(entries: JourneyEntry[]): GenreGroup[] {
     const primary = e.genre?.[0] || 'Other';
     if (!genreMap.has(primary)) genreMap.set(primary, []);
     genreMap.get(primary)!.push(e);
+  }
+
+  for (const group of genreMap.values()) {
+    group.sort((a, b) => (b.hoursPlayed ?? 0) - (a.hoursPlayed ?? 0));
   }
 
   const sorted = [...genreMap.entries()]
@@ -733,15 +739,23 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
   const flatCards = useMemo(() => flattenCards(groups), [groups]);
   const total = flatCards.length;
 
+  // Pause the 3D render loop when the tab is hidden to save GPU
+  const [visible, setVisible] = useState(!document.hidden);
+  useEffect(() => {
+    const onChange = () => setVisible(!document.hidden);
+    document.addEventListener('visibilitychange', onChange);
+    return () => document.removeEventListener('visibilitychange', onChange);
+  }, []);
+
   const defaultIndex = useMemo(() => {
     if (total === 0) return 0;
-    let latestIdx = 0;
-    let latestTime = 0;
+    let bestIdx = 0;
+    let bestHours = -1;
     for (let i = 0; i < flatCards.length; i++) {
-      const t = new Date(flatCards[i].entry.addedAt).getTime();
-      if (t > latestTime) { latestTime = t; latestIdx = i; }
+      const h = flatCards[i].entry.hoursPlayed ?? 0;
+      if (h > bestHours) { bestHours = h; bestIdx = i; }
     }
-    return latestIdx;
+    return bestIdx;
   }, [flatCards, total]);
 
   const [activeIndex, setActiveIndex] = useState(defaultIndex);
@@ -788,8 +802,16 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
 
   if (total === 0) {
     return (
-      <div className="flex items-center justify-center h-[calc(100vh-8rem)] text-white/40 text-sm">
-        No games in your voyage yet. Add some games to your library first!
+      <div className="flex items-center justify-center h-[calc(100vh-8rem)]">
+        <div className="text-center max-w-sm px-6">
+          <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-fuchsia-500/10 border border-fuchsia-500/20 flex items-center justify-center">
+            <Library className="w-7 h-7 text-fuchsia-400/50" />
+          </div>
+          <h3 className="text-base font-semibold text-white/70 mb-2">Your Ark is Empty</h3>
+          <p className="text-sm text-white/35 leading-relaxed">
+            Start playing games and track them in your library. Your journey will appear here as a 3D showcase.
+          </p>
+        </div>
       </div>
     );
   }
@@ -939,6 +961,7 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
       <div ref={containerRef} className="flex-1 min-h-0 relative">
         <Canvas
           dpr={[1, 1.5]}
+          frameloop={visible ? 'always' : 'never'}
           style={{ background: '#000000' }}
           gl={{ antialias: true, alpha: false }}
           camera={{ fov: 50, near: 0.1, far: 100 }}

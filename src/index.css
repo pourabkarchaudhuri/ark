@@ -200,3 +200,12 @@
 .embedding-space-view .hint-zoom   { animation: hint-zoom 2.2s ease-in-out infinite; }
 .embedding-space-view .hint-tap    { animation: hint-tap 2.6s ease-in-out infinite; }
 
+/* Splash screen boot terminal — lightweight CSS fade instead of Framer Motion */
+@keyframes bootFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.boot-line-fade {
+  animation: bootFadeIn 0.05s ease-out both;
+}
+

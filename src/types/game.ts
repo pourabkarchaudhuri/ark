@@ -108,6 +108,7 @@ export interface CachedGameMeta {
   releaseDate?: string;
   metacriticScore?: number | null;
   summary?: string;
+  longDescription?: string;
   epicSlug?: string;
   epicNamespace?: string;
   epicOfferId?: string;

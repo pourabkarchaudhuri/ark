@@ -32,12 +32,17 @@ nul
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+combined.log
+error.log
 
 # Testing
 coverage/
 test-results/
 playwright-report/
 playwright-report-electron/
+
+# Kaggle / external datasets + ML artifacts
+dataset/
 
 # Temporary files
 *.tmp

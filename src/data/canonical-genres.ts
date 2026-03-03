@@ -30,10 +30,12 @@ export type CanonicalGenre = (typeof CANONICAL_GENRES)[number];
 /** Map raw genre strings (lowercase, trimmed) to canonical genre. */
 const RAW_TO_CANONICAL: Record<string, CanonicalGenre> = {
   action: 'Action',
+  'action-adventure': 'Action',
   adventure: 'Adventure',
   casual: 'Casual',
   fighting: 'Fighting',
   fps: 'FPS & Shooter',
+  'first person': 'FPS & Shooter',
   shooter: 'FPS & Shooter',
   horror: 'Horror & Gore',
   gore: 'Horror & Gore',
@@ -44,22 +46,40 @@ const RAW_TO_CANONICAL: Record<string, CanonicalGenre> = {
   racing: 'Racing',
   rpg: 'RPG',
   simulation: 'Simulation',
+  'city builder': 'Simulation',
   sport: 'Sports',
   sports: 'Sports',
   strategy: 'Strategy',
+  rts: 'Strategy',
+  'tower defense': 'Strategy',
+  'turn-based': 'Strategy',
+  'card game': 'Strategy',
   survival: 'Survival',
   'souls-like': 'Souls-like',
   soulslike: 'Souls-like',
+  'action roguelike': 'Action',
+  'looter shooter': 'FPS & Shooter',
+  stealth: 'Action',
+  platformer: 'Action',
+  'rogue-lite': 'Action',
+  exploration: 'Adventure',
+  narration: 'Adventure',
 };
+
+const _canonCache = new Map<string, CanonicalGenre | null>();
 
 /**
  * Map a raw genre string (from Steam/Epic API) to the canonical genre, or null if not in our list.
+ * Results are memoized to avoid repeated toLowerCase/trim allocations in hot loops.
  */
 export function toCanonicalGenre(raw: string | undefined | null): CanonicalGenre | null {
   if (raw == null || typeof raw !== 'string') return null;
+  const cached = _canonCache.get(raw);
+  if (cached !== undefined) return cached;
   const key = raw.toLowerCase().trim();
-  if (!key) return null;
-  return RAW_TO_CANONICAL[key] ?? null;
+  const result = key ? (RAW_TO_CANONICAL[key] ?? null) : null;
+  _canonCache.set(raw, result);
+  return result;
 }
 
 /**

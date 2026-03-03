@@ -15,20 +15,23 @@ export function register(): void {
    */
   ipcMain.handle('ai:sendMessage', async (event: any, { message, gameContext, libraryData }: any) => {
     try {
-      // Security: limit message length to prevent memory abuse / prompt stuffing
       const MAX_MSG_LEN = 4000;
       if (typeof message !== 'string' || message.length > MAX_MSG_LEN) {
         throw new Error(`Message must be a string of at most ${MAX_MSG_LEN} characters`);
       }
 
+      const MAX_LIBRARY_ITEMS = 500;
+      const safeLibraryData = Array.isArray(libraryData)
+        ? libraryData.slice(0, MAX_LIBRARY_ITEMS)
+        : undefined;
+
       logger.log(`[AI IPC] sendMessage: "${message.substring(0, 50)}..."`);
       
-      // Streaming callback to send chunks to renderer
       const onStreamChunk = (chunk: string, fullContent: string) => {
         event.sender.send('ai:streamChunk', { chunk, fullContent });
       };
       
-      const result = await processMessage(message, gameContext, libraryData, onStreamChunk);
+      const result = await processMessage(message, gameContext, safeLibraryData, onStreamChunk);
       
       // Store the message in chat history
       chatStore.addMessage({ role: 'user', content: message, gameContext });

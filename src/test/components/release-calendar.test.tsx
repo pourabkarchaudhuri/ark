@@ -100,6 +100,9 @@ function renderCalendar() {
 describe('ReleaseCalendar', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    // Pin to the 1st of the current month so makeDatedGame() dates are in the future
+    const anchor = new Date();
+    vi.setSystemTime(new Date(anchor.getFullYear(), anchor.getMonth(), 1, 0, 0, 0));
 
     // Re-apply matchMedia mock (vi.restoreAllMocks in afterEach clears it)
     Object.defineProperty(window, 'matchMedia', {

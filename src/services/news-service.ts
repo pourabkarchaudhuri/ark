@@ -21,10 +21,15 @@ export interface NewsItem {
   id: string;
   title: string;
   summary: string;
-  source: string;       // e.g. "Steam · Elden Ring", "Reddit r/gaming"
+  source: string;       // e.g. "Steam · Elden Ring", "PC Gamer"
   imageUrl?: string;
   url: string;
   publishedAt: number;  // Unix timestamp in seconds
+  /** When multiple sources cover the same story (multiple relays). */
+  relayCount?: number;
+  relaySources?: { source: string; url: string }[];
+  /** True when title/summary matches a game in the user's library. */
+  isFromYourFleet?: boolean;
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -46,6 +51,26 @@ let cache: {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/** Decode all HTML entities (named + numeric decimal/hex). */
+function decodeHTMLEntities(text: string): string {
+  return text
+    .replace(/&#x([0-9a-fA-F]+);/g, (m, hex) => { const cp = parseInt(hex, 16); return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m; })
+    .replace(/&#(\d+);/g, (m, dec) => { const cp = Number(dec); return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m; })
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&rsquo;/g, '\u2019')
+    .replace(/&lsquo;/g, '\u2018')
+    .replace(/&rdquo;/g, '\u201C')
+    .replace(/&ldquo;/g, '\u201D')
+    .replace(/&mdash;/g, '\u2014')
+    .replace(/&ndash;/g, '\u2013')
+    .replace(/&hellip;/g, '\u2026');
+}
+
 /** Strip BBCode tags, HTML entities, and trim to maxLen characters. */
 function stripBBCodeAndHTML(raw: string, maxLen: number = 150): string {
   let text = raw;
@@ -55,13 +80,7 @@ function stripBBCodeAndHTML(raw: string, maxLen: number = 150): string {
   text = text.replace(/\[\/?\w+.*?\]/g, '');
   // Remove HTML tags
   text = text.replace(/<[^>]+>/g, '');
-  // Decode common HTML entities
-  text = text.replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ');
+  text = decodeHTMLEntities(text);
   // Collapse whitespace
   text = text.replace(/\s+/g, ' ').trim();
   if (text.length > maxLen) {
@@ -70,23 +89,36 @@ function stripBBCodeAndHTML(raw: string, maxLen: number = 150): string {
   return text;
 }
 
-/** Extract the first image URL from BBCode/HTML content. */
+const TRACKING_HOSTS = ['pixel.', 'track.', 'beacon.', 'analytics.', 'count.', 'stat.'];
+
+function isValidImageUrl(url: string): boolean {
+  if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
+  if (url.startsWith('data:')) return false;
+  if (url.length < 12 || url.length > 2048) return false;
+  if (TRACKING_HOSTS.some((h) => url.includes(h))) return false;
+  if (/[/.](?:1x1|pixel|spacer|blank|clear)\b/i.test(url)) return false;
+  return true;
+}
+
+/** Extract the first valid image URL from BBCode/HTML content. */
 function extractImageFromContent(contents: string): string | undefined {
   // Try [img] BBCode
   const bbMatch = /\[img\](https?:\/\/[^\[]+)\[\/img\]/i.exec(contents);
-  if (bbMatch) return bbMatch[1];
-  // Try <img src="...">
-  const htmlMatch = /<img\b[^>]*src=["']([^"']+)["']/i.exec(contents);
-  if (htmlMatch) return htmlMatch[1];
+  if (bbMatch && isValidImageUrl(bbMatch[1])) return bbMatch[1];
+  // Try <img src="..."> — collect all matches and pick the first valid one
+  const imgMatches = contents.matchAll(/<img\b[^>]*src=["'](https?:\/\/[^"']+)["']/gi);
+  for (const m of imgMatches) {
+    if (isValidImageUrl(m[1])) return m[1];
+  }
   // Try bare image URL
   const urlMatch = /(https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp))/i.exec(contents);
-  if (urlMatch) return urlMatch[1];
+  if (urlMatch && isValidImageUrl(urlMatch[1])) return urlMatch[1];
   return undefined;
 }
 
-/** Get a high-res Steam image URL for an appId. Prefers library_hero (1920x620) > capsule_616x353. */
-function getSteamHighResUrl(appId: number): string {
-  return `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/library_hero.jpg`;
+/** Get a Steam image URL for an appId. Uses header.jpg (460x215) — reliably exists for virtually all games. */
+function getSteamImageUrl(appId: number): string {
+  return `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`;
 }
 
 /** Get fallback Steam header image URL for an appId (460x215). */
@@ -217,10 +249,10 @@ async function fetchSteamNews(): Promise<NewsItem[]> {
 
         // Prefer extracted image from content, then high-res hero, then header
         const contentImage = extractImageFromContent(item.contents ?? '');
-        const imageUrl = contentImage || getSteamHighResUrl(appId);
+        const imageUrl = contentImage || getSteamImageUrl(appId);
         results.push({
-          id: `steam-${item.gid}`,
-          title: item.title,
+          id: `steam-${appId}-${item.gid}`,
+          title: decodeHTMLEntities(item.title),
           summary: stripBBCodeAndHTML(item.contents ?? '', 500),
           source: `Steam \u00B7 ${name}`,
           imageUrl,
@@ -252,8 +284,8 @@ async function fetchRSSNews(): Promise<NewsItem[]> {
       .filter((item) => isLikelyEnglish(item.title))
       .map((item) => ({
         id: item.id,
-        title: item.title,
-        summary: item.summary,
+        title: decodeHTMLEntities(item.title),
+        summary: decodeHTMLEntities(item.summary),
         source: item.source,
         imageUrl: item.imageUrl,
         url: item.url,
@@ -288,17 +320,58 @@ export async function fetchAllNews(force = false): Promise<NewsItem[]> {
     ...(rssItems.status === 'fulfilled' ? rssItems.value : []),
   ];
 
-  // Deduplicate by normalised title (exact match after lowercasing)
-  const seen = new Set<string>();
-  const deduped = allItems.filter((item) => {
-    const key = item.title.toLowerCase().trim();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // Group by normalised title (multiple relays); pick canonical (newest), attach relaySources
+  const normaliseTitle = (t: string) => t.toLowerCase().trim().replace(/\s+/g, ' ');
+  const byKey = new Map<string, NewsItem[]>();
+  for (const item of allItems) {
+    const key = normaliseTitle(item.title);
+    if (!key) continue;
+    const list = byKey.get(key) ?? [];
+    list.push(item);
+    byKey.set(key, list);
+  }
+
+  const deduped: NewsItem[] = [];
+  for (const [, group] of byKey) {
+    group.sort((a, b) => b.publishedAt - a.publishedAt);
+    const canonical = { ...group[0] };
+    if (!canonical.imageUrl) {
+      const withImage = group.find((g) => g.imageUrl);
+      if (withImage) canonical.imageUrl = withImage.imageUrl;
+    }
+    if (group.length > 1) {
+      canonical.relayCount = group.length;
+      canonical.relaySources = group.map((g) => ({ source: g.source, url: g.url }));
+    }
+    deduped.push(canonical);
+  }
 
   // Sort by date, newest first
   deduped.sort((a, b) => b.publishedAt - a.publishedAt);
+
+  // Library relevance: match title/summary to library game titles
+  let libraryTitles: string[] = [];
+  try {
+    const ids = libraryStore.getAllGameIds();
+    const seen = new Set<string>();
+    for (const id of ids) {
+      const entry = journeyStore.getEntry(id);
+      const title = entry?.title?.trim();
+      if (title && !seen.has(title.toLowerCase())) {
+        seen.add(title.toLowerCase());
+        libraryTitles.push(title);
+      }
+    }
+  } catch {
+    // non-critical
+  }
+
+  for (const item of deduped) {
+    const text = `${item.title} ${item.summary}`.toLowerCase();
+    item.isFromYourFleet = libraryTitles.some(
+      (t) => t.length > 2 && text.includes(t.toLowerCase()),
+    );
+  }
 
   // Cache
   cache = { items: deduped, fetchedAt: Date.now() };
@@ -309,4 +382,16 @@ export async function fetchAllNews(force = false): Promise<NewsItem[]> {
 /** Clear the news cache (forces re-fetch on next call). */
 export function clearNewsCache(): void {
   cache = null;
+}
+
+let _prewarming = false;
+
+/**
+ * Kick off a background fetch so the cache is hot when the user opens
+ * Transmissions. Safe to call multiple times — only the first runs.
+ */
+export function prewarmNews(): void {
+  if (_prewarming || cache) return;
+  _prewarming = true;
+  fetchAllNews().catch(() => {}).finally(() => { _prewarming = false; });
 }

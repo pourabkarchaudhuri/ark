@@ -6,7 +6,7 @@
  */
 import { memo, useEffect, useRef, useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Shield, Flame, Trophy, Globe } from 'lucide-react';
+import { Shield, Flame, Trophy, Globe, CalendarDays } from 'lucide-react';
 import type { JourneyEntry } from '@/types/game';
 import { statusHistoryStore } from '@/services/status-history-store';
 import { sessionStore } from '@/services/session-store';
@@ -15,6 +15,7 @@ import { useBadgeProgress } from '@/hooks/useBadgeProgress';
 import { TIER_NEON } from '@/data/badge-types';
 import { DnaRadar } from '@/components/medals/taste-dna';
 import { BadgeVault } from '@/components/medals/badge-vault';
+import { PlayStreakHeatmap } from '@/components/medals/play-streak-heatmap';
 import { computeOverviewAnalytics, GenreRadarChart, ActivityAreaChart, DataSourcesRadar } from '@/components/medals/overview-charts';
 import { Icon } from '@/components/ui/evervault-card';
 import DatabaseWithRestApi from '@/components/ui/database-with-rest-api';
@@ -88,7 +89,7 @@ function CardFrame({ children, className }: { children: React.ReactNode; classNa
 
 // ─── Tab type ───────────────────────────────────────────────────────────────
 
-type MedalsTab = 'overview' | 'vault';
+type MedalsTab = 'overview' | 'vault' | 'streaks';
 
 // ─── Main View ──────────────────────────────────────────────────────────────
 
@@ -175,6 +176,7 @@ export const MedalsView = memo(function MedalsView({ entries }: MedalsViewProps)
         {([
           { value: 'overview' as MedalsTab, label: 'Overview', icon: Shield },
           { value: 'vault' as MedalsTab, label: 'Badge Vault', icon: Trophy },
+          { value: 'streaks' as MedalsTab, label: 'Play Streaks', icon: CalendarDays },
         ]).map(tab => {
           const TabIcon = tab.icon;
           const active = medalsTab === tab.value;
@@ -408,6 +410,17 @@ export const MedalsView = memo(function MedalsView({ entries }: MedalsViewProps)
           >
             <Tile className="p-4" delay={0}>
               <BadgeVault badges={data.badges} unlockedCount={data.unlockedCount} />
+            </Tile>
+          </motion.div>
+        )}
+
+        {medalsTab === 'streaks' && (
+          <motion.div key="streaks" className="min-h-full"
+            initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.25 }}
+          >
+            <Tile className="p-4" delay={0}>
+              <PlayStreakHeatmap />
             </Tile>
           </motion.div>
         )}

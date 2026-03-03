@@ -25,15 +25,7 @@ loadEnv({ path: envPath });
 // Set Node.js process title — visible in system monitors and some task managers
 process.title = 'Ark';
 
-// Handle EPIPE errors globally to prevent crashes when stdout/stderr is closed
-process.stdout.on('error', (err) => {
-  if (err.code === 'EPIPE') return;
-  throw err;
-});
-process.stderr.on('error', (err) => {
-  if (err.code === 'EPIPE') return;
-  throw err;
-});
+// EPIPE error handlers are installed by safe-logger.ts (imported below).
 
 // Log startup errors to a file when packaged (app doesn't show console)
 function logStartupError(err: unknown) {
@@ -153,6 +145,14 @@ app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 // caused by stale locks when multiple Electron instances fight over storage.
 app.commandLine.appendSwitch('disable-features', 'ServiceWorkerBypassFetchHandler');
 
+// Resource throttling: keep the app lightweight when running alongside games.
+app.commandLine.appendSwitch('force-gpu-mem-available-mb', '256');
+app.commandLine.appendSwitch('max-active-webgl-contexts', '1');
+// Aggressively throttle background renderers (timers, rAF).
+app.commandLine.appendSwitch('enable-features', 'IntensiveWakeUpThrottling,OptOutOfSharedZygote');
+// Limit max renderer processes to 1 (single-window app).
+app.commandLine.appendSwitch('renderer-process-limit', '1');
+
 // Register updater IPC handlers early so the renderer never hits
 // "No handler registered" errors — even in dev mode.
 registerUpdaterIpcHandlers();
@@ -208,6 +208,7 @@ function createWindow() {
       contextIsolation: true,
       sandbox: false,
       preload: preloadPath,
+      backgroundThrottling: true,
     },
     frame: false,
     titleBarStyle: 'hidden',
@@ -259,11 +260,40 @@ function createWindow() {
     }
   });
 
-  // ---- Renderer crash recovery ----
+  // ---- Renderer crash recovery (with circuit breaker) ----
+  const crashTimestamps: number[] = [];
+  const CRASH_WINDOW_MS = 30_000;
+  const MAX_CRASHES_IN_WINDOW = 3;
+
   mainWindow.webContents.on('render-process-gone', (_event: any, details: any) => {
     logger.error('[Ark] Renderer process gone:', details.reason, details.exitCode);
-    if (details.reason !== 'clean-exit') {
-      mainWindow?.webContents.reload();
+    if (details.reason === 'clean-exit') return;
+
+    const now = Date.now();
+    crashTimestamps.push(now);
+    // Keep only crashes within the rolling window
+    while (crashTimestamps.length > 0 && crashTimestamps[0] < now - CRASH_WINDOW_MS) {
+      crashTimestamps.shift();
+    }
+
+    if (crashTimestamps.length >= MAX_CRASHES_IN_WINDOW) {
+      logger.error(`[Ark] ${MAX_CRASHES_IN_WINDOW} crashes in ${CRASH_WINDOW_MS / 1000}s — stopping reload loop`);
+      return;
+    }
+
+    logger.log('[Ark] Attempting renderer reload…');
+    mainWindow?.webContents.reload();
+  });
+
+  mainWindow.webContents.on('console-message', (_ev: any, level: number, message: string) => {
+    if (level >= 2) {
+      logger.log(`[Renderer:${level === 3 ? 'ERR' : 'WARN'}] ${message}`);
+    } else if (
+      message.startsWith('[Galaxy') ||
+      message.startsWith('[Projection') ||
+      message.startsWith('[EmbeddingService]')
+    ) {
+      logger.log(`[Renderer] ${message}`);
     }
   });
 
@@ -398,6 +428,8 @@ app.whenReady().then(async () => {
       logger.warn('[AdBlocker] Failed to initialize (non-fatal):', err);
     }
   })();
+
+  // ML model is lazy-loaded on first score request (see ml-handlers.ts)
 
   // ---- Epic Cloudflare clearance (background, non-blocking) ----
   // Epic's GraphQL API is behind Cloudflare JS challenge.  We solve it once

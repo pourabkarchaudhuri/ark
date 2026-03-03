@@ -23,6 +23,7 @@ import {
 import { FaWindows, FaApple, FaLinux, FaSteam } from 'react-icons/fa';
 import { SiEpicgames } from 'react-icons/si';
 import { cn, getHardcodedCover } from '@/lib/utils';
+import { TooltipCard } from '@/components/ui/tooltip-card';
 import { detailEnricher } from '@/services/detail-enricher';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 
@@ -44,6 +45,7 @@ interface GameCardProps {
   hideLibraryBadge?: boolean; // Hide heart button and library badge (e.g., when already in library view)
   showTerminalPanel?: boolean; // Show terminal-style floating data panel (My Ark view only)
   footer?: React.ReactNode; // Extra content rendered inside the card after the info section
+  compact?: boolean; // Compact mode: single-line truncated title, smaller text, tighter padding (dense grids)
 }
 
 // Steam platforms (Steam is primarily PC)
@@ -176,6 +178,7 @@ function GameCardComponent({
   hideLibraryBadge,
   showTerminalPanel,
   footer,
+  compact,
 }: GameCardProps) {
   const [, navigate] = useLocation();
   const [imageError, setImageError] = useState(false);
@@ -429,60 +432,77 @@ function GameCardComponent({
           {game.availableOn && game.availableOn.length > 0 ? (
             <>
               {game.availableOn.includes('steam') && (
-                <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm" title="Available on Steam">
-                  <FaSteam className="h-3.5 w-3.5 text-white/90" />
-                </div>
+                <TooltipCard content="Available on Steam — Valve's digital distribution platform with community features, achievements, and workshop support.">
+                  <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm">
+                    <FaSteam className="h-3.5 w-3.5 text-white/90" />
+                  </div>
+                </TooltipCard>
               )}
               {game.availableOn.includes('epic') && (
-                <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm" title="Available on Epic Games">
-                  <SiEpicgames className="h-3.5 w-3.5 text-white/90" />
-                </div>
+                <TooltipCard content="Available on Epic Games Store — features weekly free games, exclusive launches, and creator support.">
+                  <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm">
+                    <SiEpicgames className="h-3.5 w-3.5 text-white/90" />
+                  </div>
+                </TooltipCard>
               )}
             </>
           ) : game.store === 'epic' ? (
-            <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm" title="Epic Games">
-              <SiEpicgames className="h-3.5 w-3.5 text-white/90" />
-            </div>
+            <TooltipCard content="Available on Epic Games Store — features weekly free games, exclusive launches, and creator support.">
+              <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm">
+                <SiEpicgames className="h-3.5 w-3.5 text-white/90" />
+              </div>
+            </TooltipCard>
           ) : !game.isCustom ? (
-            <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm" title="Steam">
-              <FaSteam className="h-3.5 w-3.5 text-white/90" />
-            </div>
+            <TooltipCard content="Available on Steam — Valve's digital distribution platform with community features, achievements, and workshop support.">
+              <div className="flex items-center justify-center w-6 h-6 rounded bg-black/60 backdrop-blur-sm">
+                <FaSteam className="h-3.5 w-3.5 text-white/90" />
+              </div>
+            </TooltipCard>
           ) : null}
         </div>
 
       </div>
 
       {/* Game Info Footer */}
-      <div className="p-3 space-y-1.5">
+      <div className={compact ? "px-2 py-1.5 space-y-0.5" : "p-3 space-y-1.5"}>
         {/* Title Row with Actions */}
-        <div className="flex items-start justify-between gap-2">
+        <div className="flex items-start justify-between gap-1">
           <div className="flex-1 min-w-0">
             <h3 
-              className="font-semibold text-sm text-white leading-tight line-clamp-2 min-h-[2.5rem] max-h-[2.5rem] overflow-hidden" 
+              className={cn(
+                "font-semibold text-white leading-tight overflow-hidden",
+                compact
+                  ? "text-xs line-clamp-1 min-h-[1.125rem]"
+                  : "text-sm line-clamp-2 min-h-[2.5rem] max-h-[2.5rem]",
+              )}
               title={game.title}
             >
               {game.title}
             </h3>
-            <div className="min-h-[1rem] mt-0.5">
-              <p className="text-xs text-white/60 truncate">{game.developer || '\u00A0'}</p>
-            </div>
-            <div className="min-h-[1rem] mt-0.5">
+            {!compact && (
+              <div className="min-h-[1rem] mt-0.5">
+                <p className="text-xs text-white/60 truncate">{game.developer || '\u00A0'}</p>
+              </div>
+            )}
+            <div className={compact ? "mt-0.5" : "min-h-[1rem] mt-0.5"}>
               {game.releaseDate ? (
-                <p className="text-xs text-white/40">{formatDisplayDate(game.releaseDate)}</p>
+                <p className={cn("text-white/40", compact ? "text-[10px]" : "text-xs")}>{formatDisplayDate(game.releaseDate)}</p>
               ) : (
-                <p className="text-xs text-white/40">&nbsp;</p>
+                <p className={cn("text-white/40", compact ? "text-[10px]" : "text-xs")}>&nbsp;</p>
               )}
             </div>
-            <div className="min-h-[1rem] mt-0.5">
-              {game.playerCount !== undefined && game.playerCount > 0 ? (
-                <p className="text-xs text-cyan-400">
-                  {formatPlayerCount(game.playerCount)} playing
-                  {game.availableOn && game.availableOn.length > 1 ? ' on Steam' : ' now'}
-                </p>
-              ) : (
-                <p className="text-xs">&nbsp;</p>
-              )}
-            </div>
+            {!compact && (
+              <div className="min-h-[1rem] mt-0.5">
+                {game.playerCount !== undefined && game.playerCount > 0 ? (
+                  <p className="text-xs text-cyan-400">
+                    {formatPlayerCount(game.playerCount)} playing
+                    {game.availableOn && game.availableOn.length > 1 ? ' on Steam' : ' now'}
+                  </p>
+                ) : (
+                  <p className="text-xs">&nbsp;</p>
+                )}
+              </div>
+            )}
           </div>
           {/* Ellipsis Menu - button only for library games (right-click uses custom context menu below) */}
           <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>

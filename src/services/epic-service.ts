@@ -8,17 +8,12 @@ import { Game, LibraryGameEntry } from '@/types/game';
 import { EpicCatalogItem } from '@/types/epic';
 import { libraryStore } from './library-store';
 
-// Genre map (mirrored from electron/epic-api.ts for tag → string fallback)
-const EPIC_GENRE_MAP: Record<number, string> = {
-  1216: 'Action', 1210: 'Shooter', 1370: 'RPG', 1115: 'Strategy',
-  1218: 'Adventure', 9541: 'Survival', 1621: 'Sport', 1100: 'Indie',
-  1117: 'Simulation', 10719: 'FPS', 21122: 'Rogue-Lite', 1367: 'Puzzle',
-  1307: 'Open World', 1381: 'Platformer', 1298: 'Horror', 9547: 'Racing',
-  1364: 'Fighting', 1074: 'MMO', 21894: 'Tower Defense', 21141: 'Turn-Based',
-  21138: 'Dungeon Crawler', 21127: 'City Builder', 21120: 'Metroidvania',
-  21680: 'Souls-like', 21668: 'Card Game', 22776: 'Stealth', 1183: 'Casual',
-  21146: 'Party', 1342: 'Quiz/Trivia',
-};
+// API-verified genre tag IDs (groupName === "genre"). Fallback when groupName absent.
+const EPIC_GENRE_IDS: ReadonlySet<number> = new Set([
+  1080, 1083, 1084, 1110, 1115, 1116, 1117, 1120, 1121, 1146,
+  1151, 1170, 1181, 1210, 1212, 1216, 1218, 1263, 1283, 1287,
+  1294, 1296, 1307, 1336, 1367, 1381, 1386, 1393, 1395,
+]);
 
 /**
  * Resolve the best image from an Epic game's keyImages array.
@@ -57,12 +52,12 @@ export function transformEpicGame(
 ): Game {
   const gameId = `epic-${item.namespace}:${item.id}`;
 
-  // Extract genres from tags (Set for O(1) dedup)
+  // Extract genres from tags — only genre-group tags, not community/platform/feature
   const genreSet = new Set<string>();
   if (item.tags) {
     for (const tag of item.tags) {
-      const name = tag.name || EPIC_GENRE_MAP[tag.id];
-      if (name) genreSet.add(name);
+      const isGenre = tag.groupName === 'genre' || (!tag.groupName && EPIC_GENRE_IDS.has(tag.id));
+      if (isGenre && tag.name) genreSet.add(tag.name);
     }
   }
   const genres = Array.from(genreSet);

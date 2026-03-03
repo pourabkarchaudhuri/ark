@@ -9,10 +9,11 @@
  * a recompute.
  */
 
-import { loadAllEmbeddingsForGraph, getEmbeddingCount, embeddingService } from '@/services/embedding-service';
+import { loadProjectedEmbeddingsForGraph, getEmbeddingCount, embeddingService, EMBEDDING_TEXT_VERSION } from '@/services/embedding-service';
 import { journeyStore } from '@/services/journey-store';
 import { libraryStore } from '@/services/library-store';
 import { catalogStore } from '@/services/catalog-store';
+import { epicCatalogStore, type EpicCatalogEntry } from '@/services/epic-catalog-store';
 import type { CatalogEntry } from '@/types/catalog';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -21,10 +22,17 @@ export interface GraphNode {
   id: string;
   title: string;
   genres: string[];
+  themes: string[];
   developer: string;
+  publisher: string;
   coverUrl?: string;
   isLibrary: boolean;
   hoursPlayed: number;
+  reviewCount: number;
+  /** Aggregated quality score 0–1 used for star luminance in the galaxy. */
+  luminance: number;
+  /** Release year (e.g. 2023). 0 if unknown. */
+  releaseYear: number;
   x: number;
   y: number;
   z: number;
@@ -35,6 +43,58 @@ export interface NeighborInfo {
   id: string;
   distance: number;
   node?: GraphNode;
+}
+
+// ─── Luminance computation ──────────────────────────────────────────────────
+
+/**
+ * Aggregate all available review/quality signals into a 0–1 luminance value.
+ * Each signal is normalized to 0–1, then they are combined via weighted average.
+ * Games with zero data get a neutral 0.5.
+ */
+export function computeLuminance(opts: {
+  metacritic?: number | null;
+  steamPositivity?: number;
+  steamReviewCount?: number;
+  userRating?: number;
+  mlRecRate?: number;
+}): number {
+  const signals: { value: number; weight: number }[] = [];
+
+  if (opts.metacritic != null && opts.metacritic > 0) {
+    signals.push({ value: opts.metacritic / 100, weight: 1.0 });
+  }
+
+  if (
+    opts.steamPositivity != null &&
+    opts.steamPositivity > 0 &&
+    (opts.steamReviewCount ?? 0) > 0
+  ) {
+    // Review count drives confidence — 5 reviews at 100% is less trustworthy
+    // than 50 000 at 92%. log10(count+1)/5 caps at ~1.0 around 100k reviews.
+    const confidence = Math.min(1, Math.log10((opts.steamReviewCount ?? 1) + 1) / 5);
+    const adjusted = opts.steamPositivity * (0.6 + 0.4 * confidence);
+    signals.push({ value: adjusted, weight: 1.2 });
+  }
+
+  if (opts.userRating != null && opts.userRating > 0) {
+    signals.push({ value: opts.userRating / 5, weight: 1.5 });
+  }
+
+  // ML model game recommendation rate (from 41M Kaggle reviews)
+  if (opts.mlRecRate != null && opts.mlRecRate > 0 && Number.isFinite(opts.mlRecRate)) {
+    signals.push({ value: Math.min(opts.mlRecRate, 1), weight: 1.3 });
+  }
+
+  if (signals.length === 0) return 0.5;
+
+  let totalWeight = 0;
+  let sum = 0;
+  for (const s of signals) {
+    sum += s.value * s.weight;
+    totalWeight += s.weight;
+  }
+  return Math.max(0, Math.min(1, sum / totalWeight));
 }
 
 // ─── Genre → color palette (NMS-style warm/cool star colors) ────────────────
@@ -55,20 +115,31 @@ export const GENRE_PALETTE: [number, number, number][] = [
   [0.88, 0.75, 0.50],  // 12: default — warm amber
 ];
 
-const GENRE_MAP: Record<string, number> = {
-  action: 0, shooter: 0, fighting: 0,
-  adventure: 1, platformer: 1, 'visual novel': 1,
-  rpg: 2, 'role-playing': 2, jrpg: 2,
-  strategy: 3, 'real-time strategy': 3, 'turn-based': 3, 'city builder': 3, 'tower defense': 3,
+export const GENRE_MAP: Record<string, number> = {
+  action: 0, 'action-adventure': 0, shooter: 0, fighting: 0, fps: 0,
+  'first person': 0, 'hack and slash': 0, 'arena shooter': 0, stealth: 0,
+  soulslike: 0, 'souls-like': 0, roguelike: 0, 'rogue-lite': 0,
+  adventure: 1, platformer: 1, 'visual novel': 1, exploration: 1,
+  narration: 1, metroidvania: 1, '2d platformer': 1, 'point & click': 1,
+  rpg: 2, 'role-playing': 2, jrpg: 2, 'action rpg': 2, 'dungeon crawler': 2,
+  strategy: 3, 'real-time strategy': 3, rts: 3, 'turn-based': 3,
+  'city builder': 3, 'tower defense': 3, tactical: 3, 'turn-based strategy': 3,
   simulation: 4, management: 4, building: 4,
   indie: 5,
-  casual: 6,
-  sports: 7, racing: 7,
+  casual: 6, 'card game': 6, 'board game': 6, party: 6,
+  sports: 7, sport: 7, racing: 7,
   puzzle: 8,
   horror: 9, 'psychological horror': 9,
   mmo: 10, mmorpg: 10, 'massively multiplayer': 10,
-  survival: 11, sandbox: 11, 'open world': 11,
+  survival: 11, sandbox: 11,
+  'action roguelike': 0, 'looter shooter': 0,
+  'base building': 3, 'resource management': 3,
 };
+
+export const CANONICAL_GENRE_LABELS: string[] = [
+  'Action', 'Adventure', 'RPG', 'Strategy', 'Simulation', 'Indie',
+  'Casual', 'Sports / Racing', 'Puzzle', 'Horror', 'MMO', 'Survival',
+];
 
 export function genreToColorIdx(genres: string[]): number {
   for (const g of genres) {
@@ -112,6 +183,8 @@ async function computePCA_WebGPU(
   d: number,
 ): Promise<Float32Array | null> {
   if (!navigator.gpu) return null;
+
+  let device: GPUDevice | null = null;
   try {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return null;
@@ -123,7 +196,7 @@ async function computePCA_WebGPU(
       return null;
     }
 
-    const device = await adapter.requestDevice({
+    device = await adapter.requestDevice({
       requiredLimits: { maxStorageBufferBindingSize: Math.min(requiredSize + 4096, maxBuf) },
     });
 
@@ -190,7 +263,6 @@ async function computePCA_WebGPU(
     const hasShaderError = [...fwdInfo.messages, ...bwdInfo.messages].some(m => m.type === 'error');
     if (hasShaderError) {
       console.warn('[PCA-GPU] Shader compilation errors, falling back to CPU');
-      device.destroy();
       return null;
     }
 
@@ -281,8 +353,6 @@ async function computePCA_WebGPU(
       for (let i = 0; i < n; i++) positions[i * 3 + c] = proj[i];
     }
 
-    device.destroy();
-
     if (!validatePositions(positions, n)) {
       console.warn('[PCA-GPU] Output positions degenerate, falling back to CPU');
       return null;
@@ -293,6 +363,8 @@ async function computePCA_WebGPU(
   } catch (err) {
     console.warn('[PCA-GPU] Failed, falling back to CPU:', err);
     return null;
+  } finally {
+    device?.destroy();
   }
 }
 
@@ -346,73 +418,131 @@ function computePCA_CPU(centered: Float32Array, n: number, d: number): Float32Ar
   return positions;
 }
 
-// ─── Worker-based CPU PCA (non-blocking) ────────────────────────────────────
+// ─── Worker-based projection (PCA or UMAP, non-blocking) ────────────────────
 
-function runPCAWorker(
+type WorkerResultMsg =
+  | { type: 'progress'; stage: string; epoch?: number; totalEpochs?: number }
+  | { type: 'result'; positions: Float32Array; valid: boolean; method: string }
+  | { type: 'error'; error: string }
+  | { positions: Float32Array; valid: boolean };
+
+let _activeProjectionWorker: Worker | null = null;
+
+function cancelActiveProjectionWorker(): void {
+  if (_activeProjectionWorker) {
+    try { _activeProjectionWorker.postMessage({ type: 'cancel' }); } catch { /* already dead */ }
+    _activeProjectionWorker.terminate();
+    _activeProjectionWorker = null;
+  }
+}
+
+function runProjectionWorker(
   data: Float32Array,
   n: number,
   d: number,
   spread: number,
-): Promise<Float32Array> {
+  method: 'pca' | 'umap' = 'pca',
+  onProgress?: (stage: string, epoch?: number, totalEpochs?: number) => void,
+  preProjected = false,
+): Promise<{ positions: Float32Array; method: string }> {
+  cancelActiveProjectionWorker();
+
   return new Promise((resolve, reject) => {
     const worker = new Worker(
       new URL('../workers/pca.worker.ts', import.meta.url),
-      { type: 'module', name: 'Ark PCA Worker' },
+      { type: 'module', name: 'Ark Projection Worker' },
     );
+    _activeProjectionWorker = worker;
 
-    worker.onmessage = (e: MessageEvent<{ positions: Float32Array; valid: boolean }>) => {
-      worker.terminate();
-      if (!e.data.valid) {
-        console.warn('[PCA Worker] Output positions degenerate');
+    worker.onmessage = (e: MessageEvent<WorkerResultMsg>) => {
+      const msg = e.data;
+      if ('type' in msg) {
+        if (msg.type === 'progress') {
+          onProgress?.(msg.stage, msg.epoch, msg.totalEpochs);
+        } else if (msg.type === 'result') {
+          _activeProjectionWorker = null;
+          worker.terminate();
+          if (!msg.valid) console.warn('[Projection Worker] Output positions degenerate');
+          resolve({ positions: msg.positions, method: msg.method });
+        } else if (msg.type === 'error') {
+          _activeProjectionWorker = null;
+          worker.terminate();
+          reject(new Error(msg.error));
+        }
+      } else {
+        _activeProjectionWorker = null;
+        worker.terminate();
+        if (!msg.valid) console.warn('[PCA Worker] Output positions degenerate');
+        resolve({ positions: msg.positions, method: 'pca' });
       }
-      resolve(e.data.positions);
     };
 
     worker.onerror = (err) => {
+      _activeProjectionWorker = null;
       worker.terminate();
-      reject(new Error(`PCA Worker failed: ${err.message}`));
+      reject(new Error(`Projection Worker failed: ${err.message}`));
     };
 
-    worker.postMessage({ data, n, d, spread });
+    console.log(`[Galaxy Cache] Sending ${(data.byteLength / 1048576).toFixed(1)} MB to worker (preProjected=${preProjected})`);
+    worker.postMessage({ data, n, d, spread, method, preProjected }, [data.buffer]);
   });
 }
 
 /**
- * Run PCA on the embedding data.
+ * Compute 3D positions from pre-projected 100D embeddings.
  *
- * Strategy:
- *   1. If WebGPU is available, center data on main thread and run GPU PCA
- *      (async — GPU does the heavy lifting, main thread stays responsive).
- *   2. Otherwise, offload the entire pipeline (center + PCA + normalize) to
- *      a dedicated Web Worker so the UI never freezes.
- *   3. Last resort: if the worker fails, run synchronously on main thread.
+ * Fallback chain (used only when the main PCA path in buildGalaxyData fails):
+ *   1. Try UMAP in worker — best local clustering, slower (~30-60s).
+ *   2. WebGPU PCA — fast GPU-accelerated path.
+ *   3. CPU PCA — main-thread fallback.
  */
-async function computePCA(
+export async function computeProjection(
   data: Float32Array,
   n: number,
   d: number,
   spread: number,
-): Promise<Float32Array> {
-  // WebGPU path — centering is synchronous but fast, PCA is async on GPU
+  onProgress?: (stage: string, epoch?: number, totalEpochs?: number) => void,
+  preProjected = false,
+): Promise<{ positions: Float32Array; method: string }> {
+  // Primary: UMAP via worker (buffer is transferred — zero-copy).
+  // The worker has an internal PCA fallback if UMAP fails, so this path
+  // covers both UMAP and PCA-in-worker. If the worker itself crashes,
+  // the buffer is gone and we must reload data for main-thread fallback.
+  try {
+    return await runProjectionWorker(data, n, d, spread, 'umap', onProgress, preProjected);
+  } catch (err) {
+    console.warn('[Projection] Worker failed, trying main-thread fallbacks:', err);
+  }
+
+  // Buffer was transferred to the (now-dead) worker — reload projected data.
+  // This path is rare: only hit when the worker process itself crashes.
+  let fallbackData: Float32Array;
+  let fallbackDim: number;
+  if (data.buffer.byteLength === 0) {
+    console.log('[Projection] Buffer detached, reloading projected embeddings for fallback...');
+    const reloaded = await loadProjectedEmbeddingsForGraph();
+    fallbackData = reloaded.projected;
+    fallbackDim = reloaded.projDim;
+  } else {
+    fallbackData = data;
+    fallbackDim = d;
+  }
+
+  // WebGPU PCA fallback
   if (navigator.gpu) {
-    const centered = centerData(data, n, d);
-    const gpuResult = await computePCA_WebGPU(centered, n, d);
+    const centered = centerData(fallbackData, n, fallbackDim);
+    const gpuResult = await computePCA_WebGPU(centered, n, fallbackDim);
     if (gpuResult) {
       normalizePositions(gpuResult, n, spread);
-      return gpuResult;
+      return { positions: gpuResult, method: 'PCA (WebGPU)' };
     }
   }
 
-  // CPU fallback via Web Worker (non-blocking)
-  try {
-    return await runPCAWorker(data, n, d, spread);
-  } catch (err) {
-    console.warn('[PCA] Worker failed, falling back to main thread:', err);
-    const centered = centerData(data, n, d);
-    const positions = computePCA_CPU(centered, n, d);
-    normalizePositions(positions, n, spread);
-    return positions;
-  }
+  // Main-thread PCA fallback (last resort)
+  const centered = centerData(fallbackData, n, fallbackDim);
+  const positions = computePCA_CPU(centered, n, fallbackDim);
+  normalizePositions(positions, n, spread);
+  return { positions, method: 'PCA (CPU)' };
 }
 
 function normalizePositions(pos: Float32Array, n: number, spread: number): void {
@@ -446,34 +576,44 @@ export type GalaxyStepReporter = (
 export const GALAXY_STEP_LABELS = [
   'Loading all embedding vectors',
   'Loading game metadata',
-  'Reducing dimensions (PCA 768D → 3D)',
+  'Projecting to 3D (PCA)',
   'Building galaxy map',
 ];
 
+let _buildGeneration = 0;
+
 export async function buildGalaxyData(
   onStep?: GalaxyStepReporter,
-): Promise<{ nodes: GraphNode[]; allGenres: string[] }> {
+): Promise<{ nodes: GraphNode[]; allGenres: string[]; projectionMethod: string }> {
+  const myGen = ++_buildGeneration;
+  const cancelled = () => _buildGeneration !== myGen;
   const report = onStep ?? (() => {});
 
   report(0, 'running');
-  const { ids, data, dim } = await loadAllEmbeddingsForGraph((count, store) => {
-    report(0, 'running', `${count.toLocaleString()} from ${store}`);
-  });
+  let embResult: { ids: string[]; projected: Float32Array; projDim: number } | null =
+    await loadProjectedEmbeddingsForGraph((count: number, store: string) => {
+      report(0, 'running', `${count.toLocaleString()} from ${store}`);
+    });
+  const ids = embResult!.ids;
+  const projDim = embResult!.projDim;
+  let data: Float32Array | null = embResult!.projected;
+  embResult = null;
   const n = ids.length;
-  if (n === 0) {
-    report(0, 'done', '0 vectors');
-    return { nodes: [], allGenres: [] };
+  console.log(`[Galaxy Cache] Loaded ${n.toLocaleString()} vectors → ${projDim}D (${(data.byteLength / 1048576).toFixed(1)} MB)`);
+  if (n === 0 || cancelled()) {
+    report(0, 'done', cancelled() ? 'cancelled' : '0 vectors');
+    return { nodes: [], allGenres: [], projectionMethod: cancelled() ? 'cancelled' : 'none' };
   }
-  report(0, 'done', `${n.toLocaleString()} vectors`);
+  report(0, 'done', `${n.toLocaleString()} vectors (projected to ${projDim}D)`);
 
   report(1, 'running');
   const libraryIds = new Set(journeyStore.getAllEntries().map(e => e.gameId));
+  // Fetch catalog data for ALL steam IDs (library included) so we have
+  // review scores for luminance even on owned games.
   const catalogAppIds: number[] = [];
   for (const id of ids) {
-    if (!libraryIds.has(id)) {
-      const m = id.match(/^steam-(\d+)$/);
-      if (m) catalogAppIds.push(Number(m[1]));
-    }
+    const m = id.match(/^steam-(\d+)$/);
+    if (m) catalogAppIds.push(Number(m[1]));
   }
   const catalogMetaMap = new Map<number, CatalogEntry>();
   if (catalogAppIds.length > 0) {
@@ -485,16 +625,64 @@ export async function buildGalaxyData(
       report(1, 'running', `${Math.min(i + CHUNK, catalogAppIds.length).toLocaleString()} / ${catalogAppIds.length.toLocaleString()}`);
     }
   }
+  // Fetch Epic catalog metadata for epic-* IDs (title, genres, developer, cover)
+  const epicMetaMap = new Map<string, EpicCatalogEntry>();
+  const epicIds = ids.filter(id => id.startsWith('epic-'));
+  if (epicIds.length > 0) {
+    const epicIdSet = new Set(epicIds.map(id => id.slice(5))); // strip "epic-" prefix
+    await epicCatalogStore.getAllEntries((batch) => {
+      for (const entry of batch) {
+        if (epicIdSet.has(entry.epicId)) epicMetaMap.set(entry.epicId, entry);
+      }
+    });
+    report(1, 'running', `+ ${epicMetaMap.size.toLocaleString()} Epic entries`);
+  }
+
+  // Fetch ML game profiles (g_rec_rate) for luminance enhancement
+  let mlRecRates: Record<string, number> = {};
+  try {
+    if (window.ml) {
+      const mlStatus = await window.ml.status();
+      if (!mlStatus.loaded) await window.ml.load();
+      report(1, 'running', 'loading ML game profiles...');
+      const ML_BATCH = 10000;
+      for (let i = 0; i < ids.length; i += ML_BATCH) {
+        const batch = ids.slice(i, i + ML_BATCH);
+        const rates = await window.ml.getGameRecRates(batch);
+        Object.assign(mlRecRates, rates);
+      }
+    }
+  } catch { /* ML not available — non-fatal */ }
+
   report(1, 'done', `${libraryIds.size} library + ${catalogMetaMap.size.toLocaleString()} catalog`);
+  if (cancelled()) return { nodes: [], allGenres: [], projectionMethod: 'cancelled' };
   await new Promise(r => setTimeout(r, 30));
 
   report(2, 'running');
-  const hasGPU = typeof navigator !== 'undefined' && !!navigator.gpu;
-  const pcaMethod = hasGPU ? 'WebGPU' : 'CPU (Worker)';
-  report(2, 'running', pcaMethod);
+  report(2, 'running', 'initializing...');
   await new Promise(r => setTimeout(r, 50));
-  const positions = await computePCA(data, n, dim, 400);
-  report(2, 'done', pcaMethod);
+  console.log(`[Galaxy Cache] Projecting ${n.toLocaleString()} × ${projDim}D → 3D via PCA...`);
+  let projectionMethod = 'PCA';
+
+  // PCA on 100D pre-projected data: fast (~2-5s), no OOM risk.
+  // Try WebGPU first (instant for 100K+ points); fall back to CPU.
+  report(2, 'running', 'Running PCA...');
+  const centered = centerData(data!, n, projDim);
+  data = null;
+  let positions: Float32Array | null = null;
+  if (navigator.gpu) {
+    positions = await computePCA_WebGPU(centered, n, projDim);
+    if (positions) {
+      projectionMethod = 'PCA (WebGPU)';
+      normalizePositions(positions, n, 400);
+    }
+  }
+  if (!positions) {
+    positions = computePCA_CPU(centered, n, projDim);
+    normalizePositions(positions, n, 400);
+  }
+  console.log(`[Galaxy Cache] ${projectionMethod} done — ${n.toLocaleString()} points positioned`);
+  report(2, 'done', projectionMethod);
   await new Promise(r => setTimeout(r, 0));
 
   report(3, 'running');
@@ -512,7 +700,9 @@ export async function buildGalaxyData(
 
     let title = id;
     let genres: string[] = [];
+    let themes: string[] = [];
     let developer = '';
+    let publisher = '';
     let coverUrl: string | undefined;
 
     if (journey) {
@@ -528,18 +718,43 @@ export async function buildGalaxyData(
       if (!coverUrl && meta.coverUrl) coverUrl = meta.coverUrl;
       if (!coverUrl && meta.headerImage) coverUrl = meta.headerImage;
       if (!developer && meta.developer) developer = meta.developer;
+      if (!publisher && meta.publisher) publisher = meta.publisher;
     }
 
-    // Non-library Steam games: look up from the catalog
+    // Look up catalog entry for any steam-prefixed ID (review data + metadata fallback)
     const steamMatch = id.match(/^steam-(\d+)$/);
-    if (!isLib && steamMatch) {
-      const appid = Number(steamMatch[1]);
-      const cat = catalogMetaMap.get(appid);
-      if (cat) {
-        if (title === id) title = cat.name;
-        if (genres.length === 0) genres = cat.genres;
-        if (!developer) developer = cat.developer;
-      }
+    const cat = steamMatch ? catalogMetaMap.get(Number(steamMatch[1])) : undefined;
+
+    // Look up Epic catalog entry
+    const epicMatch = id.startsWith('epic-') ? id.slice(5) : null;
+    const epicCat = epicMatch ? epicMetaMap.get(epicMatch) : undefined;
+
+    // Non-library Steam games: fill in title/genre/developer/publisher from catalog
+    if (!isLib && cat) {
+      if (title === id) title = cat.name;
+      if (genres.length === 0) genres = cat.genres;
+      if (themes.length === 0) themes = cat.themes;
+      if (!developer) developer = cat.developer;
+      if (!publisher) publisher = cat.publisher;
+    }
+    // Non-library Epic games: fill from Epic catalog
+    if (!isLib && epicCat) {
+      if (title === id) title = epicCat.name;
+      if (genres.length === 0) genres = epicCat.genres;
+      if (themes.length === 0) themes = epicCat.themes;
+      if (!developer) developer = epicCat.developer;
+      if (!publisher) publisher = epicCat.publisher;
+    }
+    // Library games: fill gaps from catalog if cachedMeta was incomplete
+    if (isLib && cat) {
+      if (!developer) developer = cat.developer;
+      if (!publisher) publisher = cat.publisher;
+      if (themes.length === 0) themes = cat.themes;
+    }
+    if (isLib && epicCat) {
+      if (!developer) developer = epicCat.developer;
+      if (!publisher) publisher = epicCat.publisher;
+      if (themes.length === 0) themes = epicCat.themes;
     }
 
     // Cover URL fallback from Steam CDN for any steam-prefixed ID
@@ -547,7 +762,10 @@ export async function buildGalaxyData(
       coverUrl = `https://cdn.akamai.steamstatic.com/steam/apps/${steamMatch[1]}/header.jpg`;
     }
 
-    // Epic cover URL fallback from library store screenshots/header
+    // Epic cover URL fallback from Epic catalog entry or library store
+    if (!coverUrl && epicCat?.coverUrl) {
+      coverUrl = epicCat.coverUrl;
+    }
     if (!coverUrl && id.startsWith('epic-') && meta) {
       if (meta.headerImage) coverUrl = meta.headerImage;
     }
@@ -561,16 +779,39 @@ export async function buildGalaxyData(
       }
     }
 
+    // ── Luminance from aggregated review signals ──
+    const userRating = journey?.rating ?? libEntry?.rating ?? 0;
+    const luminance = computeLuminance({
+      metacritic: meta?.metacriticScore,
+      steamPositivity: cat?.reviewPositivity,
+      steamReviewCount: cat?.reviewCount,
+      userRating,
+      mlRecRate: mlRecRates[id],
+    });
+
+    // ── Release year from catalog (Unix timestamp → year) or Epic (epoch ms) ──
+    let releaseYear = 0;
+    if (cat?.releaseDate) {
+      releaseYear = new Date(cat.releaseDate * 1000).getFullYear();
+    } else if (epicCat?.releaseDate) {
+      releaseYear = new Date(epicCat.releaseDate).getFullYear();
+    }
+
     genres.forEach(g => allGenresSet.add(g));
 
     nodes.push({
       id,
       title,
       genres,
+      themes,
       developer,
+      publisher,
       coverUrl,
       isLibrary: isLib,
       hoursPlayed: journey?.hoursPlayed ?? 0,
+      reviewCount: cat?.reviewCount ?? -1,
+      luminance,
+      releaseYear,
       x: positions[i * 3],
       y: positions[i * 3 + 1],
       z: positions[i * 3 + 2],
@@ -579,7 +820,7 @@ export async function buildGalaxyData(
   }
 
   report(3, 'done', `${nodes.length.toLocaleString()} nodes`);
-  return { nodes, allGenres: [...allGenresSet].sort() };
+  return { nodes, allGenres: [...allGenresSet].sort(), projectionMethod };
 }
 
 // ─── IDB Cache ──────────────────────────────────────────────────────────────
@@ -588,12 +829,14 @@ interface CachedGalaxy {
   nodes: GraphNode[];
   allGenres: string[];
   embeddingCount: number;
+  embeddingTextVersion?: number;
   timestamp: number;
+  projectionMethod?: string;
 }
 
 const CACHE_DB = 'galaxy-cache';
 const CACHE_STORE = 'data';
-const CACHE_KEY = 'galaxy-v2';
+const CACHE_KEY = 'galaxy-v13';
 
 let _cacheDB: IDBDatabase | null = null;
 let _cacheDBPromise: Promise<IDBDatabase> | null = null;
@@ -648,18 +891,36 @@ async function saveCachedGalaxy(entry: CachedGalaxy): Promise<void> {
  * Attempt to load galaxy data from cache. Returns null if the cache is
  * stale (embedding count changed) or missing.
  */
-export async function loadCachedGalaxyIfFresh(): Promise<{ nodes: GraphNode[]; allGenres: string[] } | null> {
+export async function loadCachedGalaxyIfFresh(): Promise<{ nodes: GraphNode[]; allGenres: string[]; projectionMethod: string } | null> {
   const cached = await getCachedGalaxy();
   if (!cached || cached.nodes.length === 0) return null;
 
-  const currentCount = await getEmbeddingCount();
-  if (currentCount !== cached.embeddingCount) {
-    console.log(`[Galaxy Cache] Stale — cached ${cached.embeddingCount} vs current ${currentCount}`);
+  if (cached.embeddingTextVersion !== EMBEDDING_TEXT_VERSION) {
+    console.log(`[Galaxy Cache] Stale — embedding text version ${cached.embeddingTextVersion ?? '?'} vs current ${EMBEDDING_TEXT_VERSION}`);
     return null;
   }
 
+  const currentCount = await getEmbeddingCount();
+  const ageMs = Date.now() - cached.timestamp;
+  const RECENT_THRESHOLD_MS = 5 * 60_000;
+  if (currentCount !== cached.embeddingCount) {
+    // If the cache was built very recently (e.g. background precompute during
+    // splash) and the catalog embedding pipeline is still generating more
+    // vectors, accept the cache to avoid a wasteful full rebuild.
+    const countGrowth = currentCount > cached.embeddingCount
+      ? (currentCount - cached.embeddingCount) / cached.embeddingCount
+      : 0;
+    if (ageMs < RECENT_THRESHOLD_MS && countGrowth < 0.05) {
+      console.log(`[Galaxy Cache] Near-fresh — cached ${cached.embeddingCount} vs current ${currentCount} (${(countGrowth * 100).toFixed(1)}% growth, ${(ageMs / 1000).toFixed(0)}s old) — accepting`);
+    } else {
+      console.log(`[Galaxy Cache] Stale — cached ${cached.embeddingCount} vs current ${currentCount}`);
+      return null;
+    }
+  }
+
   console.log(`[Galaxy Cache] Hit — ${cached.nodes.length} nodes from ${new Date(cached.timestamp).toLocaleTimeString()}`);
-  return { nodes: cached.nodes, allGenres: cached.allGenres };
+  _setBuildStage('done', cached.nodes.length);
+  return { nodes: cached.nodes, allGenres: cached.allGenres, projectionMethod: cached.projectionMethod ?? 'PCA' };
 }
 
 /**
@@ -667,7 +928,7 @@ export async function loadCachedGalaxyIfFresh(): Promise<{ nodes: GraphNode[]; a
  */
 export async function buildAndCacheGalaxy(
   onStep?: GalaxyStepReporter,
-): Promise<{ nodes: GraphNode[]; allGenres: string[] }> {
+): Promise<{ nodes: GraphNode[]; allGenres: string[]; projectionMethod: string }> {
   const result = await buildGalaxyData(onStep);
   if (result.nodes.length > 0) {
     const embCount = await getEmbeddingCount();
@@ -675,9 +936,11 @@ export async function buildAndCacheGalaxy(
       nodes: result.nodes,
       allGenres: result.allGenres,
       embeddingCount: embCount,
+      embeddingTextVersion: EMBEDDING_TEXT_VERSION,
       timestamp: Date.now(),
+      projectionMethod: result.projectionMethod,
     });
-    console.log(`[Galaxy Cache] Saved ${result.nodes.length} nodes`);
+    console.log(`[Galaxy Cache] Saved ${result.nodes.length} nodes (${result.projectionMethod})`);
   }
   return result;
 }
@@ -688,16 +951,27 @@ export type GalaxyBuildStage = 'idle' | 'scheduled' | 'waiting' | 'running' | 'd
 
 let _buildStage: GalaxyBuildStage = 'idle';
 let _buildNodeCount = 0;
+let _buildStepIndex = -1;
+let _buildStepDetail = '';
 const _listeners = new Set<() => void>();
 
 function _setBuildStage(stage: GalaxyBuildStage, nodeCount?: number) {
   _buildStage = stage;
   if (nodeCount !== undefined) _buildNodeCount = nodeCount;
+  if (stage !== 'running') { _buildStepIndex = -1; _buildStepDetail = ''; }
+  _listeners.forEach(fn => fn());
+}
+
+function _setBuildStep(stepIndex: number, detail?: string) {
+  _buildStepIndex = stepIndex;
+  _buildStepDetail = detail ?? '';
   _listeners.forEach(fn => fn());
 }
 
 export function getBuildStage(): GalaxyBuildStage { return _buildStage; }
 export function getBuildNodeCount(): number { return _buildNodeCount; }
+export function getBuildStepIndex(): number { return _buildStepIndex; }
+export function getBuildStepDetail(): string { return _buildStepDetail; }
 
 export function subscribeGalaxy(fn: () => void): () => void {
   _listeners.add(fn);
@@ -707,15 +981,16 @@ export function subscribeGalaxy(fn: () => void): () => void {
 // ─── Background precomputation ──────────────────────────────────────────────
 
 let _bgScheduled = false;
-let _bgBuildPromise: Promise<{ nodes: GraphNode[]; allGenres: string[] }> | null = null;
+let _bgBuildPromise: Promise<{ nodes: GraphNode[]; allGenres: string[]; projectionMethod: string }> | null = null;
 
 export function isBackgroundRunning(): boolean { return _bgBuildPromise !== null; }
+export { cancelActiveProjectionWorker };
 
 /**
  * If a background build is in progress, return its promise so callers can
  * await the same result instead of starting a duplicate computation.
  */
-export function getBackgroundBuildPromise(): Promise<{ nodes: GraphNode[]; allGenres: string[] }> | null {
+export function getBackgroundBuildPromise(): Promise<{ nodes: GraphNode[]; allGenres: string[]; projectionMethod: string }> | null {
   return _bgBuildPromise;
 }
 
@@ -729,40 +1004,124 @@ export function scheduleBackgroundPrecompute(delayMs = 20_000): void {
   _bgScheduled = true;
   _setBuildStage('scheduled');
 
-  setTimeout(async () => {
-    // Wait for catalog embeddings to finish if running — building the galaxy
-    // while embeddings are being written to IDB causes transaction contention.
-    if (embeddingService.isCatalogRunning) {
-      _setBuildStage('waiting');
-      console.log('[Galaxy Cache] Background: waiting for catalog embeddings to finish...');
-      await new Promise<void>(resolve => {
-        if (!embeddingService.isCatalogRunning) { resolve(); return; }
-        const unsub = embeddingService.subscribe(() => {
-          if (!embeddingService.isCatalogRunning) { unsub(); resolve(); }
-        });
-      });
-    }
+  setTimeout(() => void _runBackgroundPrecompute(), delayMs);
+}
 
-    const existing = await loadCachedGalaxyIfFresh();
-    if (existing) {
-      console.log('[Galaxy Cache] Background: cache already fresh, skipping');
+async function _runBackgroundPrecompute(): Promise<void> {
+  _setBuildStage('waiting');
+  const MAX_WAIT_MS = 3 * 60_000;
+  const POLL_INTERVAL = 3_000;
+  const waitStart = Date.now();
+
+  // Wait for one of three exit conditions:
+  //   1. Embeddings already exist in IDB (from a previous session)
+  //   2. Ollama availability check completed (available or not)
+  //   3. Timeout reached
+  while (Date.now() - waitStart < MAX_WAIT_MS) {
+    const count = await getEmbeddingCount();
+    if (count > 0) {
+      console.log(`[Galaxy Cache] Background: ${count} embeddings cached, proceeding`);
+      break;
+    }
+    if (embeddingService.isOllamaUnavailable) {
+      console.log('[Galaxy Cache] Background: Ollama unavailable, cannot build galaxy — will retry when embeddings appear');
       _bgScheduled = false;
-      _setBuildStage('done', existing.nodes.length);
+      _setBuildStage('idle');
+      _scheduleRetryWhenEmbeddingsAppear();
       return;
     }
+    if (embeddingService.isCatalogRunning) break;
+    await new Promise(r => setTimeout(r, POLL_INTERVAL));
+  }
 
-    console.log('[Galaxy Cache] Background precompute starting...');
-    _setBuildStage('running');
-    _bgBuildPromise = buildAndCacheGalaxy();
-    try {
-      const result = await _bgBuildPromise;
-      _setBuildStage('done', result.nodes.length);
-    } catch (err) {
-      console.warn('[Galaxy Cache] Background precompute failed:', err);
-      _setBuildStage('idle');
-    } finally {
-      _bgBuildPromise = null;
+  // If catalog embeddings are actively running, wait for completion (with timeout)
+  if (embeddingService.isCatalogRunning) {
+    console.log('[Galaxy Cache] Background: waiting for catalog embeddings to finish...');
+    await new Promise<void>(resolve => {
+      if (!embeddingService.isCatalogRunning) { resolve(); return; }
+      const timeout = setTimeout(() => { unsub(); resolve(); }, 5 * 60_000);
+      const unsub = embeddingService.subscribe(() => {
+        if (!embeddingService.isCatalogRunning) { clearTimeout(timeout); unsub(); resolve(); }
+      });
+    });
+  }
+
+  const existing = await loadCachedGalaxyIfFresh();
+  if (existing) {
+    console.log('[Galaxy Cache] Background: cache already fresh, skipping');
+    _bgScheduled = false;
+    _setBuildStage('done', existing.nodes.length);
+    return;
+  }
+
+  // Check if we have any embeddings at all
+  const finalCount = await getEmbeddingCount();
+  if (finalCount === 0) {
+    console.log('[Galaxy Cache] Background: 0 embeddings available, deferring galaxy build');
+    _bgScheduled = false;
+    _setBuildStage('idle');
+    _scheduleRetryWhenEmbeddingsAppear();
+    return;
+  }
+
+  // Memory-pressure gate: defer if the renderer is already under heavy load.
+  // The galaxy build allocates ~300 MB for embedding data + worker projection.
+  // Starting when memory is already high risks an OOM crash.
+  const mem = (performance as any).memory;
+  if (mem && mem.usedJSHeapSize && mem.jsHeapSizeLimit) {
+    const usageRatio = mem.usedJSHeapSize / mem.jsHeapSizeLimit;
+    if (usageRatio > 0.60) {
+      console.log(`[Galaxy Cache] Memory pressure high (${(usageRatio * 100).toFixed(0)}%) — deferring galaxy build by 30s`);
       _bgScheduled = false;
+      _setBuildStage('scheduled');
+      setTimeout(() => {
+        _bgScheduled = false;
+        scheduleBackgroundPrecompute(0);
+      }, 30_000);
+      return;
     }
-  }, delayMs);
+  }
+
+  console.log('[Galaxy Cache] Background precompute starting...');
+  _setBuildStage('running');
+  _bgBuildPromise = buildAndCacheGalaxy((stepIndex, _status, detail) => {
+    _setBuildStep(stepIndex, detail);
+  });
+  try {
+    const result = await _bgBuildPromise;
+    if (result.nodes.length === 0) {
+      console.warn('[Galaxy Cache] Background: built 0 nodes, deferring');
+      _setBuildStage('idle');
+      _scheduleRetryWhenEmbeddingsAppear();
+    } else {
+      _setBuildStage('done', result.nodes.length);
+    }
+  } catch (err) {
+    console.warn('[Galaxy Cache] Background precompute failed:', err);
+    _setBuildStage('idle');
+    _scheduleRetryWhenEmbeddingsAppear();
+  } finally {
+    _bgBuildPromise = null;
+    _bgScheduled = false;
+  }
+}
+
+let _retryUnsub: (() => void) | null = null;
+
+/**
+ * Subscribe to embedding service changes and auto-retry the galaxy build
+ * once embeddings become available.
+ */
+function _scheduleRetryWhenEmbeddingsAppear(): void {
+  if (_retryUnsub) return;
+  _retryUnsub = embeddingService.subscribe(() => {
+    if (embeddingService.loadedCount > 0 || embeddingService.isCatalogRunning) {
+      _retryUnsub?.();
+      _retryUnsub = null;
+      if (!_bgScheduled && !_bgBuildPromise) {
+        console.log('[Galaxy Cache] Embeddings detected — scheduling galaxy build');
+        scheduleBackgroundPrecompute(5_000);
+      }
+    }
+  });
 }

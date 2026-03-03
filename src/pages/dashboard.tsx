@@ -1,6 +1,6 @@
-import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef, useSyncExternalStore, lazy, Suspense, startTransition } from 'react';
 import { useLocation } from 'wouter';
-import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames, extractCachedMeta } from '@/hooks/useGameStore';
+import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames, extractCachedMeta, useDebounce } from '@/hooks/useGameStore';
 import { useDeferredFilterSort } from '@/hooks/useDeferredFilterSort';
 import { useDetailEnricher } from '@/hooks/useDetailEnricher';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
@@ -13,7 +13,7 @@ import { CustomGameDialog } from '@/components/custom-game-dialog';
 // EditProgressDialog removed — edits now route through GameDialog in edit mode
 import { GameCard } from '@/components/game-card';
 import { SkeletonGrid } from '@/components/game-card-skeleton';
-import { VirtualGameGrid } from '@/components/virtual-game-grid';
+import { VirtualGameGrid, useBreakpointColumns } from '@/components/virtual-game-grid';
 // GameDetailPanel removed - now using dedicated /game/:id route
 import { FilterTrigger, FilterPanel } from '@/components/filter-sidebar';
 import { SearchSuggestions } from '@/components/search-suggestions';
@@ -24,11 +24,12 @@ import { EmptyState } from '@/components/empty-state';
 import { JourneyView } from '@/components/journey-view';
 import { BuzzView } from '@/components/buzz-view';
 import { ReleaseCalendar } from '@/components/release-calendar';
-import { OracleView } from '@/components/oracle-view';
-import { AnnGraphView } from '@/components/ann-graph-view';
+const OracleView = lazy(() => import('@/components/oracle-view').then(m => ({ default: m.OracleView })));
+const AnnGraphView = lazy(() => import('@/components/ann-graph-view').then(m => ({ default: m.AnnGraphView })));
+const DataFlowView = lazy(() => import('@/components/data-flow-view').then(m => ({ default: m.DataFlowView })));
+const DevLogView = lazy(() => import('@/components/devlog-view').then(m => ({ default: m.DevLogView })));
 import { useToast } from '@/components/ui/toast';
 
-const DarkVeil = lazy(() => import('@/components/ui/dark-veil'));
 import { cn } from '@/lib/utils';
 import { setNavigatingGame } from '@/services/prefetch-store';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -52,30 +53,53 @@ import {
   Eye,
   Network,
   HelpCircle,
+  Workflow,
+  ScrollText,
+  ChevronDown,
+  Play,
+  Pause,
+  CheckCircle2,
+  Bookmark,
+  Zap,
+  Loader2,
 } from 'lucide-react';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
-import { SettingsPanel } from '@/components/settings-panel';
+import { SettingsScreen } from '@/components/settings-screen';
 import { GuidedTour, useTourState } from '@/components/guided-tour';
+import { YearWrapped, WrappedSnackbar } from '@/components/year-wrapped';
 import { AnimateIcon, MagneticWrap } from '@/components/ui/animate-icon';
 import { useSessionTracker } from '@/hooks/useSessionTracker';
 import { NavbarStatusIndicator } from '@/components/system-status-panel';
-import { scheduleBackgroundPrecompute } from '@/services/galaxy-cache';
+import { useDevMode } from '@/hooks/useDevMode';
+import { scheduleBackgroundPrecompute, getBuildStage, subscribeGalaxy } from '@/services/galaxy-cache';
+import { embeddingService } from '@/services/embedding-service';
+import { prewarmNews } from '@/services/news-service';
+import { prewarmEvents } from '@/services/event-resolver-service';
+import { TooltipCard } from '@/components/ui/tooltip-card';
+import { MovingBorderButton } from '@/components/ui/moving-border';
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle' | 'ann-graph';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle' | 'ann-graph' | 'data-flow' | 'devlog' | 'settings';
 
 
 const RETURN_VIEW_KEY = 'ark-return-view';
-const VALID_VIEW_MODES: ViewMode[] = ['browse', 'library', 'journey', 'buzz', 'calendar', 'oracle', 'ann-graph'];
+const VALID_VIEW_MODES: ViewMode[] = ['browse', 'library', 'journey', 'buzz', 'calendar', 'oracle', 'ann-graph', 'data-flow', 'devlog', 'settings'];
 
 function getScrollStorageKey(view: ViewMode): string {
   return `ark-dashboard-scroll-${view}`;
 }
 
-// Track if cache has been cleared this session
+function LazyViewFallback() {
+  return (
+    <div className="flex items-center justify-center h-64 text-white/30">
+      <Loader2 className="h-5 w-5 animate-spin" />
+    </div>
+  );
+}
+
 export function Dashboard() {
   const [location, navigate] = useLocation();
   
@@ -88,8 +112,6 @@ export function Dashboard() {
     const saved = sessionStorage.getItem(RETURN_VIEW_KEY);
     return (saved && VALID_VIEW_MODES.includes(saved as ViewMode)) ? (saved as ViewMode) : 'browse';
   });
-  // Tracks whether the DarkVeil bg is active (stays true during exit animation)
-  const [buzzBgActive, setBuzzBgActive] = useState(false);
 
   // Guided tour state
   const { tourRunning, tourKey, startTour, stopTour } = useTourState();
@@ -116,13 +138,7 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (viewMode === 'buzz') {
-      setBuzzBgActive(true);
-    }
-    // Close the filter panel when switching to a view that doesn't support it
-    // (journey, buzz, calendar have no filterable grid).  This prevents the
-    // panel from reserving space / staying visible after a tab switch.
-    if (viewMode === 'journey' || viewMode === 'buzz' || viewMode === 'calendar' || viewMode === 'oracle') {
+    if (viewMode === 'journey' || viewMode === 'buzz' || viewMode === 'calendar' || viewMode === 'oracle' || viewMode === 'devlog' || viewMode === 'settings') {
       setIsFilterOpen(false);
     }
   }, [viewMode]);
@@ -141,9 +157,11 @@ export function Dashboard() {
   
   // Note: Cache clearing removed - useSteamGames handles data fetching on mount
   
-  // Search functionality
+  // Search functionality — input is immediate, but filtering/API calls wait
+  // until the user pauses typing (3s debounce).
   const [searchQuery, setSearchQuery] = useState('');
-  const { results: searchResults, loading: searchLoading, isSearching } = useGameSearch(searchQuery);
+  const debouncedSearch = useDebounce(searchQuery, 3000);
+  const { results: searchResults, loading: searchLoading, isSearching } = useGameSearch(debouncedSearch);
   
   // Library management
   const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, removeCustomGame, customGames } = useLibrary();
@@ -155,10 +173,28 @@ export function Dashboard() {
   const journeyEntries = useJourneyHistory();
   
   // Session tracking (live "Playing Now" status)
-  const { isPlayingNow } = useSessionTracker();
+  const { isPlayingNow, liveGames } = useSessionTracker();
+  const [devMode] = useDevMode();
 
   // Background precompute for Embedding Space galaxy data (runs once, 20s after mount)
   useEffect(() => { scheduleBackgroundPrecompute(); }, []);
+
+  // Prewarm Transmissions data so news + events are cached before the user opens the tab
+  useEffect(() => {
+    const id = requestIdleCallback(() => { prewarmNews(); prewarmEvents(); });
+    return () => cancelIdleCallback(id);
+  }, []);
+  const galaxyStage = useSyncExternalStore(subscribeGalaxy, getBuildStage);
+  const galaxyBuilding = galaxyStage === 'scheduled' || galaxyStage === 'waiting' || galaxyStage === 'running';
+  // Ollama availability — drives whether Embedding Space is accessible
+  const [ollamaUnavailable, setOllamaUnavailable] = useState(false);
+  useEffect(() => {
+    const check = () => {
+      if (embeddingService.isOllamaChecked) setOllamaUnavailable(embeddingService.isOllamaUnavailable);
+    };
+    check();
+    return embeddingService.subscribe(check);
+  }, []);
 
   // Custom game dialog state
   const [isCustomGameDialogOpen, setIsCustomGameDialogOpen] = useState(false);
@@ -167,35 +203,24 @@ export function Dashboard() {
   // AI Chat panel state
   const [isAIChatOpen, setIsAIChatOpen] = useState(false);
   
-  // Settings panel state
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  // Year Wrapped state
+  const [showWrapped, setShowWrapped] = useState(false);
   
   // Panel handlers - ensure only one panel is open at a time; toggle if already open
   const toggleAIChat = useCallback(() => {
     setIsAIChatOpen(prev => {
       if (prev) return false;          // already open → close
       setIsFilterOpen(false);
-      setIsSettingsOpen(false);
       return true;                     // was closed → open
     });
   }, []);
 
   const closeAIChat = useCallback(() => setIsAIChatOpen(false), []);
   
-  const toggleSettings = useCallback(() => {
-    setIsSettingsOpen(prev => {
-      if (prev) return false;
-      setIsFilterOpen(false);
-      setIsAIChatOpen(false);
-      return true;
-    });
-  }, []);
-
-  const closeSettings = useCallback(() => setIsSettingsOpen(false), []);
+  const switchToSettings = useCallback(() => { setViewMode('settings'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   
   const openFilters = useCallback(() => {
     setIsAIChatOpen(false);
-    setIsSettingsOpen(false);
     setIsFilterOpen(true);
   }, []);
   
@@ -209,15 +234,14 @@ export function Dashboard() {
   }, [openFilters]);
   
   // Determine which games, loading, and hasMore to use based on viewMode
-  const currentGames = useMemo(() => {
-    if (viewMode === 'library') {
-      // Use libraryGames (fetched with full details) + custom games
-      // Mark all library games as isInLibrary
-      const markedLibraryGames = libraryGames.map(g => ({ ...g, isInLibrary: true }));
-      return [...customGames, ...markedLibraryGames];
-    }
-    return steamGames;
-  }, [viewMode, steamGames, customGames, libraryGames]);
+  // Separate memoized library array — only rebuilds when library/custom data changes,
+  // NOT on every viewMode toggle. libraryGames already have isInLibrary: true.
+  const mergedLibraryGames = useMemo(() => {
+    if (customGames.length === 0) return libraryGames;
+    return [...customGames, ...libraryGames];
+  }, [customGames, libraryGames]);
+
+  const currentGames = viewMode === 'library' ? mergedLibraryGames : steamGames;
   
   // Ref mirror of currentGames — lets stable callbacks (handleCardEdit etc.)
   // find custom / library games without being recreated on every data change.
@@ -227,33 +251,6 @@ export function Dashboard() {
   const currentLoading = viewMode === 'browse' ? steamLoading : libraryLoading;
   const currentError = steamError;
 
-  // Deferred scroll restore when grid content finishes loading.
-  // Fires when currentLoading flips OR when currentGames arrive.
-  // Only clears the ref once the scroll actually lands close to the target
-  // so that earlier premature runs (loading starts as false before data
-  // fetching begins) don't consume and discard the pending position.
-  const gameCount = currentGames.length;
-  useEffect(() => {
-    const pending = pendingScrollRestoreRef.current;
-    if (location !== '/' || !pending || currentLoading) return;
-    if (viewMode !== pending.view) return;
-
-    // If the page isn't tall enough yet, bail and wait for more content
-    if (document.documentElement.scrollHeight < pending.pos + 200) return;
-
-    let attempts = 0;
-    const maxAttempts = 20;
-    const tryRestore = () => {
-      window.scrollTo({ top: pending.pos, left: 0 });
-      attempts++;
-      if (Math.abs(window.scrollY - pending.pos) <= 10) {
-        pendingScrollRestoreRef.current = null;
-      } else if (attempts < maxAttempts) {
-        requestAnimationFrame(tryRestore);
-      }
-    };
-    requestAnimationFrame(tryRestore);
-  }, [location, viewMode, currentLoading, gameCount]);
   // Epic store filter: Epic data is a finite curated set (new releases + coming
   // soon + free games), not backed by the 155k+ Steam catalog.  The catalog
   // infinite-scroll fallback only loads Steam titles, so when the user filters
@@ -315,11 +312,42 @@ export function Dashboard() {
       searchResults,
       isSearching,
       viewMode,
-      searchQuery,
+      searchQuery: debouncedSearch,
       filters,
       sortBy,
       sortDirection,
+      liveGameIds: liveGames,
     });
+
+  // Deferred scroll restore when grid content finishes loading.
+  // The virtualised grid renders from `sortedGames` which is produced
+  // asynchronously by `useDeferredFilterSort` (rAF + startTransition).
+  // We must track BOTH `currentGames.length` (data arriving from store)
+  // AND `sortedGames.length` (deferred sort output → grid height) so
+  // this effect re-fires once the grid is tall enough to scroll to.
+  const rawGameCount = currentGames.length;
+  const renderedGameCount = sortedGames.length;
+  useEffect(() => {
+    const pending = pendingScrollRestoreRef.current;
+    if (location !== '/' || !pending || currentLoading) return;
+    if (viewMode !== pending.view) return;
+    if (renderedGameCount === 0) return;
+
+    if (document.documentElement.scrollHeight < pending.pos + 200) return;
+
+    pendingScrollRestoreRef.current = null;
+
+    let attempts = 0;
+    const maxAttempts = 30;
+    const tryRestore = () => {
+      window.scrollTo({ top: pending.pos, left: 0 });
+      attempts++;
+      if (Math.abs(window.scrollY - pending.pos) > 10 && attempts < maxAttempts) {
+        requestAnimationFrame(tryRestore);
+      }
+    };
+    requestAnimationFrame(tryRestore);
+  }, [location, viewMode, currentLoading, rawGameCount, renderedGameCount]);
 
   // Auto-reset stale cascading filter values when the dynamic options no
   // longer include the currently selected value (e.g. user picks Genre=RPG,
@@ -410,13 +438,15 @@ export function Dashboard() {
   // Stable view-mode handlers — avoids creating new closures on every render.
   // Reset filters + search when leaving a mode so stale filter state from one
   // view (e.g. Browse genre=RPG) doesn't silently carry over to another (Library).
-  const switchToBrowse = useCallback(() => { setViewMode('browse'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
-  const switchToLibrary = useCallback(() => { setViewMode('library'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
+  const switchToBrowse = useCallback(() => { setSearchQuery(''); resetFilters(); startTransition(() => setViewMode('browse')); }, [resetFilters]);
+  const switchToLibrary = useCallback(() => { setSearchQuery(''); resetFilters(); startTransition(() => setViewMode('library')); }, [resetFilters]);
   const switchToJourney = useCallback(() => { setViewMode('journey'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToBuzz = useCallback(() => { setViewMode('buzz'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToCalendar = useCallback(() => { setViewMode('calendar'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToOracle = useCallback(() => { setViewMode('oracle'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToAnnGraph = useCallback(() => { setViewMode('ann-graph'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
+  const switchToDataFlow = useCallback(() => { setViewMode('data-flow'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
+  const switchToDevLog = useCallback(() => { setViewMode('devlog'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
 
 
 
@@ -549,8 +579,44 @@ export function Dashboard() {
     if (game) handleStatusChange(game, status);
   }, [handleStatusChange, resolveGame]);
 
-  // Stable render callback for VirtualGameGrid
+  // ── Library grouped sections ───────────────────────────────────────────
   const isLibraryView = viewMode === 'library';
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const libColumns = useBreakpointColumns();
+
+  const STATUS_SECTIONS: { key: string; label: string; icon: typeof Play; color: string }[] = useMemo(() => [
+    { key: 'Playing Now', label: 'Playing Now', icon: Zap, color: 'text-emerald-400' },
+    { key: 'Playing', label: 'Playing', icon: Play, color: 'text-blue-400' },
+    { key: 'On Hold', label: 'On Hold', icon: Pause, color: 'text-amber-400' },
+    { key: 'Want to Play', label: 'Want to Play', icon: Bookmark, color: 'text-fuchsia-400' },
+    { key: 'Completed', label: 'Completed', icon: CheckCircle2, color: 'text-white/50' },
+  ], []);
+
+  const libraryGroups = useMemo(() => {
+    if (!isLibraryView || filters.status !== 'All') return null;
+    const groups: Record<string, Game[]> = {};
+    for (const s of STATUS_SECTIONS) groups[s.key] = [];
+
+    for (const game of sortedGames) {
+      const isLive = liveGames?.has(game.id) ||
+        (game.steamAppId ? liveGames?.has(`steam-${game.steamAppId}`) : false);
+      const effectiveStatus = (isLive || game.status === 'Playing Now') ? 'Playing Now' : (game.status || 'Want to Play');
+      if (groups[effectiveStatus]) groups[effectiveStatus].push(game);
+      else groups['Want to Play'].push(game);
+    }
+    return groups;
+  }, [isLibraryView, filters.status, sortedGames, liveGames, STATUS_SECTIONS]);
+
+  const toggleSection = useCallback((key: string) => {
+    setCollapsedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  // Stable render callback for VirtualGameGrid
   const isPlayingNowRef = useRef(isPlayingNow);
   isPlayingNowRef.current = isPlayingNow;
   const renderGameCard = useCallback((game: Game) => {
@@ -661,37 +727,9 @@ export function Dashboard() {
 
 
   return (
-    <div className={cn("min-h-screen", buzzBgActive ? 'bg-transparent' : 'bg-black')}>
-      {/* DarkVeil background — only in buzz mode, fades in/out */}
-      <AnimatePresence onExitComplete={() => setBuzzBgActive(false)}>
-        {viewMode === 'buzz' && (
-          <motion.div
-            key="darkveil-bg"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1, transition: { duration: 0.6, ease: 'easeInOut' } }}
-            exit={{ opacity: 0, transition: { duration: 0.3, ease: 'easeOut' } }}
-            className="fixed inset-0 z-0 pointer-events-none"
-          >
-            <Suspense fallback={null}>
-              <DarkVeil
-                hueShift={0}
-                noiseIntensity={0}
-                scanlineIntensity={0}
-                speed={0.5}
-                scanlineFrequency={0}
-                warpAmount={3.4}
-                resolutionScale={1}
-              />
-            </Suspense>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
+    <div className="min-h-screen bg-black">
       {/* Header */}
-      <header className={cn(
-        "sticky top-0 z-40 drag-region",
-        buzzBgActive ? 'bg-transparent' : 'bg-black/80 backdrop-blur-xl'
-      )}>
+      <header className="sticky top-0 z-40 drag-region bg-black/80 backdrop-blur-xl">
         <div className="px-3 lg:px-6 py-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 no-drag mt-[5px]">
@@ -699,13 +737,47 @@ export function Dashboard() {
                 <Gamepad2 className="h-4 w-4 text-white" />
               </div>
               <div className="flex items-center gap-2">
-                <h1 className="text-lg font-bold text-white">Ark</h1>
+                <h1 className="text-lg font-bold text-white tracking-wide" style={{ fontFamily: "'Sterion', sans-serif" }}>ARK</h1>
                 <span className="text-xs text-white/50">v{APP_VERSION}</span>
               </div>
             </div>
 
             <div className="flex items-center gap-2 no-drag">
-              <NavbarStatusIndicator />
+              {devMode && (
+                <TooltipCard content="The developer's build log — a day-by-day timeline of features, fixes, and decisions made while constructing the Ark.">
+                  <Button
+                    onClick={switchToDevLog}
+                    variant="ghost"
+                    size="icon"
+                    className={cn(
+                      "h-7 w-7 transition-all",
+                      viewMode === 'devlog'
+                        ? "text-fuchsia-400 bg-fuchsia-500/15 border border-fuchsia-500/30"
+                        : "text-white/40 hover:text-fuchsia-400 hover:bg-fuchsia-500/10"
+                    )}
+                  >
+                    <ScrollText className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipCard>
+              )}
+              {devMode && (
+                <TooltipCard content="Visualize how data flows through the Ark's internal systems — APIs, stores, caches, and service connections.">
+                  <Button
+                    onClick={switchToDataFlow}
+                    variant="ghost"
+                    size="icon"
+                    className={cn(
+                      "h-7 w-7 transition-all",
+                      viewMode === 'data-flow'
+                        ? "text-fuchsia-400 bg-fuchsia-500/15 border border-fuchsia-500/30"
+                        : "text-white/40 hover:text-fuchsia-400 hover:bg-fuchsia-500/10"
+                    )}
+                  >
+                    <Workflow className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipCard>
+              )}
+              {devMode && <NavbarStatusIndicator />}
               <WindowControls />
             </div>
           </div>
@@ -714,114 +786,121 @@ export function Dashboard() {
 
       <main className={cn(
         "px-3 lg:px-6 py-4 lg:py-6 transition-all duration-300 relative z-10",
-        (isFilterOpen || isAIChatOpen || isSettingsOpen) && "lg:pr-[424px]"
+        (isFilterOpen || (devMode && isAIChatOpen)) && "lg:pr-[424px]"
       )}>
         {/* Results Header */}
         <div className="flex items-center justify-between mb-6 gap-4">
           <div className="flex items-center gap-3 min-w-0 flex-shrink overflow-hidden">
             {/* View Mode Toggle — collapses to icon-only below lg for split-screen */}
             <div data-tour="view-toggle" className="flex items-center bg-white/5 rounded-lg p-1 shrink-0">
-              <button
-                data-tour="browse-button"
-                onClick={switchToBrowse}
-                title="Browse"
-                className={cn(
-                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
-                  viewMode === 'browse' 
-                    ? "bg-fuchsia-500 text-white" 
-                    : "text-white/60 hover:text-white"
-                )}
-              >
-                <AnimateIcon hover="swing" className="shrink-0"><Compass className="h-3 w-3" /></AnimateIcon>
-                <span className="hidden lg:inline">Browse</span>
-              </button>
-              <button
-                data-tour="library-button"
-                onClick={switchToLibrary}
-                title={`Library (${librarySize})`}
-                className={cn(
-                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
-                  viewMode === 'library' 
-                    ? "bg-fuchsia-500 text-white" 
-                    : "text-white/60 hover:text-white"
-                )}
-              >
-                <AnimateIcon hover="pulse" className="shrink-0"><Library className="h-3 w-3" /></AnimateIcon>
-                <span className="hidden lg:inline">Library ({librarySize})</span>
-              </button>
-              <button
-                data-tour="journey-button"
-                onClick={switchToJourney}
-                title="Voyage"
-                className={cn(
-                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
-                  viewMode === 'journey' 
-                    ? "bg-fuchsia-500 text-white" 
-                    : "text-white/60 hover:text-white"
-                )}
-              >
-                <AnimateIcon hover="pulse" className="shrink-0"><Clock className="h-3 w-3" /></AnimateIcon>
-                <span className="hidden lg:inline">Voyage</span>
-              </button>
-              <button
-                data-tour="buzz-button"
-                onClick={switchToBuzz}
-                title="Transmissions"
-                className={cn(
-                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
-                  viewMode === 'buzz' 
-                    ? "bg-fuchsia-500 text-white" 
-                    : "text-white/60 hover:text-white"
-                )}
-              >
-                <AnimateIcon hover="pulse" className="shrink-0"><Newspaper className="h-3 w-3" /></AnimateIcon>
-                <span className="hidden lg:inline">Transmissions</span>
-              </button>
-              <button
-                data-tour="calendar-button"
-                onClick={switchToCalendar}
-                title="Releases"
-                className={cn(
-                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
-                  viewMode === 'calendar' 
-                    ? "bg-fuchsia-500 text-white" 
-                    : "text-white/60 hover:text-white"
-                )}
-              >
-                <AnimateIcon hover="pulse" className="shrink-0"><CalendarDays className="h-3 w-3" /></AnimateIcon>
-                <span className="hidden lg:inline">Releases</span>
-              </button>
-              <button
-                data-tour="oracle-button"
-                onClick={switchToOracle}
-                title="Oracle"
-                className={cn(
-                  "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
-                  viewMode === 'oracle' 
-                    ? "bg-fuchsia-500 text-white" 
-                    : "text-white/60 hover:text-white"
-                )}
-              >
-                <AnimateIcon hover="pulse" className="shrink-0"><Eye className="h-3 w-3" /></AnimateIcon>
-                <span className="hidden lg:inline">Oracle</span>
-              </button>
+              <TooltipCard content="Explore Steam's catalog of 150,000+ games. Filter by genre, platform, and popularity to discover your next favorite.">
+                <button
+                  data-tour="browse-button"
+                  onClick={switchToBrowse}
+                  className={cn(
+                    "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                    viewMode === 'browse' 
+                      ? "bg-fuchsia-500 text-white" 
+                      : "text-white/60 hover:text-white"
+                  )}
+                >
+                  <AnimateIcon hover="swing" className="shrink-0"><Compass className="h-3 w-3" /></AnimateIcon>
+                  <span className="hidden lg:inline">Browse</span>
+                </button>
+              </TooltipCard>
+              <TooltipCard content={<span>Your personal collection of <strong className="text-white">{librarySize}</strong> games — track what you're playing, want to play, and have completed.</span>}>
+                <button
+                  data-tour="library-button"
+                  onClick={switchToLibrary}
+                  className={cn(
+                    "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                    viewMode === 'library' 
+                      ? "bg-fuchsia-500 text-white" 
+                      : "text-white/60 hover:text-white"
+                  )}
+                >
+                  <AnimateIcon hover="pulse" className="shrink-0"><Library className="h-3 w-3" /></AnimateIcon>
+                  <span className="hidden lg:inline">Library ({librarySize})</span>
+                </button>
+              </TooltipCard>
+              <TooltipCard content="AI-powered game recommendations tailored to your library. The Oracle learns what you like and suggests what to play next.">
+                <button
+                  data-tour="oracle-button"
+                  onClick={switchToOracle}
+                  className={cn(
+                    "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                    viewMode === 'oracle' 
+                      ? "bg-fuchsia-500 text-white" 
+                      : "text-white/60 hover:text-white"
+                  )}
+                >
+                  <AnimateIcon hover="pulse" className="shrink-0"><Eye className="h-3 w-3" /></AnimateIcon>
+                  <span className="hidden lg:inline">Oracle</span>
+                </button>
+              </TooltipCard>
+              <TooltipCard content="Upcoming game releases on a calendar view. Filter by platform, track your wishlist, and never miss a launch day.">
+                <button
+                  data-tour="calendar-button"
+                  onClick={switchToCalendar}
+                  className={cn(
+                    "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                    viewMode === 'calendar' 
+                      ? "bg-fuchsia-500 text-white" 
+                      : "text-white/60 hover:text-white"
+                  )}
+                >
+                  <AnimateIcon hover="pulse" className="shrink-0"><CalendarDays className="h-3 w-3" /></AnimateIcon>
+                  <span className="hidden lg:inline">Releases</span>
+                </button>
+              </TooltipCard>
+              <TooltipCard content="A visual timeline of your gaming journey — see when you added, played, and completed games across the months.">
+                <button
+                  data-tour="journey-button"
+                  onClick={switchToJourney}
+                  className={cn(
+                    "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                    viewMode === 'journey' 
+                      ? "bg-fuchsia-500 text-white" 
+                      : "text-white/60 hover:text-white"
+                  )}
+                >
+                  <AnimateIcon hover="pulse" className="shrink-0"><Clock className="h-3 w-3" /></AnimateIcon>
+                  <span className="hidden lg:inline">Voyage</span>
+                </button>
+              </TooltipCard>
+              <TooltipCard content="Live news signals from Steam, Reddit, and RSS feeds — decoded in the built-in reader. Events with live countdowns and stream links.">
+                <button
+                  data-tour="buzz-button"
+                  onClick={switchToBuzz}
+                  className={cn(
+                    "px-2 lg:px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1",
+                    viewMode === 'buzz' 
+                      ? "bg-fuchsia-500 text-white" 
+                      : "text-white/60 hover:text-white"
+                  )}
+                >
+                  <AnimateIcon hover="pulse" className="shrink-0"><Newspaper className="h-3 w-3" /></AnimateIcon>
+                  <span className="hidden lg:inline">Transmissions</span>
+                </button>
+              </TooltipCard>
             </div>
 
             {/* Clear Library Button - only visible in library mode */}
             {viewMode === 'library' && librarySize > 0 && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setClearLibraryStep(1)}
-                className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/20"
-                title="Clear All"
-              >
-                <AnimateIcon hover="lift"><Trash2 className="h-3 w-3 lg:mr-1" /></AnimateIcon>
-                <span className="hidden lg:inline">Clear All</span>
-              </Button>
+              <TooltipCard content={<span>Remove all <strong className="text-red-400">{librarySize}</strong> games from your library. This includes progress, notes, and custom entries. Cannot be undone.</span>}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setClearLibraryStep(1)}
+                  className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/20"
+                >
+                  <AnimateIcon hover="lift"><Trash2 className="h-3 w-3 lg:mr-1" /></AnimateIcon>
+                  <span className="hidden lg:inline">Clear All</span>
+                </Button>
+              </TooltipCard>
             )}
 
-            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && (
+            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && viewMode !== 'devlog' && viewMode !== 'settings' && (
               <>
                 <p className="text-sm text-white/60 items-center gap-1.5 whitespace-nowrap shrink-0 hidden lg:flex">
                   {viewMode === 'library' ? (
@@ -875,10 +954,10 @@ export function Dashboard() {
           </div>
           
           <div className="flex items-center gap-3 shrink-0">
-            {/* Search - hidden in journey, buzz, calendar, oracle mode */}
-            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && (
+            {/* Search - hidden in journey, buzz, calendar, oracle, devlog, settings mode */}
+            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && viewMode !== 'devlog' && viewMode !== 'settings' && (
               <div data-tour="search-input" className="relative">
-                <AnimateIcon hover="wiggle" className="absolute left-3 top-1/2 -translate-y-1/2 z-10"><Search className="h-4 w-4 text-white/40" /></AnimateIcon>
+                <AnimateIcon hover="wiggle" className="absolute left-3 inset-y-0 z-10"><Search className="h-4 w-4 text-white/40" /></AnimateIcon>
                 <Input
                   ref={searchInputRef}
                   placeholder={viewMode === 'library' ? "Search your library..." : "Search games..."}
@@ -936,59 +1015,104 @@ export function Dashboard() {
               </div>
             )}
 
-            {/* Enter Embedding Space Button */}
-            <Button
-              data-tour="embedding-space"
-              onClick={switchToAnnGraph}
-              variant="ghost"
-              className="h-9 px-3 text-white/60 hover:text-fuchsia-400 hover:bg-fuchsia-500/10 border border-white/10 hover:border-fuchsia-500/50 transition-all gap-1.5"
-              title="Enter Embedding Space"
-            >
-              <AnimateIcon hover="pulse"><Network className="h-4 w-4 pointer-events-none" /></AnimateIcon>
-              <span className="text-xs font-medium hidden lg:inline">Enter Embedding Space</span>
-            </Button>
+            {/* Enter Embedding Space Button (Live + Mock) */}
+            {(() => {
+              const noOllama = ollamaUnavailable && galaxyStage !== 'done';
+              const liveDisabled = galaxyBuilding || noOllama;
+              const galaxyReady = !liveDisabled;
+              const label = noOllama
+                ? 'Install Ollama to unlock'
+                : galaxyBuilding
+                  ? 'Processing Galaxy'
+                  : 'Enter Embedding Space';
+              return (
+                <TooltipCard content={
+                  noOllama
+                    ? "Requires Ollama to generate game embeddings. Install it from Settings to unlock the Galaxy Map."
+                    : galaxyBuilding
+                      ? "The Galaxy Map is being computed — embedding your library games into a 3D similarity space. This runs once in the background."
+                      : "Enter the Galaxy Map — a 3D visualization of game similarity powered by AI embeddings. Explore how your library games relate to each other."
+                }>
+                  <div className="flex items-center" data-tour="embedding-space">
+                    {galaxyReady ? (
+                      <MovingBorderButton
+                        as="div"
+                        borderRadius="0.5rem"
+                        containerClassName="h-9 w-auto cursor-pointer"
+                        borderClassName="from-fuchsia-500 via-purple-500/40 to-transparent"
+                        className="bg-black/80 border border-fuchsia-500/20 px-3 gap-1.5"
+                        duration={2500}
+                        onClick={switchToAnnGraph}
+                      >
+                        <AnimateIcon hover="pulse"><Network className="h-4 w-4 text-fuchsia-400 pointer-events-none" /></AnimateIcon>
+                        <span className="text-xs font-medium text-fuchsia-300 hidden lg:inline whitespace-nowrap">
+                          {label}
+                        </span>
+                      </MovingBorderButton>
+                    ) : (
+                      <Button
+                        onClick={switchToAnnGraph}
+                        variant="ghost"
+                        disabled
+                        className="h-9 px-3 border rounded-lg transition-all gap-1.5 text-white/25 border-white/5 cursor-not-allowed"
+                      >
+                        <Network className={cn("h-4 w-4 opacity-40", galaxyBuilding && "animate-pulse")} />
+                        <span className="text-xs font-medium hidden lg:inline">
+                          {label}
+                        </span>
+                      </Button>
+                    )}
+                  </div>
+                </TooltipCard>
+              );
+            })()}
 
             {/* Tour Help Button */}
-            <MagneticWrap strength={0.25}>
-              <Button
-                onClick={startTour}
-                variant="ghost"
-                size="icon"
-                className="h-9 w-9 text-white/70 hover:text-white hover:bg-cyan-500/20 border border-white/10 hover:border-cyan-500/50 transition-all"
-                title="Take a tour"
-              >
-                <AnimateIcon hover="wiggle"><HelpCircle className="h-4 w-4 text-cyan-400 pointer-events-none" /></AnimateIcon>
-              </Button>
-            </MagneticWrap>
+            <TooltipCard content="Take a guided tour of the Ark's features. Great for first-time visitors or rediscovering hidden capabilities.">
+              <MagneticWrap strength={0.25}>
+                <Button
+                  onClick={startTour}
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 text-white/70 hover:text-white hover:bg-cyan-500/20 border border-white/10 hover:border-cyan-500/50 transition-all"
+                >
+                  <AnimateIcon hover="wiggle"><HelpCircle className="h-4 w-4 text-cyan-400 pointer-events-none" /></AnimateIcon>
+                </Button>
+              </MagneticWrap>
+            </TooltipCard>
 
-            {/* AI Chat Button */}
-            <MagneticWrap strength={0.25}>
-              <Button
-                data-tour="ai-chat"
-                onClick={toggleAIChat}
-                variant="ghost"
-                size="icon"
-                className="h-9 w-9 text-white/70 hover:text-white hover:bg-purple-500/20 border border-white/10 hover:border-purple-500/50 transition-all"
-                title="Open AI Assistant"
-              >
-                <AnimateIcon hover="sparkle"><Sparkles className="h-4 w-4 text-purple-400 pointer-events-none" /></AnimateIcon>
-              </Button>
-            </MagneticWrap>
+            {/* AI Chat Button (dev mode only) */}
+            {devMode && (
+              <TooltipCard content="Chat with the AI Assistant — ask about games, get personalized recommendations, or explore your library data conversationally.">
+                <MagneticWrap strength={0.25}>
+                  <Button
+                    data-tour="ai-chat"
+                    onClick={toggleAIChat}
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 text-white/70 hover:text-white hover:bg-purple-500/20 border border-white/10 hover:border-purple-500/50 transition-all"
+                  >
+                    <AnimateIcon hover="sparkle"><Sparkles className="h-4 w-4 text-purple-400 pointer-events-none" /></AnimateIcon>
+                  </Button>
+                </MagneticWrap>
+              </TooltipCard>
+            )}
 
             {/* Add Custom Game Button - only show in library mode */}
             {viewMode === 'library' && (
-              <Button
-                onClick={() => setIsCustomGameDialogOpen(true)}
-                className="h-9 bg-fuchsia-500 hover:bg-fuchsia-600 text-white gap-1.5"
-                title="Add Custom Game"
-              >
-                <AnimateIcon hover="pulse" className="shrink-0"><PlusCircle className="h-4 w-4 pointer-events-none" /></AnimateIcon>
-                <span className="hidden lg:inline">Add Custom Game</span>
-              </Button>
+              <TooltipCard content="Add a non-Steam game to your library — perfect for DRM-free, indie, or emulated titles. Track them alongside your Steam collection.">
+                <Button
+                  onClick={() => setIsCustomGameDialogOpen(true)}
+                  className="h-9 bg-fuchsia-500 hover:bg-fuchsia-600 text-white gap-1.5"
+                >
+                  <AnimateIcon hover="pulse" className="shrink-0"><PlusCircle className="h-4 w-4 pointer-events-none" /></AnimateIcon>
+                  <span className="hidden lg:inline">Add Custom Game</span>
+                </Button>
+              </TooltipCard>
             )}
 
-            {/* Filter Button - hidden in journey, buzz, calendar, oracle mode */}
-            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && (
+            {/* Filter Button - hidden in journey, buzz, calendar, oracle, devlog, settings mode */}
+            {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && viewMode !== 'devlog' && viewMode !== 'settings' && (
               <FilterTrigger
                 open={isFilterOpen}
                 onToggle={() => handleFilterOpenChange(!isFilterOpen)}
@@ -998,18 +1122,19 @@ export function Dashboard() {
             )}
 
             {/* Settings Button */}
-            <Button
-              data-tour="settings-button"
-              variant="ghost"
-              size="icon"
-              className="h-9 w-9 text-white/60 hover:text-amber-400 hover:bg-white/10"
-              onClick={toggleSettings}
-              title="Settings"
+            <TooltipCard content="Adjust your Ark preferences — data sources, Ollama configuration, cache management, import/export, and appearance.">
+              <Button
+                data-tour="settings-button"
+                variant="ghost"
+                size="icon"
+                className="h-9 w-9 text-white/60 hover:text-amber-400 hover:bg-white/10"
+                onClick={switchToSettings}
               aria-label="Settings"
               data-testid="settings-button"
             >
               <AnimateIcon hover="spin"><Settings className="h-4 w-4 pointer-events-none" /></AnimateIcon>
-            </Button>
+              </Button>
+            </TooltipCard>
           </div>
         </div>
 
@@ -1025,10 +1150,24 @@ export function Dashboard() {
         ) : viewMode === 'calendar' ? (
           <ReleaseCalendar />
         ) : viewMode === 'oracle' ? (
-          <OracleView onSwitchToBrowse={switchToBrowse} />
+          <Suspense fallback={<LazyViewFallback />}>
+            <OracleView onSwitchToBrowse={switchToBrowse} />
+          </Suspense>
+        ) : viewMode === 'devlog' ? (
+          <Suspense fallback={<LazyViewFallback />}>
+            <DevLogView onBack={switchToBrowse} />
+          </Suspense>
+        ) : viewMode === 'data-flow' ? (
+          <Suspense fallback={<LazyViewFallback />}>
+            <DataFlowView onBack={switchToBrowse} />
+          </Suspense>
+        ) : viewMode === 'settings' ? (
+          <SettingsScreen onBack={switchToBrowse} />
         ) : viewMode === 'ann-graph' ? (
           <div key="ann-graph-shell" className="fixed inset-0 top-[52px] z-30 bg-black">
-            <AnnGraphView onBack={switchToOracle} />
+            <Suspense fallback={<LazyViewFallback />}>
+              <AnnGraphView onBack={switchToOracle} />
+            </Suspense>
           </div>
         ) : (
           <div data-tour="game-grid">
@@ -1112,6 +1251,62 @@ export function Dashboard() {
                   />
                 );
               })()
+            ) : libraryGroups ? (
+              /* ── Grouped Library (status sections) ──────────────── */
+              <div className="space-y-2">
+                {STATUS_SECTIONS.map(section => {
+                  const games = libraryGroups[section.key];
+                  if (!games || games.length === 0) return null;
+                  const isCollapsed = collapsedSections.has(section.key);
+                  const SectionIcon = section.icon;
+
+                  return (
+                    <div key={section.key}>
+                      <button
+                        type="button"
+                        onClick={() => toggleSection(section.key)}
+                        className="w-full flex items-center gap-2 py-2.5 px-3 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] transition-colors cursor-pointer group"
+                      >
+                        <SectionIcon className={cn('w-3.5 h-3.5 flex-shrink-0', section.color)} />
+                        <span className="text-sm font-semibold text-white/90 font-mono tracking-wide">// {section.label}</span>
+                        <Badge variant="outline" className="text-[11px] px-2 py-0 h-5 border-white/20 text-white/50 font-mono tabular-nums">{games.length}</Badge>
+                        <div className="flex-1" />
+                        <ChevronDown className={cn(
+                          'w-4 h-4 text-white/20 group-hover:text-white/40 transition-transform duration-200',
+                          isCollapsed && '-rotate-90',
+                        )} />
+                      </button>
+
+                      <AnimatePresence initial={false}>
+                        {!isCollapsed && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2, ease: 'easeInOut' }}
+                            className="overflow-hidden"
+                          >
+                            <div
+                              className="pt-3 pb-1"
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: `repeat(${libColumns}, minmax(0, 1fr))`,
+                                gap: '16px',
+                              }}
+                            >
+                              {games.map(game => (
+                                <div key={game.id} className="min-w-0">
+                                  {renderGameCard(game)}
+                                </div>
+                              ))}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  );
+                })}
+              </div>
             ) : (
               <VirtualGameGrid
                 games={sortedGames}
@@ -1227,20 +1422,22 @@ export function Dashboard() {
         viewMode={viewMode}
       />
 
-      {/* AI Chat Panel */}
-      <AIChatPanel
-        isOpen={isAIChatOpen}
-        onClose={closeAIChat}
-      />
+      {/* AI Chat Panel (dev mode only) */}
+      {devMode && (
+        <AIChatPanel
+          isOpen={isAIChatOpen}
+          onClose={closeAIChat}
+        />
+      )}
 
-      {/* Settings Panel */}
-      <SettingsPanel
-        isOpen={isSettingsOpen}
-        onClose={closeSettings}
-      />
+      {/* Settings Screen is now a full-page view rendered via viewMode === 'settings' */}
 
       {/* Guided Tour */}
       <GuidedTour run={tourRunning} tourKey={tourKey} onFinish={stopTour} />
+
+      {/* Year Wrapped */}
+      <YearWrapped isOpen={showWrapped} onClose={() => setShowWrapped(false)} />
+      <WrappedSnackbar onLaunch={() => setShowWrapped(true)} />
 
     </div>
   );

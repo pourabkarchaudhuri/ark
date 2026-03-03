@@ -1,24 +1,23 @@
-import { useState, useEffect, useCallback } from 'react';
-import Joyride, { CallBackProps, STATUS, ACTIONS, Step, TooltipRenderProps } from 'react-joyride';
-import { Sparkles, ChevronRight, ChevronLeft, X } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef, type FC } from 'react';
+import Joyride, { CallBackProps, STATUS, ACTIONS, EVENTS, Step, TooltipRenderProps } from 'react-joyride';
+import { Sparkles, ChevronRight, ChevronLeft, X, Rocket, Compass, ScanSearch, Library, Calendar, Route, Radio, Search, Orbit, SlidersHorizontal, Settings, Gamepad2, type LucideProps } from 'lucide-react';
 
 const TOUR_COMPLETED_KEY = 'ark-tour-completed';
 
-const STEP_ICONS: Record<string, string> = {
-  'Welcome to Ark': '🚀',
-  'Navigation Bar': '🧭',
-  'Browse Games': '🔭',
-  'Your Library': '📚',
-  'Voyage Timeline': '⏳',
-  'Transmissions': '📡',
-  'Release Calendar': '📅',
-  'Oracle Recommendations': '🔮',
-  'Search': '🔍',
-  'Embedding Space': '🌌',
-  'AI Assistant': '🤖',
-  'Filters & Sorting': '⚙️',
-  'Settings': '🛠️',
-  'Game Cards': '🎮',
+const STEP_ICONS: Record<string, FC<LucideProps>> = {
+  'Welcome to Ark': Rocket,
+  'Navigation Bar': Compass,
+  'Browse Games': ScanSearch,
+  'Your Library': Library,
+  'Oracle Recommendations': Sparkles,
+  'Release Calendar': Calendar,
+  'Voyage Timeline': Route,
+  'Transmissions': Radio,
+  'Search': Search,
+  'Embedding Space': Orbit,
+  'Filters & Sorting': SlidersHorizontal,
+  'Settings': Settings,
+  'You\'re Ready!': Gamepad2,
 };
 
 function TourTooltip({
@@ -34,7 +33,7 @@ function TourTooltip({
   tooltipProps,
 }: TooltipRenderProps) {
   const progress = ((index + 1) / size) * 100;
-  const icon = STEP_ICONS[step.title as string] || '✨';
+  const Icon = STEP_ICONS[step.title as string] || Sparkles;
 
   return (
     <div
@@ -82,7 +81,7 @@ function TourTooltip({
           {/* Header: icon + title + close */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span style={{ fontSize: 20 }}>{icon}</span>
+              <Icon size={18} color="#ffffff" strokeWidth={1.5} />
               <h3
                 style={{
                   fontFamily: "'JetBrains Mono', monospace",
@@ -286,16 +285,10 @@ const tourSteps: Step[] = [
     title: 'Your Library',
   },
   {
-    target: '[data-tour="journey-button"]',
-    content: 'Voyage visualises your gaming history as an interactive timeline — a Gantt chart of sessions, a log of activity, and achievement medals you\'ve earned.',
+    target: '[data-tour="oracle-button"]',
+    content: 'The Oracle analyses your library and taste to recommend games you\'ll love. The more you track, the smarter it gets.',
     placement: 'bottom',
-    title: 'Voyage Timeline',
-  },
-  {
-    target: '[data-tour="buzz-button"]',
-    content: 'Transmissions aggregates the latest gaming news into a sleek feed so you stay in the loop without leaving Ark.',
-    placement: 'bottom',
-    title: 'Transmissions',
+    title: 'Oracle Recommendations',
   },
   {
     target: '[data-tour="calendar-button"]',
@@ -304,10 +297,16 @@ const tourSteps: Step[] = [
     title: 'Release Calendar',
   },
   {
-    target: '[data-tour="oracle-button"]',
-    content: 'The Oracle analyses your library and taste to recommend games you\'ll love. The more you track, the smarter it gets.',
+    target: '[data-tour="journey-button"]',
+    content: 'Voyage visualises your gaming history as an interactive timeline — a Gantt chart of sessions, a log of activity, and achievement medals you\'ve earned.',
     placement: 'bottom',
-    title: 'Oracle Recommendations',
+    title: 'Voyage Timeline',
+  },
+  {
+    target: '[data-tour="buzz-button"]',
+    content: 'Transmissions brings signals from the Comms Array (Steam + gaming sites). Select a transmission to decode it in the Decode Bay — no need to leave the Ark.',
+    placement: 'bottom',
+    title: 'Transmissions',
   },
   {
     target: '[data-tour="search-input"]',
@@ -322,12 +321,6 @@ const tourSteps: Step[] = [
     title: 'Embedding Space',
   },
   {
-    target: '[data-tour="ai-chat"]',
-    content: 'Your AI assistant. Ask questions about games, get personalised picks, or chat about your collection. Powered by local Ollama or Google Gemini.',
-    placement: 'bottom',
-    title: 'AI Assistant',
-  },
-  {
     target: '[data-tour="filter-trigger"]',
     content: 'Fine-tune any view with powerful filters — sort by rating, release date, or title, and narrow by genre, platform, store, year, and more.',
     placement: 'left',
@@ -340,10 +333,11 @@ const tourSteps: Step[] = [
     title: 'Settings',
   },
   {
-    target: '[data-tour="game-grid"]',
-    content: 'This is where your games live. Click any card for full details, or hit the heart icon to add it straight to your library. Happy gaming!',
-    placement: 'top',
-    title: 'Game Cards',
+    target: '[data-tour="app-logo"]',
+    content: 'You\'re all set! Click any game card for details, hit the heart to add it to your library, and explore every corner of the Ark. Happy gaming, Commander!',
+    placement: 'bottom',
+    disableBeacon: true,
+    title: 'You\'re Ready!',
   },
 ];
 
@@ -353,44 +347,99 @@ interface GuidedTourProps {
   onFinish: () => void;
 }
 
-const HIDE_STYLE_ID = 'ark-joyride-hide';
+const OVERLAY_ID = 'ark-tour-overlay';
 
-function hideJoyridePortals() {
-  if (document.getElementById(HIDE_STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = HIDE_STYLE_ID;
-  style.textContent = `
-    .react-joyride__overlay,
-    .__floater,
-    [data-react-joyride] > div {
-      display: none !important;
-    }
-  `;
-  document.head.appendChild(style);
-}
-
-function showJoyridePortals() {
-  document.getElementById(HIDE_STYLE_ID)?.remove();
+function removeJoyrideLeftovers() {
+  document.querySelectorAll(
+    '.react-joyride__overlay, .__floater, [data-react-joyride] > div',
+  ).forEach(el => el.remove());
 }
 
 export function GuidedTour({ run, tourKey, onFinish }: GuidedTourProps) {
-  const handleCallback = useCallback((data: CallBackProps) => {
-    const { status, action } = data;
-    const finishedStatuses: string[] = [STATUS.FINISHED, STATUS.SKIPPED];
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const finishedRef = useRef(false);
+  const safetyTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
-    if (finishedStatuses.includes(status) || action === ACTIONS.CLOSE) {
-      localStorage.setItem(TOUR_COMPLETED_KEY, 'true');
-      onFinish();
+  const ensureOverlay = useCallback(() => {
+    if (overlayRef.current) return;
+    let el = document.getElementById(OVERLAY_ID) as HTMLDivElement | null;
+    if (!el) {
+      el = document.createElement('div');
+      el.id = OVERLAY_ID;
+      Object.assign(el.style, {
+        position: 'fixed',
+        inset: '0',
+        zIndex: '9999',
+        background: 'rgba(0, 0, 0, 0.80)',
+        pointerEvents: 'none',
+        transition: 'opacity 0.3s ease',
+        opacity: '1',
+      });
+      document.body.appendChild(el);
     }
-  }, [onFinish]);
+    overlayRef.current = el;
+  }, []);
+
+  const removeOverlay = useCallback(() => {
+    const el = overlayRef.current ?? document.getElementById(OVERLAY_ID);
+    if (el) {
+      el.style.opacity = '0';
+      setTimeout(() => { try { el.remove(); } catch {} }, 350);
+    }
+    overlayRef.current = null;
+  }, []);
+
+  const finishTour = useCallback(() => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+    clearTimeout(safetyTimerRef.current);
+    localStorage.setItem(TOUR_COMPLETED_KEY, 'true');
+    removeOverlay();
+    setTimeout(removeJoyrideLeftovers, 100);
+    onFinish();
+  }, [onFinish, removeOverlay]);
 
   useEffect(() => {
     if (run) {
-      showJoyridePortals();
-    } else {
-      hideJoyridePortals();
+      finishedRef.current = false;
+      ensureOverlay();
+      // Safety net: if the tour gets stuck for 5 minutes, force cleanup
+      clearTimeout(safetyTimerRef.current);
+      safetyTimerRef.current = setTimeout(() => {
+        if (!finishedRef.current) finishTour();
+      }, 5 * 60 * 1000);
     }
-  }, [run, tourKey]);
+    return () => clearTimeout(safetyTimerRef.current);
+  }, [run, tourKey, ensureOverlay, finishTour]);
+
+  useEffect(() => {
+    return () => {
+      removeOverlay();
+      removeJoyrideLeftovers();
+    };
+  }, [removeOverlay]);
+
+  const handleCallback = useCallback((data: CallBackProps) => {
+    const { status, action, type, index } = data;
+
+    if (
+      status === STATUS.FINISHED ||
+      status === STATUS.SKIPPED ||
+      status === STATUS.ERROR ||
+      action === ACTIONS.CLOSE
+    ) {
+      finishTour();
+      return;
+    }
+
+    // If the target for the current step can't be found, skip to finish
+    if (type === EVENTS.TARGET_NOT_FOUND) {
+      // If it's the last step or close to it, just finish
+      if (index >= tourSteps.length - 2) {
+        finishTour();
+      }
+    }
+  }, [finishTour]);
 
   if (!run) return null;
 
@@ -409,10 +458,13 @@ export function GuidedTour({ run, tourKey, onFinish }: GuidedTourProps) {
       styles={{
         options: {
           zIndex: 10000,
-          overlayColor: 'rgba(0, 0, 0, 0.80)',
+          overlayColor: 'rgba(0, 0, 0, 0)',
         },
         spotlight: {
           borderRadius: 12,
+        },
+        overlay: {
+          backgroundColor: 'transparent',
         },
       }}
       floaterProps={{

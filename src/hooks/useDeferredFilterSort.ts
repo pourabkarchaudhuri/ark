@@ -20,7 +20,7 @@
  *    a new one is scheduled.
  */
 
-import { useState, useEffect, useLayoutEffect, useRef, startTransition } from 'react';
+import { useState, useEffect, useRef, startTransition } from 'react';
 import type { Game, GameFilters } from '@/types/game';
 import { scoreGame, buildSingleSearchIndex } from '@/services/prefetch-store';
 
@@ -37,6 +37,7 @@ export interface FilterSortInput {
   filters: GameFilters;
   sortBy: string;
   sortDirection: 'asc' | 'desc';
+  liveGameIds?: Set<string>;
 }
 
 export interface FilterSortOutput {
@@ -60,7 +61,7 @@ const EMPTY_OUTPUT: FilterSortOutput = {
 // ---------------------------------------------------------------------------
 
 function computeAll(input: FilterSortInput): FilterSortOutput {
-  const { currentGames, searchResults, isSearching, viewMode, searchQuery, filters, sortBy, sortDirection } = input;
+  const { currentGames, searchResults, isSearching, viewMode, searchQuery, filters, sortBy, sortDirection, liveGameIds } = input;
 
   // ── 1. displayedGames ────────────────────────────────────────────────
   let games: Game[];
@@ -141,6 +142,8 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
   const displayedGames = games;
 
   // ── 2. Dynamic filter options (cascading) ────────────────────────────
+  // Base pool for dynamic options: search-filtered but before genre/platform/year
+  // so the cascading dropdowns show all available values.
   let baseGames: Game[];
   let skipDynamic = false;
 
@@ -200,39 +203,34 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
     }
   }
 
-  // Genre options (from base pool)
+  // Extract genre/platform/year options in a single pass over baseGames.
+  // Cascading: platforms come from genre-filtered pool, years from genre+platform-filtered pool.
   const genreSet = new Set<string>();
-  for (const g of baseGames) {
-    for (const genre of g.genre) if (genre) genreSet.add(genre);
-  }
-  const dynamicGenres = Array.from(genreSet).sort();
-
-  // Platform options (from base pool + genre filter)
-  let afterGenre = baseGames;
-  if (filters.genre !== 'All') {
-    afterGenre = baseGames.filter(g => g.genre.includes(filters.genre));
-  }
   const platformSet = new Set<string>();
-  for (const g of afterGenre) {
-    for (const p of g.platform) if (p) platformSet.add(p);
-  }
-  const dynamicPlatforms = Array.from(platformSet).sort();
-
-  // Year options (from base pool + genre + platform)
-  let afterPlatform = afterGenre;
-  if (filters.platform !== 'All') {
-    const pLower = filters.platform.toLowerCase();
-    afterPlatform = afterGenre.filter(g =>
-      g.platform.some(p => p.toLowerCase().includes(pLower))
-    );
-  }
   const yearSet = new Set<string>();
-  for (const g of afterPlatform) {
-    if (g.releaseDate && g.releaseDate !== 'Coming Soon') {
-      const y = g.releaseDate.slice(0, 4);
-      if (y && y >= '1970' && y <= '2099') yearSet.add(y);
+  const hasGenreFilter = filters.genre !== 'All';
+  const hasPlatformFilter = filters.platform !== 'All';
+  const platformFilterLower = hasPlatformFilter ? filters.platform.toLowerCase() : '';
+
+  for (let i = 0; i < baseGames.length; i++) {
+    const g = baseGames[i];
+    for (let j = 0; j < g.genre.length; j++) if (g.genre[j]) genreSet.add(g.genre[j]);
+
+    const matchesGenre = !hasGenreFilter || g.genre.includes(filters.genre);
+    if (matchesGenre) {
+      for (let j = 0; j < g.platform.length; j++) if (g.platform[j]) platformSet.add(g.platform[j]);
+
+      const matchesPlatform = !hasPlatformFilter ||
+        g.platform.some(p => p.toLowerCase().includes(platformFilterLower));
+      if (matchesPlatform && g.releaseDate && g.releaseDate !== 'Coming Soon') {
+        const y = g.releaseDate.slice(0, 4);
+        if (y && y >= '1970' && y <= '2099') yearSet.add(y);
+      }
     }
   }
+
+  const dynamicGenres = Array.from(genreSet).sort();
+  const dynamicPlatforms = Array.from(platformSet).sort();
   const dynamicYears = Array.from(yearSet).sort().reverse();
 
   // ── 3. Sort ──────────────────────────────────────────────────────────
@@ -240,24 +238,29 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
 
   if (filters.category === 'catalog') {
     sortedGames = displayedGames;
+  } else if (viewMode === 'browse' && sortBy === 'releaseDate' && sortDirection === 'desc' && !isSearching) {
+    // Browse games arrive pre-sorted by release date (desc) from useSteamGames.
+    // Skip the expensive copy+sort for the default/most common case.
+    sortedGames = displayedGames;
   } else {
     const indexMap = new Map<string, number>();
     displayedGames.forEach((g, i) => indexMap.set(g.id, i));
 
-    // Status priority for Library when filter is "All": Playing/Playing Now → On Hold → Want to Play → Completed
-    const statusPriority = (status: string) => {
-      if (status === 'Playing' || status === 'Playing Now') return 0;
-      if (status === 'On Hold') return 1;
-      if (status === 'Want to Play') return 2;
-      if (status === 'Completed') return 3;
-      return 4;
+    const statusPriority = (game: Game) => {
+      const isLive = liveGameIds?.has(game.id) ||
+        (game.steamAppId ? liveGameIds?.has(`steam-${game.steamAppId}`) : false);
+      if (isLive || game.status === 'Playing Now') return 0;
+      if (game.status === 'Playing') return 1;
+      if (game.status === 'On Hold') return 2;
+      if (game.status === 'Want to Play') return 3;
+      if (game.status === 'Completed') return 4;
+      return 5;
     };
 
     sortedGames = [...displayedGames].sort((a, b) => {
-      // Library + All: primary sort by status priority
       if (viewMode === 'library' && filters.status === 'All') {
-        const aStatus = a.isInLibrary ? statusPriority(a.status) : 4;
-        const bStatus = b.isInLibrary ? statusPriority(b.status) : 4;
+        const aStatus = a.isInLibrary ? statusPriority(a) : 5;
+        const bStatus = b.isInLibrary ? statusPriority(b) : 5;
         if (aStatus !== bStatus) return aStatus - bStatus;
       }
 
@@ -320,27 +323,45 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
   // This prevents the auto-reset effect from clearing filters before data arrives.
   const hasPopulated = useRef(output.sortedGames.length > 0);
 
-  // ── Synchronous recompute on viewMode transition ──────────────────────
-  // Without this, switching from browse → library (or vice-versa) would
-  // show one frame of stale data from the previous view because the
-  // deferred rAF + startTransition path runs AFTER the first paint.
-  // useLayoutEffect fires after the DOM commit but BEFORE the browser
-  // paints, so the stale frame is never visible to the user.
-  const prevViewModeRef = useRef(input.viewMode);
-  useLayoutEffect(() => {
-    if (input.viewMode !== prevViewModeRef.current) {
-      prevViewModeRef.current = input.viewMode;
-      const fresh = computeAll(inputRef.current);
+  // ── Sync recompute when data arrives (empty → populated) ──────────────
+  // Uses React's "setState during render" pattern to avoid queue conflicts
+  // with the deferred startTransition path. useLayoutEffect + setOutput +
+  // startTransition targeting the same state triggers "Should have a queue"
+  // errors. Calling setOutput during render is safe: React abandons the
+  // current render and immediately re-renders with the new state.
+  // Only fires once per empty→populated transition (hasPopulated guard).
+  const prevDataLenRef = useRef(input.currentGames.length);
+  if (input.currentGames.length !== prevDataLenRef.current) {
+    const prevLen = prevDataLenRef.current;
+    prevDataLenRef.current = input.currentGames.length;
+    if (prevLen === 0 && input.currentGames.length > 0) {
+      const fresh = computeAll(input);
       hasPopulated.current = true;
       setOutput(fresh);
     }
-  }, [input.viewMode]);
+  }
 
   // Stable fingerprint to avoid re-scheduling when array references change
   // but actual content is identical (e.g. enrichment epoch bumps that don't
   // change the games slice thanks to prevGamesRef stability upstream).
   const prevFingerprintRef = useRef('');
-  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${input.filters.store.length}|${input.filters.category}|${input.sortBy}|${input.sortDirection}`;
+  const liveCount = input.liveGameIds?.size ?? 0;
+  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${input.filters.store.length}|${input.filters.category}|${input.sortBy}|${input.sortDirection}|${liveCount}`;
+
+  // ── Inline recompute on viewMode transition ───────────────────────────
+  // Compute synchronously during render so the grid paints immediately
+  // with the correct data — no blank flash. For small datasets this is
+  // trivial; for larger datasets (~6000 games) the cost is ~50-80ms but
+  // avoids the jarring empty→fill transition. The fingerprint is stamped
+  // so the deferred useEffect doesn't redundantly re-run the same work.
+  const prevViewModeRef = useRef(input.viewMode);
+  if (input.viewMode !== prevViewModeRef.current) {
+    prevViewModeRef.current = input.viewMode;
+    const fresh = computeAll(inputRef.current);
+    hasPopulated.current = true;
+    setOutput(fresh);
+    prevFingerprintRef.current = fingerprint;
+  }
 
   // Schedule heavy computation after paint using rAF + startTransition.
   // Cancels any in-flight computation when inputs change.

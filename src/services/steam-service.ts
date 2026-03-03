@@ -79,6 +79,7 @@ export function transformSteamGame(
     metacriticScore: details.metacritic?.score || null,
     releaseDate,
     summary: details.short_description || details.about_the_game || '',
+    longDescription: details.detailed_description || undefined,
     coverUrl, // Use vertical cover instead of header_image
     headerImage: details.header_image || undefined, // API-provided header (uses current CDN)
     screenshots: allScreenshots,

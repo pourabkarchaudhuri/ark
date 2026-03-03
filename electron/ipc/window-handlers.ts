@@ -40,6 +40,22 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
     return mainWindow ? mainWindow.isMaximized() : false;
   });
 
+  // Push maximize/unmaximize state changes to renderer (replaces 500ms polling).
+  // Track which window has listeners so we re-attach after window recreation.
+  let attachedWindow: BrowserWindowType | null = null;
+  ipcMain.handle('window-subscribe-maximize', () => {
+    const mainWindow = getMainWindow();
+    if (!mainWindow || mainWindow === attachedWindow) return;
+    attachedWindow = mainWindow;
+    const send = (maximized: boolean) => {
+      if (!mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('window-maximized-changed', maximized);
+      }
+    };
+    mainWindow.on('maximize', () => send(true));
+    mainWindow.on('unmaximize', () => send(false));
+  });
+
   // Open external URL in default browser
   ipcMain.handle('shell:openExternal', async (_event: any, url: string) => {
     try {

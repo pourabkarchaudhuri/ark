@@ -28,54 +28,45 @@ const GENRE_TAG_IDS = new Set([
   1662,  // Survival
   1663,  // FPS
   1667,  // Horror
-  1684,  // Fantasy
   1693,  // Shooter
-  1695,  // Open World
-  1697,  // Third Person
   1698,  // Point & Click
-  1702,  // Crafting
   1708,  // Tactical
   1716,  // Roguelike
   1720,  // Dungeon Crawler
   1741,  // Turn-Based Strategy
-  1742,  // Story Rich
   1752,  // City Builder
-  1755,  // Space
   1770,  // Board Game
   1773,  // Stealth
   1774,  // Shooter
   1777,  // Card Game
   3799,  // Visual Novel
-  3834,  // Exploration
-  3859,  // Multiplayer
   3871,  // Real-Time Strategy
-  3942,  // Sci-fi
   3959,  // Rogue-lite
   4106,  // Action RPG
-  4166,  // Atmospheric
-  4191,  // 3D
+  4231,  // Action RPG (alt tag)
   4325,  // Turn-Based
   4345,  // Arena Shooter
-  4604,  // Dark Fantasy
   5577,  // 2D Platformer
-  5611,  // Mature
   5716,  // Soulslike
-  6426,  // Choices Matter
-  7918,  // Dwarf
   29482, // Souls-like
   128,   // Massively Multiplayer
+  1664,  // Puzzle
+  42804, // Action Roguelike
+  353880, // Looter Shooter
+  7332,   // Base Building (core gameplay loop)
+  8945,   // Resource Management (core gameplay loop)
 ]);
 
 const MODE_TAG_IDS = new Set([
   1685,   // Co-op
+  1697,   // Third Person
   3839,   // First-Person
   3843,   // Online Co-Op
   3841,   // Local Co-Op
+  3859,   // Multiplayer
   4182,   // Singleplayer
   1775,   // PvP
-  5125,   // Procedural Generation
   4155,   // Class-Based
-  4236,   // Loot
   6730,   // PvE
   5055,   // eSports
   17770,  // Asynchronous Multiplayer
@@ -90,41 +81,50 @@ const THEME_TAG_IDS = new Set([
   1647,  // Moddable
   1654,  // Relaxing
   1659,  // Zombies
-  1664,  // Puzzle
   1669,  // Colorful
   1670,  // Pixel Graphics
   1671,  // Retro
   1678,  // War
+  1684,  // Fantasy (setting, not gameplay)
   1687,  // Stealthy
   1710,  // World War II
   1719,  // Comedy
   1721,  // Psychological
   1723,  // Post-Apocalyptic
   1738,  // Cyberpunk
+  1742,  // Story Rich (quality, not gameplay)
   1743,  // Emotional
+  1755,  // Space (setting)
   1756,  // Great Soundtrack
+  3942,  // Sci-fi (setting)
+  4166,  // Atmospheric (quality)
   4168,  // Medieval
   4172,  // Medieval
-  4231,  // Action RPG
+  4191,  // 3D (visual style)
   4305,  // Colorful
   4342,  // Dark
+  4604,  // Dark Fantasy (setting)
   4667,  // Violent
   4747,  // Character Customization
   5350,  // Family Friendly
+  5611,  // Mature (content rating)
   5851,  // Anime
   5984,  // Dystopian
   6041,  // Horses
+  6426,  // Choices Matter (design pattern)
   6650,  // Nudity
   6691,  // Addictive
   6971,  // Multiple Endings
   7208,  // Female Protagonist
   7250,  // Linear
-  7332,  // Base Building
   7481,  // Thriller
-  8945,  // Resource Management
+  7918,  // Dwarf (niche descriptor)
   14720, // Nostalgia
-  42804, // Action Roguelike
-  353880, // Looter Shooter
+  1695,  // Open World (world structure, not gameplay genre)
+  1702,  // Crafting (mechanic present in many genres)
+  3834,  // Exploration (activity, not gameplay loop)
+  5125,  // Procedural Generation (design technique)
+  4236,  // Loot (reward mechanic)
 ]);
 
 /**

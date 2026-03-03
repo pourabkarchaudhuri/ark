@@ -34,12 +34,12 @@ describe('EpicService', () => {
       expect(game.isInLibrary).toBe(false);
     });
 
-    it('extracts genres from tags (names and EPIC_GENRE_MAP IDs)', () => {
+    it('extracts genres from tags using groupName and fallback IDs', () => {
       const item = makeMinimalItem({
         tags: [
-          { id: 1216, name: 'Action' },      // name takes priority
-          { id: 1370 },                       // 1370 = RPG from genre map
-          { id: 1210, name: 'Shooter' },     // duplicate prevention via name
+          { id: 1216, name: 'Action', groupName: 'genre' },
+          { id: 1367, name: 'RPG', groupName: 'genre' },
+          { id: 1210, name: 'Shooter' },  // no groupName, falls back to EPIC_GENRE_IDS
         ],
       });
       const game = transformEpicGame(item);

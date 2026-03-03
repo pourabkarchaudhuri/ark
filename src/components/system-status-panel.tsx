@@ -9,8 +9,10 @@ import {
   Loader2,
   ChevronDown,
   Minus,
+  BrainCircuit,
 } from 'lucide-react';
 import { systemStatus, type SyncStatus, type SystemStatusSnapshot, type StorageMetric } from '@/services/system-status';
+import { TooltipCard } from '@/components/ui/tooltip-card';
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
@@ -111,7 +113,7 @@ function StorageRow({ metric }: { metric: StorageMetric }) {
 // ─── Aggregate LED for navbar ───────────────────────────────────────────────────
 
 function AggregateLed({ snap }: { snap: SystemStatusSnapshot }) {
-  const syncs = [snap.epicSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild];
+  const syncs = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup];
   const running = syncs.filter(s => s.stage === 'running').length;
   const errors = syncs.filter(s => s.stage === 'error').length;
   const done = syncs.filter(s => s.stage === 'done').length;
@@ -134,13 +136,68 @@ function StatusPanelContent({ snap, compact }: { snap: SystemStatusSnapshot; com
           <span className="text-[10px] font-semibold text-white/40 uppercase tracking-wider">Pipelines</span>
         </div>
         <SyncRow sync={snap.epicSync} />
+        <SyncRow sync={snap.epicCatalogSync} />
         <SyncRow sync={snap.steamBrowseSync} />
         <SyncRow sync={snap.steamCatalogSync} />
         <SyncRow sync={snap.recoPipeline} />
         <SyncRow sync={snap.catalogEmbeddings} />
         <SyncRow sync={snap.annIndexStatus} />
         <SyncRow sync={snap.galaxyBuild} />
+        <SyncRow sync={snap.ollamaSetup} />
       </div>
+
+      {/* Embedding Model */}
+      {snap.embeddingModel && (
+        <div>
+          <div className="flex items-center gap-1.5 mb-1">
+            <BrainCircuit className="w-3 h-3 text-white/30" />
+            <span className="text-[10px] font-semibold text-white/40 uppercase tracking-wider">Embedding Model</span>
+          </div>
+          <div className="py-0.5 space-y-0.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[9px] text-white/40 truncate">{snap.embeddingModel.name}</span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {snap.embeddingModel.installed
+                  ? <Check className="w-2.5 h-2.5 text-emerald-400/70" />
+                  : <X className="w-2.5 h-2.5 text-red-400/70" />}
+                <span className="text-[9px] text-white/30">{snap.embeddingModel.installed ? 'Installed' : 'Not installed'}</span>
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[8px] text-white/20">{snap.embeddingModel.parameterSize} params · {snap.embeddingModel.quantization}</span>
+              {snap.embeddingModel.sizeBytes > 0 && (
+                <span className="text-[9px] text-white/20 tabular-nums">{formatBytes(snap.embeddingModel.sizeBytes)}</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ML Model */}
+      {snap.mlModel && (
+        <div>
+          <div className="flex items-center gap-1.5 mb-1">
+            <BrainCircuit className="w-3 h-3 text-white/30" />
+            <span className="text-[10px] font-semibold text-white/40 uppercase tracking-wider">ML Recommendation Model</span>
+          </div>
+          <div className="py-0.5 space-y-0.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[9px] text-white/40 truncate">LightGBM (Kaggle 41M reviews)</span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {snap.mlModel.loaded
+                  ? <Check className="w-2.5 h-2.5 text-emerald-400/70" />
+                  : <X className="w-2.5 h-2.5 text-red-400/70" />}
+                <span className="text-[9px] text-white/30">{snap.mlModel.loaded ? 'Loaded' : 'Not loaded'}</span>
+              </div>
+            </div>
+            {snap.mlModel.loaded && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[8px] text-white/20">{snap.mlModel.modelCount} fold models · {snap.mlModel.gameProfileCount.toLocaleString()} game profiles</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Storage */}
       <div>
@@ -173,13 +230,13 @@ export function NavbarStatusIndicator() {
   }, []);
 
   // Live tick for elapsed time (every 1s while something is running)
+  const syncsForTick = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup];
+  const hasRunning = syncsForTick.some(s => s.stage === 'running');
   useEffect(() => {
-    const syncs = [snap.epicSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild];
-    const hasRunning = syncs.some(s => s.stage === 'running');
     if (!hasRunning) return;
     const id = setInterval(() => setSnap(systemStatus.getSnapshot()), 1000);
     return () => clearInterval(id);
-  }, [snap]);
+  }, [hasRunning]);
 
   // Close on outside click
   useEffect(() => {
@@ -196,8 +253,7 @@ export function NavbarStatusIndicator() {
     if (!open) systemStatus.refreshStorage();
   }, [open]);
 
-  const syncs = [snap.epicSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild];
-  const running = syncs.filter(s => s.stage === 'running');
+  const running = syncsForTick.filter(s => s.stage === 'running');
 
   const [cycleIdx, setCycleIdx] = useState(0);
 
@@ -212,38 +268,39 @@ export function NavbarStatusIndicator() {
 
   return (
     <div ref={ref} className="relative no-drag">
-      <button
-        onClick={toggle}
-        className="flex items-center justify-end gap-1.5 px-2 py-1 rounded-md hover:bg-white/5 transition-colors cursor-pointer w-72"
-        title="System Status"
-      >
-        <AggregateLed snap={snap} />
-        {running.length > 0 ? (
-          <div className="flex items-center gap-1.5 flex-1 min-w-0">
-            {running.length > 1 && (
-              <span className="text-[9px] text-cyan-400/40 tabular-nums shrink-0">{safeIdx + 1}/{running.length}</span>
-            )}
-            <AnimatePresence mode="wait">
-              <motion.span
-                key={currentRunning?.label}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.25 }}
-                className="text-[10px] text-cyan-400/60 truncate flex-1 min-w-0"
-              >
-                {currentRunning?.label}
-              </motion.span>
-            </AnimatePresence>
-            {currentRunning?.percent != null && currentRunning.percent > 0 && (
-              <span className="text-[9px] text-cyan-400/50 tabular-nums shrink-0">{currentRunning.percent}%</span>
-            )}
-          </div>
-        ) : (
-          <span className="text-[10px] text-white/25">{formatBytes(snap.totalStorageBytes)}</span>
-        )}
-        <ChevronDown className={`w-3 h-3 text-white/20 transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
+      <TooltipCard content="View system status — sync activity, data stores, Ollama connectivity, and storage usage.">
+        <button
+          onClick={toggle}
+          className="flex items-center justify-end gap-1.5 px-2 py-1 rounded-md hover:bg-white/5 transition-colors cursor-pointer w-72"
+        >
+          <AggregateLed snap={snap} />
+          {running.length > 0 ? (
+            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+              {running.length > 1 && (
+                <span className="text-[9px] text-cyan-400/40 tabular-nums shrink-0">{safeIdx + 1}/{running.length}</span>
+              )}
+              <AnimatePresence mode="wait">
+                <motion.span
+                  key={currentRunning?.label}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.25 }}
+                  className="text-[10px] text-cyan-400/60 truncate flex-1 min-w-0"
+                >
+                  {currentRunning?.label}
+                </motion.span>
+              </AnimatePresence>
+              {currentRunning?.percent != null && currentRunning.percent > 0 && (
+                <span className="text-[9px] text-cyan-400/50 tabular-nums shrink-0">{currentRunning.percent}%</span>
+              )}
+            </div>
+          ) : (
+            <span className="text-[10px] text-white/25">{formatBytes(snap.totalStorageBytes)}</span>
+          )}
+          <ChevronDown className={`w-3 h-3 text-white/20 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+      </TooltipCard>
 
       <AnimatePresence>
         {open && (
@@ -359,7 +416,7 @@ export function SplashStatusPanel() {
     return () => clearInterval(id);
   }, []);
 
-  const syncs = [snap.epicSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild];
+  const syncs = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup];
 
   return (
     <motion.div
@@ -386,6 +443,67 @@ export function SplashStatusPanel() {
             <SplashSyncRow key={sync.label} sync={sync} index={i} />
           ))}
         </div>
+
+        {/* Embedding Model */}
+        {snap.embeddingModel && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.4, delay: 2.1 }}
+          >
+            <div className="flex items-center gap-1.5 mb-1">
+              <BrainCircuit className="w-3 h-3 text-white/30" />
+              <span className="text-[10px] font-semibold text-white/40 uppercase tracking-wider">Embedding Model</span>
+            </div>
+            <div className="py-0.5 space-y-0.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[9px] text-white/40 truncate">{snap.embeddingModel.name}</span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {snap.embeddingModel.installed
+                    ? <Check className="w-2.5 h-2.5 text-emerald-400/70" />
+                    : <X className="w-2.5 h-2.5 text-red-400/70" />}
+                  <span className="text-[9px] text-white/30">{snap.embeddingModel.installed ? 'Installed' : 'Not installed'}</span>
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[8px] text-white/20">{snap.embeddingModel.parameterSize} params · {snap.embeddingModel.quantization}</span>
+                {snap.embeddingModel.sizeBytes > 0 && (
+                  <span className="text-[9px] text-white/20 tabular-nums">{formatBytes(snap.embeddingModel.sizeBytes)}</span>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* ML Recommendation Model */}
+        {snap.mlModel && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.4, delay: 2.12 }}
+          >
+            <div className="flex items-center gap-1.5 mb-1">
+              <BrainCircuit className="w-3 h-3 text-white/30" />
+              <span className="text-[10px] font-semibold text-white/40 uppercase tracking-wider">ML Recommendation Model</span>
+            </div>
+            <div className="py-0.5 space-y-0.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[9px] text-white/40 truncate">LightGBM (Kaggle 41M reviews)</span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {snap.mlModel.loaded
+                    ? <Check className="w-2.5 h-2.5 text-emerald-400/70" />
+                    : <X className="w-2.5 h-2.5 text-red-400/70" />}
+                  <span className="text-[9px] text-white/30">{snap.mlModel.loaded ? 'Loaded' : 'Not loaded'}</span>
+                </div>
+              </div>
+              {snap.mlModel.loaded && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[8px] text-white/20">{snap.mlModel.modelCount} fold models · {snap.mlModel.gameProfileCount.toLocaleString()} game profiles</span>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
 
         {/* Storage section */}
         <div>

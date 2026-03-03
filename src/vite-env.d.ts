@@ -51,6 +51,7 @@ interface ElectronAPI {
   maximize: () => Promise<void>;
   close: () => Promise<void>;
   isMaximized: () => Promise<boolean>;
+  onMaximizedChange?: (cb: (maximized: boolean) => void) => (() => void);
   openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
   /** Fetch HTML from a URL via the main process (bypasses CORS). Domain-restricted. */
   fetchHtml: (url: string) => Promise<string | null>;
@@ -109,6 +110,72 @@ interface AnalyticsAPI {
   trackPageView: (page: string) => Promise<boolean>;
 }
 
+interface MLUserProfile {
+  u_rec_rate: number;
+  u_avg_hours: number;
+  u_std_hours: number;
+  u_n_reviews: number;
+  u_avg_helpful: number;
+  u_avg_funny: number;
+  u_pct_high_hours: number;
+  log_products: number;
+  log_user_rev: number;
+}
+
+interface MLScoreResult {
+  gameId: string;
+  score: number;
+}
+
+interface MLModelAPI {
+  load: () => Promise<boolean>;
+  status: () => Promise<{
+    loaded: boolean;
+    modelCount: number;
+    gameProfileCount: number;
+    tagCount: number;
+  }>;
+  scoreGames: (userProfile: MLUserProfile, gameIds: string[]) => Promise<MLScoreResult[]>;
+  buildUserProfile: (
+    games: Array<{ gameId: string; hoursPlayed: number; rating: number; status: string }>,
+  ) => Promise<MLUserProfile | null>;
+  getGameRecRates: (gameIds: string[]) => Promise<Record<string, number>>;
+}
+
+interface DevJournalDay {
+  date: string;
+  title: string;
+  tags: string[];
+  narrative: string;
+  filesChanged: string[];
+  milestones: string[];
+  challenges: string[];
+  lookingAhead: string | null;
+}
+
+interface DevJournalData {
+  project: string;
+  days: DevJournalDay[];
+}
+
+interface DevLogAPI {
+  getJournal: () => Promise<DevJournalData | null>;
+}
+
+interface ScrapedEventData {
+  id: string;
+  startDate?: number;
+  endDate?: number;
+  youtubeUrls: string[];
+  twitchUrls: string[];
+  scrapedAt: number;
+}
+
+interface EventScraperAPI {
+  scrapeAll: (events: Array<{ id: string; url?: string }>) => Promise<Record<string, ScrapedEventData>>;
+  clearCache: () => Promise<{ success: boolean }>;
+}
+
 declare global {
   // Build-time constant injected by Vite from package.json (see vite.config.ts `define`)
   const __APP_VERSION__: string;
@@ -120,6 +187,9 @@ declare global {
     newsApi?: NewsAPI;
     webviewApi?: WebviewAPI;
     analytics?: AnalyticsAPI;
+    ml?: MLModelAPI;
+    devlog?: DevLogAPI;
+    eventScraper?: EventScraperAPI;
   }
 }
 

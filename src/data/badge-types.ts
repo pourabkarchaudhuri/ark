@@ -43,6 +43,7 @@ export type BadgeCondition =
   | { type: 'totalHours'; min: number }
   | { type: 'sessionCount'; min: number }
   | { type: 'streakDays'; min: number }
+  | { type: 'currentStreakDays'; min: number }
   | { type: 'ratingCount'; min: number }
   | { type: 'reviewCount'; min: number }
   | { type: 'genreCount'; min: number }

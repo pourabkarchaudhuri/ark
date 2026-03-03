@@ -9,6 +9,34 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.33': {
+    title: "What's New in Ark 1.0.33",
+    changes: [
+      'Galaxy Map Scale Fix — Stream-project 1024D embeddings to 100D via random projection during IDB read, eliminating a 456 MB allocation; Embedding Space now builds 111K nodes in seconds at ~1.05 GB instead of crashing with OOM',
+      'Recommendation Pipeline 100x Speedup — Memoized genre lookup, pre-computed semantic scores, dense Float32Array cosine similarity, and smart pre-filter (25K → 3K candidates) slash Oracle recommendation time',
+      'Oracle Cross-Store Dedup — Completed games no longer leak into recommendation shelves when the same game exists under different store IDs; candidate pool now checks secondaryId against the exclusion set',
+      'Embedding Space Visual Upgrade — Anti-aliasing enabled, bloom resolution bumped from quarter to half, HDR nebula skybox restored via XHR-to-Blob pipeline that bypasses fetch() limitation with file:// in Electron',
+      'Library Navigation Snappier — View switch wraps in startTransition so the UI stays responsive while the heavy filter/sort pipeline computes in the background',
+      'Voyage Thumbnail Fix — Three.js texture loader CORS mode set to passthrough for Electron file:// context; cover images now memo on stable gameId + coverUrl instead of full entry reference, preventing backfill-triggered resets',
+      'ML Model Status Fix — Status panel auto-loads the recommendation model on first poll with up to 3 retry attempts; users see "Loaded" within seconds of startup instead of permanent "Not loaded"',
+      'Galaxy Neighbour Tightening — Cosine distance threshold reduced from 0.9 to 0.7 so connections show genuinely similar games instead of loose associations',
+      'Galaxy Cache Stability — Cache tolerates small embedding count drift when freshly built, preventing instant invalidation from background catalog embedding',
+      'Lazy View Loading — Four heavy views lazy-imported with async filter/sort path to eliminate view-switching lag',
+      'Resource Pressure Fixes — Crash circuit breaker, event-driven IPC, lazy ML model loading, HDR texture cleanup, and ONNX Runtime warning silencing',
+      'Ollama NSIS Installer Step — Optional Ollama installation during setup with GPU recommendation, existing install detection, and graceful failure paths',
+    ],
+  },
+  '1.0.32': {
+    title: "What's New in Ark 1.0.32",
+    changes: [
+      'Embedding Space Galaxy Map — Interactive 3D galaxy visualization of your game library using PCA-projected embeddings; each game is a star with genre-based coloring, neighbor connections, and orbit controls',
+      'Catalog Embedding Pipeline — Background pipeline generates semantic embeddings for browse catalog games via local Ollama, stored in IndexedDB with progress tracking',
+      'System Status Panel — Real-time dashboard showing Ollama connectivity, embedding progress, ML model state, and memory usage across main and renderer processes',
+      'Guided Tour — Interactive onboarding walkthrough highlighting key features for new users via react-joyride',
+      'Data Flow View — Visual pipeline diagram showing how data moves between stores, workers, and the UI',
+      'ML Recommendation Model — ONNX-based scoring model bundled with the app for offline recommendation inference',
+    ],
+  },
   '1.0.31': {
     title: "What's New in Ark 1.0.31",
     changes: [
@@ -404,7 +432,7 @@ export function ChangelogModal() {
               <div className="flex-shrink-0 px-6 py-4 border-t border-white/10 bg-white/5">
                 <Button
                   onClick={handleClose}
-                  className="w-full bg-gradient-to-r from-fuchsia-500 to-purple-600 hover:from-fuchsia-600 hover:to-purple-700 text-white font-medium"
+                  className="w-full bg-gradient-to-r from-fuchsia-500 to-purple-600 hover:from-fuchsia-600 hover:to-purple-600 text-white font-medium"
                 >
                   Got it, let's go!
                 </Button>

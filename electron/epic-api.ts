@@ -64,41 +64,22 @@ class RateLimiter {
 // Genre tag mapping (Epic uses numeric tag IDs)
 // ---------------------------------------------------------------------------
 
+/**
+ * API-verified Epic genre tag IDs (groupName === "genre").
+ * Confirmed by querying the live Epic GraphQL API with `tags { id name groupName }`.
+ * Used as fallback when groupName field is absent from the response.
+ */
 export const EPIC_GENRE_MAP: Record<number, string> = {
-  1216: 'Action',
-  1117: 'Adventure',
-  1367: 'RPG',
-  1115: 'Strategy',
-  1128: 'Simulation',
-  1210: 'Sports',
-  1159: 'Racing',
-  1298: 'Puzzle',
-  1307: 'Indie',
-  1264: 'Casual',
-  21122: 'Shooter',
-  21725: 'Horror',
-  1336: 'Fighting',
-  21894: 'Platformer',
-  1182: 'Open World',
-  21141: 'Survival',
-  1252: 'Stealth',
-  9547: 'Turn-Based',
-  21668: 'Roguelike',
-  17187: 'Card Game',
-  1183: 'Music',
-  1185: 'Party',
-  21140: 'City Builder',
-  1178: 'Tower Defense',
-  1100: 'MMO',
-  21118: 'Hack and Slash',
-  21137: 'Sandbox',
-  21139: 'Dungeon Crawler',
-  21138: 'Metroidvania',
-  21135: 'Narrative',
-  21127: 'Visual Novel',
-  21136: 'Battle Royale',
-  21134: 'Souls-like',
-  21142: 'RTS',
+  1080: 'Survival',     1083: 'Rogue-Lite',   1084: 'Stealth',
+  1110: 'Party',        1115: 'Strategy',     1116: 'Comedy',
+  1117: 'Adventure',    1120: 'RTS',          1121: 'Space',
+  1146: 'City Builder', 1151: 'Platformer',   1170: 'Tower Defense',
+  1181: 'Card Game',    1210: 'Shooter',      1212: 'Racing',
+  1216: 'Action',       1218: 'Horror',       1263: 'Indie',
+  1283: 'Sports',       1287: 'Fantasy',      1294: 'First Person',
+  1296: 'Casual',       1307: 'Open World',   1336: 'Action-Adventure',
+  1367: 'RPG',          1381: 'Exploration',  1386: 'Turn-Based',
+  1393: 'Simulation',   1395: 'Narration',
 };
 
 // ---------------------------------------------------------------------------
@@ -153,7 +134,7 @@ export interface EpicCatalogItem {
   longDescription?: string;
   keyImages?: EpicKeyImage[];
   categories?: Array<{ path: string }>;
-  tags?: Array<{ id: number; name?: string }>;
+  tags?: Array<{ id: number; name?: string; groupName?: string | null }>;
   effectiveDate?: string;
   developer?: string;
   publisher?: string;
@@ -224,6 +205,7 @@ query searchStoreQuery($keyword: String!, $count: Int, $locale: String, $country
         tags {
           id
           name
+          groupName
         }
         effectiveDate
         developer
@@ -300,6 +282,7 @@ query catalogQuery($namespace: String!, $id: String!, $locale: String, $country:
       tags {
         id
         name
+        groupName
       }
       effectiveDate
       developer
@@ -366,6 +349,7 @@ query browseStoreQuery($count: Int, $start: Int, $locale: String, $country: Stri
         tags {
           id
           name
+          groupName
         }
         effectiveDate
         developer

@@ -152,6 +152,22 @@ describe('transformSteamGame', () => {
     expect(game.metacriticScore).toBeNull();
     expect(game.price?.isFree).toBe(false);
   });
+
+  it('stores detailed_description as longDescription', () => {
+    const details = createSteamAppDetails({
+      detailed_description: '<p>A rich description of the game with HTML tags and lots of detail.</p>',
+    });
+    const game = transformSteamGame(details);
+    expect(game.longDescription).toBe('<p>A rich description of the game with HTML tags and lots of detail.</p>');
+  });
+
+  it('sets longDescription to undefined when detailed_description is empty', () => {
+    const details = createSteamAppDetails({
+      detailed_description: '',
+    });
+    const game = transformSteamGame(details);
+    expect(game.longDescription).toBeUndefined();
+  });
 });
 
 describe('hasValidDeveloperInfo', () => {

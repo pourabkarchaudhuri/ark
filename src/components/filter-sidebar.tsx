@@ -15,6 +15,7 @@ import {
 import { Combobox } from '@/components/ui/combobox';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
+import { TooltipCard } from '@/components/ui/tooltip-card';
 import {
   RotateCcw,
   X,
@@ -49,7 +50,7 @@ const categoryOptions: { value: GameCategory; label: string }[] = [
 
 type SortOption = 'releaseDate' | 'title' | 'rating';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle' | 'ann-graph';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle' | 'ann-graph' | 'data-flow' | 'devlog';
 
 const sortOptions: { value: SortOption; label: string }[] = [
   { value: 'rating', label: 'Rating' },
@@ -390,25 +391,26 @@ export const FilterPanel = memo(function FilterPanel({
                 {(() => {
                   const disabled = isCatalog || isMostPlayed || isFreeGames;
                   return (
-                    <button
-                      type="button"
-                      onClick={() => !disabled && selectStore('both')}
-                      aria-pressed={isBothActive}
-                      disabled={disabled}
-                      title="Show games available on both stores"
-                      className={cn(
-                        'flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-all',
-                        disabled
-                          ? 'opacity-40 cursor-not-allowed'
-                          : isBothActive
-                            ? 'bg-fuchsia-500/20 border-fuchsia-500/50 text-fuchsia-300'
-                            : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
-                      )}
-                    >
-                      <FaSteam className="h-3 w-3" />
-                      <span className="text-white/30 font-mono text-xs">∩</span>
-                      <SiEpicgames className="h-3 w-3" />
-                    </button>
+                    <TooltipCard content="Filter to games available on both Steam and Epic — find titles you can pick up on either storefront.">
+                      <button
+                        type="button"
+                        onClick={() => !disabled && selectStore('both')}
+                        aria-pressed={isBothActive}
+                        disabled={disabled}
+                        className={cn(
+                          'flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-all',
+                          disabled
+                            ? 'opacity-40 cursor-not-allowed'
+                            : isBothActive
+                              ? 'bg-fuchsia-500/20 border-fuchsia-500/50 text-fuchsia-300'
+                              : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
+                        )}
+                      >
+                        <FaSteam className="h-3 w-3" />
+                        <span className="text-white/30 font-mono text-xs">∩</span>
+                        <SiEpicgames className="h-3 w-3" />
+                      </button>
+                    </TooltipCard>
                   );
                 })()}
               </div>

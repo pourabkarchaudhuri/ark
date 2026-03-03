@@ -139,6 +139,7 @@ export function extractCachedMeta(game: Game): CachedGameMeta {
     releaseDate: game.releaseDate,
     metacriticScore: game.metacriticScore,
     summary: game.summary,
+    longDescription: game.longDescription,
     epicSlug: game.epicSlug,
     epicNamespace: game.epicNamespace,
     epicOfferId: game.epicOfferId,
@@ -1233,18 +1234,114 @@ export function useLibrary() {
 }
 
 /**
- * Custom hook for getting library games with full details
+ * Build a Game object from a library entry's locally cached metadata.
+ * No API calls — everything comes from localStorage.
+ */
+function buildGameFromLocalEntry(id: string, entry: ReturnType<typeof libraryStore.getEntry>): Game | null {
+  if (!entry) return null;
+
+  if (entry.cachedMeta) {
+    const meta = entry.cachedMeta;
+    return {
+      id,
+      store: meta.store,
+      steamAppId: meta.steamAppId,
+      epicNamespace: meta.epicNamespace,
+      epicOfferId: meta.epicOfferId,
+      title: meta.title,
+      developer: meta.developer || 'Unknown',
+      publisher: meta.publisher || '',
+      genre: meta.genre || [],
+      platform: meta.platform || [],
+      metacriticScore: meta.metacriticScore ?? null,
+      releaseDate: meta.releaseDate || '',
+      summary: meta.summary,
+      longDescription: meta.longDescription,
+      coverUrl: meta.coverUrl,
+      headerImage: meta.headerImage,
+      epicSlug: meta.epicSlug,
+      themes: meta.themes,
+      gameModes: meta.gameModes,
+      playerPerspectives: meta.playerPerspectives,
+      similarGames: meta.similarGames,
+      status: entry.status,
+      priority: entry.priority,
+      publicReviews: entry.publicReviews,
+      recommendationSource: entry.recommendationSource,
+      executablePath: entry.executablePath,
+      createdAt: entry.addedAt,
+      updatedAt: entry.updatedAt,
+      isInLibrary: true,
+    } as Game;
+  }
+
+  const journeyEntry = journeyStore.getEntry(id);
+  if (journeyEntry) {
+    const store: 'steam' | 'epic' | 'custom' | undefined =
+      id.startsWith('epic-') ? 'epic' : id.startsWith('steam-') ? 'steam' : undefined;
+    return {
+      id,
+      store,
+      title: journeyEntry.title,
+      developer: 'Unknown',
+      publisher: '',
+      genre: journeyEntry.genre || [],
+      platform: journeyEntry.platform || [],
+      metacriticScore: null,
+      releaseDate: journeyEntry.releaseDate || '',
+      coverUrl: journeyEntry.coverUrl,
+      status: entry.status,
+      priority: entry.priority,
+      publicReviews: entry.publicReviews,
+      recommendationSource: entry.recommendationSource,
+      createdAt: entry.addedAt,
+      updatedAt: entry.updatedAt,
+      isInLibrary: true,
+    } as Game;
+  }
+
+  const store: 'steam' | 'epic' | 'custom' | undefined =
+    id.startsWith('epic-') ? 'epic' : id.startsWith('steam-') ? 'steam' : undefined;
+  return {
+    id,
+    store,
+    steamAppId: id.startsWith('steam-') ? parseInt(id.slice(6), 10) || undefined : undefined,
+    title: id.replace(/^(epic-|steam-)/, '').replace(/:/g, ' — '),
+    developer: 'Unknown',
+    publisher: '',
+    genre: [],
+    platform: [],
+    metacriticScore: null,
+    releaseDate: '',
+    status: entry.status,
+    priority: entry.priority,
+    publicReviews: entry.publicReviews,
+    recommendationSource: entry.recommendationSource,
+    createdAt: entry.addedAt,
+    updatedAt: entry.updatedAt,
+    isInLibrary: true,
+  } as Game;
+}
+
+/**
+ * Custom hook for getting library games with full details.
+ *
+ * Builds the game list synchronously from locally cached metadata
+ * (cachedMeta stored at add-time). Zero API calls — the library
+ * renders instantly on every visit.  Player counts are fetched in
+ * the background as a non-blocking enhancement.
  */
 export function useLibraryGames() {
-  const [games, setGames] = useState<Game[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Build initial game list synchronously from local stores (instant first paint)
+  const [games, setGames] = useState<Game[]>(() => {
+    return libraryStore.getAllGameIds()
+      .map(id => buildGameFromLocalEntry(id, libraryStore.getEntry(id)))
+      .filter((g): g is Game => g !== null);
+  });
+  const loading = false;
+  const error: string | null = null;
   const [updateCount, setUpdateCount] = useState(0);
-  // Cache of previously fetched game details — keyed by gameId.
-  // On subsequent library changes we only fetch NEW games and reuse
-  // existing data for unchanged ones (avoids N IPC calls per change).
-  const gameDetailsCacheRef = useRef<Map<string, Game>>(new Map());
-  const prevGameIdsRef = useRef<string>('');
+  const prevGameIdsRef = useRef<Set<string>>(new Set(libraryStore.getAllGameIds()));
 
   // Subscribe to library changes (debounced to coalesce rapid mutations)
   useEffect(() => {
@@ -1262,268 +1359,113 @@ export function useLibraryGames() {
     };
   }, []);
 
-  // Fetch library game details
+  // Rebuild on library changes + run journey backfills
   useEffect(() => {
     let isMounted = true;
+    const gameIds = libraryStore.getAllGameIds();
 
-    const fetchLibraryGames = async () => {
-      const gameIds = libraryStore.getAllGameIds();
-      const idsKey = gameIds.join(',');
+    if (gameIds.length === 0) {
+      setGames([]);
+      prevGameIdsRef.current = new Set();
+      return;
+    }
 
-      if (gameIds.length === 0) {
-        if (isMounted) { setGames([]); gameDetailsCacheRef.current.clear(); prevGameIdsRef.current = ''; }
-        return;
-      }
+    // Build Game objects from locally cached metadata (instant, no API calls)
+    const validGames: Game[] = [];
+    for (const id of gameIds) {
+      const game = buildGameFromLocalEntry(id, libraryStore.getEntry(id));
+      if (game) validGames.push(game);
+    }
 
-      // If the game IDs haven't changed, only refresh mutable fields from cache
-      if (idsKey === prevGameIdsRef.current && gameDetailsCacheRef.current.size > 0) {
-        const cache = gameDetailsCacheRef.current;
-        const refreshed: Game[] = [];
-        for (const id of gameIds) {
-          const cached = cache.get(id);
-          if (!cached) continue;
-          const entry = libraryStore.getEntry(id);
-          if (entry) {
-            refreshed.push({ ...cached, status: entry.status, priority: entry.priority, isInLibrary: true });
-          } else {
-            refreshed.push(cached);
-          }
-        }
-        if (isMounted && refreshed.length > 0) setGames(refreshed);
-        return;
-      }
-      prevGameIdsRef.current = idsKey;
+    setGames(validGames);
 
-      // Diff: only fetch details for game IDs we haven't seen before.
-      // For existing games, update library-specific fields (status, priority)
-      // without an API call.
-      const cache = gameDetailsCacheRef.current;
-      const newIds = gameIds.filter(id => !cache.has(id));
-      const isInitialLoad = cache.size === 0;
+    // Detect truly new game IDs for one-time background operations
+    const currentIdSet = new Set(gameIds);
+    const newGameIds = gameIds.filter(id => !prevGameIdsRef.current.has(id));
+    prevGameIdsRef.current = currentIdSet;
+    const newGames = validGames.filter(g => newGameIds.includes(g.id));
 
-      if (isMounted && isInitialLoad) {
-        setLoading(true);
-        setError(null);
-      }
+    // ── Journey backfills (synchronous, idempotent) ──────────────────
+    const arkStatuses: GameStatus[] = ['Playing', 'Playing Now', 'Completed'];
+    for (const game of newGames) {
+      if (!arkStatuses.includes(game.status) || journeyStore.has(game.id)) continue;
+      const libEntry = libraryStore.getEntry(game.id);
+      const addedAtIso = libEntry?.addedAt
+        ? new Date(libEntry.addedAt).toISOString()
+        : game.createdAt
+          ? new Date(game.createdAt).toISOString()
+          : undefined;
+      const sortDate = game.status === 'Completed'
+        ? (libEntry?.lastPlayedAt ?? addedAtIso ?? new Date().toISOString())
+        : addedAtIso;
+      journeyStore.record({
+        gameId: game.id,
+        title: game.title,
+        coverUrl: game.coverUrl,
+        genre: game.genre ?? [],
+        platform: game.platform ?? [],
+        releaseDate: game.releaseDate,
+        status: game.status,
+        hoursPlayed: libEntry?.hoursPlayed ?? 0,
+        rating: libEntry?.rating ?? 0,
+        firstPlayedAt: sortDate,
+        lastPlayedAt: libEntry?.lastPlayedAt ?? (game.status === 'Completed' ? sortDate : undefined),
+        addedAt: addedAtIso,
+      });
+    }
 
-      try {
-        // Fetch details only for NEW library games (routes to correct store automatically).
-        // If the API is unreachable (e.g. Epic/Cloudflare), fall back to cached
-        // metadata stored in the library entry at add-time.
-        const gamePromises = newIds.map(async (id) => {
-          const game = await gameService.getGameDetails(id);
-          if (game) return game;
+    for (const game of validGames) {
+      const jEntry = journeyStore.getEntry(game.id);
+      if (!jEntry) continue;
+      const libEntry = libraryStore.getEntry(game.id);
+      journeyStore.syncProgress(game.id, {
+        status: game.status,
+        hoursPlayed: libEntry?.hoursPlayed ?? jEntry.hoursPlayed,
+        rating: libEntry?.rating ?? jEntry.rating,
+        lastPlayedAt: libEntry?.lastPlayedAt ?? jEntry.lastPlayedAt,
+      });
+    }
 
-          // API returned null — reconstruct from local stores so the game
-          // is never silently lost from the library view.
-          const entry = libraryStore.getEntry(id);
-          if (!entry) return null; // orphan ID — shouldn't happen
-
-          // Fallback 1: cachedMeta (stored at add-time, richest data)
-          if (entry.cachedMeta) {
-            const meta = entry.cachedMeta;
-            return {
-              id,
-              store: meta.store,
-              steamAppId: meta.steamAppId,
-              epicNamespace: meta.epicNamespace,
-              epicOfferId: meta.epicOfferId,
-              title: meta.title,
-              developer: meta.developer || 'Unknown',
-              publisher: meta.publisher || '',
-              genre: meta.genre || [],
-              platform: meta.platform || [],
-              metacriticScore: meta.metacriticScore ?? null,
-              releaseDate: meta.releaseDate || '',
-              summary: meta.summary,
-              coverUrl: meta.coverUrl,
-              headerImage: meta.headerImage,
-              epicSlug: meta.epicSlug,
-              status: entry.status,
-              priority: entry.priority,
-              publicReviews: entry.publicReviews,
-              recommendationSource: entry.recommendationSource,
-              createdAt: entry.addedAt,
-              updatedAt: entry.updatedAt,
-            } as Game;
-          }
-
-          // Fallback 2: Journey store (persists title + coverUrl from first add)
-          const journeyEntry = journeyStore.getEntry(id);
-          if (journeyEntry) {
-            const store: 'steam' | 'epic' | 'custom' | undefined =
-              id.startsWith('epic-') ? 'epic' : id.startsWith('steam-') ? 'steam' : undefined;
-            return {
-              id,
-              store,
-              title: journeyEntry.title,
-              developer: 'Unknown',
-              publisher: '',
-              genre: journeyEntry.genre || [],
-              platform: journeyEntry.platform || [],
-              metacriticScore: null,
-              releaseDate: journeyEntry.releaseDate || '',
-              coverUrl: journeyEntry.coverUrl,
-              status: entry.status,
-              priority: entry.priority,
-              publicReviews: entry.publicReviews,
-              recommendationSource: entry.recommendationSource,
-              createdAt: entry.addedAt,
-              updatedAt: entry.updatedAt,
-            } as Game;
-          }
-
-          // Fallback 3: bare-minimum placeholder from the gameId itself
-          // The game card will be sparse but the game won't vanish.
-          const store: 'steam' | 'epic' | 'custom' | undefined =
-            id.startsWith('epic-') ? 'epic' : id.startsWith('steam-') ? 'steam' : undefined;
-          return {
-            id,
-            store,
-            title: id.replace(/^(epic-|steam-)/, '').replace(/:/g, ' — '),
-            developer: 'Unknown',
-            publisher: '',
-            genre: [],
-            platform: [],
-            metacriticScore: null,
-            releaseDate: '',
-            status: entry.status,
-            priority: entry.priority,
-            publicReviews: entry.publicReviews,
-            recommendationSource: entry.recommendationSource,
-            createdAt: entry.addedAt,
-            updatedAt: entry.updatedAt,
-          } as Game;
+    for (const game of validGames) {
+      if (!game.coverUrl) continue;
+      const jEntry = journeyStore.getEntry(game.id);
+      if (jEntry && !jEntry.coverUrl) {
+        journeyStore.record({
+          gameId: jEntry.gameId,
+          title: jEntry.title,
+          coverUrl: game.coverUrl,
+          genre: jEntry.genre,
+          platform: jEntry.platform,
+          releaseDate: jEntry.releaseDate,
+          status: jEntry.status,
+          hoursPlayed: jEntry.hoursPlayed,
+          rating: jEntry.rating,
+          firstPlayedAt: jEntry.firstPlayedAt,
+          lastPlayedAt: jEntry.lastPlayedAt,
+          addedAt: jEntry.addedAt,
         });
-
-        const results = await Promise.all(gamePromises);
-        if (isMounted) {
-          // Store newly fetched games in the detail cache
-          const newGames = results.filter((g): g is Game => g !== null);
-          for (const g of newGames) cache.set(g.id, g);
-
-          // Remove games no longer in library from the cache
-          const currentIdSet = new Set(gameIds);
-          for (const key of cache.keys()) {
-            if (!currentIdSet.has(key)) cache.delete(key);
-          }
-
-          // Build final list: use cached data + refresh library-specific fields
-          const validGames: Game[] = [];
-          for (const id of gameIds) {
-            const cached = cache.get(id);
-            if (!cached) continue;
-            // Refresh mutable library fields without an API call
-            const entry = libraryStore.getEntry(id);
-            if (entry) {
-              validGames.push({ ...cached, status: entry.status, priority: entry.priority, isInLibrary: true });
-            } else {
-              validGames.push(cached);
-            }
-          }
-
-          // Fetch real-time player counts only for NEW Steam games (skip already-counted)
-          const newSteamIds = newGames
-            .map(g => g.steamAppId)
-            .filter((id): id is number => id !== undefined && id !== null);
-
-          if (newSteamIds.length > 0) {
-            const playerCounts = await steamService.getMultiplePlayerCounts(newSteamIds);
-            // Attach counts to the matching games
-            for (let i = 0; i < validGames.length; i++) {
-              const g = validGames[i];
-              if (g.steamAppId && playerCounts[g.steamAppId]) {
-                validGames[i] = { ...g, playerCount: playerCounts[g.steamAppId] };
-              }
-            }
-          }
-
-          setGames(validGames);
-
-          // Backfill cachedMeta for existing library entries that lack it
-          // (gradual migration so entries become resilient to API outages).
-          for (const game of newGames) {
-            const entry = libraryStore.getEntry(game.id);
-            if (entry && !entry.cachedMeta && game.title) {
-              libraryStore.updateEntry(game.id, { cachedMeta: extractCachedMeta(game) });
-            }
-          }
-
-          // Backfill journey entries for library games that are Playing, Playing Now, or Completed (so they appear in Your Ark / Logs)
-          const arkStatuses: GameStatus[] = ['Playing', 'Playing Now', 'Completed'];
-          for (const game of newGames) {
-            if (!arkStatuses.includes(game.status) || journeyStore.has(game.id)) continue;
-            const libEntry = libraryStore.getEntry(game.id);
-            const addedAtIso = libEntry?.addedAt
-              ? new Date(libEntry.addedAt).toISOString()
-              : game.createdAt
-                ? new Date(game.createdAt).toISOString()
-                : undefined;
-            const sortDate = game.status === 'Completed'
-              ? (libEntry?.lastPlayedAt ?? addedAtIso ?? new Date().toISOString())
-              : addedAtIso;
-            journeyStore.record({
-              gameId: game.id,
-              title: game.title,
-              coverUrl: game.coverUrl,
-              genre: game.genre ?? [],
-              platform: game.platform ?? [],
-              releaseDate: game.releaseDate,
-              status: game.status,
-              hoursPlayed: libEntry?.hoursPlayed ?? 0,
-              rating: libEntry?.rating ?? 0,
-              firstPlayedAt: sortDate,
-              lastPlayedAt: libEntry?.lastPlayedAt ?? (game.status === 'Completed' ? sortDate : undefined),
-              addedAt: addedAtIso,
-            });
-          }
-
-          // Sync journey progress for all in-library games that have a journey entry
-          for (const game of validGames) {
-            const jEntry = journeyStore.getEntry(game.id);
-            if (!jEntry) continue;
-            const libEntry = libraryStore.getEntry(game.id);
-            journeyStore.syncProgress(game.id, {
-              status: game.status,
-              hoursPlayed: libEntry?.hoursPlayed ?? jEntry.hoursPlayed,
-              rating: libEntry?.rating ?? jEntry.rating,
-              lastPlayedAt: libEntry?.lastPlayedAt ?? jEntry.lastPlayedAt,
-            });
-          }
-
-          // Backfill journey entries with missing coverUrl — patches older
-          // entries that were saved before the image URL was available.
-          for (const game of validGames) {
-            if (!game.coverUrl) continue;
-            const jEntry = journeyStore.getEntry(game.id);
-            if (jEntry && !jEntry.coverUrl) {
-              journeyStore.record({
-                gameId: jEntry.gameId,
-                title: jEntry.title,
-                coverUrl: game.coverUrl,
-                genre: jEntry.genre,
-                platform: jEntry.platform,
-                releaseDate: jEntry.releaseDate,
-                status: jEntry.status,
-                hoursPlayed: jEntry.hoursPlayed,
-                rating: jEntry.rating,
-                firstPlayedAt: jEntry.firstPlayedAt,
-                lastPlayedAt: jEntry.lastPlayedAt,
-                addedAt: jEntry.addedAt,
-              });
-            }
-          }
-        }
-      } catch (err) {
-        if (isMounted) {
-          setError(err instanceof Error ? err.message : 'Failed to fetch library games');
-        }
-      } finally {
-        if (isMounted) setLoading(false);
       }
-    };
+    }
 
-    fetchLibraryGames();
+    // ── Background player counts (non-blocking) ──────────────────────
+    if (newGames.length > 0) {
+      const steamIds = newGames
+        .map(g => g.steamAppId)
+        .filter((id): id is number => id !== undefined && id !== null);
+
+      if (steamIds.length > 0) {
+        steamService.getMultiplePlayerCounts(steamIds).then(playerCounts => {
+          if (!isMounted) return;
+          setGames(prev => prev.map(g => {
+            if (g.steamAppId && playerCounts[g.steamAppId]) {
+              return { ...g, playerCount: playerCounts[g.steamAppId] };
+            }
+            return g;
+          }));
+        }).catch(() => { /* non-critical */ });
+      }
+    }
+
     return () => { isMounted = false; };
   }, [updateCount]);
 

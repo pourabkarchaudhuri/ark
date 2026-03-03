@@ -24,13 +24,11 @@ import { journeyStore } from '@/services/journey-store';
 import { statusHistoryStore } from '@/services/status-history-store';
 import { sessionStore } from '@/services/session-store';
 import { JourneyGanttView } from '@/components/journey-gantt-view';
-import { generateMockGanttData } from '@/components/journey-gantt-mock-data';
 import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
 import { ShowcaseView } from '@/components/showcase-view';
 import { MedalsView } from '@/components/medals-view';
 
 type JourneyViewStyle = 'log' | 'ocd' | 'ark' | 'medals';
-type GanttDataSource = 'live' | 'mock';
 
 /**
  * Build a full fallback chain of image URLs for a journey entry.
@@ -97,13 +95,19 @@ const StarRating = memo(function StarRating({ rating }: { rating: number }) {
 
 /** Cover image with multi-step fallback chain (cover → header → capsule → logo) */
 const JourneyCoverImage = memo(function JourneyCoverImage({ entry }: { entry: JourneyEntry }) {
-  const chain = useMemo(() => getJourneyImageChain(entry), [entry]);
+  // Stable dependency: gameId + coverUrl don't change during backfill re-renders
+  const chain = useMemo(
+    () => getJourneyImageChain(entry),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [entry.gameId, entry.coverUrl],
+  );
   const [attempt, setAttempt] = useState(0);
+  const chainKey = chain.join('|');
 
-  // Reset when the entry (and therefore the chain) changes
+  // Reset only when the actual URL chain changes, not on every entry reference change
   useEffect(() => {
     setAttempt(0);
-  }, [chain]);
+  }, [chainKey]);
 
   const handleError = useCallback(() => {
     setAttempt(prev => prev + 1);
@@ -263,8 +267,6 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
 
 export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
   const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('ark');
-  // Data source for OCD view: live store data vs mock data for dev/demo
-  const [dataSource, setDataSource] = useState<GanttDataSource>('live');
 
   // Fetch live player counts for journey entries in the background.
   // Keys are gameId strings ("steam-730") — values are player counts.
@@ -489,16 +491,13 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // Prepare Gantt data (only when OCD view is active)
   const ganttData = useMemo(() => {
     if (viewStyle !== 'ocd') return null;
-
-    if (dataSource === 'mock') return generateMockGanttData();
-
     return {
       journeyEntries: entries,
       statusHistory: statusHistoryRef.current,
       sessions: sessionsRef.current,
       libraryEntries: libraryEntriesRef.current,
     };
-  }, [viewStyle, dataSource, entries]);
+  }, [viewStyle, entries]);
 
   // Loading state — skeleton matches Voyage header + content (Your Ark / Log / OCD / Medals)
   if (loading) {
@@ -628,33 +627,6 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
               </button>
             </div>
 
-            {/* Mock / Live toggle (visible in OCD view) */}
-            {viewStyle === 'ocd' && (
-              <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
-                <button
-                  onClick={() => setDataSource('live')}
-                  className={cn(
-                    'px-2.5 py-1 text-[10px] font-medium rounded-md transition-colors',
-                    dataSource === 'live'
-                      ? 'bg-emerald-500 text-white'
-                      : 'text-white/50 hover:text-white'
-                  )}
-                >
-                  Live
-                </button>
-                <button
-                  onClick={() => setDataSource('mock')}
-                  className={cn(
-                    'px-2.5 py-1 text-[10px] font-medium rounded-md transition-colors',
-                    dataSource === 'mock'
-                      ? 'bg-amber-500 text-white'
-                      : 'text-white/50 hover:text-white'
-                  )}
-                >
-                  Mock
-                </button>
-              </div>
-            )}
           </div>
         </div>
       </div>

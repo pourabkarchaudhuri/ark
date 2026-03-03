@@ -7,14 +7,15 @@
  * so repeat visits load instantly.
  */
 
-import { useState, useEffect, useCallback, useRef, useMemo, type FC } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, useDeferredValue, startTransition, type FC } from 'react';
 import { toPng } from 'html-to-image';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, Search, Filter, Loader2, Check, RotateCcw, X, Library, ChevronLeft, ChevronRight, Crosshair, Route, Waypoints, Info, Clock, MousePointer, Move, ZoomIn, Plus, Camera } from 'lucide-react';
+import { ArrowLeft, Search, Filter, Loader2, Check, RotateCcw, X, Library, ChevronLeft, ChevronRight, Crosshair, Route, Waypoints, Info, Clock, MousePointer, Move, ZoomIn, Plus, Camera, CornerDownRight, Undo2 } from 'lucide-react';
 import type { SteamAppDetails } from '@/types/steam';
 import type { EpicCatalogItem, EpicProductReviews } from '@/types/epic';
 import { libraryStore } from '@/services/library-store';
 import { getStoreFromId } from '@/types/game';
+import { TooltipCard } from '@/components/ui/tooltip-card';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
@@ -23,7 +24,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { buildGameImageChain } from '@/lib/utils';
-import { getEmbeddingById, embeddingService } from '@/services/embedding-service';
+import { getEmbeddingById, embeddingService, extractFranchiseBase } from '@/services/embedding-service';
 import { annIndex } from '@/services/ann-index';
 import { journeyStore } from '@/services/journey-store';
 import {
@@ -31,12 +32,99 @@ import {
   type NeighborInfo,
   type GalaxyStepReporter,
   GENRE_PALETTE,
+  CANONICAL_GENRE_LABELS,
   GALAXY_STEP_LABELS,
   loadCachedGalaxyIfFresh,
   buildAndCacheGalaxy,
   getBackgroundBuildPromise,
+  genreToColorIdx,
+  cancelActiveProjectionWorker,
 } from '@/services/galaxy-cache';
 import { scoreGame, type SearchIndexEntry } from '@/services/prefetch-store';
+import { generateMockGalaxy } from '@/services/mock-galaxy';
+
+// ─── Genre IDF (Inverse Document Frequency) Weights ─────────────────────────
+// Approximate frequency of each genre across the gaming ecosystem.
+// Lower frequency → higher IDF weight → more discriminating genre match.
+const GENRE_FREQ: Record<string, number> = {
+  'action': 0.40, 'action-adventure': 0.30, 'adventure': 0.32,
+  'casual': 0.20, 'rpg': 0.25, 'shooter': 0.18,
+  'strategy': 0.15, 'simulation': 0.12, 'survival': 0.10,
+  'fps': 0.12, 'first person': 0.12, 'open world': 0.15,
+  'horror': 0.06, 'puzzle': 0.08, 'sports': 0.07,
+  'racing': 0.05, 'platformer': 0.06, 'roguelike': 0.04,
+  'roguelite': 0.04, 'rogue-lite': 0.04, 'souls-like': 0.02,
+  'soulslike': 0.02, 'metroidvania': 0.03, 'visual novel': 0.03,
+  'city builder': 0.02, 'tower defense': 0.03, 'fighting': 0.04,
+  'rhythm': 0.02, 'mmo': 0.05, 'mmorpg': 0.04,
+  'hack and slash': 0.04, 'turn-based': 0.05,
+  'real-time strategy': 0.04, 'grand strategy': 0.02,
+  'rts': 0.04, 'card game': 0.03, 'stealth': 0.04,
+  'exploration': 0.10, 'narration': 0.05, 'comedy': 0.05,
+  'space': 0.03, 'party': 0.03, 'indie': 0.35, 'fantasy': 0.15,
+  'sandbox': 0.08, 'battle royale': 0.04,
+  'crpg': 0.02, 'tactical': 0.04, 'isometric': 0.03,
+  'point and click': 0.03, 'walking simulator': 0.02,
+  'life sim': 0.02, 'farming': 0.02,
+  'management': 0.04, 'building': 0.05, 'crafting': 0.06,
+  'co-op': 0.10,
+};
+
+function genreIdf(genre: string): number {
+  const freq = GENRE_FREQ[genre] ?? 0.10;
+  return Math.log2(1 / freq);
+}
+
+function idfWeightedJaccard(selGenres: Set<string>, nbGenres: string[]): number {
+  const nbSet = new Set(nbGenres);
+  let sharedW = 0;
+  let unionW = 0;
+  const all = new Set([...selGenres, ...nbSet]);
+  for (const g of all) {
+    const w = genreIdf(g);
+    if (selGenres.has(g) && nbSet.has(g)) sharedW += w;
+    unionW += w;
+  }
+  return unionW > 0 ? sharedW / unionW : 0;
+}
+
+// ─── Genre Taxonomy: parent-child relationships for partial credit ──────────
+const GENRE_PARENT: Record<string, string> = {
+  'fps': 'shooter', 'first person': 'shooter', 'third-person shooter': 'shooter',
+  'action rpg': 'rpg', 'crpg': 'rpg', 'jrpg': 'rpg', 'mmorpg': 'rpg',
+  'roguelite': 'roguelike', 'rogue-lite': 'roguelike',
+  'soulslike': 'action', 'souls-like': 'action',
+  'hack and slash': 'action', 'beat em up': 'action',
+  'stealth': 'action', 'action-adventure': 'action',
+  'grand strategy': 'strategy', 'real-time strategy': 'strategy',
+  'rts': 'strategy', 'turn-based': 'strategy', 'tactical': 'strategy',
+  'tower defense': 'strategy', 'card game': 'strategy',
+  'city builder': 'simulation', 'life sim': 'simulation',
+  'farming': 'simulation', 'management': 'simulation',
+  'battle royale': 'shooter',
+  'metroidvania': 'platformer',
+  'exploration': 'adventure', 'narration': 'adventure',
+  'visual novel': 'adventure', 'point and click': 'adventure',
+  'walking simulator': 'adventure',
+  'party': 'casual', 'rhythm': 'casual',
+};
+
+function genreTaxonomyBonus(selGenres: Set<string>, nbGenres: string[]): number {
+  const nbSet = new Set(nbGenres);
+  let bonus = 0;
+  for (const sg of selGenres) {
+    if (nbSet.has(sg)) continue;
+    const selParent = GENRE_PARENT[sg];
+    for (const ng of nbGenres) {
+      if (selGenres.has(ng)) continue;
+      const nbParent = GENRE_PARENT[ng];
+      if (selParent && selParent === ng) { bonus += 0.015; break; }
+      if (nbParent && nbParent === sg) { bonus += 0.015; break; }
+      if (selParent && nbParent && selParent === nbParent) { bonus += 0.01; break; }
+    }
+  }
+  return bonus;
+}
 
 /** Image with robust fallback chain — cycles through URLs on error */
 const FallbackImg: FC<{
@@ -82,6 +170,174 @@ interface NodeDetailData {
   steam?: SteamAppDetails;
   epic?: { item: EpicCatalogItem; reviews: EpicProductReviews | null };
   stores: ('steam' | 'epic')[];
+}
+
+/**
+ * Star magnitude — popularity (review count) drives base size; publisher
+ * catalog breadth gives a secondary boost so big-publisher titles stand out.
+ * Library games get a small bonus so the user's own collection never
+ * disappears among the crowd.
+ */
+function starSize(nd: GraphNode, pubFreq: Map<string, number>, maxPubLog: number): number {
+  // Review count → log-scaled 0–1 (caps around ~200K reviews)
+  const popNorm = Math.min(Math.log10(Math.max(nd.reviewCount, 1)) / 5.3, 1);
+  // Publisher catalog breadth → log-scaled 0–1
+  const pf = nd.publisher ? (pubFreq.get(nd.publisher) ?? 1) : 1;
+  const pubNorm = maxPubLog > 0 ? Math.log10(pf + 1) / maxPubLog : 0;
+  // Blend: 70% popularity, 30% publisher weight
+  const combined = popNorm * 0.7 + pubNorm * 0.3;
+  const base = 1.2 + combined * 9;
+  return nd.isLibrary ? Math.max(base, 4) + Math.min(nd.hoursPlayed * 0.03, 4) : base;
+}
+
+/** Cosine distance between two embedding vectors (1 − cos_sim), clamped to [0,2]. */
+function cosineDistance(a: number[], b: number[]): number {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom > 0 ? Math.max(0, 1 - dot / denom) : 1;
+}
+
+/** Publisher frequency map built once when galaxy loads. */
+function buildPublisherFreqs(nodes: GraphNode[]): { pubFreq: Map<string, number>; maxPubLog: number } {
+  const pubFreq = new Map<string, number>();
+  for (const nd of nodes) {
+    if (nd.publisher) pubFreq.set(nd.publisher, (pubFreq.get(nd.publisher) ?? 0) + 1);
+  }
+  let maxFreq = 1;
+  for (const v of pubFreq.values()) if (v > maxFreq) maxFreq = v;
+  return { pubFreq, maxPubLog: Math.log10(maxFreq + 1) };
+}
+
+/** Compute the centroid position of each canonical genre cluster. */
+function computeGenreCentroids(nodes: GraphNode[]): Map<number, THREE.Vector3> {
+  const sums = new Map<number, { x: number; y: number; z: number; count: number }>();
+  for (const nd of nodes) {
+    const idx = nd.colorIdx;
+    const s = sums.get(idx);
+    if (s) { s.x += nd.x; s.y += nd.y; s.z += nd.z; s.count++; }
+    else sums.set(idx, { x: nd.x, y: nd.y, z: nd.z, count: 1 });
+  }
+  const centroids = new Map<number, THREE.Vector3>();
+  for (const [idx, s] of sums) {
+    if (idx < CANONICAL_GENRE_LABELS.length) {
+      centroids.set(idx, new THREE.Vector3(s.x / s.count, s.y / s.count, s.z / s.count));
+    }
+  }
+  return centroids;
+}
+
+function createGenreLabelSprite(
+  label: string,
+  _color: [number, number, number],
+  position: THREE.Vector3,
+): THREE.Sprite {
+  const dpr = 2;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d')!;
+
+  const fontSize = 20 * dpr;
+  const iconSize = fontSize * 0.5;
+  const iconGap = 6 * dpr;
+  const padX = 14 * dpr;
+  const padY = 6 * dpr;
+  const borderW = 1 * dpr;
+
+  ctx.font = `500 ${fontSize}px Inter, system-ui, sans-serif`;
+  const textW = ctx.measureText(label).width;
+  const contentW = iconSize * 2 + iconGap + textW;
+  const pillW = Math.ceil(contentW + padX * 2);
+  const pillH = Math.ceil(fontSize + padY * 2);
+  const margin = 4 * dpr;
+  canvas.width = pillW + margin * 2;
+  canvas.height = pillH + margin * 2;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  const rr = pillH / 2;
+  const left = cx - pillW / 2;
+  const top = cy - pillH / 2;
+
+  // bg-white/[0.04] over simulated dark backdrop-blur
+  ctx.fillStyle = 'rgba(6, 6, 14, 0.55)';
+  roundRect(ctx, left, top, pillW, pillH, rr);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+  roundRect(ctx, left, top, pillW, pillH, rr);
+  ctx.fill();
+
+  // border-white/[0.08]
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+  ctx.lineWidth = borderW;
+  roundRect(ctx, left + borderW / 2, top + borderW / 2, pillW - borderW, pillH - borderW, rr - borderW / 2);
+  ctx.stroke();
+
+  // genre dot — radial gradient circle matching the cluster color, with glow
+  const r255 = Math.round(_color[0] * 255);
+  const g255 = Math.round(_color[1] * 255);
+  const b255 = Math.round(_color[2] * 255);
+  const dotR = iconSize * 0.55;
+  const iconCx = left + padX + iconSize;
+  const glow = ctx.createRadialGradient(iconCx, cy, 0, iconCx, cy, dotR * 2.5);
+  glow.addColorStop(0, `rgba(${r255}, ${g255}, ${b255}, 0.25)`);
+  glow.addColorStop(1, `rgba(${r255}, ${g255}, ${b255}, 0)`);
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(iconCx, cy, dotR * 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  const grad = ctx.createRadialGradient(iconCx - dotR * 0.3, cy - dotR * 0.3, 0, iconCx, cy, dotR);
+  grad.addColorStop(0, `rgba(${Math.min(r255 + 80, 255)}, ${Math.min(g255 + 80, 255)}, ${Math.min(b255 + 80, 255)}, 0.95)`);
+  grad.addColorStop(1, `rgba(${r255}, ${g255}, ${b255}, 0.7)`);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(iconCx, cy, dotR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // label text — white/40, font-medium, tracking-wide
+  ctx.font = `500 ${fontSize}px Inter, system-ui, sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.40)';
+  ctx.fillText(label, iconCx + iconSize + iconGap, cy);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    opacity: 0.55,
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+
+  const sprite = new THREE.Sprite(mat);
+  sprite.position.copy(position);
+  const scale = 28;
+  sprite.scale.set(scale * (canvas.width / canvas.height), scale, 1);
+  sprite.userData = { baseOpacity: 0.55, highlightOpacity: 1.0 };
+  return sprite;
+}
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
 }
 
 const SteamIcon: FC<{ className?: string }> = ({ className = 'w-3.5 h-3.5' }) => (
@@ -359,7 +615,7 @@ const LoadingSkeleton: FC<{ steps: LoadingStep[] }> = ({ steps }) => {
   };
 
   return (
-    <div className="absolute inset-0 flex items-center justify-center z-30">
+    <div className="absolute inset-0 flex items-center justify-center">
       <div className="w-[340px] bg-black/70 backdrop-blur-xl border border-white/[0.06] rounded-xl p-5">
         <div className="flex items-center gap-3 mb-4">
           {!allDone && (
@@ -425,20 +681,36 @@ const LoadingSkeleton: FC<{ steps: LoadingStep[] }> = ({ steps }) => {
 
 const HERO_TEXT = '// Accessing embedding space';
 
-const HeroIntro: FC<{ visible: boolean }> = ({ visible }) => {
-  const [charCount, setCharCount] = useState(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+const HeroIntro: FC<{ visible: boolean; onTypingDone?: () => void }> = ({ visible, onTypingDone }) => {
+  const textRef = useRef<HTMLSpanElement>(null);
+  const doneRef = useRef(false);
 
   useEffect(() => {
-    if (!visible) { setCharCount(0); return; }
+    if (!visible) { doneRef.current = false; return; }
+    const el = textRef.current;
+    if (!el) return;
+    el.textContent = '';
+    doneRef.current = false;
     let i = 0;
-    intervalRef.current = setInterval(() => {
-      i++;
-      setCharCount(i);
-      if (i >= HERO_TEXT.length && intervalRef.current) clearInterval(intervalRef.current);
-    }, 45);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [visible]);
+    let lastTime = 0;
+    let raf = 0;
+    const CHAR_MS = 45;
+    const tick = (time: number) => {
+      if (!lastTime) lastTime = time;
+      if (time - lastTime >= CHAR_MS) {
+        i++;
+        lastTime = time;
+        el.textContent = HERO_TEXT.slice(0, i);
+        if (i >= HERO_TEXT.length) {
+          if (!doneRef.current) { doneRef.current = true; onTypingDone?.(); }
+          return;
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [visible, onTypingDone]);
 
   return (
     <AnimatePresence>
@@ -452,7 +724,7 @@ const HeroIntro: FC<{ visible: boolean }> = ({ visible }) => {
           transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
         >
           <p className="text-2xl md:text-4xl font-mono font-medium tracking-[0.15em] text-white/70">
-            {HERO_TEXT.slice(0, charCount)}
+            <span ref={textRef} />
             <span className="inline-block w-[2px] h-[1em] bg-white/70 ml-0.5 align-middle animate-pulse" />
           </p>
         </motion.div>
@@ -478,8 +750,8 @@ interface RendererBundle {
 }
 
 function createRendererBundle(w: number, h: number): RendererBundle {
-  const pixelRatio = Math.min(window.devicePixelRatio, 2);
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
+  const pixelRatio = Math.min(window.devicePixelRatio, 1.5);
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setSize(w, h);
   renderer.setPixelRatio(pixelRatio);
   renderer.setClearColor(0x020208, 1);
@@ -503,7 +775,7 @@ function createRendererBundle(w: number, h: number): RendererBundle {
 
 // ─── Main component ─────────────────────────────────────────────────────────
 
-export function AnnGraphView({ onBack }: { onBack: () => void }) {
+export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; useMock?: boolean }) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const screenshotAreaRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<{
@@ -515,15 +787,23 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     starField: THREE.Points;
     lines: THREE.LineSegments | null;
     linesMat: THREE.LineDashedMaterial | null;
+    focusedLines: THREE.LineSegments | null;
+    focusedLinesMat: THREE.LineDashedMaterial | null;
+    focusedLinesOpacity: number;
     pathLines: THREE.LineSegments | null;
     pathLinesMat: THREE.LineDashedMaterial | null;
     pathLabels: THREE.Group | null;
+    genreLabels: THREE.Group | null;
     raycaster: THREE.Raycaster;
     mouse: THREE.Vector2;
     nodes: GraphNode[];
     colorAttr: THREE.BufferAttribute;
     sizeAttr: THREE.BufferAttribute;
     brightnessAttr: THREE.BufferAttribute;
+    baseSizes: Float32Array;
+    baseBright: Float32Array;
+    baseColors: Float32Array;
+    nodeMap: Map<string, GraphNode>;
     animFrameId: number;
     composer: EffectComposer;
     sunSelected: ReturnType<typeof createSunGroup>;
@@ -531,24 +811,30 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
   } | null>(null);
 
   const [loading, setLoading] = useState(true);
+  const [emptyGalaxy, setEmptyGalaxy] = useState(false);
   const [heroVisible, setHeroVisible] = useState(false);
   const [loadingSteps, setLoadingSteps] = useState<LoadingStep[]>(
     GALAXY_STEP_LABELS.map(label => ({ label, status: 'pending' as const })),
   );
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [neighbors, setNeighbors] = useState<NeighborInfo[]>([]);
-  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
-  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+  const hoveredNodeRef2 = useRef<GraphNode | null>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const [activeGenres, setActiveGenres] = useState<Set<string>>(new Set());
+  const activeGenresRef = useRef<Set<string>>(activeGenres);
   const [allGenres, setAllGenres] = useState<string[]>([]);
+  const allGenresRef = useRef<string[]>(allGenres);
   const [showFilters, setShowFilters] = useState(false);
   const [nodeCount, setNodeCount] = useState(0);
   const [connectionCount, setConnectionCount] = useState(0);
   const [rendererBackend, setRendererBackend] = useState<RendererBackend | null>(null);
-  const neighborK = useRef(10);
+  const [projectionMethod, setProjectionMethod] = useState<string | null>(null);
+  const neighborK = useRef(GENRE_PALETTE.length - 1);
   const selectedIdRef = useRef<string | null>(null);
   const neighborIdsRef = useRef<Set<string>>(new Set());
+  const focusedNbIdsRef = useRef<Set<string>>(new Set());
   const loadedNodesRef = useRef<GraphNode[]>([]);
   const nodeSearchIndex = useRef<SearchIndexEntry[]>([]);
   const flyAnimRef = useRef<{
@@ -569,10 +855,12 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
   const [focusedNbIdx, setFocusedNbIdx] = useState(-1); // -1 = selected node, 0+ = neighbor index
   const [pathActive, setPathActive] = useState(false);
   const [pathOverview, setPathOverview] = useState(false);
+  const [pathDisabledReason, setPathDisabledReason] = useState<string | null>(null);
   const pathIdsRef = useRef<Set<string>>(new Set());
   const pathNodesRef = useRef<GraphNode[]>([]);
   const [pathIdx, setPathIdx] = useState(-1);
   const pathOverviewCardsRef = useRef<HTMLDivElement>(null);
+  const pathBuildGenRef = useRef(0);
   const libScrollRef = useRef<HTMLDivElement>(null);
   const fpsRef = useRef<HTMLSpanElement>(null);
   const autoOrbitRef = useRef(false);
@@ -580,11 +868,23 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
   const [detailData, setDetailData] = useState<NodeDetailData | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const detailNodeIdRef = useRef<string | null>(null);
-  const [, setLibVersion] = useState(0);
+  const pubFreqRef = useRef<{ pubFreq: Map<string, number>; maxPubLog: number }>({ pubFreq: new Map(), maxPubLog: 0 });
+  const hoverRafRef = useRef<number>(0);
+  const cleanupIdleRef = useRef<(() => void) | null>(null);
+  const cachedRectRef = useRef<DOMRect | null>(null);
+  const searchBlurRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heroTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [libVersion, setLibVersion] = useState(0);
+  const traversalStackRef = useRef<GraphNode[]>([]);
+  const [traversalDepth, setTraversalDepth] = useState(0);
 
   useEffect(() => {
     return libraryStore.subscribe(() => setLibVersion(v => v + 1));
   }, []);
+
+  activeGenresRef.current = activeGenres;
+  allGenresRef.current = allGenres;
+
   const sunStateRef = useRef<{
     selectedPos: THREE.Vector3 | null;
     selectedColor: [number, number, number];
@@ -632,12 +932,33 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     scene.fog = new THREE.FogExp2(0x020208, 0.0008);
 
     let hdrTex: THREE.Texture | null = null;
-    new RGBELoader().load('/HDR_hazy_nebulae.hdr', (tex) => {
-      tex.mapping = THREE.EquirectangularReflectionMapping;
-      scene.background = tex;
-      scene.backgroundIntensity = 0.15;
-      hdrTex = tex;
-    });
+    let destroyed = false;
+
+    // Load HDR skybox via XHR → Blob URL to bypass the fact that Three.js
+    // FileLoader uses fetch(), which doesn't support file:// in Electron.
+    const hdrUrl = `${import.meta.env.BASE_URL}HDR_multi_nebulae_2.hdr`;
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', hdrUrl, true);
+    xhr.responseType = 'arraybuffer';
+    xhr.onload = () => {
+      if (destroyed) return;
+      if ((xhr.status === 200 || xhr.status === 0) && xhr.response) {
+        const blobUrl = URL.createObjectURL(new Blob([xhr.response]));
+        new RGBELoader().load(blobUrl, (tex) => {
+          URL.revokeObjectURL(blobUrl);
+          if (destroyed) { tex.dispose(); return; }
+          tex.mapping = THREE.EquirectangularReflectionMapping;
+          scene.background = tex;
+          scene.backgroundIntensity = 0.15;
+          hdrTex = tex;
+        }, undefined, () => {
+          URL.revokeObjectURL(blobUrl);
+          console.warn('[Embedding Space] Failed to parse HDR skybox');
+        });
+      }
+    };
+    xhr.onerror = () => console.warn('[Embedding Space] Failed to load HDR skybox');
+    xhr.send();
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -678,6 +999,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     const sizeArr = new Float32Array(n);
     const brightArr = new Float32Array(n);
 
+    const { pubFreq, maxPubLog } = pubFreqRef.current;
     for (let i = 0; i < n; i++) {
       const nd = nodes[i];
       posArr[i * 3] = nd.x;
@@ -689,8 +1011,12 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       colArr[i * 3 + 1] = c[1];
       colArr[i * 3 + 2] = c[2];
 
-      sizeArr[i] = nd.isLibrary ? 5.0 + Math.min(nd.hoursPlayed * 0.05, 8.0) : 2.0;
-      brightArr[i] = nd.isLibrary ? 1.0 : 0.45;
+      sizeArr[i] = starSize(nd, pubFreq, maxPubLog);
+      // Brightness blends review-quality luminance with popularity magnitude
+      const popNorm = Math.min(Math.log10(Math.max(nd.reviewCount, 1)) / 5.3, 1);
+      const lumBlend = nd.luminance * 0.6 + popNorm * 0.4;
+      const bright = 0.08 + lumBlend * 0.92;
+      brightArr[i] = nd.isLibrary ? Math.min(1.0, bright + 0.15) : bright;
     }
 
     const geo = new THREE.BufferGeometry();
@@ -715,23 +1041,45 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     scene.add(sunSelected.group);
     scene.add(sunFocused.group);
 
-    // ── Bloom postprocessing ──
+    // ── Bloom postprocessing (half-res bloom for quality/perf balance) ──
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
     composer.addPass(new UnrealBloomPass(
-      new THREE.Vector2(w, h), 0.4, 0.15, 0.65,
+      new THREE.Vector2(Math.ceil(w / 2), Math.ceil(h / 2)), 0.4, 0.15, 0.65,
     ));
     composer.addPass(new OutputPass());
+
+    // ── Genre cluster labels ──
+    const centroids = computeGenreCentroids(nodes);
+    const genreLabelsGroup = new THREE.Group();
+    genreLabelsGroup.renderOrder = 999;
+    for (const [idx, pos] of centroids) {
+      if (idx >= CANONICAL_GENRE_LABELS.length) continue;
+      const sprite = createGenreLabelSprite(CANONICAL_GENRE_LABELS[idx], GENRE_PALETTE[idx], pos);
+      sprite.userData.colorIdx = idx;
+      genreLabelsGroup.add(sprite);
+    }
+    scene.add(genreLabelsGroup);
+
+    const baseSizes = sizeArr.slice();
+    const baseBright = brightArr.slice();
+    const baseColors = colArr.slice();
+    const nodeMap = new Map<string, GraphNode>(nodes.map(nd => [nd.id, nd]));
 
     const sRef = {
       renderer, scene, camera, controls, points, starField,
       lines: null as THREE.LineSegments | null,
       linesMat: null as THREE.LineDashedMaterial | null,
+      focusedLines: null as THREE.LineSegments | null,
+      focusedLinesMat: null as THREE.LineDashedMaterial | null,
+      focusedLinesOpacity: 0,
       pathLines: null as THREE.LineSegments | null,
       pathLinesMat: null as THREE.LineDashedMaterial | null,
       pathLabels: null as THREE.Group | null,
+      genreLabels: genreLabelsGroup as THREE.Group | null,
       raycaster, mouse, nodes,
       colorAttr, sizeAttr, brightnessAttr,
+      baseSizes, baseBright, baseColors, nodeMap,
       animFrameId: 0,
       composer, sunSelected, sunFocused,
     };
@@ -740,11 +1088,25 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     const _projVec = new THREE.Vector3();
     let _prevTime = performance.now();
     let _frames = 0;
+    let _lastRenderTime = 0;
+    let _cachedCW = container.clientWidth;
+    let _cachedCH = container.clientHeight;
+    const BG_FRAME_INTERVAL = 500; // ~2 FPS when hidden/unfocused
     function animate() {
       sRef.animFrameId = requestAnimationFrame(animate);
 
-      _frames++;
       const now = performance.now();
+      if (document.hidden || !document.hasFocus()) {
+        if (now - _lastRenderTime < BG_FRAME_INTERVAL) return;
+        _lastRenderTime = now;
+        controls.update();
+        return; // skip ALL GPU work when unfocused/hidden
+      } else if (now - _lastRenderTime > BG_FRAME_INTERVAL) {
+        _prevTime = now;
+        _frames = 0;
+      }
+      _lastRenderTime = now;
+      _frames++;
       const elapsed = now - _prevTime;
       if (elapsed >= 500) {
         const fps = Math.round((_frames * 1000) / elapsed);
@@ -769,6 +1131,15 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
 
       if (sRef.linesMat) (sRef.linesMat as any).dashOffset -= 0.3;
       if (sRef.pathLinesMat) (sRef.pathLinesMat as any).dashOffset -= 0.15;
+
+      if (sRef.focusedLinesMat) {
+        (sRef.focusedLinesMat as any).dashOffset -= 0.2;
+        const target = 1;
+        if (sRef.focusedLinesOpacity < target) {
+          sRef.focusedLinesOpacity = Math.min(target, sRef.focusedLinesOpacity + 0.035);
+          sRef.focusedLinesMat.opacity = sRef.focusedLinesOpacity;
+        }
+      }
 
       // ── Update sun meshes from reactive state ──
       const _sunState = sunStateRef.current;
@@ -804,60 +1175,76 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
 
       sRef.composer.render();
 
-      const cardsEl = neighborCardsRef.current;
-      if (cardsEl && cardsEl.children.length > 0) {
-        const cw = container.clientWidth;
-        const ch = container.clientHeight;
-        for (let ci = 0; ci < cardsEl.children.length; ci++) {
-          const card = cardsEl.children[ci] as HTMLElement;
-          _projVec.set(
-            parseFloat(card.dataset.nx!),
-            parseFloat(card.dataset.ny!),
-            parseFloat(card.dataset.nz!),
-          ).project(camera);
+      const projectCards = (el: HTMLDivElement | null) => {
+        if (!el) return;
+        const len = el.children.length;
+        if (len === 0) return;
+        const cw = _cachedCW;
+        const ch = _cachedCH;
+        for (let ci = 0; ci < len; ci++) {
+          const card = el.children[ci] as HTMLElement;
+          let coords = (card as any).__coords as Float64Array | undefined;
+          if (!coords) {
+            coords = new Float64Array([
+              parseFloat(card.dataset.nx!),
+              parseFloat(card.dataset.ny!),
+              parseFloat(card.dataset.nz!),
+            ]);
+            (card as any).__coords = coords;
+          }
+          _projVec.set(coords[0], coords[1], coords[2]).project(camera);
+          if (_projVec.z > 1) {
+            card.style.opacity = '0';
+            continue;
+          }
           const sx = (_projVec.x * 0.5 + 0.5) * cw;
           const sy = (-_projVec.y * 0.5 + 0.5) * ch;
           card.style.transform = `translate(${sx}px, ${sy - 48}px) translate(-50%, -100%)`;
-          card.style.opacity = _projVec.z > 1 ? '0' : '1';
+          card.style.opacity = '1';
         }
-      }
-
-      const overviewEl = pathOverviewCardsRef.current;
-      if (overviewEl && overviewEl.children.length > 0) {
-        const cw = container.clientWidth;
-        const ch = container.clientHeight;
-        for (let ci = 0; ci < overviewEl.children.length; ci++) {
-          const card = overviewEl.children[ci] as HTMLElement;
-          _projVec.set(
-            parseFloat(card.dataset.nx!),
-            parseFloat(card.dataset.ny!),
-            parseFloat(card.dataset.nz!),
-          ).project(camera);
-          const sx = (_projVec.x * 0.5 + 0.5) * cw;
-          const sy = (-_projVec.y * 0.5 + 0.5) * ch;
-          card.style.transform = `translate(${sx}px, ${sy - 48}px) translate(-50%, -100%)`;
-          card.style.opacity = _projVec.z > 1 ? '0' : '1';
-        }
-      }
+      };
+      projectCards(neighborCardsRef.current);
+      projectCards(pathOverviewCardsRef.current);
     }
     animate();
 
-    // ── Resize handler ──
+    // ── Resize handler (rAF-debounced to avoid storms) ──
+    let _resizeRaf = 0;
     const observer = new ResizeObserver(() => {
-      const cw = container.clientWidth;
-      const ch = container.clientHeight;
-      renderer.setSize(cw, ch);
-      composer.setSize(cw, ch);
-      camera.aspect = cw / ch;
-      camera.updateProjectionMatrix();
+      if (_resizeRaf) return;
+      _resizeRaf = requestAnimationFrame(() => {
+        _resizeRaf = 0;
+        const cw = container.clientWidth;
+        const ch = container.clientHeight;
+        _cachedCW = cw;
+        _cachedCH = ch;
+        renderer.setSize(cw, ch);
+        composer.setSize(cw, ch);
+        // Re-apply half-res to bloom pass (composer.setSize resets all passes to full-res)
+        for (const pass of composer.passes) {
+          if (pass instanceof UnrealBloomPass) {
+            pass.setSize(Math.ceil(cw / 2), Math.ceil(ch / 2));
+          }
+        }
+        camera.aspect = cw / ch;
+        camera.updateProjectionMatrix();
+        cachedRectRef.current = renderer.domElement.getBoundingClientRect();
+      });
     });
     observer.observe(container);
+    cachedRectRef.current = renderer.domElement.getBoundingClientRect();
 
     sceneRef.current = sRef;
 
     const cleanup = () => {
       observer.disconnect();
+      destroyed = true;
+      if (_resizeRaf) cancelAnimationFrame(_resizeRaf);
       cancelAnimationFrame(sRef.animFrameId);
+      controls.dispose();
+      for (const pass of composer.passes) {
+        if (typeof (pass as any).dispose === 'function') (pass as any).dispose();
+      }
       composer.dispose();
       renderer.dispose();
       geo.dispose();
@@ -875,13 +1262,30 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
         sRef.lines.geometry.dispose();
         (sRef.lines.material as THREE.Material).dispose();
       }
+      if (sRef.focusedLines) {
+        sRef.focusedLines.geometry.dispose();
+        (sRef.focusedLines.material as THREE.Material).dispose();
+      }
       if (sRef.pathLines) {
         sRef.pathLines.geometry.dispose();
         (sRef.pathLines.material as THREE.Material).dispose();
       }
       if (sRef.pathLabels) {
         sRef.pathLabels.traverse(child => {
-          if ((child as THREE.Sprite).material) (child as THREE.Sprite).material.dispose();
+          const sp = child as THREE.Sprite;
+          if (sp.material) {
+            if ((sp.material as THREE.SpriteMaterial).map) (sp.material as THREE.SpriteMaterial).map!.dispose();
+            sp.material.dispose();
+          }
+        });
+      }
+      if (sRef.genreLabels) {
+        sRef.genreLabels.traverse(child => {
+          const sp = child as THREE.Sprite;
+          if (sp.material) {
+            if ((sp.material as THREE.SpriteMaterial).map) (sp.material as THREE.SpriteMaterial).map!.dispose();
+            sp.material.dispose();
+          }
         });
       }
       if (renderer.domElement.parentNode === container) {
@@ -897,6 +1301,8 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
+    let catalogUnsub: (() => void) | null = null;
+    let catalogTimeout: ReturnType<typeof setTimeout> | null = null;
     setLoading(true);
 
     const RENDER_STEP = 'Rendering galaxy';
@@ -920,61 +1326,78 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       try {
       let nodes: GraphNode[];
       let allGenres: string[];
+      let projMethod = 'PCA';
 
-      // Try cache first
-      const cached = await loadCachedGalaxyIfFresh();
-      if (cached) {
-        nodes = cached.nodes;
-        allGenres = cached.allGenres;
-        GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, 'done', 'cached'));
-      } else if (embeddingService.isCatalogRunning) {
-        // Catalog embeddings are actively writing to IDB — building the galaxy
-        // now would cause a deadlock. Wait for the pipeline to finish first.
-        if (!cancelled) {
-          setLoadingSteps(allLabels.map(label => ({
-            label: `${label} — waiting for Taste DNA`,
-            status: 'waiting' as const,
-          })));
-        }
-        await new Promise<void>(resolve => {
-          if (!embeddingService.isCatalogRunning) { resolve(); return; }
-          const unsub = embeddingService.subscribe(() => {
-            if (!embeddingService.isCatalogRunning) { unsub(); resolve(); }
-          });
-        });
-        if (cancelled) return;
-        GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, 'running'));
-        const result = await buildAndCacheGalaxy(onStep);
-        nodes = result.nodes;
-        allGenres = result.allGenres;
+      if (useMock) {
+        // Fast-path: synthetic data for UI testing — no Ollama/IDB needed
+        GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, 'done', 'mock'));
+        const mock = generateMockGalaxy();
+        nodes = mock.nodes;
+        allGenres = mock.allGenres;
+        projMethod = 'MOCK';
       } else {
-        // If a background build is already in progress, piggyback on it
-        const bgPromise = getBackgroundBuildPromise();
-        if (bgPromise) {
-          GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, 'running', 'background build in progress'));
-          const result = await bgPromise;
-          nodes = result.nodes;
-          allGenres = result.allGenres;
-          GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, 'done'));
-        } else {
+        // Try cache first
+        const cached = await loadCachedGalaxyIfFresh();
+        if (cached) {
+          nodes = cached.nodes;
+          allGenres = cached.allGenres;
+          projMethod = cached.projectionMethod;
+          GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, 'done', 'cached'));
+        } else if (embeddingService.isCatalogRunning) {
+          if (!cancelled) {
+            setLoadingSteps(allLabels.map(label => ({
+              label: `${label} — waiting for embedding pipeline`,
+              status: 'waiting' as const,
+            })));
+          }
+          // Wait for catalog pipeline with a 3-minute timeout
+          await new Promise<void>(resolve => {
+            if (!embeddingService.isCatalogRunning) { resolve(); return; }
+            catalogTimeout = setTimeout(() => { catalogUnsub?.(); catalogUnsub = null; catalogTimeout = null; resolve(); }, 3 * 60_000);
+            const unsub = embeddingService.subscribe(() => {
+              if (!embeddingService.isCatalogRunning) { if (catalogTimeout) { clearTimeout(catalogTimeout); catalogTimeout = null; } catalogUnsub = null; unsub(); resolve(); }
+            });
+            catalogUnsub = unsub;
+          });
+          if (cancelled) return;
+          GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, 'running'));
           const result = await buildAndCacheGalaxy(onStep);
           nodes = result.nodes;
           allGenres = result.allGenres;
+          projMethod = result.projectionMethod;
+        } else {
+          // If a background build is already in progress, piggyback on it
+          const bgPromise = getBackgroundBuildPromise();
+          if (bgPromise) {
+            GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, 'running', 'background build in progress'));
+            const result = await bgPromise;
+            nodes = result.nodes;
+            allGenres = result.allGenres;
+            projMethod = result.projectionMethod;
+            GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, 'done'));
+          } else {
+            const result = await buildAndCacheGalaxy(onStep);
+            nodes = result.nodes;
+            allGenres = result.allGenres;
+            projMethod = result.projectionMethod;
+          }
         }
       }
 
       if (cancelled) return;
+      setProjectionMethod(projMethod);
       loadedNodesRef.current = nodes;
+      pubFreqRef.current = buildPublisherFreqs(nodes);
       nodeSearchIndex.current = [];
       setNodeCount(nodes.length);
       setAllGenres(allGenres);
       setActiveGenres(new Set());
 
-      if (nodes.length > 0 && canvasRef.current) {
+      if (nodes.length === 0) {
+        setEmptyGalaxy(true);
+      } else if (canvasRef.current) {
         onStep(RENDER_IDX, 'running');
 
-        // Yield so the loading screen can paint its "Rendering galaxy" state
-        // before the heavy synchronous initScene blocks the main thread.
         await new Promise(r => setTimeout(r, 0));
         if (cancelled) return;
 
@@ -983,13 +1406,12 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
         setRendererBackend(backend);
         (canvasRef.current as any).__cleanup = cleanup;
 
-        // Let WebGL compile shaders and render several frames so the GPU
-        // pipeline is warm before we reveal the scene (avoids visible jank).
         await new Promise<void>(resolve => {
           let warmupFrames = 0;
           const tick = () => {
+            if (cancelled) { resolve(); return; }
             warmupFrames++;
-            if (warmupFrames < 15) requestAnimationFrame(tick);
+            if (warmupFrames < 30) requestAnimationFrame(tick);
             else resolve();
           };
           requestAnimationFrame(tick);
@@ -999,30 +1421,51 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
         onStep(RENDER_IDX, 'done');
       }
 
-      // Yield so the warmup render composites before the big React
-      // re-render from setLoading(false) mounts all UI. Use setTimeout
-      // (not rAF) — rAF can stall if the Electron GPU process is busy.
-      await new Promise(r => setTimeout(r, 0));
-
-      // Critical: no `if (cancelled) return` here — setLoading(false)
-      // MUST fire to unstick the loading screen. setState on an unmounted
-      // component is a safe no-op in React 18.
-      setLoading(false);
-
-      if (!cancelled) {
-        // Yield so React commits the DOM and the browser paints before
-        // layering the lightweight hero text animation.
-        await new Promise(r => setTimeout(r, 0));
+      // Start the hero typewriter (only when we have actual galaxy nodes).
+      // The hero sits at z-25, below the loader at z-30, so it types
+      // behind the fading loader overlay — visible as it fades out.
+      if (!cancelled && nodes.length > 0) {
         setHeroVisible(true);
-        setTimeout(() => setHeroVisible(false), 3000);
+        // Give the typewriter ~600ms to render several characters and let
+        // the GPU stabilize frame rate before the heavy UI mount
+        // (genre filters, library panel, controls, etc.).
+        await new Promise(r => setTimeout(r, 600));
       }
+
+      // Check path availability before we clear loading.
+      if (!cancelled && sceneRef.current) {
+        if (useMock) {
+          const libNodes = loadedNodesRef.current.filter(n => n.isLibrary && n.hoursPlayed > 0);
+          setPathDisabledReason(libNodes.length >= 2 ? null : 'Need at least 2 library games for The Path');
+        } else {
+          const journeyWithDates = journeyStore.getAllEntries().filter(e => e.firstPlayedAt);
+          if (journeyWithDates.length < 2) {
+            setPathDisabledReason('Play at least 2 games to unlock The Path');
+          } else {
+            const mapped = journeyWithDates.filter(e => sceneRef.current!.nodeMap.has(e.gameId));
+            if (mapped.length < 2) {
+              setPathDisabledReason('Need embeddings for at least 2 played games');
+            } else {
+              setPathDisabledReason(null);
+            }
+          }
+        }
+      }
+
+      // Use startTransition so React yields to rAF between render chunks,
+      // keeping the typewriter animation smooth during the heavy UI mount.
+      startTransition(() => setLoading(false));
 
       // Build search index during idle time so the typewriter stays smooth.
       let idxPos = 0;
       const IDX_CHUNK = 3000;
+      let idleHandle = 0;
       const scheduleIdle = typeof requestIdleCallback === 'function'
-        ? (fn: IdleRequestCallback) => requestIdleCallback(fn, { timeout: 3000 })
-        : (fn: () => void) => setTimeout(fn, 60);
+        ? (fn: IdleRequestCallback) => { idleHandle = requestIdleCallback(fn, { timeout: 3000 }); }
+        : (fn: () => void) => { idleHandle = window.setTimeout(fn, 60) as unknown as number; };
+      const cancelIdle = typeof cancelIdleCallback === 'function'
+        ? () => cancelIdleCallback(idleHandle)
+        : () => clearTimeout(idleHandle);
       const buildChunk = () => {
         if (cancelled) return;
         const end = Math.min(idxPos + IDX_CHUNK, nodes.length);
@@ -1035,13 +1478,14 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
             titleNorm: titleLower.replace(/[^a-z0-9\s]/g, ''),
             titleWords: titleLower.split(/\s+/).filter(Boolean),
             devLower: (nd.developer || '').toLowerCase(),
-            pubLower: '',
+            pubLower: (nd.publisher || '').toLowerCase(),
             genresLower: nd.genres.map(g => g.toLowerCase()),
           };
         }
         if (idxPos < nodes.length) scheduleIdle(buildChunk);
       };
       scheduleIdle(buildChunk);
+      cleanupIdleRef.current = cancelIdle;
 
       } catch (err) {
         console.error('[Embedding Space] Loading failed:', err);
@@ -1051,6 +1495,13 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
 
     return () => {
       cancelled = true;
+      if (catalogTimeout) { clearTimeout(catalogTimeout); catalogTimeout = null; }
+      if (catalogUnsub) { catalogUnsub(); catalogUnsub = null; }
+      cancelActiveProjectionWorker();
+      if (cleanupIdleRef.current) { cleanupIdleRef.current(); cleanupIdleRef.current = null; }
+      if (hoverRafRef.current) { cancelAnimationFrame(hoverRafRef.current); hoverRafRef.current = 0; }
+      if (heroTimerRef.current) { clearTimeout(heroTimerRef.current); heroTimerRef.current = null; }
+      if (searchBlurRef.current) { clearTimeout(searchBlurRef.current); searchBlurRef.current = null; }
       if (canvasRef.current && (canvasRef.current as any).__cleanup) {
         (canvasRef.current as any).__cleanup();
       }
@@ -1058,92 +1509,127 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ─── Pre-computed search match set (scored once per query change) ────
-
-  const searchMatchIds = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim();
-    const tokens = q.split(/\s+/).filter(Boolean);
-    if (tokens.length === 0) return new Set<string>();
-
-    const nodes = loadedNodesRef.current;
-    const idx = nodeSearchIndex.current;
-    const ids = new Set<string>();
-    for (let i = 0; i < nodes.length; i++) {
-      if (idx.length > i && scoreGame(idx[i], tokens, q) > 0) {
-        ids.add(nodes[i].id);
-      }
-    }
-    return ids;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, nodeCount]);
-
   // ─── Visual update: highlight selection + filter ────────────────────
 
   const updateVisuals = useCallback(() => {
     const s = sceneRef.current;
     if (!s) return;
 
-    const { nodes, colorAttr, sizeAttr, brightnessAttr } = s;
+    const ag = activeGenresRef.current;
+    const al = allGenresRef.current;
+    const { nodes, colorAttr, sizeAttr, brightnessAttr, baseSizes, baseBright, baseColors } = s;
     const selId = selectedIdRef.current;
     const nbIds = neighborIdsRef.current;
+    const fnbIds = focusedNbIdsRef.current;
     const pIds = pathIdsRef.current;
     const hasSelection = !!selId;
+    const hasFocusedNbs = fnbIds.size > 0;
     const hasPath = pIds.size > 0;
-    const hasSearch = searchMatchIds.size > 0;
-    const filterActive = activeGenres.size > 0 && activeGenres.size < allGenres.length;
+    const filterActive = ag.size > 0 && ag.size < al.length;
+    const isDefault = !hasSelection && !hasPath && !filterActive;
 
-    for (let i = 0; i < nodes.length; i++) {
-      const nd = nodes[i];
-      const isSel = nd.id === selId;
-      const isNb = hasSelection && nbIds.has(nd.id);
-      const isOnPath = hasPath && pIds.has(nd.id);
-      const matchesSearch = hasSearch && searchMatchIds.has(nd.id);
-      const matchesFilter = !filterActive || nd.genres.some(g => activeGenres.has(g));
+    // Fast path: no selection, no path, no filter → restore base values in bulk
+    if (isDefault) {
+      const cArr = colorAttr.array as Float32Array;
+      const sArr = sizeAttr.array as Float32Array;
+      const bArr = brightnessAttr.array as Float32Array;
+      cArr.set(baseColors);
+      sArr.set(baseSizes);
+      bArr.set(baseBright);
+      colorAttr.needsUpdate = true;
+      sizeAttr.needsUpdate = true;
+      brightnessAttr.needsUpdate = true;
+    } else {
+      // Slow path: only runs when selection/path/filter is active.
+      // Writes directly to typed arrays (avoids per-element setXYZ overhead for 60K+ nodes).
+      const cArr = colorAttr.array as Float32Array;
+      const sArr = sizeAttr.array as Float32Array;
+      const bArr = brightnessAttr.array as Float32Array;
 
-      let bright: number;
-      let size: number;
-      const baseC = GENRE_PALETTE[nd.colorIdx];
-      let r = baseC[0], g = baseC[1], b = baseC[2];
+      for (let i = 0; i < nodes.length; i++) {
+        const nd = nodes[i];
+        const isSel = nd.id === selId;
+        const isNb = hasSelection && nbIds.has(nd.id);
+        const isOnPath = hasPath && pIds.has(nd.id);
 
-      if (isSel) {
-        bright = 1.8;
-        size = 16;
-        r = 1; g = 0.7; b = 1;
-      } else if (isNb) {
-        bright = 1.4;
-        size = nd.isLibrary ? 8 : 6;
-        r = 0.3; g = 0.95; b = 0.95;
-      } else if (isOnPath) {
-        bright = 1.5;
-        size = 7 + Math.min(nd.hoursPlayed * 0.06, 10);
-      } else if (matchesSearch) {
-        bright = 1.3;
-        size = nd.isLibrary ? 10 : 6;
-      } else if (hasSelection || hasPath) {
-        bright = nd.isLibrary ? 0.15 : 0.06;
-        size = nd.isLibrary ? 3 : 1;
-      } else if (filterActive && matchesFilter) {
-        bright = nd.isLibrary ? 1.3 : 0.9;
-        size = nd.isLibrary ? 7 : 4;
-      } else if (filterActive && !matchesFilter) {
-        bright = nd.isLibrary ? 0.35 : 0.12;
-        size = nd.isLibrary ? 3 : 1.5;
-      } else {
-        bright = nd.isLibrary ? 1.0 : 0.45;
-        size = nd.isLibrary ? 5 + Math.min(nd.hoursPlayed * 0.05, 8) : 2;
+        let bright: number;
+        let size: number;
+        let r = baseColors[i * 3], g = baseColors[i * 3 + 1], b = baseColors[i * 3 + 2];
+
+        if (isSel) {
+          bright = 1.8;
+          size = 16;
+          r = 1; g = 0.7; b = 1;
+        } else if (isNb) {
+          bright = 1.4;
+          size = Math.max(baseSizes[i], nd.isLibrary ? 8 : 6);
+          r = 0.3; g = 0.95; b = 0.95;
+        } else if (hasFocusedNbs && fnbIds.has(nd.id)) {
+          bright = 1.1;
+          size = Math.max(baseSizes[i], nd.isLibrary ? 6 : 4);
+          r = 0.65; g = 0.35; b = 1.0;
+        } else if (isOnPath) {
+          bright = 1.5;
+          size = Math.max(baseSizes[i], 7);
+        } else if (hasSelection || hasPath) {
+          bright = baseBright[i] * 0.15;
+          size = Math.min(baseSizes[i], nd.isLibrary ? 3 : 1);
+        } else if (filterActive && nd.genres.some(gn => ag.has(gn))) {
+          bright = Math.min(1.4, baseBright[i] + 0.3);
+          size = Math.max(baseSizes[i], nd.isLibrary ? 7 : 4);
+        } else if (filterActive) {
+          bright = 0.03;
+          size = 0.6;
+          const grey = 0.15;
+          r = r * 0.3 + grey * 0.7;
+          g = g * 0.3 + grey * 0.7;
+          b = b * 0.3 + grey * 0.7;
+        } else {
+          bright = baseBright[i];
+          size = baseSizes[i];
+        }
+
+        const ci = i * 3;
+        cArr[ci] = r; cArr[ci + 1] = g; cArr[ci + 2] = b;
+        sArr[i] = size;
+        bArr[i] = bright;
       }
 
-      colorAttr.setXYZ(i, r, g, b);
-      sizeAttr.setX(i, size);
-      brightnessAttr.setX(i, bright);
+      colorAttr.needsUpdate = true;
+      sizeAttr.needsUpdate = true;
+      brightnessAttr.needsUpdate = true;
     }
 
-    colorAttr.needsUpdate = true;
-    sizeAttr.needsUpdate = true;
-    brightnessAttr.needsUpdate = true;
-  }, [searchMatchIds, activeGenres, allGenres]);
+    // ── Genre label visibility ──
+    if (s.genreLabels) {
+      const hideLabels = hasSelection || hasPath;
+      const activeColorIdxs = new Set<number>();
+      if (filterActive) {
+        for (const g of ag) activeColorIdxs.add(genreToColorIdx([g]));
+      }
 
-  useEffect(() => { updateVisuals(); }, [updateVisuals]);
+      for (const child of s.genreLabels.children) {
+        const sprite = child as THREE.Sprite;
+        const mat = sprite.material as THREE.SpriteMaterial;
+        const cidx = sprite.userData.colorIdx as number;
+
+        if (hideLabels) {
+          mat.opacity = 0;
+        } else if (filterActive) {
+          mat.opacity = activeColorIdxs.has(cidx)
+            ? sprite.userData.highlightOpacity
+            : 0.02;
+        } else {
+          mat.opacity = sprite.userData.baseOpacity;
+        }
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => updateVisuals());
+    return () => cancelAnimationFrame(id);
+  }, [activeGenres, allGenres, updateVisuals]);
 
   // ─── Connection lines (animated flight-path) ───────────────────────
 
@@ -1169,7 +1655,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       if (!nb.node) continue;
       linePositions.push(selNode.x, selNode.y, selNode.z);
       linePositions.push(nb.node.x, nb.node.y, nb.node.z);
-      const intensity = Math.max(0.2, 1 - nb.distance * 2);
+      const intensity = Math.max(0.2, 1 - nb.distance * 1.2);
       lineColors.push(0.3 * intensity, 0.9 * intensity, 0.9 * intensity);
       lineColors.push(0.3 * intensity * 0.3, 0.9 * intensity * 0.3, 0.9 * intensity * 0.3);
       const dist = Math.sqrt(
@@ -1201,9 +1687,77 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     s.linesMat = mat;
   }, []);
 
+  // ─── Focused-neighbor connection lines (secondary web) ─────────────
+
+  const clearFocusedConnections = useCallback(() => {
+    const s = sceneRef.current;
+    if (!s) return;
+    if (s.focusedLines) {
+      s.scene.remove(s.focusedLines);
+      s.focusedLines.geometry.dispose();
+      (s.focusedLines.material as THREE.Material).dispose();
+      s.focusedLines = null;
+      s.focusedLinesMat = null;
+    }
+    s.focusedLinesOpacity = 0;
+    focusedNbIdsRef.current = new Set();
+  }, []);
+
+  const drawFocusedConnections = useCallback((centerNode: GraphNode, nbList: NeighborInfo[]) => {
+    const s = sceneRef.current;
+    if (!s) return;
+    clearFocusedConnections();
+    if (nbList.length === 0) return;
+
+    const linePositions: number[] = [];
+    const lineColors: number[] = [];
+    const lineDistances: number[] = [];
+
+    for (const nb of nbList) {
+      if (!nb.node) continue;
+      linePositions.push(centerNode.x, centerNode.y, centerNode.z);
+      linePositions.push(nb.node.x, nb.node.y, nb.node.z);
+      const intensity = Math.max(0.2, 1 - nb.distance * 1.2);
+      lineColors.push(0.65 * intensity, 0.35 * intensity, 1.0 * intensity);
+      lineColors.push(0.65 * intensity * 0.3, 0.35 * intensity * 0.3, 1.0 * intensity * 0.3);
+      const dist = Math.sqrt(
+        (nb.node.x - centerNode.x) ** 2 +
+        (nb.node.y - centerNode.y) ** 2 +
+        (nb.node.z - centerNode.z) ** 2,
+      );
+      lineDistances.push(0, dist);
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(lineColors, 3));
+    geo.setAttribute('lineDistance', new THREE.Float32BufferAttribute(lineDistances, 1));
+
+    const mat = new THREE.LineDashedMaterial({
+      vertexColors: true,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      dashSize: 1,
+      gapSize: 4,
+      scale: 1,
+      opacity: 0,
+    });
+
+    const focusedLineObj = new THREE.LineSegments(geo, mat);
+    s.scene.add(focusedLineObj);
+    s.focusedLines = focusedLineObj;
+    s.focusedLinesMat = mat;
+    s.focusedLinesOpacity = 0;
+
+    focusedNbIdsRef.current = new Set(nbList.map(nb => nb.id));
+    updateVisuals();
+  }, [clearFocusedConnections, updateVisuals]);
+
   // ─── Path helpers ────────────────────────────────────────────────────
 
   const clearPath = useCallback(() => {
+    pathBuildGenRef.current++;
     const s = sceneRef.current;
     if (s) {
       if (s.pathLines) {
@@ -1215,7 +1769,11 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       }
       if (s.pathLabels) {
         s.pathLabels.traverse(child => {
-          if ((child as THREE.Sprite).material) (child as THREE.Sprite).material.dispose();
+          const sp = child as THREE.Sprite;
+          if (sp.material) {
+            if ((sp.material as THREE.SpriteMaterial).map) (sp.material as THREE.SpriteMaterial).map!.dispose();
+            sp.material.dispose();
+          }
         });
         s.scene.remove(s.pathLabels);
         s.pathLabels = null;
@@ -1239,6 +1797,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     ctx.textBaseline = 'middle';
     ctx.fillText(text, 256, 32);
     const tex = new THREE.CanvasTexture(canvas);
+    tex.generateMipmaps = false;
     tex.minFilter = THREE.LinearFilter;
     const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.65, depthWrite: false, blending: THREE.AdditiveBlending });
     const sprite = new THREE.Sprite(mat);
@@ -1262,6 +1821,10 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     setConnectionCount(0);
     setShowNeighbors(false);
     setNbSearch('');
+    traversalStackRef.current = [];
+    setTraversalDepth(0);
+
+    clearFocusedConnections();
 
     const s = sceneRef.current;
     if (s) {
@@ -1274,7 +1837,131 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       s.linesMat = null;
     }
     updateVisuals();
-  }, [updateVisuals, cancelFly]);
+  }, [updateVisuals, cancelFly, clearFocusedConnections]);
+
+  const rerankNeighbors = useCallback((
+    selectedNode: GraphNode,
+    candidates: Array<{ id: string; distance: number }>,
+    nodeMap: Map<string, GraphNode>,
+    k: number,
+  ): NeighborInfo[] => {
+    const selGenresLower = new Set(selectedNode.genres.map(g => g.toLowerCase()));
+    const selThemesLower = new Set((selectedNode.themes ?? []).map(t => t.toLowerCase()));
+    const selColor = selectedNode.colorIdx;
+    const selDev = selectedNode.developer?.toLowerCase().trim() ?? '';
+    const selPub = selectedNode.publisher?.toLowerCase().trim() ?? '';
+    const selFranchise = extractFranchiseBase(selectedNode.title);
+    const selHasReviews = selectedNode.reviewCount >= 0;
+    const selPopLog = selHasReviews ? Math.log10(Math.max(selectedNode.reviewCount, 1)) : -1;
+    const selYear = selectedNode.releaseYear ?? 0;
+    const selLum = selectedNode.luminance ?? 0.5;
+
+    const scored = candidates.map(r => {
+      const nd = nodeMap.get(r.id);
+      if (!nd) return { id: r.id, distance: r.distance, node: nd, adj: r.distance + 0.30 };
+
+      if (nd.title.startsWith('Unknown Game')) {
+        return { id: r.id, distance: r.distance, node: nd, adj: r.distance + 0.50 };
+      }
+
+      const nbGenresLower = nd.genres.map(g => g.toLowerCase());
+      const sameCategory = nd.colorIdx === selColor;
+
+      const nbThemesLower = (nd.themes ?? []).map(t => t.toLowerCase());
+      const nbThemeSet = new Set(nbThemesLower);
+
+      let adj = r.distance;
+
+      // ── Popularity: smooth log curve (skip when review data absent, e.g. Epic) ──
+      const nbHasReviews = nd.reviewCount >= 0;
+      const nbPopLog = nbHasReviews ? Math.log10(Math.max(nd.reviewCount, 1)) : -1;
+      if (nbHasReviews && !nd.isLibrary && nd.reviewCount < 500) {
+        adj += 0.12 * Math.max(0, 1 - Math.log10(nd.reviewCount + 1) / 2.7);
+      }
+      if (selPopLog > 2 && nbPopLog > 2 && Math.abs(selPopLog - nbPopLog) < 1.5) {
+        adj -= 0.02;
+      }
+
+      // ── Genre: IDF-weighted Jaccard with smooth penalty/bonus curve ──
+      const idfJ = idfWeightedJaccard(selGenresLower, nbGenresLower);
+
+      if (nbGenresLower.length === 0) {
+        adj += 0.10;
+      } else if (idfJ === 0) {
+        adj += sameCategory ? 0.10 : 0.25;
+      } else {
+        const mismatchPenalty = 0.22 * (1 - idfJ) * (1 - idfJ) * (sameCategory ? 0.45 : 1.0);
+        const overlapBonus = 0.10 * Math.pow(idfJ, 1.5);
+        adj += mismatchPenalty - overlapBonus;
+      }
+
+      // ── Genre taxonomy: partial credit for related sub-genres ──
+      adj -= genreTaxonomyBonus(selGenresLower, nbGenresLower);
+
+      // ── Themes: proportional Jaccard instead of binary thresholds ──
+      let themeJaccard = 0;
+      if (selThemesLower.size > 0 && nbThemesLower.length > 0) {
+        const intersection = nbThemesLower.filter(t => selThemesLower.has(t)).length;
+        const union = new Set([...selThemesLower, ...nbThemeSet]).size;
+        themeJaccard = union > 0 ? intersection / union : 0;
+      }
+      adj -= 0.06 * themeJaccard;
+
+      // ── Franchise/series boost (strong — sequels must cluster) ──
+      const nbFranchise = extractFranchiseBase(nd.title);
+      const isFranchise = selFranchise.length >= 3 && nbFranchise === selFranchise;
+      if (isFranchise) adj -= 0.20;
+
+      // ── Developer affinity ──
+      const nbDev = nd.developer?.toLowerCase().trim() ?? '';
+      const isDev = selDev !== '' && nbDev !== '' && nbDev === selDev;
+      if (isDev) adj -= 0.04;
+
+      // ── Publisher affinity (weaker than dev, avoids double-counting) ──
+      const nbPub = nd.publisher?.toLowerCase().trim() ?? '';
+      const isPub = selPub !== '' && nbPub !== '' && nbPub === selPub && nbPub !== selDev && nbDev !== selPub;
+      if (isPub) adj -= 0.02;
+
+      // ── Release era proximity ──
+      let eraMatch = false;
+      if (selYear > 0 && nd.releaseYear > 0) {
+        const yearGap = Math.abs(selYear - nd.releaseYear);
+        if (yearGap <= 2) { adj -= 0.03; eraMatch = true; }
+        else if (yearGap <= 5) { adj -= 0.01; eraMatch = true; }
+        else if (yearGap >= 15) adj += 0.03;
+      }
+
+      // ── Luminance (review quality) proximity ──
+      const nbLum = nd.luminance ?? 0.5;
+      if (selLum > 0 && nbLum > 0) {
+        const lumDiff = Math.abs(selLum - nbLum);
+        if (lumDiff < 0.15) adj -= 0.015;
+        else if (lumDiff > 0.5) adj += 0.02;
+      }
+
+      // ── Multi-signal synergy: compound bonus when multiple signals align ──
+      let signals = 0;
+      if (idfJ >= 0.5) signals++;
+      if (themeJaccard >= 0.3) signals++;
+      if (eraMatch) signals++;
+      if (isFranchise) signals++;
+      if (isDev) signals++;
+      if (signals >= 3) adj -= 0.02 * (signals - 2);
+
+      return { id: r.id, distance: r.distance, node: nd, adj };
+    });
+
+    scored.sort((a, b) => a.adj - b.adj);
+    const MAX_DISTANCE = 1.5;
+    const out: NeighborInfo[] = [];
+    for (const s of scored) {
+      if (out.length >= k) break;
+      if (s.distance > MAX_DISTANCE) continue;
+      if (s.node?.title.startsWith('Unknown Game')) continue;
+      out.push({ id: s.id, distance: s.distance, node: s.node });
+    }
+    return out;
+  }, []);
 
   const selectPathNode = useCallback(async (idx: number) => {
     const s = sceneRef.current;
@@ -1298,15 +1985,29 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     const isLast = idx === pn.length - 1;
 
     if (isLast) {
-      const vec = await getEmbeddingById(node.id);
       let nbList: NeighborInfo[] = [];
-      if (vec && annIndex.isReady) {
-        const results = await annIndex.queryWithDistances(vec, neighborK.current + 1);
-        const nodeMap = new Map(s.nodes.map(n => [n.id, n]));
-        nbList = results
-          .filter(r => r.id !== node.id)
-          .slice(0, neighborK.current)
-          .map(r => ({ id: r.id, distance: r.distance, node: nodeMap.get(r.id) }));
+      if (useMock) {
+        // Mock: euclidean distance neighbors for the final path node
+        const k = neighborK.current;
+        const all = loadedNodesRef.current;
+        const dists: { id: string; distance: number }[] = [];
+        for (const other of all) {
+          if (other.id === node.id) continue;
+          const dx = other.x - node.x, dy = other.y - node.y, dz = other.z - node.z;
+          dists.push({ id: other.id, distance: Math.sqrt(dx * dx + dy * dy + dz * dz) });
+        }
+        dists.sort((a, b) => a.distance - b.distance);
+        nbList = dists.slice(0, k).map(d => ({ id: d.id, distance: d.distance, node: s.nodeMap.get(d.id) }));
+      } else {
+        const vec = await getEmbeddingById(node.id);
+        if (selectedIdRef.current !== node.id) return;
+        if (vec && annIndex.isReady) {
+          const overFetch = neighborK.current * 8 + 1;
+          const results = await annIndex.queryWithDistances(vec, overFetch);
+          if (selectedIdRef.current !== node.id) return;
+          const filtered = results.filter(r => r.id !== node.id);
+          nbList = rerankNeighbors(node, filtered, s.nodeMap, neighborK.current);
+        }
       }
       neighborIdsRef.current = new Set(nbList.map(nb => nb.id));
       setNeighbors(nbList);
@@ -1314,8 +2015,17 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       drawConnections(node, nbList);
     } else {
       const next = pn[idx + 1];
-      const dist = Math.sqrt((next.x - node.x) ** 2 + (next.y - node.y) ** 2 + (next.z - node.z) ** 2);
-      const nbList: NeighborInfo[] = [{ id: next.id, distance: +(dist / 100).toFixed(4), node: next }];
+      let cosDist = 0;
+      if (!useMock) {
+        const [vecA, vecB] = await Promise.all([getEmbeddingById(node.id), getEmbeddingById(next.id)]);
+        if (selectedIdRef.current !== node.id) return;
+        cosDist = vecA && vecB ? cosineDistance(vecA, vecB) : 0;
+      } else {
+        // Euclidean distance as mock substitute for cosine distance
+        const dx = next.x - node.x, dy = next.y - node.y, dz = next.z - node.z;
+        cosDist = Math.sqrt(dx * dx + dy * dy + dz * dz) / 100;
+      }
+      const nbList: NeighborInfo[] = [{ id: next.id, distance: +cosDist.toFixed(4), node: next }];
       neighborIdsRef.current = new Set([next.id]);
       setNeighbors(nbList);
       setConnectionCount(1);
@@ -1327,7 +2037,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     let maxEdgeLen = 0;
     const nbs = isLast ? neighborIdsRef.current : new Set([pn[idx + 1]?.id]);
     for (const nbId of nbs) {
-      const nbNode = s.nodes.find(n => n.id === nbId);
+      const nbNode = s.nodeMap.get(nbId);
       if (!nbNode) continue;
       const dx = nbNode.x - node.x;
       const dy = nbNode.y - node.y;
@@ -1339,7 +2049,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     const dir = new THREE.Vector3().subVectors(s.camera.position, starPos).normalize();
     const endCamPos = starPos.clone().add(dir.multiplyScalar(zoomDist));
     startFly(starPos, endCamPos, 2800);
-  }, [drawConnections, updateVisuals, startFly]);
+  }, [rerankNeighbors, drawConnections, updateVisuals, startFly, useMock]);
 
   const showThePath = useCallback(async () => {
     const s = sceneRef.current;
@@ -1358,23 +2068,40 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     setSearchQuery('');
     setSearchFocused(false);
 
-    const journeyEntries = journeyStore.getAllEntries()
-      .filter(e => e.firstPlayedAt)
-      .sort((a, b) => new Date(a.firstPlayedAt!).getTime() - new Date(b.firstPlayedAt!).getTime());
+    let pathNodes: GraphNode[] = [];
+    let pathVecs: (number[] | null)[] = [];
 
-    if (journeyEntries.length < 2) return;
+    if (useMock) {
+      // Mock mode: sort library nodes by releaseYear to simulate play chronology
+      pathNodes = loadedNodesRef.current
+        .filter(n => n.isLibrary && n.hoursPlayed > 0)
+        .sort((a, b) => a.releaseYear - b.releaseYear);
+      pathVecs = pathNodes.map(() => null); // no real embeddings
+    } else {
+      const journeyEntries = journeyStore.getAllEntries()
+        .filter(e => e.firstPlayedAt)
+        .sort((a, b) => new Date(a.firstPlayedAt!).getTime() - new Date(b.firstPlayedAt!).getTime());
 
-    const nodeMap = new Map(s.nodes.map(n => [n.id, n]));
-    const pathNodes: GraphNode[] = [];
-    for (const je of journeyEntries) {
-      const n = nodeMap.get(je.gameId);
-      if (n) pathNodes.push(n);
+      if (journeyEntries.length < 2) return;
+
+      for (const je of journeyEntries) {
+        const n = s.nodeMap.get(je.gameId);
+        if (n) pathNodes.push(n);
+      }
     }
+
     if (pathNodes.length < 2) return;
 
     pathNodesRef.current = pathNodes;
     pathIdsRef.current = new Set(pathNodes.map(n => n.id));
     setPathActive(true);
+
+    const myPathGen = ++pathBuildGenRef.current;
+
+    if (!useMock) {
+      pathVecs = await Promise.all(pathNodes.map(n => getEmbeddingById(n.id)));
+      if (pathBuildGenRef.current !== myPathGen) return;
+    }
 
     const linePositions: number[] = [];
     const lineColors: number[] = [];
@@ -1398,10 +2125,14 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       const segDist = Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2 + (b.z - a.z) ** 2);
       lineDistances.push(0, segDist);
 
-      const je = journeyEntries.find(e => e.gameId === a.id);
-      const hours = je ? je.hoursPlayed : a.hoursPlayed;
+      const vecA = pathVecs[i], vecB = pathVecs[i + 1];
+      const cosDist = vecA && vecB ? cosineDistance(vecA, vecB) : null;
+
+      const hours = a.hoursPlayed;
       const mid = new THREE.Vector3((a.x + b.x) / 2, (a.y + b.y) / 2 + 4, (a.z + b.z) / 2);
-      const label = `${hours.toFixed(0)}h · d=${(segDist / 100).toFixed(2)}`;
+      const label = cosDist != null
+        ? `${hours.toFixed(0)}h · d=${cosDist.toFixed(3)}`
+        : `${hours.toFixed(0)}h`;
       labelsGroup.add(makeTextSprite(label, mid));
     }
 
@@ -1441,7 +2172,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
 
     setPathOverview(true);
     startFly(center, overviewCamPos, 2400);
-  }, [pathActive, clearPath, clearSelection, makeTextSprite, updateVisuals, startFly]);
+  }, [pathActive, clearPath, clearSelection, makeTextSprite, updateVisuals, startFly, useMock]);
 
   const startPathExplore = useCallback(() => {
     setPathOverview(false);
@@ -1449,12 +2180,17 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
   }, [selectPathNode]);
 
   const [screenshotSaving, setScreenshotSaving] = useState(false);
+  const screenshotSavingRef = useRef(false);
 
   const captureScreenshot = useCallback(async () => {
     const area = screenshotAreaRef.current;
-    if (!area || screenshotSaving) return;
+    if (!area || screenshotSavingRef.current) return;
+    screenshotSavingRef.current = true;
     setScreenshotSaving(true);
     try {
+      const s = sceneRef.current;
+      if (s) s.composer.render();
+
       const dataUrl = await toPng(area, {
         cacheBust: true,
         pixelRatio: 2,
@@ -1477,8 +2213,9 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     } catch (err) {
       console.error('[Screenshot] Failed to capture:', err);
     }
+    screenshotSavingRef.current = false;
     setScreenshotSaving(false);
-  }, [screenshotSaving]);
+  }, []);
 
   const selectNode = useCallback(async (node: GraphNode, flyTo = false) => {
     const s = sceneRef.current;
@@ -1496,16 +2233,40 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     sunStateRef.current.selectedColor = [sunC[0], sunC[1], sunC[2]];
     sunStateRef.current.focusedPos = null;
 
-    const vec = await getEmbeddingById(node.id);
     let nbList: NeighborInfo[] = [];
 
-    if (vec && annIndex.isReady) {
-      const results = await annIndex.queryWithDistances(vec, neighborK.current + 1);
-      const nodeMap = new Map(s.nodes.map(n => [n.id, n]));
-      nbList = results
-        .filter(r => r.id !== node.id)
-        .slice(0, neighborK.current)
-        .map(r => ({ id: r.id, distance: r.distance, node: nodeMap.get(r.id) }));
+    if (useMock) {
+      // In mock mode: compute neighbors by 3D euclidean distance
+      const k = neighborK.current;
+      const all = loadedNodesRef.current;
+      if (all.length > 0) {
+        const dists: { id: string; distance: number }[] = [];
+        for (const other of all) {
+          if (other.id === node.id) continue;
+          const dx = other.x - node.x;
+          const dy = other.y - node.y;
+          const dz = other.z - node.z;
+          dists.push({ id: other.id, distance: Math.sqrt(dx * dx + dy * dy + dz * dz) });
+        }
+        dists.sort((a, b) => a.distance - b.distance);
+        const top = dists.slice(0, k);
+        nbList = top.map(d => ({
+          id: d.id,
+          distance: d.distance,
+          node: s.nodeMap.get(d.id),
+        }));
+      }
+    } else {
+      const vec = await getEmbeddingById(node.id);
+      if (selectedIdRef.current !== node.id) return;
+
+      if (vec && annIndex.isReady) {
+        const overFetch = neighborK.current * 8 + 1;
+        const results = await annIndex.queryWithDistances(vec, overFetch);
+        if (selectedIdRef.current !== node.id) return;
+        const filtered = results.filter(r => r.id !== node.id);
+        nbList = rerankNeighbors(node, filtered, s.nodeMap, neighborK.current);
+      }
     }
 
     neighborIdsRef.current = new Set(nbList.map(nb => nb.id));
@@ -1531,7 +2292,40 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       const endCamPos = starPos.clone().add(dir.multiplyScalar(zoomDist));
       startFly(starPos, endCamPos, 2800);
     }
-  }, [drawConnections, updateVisuals, startFly, pathActive, clearPath]);
+  }, [rerankNeighbors, drawConnections, updateVisuals, startFly, pathActive, clearPath, useMock]);
+
+  // ─── Camera fly helper ──────────────────────────────────────────────
+
+  const flyToNode3D = useCallback((node: GraphNode) => {
+    const s = sceneRef.current;
+    if (!s) return;
+    const pos = new THREE.Vector3(node.x, node.y, node.z);
+    const dir = new THREE.Vector3().subVectors(s.camera.position, pos).normalize();
+    const endCamPos = pos.clone().add(dir.multiplyScalar(100));
+    startFly(pos, endCamPos, 1600);
+  }, [startFly]);
+
+  // ─── Traversal: dive into neighbor's neighbors ─────────────────────
+
+  const traverseInto = useCallback((node: GraphNode) => {
+    if (!selectedNode) return;
+    traversalStackRef.current = [...traversalStackRef.current, selectedNode];
+    setTraversalDepth(traversalStackRef.current.length);
+    setDetailOpen(false);
+    flyToNode3D(node);
+    selectNode(node, false);
+  }, [selectedNode, selectNode, flyToNode3D]);
+
+  const traverseBack = useCallback(() => {
+    const stack = traversalStackRef.current;
+    if (stack.length === 0) return;
+    const prev = stack[stack.length - 1];
+    traversalStackRef.current = stack.slice(0, -1);
+    setTraversalDepth(traversalStackRef.current.length);
+    setDetailOpen(false);
+    flyToNode3D(prev);
+    selectNode(prev, false);
+  }, [selectNode, flyToNode3D]);
 
   // ─── Interaction handlers ──────────────────────────────────────────
 
@@ -1540,7 +2334,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     if (!s) return;
     if (!selectedIdRef.current) return;
 
-    const rect = s.renderer.domElement.getBoundingClientRect();
+    const rect = cachedRectRef.current ?? s.renderer.domElement.getBoundingClientRect();
     s.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     s.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     s.raycaster.setFromCamera(s.mouse, s.camera);
@@ -1553,43 +2347,68 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       if (!isSelected && !isNeighbor) return;
       if (isSelected) {
         clearSelection();
+      } else if (selectedNode) {
+        traverseInto(node);
       } else {
         await selectNode(node, true);
       }
     }
-  }, [selectNode, clearSelection]);
+  }, [selectNode, clearSelection, selectedNode, traverseInto]);
 
   const handleCanvasMove = useCallback((e: React.MouseEvent) => {
-    const s = sceneRef.current;
-    if (!s) return;
-    if (!selectedIdRef.current) {
-      if (hoveredNode) setHoveredNode(null);
-      return;
-    }
-
-    const rect = s.renderer.domElement.getBoundingClientRect();
-    s.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    s.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    s.raycaster.setFromCamera(s.mouse, s.camera);
-
-    const intersects = s.raycaster.intersectObject(s.points);
-    if (intersects.length > 0 && intersects[0].index !== undefined) {
-      const node = s.nodes[intersects[0].index];
-      const isSelected = selectedIdRef.current === node.id;
-      const isNeighbor = neighborIdsRef.current.has(node.id);
-      if (!isSelected && !isNeighbor) {
-        setHoveredNode(null);
-        s.renderer.domElement.style.cursor = 'default';
+    const cx = e.clientX;
+    const cy = e.clientY;
+    if (hoverRafRef.current) return;
+    hoverRafRef.current = requestAnimationFrame(() => {
+      hoverRafRef.current = 0;
+      const s = sceneRef.current;
+      if (!s) return;
+      const tip = tooltipRef.current;
+      if (!selectedIdRef.current) {
+        if (hoveredNodeRef2.current) {
+          hoveredNodeRef2.current = null;
+          if (tip) tip.style.display = 'none';
+        }
         return;
       }
-      setHoveredNode(node);
-      setTooltipPos({ x: e.clientX - (canvasRef.current?.getBoundingClientRect().left ?? 0), y: e.clientY - (canvasRef.current?.getBoundingClientRect().top ?? 0) });
-      s.renderer.domElement.style.cursor = 'pointer';
-    } else {
-      setHoveredNode(null);
+
+      const rect = cachedRectRef.current ?? s.renderer.domElement.getBoundingClientRect();
+      s.mouse.x = ((cx - rect.left) / rect.width) * 2 - 1;
+      s.mouse.y = -((cy - rect.top) / rect.height) * 2 + 1;
+      s.raycaster.setFromCamera(s.mouse, s.camera);
+
+      const intersects = s.raycaster.intersectObject(s.points);
+      if (intersects.length > 0 && intersects[0].index !== undefined) {
+        const node = s.nodes[intersects[0].index];
+        if (node.id === selectedIdRef.current || neighborIdsRef.current.has(node.id)) {
+          hoveredNodeRef2.current = node;
+          s.renderer.domElement.style.cursor = 'pointer';
+          if (tip) {
+            tip.style.display = 'block';
+            tip.style.left = `${cx - rect.left + 16}px`;
+            tip.style.top = `${cy - rect.top - 12}px`;
+            const titleEl = tip.querySelector('[data-tip-title]') as HTMLElement | null;
+            const devEl = tip.querySelector('[data-tip-dev]') as HTMLElement | null;
+            const genreEl = tip.querySelector('[data-tip-genre]') as HTMLElement | null;
+            if (titleEl) titleEl.textContent = node.title;
+            if (devEl) { devEl.textContent = node.developer || ''; devEl.style.display = node.developer ? '' : 'none'; }
+            if (genreEl) { genreEl.textContent = node.genres.slice(0, 3).join(' · '); genreEl.style.display = node.genres.length ? '' : 'none'; }
+          }
+          return;
+        }
+      }
+      hoveredNodeRef2.current = null;
       s.renderer.domElement.style.cursor = 'default';
-    }
-  }, [hoveredNode]);
+      if (tip) tip.style.display = 'none';
+    });
+  }, []);
+
+  const handleCanvasLeave = useCallback(() => {
+    hoveredNodeRef2.current = null;
+    if (tooltipRef.current) tooltipRef.current.style.display = 'none';
+    const s = sceneRef.current;
+    if (s) s.renderer.domElement.style.cursor = 'default';
+  }, []);
 
   const handleReset = useCallback(() => {
     clearPath();
@@ -1609,17 +2428,43 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     });
   }, []);
 
+  // ─── Canonical genre grouping (maps raw genres → palette categories) ──
+
+  const genresByCategory = useMemo(() => {
+    const map = new Map<number, string[]>();
+    for (const g of allGenres) {
+      const idx = genreToColorIdx([g]);
+      const list = map.get(idx);
+      if (list) list.push(g);
+      else map.set(idx, [g]);
+    }
+    return map;
+  }, [allGenres]);
+
+  const toggleCanonical = useCallback((colorIdx: number) => {
+    const members = genresByCategory.get(colorIdx) ?? [];
+    if (members.length === 0) return;
+    setActiveGenres(prev => {
+      const next = new Set(prev);
+      const allActive = members.every(g => next.has(g));
+      if (allActive) members.forEach(g => next.delete(g));
+      else members.forEach(g => next.add(g));
+      return next;
+    });
+  }, [genresByCategory]);
+
   // ─── Search autocomplete ──────────────────────────────────────────
 
   const suggestions = useMemo(() => {
-    if (searchQuery.length < 2 || loadedNodesRef.current.length === 0) return [];
-    const q = searchQuery.toLowerCase().trim();
+    if (deferredSearchQuery.length < 2 || loadedNodesRef.current.length === 0) return [];
+    const q = deferredSearchQuery.toLowerCase().trim();
     const tokens = q.split(/\s+/).filter(Boolean);
     if (tokens.length === 0) return [];
 
     const nodes = loadedNodesRef.current;
     const index = nodeSearchIndex.current;
     const scored: { node: GraphNode; score: number }[] = [];
+    let highQualityHits = 0;
 
     for (let i = 0; i < nodes.length; i++) {
       if (!index[i]) continue;
@@ -1629,17 +2474,21 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       if (s > 0) {
         const boost = nd.isLibrary ? 0.5 : 0;
         scored.push({ node: nd, score: s + boost });
+        if (s >= 60) highQualityHits++;
+        if (highQualityHits >= 30) break;
       }
     }
 
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, 10).map(s => s.node);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, nodeCount]);
+  }, [deferredSearchQuery, nodeCount]);
 
   const handleSuggestionSelect = useCallback((node: GraphNode) => {
     setSearchFocused(false);
     setSuggestionIdx(-1);
+    traversalStackRef.current = [];
+    setTraversalDepth(0);
     selectNode(node, true);
   }, [selectNode]);
 
@@ -1667,7 +2516,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     nodes.sort((a, b) => b.hoursPlayed - a.hoursPlayed);
     return nodes;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeCount]);
+  }, [nodeCount, libVersion]);
 
   const filteredLibNodes = useMemo(() => {
     if (!libSearch) return libraryNodes;
@@ -1690,15 +2539,6 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     () => neighbors.filter(nb => nb.node && !nb.node.title.startsWith('Unknown Game')),
     [neighbors],
   );
-
-  const flyToNode3D = useCallback((node: GraphNode) => {
-    const s = sceneRef.current;
-    if (!s) return;
-    const pos = new THREE.Vector3(node.x, node.y, node.z);
-    const dir = new THREE.Vector3().subVectors(s.camera.position, pos).normalize();
-    const endCamPos = pos.clone().add(dir.multiplyScalar(100));
-    startFly(pos, endCamPos, 1600);
-  }, [startFly]);
 
   const focusNeighborSun = useCallback((idx: number, node: GraphNode | null) => {
     if (idx === -1 || !node) {
@@ -1748,6 +2588,10 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     else if (cycleableNeighbors[prev]?.node) { flyToNode3D(cycleableNeighbors[prev].node!); focusNeighborSun(prev, cycleableNeighbors[prev].node!); }
   }, [pathActive, pathIdx, isLastPathNode, focusedNbIdx, cycleableNeighbors, selectedNode, flyToNode3D, focusNeighborSun, selectPathNode]);
 
+  const handleHeroTypingDone = useCallback(() => {
+    heroTimerRef.current = setTimeout(() => setHeroVisible(false), 1800);
+  }, []);
+
   const handleCycleHome = useCallback(() => {
     setDetailOpen(false);
     setFocusedNbIdx(-1);
@@ -1768,14 +2612,85 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
         handleCyclePrev();
+      } else if (e.key === 'ArrowDown' && focusedNbIdx >= 0) {
+        e.preventDefault();
+        const nb = cycleableNeighbors[focusedNbIdx];
+        if (nb?.node) traverseInto(nb.node);
+      } else if (e.key === 'ArrowUp' && traversalDepth > 0) {
+        e.preventDefault();
+        traverseBack();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedNode, pathActive, handleCycleNext, handleCyclePrev]);
+  }, [selectedNode, pathActive, handleCycleNext, handleCyclePrev, focusedNbIdx, cycleableNeighbors, traverseInto, traversalDepth, traverseBack]);
+
+  // ─── Secondary connections for focused neighbor ───────────────────
+  useEffect(() => {
+    if (focusedNbIdx < 0 || !neighbors[focusedNbIdx]?.node) {
+      clearFocusedConnections();
+      return;
+    }
+    const focNode = neighbors[focusedNbIdx].node!;
+    let cancelled = false;
+
+    (async () => {
+      const s = sceneRef.current;
+      if (!s) return;
+
+      const selId = selectedIdRef.current;
+      const primaryNbs = neighborIdsRef.current;
+      const k = neighborK.current;
+
+      let nbList: NeighborInfo[];
+
+      if (useMock) {
+        // Mock mode: compute secondary neighbors by euclidean distance
+        const all = loadedNodesRef.current;
+        const dists: { id: string; distance: number }[] = [];
+        for (const other of all) {
+          if (other.id === focNode.id || other.id === selId || primaryNbs.has(other.id)) continue;
+          const dx = other.x - focNode.x;
+          const dy = other.y - focNode.y;
+          const dz = other.z - focNode.z;
+          dists.push({ id: other.id, distance: Math.sqrt(dx * dx + dy * dy + dz * dz) });
+        }
+        dists.sort((a, b) => a.distance - b.distance);
+        nbList = dists.slice(0, k).map(d => ({
+          id: d.id,
+          distance: +d.distance.toFixed(4),
+          node: s.nodeMap.get(d.id),
+        }));
+      } else {
+        const vec = await getEmbeddingById(focNode.id);
+        if (cancelled || !vec || !annIndex.isReady) return;
+
+        const overFetch = k * 4 + 1;
+        const results = await annIndex.queryWithDistances(vec, overFetch);
+        if (cancelled) return;
+
+        const filtered = results
+          .filter(r => r.id !== focNode.id && r.id !== selId && !primaryNbs.has(r.id) && r.distance <= 1.5);
+
+        nbList = filtered.slice(0, k).map(r => ({
+          id: r.id,
+          distance: +r.distance.toFixed(4),
+          node: s.nodeMap.get(r.id),
+        }));
+      }
+
+      if (cancelled) return;
+      drawFocusedConnections(focNode, nbList.filter(nb => nb.node));
+    })();
+
+    return () => { cancelled = true; };
+  }, [focusedNbIdx, neighbors, clearFocusedConnections, drawFocusedConnections, useMock]);
+
+  const detailOpenRef = useRef(false);
+  detailOpenRef.current = detailOpen;
 
   const toggleDetail = useCallback(async (nodeId: string) => {
-    if (detailOpen && detailNodeIdRef.current === nodeId) {
+    if (detailOpenRef.current && detailNodeIdRef.current === nodeId) {
       setDetailOpen(false);
       return;
     }
@@ -1843,9 +2758,9 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
     await Promise.all(fetches);
     if (detailNodeIdRef.current === nodeId) {
       setDetailData(result.steam || result.epic ? result : null);
+      setDetailLoading(false);
     }
-    setDetailLoading(false);
-  }, [detailOpen]);
+  }, []);
 
   const addNodeToLibrary = useCallback((node: GraphNode) => {
     if (libraryStore.isInLibrary(node.id)) return;
@@ -1862,11 +2777,25 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
         store: getStoreFromId(node.id) as 'steam' | 'epic',
         coverUrl: node.coverUrl,
         developer: node.developer || undefined,
+        publisher: node.publisher || undefined,
         genre: node.genres,
       },
     });
     node.isLibrary = true;
-  }, []);
+
+    const s = sceneRef.current;
+    if (s) {
+      const idx = s.nodes.indexOf(node);
+      if (idx >= 0) {
+        const { pubFreq, maxPubLog } = pubFreqRef.current;
+        s.baseSizes[idx] = starSize(node, pubFreq, maxPubLog);
+        const popNorm = Math.min(Math.log10(Math.max(node.reviewCount, 1)) / 5.3, 1);
+        const lumBlend = node.luminance * 0.6 + popNorm * 0.4;
+        s.baseBright[idx] = Math.min(1.0, 0.08 + lumBlend * 0.92 + 0.15);
+      }
+    }
+    updateVisuals();
+  }, [updateVisuals]);
 
   useEffect(() => {
     if (!selectedNode) {
@@ -1883,17 +2812,21 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
       {/* Header toolbar */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/[0.06] bg-black/60 backdrop-blur-md shrink-0 z-30">
         <div className="flex items-center gap-3">
-          <button onClick={onBack}
-            className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-white/40 hover:text-white/70 hover:bg-white/5 rounded-md transition-colors cursor-pointer"
-            title="Back to Oracle">
-            <ArrowLeft className="w-3.5 h-3.5" />
-            Oracle
-          </button>
+          <TooltipCard content="Return to the Oracle view — your AI recommendation hub.">
+            <button onClick={onBack}
+              className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-white/40 hover:text-white/70 hover:bg-white/5 rounded-md transition-colors cursor-pointer">
+              <ArrowLeft className="w-3.5 h-3.5" />
+              Oracle
+            </button>
+          </TooltipCard>
           <div className="w-px h-4 bg-white/[0.06]" />
           <h2 className="text-sm font-medium text-white/70">Embedding Space</h2>
           {!loading && (
             <span className="text-[10px] text-white/30">
               {nodeCount.toLocaleString()} games{connectionCount > 0 ? ` · ${connectionCount} connections` : ''}
+              {projectionMethod === 'MOCK'
+                ? <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-mono text-[9px] font-bold border border-amber-500/30">MOCK DATA</span>
+                : projectionMethod ? ` · ${projectionMethod}` : ''}
               {rendererBackend ? ` · ${rendererBackend}` : ''}
             </span>
           )}
@@ -1906,8 +2839,8 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
               type="text"
               value={searchQuery}
               onChange={e => { setSearchQuery(e.target.value); setSuggestionIdx(-1); }}
-              onFocus={() => setSearchFocused(true)}
-              onBlur={() => setTimeout(() => setSearchFocused(false), 200)}
+              onFocus={() => { if (searchBlurRef.current) { clearTimeout(searchBlurRef.current); searchBlurRef.current = null; } setSearchFocused(true); }}
+              onBlur={() => { searchBlurRef.current = setTimeout(() => { searchBlurRef.current = null; setSearchFocused(false); }, 200); }}
               onKeyDown={handleSearchKeyDown}
               placeholder={loading ? 'Loading galaxy…' : 'Search games...'}
               disabled={loading}
@@ -1939,12 +2872,13 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
               </div>
             )}
           </div>
-          <button onClick={loading ? undefined : handleReset}
-            disabled={loading}
-            title={loading ? 'Galaxy is still loading…' : 'Reset selection'}
-            className={`px-2 py-1 text-[10px] rounded-md transition-colors ${loading ? 'text-white/10 cursor-not-allowed' : 'text-white/30 hover:text-white/50 hover:bg-white/5 cursor-pointer'}`}>
-            <RotateCcw className="w-3 h-3" />
-          </button>
+          <TooltipCard content={loading ? 'Galaxy is still loading — please wait for the embedding space to finish initializing.' : 'Reset the camera and clear any selected star or active path.'}>
+            <button onClick={loading ? undefined : handleReset}
+              disabled={loading}
+              className={`px-2 py-1 text-[10px] rounded-md transition-colors ${loading ? 'text-white/10 cursor-not-allowed' : 'text-white/30 hover:text-white/50 hover:bg-white/5 cursor-pointer'}`}>
+              <RotateCcw className="w-3 h-3" />
+            </button>
+          </TooltipCard>
         </div>
       </div>
 
@@ -1955,6 +2889,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
           className="absolute inset-0"
           onClick={handleCanvasClick}
           onMouseMove={handleCanvasMove}
+          onMouseLeave={handleCanvasLeave}
         />
 
         {/* Library side panel — collapsible glass overlay */}
@@ -2024,7 +2959,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                     <button
                       key={node.id}
                       data-active={isActive || undefined}
-                      onClick={() => selectNode(node, true)}
+                      onClick={() => { traversalStackRef.current = []; setTraversalDepth(0); selectNode(node, true); }}
                       className={`w-full rounded-lg overflow-hidden text-left transition-all duration-200 cursor-pointer group/card border ${
                         isActive
                           ? 'border-fuchsia-500/30 bg-fuchsia-500/10 ring-1 ring-fuchsia-500/20'
@@ -2089,8 +3024,52 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
           )}
         </AnimatePresence>
 
-        {loading && <LoadingSkeleton steps={loadingSteps} />}
-        <HeroIntro visible={heroVisible} />
+        <AnimatePresence>
+          {loading && (
+            <motion.div
+              key="galaxy-loader"
+              initial={{ opacity: 1 }}
+              exit={{ opacity: 0, pointerEvents: 'none' as any }}
+              transition={{ duration: 0.6, ease: 'easeOut' }}
+              className="absolute inset-0 z-30"
+            >
+              <LoadingSkeleton steps={loadingSteps} />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {emptyGalaxy && !loading && (
+          <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/80">
+            <div className="text-center max-w-md px-6">
+              <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-fuchsia-500/10 border border-fuchsia-500/20 flex items-center justify-center">
+                <Waypoints className="w-8 h-8 text-fuchsia-400/60" />
+              </div>
+              <h3 className="text-lg font-semibold text-white/80 mb-2">Embedding Space Requires Ollama</h3>
+              <p className="text-sm text-white/40 mb-5 leading-relaxed">
+                The galaxy map visualizes game embeddings generated by Ollama's Snowflake Arctic Embed model.
+                Install Ollama and restart the app to unlock this feature.
+              </p>
+              <div className="flex items-center justify-center gap-3">
+                <button
+                  onClick={onBack}
+                  className="px-4 py-2 text-xs font-medium text-white/50 bg-white/5 border border-white/10 rounded-lg hover:bg-white/10 transition-colors"
+                >
+                  Go Back
+                </button>
+                <a
+                  href="https://ollama.com/download"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-4 py-2 text-xs font-medium text-fuchsia-400 bg-fuchsia-500/10 border border-fuchsia-500/30 rounded-lg hover:bg-fuchsia-500/20 transition-colors"
+                >
+                  Download Ollama
+                </a>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <HeroIntro visible={heroVisible} onTypingDone={handleHeroTypingDone} />
 
         {/* Floating cards at star positions — selected node + neighbors */}
         <div ref={neighborCardsRef} className="absolute inset-0 pointer-events-none z-20">
@@ -2112,7 +3091,9 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
               >
                 <div className={`rounded-xl overflow-hidden backdrop-blur-xl transition-all duration-300 ${
                   focusedNbIdx === -1
-                    ? 'w-[320px] bg-black/90 border border-fuchsia-500/30 shadow-xl shadow-fuchsia-500/15 ring-1 ring-fuchsia-500/10'
+                    ? pathActive && pathIdx >= 0
+                      ? 'w-[320px] bg-black/90 border border-blue-500/30 shadow-xl shadow-blue-500/15 ring-1 ring-blue-500/10'
+                      : 'w-[320px] bg-black/90 border border-fuchsia-500/30 shadow-xl shadow-fuchsia-500/15 ring-1 ring-fuchsia-500/10'
                     : 'w-[100px] bg-black/40 border border-white/[0.03] opacity-15'
                 }`}>
                   <div className={`w-full bg-black/40 overflow-hidden transition-all duration-300 ${focusedNbIdx === -1 ? 'h-[120px]' : 'h-[20px]'}`}>
@@ -2131,7 +3112,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                         {selectedNode.genres.length > 0 && (
                           <div className="flex flex-wrap gap-1 mt-1.5">
                             {selectedNode.genres.slice(0, 4).map(g => (
-                              <span key={g} className="text-[8px] px-1.5 py-[1px] rounded bg-fuchsia-500/10 text-fuchsia-400/70 leading-tight">{g}</span>
+                              <span key={g} className={`text-[8px] px-1.5 py-[1px] rounded leading-tight ${pathActive && pathIdx >= 0 ? 'bg-blue-500/10 text-blue-400/70' : 'bg-fuchsia-500/10 text-fuchsia-400/70'}`}>{g}</span>
                             ))}
                           </div>
                         )}
@@ -2141,24 +3122,25 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                 </div>
                 {focusedNbIdx === -1 && (
                   <div className="absolute left-full top-0 bottom-0 ml-2.5 flex flex-col justify-between py-1 select-none" style={{ width: 190 }}>
-                    <div className="flex flex-col gap-[3px] font-mono text-[10px] leading-none tracking-wider text-fuchsia-400/30 pointer-events-none">
-                      <span className="text-fuchsia-400/20">{pathActive && pathIdx >= 0 ? '// THE PATH' : '// GAME EMBEDDING'}</span>
+                    <div className={`flex flex-col gap-[3px] font-mono text-[10px] leading-none tracking-wider pointer-events-none ${pathActive && pathIdx >= 0 ? 'text-blue-400/30' : 'text-fuchsia-400/30'}`}>
+                      <span className={pathActive && pathIdx >= 0 ? 'text-blue-400/20' : 'text-fuchsia-400/20'}>{pathActive && pathIdx >= 0 ? '// THE PATH' : '// GAME EMBEDDING'}</span>
                       {pathActive && pathIdx >= 0 && (
                         <>
-                          <span className="mt-1 text-amber-400/50">STEP::{pathIdx + 1}/{pathNodesRef.current.length}</span>
-                          {isLastPathNode && <span className="text-amber-400/40">★ FINAL NODE</span>}
+                          <span className="mt-1 text-blue-400/50">STEP::{pathIdx + 1}/{pathNodesRef.current.length}</span>
+                          {isLastPathNode && <span className="text-blue-400/40">★ FINAL NODE</span>}
                         </>
                       )}
                       <span className="mt-1">SYS::NODE</span>
-                      <span className="text-fuchsia-400/50">{selectedNode.id.slice(0, 12).toUpperCase()}</span>
+                      <span className={pathActive && pathIdx >= 0 ? 'text-blue-400/50' : 'text-fuchsia-400/50'}>{selectedNode.id.slice(0, 12).toUpperCase()}</span>
                       <span className="mt-1">POS</span>
-                      <span className="text-fuchsia-400/40">{selectedNode.x.toFixed(1)}</span>
-                      <span className="text-fuchsia-400/40">{selectedNode.y.toFixed(1)}</span>
-                      <span className="text-fuchsia-400/40">{selectedNode.z.toFixed(1)}</span>
+                      <span className={pathActive && pathIdx >= 0 ? 'text-blue-400/40' : 'text-fuchsia-400/40'}>{selectedNode.x.toFixed(1)}</span>
+                      <span className={pathActive && pathIdx >= 0 ? 'text-blue-400/40' : 'text-fuchsia-400/40'}>{selectedNode.y.toFixed(1)}</span>
+                      <span className={pathActive && pathIdx >= 0 ? 'text-blue-400/40' : 'text-fuchsia-400/40'}>{selectedNode.z.toFixed(1)}</span>
                       <span className="mt-1">LINKS::{connectionCount}</span>
+                      {traversalDepth > 0 && <span className="mt-1 text-amber-400/50">DEPTH::{traversalDepth}</span>}
                       {selectedNode.isLibrary && <span className="text-emerald-400/40">LIB::OWNED</span>}
-                      {selectedNode.hoursPlayed > 0 && <span className="text-fuchsia-400/40">TIME::{selectedNode.hoursPlayed.toFixed(1)}h</span>}
-                      <span className="text-fuchsia-400/20">CLR::{selectedNode.colorIdx.toString(16).toUpperCase().padStart(2, '0')}</span>
+                      {selectedNode.hoursPlayed > 0 && <span className={pathActive && pathIdx >= 0 ? 'text-blue-400/40' : 'text-fuchsia-400/40'}>TIME::{selectedNode.hoursPlayed.toFixed(1)}h</span>}
+                      <span className={pathActive && pathIdx >= 0 ? 'text-blue-400/20' : 'text-fuchsia-400/20'}>CLR::{selectedNode.colorIdx.toString(16).toUpperCase().padStart(2, '0')}</span>
                     </div>
                     <div
                       className="flex items-center gap-1 px-1.5 py-1.5 rounded-lg bg-white/[0.04] backdrop-blur-md border border-white/[0.06] pointer-events-auto mt-2"
@@ -2172,7 +3154,9 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                           </button>
                           {(!pathActive || isLastPathNode) && (
                             <button onClick={handleCycleHome} className={`p-1 rounded transition-colors cursor-pointer ${
-                              focusedNbIdx === -1 ? 'text-fuchsia-400/80 bg-fuchsia-500/10' : 'text-white/40 hover:text-white/70 hover:bg-white/10'
+                              focusedNbIdx === -1
+                                ? pathActive ? 'text-blue-400/80 bg-blue-500/10' : 'text-fuchsia-400/80 bg-fuchsia-500/10'
+                                : 'text-white/40 hover:text-white/70 hover:bg-white/10'
                             }`} title="Refocus on selected">
                               <Crosshair className="w-3 h-3" />
                             </button>
@@ -2182,38 +3166,53 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                               ? (isLastPathNode
                                   ? (focusedNbIdx === -1 ? `★ ${pathIdx + 1}/${pathNodesRef.current.length}` : `${focusedNbIdx + 1}/${cycleableNeighbors.length}`)
                                   : `${pathIdx + 1}/${pathNodesRef.current.length}`)
-                              : (focusedNbIdx === -1 ? '—' : `${focusedNbIdx + 1}/${cycleableNeighbors.length}`)}
+                              : (focusedNbIdx === -1
+                                  ? (traversalDepth > 0 ? `↳ D${traversalDepth}` : '—')
+                                  : `${focusedNbIdx + 1}/${cycleableNeighbors.length}`)}
                           </span>
                           <button onClick={handleCycleNext} className="p-1 rounded text-white/40 hover:text-white/80 hover:bg-white/10 transition-colors cursor-pointer" title={pathActive && !isLastPathNode ? 'Next game on path' : 'Next neighbor'}>
                             <ChevronRight className="w-3 h-3" />
                           </button>
                         </>
                       )}
-                      <button
-                        onClick={() => toggleDetail(selectedNode.id)}
-                        className={`p-1 rounded transition-colors cursor-pointer ${
-                          detailOpen && detailNodeIdRef.current === selectedNode.id
-                            ? 'text-fuchsia-400/80 bg-fuchsia-500/10'
-                            : 'text-white/40 hover:text-white/70 hover:bg-white/10'
-                        }`}
-                        title="Game details"
-                      >
-                        {detailLoading && detailNodeIdRef.current === selectedNode.id
-                          ? <Loader2 className="w-3 h-3 animate-spin" />
-                          : <Info className="w-3 h-3" />}
-                      </button>
-                      {!libraryStore.isInLibrary(selectedNode.id) ? (
+                      {traversalDepth > 0 && (
                         <button
-                          onClick={() => addNodeToLibrary(selectedNode)}
-                          className="p-1 rounded text-emerald-400/60 hover:text-emerald-400 hover:bg-emerald-500/15 transition-colors cursor-pointer"
-                          title="Add to library"
+                          onClick={traverseBack}
+                          className="p-1 rounded text-amber-400/60 hover:text-amber-400 hover:bg-amber-500/15 transition-colors cursor-pointer"
+                          title={`Back to ${traversalStackRef.current[traversalStackRef.current.length - 1]?.title ?? 'previous node'}`}
                         >
-                          <Plus className="w-3 h-3" />
+                          <Undo2 className="w-3 h-3" />
                         </button>
+                      )}
+                      <TooltipCard content="View full details — store info, reviews, screenshots, and description.">
+                        <button
+                          onClick={() => toggleDetail(selectedNode.id)}
+                          className={`p-1 rounded transition-colors cursor-pointer ${
+                            detailOpen && detailNodeIdRef.current === selectedNode.id
+                              ? pathActive ? 'text-blue-400/80 bg-blue-500/10' : 'text-fuchsia-400/80 bg-fuchsia-500/10'
+                              : 'text-white/40 hover:text-white/70 hover:bg-white/10'
+                          }`}
+                        >
+                          {detailLoading && detailNodeIdRef.current === selectedNode.id
+                            ? <Loader2 className="w-3 h-3 animate-spin" />
+                            : <Info className="w-3 h-3" />}
+                        </button>
+                      </TooltipCard>
+                      {!libraryStore.isInLibrary(selectedNode.id) ? (
+                        <TooltipCard content="Add this game to your personal library to track it.">
+                          <button
+                            onClick={() => addNodeToLibrary(selectedNode)}
+                            className="p-1 rounded text-emerald-400/60 hover:text-emerald-400 hover:bg-emerald-500/15 transition-colors cursor-pointer"
+                          >
+                            <Plus className="w-3 h-3" />
+                          </button>
+                        </TooltipCard>
                       ) : (
-                        <span className="p-1 text-emerald-400/40" title="In library">
-                          <Check className="w-3 h-3" />
-                        </span>
+                        <TooltipCard content="This game is already in your library.">
+                          <span className="p-1 text-emerald-400/40">
+                            <Check className="w-3 h-3" />
+                          </span>
+                        </TooltipCard>
                       )}
                     </div>
                   </div>
@@ -2225,7 +3224,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                       animate={{ opacity: 1, height: 'auto', marginTop: 8 }}
                       exit={{ opacity: 0, height: 0, marginTop: 0 }}
                       transition={{ duration: 0.25, ease: 'easeInOut' }}
-                      className="overflow-hidden rounded-lg bg-black/90 backdrop-blur-xl border border-fuchsia-500/20 shadow-xl shadow-fuchsia-500/10 pointer-events-auto w-[320px]"
+                      className={`overflow-hidden rounded-lg bg-black/90 backdrop-blur-xl pointer-events-auto w-[320px] ${pathActive && pathIdx >= 0 ? 'border border-blue-500/20 shadow-xl shadow-blue-500/10' : 'border border-fuchsia-500/20 shadow-xl shadow-fuchsia-500/10'}`}
                       onClick={e => e.stopPropagation()}
                       onMouseMove={e => e.stopPropagation()}
                     >
@@ -2324,31 +3323,43 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                             </button>
                           </>
                         )}
-                        <button
-                          onClick={() => toggleDetail(nb.node!.id)}
-                          className={`p-1 rounded transition-colors cursor-pointer ${
-                            detailOpen && detailNodeIdRef.current === nb.node!.id
-                              ? 'text-cyan-400/80 bg-cyan-500/10'
-                              : 'text-white/40 hover:text-white/70 hover:bg-white/10'
-                          }`}
-                          title="Game details"
-                        >
-                          {detailLoading && detailNodeIdRef.current === nb.node!.id
-                            ? <Loader2 className="w-3 h-3 animate-spin" />
-                            : <Info className="w-3 h-3" />}
-                        </button>
-                        {!libraryStore.isInLibrary(nb.node!.id) ? (
+                        <TooltipCard content="Traverse into — explore this game's own neighbors and see what's similar to it.">
                           <button
-                            onClick={() => addNodeToLibrary(nb.node!)}
-                            className="p-1 rounded text-emerald-400/60 hover:text-emerald-400 hover:bg-emerald-500/15 transition-colors cursor-pointer"
-                            title="Add to library"
+                            onClick={() => traverseInto(nb.node!)}
+                            className="p-1 rounded text-amber-400/60 hover:text-amber-400 hover:bg-amber-500/15 transition-colors cursor-pointer"
                           >
-                            <Plus className="w-3 h-3" />
+                            <CornerDownRight className="w-3 h-3" />
                           </button>
+                        </TooltipCard>
+                        <TooltipCard content="View full details — store info, reviews, screenshots, and description.">
+                          <button
+                            onClick={() => toggleDetail(nb.node!.id)}
+                            className={`p-1 rounded transition-colors cursor-pointer ${
+                              detailOpen && detailNodeIdRef.current === nb.node!.id
+                                ? 'text-cyan-400/80 bg-cyan-500/10'
+                                : 'text-white/40 hover:text-white/70 hover:bg-white/10'
+                            }`}
+                          >
+                            {detailLoading && detailNodeIdRef.current === nb.node!.id
+                              ? <Loader2 className="w-3 h-3 animate-spin" />
+                              : <Info className="w-3 h-3" />}
+                          </button>
+                        </TooltipCard>
+                        {!libraryStore.isInLibrary(nb.node!.id) ? (
+                          <TooltipCard content="Add this game to your personal library to track it.">
+                            <button
+                              onClick={() => addNodeToLibrary(nb.node!)}
+                              className="p-1 rounded text-emerald-400/60 hover:text-emerald-400 hover:bg-emerald-500/15 transition-colors cursor-pointer"
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                          </TooltipCard>
                         ) : (
-                          <span className="p-1 text-emerald-400/40" title="In library">
-                            <Check className="w-3 h-3" />
-                          </span>
+                          <TooltipCard content="This game is already in your library.">
+                            <span className="p-1 text-emerald-400/40">
+                              <Check className="w-3 h-3" />
+                            </span>
+                          </TooltipCard>
                         )}
                       </div>
                     </div>
@@ -2379,30 +3390,20 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
           })}
         </div>
 
-        {/* Hover tooltip */}
-        {hoveredNode && !selectedNode && (
-          <div
-            className="absolute z-40 pointer-events-none"
-            style={{ left: tooltipPos.x + 16, top: tooltipPos.y - 12 }}
-          >
-            <div className="bg-black/90 border border-white/[0.08] rounded-lg overflow-hidden backdrop-blur-xl max-w-[260px]">
-              <FallbackImg node={hoveredNode} className="w-full h-[72px] object-cover" fallbackClassName="w-full h-[72px] bg-black/40 flex items-center justify-center text-white/15 text-xs font-bold" />
-              <div className="px-3 py-2">
-                <div className="text-[12px] font-semibold text-white/90 truncate">{hoveredNode.title}</div>
-                {hoveredNode.developer && <div className="text-[10px] text-white/35 mt-0.5 truncate">{hoveredNode.developer}</div>}
-                {hoveredNode.genres.length > 0 && (
-                  <div className="text-[9px] text-purple-400/70 mt-1">{hoveredNode.genres.slice(0, 3).join(' · ')}</div>
-                )}
-                {hoveredNode.hoursPlayed > 0 && (
-                  <div className="text-[9px] text-white/25 mt-0.5">{hoveredNode.hoursPlayed.toFixed(1)}h played</div>
-                )}
-                {hoveredNode.isLibrary && (
-                  <div className="text-[8px] text-emerald-400/50 mt-1">★ In Library</div>
-                )}
-              </div>
+        {/* Hover tooltip — positioned via ref, no React re-renders */}
+        <div
+          ref={tooltipRef}
+          className="absolute z-40 pointer-events-none"
+          style={{ display: 'none' }}
+        >
+          <div className="bg-black/90 border border-white/[0.08] rounded-lg overflow-hidden backdrop-blur-xl max-w-[260px]">
+            <div className="px-3 py-2">
+              <div data-tip-title className="text-[12px] font-semibold text-white/90 truncate" />
+              <div data-tip-dev className="text-[10px] text-white/35 mt-0.5 truncate" />
+              <div data-tip-genre className="text-[9px] text-purple-400/70 mt-1" />
             </div>
           </div>
-        )}
+        </div>
 
         {/* Neighbors right-side panel — collapsible glass overlay */}
         <AnimatePresence>
@@ -2421,7 +3422,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                 <div className="flex items-center gap-2">
                   <Waypoints className="w-3.5 h-3.5 text-cyan-400/70" />
                   <span className="text-[11px] font-medium text-white/60">Neighbors</span>
-                  <span className="text-[9px] text-white/25 tabular-nums">{neighbors.filter(nb => nb.node && !nb.node.title.startsWith('Unknown Game')).length}</span>
+                  <span className="text-[9px] text-white/25 tabular-nums">{cycleableNeighbors.length}</span>
                 </div>
                 <button
                   onClick={() => { setShowNeighbors(false); setNbSearch(''); }}
@@ -2456,6 +3457,16 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
 
               {/* Selected node summary */}
               <div className="px-3.5 py-2.5 border-b border-white/[0.04] shrink-0">
+                {traversalDepth > 0 && (
+                  <button
+                    onClick={traverseBack}
+                    className="flex items-center gap-1.5 text-[9px] text-amber-400/60 hover:text-amber-400 transition-colors mb-1.5 cursor-pointer"
+                  >
+                    <Undo2 className="w-3 h-3" />
+                    <span className="truncate">← {traversalStackRef.current[traversalStackRef.current.length - 1]?.title ?? 'Back'}</span>
+                    <span className="text-amber-400/30 tabular-nums font-mono">D{traversalDepth}</span>
+                  </button>
+                )}
                 <div className="flex gap-2.5 items-start">
                   <div className="w-16 h-8 rounded bg-white/[0.06] overflow-hidden shrink-0">
                     <FallbackImg node={selectedNode} className="w-full h-full object-cover" fallbackClassName="w-full h-full flex items-center justify-center text-[7px] text-white/20 font-bold" />
@@ -2480,6 +3491,8 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                     if (nbSearch) return nb.node.title.toLowerCase().includes(nbSearch.toLowerCase());
                     return true;
                   })
+                  .slice()
+                  .sort((a, b) => a.distance - b.distance)
                   .map(nb => {
                     const isFocusedNb = cycleableNeighbors[focusedNbIdx]?.id === nb.id;
                     return (
@@ -2503,6 +3516,16 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                           {nb.node!.isLibrary && <span className="text-emerald-400/60 mr-1">★</span>}
                           {nb.node!.title}
                         </span>
+                        {isFocusedNb && (
+                          <span
+                            role="button"
+                            onClick={ev => { ev.stopPropagation(); traverseInto(nb.node!); }}
+                            className="p-0.5 rounded text-amber-400/60 hover:text-amber-400 hover:bg-amber-500/15 transition-colors shrink-0 cursor-pointer"
+                            title="Traverse into"
+                          >
+                            <CornerDownRight className="w-3 h-3" />
+                          </span>
+                        )}
                         <span className={`text-[10px] font-mono tabular-nums shrink-0 ${isFocusedNb ? 'text-cyan-400/70' : 'text-white/30'}`}>
                           {nb.distance.toFixed(4)}
                         </span>
@@ -2547,7 +3570,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                 selectPathNode(idx);
               }}
             >
-              <div className="w-[100px] group-hover/pov:w-[160px] transition-all duration-300 rounded-lg overflow-hidden border border-amber-500/15 group-hover/pov:border-amber-500/40 bg-black/60 group-hover/pov:bg-black/85 backdrop-blur-md opacity-50 group-hover/pov:opacity-100 shadow-lg shadow-black/40">
+              <div className="w-[100px] group-hover/pov:w-[160px] transition-all duration-300 rounded-lg overflow-hidden border border-blue-500/15 group-hover/pov:border-blue-500/40 bg-black/60 group-hover/pov:bg-black/85 backdrop-blur-md opacity-50 group-hover/pov:opacity-100 shadow-lg shadow-black/40">
                 <div className="relative w-full aspect-[3/4] overflow-hidden">
                   <FallbackImg
                     node={node}
@@ -2555,7 +3578,7 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                     fallbackClassName="w-full h-full flex items-center justify-center text-white/40 text-xs bg-zinc-900"
                     loading="lazy"
                   />
-                  <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-amber-500/80 text-[8px] font-bold text-black leading-none">
+                  <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-blue-500/80 text-[8px] font-bold text-black leading-none">
                     {idx + 1}
                   </div>
                 </div>
@@ -2622,18 +3645,65 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
                       : 'border-white/[0.06] text-white/30 hover:text-white/50'
                   }`}>None</button>
               </div>
-              <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide px-3 py-2.5">
-                <div className="flex flex-wrap gap-1.5">
-                  {allGenres.map(genre => (
-                    <button key={genre} onClick={() => toggleGenre(genre)}
-                      className={`text-[9px] px-2 py-1 rounded-md border transition-colors cursor-pointer ${
-                        activeGenres.has(genre)
-                          ? 'bg-fuchsia-500/10 border-fuchsia-500/20 text-fuchsia-400/80'
-                          : 'bg-transparent border-white/[0.06] text-white/20 hover:text-white/40'
-                      }`}>
-                      {genre}
-                    </button>
-                  ))}
+              <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide px-3 py-2.5 space-y-3">
+                {/* Canonical genre categories */}
+                <div>
+                  <span className="text-[8px] uppercase tracking-widest text-white/25 font-semibold mb-1.5 block">Categories</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {CANONICAL_GENRE_LABELS.map((label, idx) => {
+                      const members = genresByCategory.get(idx) ?? [];
+                      if (members.length === 0) return null;
+                      const allActive = members.every(g => activeGenres.has(g));
+                      const someActive = !allActive && members.some(g => activeGenres.has(g));
+                      const [cr, cg, cb] = GENRE_PALETTE[idx];
+                      const rgb = `${Math.round(cr * 255)}, ${Math.round(cg * 255)}, ${Math.round(cb * 255)}`;
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => toggleCanonical(idx)}
+                          className={`text-[9px] px-2 py-1 rounded-md border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                            allActive
+                              ? 'border-white/15 bg-white/[0.07]'
+                              : someActive
+                                ? 'border-white/10 bg-white/[0.03]'
+                                : 'bg-transparent border-white/[0.06] hover:border-white/10'
+                          }`}
+                          title={`${members.length} genre${members.length !== 1 ? 's' : ''}: ${members.join(', ')}`}
+                        >
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0"
+                            style={{
+                              background: `radial-gradient(circle at 35% 35%, rgba(${rgb}, ${allActive ? 1 : someActive ? 0.7 : 0.4}) 0%, rgba(${rgb}, ${allActive ? 0.5 : someActive ? 0.3 : 0.12}) 100%)`,
+                              boxShadow: allActive ? `0 0 4px rgba(${rgb}, 0.4)` : undefined,
+                            }}
+                          />
+                          <span style={{ color: allActive ? `rgba(${rgb}, 0.9)` : someActive ? `rgba(${rgb}, 0.55)` : 'rgba(255,255,255,0.25)' }}>
+                            {label}
+                          </span>
+                          <span className="text-[7px] tabular-nums" style={{ color: allActive ? `rgba(${rgb}, 0.5)` : 'rgba(255,255,255,0.15)' }}>
+                            {members.length}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Raw genre tags */}
+                <div>
+                  <span className="text-[8px] uppercase tracking-widest text-white/25 font-semibold mb-1.5 block">All Genres</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {allGenres.map(genre => (
+                      <button key={genre} onClick={() => toggleGenre(genre)}
+                        className={`text-[9px] px-2 py-1 rounded-md border transition-colors cursor-pointer ${
+                          activeGenres.has(genre)
+                            ? 'bg-fuchsia-500/10 border-fuchsia-500/20 text-fuchsia-400/80'
+                            : 'bg-transparent border-white/[0.06] text-white/20 hover:text-white/40'
+                        }`}>
+                        {genre}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </motion.div>
@@ -2685,11 +3755,15 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
         {!loading && (
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-3 z-20 screenshot-exclude">
             <button
-              onClick={showThePath}
-              className={`px-3.5 py-1.5 rounded-full border backdrop-blur-xl text-[10px] font-medium tracking-wide transition-all duration-500 cursor-pointer pointer-events-auto flex items-center gap-1.5 ${
+              onClick={pathDisabledReason && !pathActive ? undefined : showThePath}
+              disabled={!!pathDisabledReason && !pathActive}
+              title={pathDisabledReason && !pathActive ? pathDisabledReason : undefined}
+              className={`px-3.5 py-1.5 rounded-full border backdrop-blur-xl text-[10px] font-medium tracking-wide transition-all duration-500 pointer-events-auto flex items-center gap-1.5 ${
                 pathActive
-                  ? 'border-amber-500/30 bg-amber-500/15 text-amber-300/90 shadow-lg shadow-amber-500/10'
-                  : 'border-white/[0.08] bg-white/[0.04] text-white/40 hover:text-white/60 hover:border-white/[0.12]'
+                  ? 'border-blue-500/30 bg-blue-500/15 text-blue-300/90 shadow-lg shadow-blue-500/10 cursor-pointer'
+                  : pathDisabledReason
+                    ? 'border-white/[0.04] bg-white/[0.02] text-white/15 cursor-not-allowed'
+                    : 'border-white/[0.08] bg-white/[0.04] text-white/40 hover:text-white/60 hover:border-white/[0.12] cursor-pointer'
               }`}
             >
               <Route className="w-3 h-3" />
@@ -2699,20 +3773,21 @@ export function AnnGraphView({ onBack }: { onBack: () => void }) {
               <>
                 <button
                   onClick={startPathExplore}
-                  className="px-3.5 py-1.5 rounded-full border border-amber-500/40 bg-amber-500/20 text-amber-200 text-[10px] font-medium tracking-wide transition-all duration-500 cursor-pointer pointer-events-auto flex items-center gap-1.5 shadow-lg shadow-amber-500/15 hover:bg-amber-500/30 hover:border-amber-500/50"
+                  className="px-3.5 py-1.5 rounded-full border border-blue-500/40 bg-blue-500/20 text-blue-200 text-[10px] font-medium tracking-wide transition-all duration-500 cursor-pointer pointer-events-auto flex items-center gap-1.5 shadow-lg shadow-blue-500/15 hover:bg-blue-500/30 hover:border-blue-500/50"
                 >
                   <Waypoints className="w-3 h-3" />
                   Explore Path
                 </button>
-                <button
-                  onClick={captureScreenshot}
-                  disabled={screenshotSaving}
-                  className="px-3 py-1.5 rounded-full border border-white/[0.12] bg-white/[0.06] text-white/50 text-[10px] font-medium tracking-wide transition-all duration-300 cursor-pointer pointer-events-auto flex items-center gap-1.5 hover:text-white/80 hover:border-white/[0.2] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed"
-                  title="Save screenshot to Downloads"
-                >
-                  <Camera className="w-3 h-3" />
-                  {screenshotSaving ? 'Saving...' : 'Screenshot'}
-                </button>
+                <TooltipCard content="Capture a high-resolution screenshot of the galaxy and save it to your Downloads folder." containerClassName="pointer-events-auto">
+                  <button
+                    onClick={captureScreenshot}
+                    disabled={screenshotSaving}
+                    className="px-3 py-1.5 rounded-full border border-white/[0.12] bg-white/[0.06] text-white/50 text-[10px] font-medium tracking-wide transition-all duration-300 cursor-pointer flex items-center gap-1.5 hover:text-white/80 hover:border-white/[0.2] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Camera className="w-3 h-3" />
+                    {screenshotSaving ? 'Saving...' : 'Screenshot'}
+                  </button>
+                </TooltipCard>
               </>
             )}
           </div>

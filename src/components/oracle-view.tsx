@@ -37,18 +37,27 @@ import {
   DollarSign,
   Gift,
   Building2,
+  BookMarked,
+  Info,
+  ThumbsUp,
+  ThumbsDown,
   X,
   Check,
   Loader2,
   Globe,
+  AlertTriangle,
 } from 'lucide-react';
+import { DNA } from 'react-loader-spinner';
 import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
+import { EncryptedText } from '@/components/ui/encrypted-text';
 import { recoStore } from '@/services/reco-store';
 import { shelfBanditStore } from '@/services/shelf-bandit-store';
 import { recoHistoryStore } from '@/services/reco-history-store';
+import { normalizeLayerScores, generateExplanation } from '@/services/reco-explainer';
 import { embeddingService } from '@/services/embedding-service';
 import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store';
+import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
 import { GameCard } from '@/components/game-card';
@@ -56,6 +65,7 @@ import { Badge } from '@/components/ui/badge';
 import type { Game } from '@/types/game';
 import type { RecoShelf, ScoredGame, TasteProfile, ShelfType } from '@/types/reco';
 import { getCanonicalGenres } from '@/data/canonical-genres';
+import { TooltipCard } from '@/components/ui/tooltip-card';
 
 // ─── Background catalog embedding pipeline (persists across navigation) ──────
 
@@ -79,6 +89,15 @@ function startCatalogEmbeddingPipeline() {
     await embeddingService.generateCatalogEmbeddings(
       (onBatch) => catalogStore.getAllEntries(onBatch),
     );
+
+    // Chain Epic catalog embeddings
+    const epicCount = await epicCatalogStore.getEntryCount();
+    if (epicCount > 0) {
+      await embeddingService.generateEpicCatalogEmbeddings(
+        (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+      );
+    }
+
     _pipelineStarted = false;
   })();
 }
@@ -117,6 +136,7 @@ const SHELF_ICONS: Record<ShelfType, React.ElementType> = {
   'deals-for-you': DollarSign,
   'free-for-you': Gift,
   'from-studios-you-love': Building2,
+  'backlog-advisor': BookMarked,
 };
 
 const WAVE_SPRING = { type: 'spring' as const, stiffness: 500, damping: 26, mass: 0.8 };
@@ -437,7 +457,7 @@ function OracleLoadingOverlay({
                   <div className="ml-6 mt-1.5">
                     <div className="relative h-1 w-full max-w-[200px] bg-white/[0.04] rounded-full overflow-hidden">
                       <motion.div
-                        className="absolute inset-y-0 left-0 bg-gradient-to-r from-fuchsia-500/80 to-purple-400/80 rounded-full"
+                        className="absolute inset-y-0 left-0 bg-gradient-to-r from-fuchsia-500/80 to-fuchsia-600/80 rounded-full"
                         animate={{ width: `${embeddingPercent}%` }}
                         transition={{ duration: 0.3, ease: 'easeOut' }}
                       />
@@ -628,6 +648,84 @@ const OracleFooter = memo(function OracleFooter({ game }: { game: ScoredGame }) 
   );
 });
 
+// ─── Explanation Popover ──────────────────────────────────────────────────────
+
+const ExplainPopover = memo(function ExplainPopover({ game }: { game: ScoredGame }) {
+  const breakdown = useMemo(() => normalizeLayerScores(game), [game]);
+  const reasons = useMemo(() => game.explanation?.length ? game.explanation : generateExplanation(game), [game]);
+  const [thumbs, setThumbs] = useState<1 | -1 | undefined>(() => recoHistoryStore.getThumbs(game.gameId));
+
+  // Reset thumbs when the game changes (lazy init only fires on first mount)
+  useEffect(() => {
+    setThumbs(recoHistoryStore.getThumbs(game.gameId));
+  }, [game.gameId]);
+
+  const onThumbUp = useCallback(() => {
+    recoHistoryStore.recordThumbs(game.gameId, 1, game.title);
+    setThumbs(1);
+  }, [game.gameId, game.title]);
+
+  const onThumbDown = useCallback(() => {
+    recoHistoryStore.recordThumbs(game.gameId, -1, game.title);
+    setThumbs(-1);
+  }, [game.gameId, game.title]);
+
+  return (
+    <div className="absolute top-0 right-0 z-30 w-60 bg-black/95 border border-white/10 rounded-lg shadow-2xl p-3 space-y-2 backdrop-blur-xl">
+      <p className="text-[10px] font-mono uppercase tracking-wider text-white/40">Why this recommendation</p>
+      <ul className="space-y-1">
+        {reasons.map((r, i) => (
+          <li key={i} className="text-[10px] text-white/70 leading-snug flex items-start gap-1.5">
+            <Check className="w-3 h-3 text-emerald-400 flex-shrink-0 mt-[1px]" />
+            <span>{r}</span>
+          </li>
+        ))}
+      </ul>
+      {breakdown.length > 0 && (
+        <>
+          <p className="text-[10px] font-mono uppercase tracking-wider text-white/30 pt-1">Score layers</p>
+          <div className="space-y-1">
+            {breakdown.slice(0, 6).map(layer => (
+              <div key={layer.name} className="flex items-center gap-2">
+                <div className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-fuchsia-500/60"
+                    style={{ width: `${layer.percentage}%` }}
+                  />
+                </div>
+                <span className="text-[9px] font-mono text-white/40 w-14 text-right tabular-nums">{layer.percentage}%</span>
+                <span className="text-[9px] font-mono text-white/50 truncate w-20">{layer.name}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {/* Thumbs feedback */}
+      <div className="flex items-center gap-2 pt-1 border-t border-white/[0.06]">
+        <span className="text-[9px] font-mono text-white/30 flex-1">Good recommendation?</span>
+        <button
+          onClick={onThumbUp}
+          className={cn(
+            "p-1 rounded transition-colors",
+            thumbs === 1 ? "bg-emerald-500/20 text-emerald-400" : "text-white/30 hover:text-emerald-400",
+          )}
+        >
+          <ThumbsUp className="w-3 h-3" />
+        </button>
+        <button
+          onClick={onThumbDown}
+          className={cn(
+            "p-1 rounded transition-colors",
+            thumbs === -1 ? "bg-red-500/20 text-red-400" : "text-white/30 hover:text-red-400",
+          )}
+        >
+          <ThumbsDown className="w-3 h-3" />
+        </button>
+      </div>
+    </div>
+  );
+});
+
 const OracleCard = memo(function OracleCard({
   game,
   index,
@@ -640,6 +738,7 @@ const OracleCard = memo(function OracleCard({
   onDismiss?: (gameId: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
+  const [showExplain, setShowExplain] = useState(false);
   const gameObj = useMemo(() => scoredGameToGame(game), [game]);
   const oracleFooter = useMemo(() => <OracleFooter game={game} />, [game]);
 
@@ -655,7 +754,12 @@ const OracleCard = memo(function OracleCard({
     onDismiss?.(game.gameId);
   }, [game.gameId, onDismiss]);
 
-  const matchPct = Math.round(game.score * 100);
+  const toggleExplain = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowExplain(v => !v);
+  }, []);
+
+  const matchPct = Math.min(100, Math.round(game.score * 100));
   const hasDiscount = game.reasons.isOnSale && game.price?.discountPercent;
   const hasMC = game.reasons.metacriticScore && game.reasons.metacriticScore >= 80;
 
@@ -670,7 +774,7 @@ const OracleCard = memo(function OracleCard({
       className="relative flex-shrink-0 w-[calc((100vw-8rem)/6)]
                  min-w-[180px] max-w-[280px]"
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      onMouseLeave={() => { setHovered(false); setShowExplain(false); }}
       onClickCapture={handleClickCapture}
     >
       <GameCard
@@ -702,19 +806,50 @@ const OracleCard = memo(function OracleCard({
         )}
       </div>
 
-      {/* Dismiss button — top-right */}
-      {onDismiss && (
-        <button
-          onClick={handleDismiss}
-          className={cn(
-            "absolute top-2 right-2 z-20 p-1 rounded-full bg-black/60 text-white/40 hover:text-red-400 hover:bg-black/80 transition-all duration-200",
-            hovered ? "opacity-100" : "opacity-0"
-          )}
-          title="Not interested"
-        >
-          <X className="w-3 h-3" />
-        </button>
-      )}
+      {/* Top-right action buttons */}
+      <div className={cn(
+        "absolute top-2 right-2 z-20 flex gap-1 transition-opacity duration-200",
+        hovered ? "opacity-100" : "opacity-0",
+      )}>
+        {/* Explain button */}
+        <TooltipCard content="See why the Oracle picked this game for you — match score breakdown, genre overlap, and reasoning.">
+          <button
+            onClick={toggleExplain}
+            className={cn(
+              "p-1 rounded-full bg-black/60 transition-all duration-200",
+              showExplain ? "text-fuchsia-400 bg-fuchsia-500/20" : "text-white/40 hover:text-fuchsia-400 hover:bg-black/80",
+            )}
+          >
+            <Info className="w-3 h-3" />
+          </button>
+        </TooltipCard>
+
+        {/* Dismiss button */}
+        {onDismiss && (
+          <TooltipCard content="Dismiss this recommendation — the Oracle won't suggest it again. Helps refine future picks.">
+            <button
+              onClick={handleDismiss}
+              className="p-1 rounded-full bg-black/60 text-white/40 hover:text-red-400 hover:bg-black/80 transition-all duration-200"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </TooltipCard>
+        )}
+      </div>
+
+      {/* Explanation popover */}
+      <AnimatePresence>
+        {showExplain && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.15 }}
+          >
+            <ExplainPopover game={game} />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 });
@@ -818,7 +953,7 @@ function ShelfCarousel({
 function HeroCard({ game, onNavigate }: { game: ScoredGame; onNavigate: (gameId: string) => void }) {
   const { coverUrl, headerImage } = getScoredGameImages(game);
   const img = useFallbackImage(game.gameId, game.title, coverUrl, headerImage);
-  const pct = Math.round(game.score * 100);
+  const pct = Math.min(100, Math.round(game.score * 100));
   const [displayPct, setDisplayPct] = useState(0);
 
   // Animate match percentage counter
@@ -887,7 +1022,7 @@ function HeroCard({ game, onNavigate }: { game: ScoredGame; onNavigate: (gameId:
             </span>
           </div>
 
-          <h2 className="text-2xl lg:text-3xl font-bold text-white mb-2 group-hover:text-fuchsia-100 transition-colors">
+          <h2 className="text-2xl lg:text-3xl font-bold text-white mb-2 group-hover:text-fuchsia-300 transition-colors">
             {game.title}
           </h2>
 
@@ -1083,7 +1218,7 @@ function ColdStart({
     message = `${libraryCount} tales are etched in your chronicle — the Oracle knows your heart. But the realm beyond remains unseen. Venture into the catalog so the Oracle may gaze upon what awaits you.`;
   } else {
     subtitle = 'The stars are silent';
-    message = 'The Oracle has searched the constellations but found no worthy paths — for now. Explore the catalog further and return. The visions will come.';
+    message = 'The Oracle has searched the constellations but found no worthy paths — for now. Try refreshing the Oracle or explore the catalog further.';
   }
 
   return (
@@ -1288,17 +1423,52 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
         {state.status === 'error' && (
           <motion.div
             key="error"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="flex flex-col items-center justify-center h-[400px] gap-4"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, ease: 'easeOut' }}
+            className="flex flex-col items-center justify-center h-[400px] gap-6"
           >
-            <p className="text-sm text-red-400/70">{state.error}</p>
-            <button
-              onClick={handleRefresh}
-              className="px-3 py-1.5 text-xs bg-white/5 hover:bg-white/10 text-white/60 rounded-lg transition-colors"
-            >
-              Try Again
-            </button>
+            <div className="relative flex flex-col items-center gap-5 px-10 py-8 rounded-sm border border-red-500/20 bg-red-500/[0.03] max-w-lg w-full">
+              {/* Top accent */}
+              <div className="absolute top-0 left-0 right-0 h-[1.5px] bg-red-500/40" />
+
+              {/* CRT scanline overlay */}
+              <div
+                className="absolute inset-0 pointer-events-none rounded-sm opacity-[0.03]"
+                style={{ backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.4) 2px, rgba(255,255,255,0.4) 3px)', backgroundSize: '100% 3px' }}
+              />
+
+              <div className="w-10 h-10 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5 text-red-400" />
+              </div>
+
+              <div className="flex flex-col items-center gap-2 text-center">
+                <span className="font-mono text-[13px] font-bold tracking-wider text-red-400/90">
+                  <EncryptedText text="// SIGNAL LOST" revealDelayMs={40} flipDelayMs={30} />
+                </span>
+                <span className="font-mono text-[11px] leading-relaxed text-white/40 max-w-sm">
+                  <EncryptedText
+                    text={`// ${state.error ?? 'Oracle subsystem encountered a fault'}`}
+                    revealDelayMs={12}
+                    flipDelayMs={20}
+                  />
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3 mt-1">
+                <button
+                  onClick={handleRefresh}
+                  className="flex items-center gap-1.5 px-4 py-2 text-[11px] font-mono font-semibold tracking-wider rounded-sm bg-red-500/10 border border-red-500/25 text-red-400 hover:bg-red-500/20 hover:border-red-500/40 transition-colors"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  // RETRY
+                </button>
+              </div>
+
+              <span className="font-mono text-[9px] tracking-widest text-white/15 select-none">
+                <EncryptedText text="// ORACLE::ERR::SUBSYSTEM_FAULT" revealDelayMs={18} flipDelayMs={25} />
+              </span>
+            </div>
           </motion.div>
         )}
 
@@ -1346,7 +1516,7 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                 )}
                 {catalogSync.stage === 'done' && catalogEmbeddingProgress && catalogEmbeddingProgress.total > 0 && (
                   <span className="flex items-center gap-1 text-xs text-fuchsia-400/50">
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <DNA visible height={16} width={16} ariaLabel="dna-loading" />
                     Updating Taste DNA {Math.round((catalogEmbeddingProgress.completed / catalogEmbeddingProgress.total) * 100)}%
                   </span>
                 )}
@@ -1505,13 +1675,21 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                 )}
 
                 {/* Loyal Studios */}
-                {state.tasteProfile.loyalDevelopers && state.tasteProfile.loyalDevelopers.length > 0 && (
+                {((state.tasteProfile.loyalDevelopers?.length ?? 0) > 0 || (state.tasteProfile.loyalPublishers?.length ?? 0) > 0) && (
                   <div className="mx-4 mt-4 pt-4 pb-6 border-t border-white/[0.06]">
                     <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">Loyal Studios</h4>
                     <div className="flex flex-wrap gap-1.5">
-                      {state.tasteProfile.loyalDevelopers.slice(0, 6).map(dev => (
-                        <span key={dev} className="text-[9px] px-2 py-0.5 rounded-full border border-purple-500/30 text-purple-400/70 capitalize">
+                      {state.tasteProfile.loyalDevelopers?.slice(0, 6).map(dev => (
+                        <span key={`dev-${dev}`} className="text-[9px] px-2 py-0.5 rounded-full border border-purple-500/30 text-purple-400/70 capitalize">
                           {dev}
+                        </span>
+                      ))}
+                      {state.tasteProfile?.loyalPublishers
+                        ?.filter(p => !state.tasteProfile?.loyalDevelopers?.includes(p))
+                        .slice(0, 4)
+                        .map(pub => (
+                        <span key={`pub-${pub}`} className="text-[9px] px-2 py-0.5 rounded-full border border-blue-500/30 text-blue-400/70 capitalize">
+                          {pub}
                         </span>
                       ))}
                     </div>

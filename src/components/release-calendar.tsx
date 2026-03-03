@@ -43,6 +43,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
+import { TooltipCard } from '@/components/ui/tooltip-card';
 import { useLocation } from 'wouter';
 import { FaSteam } from 'react-icons/fa';
 import { SiEpicgames } from 'react-icons/si';
@@ -74,13 +75,11 @@ function LazyFadeImage({
   const [attempt, setAttempt] = useState(0);
   const [errored, setErrored] = useState(false);
 
-  const prevSrcRef = useRef(src);
-  if (prevSrcRef.current !== src) {
-    prevSrcRef.current = src;
+  useEffect(() => {
     setLoaded(false);
     setAttempt(0);
     setErrored(false);
-  }
+  }, [src]);
 
   const urls = useMemo(() => {
     const chain = [src];
@@ -278,7 +277,7 @@ function ordinalSuffix(day: number): string {
 // ─── Layout constants ───────────────────────────────────────────────────────
 
 const COMING_SOON_CAP = 300;
-const INITIAL_CARD_COUNT = 12;
+const INITIAL_CARD_COUNT = 30;
 
 const VIEW_TOGGLE_OPTIONS: { id: CalendarView; icon: typeof Grid3X3; label: string }[] = [
   { id: 'year', icon: Grid3X3, label: 'Year' },
@@ -419,15 +418,16 @@ const FilterChips = memo(function FilterChips({
     <div className="flex items-center gap-1.5 mb-2 flex-wrap">
       {hasActiveFilters && (
         <>
+          <TooltipCard content="Clear all active genre, platform, and radar filters and return to the default view.">
           <button
             onClick={handleResetFilters}
             className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium text-white/50 hover:text-white/80 hover:bg-white/10 transition-colors"
-            title="Reset all filters"
             aria-label="Reset all filters"
           >
             <AnimateIcon hover="spin"><RotateCcw className="w-3 h-3" /></AnimateIcon>
             Reset
           </button>
+          </TooltipCard>
           <div className="w-px h-4 bg-white/10" />
         </>
       )}
@@ -570,12 +570,9 @@ const GroupedFeed = memo(function GroupedFeed({
 
         return (
           <div key={group.key} className="mb-6 last:mb-2">
-            {/* Sticky section header — opaque bg avoids GPU-heavy backdrop-blur */}
+            {/* Sticky section header */}
             <div
-              className={cn(
-                'sticky top-0 z-10 flex items-center gap-3 py-2 px-1 -mx-1',
-                group.isCurrentPeriod ? 'bg-[#0d0b10]' : 'bg-[#0a0a0c]',
-              )}
+              className="sticky top-0 z-10 flex items-center gap-3 py-2 px-1 -mx-1 bg-black"
             >
               <h3 className={cn(
                 'text-sm font-semibold flex-shrink-0',
@@ -598,7 +595,7 @@ const GroupedFeed = memo(function GroupedFeed({
               )}
               {/* Heat bar */}
               <div className="flex-1 h-px relative">
-                <div className="absolute inset-0 bg-white/[0.06]" />
+                <div className="absolute inset-0 bg-white/[0.04]" />
                 {density > 0 && (
                   <div
                     className="absolute left-0 top-0 h-full bg-fuchsia-500/40 rounded-full"
@@ -617,7 +614,7 @@ const GroupedFeed = memo(function GroupedFeed({
               )
             ) : (
               <div style={{ contentVisibility: 'auto', containIntrinsicBlockSize: '400px' }}>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 mt-2">
+                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2.5 mt-2">
                   <AnimatePresence mode="popLayout">
                     {visible.map((release) => {
                       const owned = isReleaseInLibrary(release.id, libraryIds);
@@ -643,6 +640,7 @@ const GroupedFeed = memo(function GroupedFeed({
                             onDelete={NOOP_DELETE}
                             onAddToLibrary={handleAddToLibrary}
                             hideLibraryBadge={false}
+                            compact
                           />
                         </motion.div>
           );
@@ -655,8 +653,8 @@ const GroupedFeed = memo(function GroupedFeed({
                     className="mt-3 flex items-center gap-1.5 mx-auto px-4 py-1.5 rounded-lg text-[11px] font-medium bg-white/[0.04] text-white/40 hover:bg-white/[0.08] hover:text-white/70 transition-colors"
                   >
                     <ChevronDown className="w-3 h-3" />
-                    Show all {group.releases.length} releases
-                    <span className="text-white/20">(+{remaining})</span>
+                    +{remaining} more
+                    <span className="text-white/20">of {group.releases.length} total</span>
                   </button>
                 )}
                 {hasMore && isExpanded && (
@@ -698,6 +696,7 @@ const YearFeed = memo(function YearFeed({
         buckets[r.parsedDate.getMonth()].push(r);
       }
     }
+    for (const b of buckets) b.sort((a, b) => (a.parsedDate?.getTime() ?? 0) - (b.parsedDate?.getTime() ?? 0));
     const nowMonth = new Date().getMonth();
     const nowYear = new Date().getFullYear();
     return buckets.map((games, i) => ({
@@ -762,6 +761,8 @@ const MonthFeed = memo(function MonthFeed({
       }
     }
 
+    for (const w of weeks) w.releases.sort((a, b) => (a.parsedDate?.getTime() ?? 0) - (b.parsedDate?.getTime() ?? 0));
+
     const today = new Date();
     today.setHours(12, 0, 0, 0);
 
@@ -819,6 +820,8 @@ const WeekFeed = memo(function WeekFeed({
         }
       }
     }
+    for (const day of days) day.releases.sort((a, b) => (a.parsedDate?.getTime() ?? 0) - (b.parsedDate?.getTime() ?? 0));
+
     return days.map((day, i) => {
       const d = day.date;
       const isPast = (() => { const t = new Date(); t.setHours(0, 0, 0, 0); return d < t; })();
@@ -972,9 +975,11 @@ const ComingSoonSidebar = memo(function ComingSoonSidebar({
           {releases.length > 0 && (
             <span className="text-[9px] text-fuchsia-400/80 bg-fuchsia-500/15 px-1.5 py-0.5 rounded-full font-medium">{releases.length}</span>
           )}
-          <button onClick={onToggle} className="ml-auto p-1 rounded-md hover:bg-white/10 text-white/30 hover:text-white transition-colors" title="Collapse sidebar">
-            <PanelRightClose className="w-3.5 h-3.5" />
-          </button>
+          <TooltipCard content="Collapse the Coming Soon sidebar to reclaim calendar space.">
+            <button onClick={onToggle} className="ml-auto p-1 rounded-md hover:bg-white/10 text-white/30 hover:text-white transition-colors">
+              <PanelRightClose className="w-3.5 h-3.5" />
+            </button>
+          </TooltipCard>
         </div>
 
         <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0 p-2">
@@ -1051,8 +1056,8 @@ function SkeletonFeed({ sections }: { sections: number }) {
             <div className="h-4 w-8 rounded-full bg-white/[0.04] animate-pulse" />
             <div className="flex-1 h-px bg-white/[0.04]" />
                 </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 mt-2">
-            {Array.from({ length: s === 0 ? 6 : 3 }).map((_, i) => (
+          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2.5 mt-2">
+            {Array.from({ length: s === 0 ? 10 : 5 }).map((_, i) => (
               <div key={i} className="rounded-xl bg-white/[0.03] animate-pulse">
                 <div className="aspect-[3/4]" />
                 <div className="p-3 space-y-2">
@@ -1134,7 +1139,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     };
     const flushSave = () => {
       const feed = document.querySelector('[data-calendar-feed]');
-      if (feed) {
+      if (feed && feed.scrollTop > 0) {
         sessionStorage.setItem('ark-calendar-scroll', String(Math.round(feed.scrollTop)));
       }
     };
@@ -1409,27 +1414,38 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     return `${MONTH_NAMES[currentMonth]} ${currentYear}`;
   }, [calView, currentYear, currentMonth, weekLabel]);
 
-  // Restore feed scroll position after returning from game details
+  // Restore feed scroll position after returning from game details.
+  // Uses a generous retry loop because the feed DOM may not have its
+  // full content height on the first frame after loading clears.
   useEffect(() => {
     if (isInitialLoading) return;
     const saved = sessionStorage.getItem('ark-calendar-scroll');
     if (!saved) return;
-    sessionStorage.removeItem('ark-calendar-scroll');
     const pos = parseInt(saved, 10);
-    if (isNaN(pos) || pos <= 0) return;
-    // Wait for the feed DOM to render, then restore scroll
+    if (isNaN(pos) || pos <= 0) {
+      sessionStorage.removeItem('ark-calendar-scroll');
+      return;
+    }
+
     let attempts = 0;
+    const maxAttempts = 25;
     const tryRestore = () => {
       const feed = document.querySelector('[data-calendar-feed]');
       if (feed) {
         feed.scrollTop = pos;
-        if (Math.abs(feed.scrollTop - pos) > 10 && attempts < 10) {
+        if (Math.abs(feed.scrollTop - pos) <= 10) {
+          sessionStorage.removeItem('ark-calendar-scroll');
+        } else if (attempts < maxAttempts) {
           attempts++;
           requestAnimationFrame(tryRestore);
+        } else {
+          sessionStorage.removeItem('ark-calendar-scroll');
         }
-      } else if (attempts < 10) {
+      } else if (attempts < maxAttempts) {
         attempts++;
         requestAnimationFrame(tryRestore);
+      } else {
+        sessionStorage.removeItem('ark-calendar-scroll');
       }
     };
     requestAnimationFrame(tryRestore);
@@ -1522,17 +1538,18 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
           {loading && <Loader2 className="w-3.5 h-3.5 text-white/30 animate-spin" />}
 
           {!isInitialLoading && !sidebarOpen && (
-            <button
-              onClick={toggleSidebar}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors text-white/40 hover:text-white hover:bg-white/10"
-              title="Show Coming Soon"
-            >
-              <PanelRightOpen className="w-3.5 h-3.5" />
-              <span className="text-[10px] font-medium">TBA</span>
-              {tbdReleases.length > 0 && (
-                <span className="text-[9px] text-fuchsia-400/80 bg-fuchsia-500/15 px-1.5 py-0.5 rounded-full font-medium">{tbdReleases.length}</span>
-              )}
-            </button>
+            <TooltipCard content="Open the Coming Soon sidebar — browse upcoming releases with undated or TBA launch windows.">
+              <button
+                onClick={toggleSidebar}
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors text-white/40 hover:text-white hover:bg-white/10"
+              >
+                <PanelRightOpen className="w-3.5 h-3.5" />
+                <span className="text-[10px] font-medium">TBA</span>
+                {tbdReleases.length > 0 && (
+                  <span className="text-[9px] text-fuchsia-400/80 bg-fuchsia-500/15 px-1.5 py-0.5 rounded-full font-medium">{tbdReleases.length}</span>
+                )}
+              </button>
+            </TooltipCard>
           )}
         </div>
       </div>

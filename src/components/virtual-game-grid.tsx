@@ -31,7 +31,7 @@ function getColumns(width: number): number {
   return 2;
 }
 
-function useBreakpointColumns(): number {
+export function useBreakpointColumns(): number {
   const [cols, setCols] = useState(() => getColumns(window.innerWidth));
 
   useEffect(() => {

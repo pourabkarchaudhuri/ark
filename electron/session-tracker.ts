@@ -120,6 +120,9 @@ const activeSessions: Map<string, ActiveSession> = new Map(); // gameId -> sessi
 function pollTick() {
   if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
 
+  // Skip expensive process snapshot when nothing is being tracked
+  if (trackedGames.length === 0 && activeSessions.size === 0) return;
+
   // Snapshot all running processes ONCE — O(1) lookups for each game below
   refreshProcessSnapshot();
 

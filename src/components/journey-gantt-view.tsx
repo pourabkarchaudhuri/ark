@@ -27,13 +27,14 @@
  *  - Tooltip edge clamping
  *  - Accessibility (ARIA roles + labels)
  */
-import { useMemo, useRef, useState, useCallback, useEffect } from 'react';
+import { useMemo, useRef, useState, useCallback, useEffect, memo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 
 import { motion } from 'framer-motion';
 import DOMPurify from 'dompurify';
 import { Gamepad2, Clock, Calendar, Search, X, Crosshair, ArrowUpDown, Library } from 'lucide-react';
 import { JourneyEntry, StatusChangeEntry, GameStatus, GameSession } from '@/types/game';
+import { useDebounce } from '@/hooks/useGameStore';
 import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
@@ -462,8 +463,8 @@ const TOOLTIP_H = 120;
 interface MinimapProps {
   rows: GanttGameRow[];
   timelineWidth: number;
-  scrollLeft: number;
-  viewportWidth: number;
+  viewportWidthRef: React.RefObject<number>;
+  vpIndicatorRef: React.RefObject<HTMLDivElement>;
   onSeek: (scrollLeft: number) => void;
   dateToX: (iso: string) => number;
 }
@@ -471,28 +472,27 @@ interface MinimapProps {
 const MINIMAP_HEIGHT = 28;
 const MINIMAP_ROW_HEIGHT = 2;
 
-function GanttMinimap({ rows, timelineWidth, scrollLeft, viewportWidth, onSeek, dateToX }: MinimapProps) {
+const GanttMinimap = memo(function GanttMinimap({ rows, timelineWidth, viewportWidthRef, vpIndicatorRef, onSeek, dateToX }: MinimapProps) {
   const minimapRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
 
-  const scale = viewportWidth > 0 ? viewportWidth / timelineWidth : 1;
-  const vpIndicatorLeft = scrollLeft * scale;
-  const vpIndicatorWidth = Math.max(8, viewportWidth * scale);
+  const vw = viewportWidthRef.current ?? 0;
+  const scale = vw > 0 ? vw / timelineWidth : 1;
 
   const seekFromEvent = useCallback((clientX: number) => {
     if (!minimapRef.current) return;
+    const vw = viewportWidthRef.current ?? 0;
     const rect = minimapRef.current.getBoundingClientRect();
     const clickX = clientX - rect.left;
-    const targetScroll = (clickX / rect.width) * timelineWidth - viewportWidth / 2;
+    const targetScroll = (clickX / rect.width) * timelineWidth - vw / 2;
     onSeek(Math.max(0, targetScroll));
-  }, [timelineWidth, viewportWidth, onSeek]);
+  }, [timelineWidth, viewportWidthRef, onSeek]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     isDraggingRef.current = true;
     seekFromEvent(e.clientX);
   }, [seekFromEvent]);
 
-  // Drag-to-scrub via document-level mouse events
   useEffect(() => {
     const handleMove = (e: MouseEvent) => {
       if (!isDraggingRef.current) return;
@@ -510,7 +510,7 @@ function GanttMinimap({ rows, timelineWidth, scrollLeft, viewportWidth, onSeek, 
     };
   }, [seekFromEvent]);
 
-  if (rows.length === 0 || timelineWidth <= viewportWidth) return null;
+  if (rows.length === 0 || timelineWidth <= vw) return null;
 
   return (
     <div
@@ -522,9 +522,7 @@ function GanttMinimap({ rows, timelineWidth, scrollLeft, viewportWidth, onSeek, 
       aria-label="Timeline minimap"
       aria-valuemin={0}
       aria-valuemax={timelineWidth}
-      aria-valuenow={scrollLeft}
     >
-      {/* Compressed bars */}
       {rows.map((row, ri) => (
         <div key={row.gameId}>
           {row.segments.map((seg, si) => {
@@ -549,14 +547,14 @@ function GanttMinimap({ rows, timelineWidth, scrollLeft, viewportWidth, onSeek, 
         </div>
       ))}
 
-      {/* Viewport indicator */}
+      {/* Viewport indicator — positioned imperatively via ref, no re-renders */}
       <div
-        className="absolute top-0 bottom-0 border border-fuchsia-500/50 bg-fuchsia-500/10 rounded-sm"
-        style={{ left: vpIndicatorLeft, width: vpIndicatorWidth }}
+        ref={vpIndicatorRef}
+        className="absolute top-0 bottom-0 border border-fuchsia-500/50 bg-fuchsia-500/10 rounded-sm pointer-events-none"
       />
     </div>
   );
-}
+});
 
 // ─── Main component ─────────────────────────────────────────────────────────
 
@@ -621,16 +619,21 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       : 'week'
   );
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearch = useDebounce(searchQuery, 3000);
   const [focusedRowIdx, setFocusedRowIdx] = useState(-1);
   // Use refs for hover/scroll state to avoid full re-renders
   const hoveredRowIdRef = useRef<string | null>(null);
   const rowEls = useRef<Map<string, HTMLDivElement>>(new Map());
-  const [minimapScrollLeft, setMinimapScrollLeft] = useState(0);
-  const [viewportWidth, setViewportWidth] = useState(0);
+  const minimapScrollLeftRef = useRef(0);
+  const viewportWidthRef = useRef(0);
+  const vpIndicatorRef = useRef<HTMLDivElement>(null);
   const scrollRaf = useRef(0);
   const hasAnimated = useRef(false);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const tooltipDataRef = useRef<TooltipData | null>(null);
+  const [isNowVisible, setIsNowVisible] = useState(true);
+  // viewportWidth as state for layout only — updated on resize, NOT on scroll
+  const [viewportWidth, setViewportWidth] = useState(0);
 
   // ── Dynamic chart height (fill remaining viewport) ─────────────────
   const [chartHeight, setChartHeight] = useState(500);
@@ -701,8 +704,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       result = result.filter((r) => !hiddenStatuses.has(r.currentStatus));
     }
 
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
+    if (debouncedSearch.trim()) {
+      const q = debouncedSearch.toLowerCase();
       result = result.filter((r) => r.title.toLowerCase().includes(q));
     }
 
@@ -720,7 +723,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     }
 
     return result;
-  }, [allRows, hiddenStatuses, searchQuery, sortBy]);
+  }, [allRows, hiddenStatuses, debouncedSearch, sortBy]);
 
   // ── Status counts for legend badges ───────────────────────────────────
   const statusCounts = useMemo(() => {
@@ -838,6 +841,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     [timelineStart, effectiveDayWidth]
   );
 
+  const nowX = useMemo(() => dateToX(new Date().toISOString()), [dateToX]);
+
   // Info segment index
   const getInfoSegmentIndex = useCallback(
     (row: GanttGameRow): number => {
@@ -938,6 +943,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
   const handleSegmentHover = useCallback(
     (e: React.MouseEvent, seg: GanttSegment, row: GanttGameRow) => {
+      if (isDraggingRef.current) return;
       const isSession = seg.status === 'Playing Now' && seg.sessionMinutes != null;
       updateTooltipEl({
         title: row.title,
@@ -980,7 +986,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     hasDragged.current = false;
     dragStart.current = { x: e.clientX, scrollLeft: el.scrollLeft };
     el.style.cursor = 'grabbing';
-  }, []);
+    updateTooltipEl(null);
+  }, [updateTooltipEl]);
 
   useEffect(() => {
     const handleMove = (e: MouseEvent) => {
@@ -1006,31 +1013,55 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     };
   }, []);
 
-  // ── Track viewport width + scroll position for minimap (RAF-throttled) ──
+  // ── Track scroll position for minimap (RAF-throttled, ref-driven — zero re-renders) ──
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
-    const update = () => {
-      setMinimapScrollLeft(el.scrollLeft);
-      setViewportWidth(el.clientWidth);
+    const updateIndicator = () => {
+      const sl = el.scrollLeft;
+      const cw = viewportWidthRef.current;
+      minimapScrollLeftRef.current = sl;
+
+      const indicator = vpIndicatorRef.current;
+      if (indicator && timelineWidth > 0) {
+        const scale = cw / timelineWidth;
+        indicator.style.left = `${sl * scale}px`;
+        indicator.style.width = `${Math.max(8, cw * scale)}px`;
+      }
+
+      const nowVis = nowX >= sl && nowX <= sl + cw;
+      setIsNowVisible(prev => prev === nowVis ? prev : nowVis);
     };
 
-    // Throttle scroll updates to one per animation frame
     const onScroll = () => {
       cancelAnimationFrame(scrollRaf.current);
-      scrollRaf.current = requestAnimationFrame(update);
+      scrollRaf.current = requestAnimationFrame(updateIndicator);
     };
 
-    update();
+    updateIndicator();
     el.addEventListener('scroll', onScroll, { passive: true });
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
     return () => {
       el.removeEventListener('scroll', onScroll);
       cancelAnimationFrame(scrollRaf.current);
-      ro.disconnect();
     };
+  }, [timelineWidth, nowX]);
+
+  // ── Track viewport width (resize only — NOT on scroll) ─────────────────
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const updateSize = () => {
+      const cw = el.clientWidth;
+      viewportWidthRef.current = cw;
+      setViewportWidth(cw);
+    };
+
+    updateSize();
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
 
   // ── Keyboard navigation ───────────────────────────────────────────────
@@ -1077,18 +1108,13 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
   }, [focusedRowIdx, rowVirtualizer]);
 
   // ── Scroll-to-Now helper ──────────────────────────────────────────────
-  const nowX = useMemo(() => dateToX(new Date().toISOString()), [dateToX]);
-
   const scrollToNow = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTo({ left: nowX - el.clientWidth / 2, behavior: 'smooth' });
   }, [nowX]);
 
-  const isNowVisible = useMemo(() => {
-    if (viewportWidth === 0) return true;
-    return nowX >= minimapScrollLeft && nowX <= minimapScrollLeft + viewportWidth;
-  }, [nowX, minimapScrollLeft, viewportWidth]);
+  // isNowVisible is now computed imperatively in the scroll handler above
 
   // ── Legend toggle handler ─────────────────────────────────────────────
   const toggleStatus = useCallback((status: GameStatus) => {
@@ -1807,10 +1833,10 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       <GanttMinimap
         rows={rows}
         timelineWidth={timelineWidth}
-        scrollLeft={minimapScrollLeft}
-        viewportWidth={viewportWidth}
+        viewportWidthRef={viewportWidthRef}
+        vpIndicatorRef={vpIndicatorRef}
         dateToX={dateToX}
-        onSeek={(left) => scrollRef.current?.scrollTo({ left, behavior: 'smooth' })}
+        onSeek={(left) => { if (scrollRef.current) scrollRef.current.scrollLeft = left; }}
       />
 
       {/* ── Summary footer ──────────────────────────────────────────── */}

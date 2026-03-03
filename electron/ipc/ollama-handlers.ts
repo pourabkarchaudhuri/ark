@@ -14,6 +14,9 @@ import {
   isOllamaRunning,
   runOllamaSetup,
   generateEmbedding,
+  getEmbeddingModelInfo,
+  getEmbeddingModelSize,
+  EMBEDDING_MODEL_NAME,
 } from '../ollama-setup.js';
 
 export function register(): void {
@@ -27,11 +30,18 @@ export function register(): void {
     }
   });
 
-  // Run the full setup sequence (check + pull missing models)
-  ipcMain.handle('ollama:setup', async () => {
+  // Run the full setup sequence (check + pull missing models).
+  // Progress is sent to the renderer via ollama:setup-progress for splash UI.
+  ipcMain.handle('ollama:setup', async (event) => {
+    const sender = event.sender;
     try {
       return await runOllamaSetup((status, pct) => {
         logger.log(`[Ollama Setup] ${status} (${pct}%)`);
+        try {
+          sender.send('ollama:setup-progress', { status, pct });
+        } catch {
+          // Window may have closed
+        }
       });
     } catch (error) {
       logger.error('[Ollama] Setup error:', error);
@@ -66,9 +76,7 @@ export function register(): void {
       const results: Record<string, number[]> = {};
       let completed = 0;
 
-      // Process in concurrent batches of 5 (Ollama handles one at a time
-      // internally, but pipelining requests reduces round-trip latency)
-      const CONCURRENCY = 5;
+      const CONCURRENCY = 20;
 
       for (let i = 0; i < validItems.length; i += CONCURRENCY) {
         const batch = validItems.slice(i, i + CONCURRENCY);
@@ -92,6 +100,30 @@ export function register(): void {
     } catch (error) {
       logger.error('[Ollama] Batch embedding error:', error);
       return {};
+    }
+  });
+
+  ipcMain.handle('ollama:modelInfo', async () => {
+    try {
+      const info = await getEmbeddingModelInfo();
+      if (info) return info;
+      const size = await getEmbeddingModelSize();
+      return {
+        name: EMBEDDING_MODEL_NAME,
+        installed: size > 0,
+        sizeBytes: size,
+        parameterSize: '568M',
+        quantization: 'F16',
+      };
+    } catch (error) {
+      logger.error('[Ollama] Model info error:', error);
+      return {
+        name: EMBEDDING_MODEL_NAME,
+        installed: false,
+        sizeBytes: 0,
+        parameterSize: '568M',
+        quantization: 'F16',
+      };
     }
   });
 }

@@ -28,6 +28,8 @@ export interface RecoConversion {
   rating?: number;
   /** Whether this reco was ultimately "successful". */
   converted: boolean;
+  /** Quick thumbs feedback: 1 = positive, -1 = negative, undefined = none. */
+  thumbs?: 1 | -1;
 }
 
 class RecoHistoryStore {
@@ -156,6 +158,37 @@ class RecoHistoryStore {
       entry.converted = true;
       this.save();
     }
+  }
+
+  /** Record thumbs-up or thumbs-down feedback on a recommendation. */
+  recordThumbs(gameId: string, value: 1 | -1, title = '', shelfType = '') {
+    let entry = this.history.get(gameId);
+    if (!entry) {
+      entry = {
+        gameId,
+        title,
+        shelfType,
+        clickedAt: Date.now(),
+        converted: false,
+      };
+      this.history.set(gameId, entry);
+    }
+    entry.thumbs = value;
+    if (value === 1) entry.converted = true;
+    this.save();
+    this.notify();
+  }
+
+  /** Get thumbs feedback for a game. */
+  getThumbs(gameId: string): 1 | -1 | undefined {
+    return this.history.get(gameId)?.thumbs;
+  }
+
+  /** Get positive feedback ratio (for signal quality measurement). */
+  getPositiveFeedbackRate(): number {
+    const withThumbs = [...this.history.values()].filter(e => e.thumbs !== undefined);
+    if (withThumbs.length === 0) return 0;
+    return withThumbs.filter(e => e.thumbs === 1).length / withThumbs.length;
   }
 
   // ── Feedback Analysis ──
