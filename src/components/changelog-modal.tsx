@@ -9,6 +9,14 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.34': {
+    title: "What's New in Ark 1.0.34",
+    changes: [
+      'Transmissions — Scheduled Broadcasts strip now has Previous/Next buttons to scroll event tiles on desktop; horizontal scroll no longer relies on touchpad or hidden scrollbars',
+      'Broadcast card glow — Live and imminent event cards use a theme-aligned static magenta glow instead of the rotating edge effect; padding in the strip prevents glow clipping',
+      'Event location metadata — Transmission cards show city (e.g. San Francisco, Boston) or "Online" for each gaming event, with MapPin/Globe icons',
+    ],
+  },
   '1.0.33': {
     title: "What's New in Ark 1.0.33",
     changes: [
