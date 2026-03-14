@@ -9,17 +9,18 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Settings, Key, Eye, EyeOff, Check, AlertCircle, Trash2,
   Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2,
-  Palette, Brain, BookOpen, Info, Users, Scale, ExternalLink,
-  Library, Compass, Globe, BarChart3, Newspaper, Calendar, Gamepad2,
-  Cpu, Zap, Search, Star, Trophy, Map, MessageCircle, Shield,
+  Brain, BookOpen, Info, Users, Scale, ExternalLink,
+  Library, Compass, Globe, Newspaper, Calendar, Gamepad2,
+  Zap, Search, Star, Trophy, Map, MessageCircle, Shield,
   Layers, Wand2, TrendingUp, Heart, Package,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { AnimateIcon } from '@/components/ui/animate-icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
+import { gameService } from '@/services/game-service';
 import { useDevMode } from '@/hooks/useDevMode';
+import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 
@@ -99,6 +100,7 @@ function Toggle({ value, onChange, disabled }: { value: boolean; onChange: () =>
 const GeneralTab = memo(function GeneralTab() {
   const [autoLaunch, setAutoLaunchState] = useState(true);
   const [devMode, setDevMode] = useDevMode();
+  const [allowAdultContent, setAllowAdultContent] = useAllowAdultContent();
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
@@ -145,8 +147,14 @@ const GeneralTab = memo(function GeneralTab() {
     setImportStatus('loading'); setImportMessage(null);
     const processContent = (content: string) => {
       const result = libraryStore.importData(content);
-      if (result.success) { setImportStatus('success'); setImportMessage(`Imported ${result.count} games`); }
-      else { setImportStatus('error'); setImportMessage(result.error || 'Failed'); }
+      if (result.success) {
+        setImportStatus('success');
+        setImportMessage(`Imported ${result.count} games`);
+        gameService.backfillLibraryMissingCachedMeta().catch(() => { /* non-blocking */ });
+      } else {
+        setImportStatus('error');
+        setImportMessage(result.error || 'Failed');
+      }
     };
     try {
       if (window.fileDialog) {
@@ -178,6 +186,18 @@ const GeneralTab = memo(function GeneralTab() {
               <p className="text-xs text-white/35 mt-0.5">Automatically start Ark when you log in (minimized to system tray)</p>
             </div>
             <Toggle value={autoLaunch} onChange={handleAutoLaunchToggle} />
+          </div>
+          <div className="border-t border-white/[0.04] pt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <Eye className="h-3.5 w-3.5 text-white/40" />
+                  <p className="text-sm font-medium text-white/90">Allow adult content</p>
+                </div>
+                <p className="text-xs text-white/35 mt-0.5">When off, games classified as sexually explicit (from description) are hidden from browse and library. Turn on to show all games.</p>
+              </div>
+              <Toggle value={allowAdultContent} onChange={() => setAllowAdultContent(!allowAdultContent)} />
+            </div>
           </div>
           <div className="border-t border-white/[0.04] pt-4">
             <div className="flex items-center justify-between">

@@ -172,14 +172,20 @@ class LibraryStore {
       throw new Error('No game ID provided');
     }
     
+    const hoursPlayed = input.hoursPlayed ?? 0;
     const entry: LibraryGameEntry = {
       ...input,
       gameId,
-      hoursPlayed: input.hoursPlayed ?? 0,
+      hoursPlayed,
       rating: input.rating ?? 0,
       addedAt: now,
       updatedAt: now,
     };
+    // Set baseline when adding with initial hours so session updates add on top from the start
+    if (hoursPlayed > 0) {
+      const sessionTotal = sessionStore.getTotalHours(gameId);
+      entry.hoursBaseline = Math.max(0, hoursPlayed - sessionTotal);
+    }
 
     this.entries.set(gameId, entry);
     this.invalidateSortedCache();
@@ -224,6 +230,12 @@ class LibraryStore {
       ...input,
       updatedAt: new Date(),
     };
+
+    // When user edits hours, set baseline so session updates add on top instead of overwriting
+    if (input.hoursPlayed !== undefined) {
+      const sessionTotal = sessionStore.getTotalHours(gameId);
+      updated.hoursBaseline = Math.max(0, input.hoursPlayed - sessionTotal);
+    }
 
     this.entries.set(gameId, updated);
     this.invalidateSortedCache();
@@ -377,20 +389,25 @@ class LibraryStore {
     return this.getAllEntries().filter((entry) => entry.priority === priority);
   }
 
-  // Update hoursPlayed from session tracking totals
-  updateHoursFromSessions(gameId: string, totalHours: number, lastPlayedAt?: string) {
+  // Update hoursPlayed from session tracking totals (preserves baseline so user-entered hours are not lost)
+  updateHoursFromSessions(gameId: string, sessionTotalHours: number, lastPlayedAt?: string) {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
-    existing.hoursPlayed = totalHours;
+    // Migrate: if no baseline yet, treat current hoursPlayed as effective and infer baseline
+    if (existing.hoursBaseline === undefined) {
+      existing.hoursBaseline = Math.max(0, (existing.hoursPlayed ?? 0) - sessionTotalHours);
+    }
+    const baseline = existing.hoursBaseline ?? 0;
+    const effectiveHours = baseline + sessionTotalHours;
+    existing.hoursPlayed = effectiveHours;
     if (lastPlayedAt !== undefined) existing.lastPlayedAt = lastPlayedAt;
     existing.updatedAt = new Date();
     this.invalidateSortedCache();
     this.scheduleSave();
     this.notifyListeners();
 
-    // Sync to journey store
-    journeyStore.syncProgress(gameId, { hoursPlayed: totalHours, lastPlayedAt });
+    journeyStore.syncProgress(gameId, { hoursPlayed: effectiveHours, lastPlayedAt });
   }
 
   // Get all entries that have an executablePath set

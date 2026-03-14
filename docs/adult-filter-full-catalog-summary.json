@@ -1,0 +1,14 @@
+{
+  "steam": {
+    "total": 158246,
+    "excluded": 0,
+    "excludedList": []
+  },
+  "epic": {
+    "total": 99,
+    "excluded": 0,
+    "excludedList": []
+  },
+  "runAt": "2026-03-07T19:26:17.776Z",
+  "epicSource": "egdata top-sellers"
+}

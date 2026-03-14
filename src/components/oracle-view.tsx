@@ -172,7 +172,7 @@ function OracleSkeleton() {
               <div className="flex gap-4 overflow-hidden px-1">
                 {Array.from({ length: 6 }).map((_, i) => (
                   <div key={i} className="flex-shrink-0 w-[160px]">
-                    <div className="aspect-[2/3] rounded-lg bg-white/[0.04] animate-pulse mb-2" />
+                    <div className="aspect-[3/2] rounded-lg bg-white/[0.04] animate-pulse mb-2" />
                     <div className="h-3 w-[80%] bg-white/8 rounded animate-pulse mb-1.5" />
                     <div className="h-2.5 w-[55%] bg-white/5 rounded animate-pulse" />
                   </div>
@@ -771,8 +771,8 @@ const OracleCard = memo(function OracleCard({
         transition: { ...WAVE_SPRING, delay: index * 0.05 },
       }}
       exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.2 } }}
-      className="relative flex-shrink-0 w-[calc((100vw-8rem)/6)]
-                 min-w-[180px] max-w-[280px]"
+      className="relative flex-shrink-0 w-[calc((100vw-8rem)/5)]
+                 min-w-[200px] max-w-[320px]"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); setShowExplain(false); }}
       onClickCapture={handleClickCapture}

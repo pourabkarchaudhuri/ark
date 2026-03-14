@@ -1,6 +1,17 @@
-import { describe, it, expect } from 'vitest';
-import { normalizeTitle, deduplicateGames } from '@/services/game-service';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { normalizeTitle, deduplicateGames, gameService } from '@/services/game-service';
 import { Game } from '@/types/game';
+
+// Minimal Epic Game for catalog mock
+function createEpicGame(i: number): Game {
+  return createGame({
+    id: `epic-ns${i}:off${i}`,
+    title: `Epic Game ${i}`,
+    store: 'epic',
+    epicNamespace: `ns${i}`,
+    epicOfferId: `off${i}`,
+  });
+}
 
 // Helper to create a minimal Game object for testing
 function createGame(overrides: Partial<Game> & { id: string; title: string }): Game {
@@ -80,6 +91,12 @@ describe('normalizeTitle', () => {
     expect(normalizeTitle('Alan Wake Remastered')).toBe('alan wake');
     expect(normalizeTitle('Dark Souls Trilogy')).toBe('dark souls');
     expect(normalizeTitle('Borderlands: The Handsome Collection')).toBe('borderlands the handsome');
+  });
+
+  it('strips store-specific edition phrases so Steam and Epic titles match', () => {
+    expect(normalizeTitle('Total War: ROME II - Emperor Edition')).toBe('total war rome 2');
+    expect(normalizeTitle('Total War: Rome II')).toBe('total war rome 2');
+    expect(normalizeTitle('Total War: ROME II - Emperor Edition')).toBe(normalizeTitle('Total War: Rome II'));
   });
 });
 
@@ -167,6 +184,18 @@ describe('deduplicateGames', () => {
 
     const result = deduplicateGames(games);
     expect(result[0].epicPrice).toEqual({ isFree: false, finalFormatted: '$49.99', discountPercent: 10 });
+  });
+
+  it('preserves both steamListPosition and epicListPosition when merging cross-store', () => {
+    const games = [
+      createGame({ id: 'steam-730', title: 'Elden Ring', store: 'steam', steamAppId: 730, steamListPosition: 2 }),
+      createGame({ id: 'epic-ns:elden', title: 'Elden Ring', store: 'epic', epicNamespace: 'ns', epicOfferId: 'elden', epicListPosition: 5 }),
+    ];
+
+    const result = deduplicateGames(games);
+    expect(result).toHaveLength(1);
+    expect(result[0].steamListPosition).toBe(2);
+    expect(result[0].epicListPosition).toBe(5);
   });
 
   it('deduplicates edition variants', () => {
@@ -279,5 +308,75 @@ describe('filterByStore', () => {
 
     expect(inSteam).toBe(true);
     expect(inEpic).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getTopSellers: Epic catalog fallback when egdata unavailable or fails
+// ---------------------------------------------------------------------------
+vi.mock('@/services/steam-service', () => ({
+  steamService: {
+    getTopSellers: vi.fn().mockResolvedValue([]),
+    getNewReleases: vi.fn().mockResolvedValue([]),
+  },
+}));
+
+vi.mock('@/services/epic-service', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/epic-service')>();
+  return {
+    ...actual,
+    epicService: {
+      ...actual.epicService,
+      getTopSellersFromCollection: vi.fn().mockResolvedValue([]),
+      getFreeGames: vi.fn().mockResolvedValue([]),
+      browseCatalog: vi.fn().mockResolvedValue([]),
+    },
+  };
+});
+
+describe('getTopSellers', () => {
+  beforeEach(() => {
+    (globalThis as typeof window & { window?: Window }).window = globalThis.window ?? ({} as Window);
+    (globalThis.window as Window & { egdata?: unknown }).egdata = undefined;
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('uses Epic catalog when egdata unavailable and returns many Epic games', async () => {
+    const epicCatalog = Array.from({ length: 99 }, (_, i) => createEpicGame(i));
+    const { epicService } = await import('@/services/epic-service');
+    vi.mocked(epicService.browseCatalog).mockResolvedValue(epicCatalog);
+
+    const result = await gameService.getTopSellers();
+
+    const epicCount = result.filter(g => g.store === 'epic' || g.availableOn?.includes('epic')).length;
+    expect(epicCount).toBeGreaterThanOrEqual(99);
+    expect(result.length).toBeGreaterThanOrEqual(99);
+  });
+
+  it('uses Epic catalog when egdata returns 0 and catalog returns games', async () => {
+    const epicCatalog = Array.from({ length: 50 }, (_, i) => createEpicGame(i));
+    const { epicService } = await import('@/services/epic-service');
+    vi.mocked(epicService.browseCatalog).mockResolvedValue(epicCatalog);
+
+    const result = await gameService.getTopSellers();
+
+    expect(result.length).toBeGreaterThanOrEqual(50);
+  });
+
+  it('uses Epic catalog when egdata would throw (IPC/network failure)', async () => {
+    (globalThis.window as Window & { egdata?: { getTopSellers: unknown; isEnabled: () => Promise<boolean> } }).egdata = {
+      getTopSellers: vi.fn().mockRejectedValue(new Error('IPC failed')),
+      isEnabled: vi.fn().mockResolvedValue(true),
+    };
+    const epicCatalog = Array.from({ length: 99 }, (_, i) => createEpicGame(i));
+    const { epicService } = await import('@/services/epic-service');
+    vi.mocked(epicService.browseCatalog).mockResolvedValue(epicCatalog);
+
+    const result = await gameService.getTopSellers();
+
+    expect(result.length).toBeGreaterThanOrEqual(99);
   });
 });

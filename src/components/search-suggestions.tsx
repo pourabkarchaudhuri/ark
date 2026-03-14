@@ -8,6 +8,8 @@ import { SiEpicgames } from 'react-icons/si';
 interface SearchSuggestionsProps {
   results: Game[];
   loading: boolean;
+  /** True when the user has typed but the debounced search has not run yet — avoid showing "no games found" during this time */
+  searchPending?: boolean;
   visible: boolean;
   onSelect: (game: Game) => void;
   onClose: () => void;
@@ -163,6 +165,7 @@ function StoreBadges({ game }: { game: Game }) {
 function SearchSuggestionsComponent({
   results,
   loading,
+  searchPending = false,
   visible,
   onSelect,
   onClose,
@@ -202,7 +205,7 @@ function SearchSuggestionsComponent({
     };
   }, [visible, onClose]);
 
-  if (!visible || (!loading && results.length === 0 && !searchQuery.trim())) {
+  if (!visible || (!loading && !searchPending && results.length === 0 && !searchQuery.trim())) {
     return null;
   }
 
@@ -211,7 +214,7 @@ function SearchSuggestionsComponent({
       ref={containerRef}
       className="absolute top-full left-0 right-0 mt-1 bg-card/95 backdrop-blur-xl border border-white/10 rounded-lg shadow-xl z-50 max-h-80 overflow-y-auto"
     >
-      {loading && (
+      {(loading || searchPending) && (
         <div className="py-1">
           {/* Skeleton loaders for search results */}
           {[...Array(4)].map((_, i) => (
@@ -231,14 +234,14 @@ function SearchSuggestionsComponent({
         </div>
       )}
 
-      {!loading && results.length === 0 && searchQuery.trim() && (
+      {!loading && !searchPending && results.length === 0 && searchQuery.trim() && (
         <div className="flex items-center gap-3 px-4 py-4 text-white/60">
           <Search className="h-4 w-4" />
           <span className="text-sm">No games found for "{searchQuery}"</span>
         </div>
       )}
 
-      {!loading && results.length > 0 && (
+      {!loading && !searchPending && results.length > 0 && (
         <ul className="py-1">
           {/* Results arrive pre-sorted by relevance from the search algorithm */}
           {results

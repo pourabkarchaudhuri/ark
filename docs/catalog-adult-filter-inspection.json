@@ -1,0 +1,2260 @@
+{
+  "inspectedAt": "2026-03-07T18:35:02.681Z",
+  "steam": {
+    "sampleCount": 6,
+    "appIds": [
+      2868840,
+      3065800,
+      3764200,
+      1808500,
+      3897800,
+      2778610
+    ],
+    "samples": [
+      {
+        "steam_appid": 2868840,
+        "name": "Slay the Spire 2",
+        "type": "game",
+        "required_age": 0,
+        "categories": [
+          {
+            "id": 2,
+            "description": "Single-player"
+          },
+          {
+            "id": 1,
+            "description": "Multi-player"
+          },
+          {
+            "id": 9,
+            "description": "Co-op"
+          },
+          {
+            "id": 38,
+            "description": "Online Co-op"
+          },
+          {
+            "id": 28,
+            "description": "Full controller support"
+          },
+          {
+            "id": 68,
+            "description": "Custom Volume Controls"
+          },
+          {
+            "id": 76,
+            "description": "Mouse Only Option"
+          },
+          {
+            "id": 74,
+            "description": "Playable without Timed Input"
+          },
+          {
+            "id": 79,
+            "description": "Save Anytime"
+          },
+          {
+            "id": 23,
+            "description": "Steam Cloud"
+          },
+          {
+            "id": 15,
+            "description": "Stats"
+          },
+          {
+            "id": 25,
+            "description": "Steam Leaderboards"
+          },
+          {
+            "id": 62,
+            "description": "Family Sharing"
+          }
+        ],
+        "genres": [
+          {
+            "id": "23",
+            "description": "Indie"
+          },
+          {
+            "id": "2",
+            "description": "Strategy"
+          },
+          {
+            "id": "70",
+            "description": "Early Access"
+          }
+        ],
+        "content_descriptors": {
+          "ids": [],
+          "notes": null
+        },
+        "ratings": {
+          "dejus": {
+            "rating_generated": "1",
+            "rating": "10",
+            "required_age": "10",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Violência"
+          },
+          "steam_germany": {
+            "rating_generated": "1",
+            "rating": "12",
+            "required_age": "12",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Gewalt"
+          }
+        }
+      },
+      {
+        "steam_appid": 3065800,
+        "name": "Marathon",
+        "type": "game",
+        "required_age": 0,
+        "categories": [
+          {
+            "id": 1,
+            "description": "Multi-player"
+          },
+          {
+            "id": 49,
+            "description": "PvP"
+          },
+          {
+            "id": 36,
+            "description": "Online PvP"
+          },
+          {
+            "id": 27,
+            "description": "Cross-Platform Multiplayer"
+          },
+          {
+            "id": 22,
+            "description": "Steam Achievements"
+          },
+          {
+            "id": 64,
+            "description": "Adjustable Text Size"
+          },
+          {
+            "id": 67,
+            "description": "Camera Comfort"
+          },
+          {
+            "id": 66,
+            "description": "Color Alternatives"
+          },
+          {
+            "id": 68,
+            "description": "Custom Volume Controls"
+          },
+          {
+            "id": 75,
+            "description": "Keyboard Only Option"
+          },
+          {
+            "id": 76,
+            "description": "Mouse Only Option"
+          },
+          {
+            "id": 74,
+            "description": "Playable without Timed Input"
+          },
+          {
+            "id": 69,
+            "description": "Stereo Sound"
+          },
+          {
+            "id": 65,
+            "description": "Subtitle Options"
+          },
+          {
+            "id": 70,
+            "description": "Surround Sound"
+          },
+          {
+            "id": 77,
+            "description": "Touch Only Option"
+          },
+          {
+            "id": 18,
+            "description": "Partial Controller Support"
+          },
+          {
+            "id": 62,
+            "description": "Family Sharing"
+          }
+        ],
+        "genres": [
+          {
+            "id": "1",
+            "description": "Action"
+          }
+        ],
+        "content_descriptors": {
+          "ids": [],
+          "notes": null
+        },
+        "ratings": {
+          "esrb": {
+            "rating": "t",
+            "descriptors": "Violence\r\nAnimated Blood\r\nLanguage\r\n",
+            "interactive_elements": "Users Interact\r\nIn-Game Purchases\r\n"
+          },
+          "usk": {
+            "rating": "16",
+            "rating_id": "58426",
+            "descriptors": "Gewalt"
+          },
+          "pegi": {
+            "rating": "16",
+            "descriptors": "Violence"
+          },
+          "dejus": {
+            "rating_generated": "1",
+            "rating": "14",
+            "required_age": "14",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Violência"
+          },
+          "steam_germany": {
+            "rating_generated": "1",
+            "rating": "16",
+            "required_age": "16",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Drastische Gewalt"
+          }
+        }
+      },
+      {
+        "steam_appid": 3764200,
+        "name": "Resident Evil Requiem",
+        "type": "game",
+        "required_age": "17",
+        "categories": [
+          {
+            "id": 2,
+            "description": "Single-player"
+          },
+          {
+            "id": 22,
+            "description": "Steam Achievements"
+          },
+          {
+            "id": 28,
+            "description": "Full controller support"
+          },
+          {
+            "id": 29,
+            "description": "Steam Trading Cards"
+          },
+          {
+            "id": 13,
+            "description": "Captions available"
+          },
+          {
+            "id": 23,
+            "description": "Steam Cloud"
+          },
+          {
+            "id": 61,
+            "description": "HDR available"
+          },
+          {
+            "id": 62,
+            "description": "Family Sharing"
+          }
+        ],
+        "genres": [
+          {
+            "id": "1",
+            "description": "Action"
+          },
+          {
+            "id": "25",
+            "description": "Adventure"
+          }
+        ],
+        "content_descriptors": {
+          "ids": [
+            2,
+            5
+          ],
+          "notes": "This Game may contain content not appropriate for all ages, or may not be appropriate for viewing at work: Frequent Violence or Gore, General Mature Content"
+        },
+        "ratings": {
+          "esrb": {
+            "rating": "m",
+            "descriptors": "Intense Violence\r\nBlood and Gore\r\nStrong Language\r\n",
+            "interactive_elements": "In-Game Purchases\r\n",
+            "use_age_gate": "true",
+            "required_age": "17"
+          },
+          "pegi": {
+            "rating": "18",
+            "descriptors": "Violence\r\nBad Language\r\nIn-Game Purchases",
+            "use_age_gate": "true",
+            "required_age": "18"
+          },
+          "usk": {
+            "rating": "18",
+            "rating_id": "57899/25",
+            "descriptors": "Drastische Gewalt\r\nHorror\r\nIn-Game-Käufe",
+            "use_age_gate": "true",
+            "required_age": "18"
+          },
+          "oflc": {
+            "rating": "r18",
+            "descriptors": "High impact horror violence\r\nblood and gore\r\nin-game purchases",
+            "required_age": "18",
+            "use_age_gate": "true"
+          },
+          "nzoflc": {
+            "rating": "r16",
+            "descriptors": "Graphic violence &amp; horror",
+            "use_age_gate": "true",
+            "required_age": "16"
+          },
+          "cero": {
+            "rating": "z",
+            "descriptors": "暴力",
+            "use_age_gate": "true",
+            "required_age": "18"
+          },
+          "kgrb": {
+            "rating": "19",
+            "use_age_gate": "true",
+            "required_age": "19",
+            "descriptors": "暴力・脅迫\r\n恐怖\r\n言葉遣い\r\nアルコール・タバコ・ドラッグ"
+          },
+          "gmedia": {
+            "rating": "18",
+            "use_age_gate": "true",
+            "required_age": "18"
+          },
+          "fpb": {
+            "rating": "18",
+            "descriptors": "Horror\r\nLanguage\r\nViolence\r\nCompetitive Intensity",
+            "use_age_gate": "true",
+            "required_age": "18"
+          },
+          "csrr": {
+            "rating": "R",
+            "descriptors": "暴力\r\n恐怖",
+            "use_age_gate": "true",
+            "required_age": "18"
+          },
+          "crl": {
+            "rating": "18",
+            "use_age_gate": "true",
+            "required_age": "18"
+          },
+          "dejus": {
+            "rating": "18",
+            "descriptors": "Violência Extrema\r\nLinguagem imprópria\r\n",
+            "required_age": "18",
+            "use_age_gate": "true"
+          },
+          "steam_germany": {
+            "rating_generated": "1",
+            "rating": "18",
+            "required_age": "18",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Drastische Gewalt\nAlkohol / Tabak"
+          }
+        }
+      },
+      {
+        "steam_appid": 1808500,
+        "name": "ARC Raiders",
+        "type": "game",
+        "required_age": 0,
+        "categories": [
+          {
+            "id": 1,
+            "description": "Multi-player"
+          },
+          {
+            "id": 49,
+            "description": "PvP"
+          },
+          {
+            "id": 36,
+            "description": "Online PvP"
+          },
+          {
+            "id": 9,
+            "description": "Co-op"
+          },
+          {
+            "id": 38,
+            "description": "Online Co-op"
+          },
+          {
+            "id": 27,
+            "description": "Cross-Platform Multiplayer"
+          },
+          {
+            "id": 22,
+            "description": "Steam Achievements"
+          },
+          {
+            "id": 28,
+            "description": "Full controller support"
+          },
+          {
+            "id": 35,
+            "description": "In-App Purchases"
+          },
+          {
+            "id": 15,
+            "description": "Stats"
+          },
+          {
+            "id": 62,
+            "description": "Family Sharing"
+          }
+        ],
+        "genres": [
+          {
+            "id": "1",
+            "description": "Action"
+          }
+        ],
+        "content_descriptors": {
+          "ids": [],
+          "notes": null
+        },
+        "ratings": {
+          "csrr": {
+            "rating": "C15",
+            "descriptors": "Card or Casual Games, Horror, Inappropriate Language, Violence"
+          },
+          "dejus": {
+            "rating_generated": "1",
+            "rating": "12",
+            "required_age": "12",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Linguagem imprópria\nViolência"
+          },
+          "steam_germany": {
+            "rating_generated": "1",
+            "rating": "16",
+            "required_age": "16",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Gewalt\nSchimpfwörte"
+          }
+        }
+      },
+      {
+        "steam_appid": 3897800,
+        "name": "Poker Night at the Inventory",
+        "type": "game",
+        "required_age": 0,
+        "categories": [
+          {
+            "id": 2,
+            "description": "Single-player"
+          },
+          {
+            "id": 22,
+            "description": "Steam Achievements"
+          },
+          {
+            "id": 28,
+            "description": "Full controller support"
+          },
+          {
+            "id": 68,
+            "description": "Custom Volume Controls"
+          },
+          {
+            "id": 78,
+            "description": "Adjustable Difficulty"
+          },
+          {
+            "id": 76,
+            "description": "Mouse Only Option"
+          },
+          {
+            "id": 74,
+            "description": "Playable without Timed Input"
+          },
+          {
+            "id": 65,
+            "description": "Subtitle Options"
+          },
+          {
+            "id": 77,
+            "description": "Touch Only Option"
+          },
+          {
+            "id": 23,
+            "description": "Steam Cloud"
+          },
+          {
+            "id": 62,
+            "description": "Family Sharing"
+          }
+        ],
+        "genres": [
+          {
+            "id": "4",
+            "description": "Casual"
+          }
+        ],
+        "content_descriptors": {
+          "ids": [],
+          "notes": null
+        },
+        "ratings": {
+          "dejus": {
+            "rating_generated": "1",
+            "rating": "14",
+            "required_age": "14",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Linguagem imprÃ³pria"
+          },
+          "steam_germany": {
+            "rating_generated": "1",
+            "rating": "6",
+            "required_age": "6",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Alkohol / Tabak\nDerbe Sprache"
+          }
+        }
+      },
+      {
+        "steam_appid": 2778610,
+        "name": "Over The Top: WWI",
+        "type": "game",
+        "required_age": 0,
+        "categories": [
+          {
+            "id": 2,
+            "description": "Single-player"
+          },
+          {
+            "id": 1,
+            "description": "Multi-player"
+          },
+          {
+            "id": 49,
+            "description": "PvP"
+          },
+          {
+            "id": 36,
+            "description": "Online PvP"
+          },
+          {
+            "id": 47,
+            "description": "LAN PvP"
+          },
+          {
+            "id": 9,
+            "description": "Co-op"
+          },
+          {
+            "id": 38,
+            "description": "Online Co-op"
+          },
+          {
+            "id": 48,
+            "description": "LAN Co-op"
+          },
+          {
+            "id": 22,
+            "description": "Steam Achievements"
+          },
+          {
+            "id": 30,
+            "description": "Steam Workshop"
+          },
+          {
+            "id": 67,
+            "description": "Camera Comfort"
+          },
+          {
+            "id": 66,
+            "description": "Color Alternatives"
+          },
+          {
+            "id": 68,
+            "description": "Custom Volume Controls"
+          },
+          {
+            "id": 75,
+            "description": "Keyboard Only Option"
+          },
+          {
+            "id": 74,
+            "description": "Playable without Timed Input"
+          },
+          {
+            "id": 69,
+            "description": "Stereo Sound"
+          },
+          {
+            "id": 65,
+            "description": "Subtitle Options"
+          },
+          {
+            "id": 18,
+            "description": "Partial Controller Support"
+          },
+          {
+            "id": 23,
+            "description": "Steam Cloud"
+          },
+          {
+            "id": 17,
+            "description": "Includes level editor"
+          },
+          {
+            "id": 62,
+            "description": "Family Sharing"
+          }
+        ],
+        "genres": [
+          {
+            "id": "1",
+            "description": "Action"
+          },
+          {
+            "id": "23",
+            "description": "Indie"
+          },
+          {
+            "id": "29",
+            "description": "Massively Multiplayer"
+          },
+          {
+            "id": "28",
+            "description": "Simulation"
+          }
+        ],
+        "content_descriptors": {
+          "ids": [
+            2,
+            5
+          ],
+          "notes": "This game features mature content, including blood, gore, and depictions of death. "
+        },
+        "ratings": {
+          "dejus": {
+            "rating_generated": "1",
+            "rating": "18",
+            "required_age": "18",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "ViolÃªncia Extrema\nLinguagem imprÃ³pria"
+          },
+          "steam_germany": {
+            "rating_generated": "1",
+            "rating": "18",
+            "required_age": "18",
+            "banned": "0",
+            "use_age_gate": "0",
+            "descriptors": "Drastische Gewalt\nAlkohol / Tabak\nSchimpfwÃ¶rte"
+          }
+        }
+      }
+    ],
+    "summary": {
+      "required_ages": [
+        0,
+        "17"
+      ],
+      "esrb_ratings_seen": [
+        "m",
+        "t"
+      ],
+      "content_descriptor_ids_seen": [
+        2,
+        5
+      ],
+      "category_ids_seen": [
+        1,
+        13,
+        15,
+        17,
+        18,
+        2,
+        22,
+        23,
+        25,
+        27,
+        28,
+        29,
+        30,
+        35,
+        36,
+        38,
+        47,
+        48,
+        49,
+        61,
+        62,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        9
+      ]
+    }
+  },
+  "egdata": {
+    "elementCount": 100,
+    "tagCount": 42,
+    "categoryPathCount": 4,
+    "allTagNames": [
+      "Achievements",
+      "Action",
+      "Action-Adventure",
+      "Adventure",
+      "Amazing Characters",
+      "Amazing Storytelling",
+      "Beautiful Visuals",
+      "Challenging Combat",
+      "Cloud Saves",
+      "Co-op",
+      "Competitive",
+      "Competitive Community",
+      "Controller Support",
+      "Diverse Characters",
+      "EA Play",
+      "EA Play Discount",
+      "EA Play Trial",
+      "Extremely Fun",
+      "Fighting",
+      "First Person",
+      "Gift A Game",
+      "Great Boss Battles",
+      "Great for Beginners",
+      "Great for Quick Sessions",
+      "Horror",
+      "Multiplayer",
+      "Online Multiplayer",
+      "Open World",
+      "Promotional Content",
+      "Quickly Understand the Controls",
+      "RELAXING",
+      "Racing",
+      "Realistic Visuals",
+      "Recommend this Game",
+      "SURVIVAL HORROR",
+      "Shooter",
+      "Simulation",
+      "Single Player",
+      "Sports",
+      "Survival",
+      "Windows",
+      "ZOMBIES"
+    ],
+    "allTagIds": [
+      "1080",
+      "1117",
+      "1131",
+      "1188",
+      "1203",
+      "1210",
+      "1212",
+      "1216",
+      "1218",
+      "1220",
+      "1264",
+      "1283",
+      "1294",
+      "1299",
+      "1307",
+      "1336",
+      "1344",
+      "1370",
+      "1393",
+      "19847",
+      "21109",
+      "21119",
+      "21121",
+      "21122",
+      "21125",
+      "21129",
+      "21134",
+      "21135",
+      "21138",
+      "21139",
+      "21140",
+      "21141",
+      "21149",
+      "21894",
+      "29088",
+      "32709",
+      "33639",
+      "34154",
+      "34568",
+      "39940",
+      "9547",
+      "9549"
+    ],
+    "tagIdToName": {
+      "1080": "Survival",
+      "1117": "Adventure",
+      "1131": "SURVIVAL HORROR",
+      "1188": "RELAXING",
+      "1203": "Multiplayer",
+      "1210": "Shooter",
+      "1212": "Racing",
+      "1216": "Action",
+      "1218": "Horror",
+      "1220": "ZOMBIES",
+      "1264": "Co-op",
+      "1283": "Sports",
+      "1294": "First Person",
+      "1299": "Competitive",
+      "1307": "Open World",
+      "1336": "Action-Adventure",
+      "1344": "Fighting",
+      "1370": "Single Player",
+      "1393": "Simulation",
+      "9547": "Windows",
+      "9549": "Controller Support",
+      "19847": "Achievements",
+      "21109": "Great Boss Battles",
+      "21119": "Great for Beginners",
+      "21121": "Great for Quick Sessions",
+      "21122": "Diverse Characters",
+      "21125": "Competitive Community",
+      "21129": "Challenging Combat",
+      "21134": "Beautiful Visuals",
+      "21135": "Realistic Visuals",
+      "21138": "Recommend this Game",
+      "21139": "Amazing Characters",
+      "21140": "Amazing Storytelling",
+      "21141": "Extremely Fun",
+      "21149": "Quickly Understand the Controls",
+      "21894": "Cloud Saves",
+      "29088": "Online Multiplayer",
+      "32709": "EA Play",
+      "33639": "Promotional Content",
+      "34154": "EA Play Trial",
+      "34568": "EA Play Discount",
+      "39940": "Gift A Game"
+    },
+    "allCategoryPaths": [
+      "applications",
+      "games",
+      "games/edition",
+      "games/edition/base"
+    ],
+    "sampleByTag": {
+      "Achievements": "Resident Evil Requiem",
+      "Action": "ARC Raiders",
+      "Action-Adventure": "Resident Evil Requiem",
+      "Adventure": "Grand Theft Auto V Enhanced",
+      "Amazing Characters": "Resident Evil Requiem",
+      "Amazing Storytelling": "Resident Evil Requiem",
+      "Beautiful Visuals": "ARC Raiders",
+      "Challenging Combat": "ARC Raiders",
+      "Cloud Saves": "World War Z Aftermath",
+      "Co-op": "Grand Theft Auto V Enhanced",
+      "Competitive": "WRC 10 FIA World Rally Championship",
+      "Competitive Community": "ARC Raiders",
+      "Controller Support": "Resident Evil Requiem",
+      "Diverse Characters": "Resident Evil Requiem",
+      "EA Play": "EA SPORTS FC™ 26 Standard Edition",
+      "EA Play Discount": "EA SPORTS FC™ 26 Standard Edition",
+      "EA Play Trial": "EA SPORTS FC™ 26 Standard Edition",
+      "Extremely Fun": "Resident Evil Requiem",
+      "Fighting": "Crimson Desert Standard Edition",
+      "First Person": "Battlefield™ 6",
+      "Gift A Game": "ARC Raiders",
+      "Great Boss Battles": "ARC Raiders",
+      "Great for Beginners": "Resident Evil Requiem",
+      "Great for Quick Sessions": "WRC 10 FIA World Rally Championship",
+      "Horror": "Resident Evil Requiem",
+      "Multiplayer": "Grand Theft Auto V Enhanced",
+      "Online Multiplayer": "ARC Raiders",
+      "Open World": "Grand Theft Auto V Enhanced",
+      "Promotional Content": "Resident Evil Requiem",
+      "Quickly Understand the Controls": "Resident Evil Requiem",
+      "Racing": "WRC 10 FIA World Rally Championship",
+      "Realistic Visuals": "WRC 10 FIA World Rally Championship",
+      "Recommend this Game": "Resident Evil Requiem",
+      "RELAXING": "Resident Evil Requiem",
+      "Shooter": "ARC Raiders",
+      "Simulation": "EA SPORTS FC™ 26 Standard Edition",
+      "Single Player": "Resident Evil Requiem",
+      "Sports": "EA SPORTS FC™ 26 Standard Edition",
+      "Survival": "Dead by Daylight",
+      "SURVIVAL HORROR": "Dead by Daylight",
+      "Windows": "Resident Evil Requiem",
+      "ZOMBIES": "World War Z Aftermath"
+    },
+    "firstTitles": [
+      {
+        "title": "Resident Evil Requiem",
+        "namespace": "cdf68ea2cdbd443ca0bd1de2d9cfea68",
+        "id": "03c9e4679725466891f8d72c832dcc01",
+        "tags": [
+          {
+            "id": "1218",
+            "name": "Horror"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "1188",
+            "name": "RELAXING"
+          },
+          {
+            "id": "33639",
+            "name": "Promotional Content"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "9549",
+            "name": "Controller Support"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1336",
+            "name": "Action-Adventure"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          },
+          {
+            "id": "21119",
+            "name": "Great for Beginners"
+          }
+        ],
+        "categories": [
+          "games/edition/base",
+          "games/edition",
+          "games"
+        ]
+      },
+      {
+        "title": "ARC Raiders",
+        "namespace": "b4bb52a95d0b43d9af543c6ec3c54e04",
+        "id": "6e1b49b0a42f415b9fa77ca632059209",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "29088",
+            "name": "Online Multiplayer"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "39940",
+            "name": "Gift A Game"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "21134",
+            "name": "Beautiful Visuals"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21109",
+            "name": "Great Boss Battles"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1210",
+            "name": "Shooter"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          },
+          {
+            "id": "21119",
+            "name": "Great for Beginners"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "Grand Theft Auto V Enhanced",
+        "namespace": "b0cd075465c44f87be3b505ac04a2e46",
+        "id": "331226ba7c944720baa99103cb1fe80c",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "1188",
+            "name": "RELAXING"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "1264",
+            "name": "Co-op"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "1203",
+            "name": "Multiplayer"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "1307",
+            "name": "Open World"
+          },
+          {
+            "id": "1117",
+            "name": "Adventure"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          },
+          {
+            "id": "21119",
+            "name": "Great for Beginners"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "Dead by Daylight",
+        "namespace": "611482b8586142cda48a0786eb8a127c",
+        "id": "dc3a03c1ce5d467bb5db4693be7dbef8",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "29088",
+            "name": "Online Multiplayer"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "1131",
+            "name": "SURVIVAL HORROR"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1080",
+            "name": "Survival"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "EA SPORTS FC™ 26 Standard Edition",
+        "namespace": "1d4d85b1051e41ee8f1a099e99d59f3f",
+        "id": "c28d94d0ed334be8be6e0abb2d11c50e",
+        "tags": [
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "1283",
+            "name": "Sports"
+          },
+          {
+            "id": "39940",
+            "name": "Gift A Game"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "32709",
+            "name": "EA Play"
+          },
+          {
+            "id": "34568",
+            "name": "EA Play Discount"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "34154",
+            "name": "EA Play Trial"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "1264",
+            "name": "Co-op"
+          },
+          {
+            "id": "1393",
+            "name": "Simulation"
+          },
+          {
+            "id": "1203",
+            "name": "Multiplayer"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "Crimson Desert Standard Edition",
+        "namespace": "302e7fc27b6c4f1987e500aa11b0c35a",
+        "id": "9e8a8b72911d47d8999c862c95bcf0ab",
+        "tags": [
+          {
+            "id": "1344",
+            "name": "Fighting"
+          },
+          {
+            "id": "1336",
+            "name": "Action-Adventure"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "1307",
+            "name": "Open World"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "9549",
+            "name": "Controller Support"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base"
+        ]
+      },
+      {
+        "title": "World War Z Aftermath",
+        "namespace": "wombat",
+        "id": "05af9ab1d2dc4b78ada8b2f09724da20",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "1220",
+            "name": "ZOMBIES"
+          },
+          {
+            "id": "39940",
+            "name": "Gift A Game"
+          },
+          {
+            "id": "1188",
+            "name": "RELAXING"
+          },
+          {
+            "id": "21894",
+            "name": "Cloud Saves"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "9549",
+            "name": "Controller Support"
+          },
+          {
+            "id": "1264",
+            "name": "Co-op"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "1203",
+            "name": "Multiplayer"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21109",
+            "name": "Great Boss Battles"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1080",
+            "name": "Survival"
+          },
+          {
+            "id": "1210",
+            "name": "Shooter"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          },
+          {
+            "id": "21119",
+            "name": "Great for Beginners"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "WRC 10 FIA World Rally Championship",
+        "namespace": "d4d0270b8219470ebfc720c18767aef9",
+        "id": "2abb210228a8433a98c8dc8b8ce0107a",
+        "tags": [
+          {
+            "id": "21121",
+            "name": "Great for Quick Sessions"
+          },
+          {
+            "id": "1188",
+            "name": "RELAXING"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "21894",
+            "name": "Cloud Saves"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "21135",
+            "name": "Realistic Visuals"
+          },
+          {
+            "id": "1393",
+            "name": "Simulation"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "1299",
+            "name": "Competitive"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1212",
+            "name": "Racing"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base"
+        ]
+      },
+      {
+        "title": "DEATH STRANDING 2: ON THE BEACH",
+        "namespace": "3dd83ff56d484e2c8c1d911170df0c52",
+        "id": "4a7b130c4f424ba9adfa271a3f9b1894",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "21894",
+            "name": "Cloud Saves"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "9549",
+            "name": "Controller Support"
+          }
+        ],
+        "categories": [
+          "games/edition/base",
+          "games/edition",
+          "games"
+        ]
+      },
+      {
+        "title": "Battlefield™ 6",
+        "namespace": "a14a02aa3c8143729605eaf7c93d7501",
+        "id": "a0bfa081c4aa4cacb59e6f512c130dc1",
+        "tags": [
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "32709",
+            "name": "EA Play"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "34568",
+            "name": "EA Play Discount"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "1294",
+            "name": "First Person"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "1203",
+            "name": "Multiplayer"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1210",
+            "name": "Shooter"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "Resident Evil Requiem",
+        "namespace": "cdf68ea2cdbd443ca0bd1de2d9cfea68",
+        "id": "03c9e4679725466891f8d72c832dcc01",
+        "tags": [
+          {
+            "id": "1218",
+            "name": "Horror"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "1188",
+            "name": "RELAXING"
+          },
+          {
+            "id": "33639",
+            "name": "Promotional Content"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "9549",
+            "name": "Controller Support"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1336",
+            "name": "Action-Adventure"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          },
+          {
+            "id": "21119",
+            "name": "Great for Beginners"
+          }
+        ],
+        "categories": [
+          "games/edition/base",
+          "games/edition",
+          "games"
+        ]
+      },
+      {
+        "title": "ARC Raiders",
+        "namespace": "b4bb52a95d0b43d9af543c6ec3c54e04",
+        "id": "6e1b49b0a42f415b9fa77ca632059209",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "29088",
+            "name": "Online Multiplayer"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "39940",
+            "name": "Gift A Game"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "21134",
+            "name": "Beautiful Visuals"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21109",
+            "name": "Great Boss Battles"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1210",
+            "name": "Shooter"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          },
+          {
+            "id": "21119",
+            "name": "Great for Beginners"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "Grand Theft Auto V Enhanced",
+        "namespace": "b0cd075465c44f87be3b505ac04a2e46",
+        "id": "331226ba7c944720baa99103cb1fe80c",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "1188",
+            "name": "RELAXING"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "1264",
+            "name": "Co-op"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "1203",
+            "name": "Multiplayer"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "1307",
+            "name": "Open World"
+          },
+          {
+            "id": "1117",
+            "name": "Adventure"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          },
+          {
+            "id": "21119",
+            "name": "Great for Beginners"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "Dead by Daylight",
+        "namespace": "611482b8586142cda48a0786eb8a127c",
+        "id": "dc3a03c1ce5d467bb5db4693be7dbef8",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "29088",
+            "name": "Online Multiplayer"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "1131",
+            "name": "SURVIVAL HORROR"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1080",
+            "name": "Survival"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "EA SPORTS FC™ 26 Standard Edition",
+        "namespace": "1d4d85b1051e41ee8f1a099e99d59f3f",
+        "id": "c28d94d0ed334be8be6e0abb2d11c50e",
+        "tags": [
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "1283",
+            "name": "Sports"
+          },
+          {
+            "id": "39940",
+            "name": "Gift A Game"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "32709",
+            "name": "EA Play"
+          },
+          {
+            "id": "34568",
+            "name": "EA Play Discount"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "34154",
+            "name": "EA Play Trial"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "1264",
+            "name": "Co-op"
+          },
+          {
+            "id": "1393",
+            "name": "Simulation"
+          },
+          {
+            "id": "1203",
+            "name": "Multiplayer"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "Crimson Desert Standard Edition",
+        "namespace": "302e7fc27b6c4f1987e500aa11b0c35a",
+        "id": "9e8a8b72911d47d8999c862c95bcf0ab",
+        "tags": [
+          {
+            "id": "1344",
+            "name": "Fighting"
+          },
+          {
+            "id": "1336",
+            "name": "Action-Adventure"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "1307",
+            "name": "Open World"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "9549",
+            "name": "Controller Support"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base"
+        ]
+      },
+      {
+        "title": "World War Z Aftermath",
+        "namespace": "wombat",
+        "id": "05af9ab1d2dc4b78ada8b2f09724da20",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "1220",
+            "name": "ZOMBIES"
+          },
+          {
+            "id": "39940",
+            "name": "Gift A Game"
+          },
+          {
+            "id": "1188",
+            "name": "RELAXING"
+          },
+          {
+            "id": "21894",
+            "name": "Cloud Saves"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "9549",
+            "name": "Controller Support"
+          },
+          {
+            "id": "1264",
+            "name": "Co-op"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "1203",
+            "name": "Multiplayer"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21109",
+            "name": "Great Boss Battles"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1080",
+            "name": "Survival"
+          },
+          {
+            "id": "1210",
+            "name": "Shooter"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          },
+          {
+            "id": "21119",
+            "name": "Great for Beginners"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      },
+      {
+        "title": "WRC 10 FIA World Rally Championship",
+        "namespace": "d4d0270b8219470ebfc720c18767aef9",
+        "id": "2abb210228a8433a98c8dc8b8ce0107a",
+        "tags": [
+          {
+            "id": "21121",
+            "name": "Great for Quick Sessions"
+          },
+          {
+            "id": "1188",
+            "name": "RELAXING"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "21894",
+            "name": "Cloud Saves"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "21135",
+            "name": "Realistic Visuals"
+          },
+          {
+            "id": "1393",
+            "name": "Simulation"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "1299",
+            "name": "Competitive"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1212",
+            "name": "Racing"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base"
+        ]
+      },
+      {
+        "title": "DEATH STRANDING 2: ON THE BEACH",
+        "namespace": "3dd83ff56d484e2c8c1d911170df0c52",
+        "id": "4a7b130c4f424ba9adfa271a3f9b1894",
+        "tags": [
+          {
+            "id": "1216",
+            "name": "Action"
+          },
+          {
+            "id": "21894",
+            "name": "Cloud Saves"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "9549",
+            "name": "Controller Support"
+          }
+        ],
+        "categories": [
+          "games/edition/base",
+          "games/edition",
+          "games"
+        ]
+      },
+      {
+        "title": "Battlefield™ 6",
+        "namespace": "a14a02aa3c8143729605eaf7c93d7501",
+        "id": "a0bfa081c4aa4cacb59e6f512c130dc1",
+        "tags": [
+          {
+            "id": "21122",
+            "name": "Diverse Characters"
+          },
+          {
+            "id": "21125",
+            "name": "Competitive Community"
+          },
+          {
+            "id": "32709",
+            "name": "EA Play"
+          },
+          {
+            "id": "19847",
+            "name": "Achievements"
+          },
+          {
+            "id": "34568",
+            "name": "EA Play Discount"
+          },
+          {
+            "id": "21129",
+            "name": "Challenging Combat"
+          },
+          {
+            "id": "9547",
+            "name": "Windows"
+          },
+          {
+            "id": "1294",
+            "name": "First Person"
+          },
+          {
+            "id": "21138",
+            "name": "Recommend this Game"
+          },
+          {
+            "id": "1203",
+            "name": "Multiplayer"
+          },
+          {
+            "id": "21139",
+            "name": "Amazing Characters"
+          },
+          {
+            "id": "21140",
+            "name": "Amazing Storytelling"
+          },
+          {
+            "id": "21141",
+            "name": "Extremely Fun"
+          },
+          {
+            "id": "1210",
+            "name": "Shooter"
+          },
+          {
+            "id": "1370",
+            "name": "Single Player"
+          },
+          {
+            "id": "21149",
+            "name": "Quickly Understand the Controls"
+          }
+        ],
+        "categories": [
+          "games",
+          "games/edition",
+          "games/edition/base",
+          "applications"
+        ]
+      }
+    ]
+  }
+}

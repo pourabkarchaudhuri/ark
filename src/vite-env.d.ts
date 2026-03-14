@@ -176,6 +176,28 @@ interface EventScraperAPI {
   clearCache: () => Promise<{ success: boolean }>;
 }
 
+// egdata API (Epic top sellers, fallback when Epic blocked, optional enrichment)
+interface EgdataTopSellersResult {
+  elements: Array<Record<string, unknown>>;
+  total?: number;
+}
+interface EgdataAPI {
+  getTopSellers: (limit?: number, skip?: number) => Promise<EgdataTopSellersResult>;
+  getAutocomplete: (query: string, limit?: number) => Promise<EgdataTopSellersResult>;
+  getOffer: (id: string) => Promise<Record<string, unknown> | null>;
+  health: () => Promise<{ status: string } | null>;
+  isEnabled: () => Promise<boolean>;
+}
+
+// Catalog helpers (e.g. full-catalog adult filter test)
+interface CatalogAPI {
+  runFullCatalogAdultFilterTest: () => Promise<{
+    steam: { total: number; excluded: number; excludedList: Array<{ appid: number; name: string }>; error?: string };
+    epic: { total: number; excluded: number; excludedList: Array<{ title: string; id: string; namespace: string; matchingTags: string[] }>; error?: string };
+    runAt: string;
+  }>;
+}
+
 declare global {
   // Build-time constant injected by Vite from package.json (see vite.config.ts `define`)
   const __APP_VERSION__: string;
@@ -190,6 +212,8 @@ declare global {
     ml?: MLModelAPI;
     devlog?: DevLogAPI;
     eventScraper?: EventScraperAPI;
+    egdata?: EgdataAPI;
+    catalog?: CatalogAPI;
   }
 }
 

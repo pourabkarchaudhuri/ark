@@ -269,11 +269,11 @@ function GameCardComponent({
     const hardcoded = getHardcodedCover(game.title);
     if (hardcoded) return [hardcoded];
 
-    // Epic games: use coverUrl directly (no CDN URL construction)
+    // Epic games: prefer landscape (headerImage = wide) for 4:3 card, then tall cover, then screenshots
     if (game.store === 'epic' || game.id?.startsWith('epic-')) {
       const candidates = [
-        game.coverUrl || '',
         game.headerImage || '',
+        game.coverUrl || '',
         ...(game.screenshots || []),
       ];
       const seen = new Set<string>();
@@ -286,13 +286,14 @@ function GameCardComponent({
 
     if (!game.steamAppId) return [game.coverUrl || ''];
 
+    // Steam: prefer landscape for 4:3 card (header, capsule), then vertical cover as fallback
     const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
     const candidates = [
-      game.coverUrl || `${cdnBase}/${game.steamAppId}/library_600x900.jpg`,
       game.headerImage || `${cdnBase}/${game.steamAppId}/header.jpg`,
       `${cdnBase}/${game.steamAppId}/header.jpg`,
       `${cdnBase}/${game.steamAppId}/capsule_616x353.jpg`,
       `${cdnBase}/${game.steamAppId}/capsule_231x87.jpg`,
+      game.coverUrl || `${cdnBase}/${game.steamAppId}/library_600x900.jpg`,
       `${cdnBase}/${game.steamAppId}/logo.png`,
       game.screenshots?.[0] || '',
     ];
@@ -353,9 +354,9 @@ function GameCardComponent({
     >
       {/* Inner card — overflow-hidden for border-radius clipping */}
       <div className="flex flex-col rounded-xl overflow-hidden bg-card/30 group-hover:bg-card/50 border border-transparent group-hover:border-white/10 transition-all duration-300 w-full cursor-pointer">
-      {/* Cover Image Container - 3:4 aspect ratio like game covers */}
+      {/* Cover Image Container - 16:9 so landscape art (header/capsule) fits with minimal crop */}
       <div 
-        className="relative aspect-[3/4] overflow-hidden"
+        className="relative aspect-video overflow-hidden"
         style={{ background: imageError || !coverUrl ? fallbackGradient : '#0a0a0a' }}
       >
         {/* Cover Image */}

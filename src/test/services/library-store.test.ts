@@ -17,6 +17,7 @@ vi.mock('@/services/journey-store', () => ({
 
 vi.mock('@/services/session-store', () => ({
   sessionStore: {
+    getTotalHours: vi.fn().mockReturnValue(0),
     exportData: vi.fn().mockReturnValue([]),
     importData: vi.fn().mockReturnValue({ added: 0, skipped: 0 }),
     clear: vi.fn(),
@@ -56,6 +57,7 @@ Object.defineProperty(window, 'localStorage', {
 
 // Import after mocking
 import { libraryStore } from '@/services/library-store';
+import { sessionStore } from '@/services/session-store';
 
 describe('LibraryStore', () => {
   beforeEach(() => {
@@ -180,6 +182,63 @@ describe('LibraryStore', () => {
       const updated = libraryStore.updateEntry('steam-12345', { priority: 'High' });
 
       expect(updated?.updatedAt.getTime()).toBeGreaterThanOrEqual(originalUpdatedAt);
+    });
+
+    it('sets hoursBaseline when user updates hoursPlayed so session updates add on top', () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-12345',
+        status: 'Playing',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+      });
+      vi.mocked(sessionStore.getTotalHours).mockReturnValue(10);
+
+      const updated = libraryStore.updateEntry('steam-12345', { hoursPlayed: 50 });
+
+      expect(updated?.hoursPlayed).toBe(50);
+      expect(updated?.hoursBaseline).toBe(40);
+    });
+  });
+
+  describe('updateHoursFromSessions', () => {
+    it('sets hoursPlayed to baseline + session total and migrates baseline when missing', () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-12345',
+        status: 'Playing',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+      });
+      const entry = libraryStore.getEntry('steam-12345');
+      expect(entry).toBeDefined();
+      entry!.hoursPlayed = 100;
+      // No hoursBaseline (legacy entry)
+
+      libraryStore.updateHoursFromSessions('steam-12345', 2, '2025-01-15T12:00:00Z');
+
+      const after = libraryStore.getEntry('steam-12345');
+      expect(after?.hoursBaseline).toBe(98);
+      expect(after?.hoursPlayed).toBe(100);
+      expect(after?.lastPlayedAt).toBe('2025-01-15T12:00:00Z');
+    });
+
+    it('adds session hours on top of baseline without overwriting', () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-12345',
+        status: 'Playing',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+      });
+      libraryStore.updateEntry('steam-12345', { hoursPlayed: 50 });
+      vi.mocked(sessionStore.getTotalHours).mockReturnValue(10);
+
+      libraryStore.updateHoursFromSessions('steam-12345', 12, '2025-01-16T14:00:00Z');
+
+      const after = libraryStore.getEntry('steam-12345');
+      expect(after?.hoursBaseline).toBe(40);
+      expect(after?.hoursPlayed).toBe(52);
     });
   });
 

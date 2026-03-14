@@ -293,10 +293,10 @@ function SimilarGamesSection({ similarGames }: { similarGames: { id: number; nam
         <Gamepad2 className="h-5 w-5 text-fuchsia-400" />
         <p className="text-white/50 text-xs uppercase tracking-wide">Similar Games</p>
       </div>
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
         {displayedGames.map((sg) => (
           <div key={sg.id} className="flex flex-col items-center gap-1">
-            <div className="w-full aspect-[3/4] rounded-lg overflow-hidden bg-white/10">
+            <div className="w-full aspect-[4/3] rounded-lg overflow-hidden bg-white/10">
               {sg.coverUrl ? (
                 <img 
                   src={sg.coverUrl} 
@@ -438,10 +438,12 @@ export function GameDetailPanel({
                 {/* Close button */}
                 <button
                   onClick={onClose}
-                  className="absolute top-4 right-4 p-2 rounded-full bg-black/50 backdrop-blur-sm hover:bg-black/70 transition-colors z-20"
+                  className="group absolute top-4 right-4 min-w-[44px] min-h-[44px] flex items-center justify-center z-20"
                   aria-label="Close"
                 >
-                  <X className="h-5 w-5 text-white" />
+                  <span className="p-2 rounded-full flex items-center justify-center bg-black/50 backdrop-blur-sm group-hover:bg-black/70 transition-colors">
+                    <X className="h-5 w-5 text-white pointer-events-none" />
+                  </span>
                 </button>
                 
                 {/* Library Heart Button */}

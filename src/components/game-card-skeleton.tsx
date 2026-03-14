@@ -7,8 +7,8 @@ import { memo } from 'react';
 function GameCardSkeletonComponent() {
   return (
     <div className="relative flex flex-col rounded-xl overflow-hidden bg-card/30 border border-transparent w-full">
-      {/* Cover Image Container - 3:4 aspect ratio like game covers */}
-      <div className="relative aspect-[3/4] overflow-hidden bg-white/5 animate-pulse">
+      {/* Cover Image Container - 16:9 to match GameCard landscape art */}
+      <div className="relative aspect-video overflow-hidden bg-white/5 animate-pulse">
         {/* Gradient overlay to match real cards */}
         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent pointer-events-none" />
       </div>

@@ -8,6 +8,7 @@ import {
   getCachedBrowseData,
   prefetchBrowseData,
   isPrefetchReady,
+  startTopSellersPreload,
 } from '@/services/prefetch-store';
 import { embeddingService } from '@/services/embedding-service';
 import { catalogStore } from '@/services/catalog-store';
@@ -335,6 +336,9 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
         (candidateIds) => embeddingService.enrichWithCatalogEmbeddings(candidateIds),
       );
     };
+
+    // Start Top Sellers preload immediately so Trending shows 137 when dashboard opens (cache hit or miss).
+    startTopSellersPreload();
 
     // If data is already loaded (e.g. HMR re-mount), nothing to do.
     if (isPrefetchReady()) {

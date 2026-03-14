@@ -389,6 +389,39 @@ query browseStoreQuery($count: Int, $start: Int, $locale: String, $country: Stri
   }
 }`;
 
+/** Storefront collectionLayout — returns curated list (e.g. top-sellers, 99 items). */
+const COLLECTION_LAYOUT_QUERY = `
+query collectionLayoutQuery($locale: String, $country: String!, $slug: String) {
+  Storefront {
+    collectionLayout(locale: $locale, slug: $slug) {
+      _slug
+      _title
+      collectionOffers {
+        namespace
+        id
+        title
+        productSlug
+        keyImages {
+          type
+          url
+        }
+        seller { name }
+        price(country: $country) {
+          totalPrice {
+            discountPrice
+            originalPrice
+            fmtPrice {
+              originalPrice
+              discountPrice
+              intermediatePrice
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
 // ---------------------------------------------------------------------------
 // Cache TTLs
 // ---------------------------------------------------------------------------
@@ -424,6 +457,11 @@ class EpicAPIClient {
 
   // Cloudflare clearance state
   private cfInitialized = false;
+
+  /** Whether Epic GraphQL is currently blocked (circuit open). Use egdata as fallback when true. */
+  isEpicBlocked(): boolean {
+    return this.gqlCircuitOpen;
+  }
   private cfInitPromise: Promise<boolean> | null = null;
 
   // -----------------------------------------------------------------------
@@ -1070,10 +1108,11 @@ class EpicAPIClient {
     if (cached && !this.cache.isStale(cacheKey)) return cached;
 
     try {
-      // getNewReleases and getComingSoon already have REST fallbacks internally
+      // getNewReleases and getComingSoon already have REST fallbacks internally.
+      // Use 200 each so the release calendar gets full upcoming/TBA when prefetch is empty or to supplement.
       const [newReleases, comingSoon] = await Promise.all([
-        this.getNewReleases(30),
-        this.getComingSoon(30),
+        this.getNewReleases(200),
+        this.getComingSoon(200),
       ]);
 
       let all = [...newReleases, ...comingSoon];
@@ -1245,6 +1284,47 @@ class EpicAPIClient {
     try {
       return await this.getPromotionalCatalog();
     } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get Epic's curated Top Sellers list (99 items) via Storefront.collectionLayout.
+   * Prefer this over egdata when Epic GraphQL is not blocked.
+   */
+  async getTopSellersFromCollection(): Promise<EpicCatalogItem[]> {
+    const cacheKey = 'epic:top-sellers-collection';
+    const cached = this.cache.get<EpicCatalogItem[]>(cacheKey, true);
+    if (cached && !this.cache.isStale(cacheKey)) return cached;
+
+    try {
+      const data = await this.gqlFetch<{
+        Storefront?: {
+          collectionLayout?: {
+            collectionOffers?: EpicCatalogItem[];
+          };
+        };
+      }>(COLLECTION_LAYOUT_QUERY, {
+        locale: 'en-US',
+        country: 'IN',
+        slug: 'top-sellers',
+      });
+
+      const offers = data?.Storefront?.collectionLayout?.collectionOffers ?? [];
+      if (offers.length === 0) return [];
+
+      // Map seller → developer for compatibility with EpicCatalogItem
+      for (const el of offers) {
+        if (!el.developer && el.seller?.name) {
+          el.developer = el.seller.name;
+        }
+      }
+
+      this.cache.set(cacheKey, offers, RELEASES_CACHE_TTL);
+      logger.log(`[EpicAPI] Top Sellers from collectionLayout: ${offers.length} games`);
+      return offers;
+    } catch (err) {
+      logger.warn('[EpicAPI] getTopSellersFromCollection failed:', (err as Error).message);
       return [];
     }
   }

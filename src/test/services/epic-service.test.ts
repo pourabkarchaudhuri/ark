@@ -101,7 +101,8 @@ describe('EpicService', () => {
       const discountedGame = transformEpicGame(discountedItem);
       expect(discountedGame.price?.isFree).toBe(false);
       expect(discountedGame.price?.discountPercent).toBe(50);
-      expect(discountedGame.price?.finalFormatted).toBe('$29.99');
+      // USD strings from Epic are converted to INR for display (29.99 * 83 ≈ 2,489)
+      expect(discountedGame.price?.finalFormatted).toBe('₹2,489');
 
       const fullPriceItem = makeMinimalItem({
         price: {
@@ -115,6 +116,8 @@ describe('EpicService', () => {
       const fullPriceGame = transformEpicGame(fullPriceItem);
       expect(fullPriceGame.price?.isFree).toBe(false);
       expect(fullPriceGame.price?.discountPercent).toBeUndefined();
+      // 59.99 * 83 ≈ 4,979
+      expect(fullPriceGame.price?.finalFormatted).toBe('₹4,979');
     });
 
     it('resolves images: coverUrl prefers tall, headerImage prefers wide', () => {

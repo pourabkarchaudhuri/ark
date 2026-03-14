@@ -151,6 +151,10 @@ contextBridge.exposeInMainWorld('epic', {
   getUpcomingReleases: () =>
     ipcRenderer.invoke('epic:getUpcomingReleases'),
 
+  // Get Epic Top Sellers (99) from Storefront.collectionLayout
+  getTopSellersCollection: () =>
+    ipcRenderer.invoke('epic:getTopSellersCollection'),
+
   // Get cover image URL for a game (returns cached URL or null)
   // Browse full Epic catalog (paginated)
   browseCatalog: (limit) =>
@@ -182,6 +186,34 @@ contextBridge.exposeInMainWorld('epic', {
   // Get DLC/add-ons by namespace
   getAddons: (namespace, limit) =>
     ipcRenderer.invoke('epic:getAddons', namespace, limit),
+
+  // Whether Epic GraphQL is blocked (use egdata fallback when true)
+  isEpicBlocked: () =>
+    ipcRenderer.invoke('epic:isEpicBlocked'),
+});
+
+// Expose egdata API to renderer (Epic top sellers, fallback, enrichment)
+contextBridge.exposeInMainWorld('egdata', {
+  getTopSellers: (limit, skip) =>
+    ipcRenderer.invoke('egdata:getTopSellers', limit, skip),
+  getAutocomplete: (query, limit) =>
+    ipcRenderer.invoke('egdata:getAutocomplete', query, limit),
+  getOffer: (id) =>
+    ipcRenderer.invoke('egdata:getOffer', id),
+  getPrice: (id, country) =>
+    ipcRenderer.invoke('egdata:getPrice', id, country),
+  getRelated: (id) =>
+    ipcRenderer.invoke('egdata:getRelated', id),
+  health: () =>
+    ipcRenderer.invoke('egdata:health'),
+  isEnabled: () =>
+    ipcRenderer.invoke('egdata:isEnabled'),
+});
+
+// Expose catalog helpers (e.g. full-catalog adult filter test)
+contextBridge.exposeInMainWorld('catalog', {
+  runFullCatalogAdultFilterTest: () =>
+    ipcRenderer.invoke('catalog:runFullCatalogAdultFilterTest'),
 });
 
 // Expose Metacritic API to renderer

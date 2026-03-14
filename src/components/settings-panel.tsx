@@ -11,6 +11,7 @@ import { AnimateIcon } from '@/components/ui/animate-icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
+import { gameService } from '@/services/game-service';
 import { useDevMode } from '@/hooks/useDevMode';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
@@ -291,6 +292,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
       if (result.success) {
         setImportStatus('success');
         setImportMessage(`Imported ${result.count} games`);
+        gameService.backfillLibraryMissingCachedMeta().catch(() => { /* non-blocking */ });
       } else {
         setImportStatus('error');
         setImportMessage(result.error || 'Failed to import');
@@ -361,9 +363,11 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                 variant="ghost"
                 size="icon"
                 onClick={onClose}
-                className="h-7 w-7 text-white/30 hover:text-white/70 hover:bg-white/[0.06]"
+                className="group min-w-[44px] min-h-[44px] p-0 flex items-center justify-center bg-transparent hover:bg-transparent text-white/30 transition-[color,background-color] duration-0"
               >
-                <AnimateIcon hover="shrink"><X className="h-4 w-4 pointer-events-none" /></AnimateIcon>
+                <span className="h-7 w-7 flex items-center justify-center rounded-md group-hover:text-white/70 group-hover:bg-white/[0.06] transition-colors duration-0">
+                  <AnimateIcon hover="shrink"><X className="h-4 w-4 pointer-events-none" /></AnimateIcon>
+                </span>
               </Button>
             </div>
 

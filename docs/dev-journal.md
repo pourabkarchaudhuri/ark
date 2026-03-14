@@ -154,3 +154,29 @@ Squashed a recommendation bug where completed games leaked into Oracle shelves �
 Finally cracked the HDR skybox loading issue. Three.js `FileLoader` uses `fetch()` internally, which doesn't support `file://` URLs in Electron production builds — the nebula backdrop was silently failing with no error callback. Replaced with an XHR-to-Blob-URL pipeline: XHR loads the raw bytes (works with `file://`), wraps them in a Blob URL, and feeds that to `RGBELoader`. Also removed the aggressive `tex.image = null` memory optimization that could break texture state on re-render.
 
 ---
+
+## Friday, March 6, 2026
+
+*fix, progress*
+
+Search UX got a proper pass so the app never flashes "no games found" before a search has actually run. In **browse mode**, as soon as you type we now show a "Searching…" skeleton (spinner + label) until the debounced search finishes — and we treat "query has results" vs "query returned empty" only after the request completes, using a completed-query ref so we don’t show loading forever when the result is legitimately zero. In **library mode**, the same idea: if you’ve typed but the debounced filter hasn’t kicked in yet, we show "Searching…" instead of the full list or an empty state. The search bar spinner now runs in both modes whenever search is pending (raw query ahead of debounce or API in flight). The grid only shows the empty "no results" state when we’re not in that pending state, so the flow is: type → see "Searching…" → then either results or "No games found" once the work is done.
+
+---
+
+## Saturday, March 7, 2026
+
+*exploration, progress, milestone*
+
+Ran a full exploratory comparison of egdata-api (Epic-only, Hono/MongoDB/Redis) against Tracker — real API calls to api.egdata.app for top-sellers, latest-games, featured, price by country, related offers, achievements, reviews-summary, sales, and autocomplete. Confirmed egdata gives a stable Epic catalog with a real top-sellers list (99 items from a GamePosition-backed collection), regional pricing, related editions/DLC, and optional achievements/IGDB/reviews, while Tracker has no Epic top-sellers list and relies on live GraphQL (plus Cloudflare risk) and REST fallback. Deepened the write-up in `docs/egdata-api-comparison.md` with architecture, field-level shapes, and integration options.
+
+Then reinforced the adult-content filter so it actually catches titles that slipped through. Added the **cuss** package — a public linguistic list of profane/explicit words with sureness ratings — and use it for **word-boundary** checks so we don't flag "Assassin" or "classic." Expanded the curated phrase list (e.g. lusty, futa, femboy, hentai, nsfw, sexual content) so titles like "Lusty Bubbles" and "Femboy Futa Mania" are consistently hidden when "Allow adult content" is off. Introduced a cache version: when the filter logic or word list changes we bump the version and clear the classification cache so every game is re-evaluated on next load. All five tests pass (explicit titles classified, mainstream titles and word-boundary cases left in). Users get a safer default browse without relying on store tags.
+
+---
+
+## Wednesday, March 11, 2026
+
+*fix, progress*
+
+Tightened the Voyage Medals experience so it feels intentional instead of half-empty. The **Play Streaks** tab now fills the visible area: the tab content uses the same flex layout as Overview, the heatmap lives in a scrollable flex-1 region so the stats bar stays at the top and the grid uses the rest of the space (or scrolls when needed), and the heatmap block is centered so wide screens don’t leave dead space on the sides. No more awkward empty bands. Also capped **all displayed numeric values** to at most two decimal places — added a shared `formatMaxTwoDecimals` helper and wired it into the Medals view (Taste DNA percentages, genome purity, overview axis labels) so percentages and stats never show runaway precision.
+
+---

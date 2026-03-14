@@ -3,8 +3,8 @@
  * virtualisation so only ~3 rows above/below the viewport are mounted.
  *
  * Uses `@tanstack/react-virtual` with window scrolling.
- * Responsive breakpoints mirror the original Tailwind grid:
- *   2 cols (< 640)  |  3 cols (sm)  |  4 cols (md)  |  5 cols (lg)  |  6 cols (xl)
+ * Responsive breakpoints (wider cards for landscape art):
+ *   2 cols (< 640)  |  2 cols (sm, md)  |  3 cols (lg)  |  4 cols (xl)
  */
 
 import { useRef, useMemo, useCallback, useState, useEffect, type ReactNode } from 'react';
@@ -15,12 +15,12 @@ import { Game } from '@/types/game';
 // Responsive column hook
 // ---------------------------------------------------------------------------
 
-/** Tailwind breakpoints (px) → column count */
+/** Tailwind breakpoints (px) → column count (wider cards so landscape art fits) */
 const BREAKPOINTS: [number, number][] = [
-  [1280, 6], // xl
-  [1024, 5], // lg
-  [768, 4],  // md
-  [640, 3],  // sm
+  [1280, 4], // xl
+  [1024, 3], // lg
+  [768, 2],  // md
+  [640, 2],  // sm
   [0, 2],    // default
 ];
 
@@ -85,10 +85,8 @@ export function VirtualGameGrid({
 
   const rowCount = Math.ceil(games.length / columns);
 
-  // Estimate row height: 3:4 cover aspect-ratio card.
-  // At a typical 6-col layout the card is ~200px wide → 267px tall cover + ~80px info ≈ 350px.
-  // We add gap to each row. The virtualizer will measure real sizes after first paint.
-  const estimateSize = useCallback(() => 380 + gap, [gap]);
+  // Estimate row height: 16:9 cover + info. Wider cards → 16:9 keeps cover shorter; ~260px total.
+  const estimateSize = useCallback(() => 260 + gap, [gap]);
 
   const virtualizer = useWindowVirtualizer({
     count: rowCount,

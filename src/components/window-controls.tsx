@@ -7,6 +7,7 @@
 import { useState, useEffect } from 'react';
 import { X, Minus, Maximize2, Square } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 
 interface WindowControlsProps {
   className?: string;
@@ -50,37 +51,43 @@ export function WindowControls({ className }: WindowControlsProps) {
   }
 
   return (
-    <div className={`flex items-center gap-2 no-drag ${className || ''}`}>
+    <div className={cn('flex items-center gap-0 no-drag', className)}>
       <Button
         variant="ghost"
         size="icon"
-        className="h-6 w-6 rounded-full bg-gray-700/80 hover:bg-gray-600 p-0 transition-colors"
+        className="group min-w-[44px] min-h-[44px] p-0 flex items-center justify-center rounded-full bg-transparent hover:bg-transparent transition-[background-color] duration-0"
         onClick={handleClose}
         aria-label="Close window"
       >
-        <X className="h-3 w-3 text-white pointer-events-none" />
+        <span className="h-6 w-6 rounded-full bg-gray-700/80 group-hover:bg-gray-600 flex items-center justify-center transition-[background-color] duration-0">
+          <X className="h-3 w-3 text-white pointer-events-none" />
+        </span>
       </Button>
       <Button
         variant="ghost"
         size="icon"
-        className="h-6 w-6 rounded-full bg-gray-700/80 hover:bg-gray-600 p-0 transition-colors"
+        className="group min-w-[44px] min-h-[44px] p-0 flex items-center justify-center rounded-full bg-transparent hover:bg-transparent transition-[background-color] duration-0"
         onClick={handleMinimize}
         aria-label="Minimize window"
       >
-        <Minus className="h-3 w-3 text-white pointer-events-none" />
+        <span className="h-6 w-6 rounded-full bg-gray-700/80 group-hover:bg-gray-600 flex items-center justify-center transition-[background-color] duration-0">
+          <Minus className="h-3 w-3 text-white pointer-events-none" />
+        </span>
       </Button>
       <Button
         variant="ghost"
         size="icon"
-        className="h-6 w-6 rounded-full bg-gray-700/80 hover:bg-gray-600 p-0 transition-colors"
+        className="group min-w-[44px] min-h-[44px] p-0 flex items-center justify-center rounded-full bg-transparent hover:bg-transparent transition-[background-color] duration-0"
         onClick={handleMaximize}
         aria-label={isMaximized ? 'Restore window' : 'Maximize window'}
       >
-        {isMaximized ? (
-          <Maximize2 className="h-2.5 w-2.5 text-white pointer-events-none" />
-        ) : (
-          <Square className="h-3 w-3 text-white pointer-events-none" />
-        )}
+        <span className="h-6 w-6 rounded-full bg-gray-700/80 group-hover:bg-gray-600 flex items-center justify-center transition-[background-color] duration-0">
+          {isMaximized ? (
+            <Maximize2 className="h-2.5 w-2.5 text-white pointer-events-none" />
+          ) : (
+            <Square className="h-3 w-3 text-white pointer-events-none" />
+          )}
+        </span>
       </Button>
     </div>
   );

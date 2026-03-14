@@ -109,6 +109,13 @@
                 0 0 40px hsl(280 100% 60% / 0.3),
                 0 0 60px hsl(280 100% 60% / 0.1);
   }
+
+  /* Broadcast card: even glow that doesn’t rely on large blur (avoids clip in scroll) */
+  .broadcast-card-glow {
+    box-shadow: 0 0 0 1px hsl(280 100% 60% / 0.25),
+                0 0 16px hsl(280 100% 60% / 0.35),
+                0 0 28px hsl(280 100% 60% / 0.2);
+  }
   
   .neon-glow-cyan {
     box-shadow: 0 0 20px hsl(180 100% 50% / 0.5),

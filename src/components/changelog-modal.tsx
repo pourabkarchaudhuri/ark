@@ -9,6 +9,14 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.35': {
+    title: "What's New in Ark 1.0.35",
+    changes: [
+      'Playtime no longer resets — Custom or manually entered hours are preserved when the app tracks your game exe; total hours = baseline (your past/manual hours) + session-tracked time',
+      'Library and custom games — Both use a baseline so editing hours in My Progress and then playing tracked sessions adds on top instead of overwriting',
+      'Transmissions — Scheduled Broadcasts strip has Previous/Next buttons, broadcast card glow, and event location (city or Online) on cards',
+    ],
+  },
   '1.0.34': {
     title: "What's New in Ark 1.0.34",
     changes: [

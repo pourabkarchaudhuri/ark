@@ -386,6 +386,38 @@ class SteamAPIClient {
   }
 
   /**
+   * Fetch app details for multiple app IDs in one store request (no cache).
+   * Used by full-catalog adult-filter test. Max 20 ids per request to avoid URL length limits.
+   */
+  async fetchAppDetailsBatch(appIds: number[]): Promise<Array<{ appid: number; name: string; ratings?: { esrb?: { rating?: string } } | null }>> {
+    if (appIds.length === 0) return [];
+    const ids = appIds.slice(0, 20).join(',');
+    const url = `${STEAM_STORE_API_BASE}/appdetails?appids=${ids}&cc=us&l=english`;
+    try {
+      const response = await this.rateLimiter.execute(async () => {
+        const res = await fetchWithTimeout(url, 15000);
+        if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
+        return res.json() as Promise<Record<string, { success?: boolean; data?: SteamAppDetails['data'] }>>;
+      }, `appdetails-batch-${appIds[0]}`);
+      const out: Array<{ appid: number; name: string; ratings?: { esrb?: { rating?: string } } | null }> = [];
+      for (const appId of appIds.slice(0, 20)) {
+        const app = response[String(appId)];
+        if (app?.success && app.data) {
+          out.push({
+            appid: app.data.steam_appid,
+            name: app.data.name ?? '',
+            ratings: (app.data as any).ratings ?? null,
+          });
+        }
+      }
+      return out;
+    } catch (error) {
+      logger.warn('[Steam] fetchAppDetailsBatch failed:', (error as Error).message);
+      return [];
+    }
+  }
+
+  /**
    * Force refresh app details (called by stale-while-revalidate)
    */
   private async refreshAppDetails(appId: number): Promise<SteamAppDetails['data'] | null> {

@@ -48,9 +48,9 @@ const categoryOptions: { value: GameCategory; label: string }[] = [
   { value: 'catalog', label: 'Catalog (A–Z)' },
 ];
 
-type SortOption = 'releaseDate' | 'title' | 'rating';
+type SortOption = 'rating' | 'releaseDate' | 'title';
 type SortDirection = 'asc' | 'desc';
-type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle' | 'ann-graph' | 'data-flow' | 'devlog';
+type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle' | 'ann-graph' | 'data-flow' | 'devlog' | 'settings';
 
 const sortOptions: { value: SortOption; label: string }[] = [
   { value: 'rating', label: 'Rating' },
@@ -114,19 +114,21 @@ export const FilterTrigger = memo(function FilterTrigger({
       data-tour="filter-trigger"
       variant="outline"
       size="icon"
-      className="h-9 w-9 relative"
+      className="group min-w-[44px] min-h-[44px] p-0 flex items-center justify-center rounded-md border-0 transition-[background-color,border-color] duration-0 [&>span]:border [&>span]:border-input [&>span]:rounded-md"
       onClick={onToggle}
       aria-label={open ? 'Close filters' : 'Open filters'}
     >
-      <SlidersHorizontal className="h-4 w-4 pointer-events-none" />
-      {activeFilterCount > 0 && (
-        <Badge
-          variant="secondary"
-          className="absolute -top-1 -right-1 h-5 w-5 p-0 flex items-center justify-center text-xs bg-fuchsia-500 text-white"
-        >
-          {activeFilterCount}
-        </Badge>
-      )}
+      <span className="h-9 w-9 flex items-center justify-center rounded-md bg-background group-hover:bg-accent group-hover:text-accent-foreground transition-colors duration-0 relative">
+        <SlidersHorizontal className="h-4 w-4 pointer-events-none" />
+        {activeFilterCount > 0 && (
+          <Badge
+            variant="secondary"
+            className="absolute -top-1 -right-1 h-5 w-5 p-0 flex items-center justify-center text-xs bg-fuchsia-500 text-white"
+          >
+            {activeFilterCount}
+          </Badge>
+        )}
+      </span>
     </Button>
   );
 });
@@ -243,10 +245,12 @@ export const FilterPanel = memo(function FilterPanel({
               <button
                 type="button"
                 onClick={() => onOpenChange(false)}
-                className="h-9 w-9 flex items-center justify-center rounded-md text-zinc-400 hover:text-white hover:bg-zinc-700 transition-none flex-shrink-0"
+                className="group min-w-[44px] min-h-[44px] flex items-center justify-center flex-shrink-0 rounded-md text-zinc-400 transition-none"
                 aria-label="Close filters"
               >
-                <X className="h-4 w-4 pointer-events-none" />
+                <span className="h-9 w-9 rounded-md flex items-center justify-center bg-transparent group-hover:bg-zinc-700 group-hover:text-white transition-none">
+                  <X className="h-4 w-4 pointer-events-none" />
+                </span>
               </button>
             </div>
 
@@ -308,7 +312,7 @@ export const FilterPanel = memo(function FilterPanel({
           <div className={cn('space-y-2', isCatalog && 'opacity-40 pointer-events-none')}>
             <Label className="text-sm font-medium">Sort By</Label>
             <div className="flex gap-2">
-              <Select value={sortBy} onValueChange={(value) => setSortBy(value as SortOption)} disabled={isCatalog}>
+              <Select value={sortBy === 'default' ? 'rating' : sortBy} onValueChange={(value) => setSortBy(value as SortOption)} disabled={isCatalog}>
                 <SelectTrigger className="flex-1 bg-background/50" aria-label="Sort by">
                   <ArrowUpDown className="h-4 w-4 mr-2 pointer-events-none" />
                   <SelectValue />
@@ -350,7 +354,7 @@ export const FilterPanel = memo(function FilterPanel({
                       aria-pressed={selected}
                       disabled={disabled}
                       className={cn(
-                        'flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-all',
+                        'flex items-center justify-center h-8 gap-1.5 px-3 rounded-md border text-sm transition-all',
                         disabled
                           ? 'opacity-40 cursor-not-allowed'
                           : selected
@@ -358,7 +362,7 @@ export const FilterPanel = memo(function FilterPanel({
                             : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
                       )}
                     >
-                      <FaSteam className="h-3.5 w-3.5" />
+                      <FaSteam className="h-3.5 w-3.5 shrink-0" />
                       Steam
                     </button>
                   );
@@ -374,7 +378,7 @@ export const FilterPanel = memo(function FilterPanel({
                       aria-pressed={selected}
                       disabled={disabled}
                       className={cn(
-                        'flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-all',
+                        'flex items-center justify-center h-8 gap-1.5 px-3 rounded-md border text-sm transition-all',
                         disabled
                           ? 'opacity-40 cursor-not-allowed'
                           : selected
@@ -382,7 +386,7 @@ export const FilterPanel = memo(function FilterPanel({
                             : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
                       )}
                     >
-                      <SiEpicgames className="h-3.5 w-3.5" />
+                      <SiEpicgames className="h-3.5 w-3.5 shrink-0" />
                       Epic Games
                     </button>
                   );
@@ -391,14 +395,17 @@ export const FilterPanel = memo(function FilterPanel({
                 {(() => {
                   const disabled = isCatalog || isMostPlayed || isFreeGames;
                   return (
-                    <TooltipCard content="Filter to games available on both Steam and Epic — find titles you can pick up on either storefront.">
+                    <TooltipCard
+                      content="Filter to games available on both Steam and Epic — find titles you can pick up on either storefront."
+                      containerClassName="flex items-stretch"
+                    >
                       <button
                         type="button"
                         onClick={() => !disabled && selectStore('both')}
                         aria-pressed={isBothActive}
                         disabled={disabled}
                         className={cn(
-                          'flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-all',
+                          'flex items-center justify-center h-full min-w-[2.5rem] gap-1.5 px-3 rounded-md border text-sm transition-all',
                           disabled
                             ? 'opacity-40 cursor-not-allowed'
                             : isBothActive
@@ -406,9 +413,9 @@ export const FilterPanel = memo(function FilterPanel({
                               : 'bg-background/50 border-zinc-700 text-white/60 hover:border-zinc-500 hover:text-white/80',
                         )}
                       >
-                        <FaSteam className="h-3 w-3" />
-                        <span className="text-white/30 font-mono text-xs">∩</span>
-                        <SiEpicgames className="h-3 w-3" />
+                        <FaSteam className="h-3.5 w-3.5 shrink-0" />
+                        <span className="text-white/30 font-mono text-sm leading-none">∩</span>
+                        <SiEpicgames className="h-3.5 w-3.5 shrink-0" />
                       </button>
                     </TooltipCard>
                   );

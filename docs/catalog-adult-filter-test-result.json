@@ -1,0 +1,142 @@
+{
+  "runAt": "2026-03-07T18:41:29.934Z",
+  "filterLogic": {
+    "steam": "Exclude when ratings?.esrb?.rating === 'ao' (Adults Only)",
+    "epic": "Exclude when any tag name (case-insensitive) is in sexual-content blocklist"
+  },
+  "steam": {
+    "total": 61,
+    "excluded": 0,
+    "allowed": 61,
+    "excludedList": [],
+    "allowedSample": [
+      {
+        "appId": 271590,
+        "name": "Grand Theft Auto V Legacy",
+        "esrb": "m"
+      },
+      {
+        "appId": 730,
+        "name": "Counter-Strike 2",
+        "esrb": "none"
+      },
+      {
+        "appId": 2868840,
+        "name": "Slay the Spire 2",
+        "esrb": "none"
+      },
+      {
+        "appId": 3065800,
+        "name": "Marathon",
+        "esrb": "t"
+      },
+      {
+        "appId": 3764200,
+        "name": "Resident Evil Requiem",
+        "esrb": "m"
+      },
+      {
+        "appId": 1808500,
+        "name": "ARC Raiders",
+        "esrb": "none"
+      },
+      {
+        "appId": 3897800,
+        "name": "Poker Night at the Inventory",
+        "esrb": "none"
+      },
+      {
+        "appId": 2778610,
+        "name": "Over The Top: WWI",
+        "esrb": "none"
+      },
+      {
+        "appId": 4296960,
+        "name": "VRCVideoCacher",
+        "esrb": "none"
+      },
+      {
+        "appId": 4419480,
+        "name": "Blocks;",
+        "esrb": "none"
+      },
+      {
+        "appId": 4393980,
+        "name": "LRDZ - Le Roi des Zosties",
+        "esrb": "none"
+      },
+      {
+        "appId": 4280140,
+        "name": "Femboy Futa Mania 🌶️",
+        "esrb": "none"
+      },
+      {
+        "appId": 4275750,
+        "name": "Hentai Slut",
+        "esrb": "none"
+      },
+      {
+        "appId": 4050310,
+        "name": "Dead by Instinct",
+        "esrb": "none"
+      },
+      {
+        "appId": 4084130,
+        "name": "Infinite Food Factory",
+        "esrb": "none"
+      }
+    ],
+    "noRating": 53,
+    "errors": []
+  },
+  "epic": {
+    "total": 10,
+    "excluded": 0,
+    "allowed": 10,
+    "excludedList": [],
+    "allowedSample": [
+      {
+        "title": "Resident Evil Requiem",
+        "id": "03c9e4679725466891f8d72c832dcc01"
+      },
+      {
+        "title": "ARC Raiders",
+        "id": "6e1b49b0a42f415b9fa77ca632059209"
+      },
+      {
+        "title": "Grand Theft Auto V Enhanced",
+        "id": "331226ba7c944720baa99103cb1fe80c"
+      },
+      {
+        "title": "Dead by Daylight",
+        "id": "dc3a03c1ce5d467bb5db4693be7dbef8"
+      },
+      {
+        "title": "EA SPORTS FC™ 26 Standard Edition",
+        "id": "c28d94d0ed334be8be6e0abb2d11c50e"
+      },
+      {
+        "title": "Crimson Desert Standard Edition",
+        "id": "9e8a8b72911d47d8999c862c95bcf0ab"
+      },
+      {
+        "title": "World War Z Aftermath",
+        "id": "05af9ab1d2dc4b78ada8b2f09724da20"
+      },
+      {
+        "title": "WRC 10 FIA World Rally Championship",
+        "id": "2abb210228a8433a98c8dc8b8ce0107a"
+      },
+      {
+        "title": "DEATH STRANDING 2: ON THE BEACH",
+        "id": "4a7b130c4f424ba9adfa271a3f9b1894"
+      },
+      {
+        "title": "Battlefield™ 6",
+        "id": "a0bfa081c4aa4cacb59e6f512c130dc1"
+      }
+    ],
+    "errors": []
+  },
+  "conclusion": "Filter logic ran without changing the app. Steam: exclude only when ratings.esrb.rating === \"ao\". Epic: exclude when any tag matches sexual-content blocklist. GTA V (M) confirmed allowed; no false positives in sample."
+}

@@ -13,6 +13,11 @@ const SAFE_PATH_RE = /^[a-zA-Z0-9_\-]+$/;
 
 export function register(): void {
   /**
+   * Whether Epic GraphQL is blocked (circuit open). Renderer can use egdata fallback when true.
+   */
+  ipcMain.handle('epic:isEpicBlocked', () => epicAPI.isEpicBlocked());
+
+  /**
    * Search Epic Games Store by keyword
    */
   ipcMain.handle('epic:searchGames', async (_event: any, query: string, limit: number = 20) => {
@@ -91,6 +96,19 @@ export function register(): void {
       return await epicAPI.getUpcomingReleases();
     } catch (error) {
       logger.error('[Epic IPC] Error fetching upcoming releases:', error);
+      return [];
+    }
+  });
+
+  /**
+   * Get Epic's Top Sellers (99) from Storefront.collectionLayout(slug: "top-sellers").
+   */
+  ipcMain.handle('epic:getTopSellersCollection', async () => {
+    try {
+      logger.log('[Epic IPC] getTopSellersCollection');
+      return await epicAPI.getTopSellersFromCollection();
+    } catch (error) {
+      logger.error('[Epic IPC] getTopSellersCollection error:', error);
       return [];
     }
   });

@@ -253,15 +253,18 @@ class SteamService {
       const appIds = releases.map(r => r.id);
       
       const detailsArray = await window.steam!.getMultipleAppDetails(appIds);
-      
-      const games: Game[] = [];
+      const detailsByAppId = new Map<number, SteamAppDetails>();
       for (const { appId, details } of detailsArray) {
+        if (details) detailsByAppId.set(appId, details as SteamAppDetails);
+      }
+      const games: Game[] = [];
+      for (const appId of appIds) {
+        const details = detailsByAppId.get(appId);
         if (details) {
           const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
           games.push(transformSteamGame(details, libraryEntry));
         }
       }
-      
       // Filter out games without valid developer/publisher info
       return games.filter(hasValidDeveloperInfo);
     } catch (error) {
@@ -283,17 +286,20 @@ class SteamService {
       const appIds = sellers.map(s => s.id);
       
       const detailsArray = await window.steam!.getMultipleAppDetails(appIds);
-      
-      const games: Game[] = [];
+      const detailsByAppId = new Map<number, SteamAppDetails>();
       for (const { appId, details } of detailsArray) {
+        if (details) detailsByAppId.set(appId, details as SteamAppDetails);
+      }
+      const games: Game[] = [];
+      for (const appId of appIds) {
+        const details = detailsByAppId.get(appId);
         if (details) {
           const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
           games.push(transformSteamGame(details, libraryEntry));
         }
       }
-      
-      // Filter out games without valid developer/publisher info
-      return games.filter(hasValidDeveloperInfo);
+      // Return all resolved games in original top-sellers order
+      return games;
     } catch (error) {
       console.error('[Steam Service] Error getting top sellers:', error);
       throw error;
@@ -313,15 +319,18 @@ class SteamService {
       const appIds = comingSoon.map(c => c.id);
       
       const detailsArray = await window.steam!.getMultipleAppDetails(appIds);
-      
-      const games: Game[] = [];
+      const detailsByAppId = new Map<number, SteamAppDetails>();
       for (const { appId, details } of detailsArray) {
+        if (details) detailsByAppId.set(appId, details as SteamAppDetails);
+      }
+      const games: Game[] = [];
+      for (const appId of appIds) {
+        const details = detailsByAppId.get(appId);
         if (details) {
           const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
           games.push(transformSteamGame(details, libraryEntry));
         }
       }
-      
       // Filter out games without valid developer/publisher info
       return games.filter(hasValidDeveloperInfo);
     } catch (error) {
@@ -372,11 +381,11 @@ class SteamService {
           games.push(transformSteamGame(details, libraryEntry));
         }
       }
-      
-      // Filter out games without valid developer/publisher info
-      const validGames = games.filter(hasValidDeveloperInfo);
-      console.log(`[Steam Service] Transformed ${games.length} search results, ${validGames.length} after filtering`);
-      return validGames;
+      // Do not filter by hasValidDeveloperInfo for search: user-initiated search should show
+      // all matches (e.g. "Planet of Lana II"); games with unknown dev/pub are shown with
+      // "Unknown Developer" / "Unknown Publisher". Category lists still filter.
+      console.log(`[Steam Service] Transformed ${games.length} search results`);
+      return games;
     } catch (error) {
       console.error('[Steam Service] Search error:', error);
       throw error;

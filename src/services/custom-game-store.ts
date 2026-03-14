@@ -5,6 +5,7 @@ import {
   Game,
 } from '@/types/game';
 import { journeyStore } from '@/services/journey-store';
+import { sessionStore } from '@/services/session-store';
 
 const STORAGE_KEY = 'ark-custom-games';
 const STORAGE_VERSION = 2; // v2: id migrated from negative number to "custom-N" string
@@ -175,7 +176,8 @@ class CustomGameStore {
   addGame(input: CreateCustomGameEntry): CustomGameEntry {
     const now = new Date();
     const id = `custom-${this.nextCounter++}`;
-    
+    const hoursPlayed = input.hoursPlayed ?? 0;
+
     const entry: CustomGameEntry = {
       id,
       title: input.title,
@@ -185,6 +187,11 @@ class CustomGameStore {
       addedAt: now,
       updatedAt: now,
     };
+    if (hoursPlayed > 0) {
+      entry.hoursPlayed = hoursPlayed;
+      const sessionTotal = sessionStore.getTotalHours(id);
+      entry.hoursBaseline = Math.max(0, hoursPlayed - sessionTotal);
+    }
 
     this.entries.set(id, entry);
     this.scheduleSave();
@@ -247,6 +254,12 @@ class CustomGameStore {
       updatedAt: new Date(),
     };
 
+    // When user edits hours, set baseline so session updates add on top instead of overwriting
+    if (input.hoursPlayed !== undefined) {
+      const sessionTotal = sessionStore.getTotalHours(id);
+      updated.hoursBaseline = Math.max(0, input.hoursPlayed - sessionTotal);
+    }
+
     this.entries.set(id, updated);
     this.scheduleSave();
     this.notifyListeners();
@@ -297,6 +310,33 @@ class CustomGameStore {
     }
 
     return updated;
+  }
+
+  /**
+   * Update hours from session tracking (preserves baseline so user-entered hours are not lost).
+   * Call this from the session tracker instead of updateGame(..., { hoursPlayed }) for session-driven updates.
+   */
+  updateHoursFromSessions(gameId: string, sessionTotalHours: number, lastPlayedAt?: string): void {
+    if (!this.isCustomGame(gameId)) return;
+
+    const existing = this.entries.get(gameId);
+    if (!existing) return;
+
+    if (existing.hoursBaseline === undefined) {
+      existing.hoursBaseline = Math.max(0, (existing.hoursPlayed ?? 0) - sessionTotalHours);
+    }
+    const baseline = existing.hoursBaseline ?? 0;
+    const effectiveHours = baseline + sessionTotalHours;
+    const updated: CustomGameEntry = {
+      ...existing,
+      hoursPlayed: effectiveHours,
+      ...(lastPlayedAt !== undefined ? { lastPlayedAt } : {}),
+      updatedAt: new Date(),
+    };
+    this.entries.set(gameId, updated);
+    this.scheduleSave();
+    this.notifyListeners();
+    journeyStore.syncProgress(gameId, { hoursPlayed: effectiveHours, lastPlayedAt });
   }
 
   // Get a custom game by ID

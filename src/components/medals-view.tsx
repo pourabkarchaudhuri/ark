@@ -19,7 +19,7 @@ import { PlayStreakHeatmap } from '@/components/medals/play-streak-heatmap';
 import { computeOverviewAnalytics, GenreRadarChart, ActivityAreaChart, DataSourcesRadar } from '@/components/medals/overview-charts';
 import { Icon } from '@/components/ui/evervault-card';
 import DatabaseWithRestApi from '@/components/ui/database-with-rest-api';
-import { cn } from '@/lib/utils';
+import { cn, formatMaxTwoDecimals } from '@/lib/utils';
 
 interface MedalsViewProps {
   entries: JourneyEntry[];
@@ -293,7 +293,7 @@ export const MedalsView = memo(function MedalsView({ entries }: MedalsViewProps)
               {data.tasteDna.slice(0, 4).map(a => (
                 <div key={a.key} className="flex justify-between text-[10px] font-mono">
                   <span className="text-white/50 truncate">{a.label}</span>
-                  <span className="text-fuchsia-400 font-bold tabular-nums">{a.value}%</span>
+                  <span className="text-fuchsia-400 font-bold tabular-nums">{formatMaxTwoDecimals(a.value)}%</span>
                 </div>
               ))}
             </div>
@@ -415,11 +415,11 @@ export const MedalsView = memo(function MedalsView({ entries }: MedalsViewProps)
         )}
 
         {medalsTab === 'streaks' && (
-          <motion.div key="streaks" className="min-h-full"
+          <motion.div key="streaks" className="h-full flex flex-col min-h-0"
             initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.25 }}
           >
-            <Tile className="p-4" delay={0}>
+            <Tile className="p-4 flex flex-col flex-1 min-h-0 overflow-hidden" delay={0}>
               <PlayStreakHeatmap />
             </Tile>
           </motion.div>

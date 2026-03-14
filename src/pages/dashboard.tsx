@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef, useSyncExternalStore, lazy, Suspense, startTransition } from 'react';
 import { useLocation } from 'wouter';
 import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames, extractCachedMeta, useDebounce } from '@/hooks/useGameStore';
-import { useDeferredFilterSort } from '@/hooks/useDeferredFilterSort';
+import { useDeferredFilterSort, getAdjustedRatingForSort } from '@/hooks/useDeferredFilterSort';
 import { useDetailEnricher } from '@/hooks/useDetailEnricher';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { Game, GameStatus } from '@/types/game';
@@ -73,6 +73,7 @@ import { AnimateIcon, MagneticWrap } from '@/components/ui/animate-icon';
 import { useSessionTracker } from '@/hooks/useSessionTracker';
 import { NavbarStatusIndicator } from '@/components/system-status-panel';
 import { useDevMode } from '@/hooks/useDevMode';
+import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { scheduleBackgroundPrecompute, getBuildStage, subscribeGalaxy } from '@/services/galaxy-cache';
 import { embeddingService } from '@/services/embedding-service';
 import { prewarmNews } from '@/services/news-service';
@@ -80,7 +81,7 @@ import { prewarmEvents } from '@/services/event-resolver-service';
 import { TooltipCard } from '@/components/ui/tooltip-card';
 import { MovingBorderButton } from '@/components/ui/moving-border';
 
-type SortOption = 'releaseDate' | 'title' | 'rating';
+type SortOption = 'rating' | 'releaseDate' | 'title';
 type SortDirection = 'asc' | 'desc';
 type ViewMode = 'browse' | 'library' | 'journey' | 'buzz' | 'calendar' | 'oracle' | 'ann-graph' | 'data-flow' | 'devlog' | 'settings';
 
@@ -162,6 +163,9 @@ export function Dashboard() {
   const [searchQuery, setSearchQuery] = useState('');
   const debouncedSearch = useDebounce(searchQuery, 3000);
   const { results: searchResults, loading: searchLoading, isSearching } = useGameSearch(debouncedSearch);
+  // Show "searching" until debounce kicks in (avoids flashing full list then no-results)
+  const browseSearchPending = viewMode === 'browse' && searchQuery.trim() !== '' && debouncedSearch !== searchQuery;
+  const librarySearchPending = viewMode === 'library' && searchQuery.trim() !== '' && debouncedSearch !== searchQuery;
   
   // Library management
   const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, removeCustomGame, customGames } = useLibrary();
@@ -284,8 +288,9 @@ export function Dashboard() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingGame, setEditingGame] = useState<Game | null>(null);
   const [editInitialEntry, setEditInitialEntry] = useState<GameDialogInitialEntry | null>(null);
-  const [sortBy, setSortBy] = useState<SortOption>('releaseDate');
+  const [sortBy, setSortBy] = useState<SortOption>('rating');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [allowAdultContent] = useAllowAdultContent();
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [showScrollTop, setShowScrollTop] = useState(false);
@@ -317,16 +322,82 @@ export function Dashboard() {
       sortBy,
       sortDirection,
       liveGameIds: liveGames,
+      allowAdultContent,
     });
 
+  // In Library view, use the hook result only when it's actually the library list (every
+  // game in sortedGames is in mergedLibraryGames). Otherwise we'd show Browse data when
+  // Browse has few items (e.g. Top Sellers 17) and Library has more — sortedGames.length
+  // <= mergedLibraryGames.length would be true for the wrong list.
+  const libraryDisplayGames = useMemo(() => {
+    if (viewMode !== 'library') return sortedGames;
+    const libIds = new Set(mergedLibraryGames.map((g: Game) => g.id));
+    const sortedIsFromLibrary =
+      sortedGames.length > 0 && sortedGames.every((g: Game) => libIds.has(g.id));
+    if (sortedIsFromLibrary) return sortedGames;
+    const effectiveSort = (sortBy === 'default' ? 'rating' : sortBy) as 'rating' | 'releaseDate' | 'title';
+    const statusOrder = (g: Game) => {
+      const isLive = liveGames?.has(g.id) || (g.steamAppId ? liveGames?.has(`steam-${g.steamAppId}`) : false);
+      if (isLive || g.status === 'Playing Now') return 0;
+      if (g.status === 'Playing') return 1;
+      if (g.status === 'On Hold') return 2;
+      if (g.status === 'Want to Play') return 3;
+      if (g.status === 'Completed') return 4;
+      return 5;
+    };
+    const releaseTs = (g: Game) => (g.releaseDate ? new Date(g.releaseDate).getTime() : 0);
+    return [...mergedLibraryGames].sort((a, b) => {
+      if (filters.status === 'All') {
+        const diff = statusOrder(a) - statusOrder(b);
+        if (diff !== 0) return diff;
+      }
+      let cmp = 0;
+      if (effectiveSort === 'title') cmp = a.title.localeCompare(b.title);
+      else if (effectiveSort === 'rating') cmp = getAdjustedRatingForSort(a) - getAdjustedRatingForSort(b);
+      else cmp = releaseTs(a) - releaseTs(b);
+      return sortDirection === 'desc' ? -cmp : cmp;
+    });
+  }, [viewMode, sortedGames, mergedLibraryGames, liveGames, filters.status, sortBy, sortDirection]);
+
+  // In Browse view, use the hook result (single source of truth). Only use fallback when
+  // sortedGames is clearly stale library data (same length as library and all ids in library).
+  const browseDisplayGames = useMemo(() => {
+    if (viewMode !== 'browse') return sortedGames;
+    // Empty browse: show nothing or let hook fill in next frame
+    if (sortedGames.length === 0 && steamGames.length === 0) return sortedGames;
+    // Hook not yet populated for browse: show steamGames so user sees something
+    if (sortedGames.length === 0 && steamGames.length > 0) {
+      const effectiveSort = sortBy === 'default' ? 'rating' : sortBy;
+      const releaseTs = (g: Game) => (g.releaseDate ? new Date(g.releaseDate).getTime() : 0);
+      return [...steamGames].sort((a, b) => {
+        let cmp = 0;
+        if (effectiveSort === 'title') cmp = a.title.localeCompare(b.title);
+        else if (effectiveSort === 'rating') cmp = getAdjustedRatingForSort(a) - getAdjustedRatingForSort(b);
+        else cmp = releaseTs(a) - releaseTs(b);
+        return sortDirection === 'desc' ? -cmp : cmp;
+      });
+    }
+    const libIds = new Set(mergedLibraryGames.map((g: Game) => g.id));
+    const sortedIsStaleLibrary =
+      sortedGames.length > 0 &&
+      sortedGames.length === mergedLibraryGames.length &&
+      sortedGames.every((g: Game) => libIds.has(g.id));
+    if (!sortedIsStaleLibrary) return sortedGames;
+    // Fallback only when hook clearly returned library list (same count, all in library)
+    const effectiveSort = sortBy === 'default' ? 'rating' : sortBy;
+    const releaseTs = (g: Game) => (g.releaseDate ? new Date(g.releaseDate).getTime() : 0);
+    return [...steamGames].sort((a, b) => {
+      let cmp = 0;
+      if (effectiveSort === 'title') cmp = a.title.localeCompare(b.title);
+      else if (effectiveSort === 'rating') cmp = getAdjustedRatingForSort(a) - getAdjustedRatingForSort(b);
+      else cmp = releaseTs(a) - releaseTs(b);
+      return sortDirection === 'desc' ? -cmp : cmp;
+    });
+  }, [viewMode, sortedGames, mergedLibraryGames, steamGames, sortBy, sortDirection]);
+
   // Deferred scroll restore when grid content finishes loading.
-  // The virtualised grid renders from `sortedGames` which is produced
-  // asynchronously by `useDeferredFilterSort` (rAF + startTransition).
-  // We must track BOTH `currentGames.length` (data arriving from store)
-  // AND `sortedGames.length` (deferred sort output → grid height) so
-  // this effect re-fires once the grid is tall enough to scroll to.
   const rawGameCount = currentGames.length;
-  const renderedGameCount = sortedGames.length;
+  const renderedGameCount = viewMode === 'library' ? libraryDisplayGames.length : browseDisplayGames.length;
   useEffect(() => {
     const pending = pendingScrollRestoreRef.current;
     if (location !== '/' || !pending || currentLoading) return;
@@ -597,7 +668,8 @@ export function Dashboard() {
     const groups: Record<string, Game[]> = {};
     for (const s of STATUS_SECTIONS) groups[s.key] = [];
 
-    for (const game of sortedGames) {
+    // Use libraryDisplayGames so we always group the full 66, not a stale Browse list.
+    for (const game of libraryDisplayGames) {
       const isLive = liveGames?.has(game.id) ||
         (game.steamAppId ? liveGames?.has(`steam-${game.steamAppId}`) : false);
       const effectiveStatus = (isLive || game.status === 'Playing Now') ? 'Playing Now' : (game.status || 'Want to Play');
@@ -605,7 +677,7 @@ export function Dashboard() {
       else groups['Want to Play'].push(game);
     }
     return groups;
-  }, [isLibraryView, filters.status, sortedGames, liveGames, STATUS_SECTIONS]);
+  }, [isLibraryView, filters.status, libraryDisplayGames, liveGames, STATUS_SECTIONS]);
 
   const toggleSection = useCallback((key: string) => {
     setCollapsedSections(prev => {
@@ -904,7 +976,7 @@ export function Dashboard() {
               <>
                 <p className="text-sm text-white/60 items-center gap-1.5 whitespace-nowrap shrink-0 hidden lg:flex">
                   {viewMode === 'library' ? (
-                    <><span className="text-white font-medium">{sortedGames.length.toLocaleString()}</span> games</>
+                    <><span className="text-white font-medium">{libraryDisplayGames.length.toLocaleString()}</span> games</>
                   ) : filters.category === 'catalog' ? (
                     /* Catalog A–Z: show the absolute full catalog count */
                     catalogTotalCount > 0 ? (
@@ -922,8 +994,8 @@ export function Dashboard() {
                   ) : (
                     /* Other browse categories: "X games of {filter}" */
                     <>
-                      <span className="text-white font-medium">
-                        {sortedGames.length.toLocaleString()}
+                      <span className="text-white font-medium" data-testid="browse-game-count">
+                        {browseDisplayGames.length.toLocaleString()}
                       </span> games of <button onClick={openFilters} className="text-white/80 hover:text-fuchsia-400 transition-colors cursor-pointer underline decoration-white/20 hover:decoration-fuchsia-400/50 underline-offset-2">{{ trending: 'Top Sellers', 'most-played': 'Most Played', free: 'Free Games', recent: 'New Releases', 'award-winning': 'Coming Soon', catalog: 'Catalog', all: 'All' }[filters.category] ?? filters.category}</button>
                     </>
                   )}
@@ -988,7 +1060,7 @@ export function Dashboard() {
                     <X className="h-3 w-3 text-white/40" />
                   </button>
                 )}
-                {searchLoading && viewMode !== 'library' && (
+                {(searchLoading || browseSearchPending || librarySearchPending) && (
                   <div className="absolute right-10 top-1/2 -translate-y-1/2">
                     <div className="w-4 h-4 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
                   </div>
@@ -999,6 +1071,7 @@ export function Dashboard() {
                   <SearchSuggestions
                     results={searchResults}
                     loading={searchLoading}
+                    searchPending={browseSearchPending}
                     visible={showSuggestions && searchQuery.trim().length > 0}
                     onSelect={(game) => {
                       setShowSuggestions(false);
@@ -1173,15 +1246,15 @@ export function Dashboard() {
           <div data-tour="game-grid">
             {/* Loading State - Skeleton Grid */}
             {(currentLoading && currentGames.length === 0) && (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 auto-rows-fr">
+              <div
+                className="auto-rows-fr"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: `repeat(${libColumns}, minmax(0, 1fr))`,
+                  gap: 16,
+                }}
+              >
                 <SkeletonGrid count={12} />
-              </div>
-            )}
-
-            {/* Search Loading State */}
-            {searchLoading && isSearching && viewMode === 'browse' && sortedGames.length === 0 && (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 auto-rows-fr">
-                <SkeletonGrid count={6} />
               </div>
             )}
 
@@ -1217,10 +1290,11 @@ export function Dashboard() {
             )}
 
             {/* Games Grid */}
-            {!currentLoading && !searchLoading && !currentError && sortedGames.length === 0 ? (
+            {!currentLoading && !currentError && (viewMode === 'library' ? libraryDisplayGames.length : browseDisplayGames.length) === 0 ? (
               (() => {
-                // Determine which empty state to show
+                // In browse, never show "no results" while the user is typing or search is in flight
                 if (isSearching) {
+                  if (viewMode === 'browse' && (searchLoading || browseSearchPending)) return null;
                   return (
                     <EmptyState 
                       type="no-results" 
@@ -1248,7 +1322,7 @@ export function Dashboard() {
                   <EmptyState 
                     type="no-games" 
                     onAction={() => {}} 
-                  />
+                />
                 );
               })()
             ) : libraryGroups ? (
@@ -1309,7 +1383,7 @@ export function Dashboard() {
               </div>
             ) : (
               <VirtualGameGrid
-                games={sortedGames}
+                games={viewMode === 'library' ? libraryDisplayGames : browseDisplayGames}
                 renderCard={renderGameCard}
                 gap={16}
                 footer={infiniteScrollSentinel}

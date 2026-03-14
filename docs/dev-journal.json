@@ -152,6 +152,36 @@
       "milestones": ["ML model auto-loads on first status poll", "HDR nebula skybox loads correctly in production builds", "Neighbour distance threshold tightened to 0.7 for higher-quality connections", "Galaxy cache tolerates in-flight embedding growth — no more re-queue on entry", "Completed games no longer leak into Oracle recommendations via cross-store IDs", "Voyage thumbnails restored in Electron production builds", "Embedding Space anti-aliasing enabled, bloom bumped to half-res", "HDR skybox finally loads in production via XHR→Blob URL bypass"],
       "challenges": ["HDR path used absolute '/' which fails with Vite base './'", "Galaxy cache strict equality caused unnecessary rebuilds when background pipeline was still running", "Cross-store dedup secondaryId not checked during candidate exclusion", "THREE.TextureLoader default crossOrigin='anonymous' fails under Electron file:// origin", "Three.js FileLoader uses fetch() which doesn't support file:// URLs in Electron production"],
       "lookingAhead": "Monitor neighbor quality with the tighter 0.7 threshold — may need genre-specific tuning for sparse categories."
+    },
+    {
+      "date": "2026-03-06",
+      "title": "Search UX: Searching… until debounce and results",
+      "tags": ["fix", "progress"],
+      "narrative": "Search UX got a proper pass so the app never flashes 'no games found' before a search has actually run. In browse mode, as soon as you type we now show a 'Searching…' skeleton (spinner + label) until the debounced search finishes — and we treat 'query has results' vs 'query returned empty' only after the request completes, using a completed-query ref so we don't show loading forever when the result is legitimately zero. In library mode, the same idea: if you've typed but the debounced filter hasn't kicked in yet, we show 'Searching…' instead of the full list or an empty state. The search bar spinner now runs in both modes whenever search is pending (raw query ahead of debounce or API in flight). The grid only shows the empty 'no results' state when we're not in that pending state.",
+      "filesChanged": ["src/hooks/useGameStore.ts", "src/pages/dashboard.tsx"],
+      "milestones": [],
+      "challenges": [],
+      "lookingAhead": ""
+    },
+    {
+      "date": "2026-03-07",
+      "title": "egdata comparison + adult filter reinforced with cuss",
+      "tags": ["exploration", "progress", "milestone"],
+      "narrative": "Ran a full exploratory comparison of egdata-api (Epic-only, Hono/MongoDB/Redis) against Tracker — real API calls to api.egdata.app for top-sellers, latest-games, featured, price by country, related offers, achievements, reviews-summary, sales, and autocomplete. Confirmed egdata gives a stable Epic catalog with a real top-sellers list (99 items from a GamePosition-backed collection), regional pricing, related editions/DLC, and optional achievements/IGDB/reviews, while Tracker has no Epic top-sellers list and relies on live GraphQL (plus Cloudflare risk) and REST fallback. Deepened the write-up in docs/egdata-api-comparison.md with architecture, field-level shapes, and integration options.\n\nThen reinforced the adult-content filter so it consistently catches explicit titles. Added the cuss package — a public linguistic list of profane/explicit words with sureness ratings — and use it for word-boundary checks so we don't flag \"Assassin\" or \"classic.\" Expanded the curated phrase list (e.g. lusty, futa, femboy, hentai, nsfw, sexual content) so titles like \"Lusty Bubbles\" and \"Femboy Futa Mania\" are hidden when \"Allow adult content\" is off. Introduced a cache version so when the filter logic or word list changes we clear the classification cache and re-evaluate every game on next load. All five tests pass; users get a safer default browse without relying on store tags.",
+      "filesChanged": ["docs/egdata-api-comparison.md", "src/services/adult-content-filter.ts", "src/test/services/adult-content-filter.test.ts", "src/hooks/useAllowAdultContent.ts", "src/hooks/useDeferredFilterSort.ts", "src/components/settings-screen.tsx", "src/pages/dashboard.tsx", "package.json"],
+      "milestones": ["Adult-content filter reinforced with cuss linguistic library and expanded phrase list; cache version invalidates on logic change"],
+      "challenges": [],
+      "lookingAhead": "Optional: implement egdata as an augmentation source for Epic top sellers and detail enrichment; consider cuss rating threshold tuning if false positives or misses appear."
+    },
+    {
+      "date": "2026-03-11",
+      "title": "Play Streaks layout and 2-decimal value cap",
+      "tags": ["fix", "progress"],
+      "narrative": "Tightened the Voyage Medals experience so it feels intentional instead of half-empty. The Play Streaks tab now fills the visible area: the tab content uses the same flex layout as Overview, the heatmap lives in a scrollable flex-1 region so the stats bar stays at the top and the grid uses the rest of the space (or scrolls when needed), and the heatmap block is centered so wide screens don't leave dead space on the sides. No more awkward empty bands. Also capped all displayed numeric values to at most two decimal places — added a shared formatMaxTwoDecimals helper and wired it into the Medals view (Taste DNA percentages, genome purity, overview axis labels) so percentages and stats never show runaway precision.",
+      "filesChanged": ["src/components/medals-view.tsx", "src/components/medals/play-streak-heatmap.tsx", "src/components/medals/taste-dna.tsx", "src/lib/utils.ts"],
+      "milestones": [],
+      "challenges": [],
+      "lookingAhead": null
     }
   ]
 }

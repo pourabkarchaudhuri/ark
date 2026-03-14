@@ -95,9 +95,9 @@ export const PlayStreakHeatmap = memo(function PlayStreakHeatmap() {
   const handleCellLeave = useCallback(() => setTooltip(null), []);
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col h-full min-h-0 gap-4">
       {/* ── Streak stats bar ── */}
-      <div className="flex flex-wrap gap-4">
+      <div className="flex flex-wrap gap-4 flex-shrink-0">
         <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-orange-500/20 bg-orange-500/5">
           <Flame className="w-4 h-4 text-orange-400" />
           <div>
@@ -129,7 +129,8 @@ export const PlayStreakHeatmap = memo(function PlayStreakHeatmap() {
       </div>
 
       {/* ── Heatmap grid ── */}
-      <div className="relative overflow-x-auto pb-2">
+      <div className="flex-1 min-h-0 overflow-auto flex flex-col items-center">
+        <div className="relative pb-2 inline-block">
         {/* Month labels */}
         <div className="flex ml-8 mb-1 gap-0" style={{ minWidth: weeks.length * 14 }}>
           {monthLabels.map((m, i) => (
@@ -197,6 +198,7 @@ export const PlayStreakHeatmap = memo(function PlayStreakHeatmap() {
           <div className="w-[12px] h-[12px] rounded-[2px] bg-emerald-500/60" />
           <div className="w-[12px] h-[12px] rounded-[2px] bg-emerald-400/80" />
           <span className="text-[9px] font-mono text-white/30">More</span>
+        </div>
         </div>
       </div>
     </div>

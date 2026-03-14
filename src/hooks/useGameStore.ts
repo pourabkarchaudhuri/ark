@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react';
 import { steamService } from '@/services/steam-service';
 import { epicService } from '@/services/epic-service';
 import { gameService } from '@/services/game-service';
@@ -9,6 +9,8 @@ import { customGameStore } from '@/services/custom-game-store';
 import {
   getPrefetchedGames,
   setPrefetchedGames,
+  getPrefetchedTopSellers,
+  waitForTopSellersPreload,
   clearBrowseCache,
   searchPrefetchedGames,
 } from '@/services/prefetch-store';
@@ -159,30 +161,27 @@ export function extractCachedMeta(game: Game): CachedGameMeta {
  * 'catalog' category: continuous A–Z browsing via GetAppList + chunked details
  */
 export function useSteamGames(category: GameCategory = 'trending') {
-  // If prefetched data is available (loaded during splash), initialize instantly
-  // to eliminate the 1-2s blank/skeleton flash on dashboard mount.
+  // Minimum games to consider Top Sellers preload "complete" (Steam ~37 + Epic, avoid showing Steam-only 38).
+  const TOP_SELLERS_MIN_FULL = 40;
+  // Seed from prefetched for 'all' only. For 'trending' never seed from preload so we always run fetch and get full 137.
   const [allGames, setAllGames] = useState<Game[]>(() => {
-    if (category === 'trending' || category === 'all') {
+    if (category === 'all') {
       const prefetched = getPrefetchedGames();
       if (prefetched && prefetched.length > 0) return prefetched;
     }
     return [];
   });
-  // Start with a small batch to keep the first render fast (<50ms), then
-  // expand to the full dataset after the first paint via useEffect below.
-  // Processing 6000+ games in useMemo (enrichment, filtering, dynamic filters,
-  // sorting) on the very first render frame freezes the UI for several seconds.
   const INITIAL_DISPLAY_BATCH = 120;
   const [displayCount, setDisplayCount] = useState(() => {
-    if (category === 'trending' || category === 'all') {
+    if (category === 'all') {
       const prefetched = getPrefetchedGames();
       if (prefetched && prefetched.length > 0) return Math.min(prefetched.length, INITIAL_DISPLAY_BATCH);
     }
-    return 30;
+    return category === 'trending' ? 0 : 30;
   });
   const [loading, setLoading] = useState(() => {
-    // Skip loading state if we already have data
-    if (category === 'trending' || category === 'all') {
+    if (category === 'trending') return true;
+    if (category === 'all') {
       const prefetched = getPrefetchedGames();
       if (prefetched && prefetched.length > 0) return false;
     }
@@ -194,9 +193,13 @@ export function useSteamGames(category: GameCategory = 'trending') {
   const initialFetchDoneRef = useRef(false);
   const genreSearchIndexRef = useRef(0);
   const bgRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trendingRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fetchVersionRef = useRef(0);
   const [isSyncing, setIsSyncing] = useState(false);
   const allGamesRef = useRef<Game[]>([]);
   allGamesRef.current = allGames;
+  // Full list for finite categories (trending, most-played, etc.) so we never show a truncated slice.
+  const finiteCategoryListRef = useRef<Game[]>([]);
 
   // --- Catalog-specific state ---
   // Full sorted app list (kept in ref, not state, to avoid huge re-renders)
@@ -210,6 +213,8 @@ export function useSteamGames(category: GameCategory = 'trending') {
   // Mirror in a ref so closures always see the latest value
   const catalogLetterRef = useRef<string | null>(null);
   useEffect(() => { catalogLetterRef.current = catalogLetter; }, [catalogLetter]);
+  const categoryRef = useRef(category);
+  useEffect(() => { categoryRef.current = category; }, [category]);
   // Whether there are more catalog entries to fetch (state-based to trigger re-renders)
   const [catalogHasMore, setCatalogHasMore] = useState(false);
 
@@ -332,11 +337,11 @@ export function useSteamGames(category: GameCategory = 'trending') {
       return;
     }
 
-    // Fast path: if prefetched data was already loaded into initial state
-    // (via useState initializer), skip the fetch entirely on first mount.
-    // This eliminates the 1-2s blank/skeleton flash on dashboard open.
+    // Fast path: if prefetched data was already loaded into initial state, skip the fetch on first mount.
+    // For 'trending' we never skip: we must run the fetch to apply egdata (Epic top 99) when enabled;
+    // otherwise we would keep showing the full prefetched list (~5183) instead of Steam + 99.
     if (
-      (cat === 'trending' || cat === 'all') &&
+      cat === 'all' &&
       allGamesRef.current.length > 0 &&
       !initialFetchDoneRef.current
     ) {
@@ -346,12 +351,18 @@ export function useSteamGames(category: GameCategory = 'trending') {
     }
     initialFetchDoneRef.current = true;
 
+    // Trending: always fetch (never use preload) so we get full 137 and never show 38
+    const myVersion = ++fetchVersionRef.current;
     setLoading(true);
     setError(null);
     // Don't reset displayCount to a tiny number — it will be set to the full
     // dataset size once fetching completes. Setting it low here only matters
     // briefly during the loading state, so 0 is safe (no stale items shown).
     setDisplayCount(0);
+    // Clear list when starting a finite-category fetch so we don't show another category's list.
+    if (['trending', 'most-played', 'recent', 'award-winning', 'free'].includes(cat)) {
+      setAllGames([]);
+    }
     // Reset catalog refs when leaving catalog
     catalogAppListRef.current = [];
     catalogOffsetRef.current = 0;
@@ -376,20 +387,23 @@ export function useSteamGames(category: GameCategory = 'trending') {
           // Keep original rank order - don't sort by date
           console.log(`[useSteamGames] Fetched ${fetchedGames.length} most-played games (rank order)`);
           if (isMountedRef.current) {
+            finiteCategoryListRef.current = fetchedGames;
             setAllGames(fetchedGames);
             setDisplayCount(fetchedGames.length);
             setLoading(false);
           }
           return; // Early return to skip date sorting
         case 'trending': {
-          // Use prefetched data if available (already contains top sellers + epic catalog).
-          // This avoids 3 redundant API calls on dashboard mount.
-          const prefetchedForTrending = getPrefetchedGames();
-          if (prefetchedForTrending && prefetchedForTrending.length > 0) {
-            fetchedGames = prefetchedForTrending;
-            console.log(`[useSteamGames] Trending: using ${prefetchedForTrending.length} pre-fetched games (instant)`);
-          } else {
-            fetchedGames = await gameService.getTopSellers();
+          // Always fetch Top Sellers from gameService so we get Steam + Epic 99 + free (never prefetched).
+          fetchedGames = await gameService.getTopSellers();
+          console.log(`[useSteamGames] Trending: Top Sellers (${fetchedGames.length} games)`);
+          // If we got <50 (Epic not ready), wait up to 5s for splash preload to finish — it may have 137.
+          if (fetchedGames.length < 50) {
+            const fromPreload = await waitForTopSellersPreload(5000);
+            if (fromPreload && fromPreload.length > fetchedGames.length) {
+              fetchedGames = fromPreload;
+              console.log(`[useSteamGames] Trending: using preload (${fetchedGames.length} games)`);
+            }
           }
           break;
         }
@@ -537,13 +551,54 @@ export function useSteamGames(category: GameCategory = 'trending') {
       fetchedGames.sort((a, b) => ((b as any)._releaseTs ?? 0) - ((a as any)._releaseTs ?? 0));
       
       console.log(`[useSteamGames] Fetched and sorted ${fetchedGames.length} ${cat} games`);
-      if (isMountedRef.current) {
+      const isLatest = myVersion === fetchVersionRef.current;
+      const hasMore = fetchedGames.length >= allGamesRef.current.length;
+      const wouldDowngrade = cat === 'trending' && fetchedGames.length < TOP_SELLERS_MIN_FULL && allGamesRef.current.length >= TOP_SELLERS_MIN_FULL;
+      if (isMountedRef.current && !wouldDowngrade && (isLatest || hasMore)) {
+        if (['trending', 'most-played', 'recent', 'award-winning', 'free'].includes(cat)) {
+          finiteCategoryListRef.current = fetchedGames;
+        }
         setAllGames(fetchedGames);
         // Expose the full dataset to the dashboard — the virtual grid only renders
         // visible cards (~40), so there's no rendering cost.  Capping to a small
         // number (e.g. 100) breaks store/genre/year filters that run AFTER the
         // slice, causing most filtered results to be silently truncated.
         setDisplayCount(fetchedGames.length);
+        // If Top Sellers returned few (likely Epic not ready yet), retry at 2s and again at 5s to pick up Epic/egdata.
+        if (cat === 'trending' && fetchedGames.length < 50) {
+          const doRetry = async (priorCount: number) => {
+            if (!isMountedRef.current || categoryRef.current !== 'trending') return priorCount;
+            try {
+              const retryGames = await gameService.getTopSellers();
+              if (!isMountedRef.current || categoryRef.current !== 'trending') return priorCount;
+              if (retryGames.length > priorCount) {
+                const sorted = [...retryGames];
+                for (const g of sorted) (g as any)._releaseTs = g.releaseDate ? new Date(g.releaseDate).getTime() : 0;
+                sorted.sort((a, b) => ((b as any)._releaseTs ?? 0) - ((a as any)._releaseTs ?? 0));
+                finiteCategoryListRef.current = sorted;
+                setAllGames(sorted);
+                setDisplayCount(sorted.length);
+                console.log(`[useSteamGames] Trending retry: ${retryGames.length} games (was ${priorCount})`);
+                return retryGames.length;
+              }
+            } catch {
+              // Non-fatal
+            }
+            return priorCount;
+          };
+          if (trendingRetryTimerRef.current) clearTimeout(trendingRetryTimerRef.current);
+          trendingRetryTimerRef.current = setTimeout(async () => {
+            trendingRetryTimerRef.current = null;
+            const afterFirst = await doRetry(fetchedGames.length);
+            // Second retry at 3s later if still under 50
+            if (afterFirst < 50 && isMountedRef.current && categoryRef.current === 'trending') {
+              trendingRetryTimerRef.current = setTimeout(async () => {
+                trendingRetryTimerRef.current = null;
+                await doRetry(afterFirst);
+              }, 3000);
+            }
+          }, 2000);
+        }
       }
     } catch (err) {
       console.error('[useSteamGames] Failed to fetch games:', err);
@@ -565,6 +620,10 @@ export function useSteamGames(category: GameCategory = 'trending') {
         clearTimeout(bgRefreshTimerRef.current);
         bgRefreshTimerRef.current = null;
       }
+      if (trendingRetryTimerRef.current) {
+        clearTimeout(trendingRetryTimerRef.current);
+        trendingRetryTimerRef.current = null;
+      }
     };
   }, [category, fetchGames]);
 
@@ -584,6 +643,22 @@ export function useSteamGames(category: GameCategory = 'trending') {
       return () => cancelAnimationFrame(id);
     }
   }, [allGames.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When Top Sellers shows <50 (Epic not ready), poll prefetched list — splash/preload
+  // may complete later with 137; upgrade so we don't stick at 38.
+  useEffect(() => {
+    if (category !== 'trending' || allGames.length >= 50) return;
+    const intervalId = setInterval(() => {
+      if (!isMountedRef.current || categoryRef.current !== 'trending') return;
+      const prefetched = getPrefetchedTopSellers();
+      if (!prefetched || prefetched.length <= allGamesRef.current.length) return;
+      finiteCategoryListRef.current = prefetched;
+      setAllGames(prefetched);
+      setDisplayCount(prefetched.length);
+      console.log(`[useSteamGames] Trending: upgraded from ${allGamesRef.current.length} to ${prefetched.length} (preload)`);
+    }, 2000);
+    return () => clearInterval(intervalId);
+  }, [category, allGames.length]);
 
   // Background catalog count — fires once per session regardless of category.
   // Loads the full Steam app list (cached 24h on disk) just to get the count
@@ -617,11 +692,10 @@ export function useSteamGames(category: GameCategory = 'trending') {
   }, []);
 
   // ── Periodic catalog staleness check ─────────────────────────────────────
-  // Every 30 minutes while the app is open, check if the catalog cache is
-  // older than 6 hours.  If so, silently re-sync in the background so the
-  // user always has a fresh list available.
+  // Every 6 hours while the app is open, check if the catalog cache is
+  // older than 6 hours and re-sync in the background if so.
   useEffect(() => {
-    const POLL_INTERVAL_MS = 30 * 60 * 1000; // 30 min
+    const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
     const checkAndRefresh = async () => {
       try {
@@ -763,16 +837,14 @@ export function useSteamGames(category: GameCategory = 'trending') {
     console.log(`[useSteamGames] Catalog ready for All Games (${appList.length} apps)`);
   }, []);
 
-  // Pagination + enrichment — merges player-counts, detail enrichment, and
-  // library status into the game objects at read-time.
-  //
-  // **Stability optimisation**: returns the SAME array reference if no game
-  // actually changed.  This prevents the dashboard's deferred filter/sort
-  // hook from re-scheduling heavy computation on every enrichmentEpoch bump
-  // that only touched a handful of games (or none at all).
+  // Finite categories have a fixed list (no infinite scroll); show the full list.
+  const finiteCategory = ['trending', 'most-played', 'recent', 'award-winning', 'free'].includes(category);
+  const effectiveDisplayCount = finiteCategory ? allGames.length : displayCount;
+  // For finite categories use allGames directly so we never show a stale ref (e.g. 38 from an old fetch).
+  // effectiveDisplayCount === allGames.length here, so slice is the full list.
   const prevGamesRef = useRef<Game[]>([]);
   const games = useMemo(() => {
-    const slice = allGames.slice(0, displayCount);
+    const slice = allGames.slice(0, effectiveDisplayCount);
     let anyDiff = slice.length !== prevGamesRef.current.length;
 
     // Pre-build library lookup to avoid per-item method calls on 6000+ games
@@ -808,9 +880,11 @@ export function useSteamGames(category: GameCategory = 'trending') {
     prevGamesRef.current = result;
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allGames, displayCount, enrichmentEpoch]);
-  // "all" mode: always has more games (catalog has 155k+)
-  const hasMore = category === 'catalog'
+  }, [allGames, effectiveDisplayCount, enrichmentEpoch]);
+  // "all" mode: always has more games (catalog has 155k+). Finite categories have no "load more".
+  const hasMore = finiteCategory
+    ? false
+    : category === 'catalog'
     ? catalogHasMore
     : category === 'all'
       ? (allCatalogActiveRef.current ? catalogHasMore : true)
@@ -1043,8 +1117,19 @@ export function useGameSearch(query: string, debounceMs: number = 300) {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Monotonically increasing counter — only the latest request may write state
   const requestIdRef = useRef(0);
+  // Track which query we've finished so we don't show "searching" forever when result is 0
+  const completedQueryRef = useRef<string>('');
 
   const isSearching = query.trim().length > 0;
+
+  // Show "searching" as soon as user types (before debounce) so we never flash "no results"
+  useLayoutEffect(() => {
+    if (query.trim()) setLoading(true);
+    else {
+      setLoading(false);
+      completedQueryRef.current = '';
+    }
+  }, [query]);
 
   useEffect(() => {
     // Cancel any pending debounce from the previous query
@@ -1055,12 +1140,9 @@ export function useGameSearch(query: string, debounceMs: number = 300) {
 
     if (!query.trim()) {
       setResults([]);
-      setLoading(false);
       setError(null);
       return;
     }
-
-    setLoading(true);
 
     // Capture a unique id for THIS search request
     const currentId = ++requestIdRef.current;
@@ -1074,6 +1156,7 @@ export function useGameSearch(query: string, debounceMs: number = 300) {
             setResults(memResults);
             setError(null);
             setLoading(false);
+            completedQueryRef.current = query;
           }
           // If we got good in-memory results, no need for API calls
           if (memResults.length >= 5) return;
@@ -1093,6 +1176,7 @@ export function useGameSearch(query: string, debounceMs: number = 300) {
         }
         setError(null);
         setLoading(false);
+        completedQueryRef.current = query;
       } catch (err) {
         console.error('[useGameSearch] Search error:', err);
         if (currentId === requestIdRef.current) {
@@ -1106,6 +1190,7 @@ export function useGameSearch(query: string, debounceMs: number = 300) {
             setResults([]);
           }
           setLoading(false);
+          completedQueryRef.current = query;
         }
       }
     }, debounceMs);
@@ -1118,9 +1203,13 @@ export function useGameSearch(query: string, debounceMs: number = 300) {
     };
   }, [query, debounceMs]);
 
+  // Show "searching" until request completes; avoid showing "no results" on first frame after debounce
+  const effectiveLoading =
+    loading || (isSearching && results.length === 0 && completedQueryRef.current !== query);
+
   return {
     results,
-    loading,
+    loading: effectiveLoading,
     error,
     isSearching,
   };
@@ -1236,8 +1325,9 @@ export function useLibrary() {
 /**
  * Build a Game object from a library entry's locally cached metadata.
  * No API calls — everything comes from localStorage.
+ * Exported for tests (fallback title when cachedMeta missing).
  */
-function buildGameFromLocalEntry(id: string, entry: ReturnType<typeof libraryStore.getEntry>): Game | null {
+export function buildGameFromLocalEntry(id: string, entry: ReturnType<typeof libraryStore.getEntry>): Game | null {
   if (!entry) return null;
 
   if (entry.cachedMeta) {
@@ -1302,11 +1392,12 @@ function buildGameFromLocalEntry(id: string, entry: ReturnType<typeof librarySto
 
   const store: 'steam' | 'epic' | 'custom' | undefined =
     id.startsWith('epic-') ? 'epic' : id.startsWith('steam-') ? 'steam' : undefined;
+  // Never show raw IDs; use a safe placeholder until metadata is backfilled
   return {
     id,
     store,
     steamAppId: id.startsWith('steam-') ? parseInt(id.slice(6), 10) || undefined : undefined,
-    title: id.replace(/^(epic-|steam-)/, '').replace(/:/g, ' — '),
+    title: 'Unknown Game',
     developer: 'Unknown',
     publisher: '',
     genre: [],
@@ -1467,6 +1558,36 @@ export function useLibraryGames() {
     }
 
     return () => { isMounted = false; };
+  }, [updateCount]);
+
+  // ── Backfill cachedMeta for entries that have none (e.g. after import or legacy add) ──
+  const backfillStartedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const idsToBackfill = libraryStore
+      .getAllGameIds()
+      .filter((id) => {
+        if (!id.startsWith('epic-') && !id.startsWith('steam-')) return false;
+        if (backfillStartedRef.current.has(id)) return false;
+        const entry = libraryStore.getEntry(id);
+        return entry && !entry.cachedMeta;
+      });
+    if (idsToBackfill.length === 0) return;
+    idsToBackfill.forEach((id) => backfillStartedRef.current.add(id));
+    const queue = [...idsToBackfill];
+    const runNext = () => {
+      const id = queue.shift();
+      if (!id) return;
+      gameService
+        .getGameDetails(id)
+        .then((game) => {
+          if (game) libraryStore.updateEntry(id, { cachedMeta: extractCachedMeta(game) });
+        })
+        .catch(() => { /* non-critical */ })
+        .finally(() => {
+          if (queue.length > 0) setTimeout(runNext, 200);
+        });
+    };
+    runNext();
   }, [updateCount]);
 
   return { games, loading, error };

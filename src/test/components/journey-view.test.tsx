@@ -374,26 +374,25 @@ describe('JourneyView', () => {
     expect(titles.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('shows Mock/Live toggle only in OCD view', () => {
+  it('shows OCD view when OCD tab is clicked', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    // In Ark view, Mock/Live should NOT be visible
-    expect(screen.queryByText('Mock')).not.toBeInTheDocument();
-    expect(screen.queryByText('Live')).not.toBeInTheDocument();
+    // In Ark view, OCD is not selected
+    const ocdButton = screen.getByRole('button', { name: /OCD/i });
+    expect(ocdButton).not.toHaveClass('bg-fuchsia-500');
 
     // Switch to OCD
-    fireEvent.click(screen.getByText('OCD'));
+    fireEvent.click(ocdButton);
 
-    // Now Mock/Live should be visible
-    expect(screen.getByText('Mock')).toBeInTheDocument();
-    expect(screen.getByText('Live')).toBeInTheDocument();
+    // OCD view is active (button has selected styling)
+    expect(screen.getByRole('button', { name: /OCD/i })).toHaveClass('bg-fuchsia-500');
   });
 
-  it('loads mock data when Mock is clicked in OCD view', () => {
+  it('shows entry data in OCD view', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
@@ -402,12 +401,10 @@ describe('JourneyView', () => {
 
     // Switch to OCD
     fireEvent.click(screen.getByText('OCD'));
-    // Switch to Mock
-    fireEvent.click(screen.getByText('Mock'));
 
-    // Mock data includes well-known game titles from the mock generator
-    const eldenRings = screen.getAllByText('Elden Ring');
-    expect(eldenRings.length).toBeGreaterThanOrEqual(1);
+    // OCD view shows the game title from the entry (Gantt or timeline)
+    const titles = screen.getAllByText('Counter-Strike 2');
+    expect(titles.length).toBeGreaterThanOrEqual(1);
   });
 
   it('switches to Medals view when Medals tab is clicked', () => {

@@ -77,17 +77,16 @@ export function useSessionTracker() {
     const unsubLive = window.sessionTracker.onLiveUpdate((data) => {
       const gameId = typeof data.gameId === 'number' ? `steam-${data.gameId}` : String(data.gameId);
       const activeMinutes = data.activeMinutes;
-      // Compute live total: previously recorded hours + current active session
       const previousHours = sessionStore.getTotalHours(gameId);
-      const liveTotal = previousHours + activeMinutes / 60;
+      const liveSessionTotal = previousHours + activeMinutes / 60;
 
       if (gameId.startsWith('custom-')) {
         const existing = customGameStore.getGame(gameId);
         if (existing) {
-          customGameStore.updateGame(gameId, { hoursPlayed: liveTotal });
+          customGameStore.updateHoursFromSessions(gameId, liveSessionTotal);
         }
       } else {
-        libraryStore.updateHoursFromSessions(gameId, liveTotal);
+        libraryStore.updateHoursFromSessions(gameId, liveSessionTotal);
       }
     });
 
@@ -103,17 +102,14 @@ export function useSessionTracker() {
       // Record the session
       sessionStore.record(session);
 
-      // Update hoursPlayed and lastPlayedAt — route to correct store based on ID prefix
       const totalHours = sessionStore.getTotalHours(session.gameId);
       const lastPlayedAt = session.endTime;
       if (session.gameId.startsWith('custom-')) {
-        // Custom game — update custom game store and journey lastPlayedAt
         const existing = customGameStore.getGame(session.gameId);
         if (existing) {
-          customGameStore.updateGame(session.gameId, { hoursPlayed: totalHours, lastPlayedAt });
+          customGameStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
         }
       } else {
-        // Library game — update library store (and journey via sync)
         libraryStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
       }
     });

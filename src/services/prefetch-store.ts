@@ -14,6 +14,7 @@
 import { Game } from '@/types/game';
 import { steamService } from './steam-service';
 import { epicService } from './epic-service';
+import { gameService } from './game-service';
 import { dedupSortInWorker } from '@/workers/use-dedup-worker';
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,9 @@ const _hmr: PrefetchHmrState = ((globalThis as any).__ARK_PREFETCH_STATE__ ??= {
 let prefetchedGames: Game[] | null = _hmr.games;
 let prefetchReady = _hmr.ready;
 let prefetchPromise: Promise<Game[]> | null = null;
+/** Top Sellers (Steam + Epic 99 + free) preloaded during splash for instant dashboard display */
+let prefetchedTopSellers: Game[] | null = null;
+let topSellersPromise: Promise<Game[]> | null = null;
 // Pre-computed lowercase search strings — avoids calling .toLowerCase() on
 // every game during every keystroke. Built once when games are set.
 let searchIndex: SearchIndexEntry[] | null = _hmr.searchIndex;
@@ -172,6 +176,20 @@ function isWithinEditDistance(a: string, b: string, maxDist: number): boolean {
 }
 
 /**
+ * Returns true if query is a subsequence of text (each char of query appears
+ * in text in order, with possible gaps). Used for shorthand matching (rdr2, gtav, fnaf).
+ */
+function isSubsequence(query: string, text: string): boolean {
+  let j = 0;
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  for (let i = 0; i < t.length && j < q.length; i++) {
+    if (t[i] === q[j]) j++;
+  }
+  return j === q.length;
+}
+
+/**
  * Score a game against a set of query tokens.  Higher is more relevant.
  * Returns 0 if no match.
  *
@@ -185,13 +203,18 @@ function isWithinEditDistance(a: string, b: string, maxDist: number): boolean {
  *     5 — fuzzy match (within 1-2 edit distance of a title word)
  *
  * Bonus:  +1 per 1000 metacriticScore (subtle tiebreaker for popular games)
+ *
+ * Shorthand (browse only): single-token queries of 4+ chars can match as
+ * subsequence of title (rdr2 → Red Dead Redemption 2, gtav → GTA V).
  */
 export function scoreGame(
   idx: SearchIndexEntry,
   tokens: string[],
   fullQuery: string,
   game?: Game | null,
+  options?: { allowShorthand?: boolean },
 ): number {
+  const allowShorthand = options?.allowShorthand !== false;
   let score = 0;
 
   // Exact full-title match
@@ -207,12 +230,20 @@ export function scoreGame(
     let tokenMatchedTitle = false;
     let tokenWordBoundary = false;
 
+    // Shorthand: single token 4+ chars as subsequence of title (rdr2, gtav, fnaf)
+    if (allowShorthand && tokens.length === 1 && tLen >= 4 && isSubsequence(token, idx.titleLower)) {
+      tokenMatchedTitle = true;
+      score = Math.max(score, 80);
+    }
+
     // Word-boundary check: does a title word start with this token?
-    for (const word of idx.titleWords) {
-      if (word.startsWith(token)) {
-        tokenWordBoundary = true;
-        tokenMatchedTitle = true;
-        break;
+    if (!tokenMatchedTitle) {
+      for (const word of idx.titleWords) {
+        if (word.startsWith(token)) {
+          tokenWordBoundary = true;
+          tokenMatchedTitle = true;
+          break;
+        }
       }
     }
 
@@ -375,6 +406,8 @@ export function saveBrowseCache(games: Game[]): Promise<void> {
 export async function prefetchBrowseData(
   onProgress?: ProgressCallback,
 ): Promise<Game[]> {
+  startTopSellersPreload();
+
   // Prevent duplicate concurrent fetches
   if (prefetchPromise) return prefetchPromise;
 
@@ -384,6 +417,47 @@ export async function prefetchBrowseData(
   } finally {
     prefetchPromise = null;
   }
+}
+
+/**
+ * Preloaded Top Sellers (Steam + Epic 99 + free) from splash. Use in useSteamGames for trending.
+ */
+export function getPrefetchedTopSellers(): Game[] | null {
+  return prefetchedTopSellers;
+}
+
+/**
+ * Start Top Sellers preload (e.g. from splash on mount). Safe to call multiple times.
+ * Does not block; results are available via getPrefetchedTopSellers() when ready.
+ */
+export function startTopSellersPreload(): void {
+  if (topSellersPromise) return;
+  topSellersPromise = gameService
+    .getTopSellers()
+    .then((games) => {
+      prefetchedTopSellers = games;
+      if (games.length > 0) {
+        console.log(`[PrefetchStore] Top Sellers preload: ${games.length} games`);
+      }
+      return games;
+    })
+    .finally(() => {
+      topSellersPromise = null;
+    });
+}
+
+/**
+ * Wait for the Top Sellers preload to complete (or timeout). Use when fetch returned &lt;50
+ * so we can upgrade to the preload result if it has more games.
+ */
+export function waitForTopSellersPreload(maxMs: number): Promise<Game[] | null> {
+  const existing = getPrefetchedTopSellers();
+  if (existing && existing.length >= 50) return Promise.resolve(existing);
+  if (!topSellersPromise) return Promise.resolve(getPrefetchedTopSellers());
+  return Promise.race([
+    topSellersPromise,
+    new Promise<null>((r) => setTimeout(() => r(null), maxMs)),
+  ]).then((games) => (Array.isArray(games) ? games : null));
 }
 
 // Total steps: 6 API sources + 1 dedup step
@@ -604,6 +678,7 @@ export function setPrefetchedGames(games: Game[]): void {
 export async function clearBrowseCache(): Promise<void> {
   prefetchedGames = null;
   prefetchReady = false;
+  prefetchedTopSellers = null;
   searchIndex = null;
   _hmr.games = null;
   _hmr.ready = false;

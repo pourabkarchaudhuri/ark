@@ -11,9 +11,9 @@
  */
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react';
 import {
-  Newspaper, RefreshCw, ExternalLink, Clock, X, Loader2, Globe,
+  Newspaper, RefreshCw, ExternalLink, Clock, X, Loader2, Globe, MapPin,
   ArrowLeft, ArrowRight, RotateCw,
-  Check, Maximize2, Minimize2, ChevronDown, ChevronUp, GripVertical,
+  Check, Maximize2, Minimize2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, GripVertical,
   Radio,
 } from 'lucide-react';
 import { SiYoutube, SiTwitch } from 'react-icons/si';
@@ -26,7 +26,6 @@ import type { ResolvedEvent } from '@/data/gaming-events';
 import { resolveEvents, refreshStatuses, clearResolvedCache } from '@/services/event-resolver-service';
 import { transmissionsHistoryStore } from '@/services/transmissions-history-store';
 import { TooltipCard } from '@/components/ui/tooltip-card';
-import { MovingBorderButton } from '@/components/ui/moving-border';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -64,13 +63,6 @@ function formatCountdown(unixSeconds: number): string {
 
 function formatEventDate(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-function getSourceColor(source: string): string {
-  if (source.startsWith('Steam')) return 'bg-blue-500/90 text-white';
-  if (source.includes('r/gaming')) return 'bg-orange-500/90 text-white';
-  if (source.includes('r/pcgaming')) return 'bg-red-500/90 text-white';
-  return 'bg-fuchsia-500/90 text-white';
 }
 
 function getSteamFallbackFromId(itemId: string, imageUrl?: string): string | undefined {
@@ -636,6 +628,18 @@ const EventCard = memo(function EventCard({
           </span>
         )}
 
+        {/* Location: city or Online */}
+        {event.location && (
+          <div className="flex items-center gap-1.5 text-[12px] font-medium text-white/50">
+            {event.location === 'Online' ? (
+              <Globe className="w-3.5 h-3.5 shrink-0 text-white/40" aria-hidden />
+            ) : (
+              <MapPin className="w-3.5 h-3.5 shrink-0 text-white/40" aria-hidden />
+            )}
+            <span>{event.location}</span>
+          </div>
+        )}
+
         {/* Countdown ticker — the centrepiece */}
         {isUpcoming && event.startDate && (
           <div className="flex items-baseline gap-2.5">
@@ -704,20 +708,15 @@ const EventCard = memo(function EventCard({
   if (!isImminent) return <div className="w-[280px] shrink-0">{card}</div>;
 
   return (
-    <MovingBorderButton
-      as="div"
-      borderRadius="20px"
-      duration={4000}
-      containerClassName="w-[280px] shrink-0 shadow-[0_0_35px_-8px_rgba(168,85,247,0.3)]"
-      borderClassName="from-purple-500 via-fuchsia-500/40 to-transparent"
-      className="p-0 !bg-transparent"
-    >
+    <div className="w-[280px] shrink-0 rounded-[20px] border border-primary/40 broadcast-card-glow bg-primary/5">
       {card}
-    </MovingBorderButton>
+    </div>
   );
 });
 
 // ─── Scheduled broadcasts strip (collapsible, sorted, with live data) ───────
+
+const SCROLL_STEP = 296; // card width (280) + gap (16)
 
 const BroadcastsStrip = memo(function BroadcastsStrip({
   events, eventsLoading, tick, eventFilter, onEventLatest, onClearFilter, onOpenUrl,
@@ -730,6 +729,36 @@ const BroadcastsStrip = memo(function BroadcastsStrip({
   onClearFilter: () => void;
   onOpenUrl: (url: string) => void;
 }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const checkScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setCanScrollLeft(el.scrollLeft > 4);
+    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 4);
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    checkScroll();
+    el.addEventListener('scroll', checkScroll, { passive: true });
+    const ro = new ResizeObserver(checkScroll);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener('scroll', checkScroll);
+      ro.disconnect();
+    };
+  }, [checkScroll]);
+
+  const scroll = useCallback((dir: 'left' | 'right') => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dir === 'left' ? -SCROLL_STEP : SCROLL_STEP, behavior: 'smooth' });
+  }, []);
+
   const { sorted, liveCount, upcomingCount, todayCount } = useMemo(() => {
     let live = 0;
     let upcoming = 0;
@@ -789,10 +818,33 @@ const BroadcastsStrip = memo(function BroadcastsStrip({
       </button>
       {expanded && (
         <div className="px-3 pb-3">
-          <div className="flex gap-4 overflow-x-auto scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10 pb-2 pt-1">
-            {sorted.map((ev) => (
-              <EventCard key={ev.id} event={ev} tick={tick} onLatest={onEventLatest} onOpenUrl={onOpenUrl} />
-            ))}
+          <div className="flex items-center gap-1 pt-1">
+            <button
+              type="button"
+              onClick={() => scroll('left')}
+              disabled={!canScrollLeft}
+              aria-label="Previous broadcasts"
+              className="shrink-0 p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/5 disabled:opacity-25 disabled:pointer-events-none transition-colors"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div
+              ref={scrollRef}
+              className="flex gap-4 overflow-x-auto scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10 flex-1 min-w-0 py-5 px-5 pb-2"
+            >
+              {sorted.map((ev) => (
+                <EventCard key={ev.id} event={ev} tick={tick} onLatest={onEventLatest} onOpenUrl={onOpenUrl} />
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => scroll('right')}
+              disabled={!canScrollRight}
+              aria-label="Next broadcasts"
+              className="shrink-0 p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/5 disabled:opacity-25 disabled:pointer-events-none transition-colors"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
           </div>
           {eventFilter && (
             <button onClick={onClearFilter} className="mt-2 text-[10px] text-fuchsia-400 hover:text-fuchsia-300">

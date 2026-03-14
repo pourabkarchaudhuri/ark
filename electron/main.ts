@@ -334,6 +334,7 @@ function createWindow() {
 // Register all IPC handlers (extracted to electron/ipc/ modules)
 // ---------------------------------------------------------------------------
 import { registerAllHandlers, webviewHandlers } from './ipc/index.js';
+import { runFullCatalogAdultFilterTest } from './ipc/catalog-handlers.js';
 registerAllHandlers(() => mainWindow);
 
 // Access the webview's destroy function for window cleanup
@@ -347,6 +348,22 @@ function destroyWebContentsView() {
 // ============================================================================
 
 app.whenReady().then(async () => {
+  // CLI: run full-catalog adult filter test then exit
+  if (process.argv.includes('--run-adult-filter-test')) {
+    // Keep one hidden window so the process is not killed by OS/tooling during long runs
+    const testWindow = new BrowserWindow({ width: 1, height: 1, show: false });
+    try {
+      logger.log('[Startup] Running full-catalog adult filter test...');
+      const result = await runFullCatalogAdultFilterTest();
+      logger.log(`[Startup] Done. Steam excluded: ${result.steam.excluded}, Epic excluded: ${result.epic.excluded}`);
+    } catch (err) {
+      logStartupError(err);
+    }
+    testWindow.destroy();
+    app.quit();
+    return;
+  }
+
   // Apply auto-launch setting on startup
   try {
     const autoLaunchEnabled = settingsStore.getAutoLaunch();

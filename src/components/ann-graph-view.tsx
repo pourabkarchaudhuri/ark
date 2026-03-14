@@ -3570,8 +3570,8 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
                 selectPathNode(idx);
               }}
             >
-              <div className="w-[100px] group-hover/pov:w-[160px] transition-all duration-300 rounded-lg overflow-hidden border border-blue-500/15 group-hover/pov:border-blue-500/40 bg-black/60 group-hover/pov:bg-black/85 backdrop-blur-md opacity-50 group-hover/pov:opacity-100 shadow-lg shadow-black/40">
-                <div className="relative w-full aspect-[3/4] overflow-hidden">
+              <div className="w-[115px] group-hover/pov:w-[184px] transition-all duration-300 rounded-lg overflow-hidden border border-blue-500/15 group-hover/pov:border-blue-500/40 bg-black/60 group-hover/pov:bg-black/85 backdrop-blur-md opacity-50 group-hover/pov:opacity-100 shadow-lg shadow-black/40">
+                <div className="relative w-full aspect-[4/3] overflow-hidden">
                   <FallbackImg
                     node={node}
                     className="w-full h-full object-cover"

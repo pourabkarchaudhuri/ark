@@ -25,7 +25,7 @@ export function normalizeTitle(title: string | undefined | null): string {
     .replace(/&/g, 'and')                            // ampersand
     .replace(/[^a-z0-9\s]/g, ' ')                    // all remaining special chars → space
     // Strip common edition / variant phrase suffixes (longer phrases first)
-    .replace(/\b(game of the year|goty|directors cut|digital deluxe|digital edition|special edition|anniversary edition|legendary edition|ultimate edition|definitive edition|complete edition|deluxe edition|premium edition|gold edition|standard edition|first edition|limited edition|collectors edition)\b/g, '')
+    .replace(/\b(game of the year|goty|directors cut|digital deluxe|digital edition|special edition|anniversary edition|legendary edition|ultimate edition|definitive edition|complete edition|deluxe edition|premium edition|gold edition|standard edition|first edition|limited edition|collectors edition|emperor edition|imperial edition|commander edition|warlord edition|dynasty edition)\b/g, '')
     // Strip standalone edition / packaging words that are always suffixes
     .replace(/\b(edition|deluxe|ultimate|standard|remastered|definitive|enhanced|complete|premium|gold|anniversary|remake|hd|redux|classic|collection|bundle|pack|trilogy|anthology)\b/g, '')
     .replace(/\s+/g, ' ')
@@ -114,6 +114,9 @@ export function deduplicateGames(games: Game[]): Game[] {
           // Preserve Epic cover if Steam doesn't have one
           coverUrl: primary.coverUrl || secondary.coverUrl,
           headerImage: primary.headerImage || secondary.headerImage,
+          // Store-order: keep both stores' list positions for single-store re-sort
+          steamListPosition: steamSide.steamListPosition,
+          epicListPosition: epicSide.epicListPosition,
         });
       }
       // If same store appears twice, skip the later duplicate

@@ -38,6 +38,10 @@ export interface Game {
   playerCount?: number; // Live concurrent players (from Steam API)
   playerCountSource?: 'steam'; // Where the count came from (for label clarity)
   rank?: number; // Rank in most played
+  /** 1-based position in Steam top-sellers/new-releases list (for Store order in Steam-only view). */
+  steamListPosition?: number;
+  /** 1-based position in Epic top-sellers list (for Store order in Epic-only view). */
+  epicListPosition?: number;
   price?: {
     isFree: boolean;
     finalFormatted?: string;
@@ -129,7 +133,8 @@ export interface LibraryGameEntry {
   publicReviews: string;
   recommendationSource: string;
   // Progress tracking fields
-  hoursPlayed: number; // Total hours played
+  hoursPlayed: number; // Total hours played (effective = hoursBaseline + session-tracked)
+  hoursBaseline?: number; // Hours not from session tracker (manual/pre-existing); preserved when sessions update
   rating: number; // User rating 1-5 stars (0 = not rated)
   executablePath?: string; // Path to game executable for session tracking
   secondaryGameId?: string; // ID on another store (for dedup-linked games)
@@ -153,7 +158,8 @@ export interface CustomGameEntry {
   status: GameStatus;
   priority?: GamePriority;
   executablePath?: string; // Path to game executable for session tracking
-  hoursPlayed?: number; // Total hours played (updated from session tracker)
+  hoursPlayed?: number; // Total hours played (effective = hoursBaseline + session-tracked)
+  hoursBaseline?: number; // Hours not from session tracker (manual/pre-existing); preserved when sessions update
   rating?: number; // User rating 1-5 stars (0 = not rated)
   lastPlayedAt?: string; // ISO date — last time the game was played
   publicReviews?: string; // Personal notes / reviews

@@ -37,6 +37,7 @@ import { useToast } from '@/components/ui/toast';
 import { getRepackLinkForGame } from '@/services/fitgirl-service';
 import { steamService } from '@/services/steam-service';
 import { epicService } from '@/services/epic-service';
+import { gameService } from '@/services/game-service';
 import { findGameById, searchPrefetchedGames, getPrefetchedGames } from '@/services/prefetch-store';
 import { WindowControls } from '@/components/window-controls';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -758,14 +759,13 @@ export function GameDetailsPage() {
   }, [createGameFromDetails, gameId, gameInLibrary, isCustomGame]);
   
   // Handle saving library entry from dialog
-  const handleSaveLibraryEntry = useCallback((gameData: Partial<Game> & { executablePath?: string }) => {
+  const handleSaveLibraryEntry = useCallback(async (gameData: Partial<Game> & { executablePath?: string }) => {
     if (!gameId) return;
-    
+
     const isNewAdd = !gameInLibrary && !isCustomGame;
     const gameName = details?.name || epicGame?.title || 'Game';
-    
+
     if (isCustomGame) {
-      // Custom games live in customGameStore, not libraryStore
       customGameStore.updateGame(gameId, {
         status: gameData.status,
         priority: gameData.priority,
@@ -774,7 +774,6 @@ export function GameDetailsPage() {
         executablePath: gameData.executablePath,
       });
     } else if (gameInLibrary) {
-      // Update existing entry
       updateEntry(gameId, {
         status: gameData.status,
         priority: gameData.priority,
@@ -783,10 +782,17 @@ export function GameDetailsPage() {
         executablePath: gameData.executablePath,
       });
     } else {
-      // Add to library — cache metadata for offline resilience
-      const meta = dialogGame ? extractCachedMeta(dialogGame) : undefined;
+      // Add to library — always cache metadata; resolve from API if dialog didn't have it
+      let meta = dialogGame ? extractCachedMeta(dialogGame) : undefined;
+      if (!meta && (gameId.startsWith('epic-') || gameId.startsWith('steam-'))) {
+        try {
+          const game = await gameService.getGameDetails(gameId);
+          meta = game ? extractCachedMeta(game) : { title: 'Unknown Game', store: gameId.startsWith('epic-') ? 'epic' : 'steam' };
+        } catch {
+          meta = { title: 'Unknown Game', store: gameId.startsWith('epic-') ? 'epic' : 'steam' };
+        }
+      }
       addToLibrary(gameId, gameData.status || 'Want to Play', meta);
-      // Then update with additional fields if provided
       if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath) {
         updateEntry(gameId, {
           priority: gameData.priority,
@@ -796,7 +802,7 @@ export function GameDetailsPage() {
         });
       }
     }
-    
+
     setIsDialogOpen(false);
     setDialogGame(null);
     setDialogInitialEntry(null);
@@ -806,7 +812,7 @@ export function GameDetailsPage() {
     } else {
       toastSuccess(`${gameName} updated successfully`);
     }
-  }, [gameId, gameInLibrary, isCustomGame, addToLibrary, updateEntry, details, epicGame, toastSuccess]);
+  }, [gameId, gameInLibrary, isCustomGame, addToLibrary, updateEntry, details, epicGame, toastSuccess, dialogGame]);
 
   // Fetch game details and reviews - uses prefetch store first, then API
   useEffect(() => {

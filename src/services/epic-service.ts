@@ -2,11 +2,14 @@
  * Epic Games Service
  * Handles Epic Games Store API interactions and data transformation.
  * Mirrors the pattern of steam-service.ts.
+ * When Epic GraphQL is blocked, falls back to egdata for search.
  */
 
 import { Game, LibraryGameEntry } from '@/types/game';
 import { EpicCatalogItem } from '@/types/epic';
 import { libraryStore } from './library-store';
+import { egdataOfferToEpicCatalogItem } from './egdata-adapter';
+import type { EgdataOfferLike } from './egdata-adapter';
 
 // API-verified genre tag IDs (groupName === "genre"). Fallback when groupName absent.
 const EPIC_GENRE_IDS: ReadonlySet<number> = new Set([
@@ -43,6 +46,24 @@ function resolveImage(
   return keyImages[0]?.url;
 }
 
+/** Approximate USD → INR for display when Epic returns USD (e.g. cached or US response). Update periodically or make configurable. */
+const USD_TO_INR = 83;
+
+/**
+ * If the formatted price looks like USD (e.g. "$29.99"), convert to INR and return "₹X,XXX".
+ * Otherwise returns the string unchanged (already INR or other).
+ */
+function ensureInrFormattedPrice(formatted: string): string {
+  const trimmed = formatted.trim();
+  if (!trimmed.startsWith('$')) return trimmed;
+  const match = trimmed.replace(/,/g, '').match(/^\$\s*([\d.]+)/);
+  if (!match) return trimmed;
+  const usd = parseFloat(match[1]);
+  if (Number.isNaN(usd) || usd < 0) return trimmed;
+  const inr = Math.round(usd * USD_TO_INR);
+  return `₹${inr.toLocaleString('en-IN')}`;
+}
+
 /**
  * Transform an Epic catalog item into our universal Game type.
  */
@@ -64,7 +85,7 @@ export function transformEpicGame(
 
   // Extract platforms from customAttributes or categories; default to Windows
   const platforms: string[] = [];
-  if (item.customAttributes) {
+  if (Array.isArray(item.customAttributes)) {
     for (const attr of item.customAttributes) {
       const key = attr.key?.toLowerCase() ?? '';
       if (key.includes('platform')) {
@@ -75,9 +96,13 @@ export function transformEpicGame(
       }
     }
   }
-  if (item.categories) {
+  if (Array.isArray(item.categories)) {
     for (const cat of item.categories) {
-      const p = cat.path?.toLowerCase() ?? '';
+      const p = (typeof cat === 'object' && cat && 'path' in cat
+        ? (cat as { path?: string }).path
+        : typeof cat === 'string'
+          ? cat
+          : '')?.toLowerCase() ?? '';
       if (p.includes('windows') && !platforms.includes('Windows')) platforms.push('Windows');
       if (p.includes('mac') && !platforms.includes('Mac')) platforms.push('Mac');
       if (p.includes('linux') && !platforms.includes('Linux')) platforms.push('Linux');
@@ -119,17 +144,19 @@ export function transformEpicGame(
     : false;
 
   // Formatted price: prefer discountPrice (current price after any sale),
-  // fall back to originalPrice string, then compute from numeric cents.
-  const finalFormatted =
+  // fall back to originalPrice string, then compute from numeric (paise when country=IN).
+  // If Epic returns USD strings (e.g. cached US response), convert to INR for display.
+  const rawFormatted =
     (fmtDiscount && fmtDiscount !== '0' ? fmtDiscount : null)
     || (fmtOriginal && fmtOriginal !== '0' ? fmtOriginal : null)
     || (tp && tp.discountPrice > 0
-      ? `₹${(tp.discountPrice / 100).toFixed(0)}`
+      ? `₹${(tp.discountPrice / 100).toLocaleString('en-IN')}`
       : null)
     || (tp && tp.originalPrice > 0
-      ? `₹${(tp.originalPrice / 100).toFixed(0)}`
+      ? `₹${(tp.originalPrice / 100).toLocaleString('en-IN')}`
       : null)
-    || undefined;  // leave undefined when truly unknown
+    || undefined;
+  const finalFormatted = rawFormatted ? ensureInrFormattedPrice(rawFormatted) : undefined;
 
   const discountPercent = tp && tp.originalPrice > 0
     ? Math.round(((tp.originalPrice - tp.discountPrice) / tp.originalPrice) * 100)
@@ -269,7 +296,8 @@ function isEpicAvailable(): boolean {
  */
 class EpicService {
   /**
-   * Search Epic Games Store
+   * Search Epic Games Store.
+   * When Epic GraphQL is blocked (Cloudflare), falls back to egdata autocomplete + offer detail.
    */
   async searchGames(query: string, limit: number = 20): Promise<Game[]> {
     if (!query.trim()) return [];
@@ -279,6 +307,27 @@ class EpicService {
     }
 
     try {
+      const epicBlocked =
+        typeof window.epic?.isEpicBlocked === 'function'
+          ? await window.epic.isEpicBlocked().catch(() => false)
+          : false;
+
+      if (epicBlocked && typeof window.egdata?.getAutocomplete === 'function' && window.egdata.getOffer) {
+        const result = await window.egdata.getAutocomplete(query, Math.min(limit, 20));
+        const elements = (result?.elements ?? []) as EgdataOfferLike[];
+        const games: Game[] = [];
+        for (const el of elements.slice(0, 20)) {
+          const id = el?.id;
+          if (!id) continue;
+          const full = await window.egdata.getOffer(id) as EgdataOfferLike | null;
+          const item = full ? egdataOfferToEpicCatalogItem(full) : null;
+          if (item) {
+            games.push(transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)));
+          }
+        }
+        return games;
+      }
+
       console.log(`[Epic Service] searchGames: "${query}" (limit ${limit})`);
       const items = await window.epic!.searchGames(query, limit);
       return items.map(item => transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)));
@@ -348,13 +397,45 @@ class EpicService {
   }
 
   /**
+   * Get Epic's curated Top Sellers (99) from Storefront.collectionLayout(slug: "top-sellers").
+   * Returns [] if Epic is unavailable or the query fails (e.g. blocked).
+   */
+  async getTopSellersFromCollection(): Promise<Game[]> {
+    if (!isEpicAvailable() || typeof window.epic?.getTopSellersCollection !== 'function') return [];
+    try {
+      const items = await window.epic.getTopSellersCollection();
+      return items.map(item =>
+        transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
+      );
+    } catch (error) {
+      console.warn('[Epic Service] getTopSellersFromCollection failed:', error);
+      return [];
+    }
+  }
+
+  /**
    * Browse the full Epic catalog — returns hundreds of games (paginated on backend).
-   * Unlike getNewReleases/getComingSoon which are date-filtered, this fetches
-   * the full catalog sorted by release date.
+   * When Epic GraphQL is blocked, falls back to egdata top-sellers (99) so prefetch still gets Epic data.
    */
   async browseCatalog(limit: number = 0): Promise<Game[]> {
     if (!isEpicAvailable()) return [];
     try {
+      const epicBlocked =
+        typeof window.epic?.isEpicBlocked === 'function'
+          ? await window.epic.isEpicBlocked().catch(() => false)
+          : false;
+
+      if (epicBlocked && typeof window.egdata?.getTopSellers === 'function') {
+        const result = await window.egdata.getTopSellers(99, 0);
+        const elements = (result?.elements ?? []) as EgdataOfferLike[];
+        return elements
+          .map((o) => egdataOfferToEpicCatalogItem(o))
+          .filter((item): item is EpicCatalogItem => item != null)
+          .map((item) =>
+            transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
+          );
+      }
+
       console.log(`[Epic Service] browseCatalog (limit ${limit || 'ALL'})`);
       const items = await window.epic!.browseCatalog(limit);
       return items.map(item =>

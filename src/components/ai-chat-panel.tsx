@@ -38,8 +38,9 @@ import type {
   GameContext, 
   ThoughtStep 
 } from '@/types/chat';
-import { GameStatus } from '@/types/game';
-import { useLibrary } from '@/hooks/useGameStore';
+import { GameStatus, type CachedGameMeta } from '@/types/game';
+import { useLibrary, extractCachedMeta } from '@/hooks/useGameStore';
+import { gameService } from '@/services/game-service';
 
 interface AIChatPanelProps {
   isOpen: boolean;
@@ -723,13 +724,28 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
         // Handle library actions
         if (response.actions && response.actions.length > 0) {
           for (const action of response.actions) {
-            const stringId = `steam-${action.appId}`;
+            // Support both Steam (appId) and Epic (gameId) from backend
+            const stringId =
+              typeof (action as { gameId?: string }).gameId === 'string'
+                ? (action as { gameId: string }).gameId
+                : `steam-${action.appId}`;
             if (action.type === 'add') {
               try {
-                await addToLibrary({ 
+                let cachedMeta: CachedGameMeta;
+                try {
+                  const game = await gameService.getGameDetails(stringId);
+                  if (game) cachedMeta = extractCachedMeta(game);
+                  else cachedMeta = { title: 'Unknown Game', store: stringId.startsWith('epic-') ? 'epic' : 'steam' };
+                } catch {
+                  cachedMeta = { title: 'Unknown Game', store: stringId.startsWith('epic-') ? 'epic' : 'steam' };
+                }
+                const steamAppId = stringId.startsWith('steam-') ? parseInt(stringId.slice(6), 10) : undefined;
+                const validAppId = typeof steamAppId === 'number' && !isNaN(steamAppId) ? steamAppId : undefined;
+                await addToLibrary({
                   gameId: stringId,
-                  steamAppId: action.appId, 
-                  status: (action.status as GameStatus) || 'Want to Play' 
+                  steamAppId: validAppId,
+                  status: (action.status as GameStatus) || 'Want to Play',
+                  cachedMeta,
                 });
               } catch (e) {
                 console.error('Failed to add game:', e);
@@ -857,9 +873,11 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   variant="ghost"
                   size="icon"
                   onClick={onClose}
-                  className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+                  className="group min-w-[44px] min-h-[44px] p-0 flex items-center justify-center bg-transparent hover:bg-transparent text-zinc-400 transition-[color,background-color] duration-0"
                 >
-                  <AnimateIcon hover="shrink"><X className="h-4 w-4 pointer-events-none" /></AnimateIcon>
+                  <span className="h-7 w-7 flex items-center justify-center rounded-md group-hover:text-zinc-200 group-hover:bg-zinc-800 transition-colors duration-0">
+                    <AnimateIcon hover="shrink"><X className="h-4 w-4 pointer-events-none" /></AnimateIcon>
+                  </span>
                 </Button>
               </div>
             </div>

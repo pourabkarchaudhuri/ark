@@ -78,6 +78,8 @@ declare global {
       getComingSoon: () => Promise<EpicCatalogItem[]>;
       getFreeGames: () => Promise<EpicCatalogItem[]>;
       getUpcomingReleases: () => Promise<EpicUpcomingRelease[]>;
+      /** Epic's curated Top Sellers (99) from Storefront.collectionLayout */
+      getTopSellersCollection: () => Promise<EpicCatalogItem[]>;
       browseCatalog: (limit?: number) => Promise<EpicCatalogItem[]>;
       getCoverUrl: (namespace: string, offerId: string) => string | null;
       clearCache: () => Promise<void>;
@@ -101,6 +103,8 @@ declare global {
       getProductReviews: (slug: string) => Promise<EpicProductReviews | null>;
       /** DLC and add-ons for a game namespace */
       getAddons: (namespace: string, limit?: number) => Promise<EpicAddon[]>;
+      /** Whether Epic GraphQL is blocked (circuit open). Use egdata fallback when true. */
+      isEpicBlocked: () => Promise<boolean>;
     };
   }
 }

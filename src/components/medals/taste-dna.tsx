@@ -6,6 +6,7 @@
 import { memo, useMemo, useEffect, useRef, useState } from 'react';
 import { PolarAngleAxis, PolarGrid, Radar, RadarChart } from 'recharts';
 import type { TasteDnaAxis } from '@/data/badge-types';
+import { formatMaxTwoDecimals } from '@/lib/utils';
 import {
   ChartContainer,
   ChartTooltip,
@@ -104,7 +105,7 @@ export const DnaHelix = memo(function DnaHelix({ axes }: { axes: TasteDnaAxis[] 
           <text x={x} y={Math.min(yA, yB) - 8} textAnchor="middle"
             className="fill-white/40 text-[7px] font-mono uppercase tracking-wider">{axis.label}</text>
           <text x={x} y={Math.max(yA, yB) + 14} textAnchor="middle"
-            className="fill-fuchsia-400 text-[8px] font-bold font-mono">{axis.value}%</text>
+            className="fill-fuchsia-400 text-[8px] font-bold font-mono">{formatMaxTwoDecimals(axis.value)}%</text>
           <circle cx={x} cy={yA} r={2} fill="rgb(168,85,247)" opacity={opacity} />
           <circle cx={x} cy={yB} r={2} fill="rgb(6,182,212)" opacity={opacity} />
         </g>
@@ -160,7 +161,7 @@ export const DnaRadar = memo(function DnaRadar({ axes, genomePurity }: { axes: T
         </RadarChart>
       </ChartContainer>
       <div className="mt-0.5 text-center">
-        <span className="text-sm font-black font-mono text-white">{genomePurity}%</span>
+        <span className="text-sm font-black font-mono text-white">{formatMaxTwoDecimals(genomePurity)}%</span>
         <span className="text-[8px] font-mono uppercase tracking-widest text-white/30 ml-1.5">Purity</span>
       </div>
     </div>

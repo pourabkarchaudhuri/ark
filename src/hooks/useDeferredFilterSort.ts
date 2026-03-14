@@ -13,16 +13,20 @@
  * **How it works:**
  * 1. The first render uses whatever data is available (empty or stale) so
  *    the browser can paint immediately.
- * 2. After paint, `requestAnimationFrame` schedules the heavy computation.
+ * 2. After paint, the work runs in two phases with a yield (rAF) between them:
+ *    phase 1 = filter + dynamic options, phase 2 = sort. That lets the main
+ *    thread process input (e.g. hover) and stay responsive during heavy work.
  * 3. The result is applied via `startTransition` so React treats the
  *    resulting re-render as low-priority (interruptible).
  * 4. If inputs change while a computation is in-flight, it's cancelled and
  *    a new one is scheduled.
  */
 
-import { useState, useEffect, useRef, startTransition } from 'react';
+import { useState, useEffect, useRef, useCallback, startTransition } from 'react';
+import type { MutableRefObject } from 'react';
 import type { Game, GameFilters } from '@/types/game';
-import { scoreGame, buildSingleSearchIndex } from '@/services/prefetch-store';
+import { scoreGame, buildSingleSearchIndex, type SearchIndexEntry } from '@/services/prefetch-store';
+import { isAdultContentByDescription } from '@/services/adult-content-filter';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +42,10 @@ export interface FilterSortInput {
   sortBy: string;
   sortDirection: 'asc' | 'desc';
   liveGameIds?: Set<string>;
+  /** Pre-built search index for library games (set by hook to avoid rebuilding on every search). */
+  librarySearchIndex?: SearchIndexEntry[] | null;
+  /** When false, games classified as adult (by description) are hidden. Default off. */
+  allowAdultContent?: boolean;
 }
 
 export interface FilterSortOutput {
@@ -56,12 +64,47 @@ const EMPTY_OUTPUT: FilterSortOutput = {
   dynamicYears: [],
 };
 
+/** Result of filter + dynamic options only (no sort). Used to yield between phases. */
+interface FilterAndDynamicResult {
+  displayedGames: Game[];
+  dynamicGenres: string[];
+  dynamicPlatforms: string[];
+  dynamicYears: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Rating sort: Bayesian-style adjusted score so few-review games don't outrank many-review games
+// ---------------------------------------------------------------------------
+
+const RATING_PRIOR = 70;   // pull low-review scores toward this
+const RATING_MIN_WEIGHT = 15; // virtual "reviews" so 0-review games sit at prior
+
+/**
+ * Adjusted rating for sort: (score * n + prior * m) / (n + m).
+ * Games with no/few Steam recommendations sort toward RATING_PRIOR so they don't
+ * push well-reviewed titles down.
+ * Defensive: always returns a finite number (handles missing game, non-numeric score, NaN).
+ */
+export function getAdjustedRatingForSort(game: Game | null | undefined): number {
+  if (!game) return 0;
+  const rawScore = game.metacriticScore ?? 0;
+  const score = typeof rawScore === 'number' && Number.isFinite(rawScore) ? rawScore : 0;
+  const n = Math.max(0, Number(game.recommendations) || 0);
+  if (score <= 0) return 0;
+  const adjusted = (score * n + RATING_PRIOR * RATING_MIN_WEIGHT) / (n + RATING_MIN_WEIGHT);
+  return Number.isFinite(adjusted) ? adjusted : 0;
+}
+
 // ---------------------------------------------------------------------------
 // Pure computation (runs off the render phase)
 // ---------------------------------------------------------------------------
 
-function computeAll(input: FilterSortInput): FilterSortOutput {
-  const { currentGames, searchResults, isSearching, viewMode, searchQuery, filters, sortBy, sortDirection, liveGameIds } = input;
+/**
+ * Phase 1: filter + dynamic options. Yielding after this lets the main thread
+ * process input (e.g. hover) before running the sort phase.
+ */
+function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult {
+  const { currentGames, searchResults, isSearching, viewMode, searchQuery, filters, librarySearchIndex, allowAdultContent } = input;
 
   // ── 1. displayedGames ────────────────────────────────────────────────
   let games: Game[];
@@ -72,9 +115,16 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
       const tokens = q.split(/\s+/).filter(Boolean);
-      const scored = libraryGames.map(g => ({
+      const useCachedIndex = librarySearchIndex && librarySearchIndex.length === libraryGames.length;
+      const scored = libraryGames.map((g, i) => ({
         game: g,
-        score: scoreGame(buildSingleSearchIndex(g), tokens, q, g),
+        score: scoreGame(
+          useCachedIndex ? librarySearchIndex[i]! : buildSingleSearchIndex(g),
+          tokens,
+          q,
+          g,
+          { allowShorthand: false },
+        ),
       })).filter(s => s.score > 0);
       scored.sort((a, b) => b.score - a.score);
       libraryGames = scored.map(s => s.game);
@@ -85,6 +135,11 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
     skipBrowseFilters = true;
   } else {
     games = currentGames;
+  }
+
+  // When "Allow adult content" is off, hide games classified as sexually explicit (by description).
+  if (allowAdultContent === false) {
+    games = games.filter((g) => !isAdultContentByDescription(g));
   }
 
   if (!skipBrowseFilters) {
@@ -152,7 +207,16 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
     if (searchQuery.trim()) {
       const q2 = searchQuery.toLowerCase().trim();
       const tokens2 = q2.split(/\s+/).filter(Boolean);
-      lib = lib.filter(g => scoreGame(buildSingleSearchIndex(g), tokens2, q2, g) > 0);
+      const useCachedIndex = librarySearchIndex && librarySearchIndex.length === lib.length;
+      lib = lib.filter((g, i) =>
+        scoreGame(
+          useCachedIndex ? librarySearchIndex[i]! : buildSingleSearchIndex(g),
+          tokens2,
+          q2,
+          g,
+          { allowShorthand: false },
+        ) > 0,
+      );
     }
     baseGames = lib;
   } else if (viewMode === 'browse' && isSearching) {
@@ -165,11 +229,11 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
   if (!skipDynamic) {
     const hasStatus = filters.status !== 'All' && viewMode === 'library';
     const hasPriority = filters.priority !== 'All' && viewMode === 'library';
-    const hasStore = filters.store.length > 0;
-    const storeSet2 = hasStore ? new Set(filters.store) : null;
+    const hasStore2 = filters.store.length > 0;
+    const storeSet2 = hasStore2 ? new Set(filters.store) : null;
     const hideSentinel2 = viewMode === 'browse';
 
-    const anyBaseFilter = hasStatus || hasPriority || hasStore || hideSentinel2;
+    const anyBaseFilter = hasStatus || hasPriority || hasStore2 || hideSentinel2;
 
     if (anyBaseFilter) {
       baseGames = baseGames.filter(game => {
@@ -233,58 +297,76 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
   const dynamicPlatforms = Array.from(platformSet).sort();
   const dynamicYears = Array.from(yearSet).sort().reverse();
 
-  // ── 3. Sort ──────────────────────────────────────────────────────────
-  let sortedGames: Game[];
+  return { displayedGames, dynamicGenres, dynamicPlatforms, dynamicYears };
+}
+
+/**
+ * Phase 2: sort displayedGames. Runs after a yield so input/hover can be processed.
+ */
+function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
+  const { filters, sortBy, sortDirection, viewMode, isSearching, liveGameIds } = input;
 
   if (filters.category === 'catalog') {
-    sortedGames = displayedGames;
-  } else if (viewMode === 'browse' && sortBy === 'releaseDate' && sortDirection === 'desc' && !isSearching) {
-    // Browse games arrive pre-sorted by release date (desc) from useSteamGames.
-    // Skip the expensive copy+sort for the default/most common case.
-    sortedGames = displayedGames;
-  } else {
-    const indexMap = new Map<string, number>();
-    displayedGames.forEach((g, i) => indexMap.set(g.id, i));
-
-    const statusPriority = (game: Game) => {
-      const isLive = liveGameIds?.has(game.id) ||
-        (game.steamAppId ? liveGameIds?.has(`steam-${game.steamAppId}`) : false);
-      if (isLive || game.status === 'Playing Now') return 0;
-      if (game.status === 'Playing') return 1;
-      if (game.status === 'On Hold') return 2;
-      if (game.status === 'Want to Play') return 3;
-      if (game.status === 'Completed') return 4;
-      return 5;
-    };
-
-    sortedGames = [...displayedGames].sort((a, b) => {
-      if (viewMode === 'library' && filters.status === 'All') {
-        const aStatus = a.isInLibrary ? statusPriority(a) : 5;
-        const bStatus = b.isInLibrary ? statusPriority(b) : 5;
-        if (aStatus !== bStatus) return aStatus - bStatus;
-      }
-
-      let comparison = 0;
-      switch (sortBy) {
-        case 'title':
-          comparison = a.title.localeCompare(b.title);
-          break;
-        case 'rating':
-          comparison = (a.metacriticScore ?? 0) - (b.metacriticScore ?? 0);
-          break;
-        case 'releaseDate':
-        default:
-          comparison = ((a as any)._releaseTs ?? 0) - ((b as any)._releaseTs ?? 0);
-          break;
-      }
-      if (comparison !== 0) {
-        return sortDirection === 'desc' ? -comparison : comparison;
-      }
-      return (indexMap.get(a.id) ?? 0) - (indexMap.get(b.id) ?? 0);
-    });
+    return displayedGames;
+  }
+  if (viewMode === 'browse' && sortBy === 'releaseDate' && sortDirection === 'desc' && !isSearching) {
+    return displayedGames;
   }
 
-  return { displayedGames, sortedGames, dynamicGenres, dynamicPlatforms, dynamicYears };
+  const indexMap = new Map<string, number>();
+  displayedGames.forEach((g, i) => indexMap.set(g.id, i));
+
+  const statusPriority = (game: Game) => {
+    const isLive = liveGameIds?.has(game.id) ||
+      (game.steamAppId ? liveGameIds?.has(`steam-${game.steamAppId}`) : false);
+    if (isLive || game.status === 'Playing Now') return 0;
+    if (game.status === 'Playing') return 1;
+    if (game.status === 'On Hold') return 2;
+    if (game.status === 'Want to Play') return 3;
+    if (game.status === 'Completed') return 4;
+    return 5;
+  };
+
+  return [...displayedGames].sort((a, b) => {
+    if (viewMode === 'library' && filters.status === 'All') {
+      const aStatus = a.isInLibrary ? statusPriority(a) : 5;
+      const bStatus = b.isInLibrary ? statusPriority(b) : 5;
+      if (aStatus !== bStatus) return aStatus - bStatus;
+    }
+
+    let comparison = 0;
+    switch (sortBy) {
+      case 'title':
+        comparison = a.title.localeCompare(b.title);
+        break;
+      case 'rating':
+      case 'default': {
+        const adjA = getAdjustedRatingForSort(a);
+        const adjB = getAdjustedRatingForSort(b);
+        comparison = Number.isFinite(adjA) && Number.isFinite(adjB) ? adjA - adjB : (a.metacriticScore ?? 0) - (b.metacriticScore ?? 0);
+        break;
+      }
+      case 'releaseDate':
+        comparison = ((a as any)._releaseTs ?? 0) - ((b as any)._releaseTs ?? 0);
+        break;
+      default:
+        comparison = (indexMap.get(a.id) ?? 0) - (indexMap.get(b.id) ?? 0);
+        break;
+    }
+    if (comparison !== 0) {
+      return sortDirection === 'desc' ? -comparison : comparison;
+    }
+    const aPos = a.steamListPosition ?? a.epicListPosition ?? 9999;
+    const bPos = b.steamListPosition ?? b.epicListPosition ?? 9999;
+    if (aPos !== bPos) return aPos - bPos;
+    return (indexMap.get(a.id) ?? 0) - (indexMap.get(b.id) ?? 0);
+  });
+}
+
+function computeAll(input: FilterSortInput): FilterSortOutput {
+  const phase1 = computeFilterAndDynamic(input);
+  const sortedGames = computeSort(phase1.displayedGames, input);
+  return { ...phase1, sortedGames };
 }
 
 // ---------------------------------------------------------------------------
@@ -299,14 +381,35 @@ function computeAll(input: FilterSortInput): FilterSortOutput {
  * from whatever data is available (typically a small initial batch).
  * Subsequent heavy computations happen off the render phase.
  */
+/** Cache for library search index so we don't rebuild on every search keystroke. */
+function getLibrarySearchIndex(
+  games: Game[],
+  cacheRef: MutableRefObject<{ games: Game[]; index: SearchIndexEntry[] } | null>,
+): SearchIndexEntry[] {
+  if (cacheRef.current && cacheRef.current.games === games) return cacheRef.current.index;
+  const index = games.map(g => buildSingleSearchIndex(g));
+  cacheRef.current = { games, index };
+  return index;
+}
+
 export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput {
   // Stable ref to the latest input — lets the scheduled callback always
   // read the freshest values without being in the dependency array.
   const inputRef = useRef(input);
   inputRef.current = input;
 
+  const libraryIndexCacheRef = useRef<{ games: Game[]; index: SearchIndexEntry[] } | null>(null);
+
   // Monotonically increasing version counter — lets us discard stale results.
   const versionRef = useRef(0);
+
+  const augmentInput = useCallback((raw: FilterSortInput): FilterSortInput => {
+    if (raw.viewMode !== 'library') return { ...raw, librarySearchIndex: null };
+    return {
+      ...raw,
+      librarySearchIndex: getLibrarySearchIndex(raw.currentGames, libraryIndexCacheRef),
+    };
+  }, []);
 
   // Synchronous fast-path for the very first render so the user sees
   // *something* immediately (the initial batch of ~120 games).
@@ -314,7 +417,7 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
     // Only compute synchronously if the dataset is small enough (~120 items).
     // Large datasets (6000+) are deferred to the effect.
     if (input.currentGames.length <= 200) {
-      return computeAll(input);
+      return computeAll(augmentInput(input));
     }
     return EMPTY_OUTPUT;
   });
@@ -323,19 +426,19 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
   // This prevents the auto-reset effect from clearing filters before data arrives.
   const hasPopulated = useRef(output.sortedGames.length > 0);
 
-  // ── Sync recompute when data arrives (empty → populated) ──────────────
+  // ── Sync recompute when data arrives or grows (e.g. empty→n or 38→137) ─
   // Uses React's "setState during render" pattern to avoid queue conflicts
-  // with the deferred startTransition path. useLayoutEffect + setOutput +
-  // startTransition targeting the same state triggers "Should have a queue"
-  // errors. Calling setOutput during render is safe: React abandons the
-  // current render and immediately re-renders with the new state.
-  // Only fires once per empty→populated transition (hasPopulated guard).
+  // with the deferred startTransition path. Ensures Top Sellers etc. show the
+  // full list immediately when the hook receives the larger set, not one frame later.
   const prevDataLenRef = useRef(input.currentGames.length);
   if (input.currentGames.length !== prevDataLenRef.current) {
     const prevLen = prevDataLenRef.current;
-    prevDataLenRef.current = input.currentGames.length;
-    if (prevLen === 0 && input.currentGames.length > 0) {
-      const fresh = computeAll(input);
+    const nextLen = input.currentGames.length;
+    prevDataLenRef.current = nextLen;
+    const emptyToPopulated = prevLen === 0 && nextLen > 0;
+    const smallDatasetGrew = nextLen <= 200 && nextLen > prevLen;
+    if (emptyToPopulated || smallDatasetGrew) {
+      const fresh = computeAll(augmentInput(input));
       hasPopulated.current = true;
       setOutput(fresh);
     }
@@ -346,49 +449,59 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
   // change the games slice thanks to prevGamesRef stability upstream).
   const prevFingerprintRef = useRef('');
   const liveCount = input.liveGameIds?.size ?? 0;
-  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${input.filters.store.length}|${input.filters.category}|${input.sortBy}|${input.sortDirection}|${liveCount}`;
+  // Include store filter values (not just length) so Steam vs Epic vs Both trigger recompute
+  const storeKey = (input.filters.store || []).slice().sort().join(',');
+  // Only include liveCount when it affects sort (library + status priority). Omitting for browse
+  // prevents player-count updates from re-running the effect and overwriting store order.
+  const livePart = input.viewMode === 'library' ? liveCount : '';
+  const adultPart = input.allowAdultContent === true ? '1' : '0';
+  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${storeKey}|${input.filters.category}|${input.sortBy}|${input.sortDirection}|${livePart}|${adultPart}`;
 
   // ── Inline recompute on viewMode transition ───────────────────────────
-  // Compute synchronously during render so the grid paints immediately
-  // with the correct data — no blank flash. For small datasets this is
-  // trivial; for larger datasets (~6000 games) the cost is ~50-80ms but
-  // avoids the jarring empty→fill transition. The fingerprint is stamped
-  // so the deferred useEffect doesn't redundantly re-run the same work.
+  // For small datasets we compute synchronously so the grid paints immediately.
+  // For large datasets we only stamp the fingerprint and let the effect run
+  // (with phased yield) so the main thread stays responsive for hover/input.
   const prevViewModeRef = useRef(input.viewMode);
   if (input.viewMode !== prevViewModeRef.current) {
     prevViewModeRef.current = input.viewMode;
-    const fresh = computeAll(inputRef.current);
-    hasPopulated.current = true;
-    setOutput(fresh);
-    prevFingerprintRef.current = fingerprint;
+    if (input.currentGames.length <= 300) {
+      const fresh = computeAll(augmentInput(inputRef.current));
+      hasPopulated.current = true;
+      setOutput(fresh);
+      prevFingerprintRef.current = fingerprint;
+    }
   }
 
-  // Schedule heavy computation after paint using rAF + startTransition.
-  // Cancels any in-flight computation when inputs change.
+  // Schedule heavy computation after paint; yield between filter and sort
+  // so the main thread can process input (e.g. hover) and stay responsive.
   useEffect(() => {
-    // Skip if fingerprint is identical (content unchanged despite new references)
     if (fingerprint === prevFingerprintRef.current) return;
     prevFingerprintRef.current = fingerprint;
 
     const version = ++versionRef.current;
-    let rafId = 0;
+    let raf1 = 0;
+    let raf2 = 0;
 
-    rafId = requestAnimationFrame(() => {
-      // Double-check we haven't been superseded
+    raf1 = requestAnimationFrame(() => {
       if (version !== versionRef.current) return;
+      const phase1 = computeFilterAndDynamic(augmentInput(inputRef.current));
 
-      const result = computeAll(inputRef.current);
-
-      // Only update state if this is still the latest computation
-      if (version === versionRef.current) {
-        startTransition(() => {
-          hasPopulated.current = true;
-          setOutput(result);
-        });
-      }
+      raf2 = requestAnimationFrame(() => {
+        if (version !== versionRef.current) return;
+        const sortedGames = computeSort(phase1.displayedGames, inputRef.current);
+        if (version === versionRef.current) {
+          startTransition(() => {
+            hasPopulated.current = true;
+            setOutput({ ...phase1, sortedGames });
+          });
+        }
+      });
     });
 
-    return () => cancelAnimationFrame(rafId);
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fingerprint]);
 

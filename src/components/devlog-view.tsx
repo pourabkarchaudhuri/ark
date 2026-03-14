@@ -5,8 +5,23 @@
  * the daily dev journal (docs/dev-journal.json).
  * Dev-mode only.
  */
-
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
+
+interface DevJournalDay {
+  date: string;
+  title: string;
+  tags: string[];
+  narrative: string;
+  filesChanged: string[];
+  milestones: string[];
+  challenges: string[];
+  lookingAhead: string | null;
+}
+
+interface DevJournalData {
+  project: string;
+  days: DevJournalDay[];
+}
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft,
@@ -212,7 +227,7 @@ const DayCard = memo(function DayCard({ day, index, isLatest }: DayCardProps) {
             {day.tags.length > 0 && (
               <>
                 <span className="mt-1.5">TAGS::{day.tags.length}</span>
-                {day.tags.slice(0, 3).map(t => (
+                {day.tags.slice(0, 3).map((t: string) => (
                   <span key={t} className="text-fuchsia-400/40">{TAG_ICONS[t.toLowerCase()] ?? '·'} {t.toUpperCase()}</span>
                 ))}
               </>
@@ -246,7 +261,7 @@ const DayCard = memo(function DayCard({ day, index, isLatest }: DayCardProps) {
 
           {/* Tags */}
           <div className="flex items-center gap-1.5 flex-wrap">
-            {day.tags.map(tag => (
+            {day.tags.map((tag: string) => (
               <span
                 key={tag}
                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-mono text-[10px] tracking-wider uppercase text-white/30 border border-white/[0.08] bg-white/[0.02]"
@@ -265,7 +280,7 @@ const DayCard = memo(function DayCard({ day, index, isLatest }: DayCardProps) {
 
           {/* Narrative — full height, no scroll */}
           <div className="font-mono text-sm text-white/50 leading-[1.9] whitespace-pre-wrap">
-            {day.narrative.split('\n\n').map((para, i) => (
+            {day.narrative.split('\n\n').map((para: string, i: number) => (
               <p key={i} className={i > 0 ? 'mt-4' : ''}>
                 <span className="text-white/[0.12] select-none mr-2">{'>'}</span>
                 {para}
@@ -276,7 +291,7 @@ const DayCard = memo(function DayCard({ day, index, isLatest }: DayCardProps) {
           {/* Milestones */}
           {day.milestones.length > 0 && (
             <div className="space-y-1.5 pl-3 border-l-2 border-emerald-500/20">
-              {day.milestones.map((m, i) => (
+              {day.milestones.map((m: string, i: number) => (
                 <div key={i} className="flex items-start gap-2.5 py-0.5">
                   <span className="font-mono text-xs text-emerald-400/30 select-none mt-px">◆</span>
                   <span className="font-mono text-[13px] text-white/45 leading-relaxed">{m}</span>
@@ -288,7 +303,7 @@ const DayCard = memo(function DayCard({ day, index, isLatest }: DayCardProps) {
           {/* Challenges */}
           {day.challenges.length > 0 && (
             <div className="space-y-1.5 pl-3 border-l-2 border-amber-500/20">
-              {day.challenges.map((c, i) => (
+              {day.challenges.map((c: string, i: number) => (
                 <div key={i} className="flex items-start gap-2.5 py-0.5">
                   <span className="font-mono text-xs text-amber-400/30 select-none mt-px">▲</span>
                   <span className="font-mono text-[13px] text-white/40 leading-relaxed">{c}</span>
@@ -327,7 +342,7 @@ const DayCard = memo(function DayCard({ day, index, isLatest }: DayCardProps) {
                     className="overflow-hidden"
                   >
                     <div className="mt-2 rounded bg-black/40 border border-white/[0.03] p-2.5 space-y-px">
-                      {day.filesChanged.map((f, i) => (
+                      {day.filesChanged.map((f: string, i: number) => (
                         <div key={i} className="font-mono text-[11px] text-white/25 truncate py-0.5 px-1.5 rounded hover:bg-white/[0.03]" title={f}>
                           <span className="text-white/10 select-none mr-1.5">$</span>{f}
                         </div>
@@ -348,7 +363,7 @@ const DayCard = memo(function DayCard({ day, index, isLatest }: DayCardProps) {
 
 function EmptyJournal({ isElectron }: { isElectron: boolean }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full text-center">
+    <div className="flex flex-col items-center justify-center min-h-[min(60vh,400px)] py-12 text-center px-4">
       <div className="w-14 h-14 rounded-lg bg-white/[0.03] border border-white/[0.06] flex items-center justify-center mb-6">
         <Terminal className="h-6 w-6 text-white/20" />
       </div>
@@ -357,11 +372,11 @@ function EmptyJournal({ isElectron }: { isElectron: boolean }) {
       </h3>
       <p className="font-mono text-[13px] text-white/25 max-w-md leading-relaxed">
         {isElectron
-          ? 'The construction log is empty. As you build through Cursor prompts, the session-journal skill will chronicle each day here.'
+          ? 'No entries yet. This log shows development updates when the app is built with Cursor or when a journal file is present.'
           : 'The construction log requires the Electron runtime. Run the app via Electron to view the dev journal.'}
       </p>
       <p className="font-mono text-[11px] text-white/15 mt-4">
-        {isElectron ? 'awaiting first entry at docs/dev-journal.json' : 'window.devlog unavailable'}
+        {isElectron ? 'Journal file: docs/dev-journal.json' : 'window.devlog unavailable'}
       </p>
     </div>
   );

@@ -52,6 +52,8 @@ import { getSteamHeaderUrl } from '@/types/steam';
 import { libraryStore } from '@/services/library-store';
 import { getCanonicalGenres, toCanonicalGenres } from '@/data/canonical-genres';
 import { useToast } from '@/components/ui/toast';
+import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
+import { isAdultContentByDescription } from '@/services/adult-content-filter';
 import { GameCard } from '@/components/game-card';
 import type { CachedGameMeta, Game, GameStatus } from '@/types/game';
 
@@ -136,6 +138,15 @@ function extractSteamAppId(id: string | number): number | null {
     return isNaN(n) ? null : n;
   }
   return null;
+}
+
+/** Canonical id for dedup: same game (same store) = one row. */
+function getCanonicalId(r: UpcomingRelease): string {
+  if (typeof r.id === 'number') return `steam-${r.id}`;
+  const s = String(r.id);
+  if (s.startsWith('steam-') || s.startsWith('epic-')) return s;
+  if (r.epicNamespace != null && r.epicOfferId != null) return `epic-${r.epicNamespace}:${r.epicOfferId}`;
+  return s;
 }
 
 function buildImageFallbackChain(game: UpcomingRelease): string[] {
@@ -614,7 +625,7 @@ const GroupedFeed = memo(function GroupedFeed({
               )
             ) : (
               <div style={{ contentVisibility: 'auto', containIntrinsicBlockSize: '400px' }}>
-                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2.5 mt-2">
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8 gap-2.5 mt-2">
                   <AnimatePresence mode="popLayout">
                     {visible.map((release) => {
                       const owned = isReleaseInLibrary(release.id, libraryIds);
@@ -1056,10 +1067,10 @@ function SkeletonFeed({ sections }: { sections: number }) {
             <div className="h-4 w-8 rounded-full bg-white/[0.04] animate-pulse" />
             <div className="flex-1 h-px bg-white/[0.04]" />
                 </div>
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2.5 mt-2">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8 gap-2.5 mt-2">
             {Array.from({ length: s === 0 ? 10 : 5 }).map((_, i) => (
               <div key={i} className="rounded-xl bg-white/[0.03] animate-pulse">
-                <div className="aspect-[3/4]" />
+                <div className="aspect-[4/3]" />
                 <div className="p-3 space-y-2">
                   <div className="h-4 w-3/4 rounded bg-white/[0.04]" />
                   <div className="h-3 w-1/2 rounded bg-white/[0.03]" />
@@ -1113,6 +1124,15 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     const unsub = libraryStore.subscribe(() => setLibraryIds(buildLibraryIdSet()));
     return unsub;
   }, []);
+
+  const [allowAdultContent] = useAllowAdultContent();
+  const baseReleases = useMemo(() => {
+    if (allowAdultContent) return releases;
+    return releases.filter((r) => {
+      const gameLike = { id: releaseToGameId(r), title: r.name, summary: '', longDescription: '' };
+      return !isAdultContentByDescription(gameLike);
+    });
+  }, [releases, allowAdultContent]);
 
   const gridRef = useRef<HTMLDivElement>(null);
   const [gridHeight, setGridHeight] = useState(600);
@@ -1178,7 +1198,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   const filteredReleases = useMemo(() => {
     const now = new Date();
     const tY = now.getFullYear(), tM = now.getMonth(), tD = now.getDate();
-    let result = releases.filter((r) => {
+    let result = baseReleases.filter((r) => {
       if (!r.parsedDate) return true;
       const y = r.parsedDate.getFullYear(), m = r.parsedDate.getMonth(), d = r.parsedDate.getDate();
       return y > tY || (y === tY && (m > tM || (m === tM && d >= tD)));
@@ -1200,7 +1220,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       result = result.filter((r) => isReleaseInLibrary(r.id, libraryIds));
     }
     return result;
-  }, [releases, storeFilter, platformFilter, genreFilter, radarActive, libraryIds]);
+  }, [baseReleases, storeFilter, platformFilter, genreFilter, radarActive, libraryIds]);
 
   const tbdReleases = useMemo(() => {
     return filteredReleases.filter(r => !r.parsedDate);
@@ -1271,68 +1291,87 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     setLoading(true);
     setError(null);
     try {
+      // Prefetch-derived: full browse set with dates + Coming Soon (when prefetch ready)
       const prefetchDerived = deriveReleasesFromPrefetch();
       let allReleases: UpcomingRelease[] = prefetchDerived ?? [];
 
-      if (allReleases.length === 0) {
-        const [steamResult, epicResult] = await Promise.all([
-          window.steam?.getUpcomingReleases
-            ? window.steam.getUpcomingReleases().catch((err: unknown) => { console.warn('[ReleaseCalendar] Steam fetch failed:', err); return []; })
-            : Promise.resolve([]),
-          window.epic?.getUpcomingReleases
-            ? window.epic.getUpcomingReleases().catch((err: unknown) => { console.warn('[ReleaseCalendar] Epic fetch failed:', err); return []; })
-            : Promise.resolve([]),
-        ]);
+      // Always also fetch from store IPC APIs so we get dedicated upcoming/TBA lists
+      // (Steam/Epic getUpcomingReleases). Merge with prefetch so we have full data + TBA.
+      const [steamResult, epicResult] = await Promise.all([
+        window.steam?.getUpcomingReleases
+          ? window.steam.getUpcomingReleases().catch((err: unknown) => { console.warn('[ReleaseCalendar] Steam fetch failed:', err); return []; })
+          : Promise.resolve([]),
+        window.epic?.getUpcomingReleases
+          ? window.epic.getUpcomingReleases().catch((err: unknown) => { console.warn('[ReleaseCalendar] Epic fetch failed:', err); return []; })
+          : Promise.resolve([]),
+      ]);
 
-        for (const r of steamResult as any[]) {
-            allReleases.push({ ...r, store: 'steam' });
-          }
-        for (const r of epicResult as any[]) {
-            const releaseDate = r.date ? new Date(r.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Coming Soon';
-            const comingSoon = r.date ? new Date(r.date).getTime() > Date.now() : true;
-            allReleases.push({
-              id: `epic-${r.namespace}:${r.offerId}`,
-              name: r.title,
-              image: r.capsule,
-            epicNamespace: r.namespace,
-            epicOfferId: r.offerId,
-              releaseDate,
-              comingSoon,
-              genres: [],
-              platforms: { windows: true, mac: false, linux: false },
-              store: 'epic',
-            });
+      // Add Steam IPC items. Always push (even if key exists in prefetch) so the final
+      // dedup can merge stores and we get correct "Steam + Epic" for same game.
+      for (const r of steamResult as any[]) {
+        const name = (r.name ?? r.title ?? '').trim();
+        if (!name) continue;
+        allReleases.push({ ...r, name, store: 'steam' });
+      }
+      for (const r of epicResult as any[]) {
+        const title = (r.title || '').trim();
+        if (!title) continue;
+        const releaseDate = r.date ? new Date(r.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Coming Soon';
+        const comingSoon = r.date ? new Date(r.date).getTime() > Date.now() : true;
+        allReleases.push({
+          id: `epic-${r.namespace}:${r.offerId}`,
+          name: title,
+          image: r.capsule,
+          epicNamespace: r.namespace,
+          epicOfferId: r.offerId,
+          releaseDate,
+          comingSoon,
+          genres: [],
+          platforms: { windows: true, mac: false, linux: false },
+          store: 'epic',
+        });
       }
 
-      if (allReleases.length === 0 && !window.steam?.getUpcomingReleases && !window.epic?.getUpcomingReleases) {
+      if (allReleases.length === 0 && !isPrefetchReady() && !window.steam?.getUpcomingReleases && !window.epic?.getUpcomingReleases) {
         setError('Store APIs not available');
         setLoading(false);
         return;
-        }
       }
 
-      const seen = new Map<string, UpcomingRelease>();
-      const storesByKey = new Map<string, Set<string>>();
+      // Phase 1: Dedup by canonical id (same game from same store = one row; merge stores)
+      const byId = new Map<string, { r: UpcomingRelease; stores: Set<string> }>();
       for (let i = 0; i < allReleases.length; i++) {
         const r = allReleases[i];
-        const key = r.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!seen.has(key)) {
-          seen.set(key, r);
-          storesByKey.set(key, new Set(r.store ? [r.store] : []));
-        } else if (r.store) {
-          storesByKey.get(key)!.add(r.store);
+        const cid = getCanonicalId(r);
+        if (byId.has(cid)) {
+          if (r.store) byId.get(cid)!.stores.add(r.store);
+        } else {
+          byId.set(cid, { r, stores: new Set(r.store ? [r.store] : []) });
+        }
+      }
+      const byIdList = Array.from(byId.values());
+
+      // Phase 2: Dedup by normalized name (merge cross-store: same name = one row, combined stores)
+      const seenByName = new Map<string, { r: UpcomingRelease; stores: Set<string> }>();
+      for (const { r, stores } of byIdList) {
+        const nameKey = r.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!nameKey) continue;
+        if (seenByName.has(nameKey)) {
+          stores.forEach((s) => seenByName.get(nameKey)!.stores.add(s));
+        } else {
+          seenByName.set(nameKey, { r, stores: new Set(stores) });
         }
       }
 
-      const dedupArr = Array.from(seen.entries());
+      const dedupArr = Array.from(seenByName.entries());
       const parsed: ParsedRelease[] = new Array(dedupArr.length);
       for (let i = 0; i < dedupArr.length; i++) {
-        const [key, r] = dedupArr[i];
+        const [_, { r, stores }] = dedupArr[i];
         parsed[i] = {
           ...r,
           parsedDate: parseReleaseDate(r.releaseDate),
           _fallbackChain: buildImageFallbackChain(r),
-          _stores: storesByKey.get(key) ?? new Set(),
+          _stores: stores,
         };
       }
       setReleases(parsed);
@@ -1506,7 +1545,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
 
             {calView === 'month' && (
               <MiniMonthStrip
-                releases={releases}
+                releases={baseReleases}
                 currentYear={currentYear}
                 currentMonth={currentMonth}
                 onNavigate={navigateToMonth}

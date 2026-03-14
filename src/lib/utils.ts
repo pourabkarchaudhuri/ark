@@ -104,3 +104,14 @@ export function formatHours(decimalHours: number): string {
   return `${h} ${hrLabel} ${m} ${minLabel}`;
 }
 
+/**
+ * Format a number for display with at most 2 decimal places.
+ * Trailing zeros after the decimal are kept (e.g. 1.20) for consistency.
+ */
+export function formatMaxTwoDecimals(n: number): string {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '0';
+  const rounded = Math.round(n * 100) / 100;
+  if (rounded % 1 === 0) return String(Math.round(rounded));
+  return rounded.toFixed(2);
+}
+

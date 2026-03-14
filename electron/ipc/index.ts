@@ -21,11 +21,15 @@ import { register as registerAnalyticsHandlers } from './analytics-handlers.js';
 import { register as registerMlHandlers } from './ml-handlers.js';
 import { register as registerDevlogHandlers } from './devlog-handlers.js';
 import { register as registerEventScraperHandlers } from './event-scraper-handlers.js';
+import { register as registerEgdataHandlers } from './egdata-handlers.js';
+import { register as registerCatalogHandlers } from './catalog-handlers.js';
 
 export function registerAllHandlers(getMainWindow: () => BrowserWindowType | null): void {
   registerWindowHandlers(getMainWindow);
   registerSteamHandlers();
   registerEpicHandlers();
+  registerEgdataHandlers();
+  registerCatalogHandlers();
   registerRssHandlers();
   registerMetacriticHandlers();
   registerProxyHandlers();
