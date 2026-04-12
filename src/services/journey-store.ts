@@ -3,6 +3,16 @@ import { JourneyEntry, GameStatus, migrateGameId } from '@/types/game';
 const STORAGE_KEY = 'ark-journey-history';
 const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
 
+/** True when the journey row title should be replaced once library metadata loads. */
+export function isPlaceholderJourneyTitle(title: string | undefined): boolean {
+  if (title == null) return true;
+  const t = title.trim();
+  if (t.length === 0) return true;
+  const lower = t.toLowerCase();
+  if (lower === 'unknown' || lower === 'unknown game') return true;
+  return false;
+}
+
 interface StoredJourneyData {
   version: number;
   entries: JourneyEntry[];
@@ -182,6 +192,41 @@ class JourneyStore {
     if (fields.firstPlayedAt !== undefined) existing.firstPlayedAt = fields.firstPlayedAt;
     if (fields.lastPlayedAt !== undefined) existing.lastPlayedAt = fields.lastPlayedAt;
 
+    this.invalidateSortedCache();
+    this.scheduleSave();
+    this.notifyListeners();
+  }
+
+  /**
+   * When library metadata arrives after the journey row was created with a placeholder title,
+   * update the stored title so Voyage / Gantt show the real name.
+   */
+  syncTitleIfPlaceholder(gameId: string, title: string | undefined) {
+    if (!title || isPlaceholderJourneyTitle(title)) return;
+    const trimmed = title.trim();
+    const existing = this.entries.get(gameId);
+    if (!existing) return;
+    if (!isPlaceholderJourneyTitle(existing.title)) return;
+    if (existing.title === trimmed) return;
+
+    existing.title = trimmed;
+    this.invalidateSortedCache();
+    this.scheduleSave();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set the journey row title from an authoritative source (e.g. custom game rename).
+   * Unlike syncTitleIfPlaceholder, this updates whenever the title differs.
+   */
+  syncJourneyTitle(gameId: string, title: string | undefined) {
+    if (!title || !title.trim()) return;
+    const trimmed = title.trim();
+    const existing = this.entries.get(gameId);
+    if (!existing) return;
+    if (existing.title === trimmed) return;
+
+    existing.title = trimmed;
     this.invalidateSortedCache();
     this.scheduleSave();
     this.notifyListeners();

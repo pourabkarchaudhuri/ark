@@ -543,8 +543,9 @@ export function DataFlowView({ onBack }: DataFlowViewProps) {
 
         {/* Header — Ark terminal style */}
         <Panel position="top-left" className="!m-4">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3" data-tour="dataflow-panel">
             <Button
+              data-tour="dataflow-back"
               onClick={onBack}
               variant="ghost"
               size="sm"

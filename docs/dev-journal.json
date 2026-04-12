@@ -2,9 +2,61 @@
   "project": "Tracker",
   "days": [
     {
+      "date": "2026-04-12",
+      "title": "Spotlight fix, rerank badges, and full Joyride tour audit",
+      "tags": ["fix", "polish"],
+      "summary": "Fixed Joyride spotlight — removed custom overlay that was covering the spotlight cutout, letting Joyride handle dimming natively with overlayColor and spotlightPadding. This also eliminates the removeChild crash. Moved rerank status to inline badges in Oracle and Embedding Space. Full audit of every tour: fixed handleCallback event overlap, added data-tour anchors to journey loading/empty skeletons, removed loading guard on library status chips, increased lazy-view resolve retries. 640 tests pass.",
+      "filesChanged": [
+        "src/components/guided-tour.tsx",
+        "src/components/oracle-view.tsx",
+        "src/components/ann-graph-view.tsx",
+        "src/components/journey-view.tsx",
+        "src/pages/dashboard.tsx"
+      ],
+      "milestones": [],
+      "challenges": [],
+      "lookingAhead": null
+    },
+    {
+      "date": "2026-03-31",
+      "title": "Guided tours: crash fix, markdown, and Guide tab redesign",
+      "tags": [
+        "milestone",
+        "progress",
+        "fix"
+      ],
+      "narrative": "Fixed the removeChild crash caused by removeJoyrideLeftovers racing React’s unmount of Joyride portal nodes — deferred orphan cleanup to setTimeout(0). Tooltip content now renders bold/italic markdown instead of raw asterisks. The Browse tour dropped the flaky browse-catalog-jump step; TARGET_NOT_FOUND no longer kills the tour, Joyride auto-skips to the next step. Redesigned the Settings Guide tab: unified 2-column tour list with play/replay icons, completion checkmarks, dev-only tags, and clear visual hierarchy separating interactive tours from informational Getting Started steps.",
+      "filesChanged": [
+        "src/components/guided-tour.tsx",
+        "src/pages/dashboard.tsx",
+        "src/pages/game-details.tsx",
+        "src/components/journey-view.tsx",
+        "src/components/buzz-view.tsx",
+        "src/components/release-calendar.tsx",
+        "src/components/oracle-view.tsx",
+        "src/components/ann-graph-view.tsx",
+        "src/components/settings-screen.tsx",
+        "src/components/devlog-view.tsx",
+        "src/components/data-flow-view.tsx",
+        "docs/dev-journal.md",
+        "docs/dev-journal.json"
+      ],
+      "milestones": [
+        "removeChild crash fixed via deferred Joyride cleanup",
+        "Inline markdown rendering in tour tooltips",
+        "Settings Guide tab redesigned with completion tracking"
+      ],
+      "challenges": [],
+      "lookingAhead": null
+    },
+    {
       "date": "2026-02-23",
       "title": "The Ark Gets Its Construction Log and DevLog Timeline",
-      "tags": ["milestone", "progress", "decision"],
+      "tags": [
+        "milestone",
+        "progress",
+        "decision"
+      ],
       "narrative": "I started the day with a vision — every great ship needs a captain's log, and the Ark deserves no less. I built a Cursor skill called session-journal that automatically chronicles each day's development story into a living markdown document and a structured JSON file. The first version logged every prompt individually like telemetry, but that felt soulless. I pivoted to an aggregation model: one entry per day, rewritten with each prompt into a cohesive first-person narrative. The tone is fun, passionate, and unapologetically visionary.\n\nThen came the real prize — turning that journal into a feature. I created the DevLog view, a lore-themed timeline woven into the Voyage section, gated behind developer mode. It reads from docs/dev-journal.json and renders each day as a terminal-styled card on a glowing vertical timeline. Milestones get amber halos, challenges get red warnings, and every entry carries a stardate. The whole thing feels like reading the construction log of a starship being built in real time.\n\nThe IPC plumbing was straightforward — a tiny handler in the Electron main process reads the JSON, the preload exposes it as window.devlog, and the React component fetches on mount. Clean, minimal, dev-mode only.\n\nLater in the day, I did a full UX rethink of the Transmissions page. The old layout had a permanent side-by-side split — the Decode Bay sat there empty when idle, wasting half the screen. I rebuilt around a single principle: idle = full-width stream, decode = resizable split. When no article is selected, the signal stream fills the entire viewport. Select a transmission and the Decode Bay slides in with a draggable divider. Focus mode goes full-screen reader. Scheduled Broadcasts became a collapsible horizontal strip instead of a permanent sidebar section. Zero wasted real estate.\n\nThen the big one — live event intelligence. The old Scheduled broadcasts was just a static list with naive word matching. I built a full background scraper in the Electron main process that fetches each event's official website using net.fetch, extracts dates via multi-pattern regex (US/EU formats, ranges), and scrapes YouTube/Twitch links from the HTML. Results cache to JSON with 24h TTL. The renderer resolves events via IPC and re-computes live status every 60 seconds. The UI now shows live countdown badges, a pulsing LIVE indicator, YouTube/Twitch quick-open buttons (opening in the Decode Bay), and events auto-sorted by status. Added official URLs for 20 of 24 events. Zero new APIs.",
       "filesChanged": [
         "src/components/devlog-view.tsx",
@@ -136,29 +188,103 @@
     {
       "date": "2026-02-24",
       "title": "Galaxy Map scales to 111K: streaming projection kills OOM",
-      "tags": ["progress", "fix", "challenge", "milestone"],
+      "tags": [
+        "progress",
+        "fix",
+        "challenge",
+        "milestone"
+      ],
       "narrative": "Big day of polish and deep stability work. Accent colors unified, ML inference fixed, guided tour realigned, Data Flow rebuilt, Oracle error state redesigned, neighbor connections capped at 0.9 cosine distance.\n\nThe headline: the Galaxy Map finally works at scale. With 111K+ embeddings, the Embedding Space was crashing with OOM — the renderer allocated a 456 MB Float32Array for raw 1024D vectors on top of ~1.75 GB baseline memory. Multiple rounds of worker-side fixes (in-place centering, landmark subsampling, mutable refs) helped the worker but couldn't fix the main-thread allocation. The final solution: stream-project each 1024D vector to 100D during the IDB cursor read — L2 normalize, Gaussian random project, store into a pre-allocated 42.5 MB buffer. The full 1024D data never exists in memory. PCA (WebGPU when available, CPU fallback) runs directly on the 100D buffer — fast, deterministic, zero OOM risk. Galaxy builds 111K nodes in seconds at ~1.05 GB renderer memory.\n\nAlso shipped: Ollama as optional NSIS installer step, recommendation pipeline 100x speedup, view switching lag eliminated (4 lazy imports + async filter/sort), 11 resource pressure fixes, and crash circuit breaker.",
-      "filesChanged": ["src/services/galaxy-cache.ts", "src/services/embedding-service.ts", "src/workers/pca.worker.ts", "src/components/settings-screen.tsx", "electron/main.ts", "src/pages/game-details.tsx", "src/components/guided-tour.tsx", "src/components/showcase-view.tsx", "src/components/data-flow-view.tsx", "src/types/reco.ts", "src/workers/reco.worker.ts", "src/services/reco-store.ts", "src/components/oracle-view.tsx", "src/components/ann-graph-view.tsx", "electron/ml-model.ts", "src/services/system-status.ts", "src/pages/dashboard.tsx", "src/hooks/useDeferredFilterSort.ts", "build/installer/ollama-install.nsh", "package.json"],
-      "milestones": ["Galaxy Map builds 111K nodes without OOM — streaming IDB→100D projection eliminates 456 MB main-thread allocation", "PCA projection (WebGPU + CPU fallback) replaces UMAP worker — instant, deterministic, no worker hang risk", "Random projection preserves pairwise distances (Johnson-Lindenstrauss) — 3D layout quality maintained", "Renderer memory stable at ~1.05 GB during galaxy build (was 1.75 GB+, crashing)", "Ollama install offered during Ark setup with clear value messaging", "Oracle pipeline 100x speedup with dense Float32Array cosine and smart pre-filtering", "4 heavy views lazy-imported — 456 KB JS deferred to navigation time", "11 resource pressure fixes across RAM, CPU, and GPU"],
-      "challenges": ["Main-thread 1024D allocation was the true OOM bottleneck — worker-side fixes alone insufficient", "UMAP worker hung silently in Electron renderer despite working in Node.js test — isolated as environment-specific issue", "Multiple HMR-triggered concurrent galaxy builds caused resource contention — solved with generation counter and cancellation checks", "umap-js O(n²) brute-force fallback with custom distanceFn made 15K landmarks infeasible"],
+      "filesChanged": [
+        "src/services/galaxy-cache.ts",
+        "src/services/embedding-service.ts",
+        "src/workers/pca.worker.ts",
+        "src/components/settings-screen.tsx",
+        "electron/main.ts",
+        "src/pages/game-details.tsx",
+        "src/components/guided-tour.tsx",
+        "src/components/showcase-view.tsx",
+        "src/components/data-flow-view.tsx",
+        "src/types/reco.ts",
+        "src/workers/reco.worker.ts",
+        "src/services/reco-store.ts",
+        "src/components/oracle-view.tsx",
+        "src/components/ann-graph-view.tsx",
+        "electron/ml-model.ts",
+        "src/services/system-status.ts",
+        "src/pages/dashboard.tsx",
+        "src/hooks/useDeferredFilterSort.ts",
+        "build/installer/ollama-install.nsh",
+        "package.json"
+      ],
+      "milestones": [
+        "Galaxy Map builds 111K nodes without OOM — streaming IDB→100D projection eliminates 456 MB main-thread allocation",
+        "PCA projection (WebGPU + CPU fallback) replaces UMAP worker — instant, deterministic, no worker hang risk",
+        "Random projection preserves pairwise distances (Johnson-Lindenstrauss) — 3D layout quality maintained",
+        "Renderer memory stable at ~1.05 GB during galaxy build (was 1.75 GB+, crashing)",
+        "Ollama install offered during Ark setup with clear value messaging",
+        "Oracle pipeline 100x speedup with dense Float32Array cosine and smart pre-filtering",
+        "4 heavy views lazy-imported — 456 KB JS deferred to navigation time",
+        "11 resource pressure fixes across RAM, CPU, and GPU"
+      ],
+      "challenges": [
+        "Main-thread 1024D allocation was the true OOM bottleneck — worker-side fixes alone insufficient",
+        "UMAP worker hung silently in Electron renderer despite working in Node.js test — isolated as environment-specific issue",
+        "Multiple HMR-triggered concurrent galaxy builds caused resource contention — solved with generation counter and cancellation checks",
+        "umap-js O(n²) brute-force fallback with custom distanceFn made 15K landmarks infeasible"
+      ],
       "lookingAhead": "Monitor memory in production builds. Consider re-enabling UMAP as an opt-in quality mode once worker communication issues are diagnosed."
     },
     {
       "date": "2026-03-02",
       "title": "Oracle cross-store fix, snappier Library, Voyage thumbnails restored",
-      "tags": ["fix", "progress"],
+      "tags": [
+        "fix",
+        "progress"
+      ],
       "narrative": "Fixed the ML Recommendation Model always showing 'Not loaded' on both status panels — auto-loads on first status poll with capped retry. Silenced noisy ONNX Runtime warnings during batch inference.\n\nPolished the Embedding Space: the HDR nebula skybox wasn't loading in production (hardcoded '/' path instead of Vite BASE_URL). Smoothed the loading-to-galaxy transition by doubling GPU warmup frames and extending the typewriter lead-in so the scene is fully stable before the overlay fades. Tightened the neighbour limit from 0.9 to 0.7 cosine distance — connections now show genuinely similar games. Fixed the re-queue bug where the galaxy cache was invalidated on entry because the catalog embedding pipeline was still generating vectors — cache now tolerates small count drift when freshly built.\n\nSquashed a recommendation bug where completed games leaked into Oracle shelves via cross-store ID mismatch — candidate pool now checks secondaryId against exclusion set. Library navigation wrapped in startTransition for responsive switching. Voyage thumbnails fixed: TextureLoader CORS mode set to passthrough for Electron file:// context, and cover image memos stabilized on gameId + coverUrl. Embedding Space upgraded with anti-aliasing enabled and bloom resolution doubled from quarter to half.\n\nFinally cracked the HDR skybox — Three.js FileLoader uses fetch() which doesn't support file:// in Electron. Replaced with XHR→Blob URL pipeline and removed the aggressive tex.image nullification that could break texture state.",
-      "filesChanged": ["src/services/system-status.ts", "electron/ml-model.ts", "dataset/ml/export_model.py", "src/components/ann-graph-view.tsx", "src/services/galaxy-cache.ts", "src/services/reco-store.ts", "src/pages/dashboard.tsx", "src/components/journey-view.tsx", "src/components/showcase-view.tsx"],
-      "milestones": ["ML model auto-loads on first status poll", "HDR nebula skybox loads correctly in production builds", "Neighbour distance threshold tightened to 0.7 for higher-quality connections", "Galaxy cache tolerates in-flight embedding growth — no more re-queue on entry", "Completed games no longer leak into Oracle recommendations via cross-store IDs", "Voyage thumbnails restored in Electron production builds", "Embedding Space anti-aliasing enabled, bloom bumped to half-res", "HDR skybox finally loads in production via XHR→Blob URL bypass"],
-      "challenges": ["HDR path used absolute '/' which fails with Vite base './'", "Galaxy cache strict equality caused unnecessary rebuilds when background pipeline was still running", "Cross-store dedup secondaryId not checked during candidate exclusion", "THREE.TextureLoader default crossOrigin='anonymous' fails under Electron file:// origin", "Three.js FileLoader uses fetch() which doesn't support file:// URLs in Electron production"],
+      "filesChanged": [
+        "src/services/system-status.ts",
+        "electron/ml-model.ts",
+        "dataset/ml/export_model.py",
+        "src/components/ann-graph-view.tsx",
+        "src/services/galaxy-cache.ts",
+        "src/services/reco-store.ts",
+        "src/pages/dashboard.tsx",
+        "src/components/journey-view.tsx",
+        "src/components/showcase-view.tsx"
+      ],
+      "milestones": [
+        "ML model auto-loads on first status poll",
+        "HDR nebula skybox loads correctly in production builds",
+        "Neighbour distance threshold tightened to 0.7 for higher-quality connections",
+        "Galaxy cache tolerates in-flight embedding growth — no more re-queue on entry",
+        "Completed games no longer leak into Oracle recommendations via cross-store IDs",
+        "Voyage thumbnails restored in Electron production builds",
+        "Embedding Space anti-aliasing enabled, bloom bumped to half-res",
+        "HDR skybox finally loads in production via XHR→Blob URL bypass"
+      ],
+      "challenges": [
+        "HDR path used absolute '/' which fails with Vite base './'",
+        "Galaxy cache strict equality caused unnecessary rebuilds when background pipeline was still running",
+        "Cross-store dedup secondaryId not checked during candidate exclusion",
+        "THREE.TextureLoader default crossOrigin='anonymous' fails under Electron file:// origin",
+        "Three.js FileLoader uses fetch() which doesn't support file:// URLs in Electron production"
+      ],
       "lookingAhead": "Monitor neighbor quality with the tighter 0.7 threshold — may need genre-specific tuning for sparse categories."
     },
     {
       "date": "2026-03-06",
       "title": "Search UX: Searching… until debounce and results",
-      "tags": ["fix", "progress"],
+      "tags": [
+        "fix",
+        "progress"
+      ],
       "narrative": "Search UX got a proper pass so the app never flashes 'no games found' before a search has actually run. In browse mode, as soon as you type we now show a 'Searching…' skeleton (spinner + label) until the debounced search finishes — and we treat 'query has results' vs 'query returned empty' only after the request completes, using a completed-query ref so we don't show loading forever when the result is legitimately zero. In library mode, the same idea: if you've typed but the debounced filter hasn't kicked in yet, we show 'Searching…' instead of the full list or an empty state. The search bar spinner now runs in both modes whenever search is pending (raw query ahead of debounce or API in flight). The grid only shows the empty 'no results' state when we're not in that pending state.",
-      "filesChanged": ["src/hooks/useGameStore.ts", "src/pages/dashboard.tsx"],
+      "filesChanged": [
+        "src/hooks/useGameStore.ts",
+        "src/pages/dashboard.tsx"
+      ],
       "milestones": [],
       "challenges": [],
       "lookingAhead": ""
@@ -166,19 +292,42 @@
     {
       "date": "2026-03-07",
       "title": "egdata comparison + adult filter reinforced with cuss",
-      "tags": ["exploration", "progress", "milestone"],
+      "tags": [
+        "exploration",
+        "progress",
+        "milestone"
+      ],
       "narrative": "Ran a full exploratory comparison of egdata-api (Epic-only, Hono/MongoDB/Redis) against Tracker — real API calls to api.egdata.app for top-sellers, latest-games, featured, price by country, related offers, achievements, reviews-summary, sales, and autocomplete. Confirmed egdata gives a stable Epic catalog with a real top-sellers list (99 items from a GamePosition-backed collection), regional pricing, related editions/DLC, and optional achievements/IGDB/reviews, while Tracker has no Epic top-sellers list and relies on live GraphQL (plus Cloudflare risk) and REST fallback. Deepened the write-up in docs/egdata-api-comparison.md with architecture, field-level shapes, and integration options.\n\nThen reinforced the adult-content filter so it consistently catches explicit titles. Added the cuss package — a public linguistic list of profane/explicit words with sureness ratings — and use it for word-boundary checks so we don't flag \"Assassin\" or \"classic.\" Expanded the curated phrase list (e.g. lusty, futa, femboy, hentai, nsfw, sexual content) so titles like \"Lusty Bubbles\" and \"Femboy Futa Mania\" are hidden when \"Allow adult content\" is off. Introduced a cache version so when the filter logic or word list changes we clear the classification cache and re-evaluate every game on next load. All five tests pass; users get a safer default browse without relying on store tags.",
-      "filesChanged": ["docs/egdata-api-comparison.md", "src/services/adult-content-filter.ts", "src/test/services/adult-content-filter.test.ts", "src/hooks/useAllowAdultContent.ts", "src/hooks/useDeferredFilterSort.ts", "src/components/settings-screen.tsx", "src/pages/dashboard.tsx", "package.json"],
-      "milestones": ["Adult-content filter reinforced with cuss linguistic library and expanded phrase list; cache version invalidates on logic change"],
+      "filesChanged": [
+        "docs/egdata-api-comparison.md",
+        "src/services/adult-content-filter.ts",
+        "src/test/services/adult-content-filter.test.ts",
+        "src/hooks/useAllowAdultContent.ts",
+        "src/hooks/useDeferredFilterSort.ts",
+        "src/components/settings-screen.tsx",
+        "src/pages/dashboard.tsx",
+        "package.json"
+      ],
+      "milestones": [
+        "Adult-content filter reinforced with cuss linguistic library and expanded phrase list; cache version invalidates on logic change"
+      ],
       "challenges": [],
       "lookingAhead": "Optional: implement egdata as an augmentation source for Epic top sellers and detail enrichment; consider cuss rating threshold tuning if false positives or misses appear."
     },
     {
       "date": "2026-03-11",
       "title": "Play Streaks layout and 2-decimal value cap",
-      "tags": ["fix", "progress"],
+      "tags": [
+        "fix",
+        "progress"
+      ],
       "narrative": "Tightened the Voyage Medals experience so it feels intentional instead of half-empty. The Play Streaks tab now fills the visible area: the tab content uses the same flex layout as Overview, the heatmap lives in a scrollable flex-1 region so the stats bar stays at the top and the grid uses the rest of the space (or scrolls when needed), and the heatmap block is centered so wide screens don't leave dead space on the sides. No more awkward empty bands. Also capped all displayed numeric values to at most two decimal places — added a shared formatMaxTwoDecimals helper and wired it into the Medals view (Taste DNA percentages, genome purity, overview axis labels) so percentages and stats never show runaway precision.",
-      "filesChanged": ["src/components/medals-view.tsx", "src/components/medals/play-streak-heatmap.tsx", "src/components/medals/taste-dna.tsx", "src/lib/utils.ts"],
+      "filesChanged": [
+        "src/components/medals-view.tsx",
+        "src/components/medals/play-streak-heatmap.tsx",
+        "src/components/medals/taste-dna.tsx",
+        "src/lib/utils.ts"
+      ],
       "milestones": [],
       "challenges": [],
       "lookingAhead": null

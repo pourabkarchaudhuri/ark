@@ -295,6 +295,12 @@ contextBridge.exposeInMainWorld('settings', {
   // Set auto-launch setting
   setAutoLaunch: (enabled) =>
     ipcRenderer.invoke('settings:setAutoLaunch', enabled),
+
+  getPreferredChatProvider: () =>
+    ipcRenderer.invoke('settings:getPreferredChatProvider'),
+
+  setPreferredChatProvider: (provider) =>
+    ipcRenderer.invoke('settings:setPreferredChatProvider', provider),
 });
 
 // Expose auto-updater API to renderer
@@ -467,6 +473,10 @@ contextBridge.exposeInMainWorld('ollama', {
     ipcRenderer.on('ollama:setup-progress', handler);
     return () => ipcRenderer.removeListener('ollama:setup-progress', handler);
   },
+
+  // Cross-encoder rerank (POST /api/rerank) for Embedding Space neighbors
+  rerank: (payload) =>
+    ipcRenderer.invoke('ollama:rerank', payload),
 });
 
 // Expose ANN Index API to renderer (HNSW nearest-neighbor search)

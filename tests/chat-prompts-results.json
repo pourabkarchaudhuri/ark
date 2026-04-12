@@ -1,0 +1,607 @@
+{
+  "description": "Chat prompt test results",
+  "ranAt": "2026-03-14T15:05:52.124Z",
+  "results": [
+    {
+      "id": 1,
+      "category": "library",
+      "prompt": "Add Cyberpunk 2077 to my library as Want to Play",
+      "content": "## Cyberpunk 2077 — add to library\nI couldn’t find **Cyberpunk 2077** via Steam search right now (the search returned no results).\n\nWant me to try again, or if you have the **Steam App ID** for it, paste it here and I’ll add it as **Want to Play**.",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 3862,
+      "inputTokens": 2008,
+      "outputTokens": 72,
+      "totalTokens": 2080
+    },
+    {
+      "id": 2,
+      "category": "library",
+      "prompt": "What games do I have in my library?",
+      "content": "## Your Ark library\nYour library is currently **empty**.\n\nIf you tell me a game name (e.g., “Hades” or “Elden Ring”), I can search it on Steam and **add it to your library**.",
+      "toolsUsed": [
+        "getLibraryGames"
+      ],
+      "responseTimeMs": 3408,
+      "inputTokens": 1996,
+      "outputTokens": 53,
+      "totalTokens": 2049
+    },
+    {
+      "id": 3,
+      "category": "library",
+      "prompt": "Remove Hollow Knight from my library",
+      "content": "## Remove **Hollow Knight**\nI couldn’t find **Hollow Knight** via Steam search right now (no results returned), so I can’t safely grab the Steam App ID to remove it.\n\n### Quick fix options\n1. **Tell me the Steam App ID** if you have it (e.g. `367520`), and I’ll remove it.\n2. Or I can **list your library entries** and you can point to the one that corresponds to Hollow Knight (your library currently shows “Unknown” titles with IDs like `steam-...`).\n\nWhich do you prefer?",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 3563,
+      "inputTokens": 1999,
+      "outputTokens": 124,
+      "totalTokens": 2123
+    },
+    {
+      "id": 4,
+      "category": "library",
+      "prompt": "Add Elden Ring with status Playing",
+      "content": "I couldn’t find **Elden Ring** on Steam via search right now (no results returned), so I can’t add it yet.\n\nCan you confirm one of these so I can add it with status **Playing**?\n- The **Steam store link**, or\n- The **Steam App ID** (a number), or\n- If you meant a different edition name (e.g., “ELDEN RING Shadow of the Erdtree”)\n\nOnce you send one of those, I’ll add it immediately.",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 3997,
+      "inputTokens": 2000,
+      "outputTokens": 109,
+      "totalTokens": 2109
+    },
+    {
+      "id": 5,
+      "category": "library",
+      "prompt": "Show me everything I've marked as Completed",
+      "content": "## Completed games\nYou currently have **no games marked as _Completed_** in your Ark library.\n\nIf you think something should be completed, tell me the game name (or add it), and I can update it.",
+      "toolsUsed": [
+        "getLibraryGames"
+      ],
+      "responseTimeMs": 2336,
+      "inputTokens": 1994,
+      "outputTokens": 49,
+      "totalTokens": 2043
+    },
+    {
+      "id": 6,
+      "category": "review",
+      "prompt": "Is Baldur's Gate 3 worth buying? Give me a quick review",
+      "content": "## Baldur’s Gate 3 — quick review (worth it?)\n**Yes, for most RPG fans it’s absolutely worth buying**—especially if you like choice-driven stories, tactical combat, and party-based RPGs.\n\n### What’s great\n- **Top-tier roleplaying & reactivity:** Your choices (dialogue, skills, morality, even weird ideas) are heavily supported and often lead to unique outcomes.\n- **Tactical combat that rewards creativity:** Turn-based fights with lots of interaction (positioning, terrain, spells, shove/throw, etc.).\n- **Strong characters & quests:** Companion writing and quest design are a standout, with lots of memorable moments.\n- **Co-op works really well:** Great with friends if you want a shared RPG campaign.\n\n### What might not click\n- **Pacing/length:** It’s big and can feel overwhelming if you want something tight and short.\n- **RNG + turn-based:** Dice rolls and turn-based combat are core—if you dislike either, it may frustrate you.\n- **Inventory/management friction:** Loot, sorting, and party management can feel fiddly at times.\n\n### Critics / consensus\n- **Metacritic score:** **96** (critics) for *Baldur’s Gate 3*.\n\n### My buy take\n- **Buy if:** you want a deep, choice-heavy RPG and don’t mind turn-based combat.\n- **Wait for sale if:** you’re unsure about CRPG pacing/complexity or want something more action-focused.\n\nIf you tell me your taste (e.g., “I liked Dragon Age / Divinity: Original Sin 2 / Witcher 3”), I’ll give a tighter “worth it for you?” verdict.",
+      "toolsUsed": [
+        "searchSteamGames",
+        "getMetacriticReviews",
+        "searchSteamGames",
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 11781,
+      "inputTokens": 2178,
+      "outputTokens": 358,
+      "totalTokens": 2536
+    },
+    {
+      "id": 7,
+      "category": "review",
+      "prompt": "What do critics say about Hades?",
+      "content": "## Critics on *Hades* (Metacritic)\n- **Metascore (critics): 93**\n- **Release date (as listed): 2020-09-17**\n\nIf you want, I can also pull **Steam user reviews** for *Hades* to compare what players think vs critics.",
+      "toolsUsed": [
+        "getMetacriticReviews"
+      ],
+      "responseTimeMs": 4179,
+      "inputTokens": 2028,
+      "outputTokens": 70,
+      "totalTokens": 2098
+    },
+    {
+      "id": 8,
+      "category": "review",
+      "prompt": "Review Stardew Valley for me",
+      "content": "I’m not getting any Steam search results back for **Stardew Valley** right now (so I can’t pull its Steam details/reviews via Ark).\n\nIf you want, I can still:\n- give you a **general review** (gameplay, pros/cons, who it’s for), or\n- pull **Metacritic critic/user scores** via Ark (tell me if you want that).\n\nWhich would you prefer?",
+      "toolsUsed": [
+        "searchSteamGames",
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 4436,
+      "inputTokens": 2039,
+      "outputTokens": 92,
+      "totalTokens": 2131
+    },
+    {
+      "id": 9,
+      "category": "comparison",
+      "prompt": "Compare The Witcher 3 and Skyrim — which one should I play first?",
+      "content": "## The Witcher 3 vs. Skyrim — which to play first?\n\n### Play **The Witcher 3** first if you want…\n- **A strong, directed story** with memorable characters and quests\n- **Cinematic presentation** and lots of dialogue/choice\n- A game that’s great **vanilla** (mods optional, not required)\n- A more **curated** open world (fewer “make your own fun” moments)\n\n### Play **Skyrim** first if you want…\n- **Freedom and roleplay**: make any kind of character and just wander\n- A “sandbox” open world where exploration is the main reward\n- **Modding** as a big part of the experience (it can transform the game)\n- A lighter, more self-driven narrative (you set the pace and priorities)\n\n### Quick decision\n- If you’re choosing one to start **today**, I’d pick **The Witcher 3 first** for the tighter pacing and story momentum.\n- Then play **Skyrim** after, when you’re in the mood for a long, cozy “live in the world” RPG (especially if you want to mod it).\n\n### One caveat\nIf you *know* you’ll mod Skyrim heavily, it can become a time sink before you even play—so Witcher 3 is often the smoother “start and finish” first pick.\n\nWant me to tailor it: are you more into **story/characters** or **builds/exploration**, and are you planning to **mod** Skyrim?",
+      "toolsUsed": [],
+      "responseTimeMs": 5210,
+      "inputTokens": 1972,
+      "outputTokens": 321,
+      "totalTokens": 2293
+    },
+    {
+      "id": 10,
+      "category": "comparison",
+      "prompt": "What's the difference between Dark Souls and Elden Ring?",
+      "content": "## Dark Souls vs. Elden Ring (what’s actually different)\n\n- **Structure**\n  - **Dark Souls:** Mostly **linear, interwoven levels** with a few branching paths; progression is more guided.\n  - **Elden Ring:** A true **open world** with huge optional regions, dungeons, and lots of “go somewhere else and come back later.”\n\n- **Exploration & pacing**\n  - **Dark Souls:** Exploration is about **mastering a tight route** (shortcuts, bonfires, boss gates).\n  - **Elden Ring:** Exploration is about **roaming and discovery** (caves, catacombs, world bosses, secrets everywhere).\n\n- **Mobility**\n  - **Dark Souls:** On-foot only; movement is more constrained.\n  - **Elden Ring:** Adds **jumping as a core mechanic** and a **mount (Torrent)**, which changes traversal and some combat.\n\n- **Combat tools**\n  - **Dark Souls:** More “classic” Souls kit; fewer ways to trivialize fights.\n  - **Elden Ring:** Much broader toolkit—**Ashes of War** (weapon skills you can swap), **Spirit Ash summons**, more status/weapon variety—so you can tailor difficulty more.\n\n- **Build variety**\n  - **Dark Souls:** Strong build variety, but generally **tighter** and more limited in breadth.\n  - **Elden Ring:** **Wider** build options and hybrid builds (plus respec is more accessible), with many more weapons/spells.\n\n- **Boss design**\n  - **Dark Souls:** Often more deliberate, “learn the pattern” fights; fewer hyper-aggressive movesets overall.\n  - **Elden Ring:** Many bosses are **faster/more complex**, with longer strings and mix-ups—balanced by giving you more tools (summons, ashes, etc.).\n\n- **Multiplayer**\n  - Both use **summoning/invasions**, but **Elden Ring** generally has more active co-op and more convenience features (still with FromSoftware quirks).\n\nIf you tell me which **Dark Souls** you mean (1, 2, or 3) and what you care about most (exploration, difficulty, co-op, story), I can give a sharper “which should you play first?” recommendation.",
+      "toolsUsed": [],
+      "responseTimeMs": 12650,
+      "inputTokens": 1967,
+      "outputTokens": 479,
+      "totalTokens": 2446
+    },
+    {
+      "id": 11,
+      "category": "comparison",
+      "prompt": "Which is better for co-op: It Takes Two or Overcooked 2?",
+      "content": "## Co-op pick: **It Takes Two** vs **Overcooked! 2**\n\nI can’t pull Steam data right now (search returned no results), but here’s the practical co-op comparison:\n\n### Choose **It Takes Two** if you want…\n- **A story-driven, “co-op is mandatory”** experience (built specifically for two players).\n- **Variety**: constantly changing mechanics, more like a co-op adventure/platformer.\n- **A longer, one-and-done campaign** you’ll remember.\n\n**Best for:** a consistent partner, couch co-op date-night vibes, players who like progression and setpieces.\n\n### Choose **Overcooked! 2** if you want…\n- **Chaotic party co-op** with lots of laughing/yelling and quick rounds.\n- **Replayability**: chasing higher scores, repeating levels, DLC content.\n- **More flexible group size** (works great with 2, but shines with 3–4).\n\n**Best for:** groups, drop-in sessions, competitive/cooperative score-chasing.\n\n### My recommendation\n- **For 2 players specifically:** **It Takes Two** is usually the better “co-op game” overall.\n- **For parties / replayable chaos:** **Overcooked! 2**.\n\nTell me: are you playing **local couch** or **online**, and is it **just two of you** or a group?",
+      "toolsUsed": [
+        "searchSteamGames",
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 8527,
+      "inputTokens": 2054,
+      "outputTokens": 295,
+      "totalTokens": 2349
+    },
+    {
+      "id": 12,
+      "category": "recommendations",
+      "prompt": "Recommend games similar to what I have in my library",
+      "content": "## Recommendations based on your library\nI can’t generate “similar to your library” recommendations right now because **Ark isn’t seeing any games in your library** (it’s coming back as empty).\n\n### What you can do\n- **Add a few games** you own/like (tell me names), and I’ll generate recommendations immediately.\n- Or tell me **one or two games** you want the recommendations to be similar to (e.g., “like Hades and Hollow Knight”), and I’ll recommend from that.\n\nWhich games should I base the recommendations on?",
+      "toolsUsed": [
+        "getGameRecommendations"
+      ],
+      "responseTimeMs": 4233,
+      "inputTokens": 2005,
+      "outputTokens": 119,
+      "totalTokens": 2124
+    },
+    {
+      "id": 13,
+      "category": "recommendations",
+      "prompt": "Suggest something like Disco Elysium",
+      "content": "## Games like **Disco Elysium** (narrative-heavy, choice-driven, dialogue-first)\n\n- **Planescape: Torment: Enhanced Edition** — the closest “philosophical RPG via writing” vibe; tons of reading and consequential choices.  \n- **Citizen Sleeper** — tabletop-like skill checks, great writing, bleak sci‑fi survival, lots of agency.  \n- **Pentiment** — investigative mystery with deep roleplaying choices; rich historical setting and dialogue.  \n- **Norco** — surreal Southern gothic sci‑fi; strong atmosphere and narrative focus.  \n- **The Forgotten City** — investigation + time loop; choice-and-consequence with lots of dialogue.  \n- **Roadwarden** — text-forward RPG/adventure; slower, reflective, and very choice-driven.  \n- **Suzerain** — political roleplay where decisions spiral; heavy reading and moral tradeoffs.  \n- **Heaven’s Vault** — archeology + language decoding; exploration and story discovery over combat.\n\nIf you tell me what you liked most about Disco Elysium—**detective/investigation**, **politics**, **surreal humor**, or **pure character roleplay**—I’ll narrow this to 3 best picks.",
+      "toolsUsed": [
+        "searchSteamGames",
+        "getMetacriticReviews",
+        "getGameRecommendations"
+      ],
+      "responseTimeMs": 10649,
+      "inputTokens": 2111,
+      "outputTokens": 261,
+      "totalTokens": 2372
+    },
+    {
+      "id": 14,
+      "category": "recommendations",
+      "prompt": "What should I play next based on my library?",
+      "content": "## Recommendations\nI can’t generate recommendations yet because Ark is seeing your library as **empty** for recommendation purposes.\n\nIf you want, I can still recommend games in either of these ways:\n\n1. **Use your actual Ark library list**: tell me 5–10 games you like (or paste a chunk of your library), and I’ll recommend similar picks.\n2. **Sync/fix the library**: if you re-link Steam/Epic (or re-import), I can then run recommendations automatically.\n\nWhich option do you want—and what kind of mood/genre are you aiming for (cozy, story, roguelike, soulslike, etc.)?",
+      "toolsUsed": [
+        "getGameRecommendations"
+      ],
+      "responseTimeMs": 5596,
+      "inputTokens": 2001,
+      "outputTokens": 139,
+      "totalTokens": 2140
+    },
+    {
+      "id": 15,
+      "category": "recommendations",
+      "prompt": "I like roguelikes — any recommendations?",
+      "content": "## Roguelike recommendations\nI can generate personalized picks based on your Ark library, but right now Ark is returning your library as **empty**, so I can’t tailor them yet.\n\nIn the meantime, here are some strong roguelikes/roguelites (mostly on Steam):\n\n- **Hades** — fast, story-rich action roguelite  \n- **Dead Cells** — tight combat + huge build variety  \n- **Slay the Spire** — the deckbuilder standard  \n- **Risk of Rain 2** — co-op friendly 3D run-based chaos  \n- **The Binding of Isaac: Rebirth** — massive item pool, very replayable  \n- **Enter the Gungeon** — bullet-hell twin-stick runs  \n- **Rogue Legacy 2** — action platformer with persistent progression  \n- **FTL: Faster Than Light** — tense ship-management runs  \n- **Spelunky 2** — high-skill platforming roguelike  \n- **Against the Storm** — city-builder roguelite (runs + meta progression)\n\nIf you tell me what you prefer—**action vs turn-based**, **meta-progression yes/no**, and **solo vs co-op**—I’ll narrow this to 5 best fits.",
+      "toolsUsed": [
+        "getGameRecommendations"
+      ],
+      "responseTimeMs": 7713,
+      "inputTokens": 2004,
+      "outputTokens": 262,
+      "totalTokens": 2266
+    },
+    {
+      "id": 16,
+      "category": "game-info",
+      "prompt": "Tell me about Red Dead Redemption 2",
+      "content": "## Red Dead Redemption 2 — overview (Steam)\nI couldn’t find **Red Dead Redemption 2** via Steam search from here (no results returned), so I can’t pull the store details/reviews with Ark tools right now.\n\n### What it is\n- **Genre:** Open-world action-adventure (third-person/first-person)\n- **Setting:** American frontier, 1899\n- **Structure:** Large story campaign + tons of side activities (hunting, bounties, exploration), with a slower, simulation-leaning pace\n- **Strengths:** Cinematic story and characters, world detail/immersion, strong writing and performances\n- **Potential downsides:** Deliberate pacing, long animations/travel, and demanding PC performance; Rockstar launcher/account requirements can be a friction point on PC\n\n### If you want, I can still do any of these:\n- **Steam user reviews** + store info (price, tags, features) if you share the **Steam App ID** or a **Steam store link**\n- **Metacritic critic/user scores** if you want that specifically (tell me: PC / PS4 / Xbox One)",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 7904,
+      "inputTokens": 2003,
+      "outputTokens": 242,
+      "totalTokens": 2245
+    },
+    {
+      "id": 17,
+      "category": "game-info",
+      "prompt": "What's the release date for Half-Life Alyx?",
+      "content": "I couldn’t find **Half-Life: Alyx** via the Steam search tool right now (it returned no results), so I can’t fetch the store release date from Steam directly.\n\nFrom general knowledge: **Half-Life: Alyx released on March 23, 2020 (PC VR).**\n\nIf you want, I can try again if you confirm the exact title spelling you use in Ark (e.g., “Half-Life Alyx” vs “Half-Life: Alyx”).",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 4659,
+      "inputTokens": 2005,
+      "outputTokens": 102,
+      "totalTokens": 2107
+    },
+    {
+      "id": 18,
+      "category": "game-info",
+      "prompt": "Who made Celeste?",
+      "content": "**Celeste** was developed by **Matt Makes Games** (the studio led by **Matt Thorson**; now known as **Extremely OK Games**) and published by **Matt Makes Games Inc.**",
+      "toolsUsed": [],
+      "responseTimeMs": 1814,
+      "inputTokens": 1961,
+      "outputTokens": 47,
+      "totalTokens": 2008
+    },
+    {
+      "id": 19,
+      "category": "game-info",
+      "prompt": "What genres is Slay the Spire?",
+      "content": "I’m not able to find **Slay the Spire** in Steam search via Ark right now (the search returned no results), so I can’t pull the genres from the Steam listing.\n\nFrom general game knowledge, **Slay the Spire** is typically categorized as:\n\n- **Roguelike / Roguelite**\n- **Deckbuilder / Card battler**\n- **Strategy (turn-based)**\n\nIf you want, I can try again if you tell me whether you mean the **base game** or a specific edition/DLC, or if you’re looking for the genres on **Epic** instead of Steam.",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 4496,
+      "inputTokens": 2004,
+      "outputTokens": 131,
+      "totalTokens": 2135
+    },
+    {
+      "id": 20,
+      "category": "news",
+      "prompt": "Any recent news or updates about GTA VI?",
+      "content": "I can’t reliably give **recent** GTA VI news/updates from here because I don’t have live web/news access in this chat, and I don’t want to guess.\n\nIf you paste a link/headline (or tell me what you heard), I’ll **verify/explain it** and summarize what it means. Otherwise, the safest official places to check are:\n\n- **Rockstar Newswire**: https://www.rockstargames.com/newswire  \n- **Rockstar Games** (site): https://www.rockstargames.com/  \n- **Rockstar YouTube**: https://www.youtube.com/@RockstarGames",
+      "toolsUsed": [],
+      "responseTimeMs": 3779,
+      "inputTokens": 1965,
+      "outputTokens": 136,
+      "totalTokens": 2101
+    },
+    {
+      "id": 21,
+      "category": "news",
+      "prompt": "What's the latest on Silksong?",
+      "content": "I don’t have live news access in Ark right now, so I can’t reliably tell you the *latest* Silksong update without a web/news source.\n\n## What I can say (as of my knowledge cutoff: 2025-09)\n- **Hollow Knight: Silksong** still **hadn’t released** by then.\n- Team Cherry had confirmed it was **in development**, but **no firm release date** was locked in at that time.\n\n## If you want, I can still help in Ark\n- Pull up **Hollow Knight** details/reviews on Steam (to scratch the itch).\n- Recommend **Silksong-like** games (Metroidvania / precision platforming).\n\nIf you want the actual latest news, paste a link or a quote/tweet/article you saw and I’ll summarize it and tell you what it implies.",
+      "toolsUsed": [],
+      "responseTimeMs": 5035,
+      "inputTokens": 1964,
+      "outputTokens": 180,
+      "totalTokens": 2144
+    },
+    {
+      "id": 22,
+      "category": "news",
+      "prompt": "Has Elden Ring had any DLC or patches lately?",
+      "content": "I can’t verify “lately” updates from here right now (no live patch/news feed), and my Steam search tool didn’t return results for **Elden Ring**, so I can’t pull its current store patch notes automatically.\n\n## DLC (what I can confirm)\n- **Major expansion:** **Shadow of the Erdtree** (paid DLC) exists for *Elden Ring*.\n\n## How to check the most recent patches (fastest sources)\n- **Steam news/patch notes:** https://store.steampowered.com/news/?appids=1245620  \n- **Bandai Namco support/news (official):** https://en.bandainamcoent.eu/elden-ring/elden-ring  \n\nIf you tell me what platform you’re on (**PC/Steam, PS5, Xbox**) and what you mean by “lately” (e.g., **last week / last month**), I can summarize what typically changed in that window and what to look for in the notes.",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 6635,
+      "inputTokens": 2004,
+      "outputTokens": 208,
+      "totalTokens": 2212
+    },
+    {
+      "id": 23,
+      "category": "lore",
+      "prompt": "Explain the lore of Dark Souls in simple terms",
+      "content": "## Dark Souls lore (simple version)\n\n- **The world used to be “normal” in a fantasy way**: ancient stone dragons ruled, and everything felt static—no real life/death cycle, no big change.\n\n- **Then the First Flame appeared**, and with it came **big opposites**: light and dark, life and death, heat and cold. This starts the **Age of Fire**.\n\n- **Powerful beings (the “gods”) found great souls** near the Flame and used them to overthrow the dragons. They built a shining civilization (Anor Londo) and basically became the rulers of the world.\n\n- **But the Flame is fading.** When it fades, the world shifts toward an **Age of Dark**—which the gods fear because it means their power ends.\n\n- To stop that, they push a solution: **keep the fire going** by sacrificing a powerful soul to “link the fire” and restart the Age of Fire.\n\n- **Humans are tied to the Dark.** Humanity comes from the “Dark Soul,” and the natural direction of the world is arguably toward Dark. The gods try to control this by branding humans with the **Darksign**, which creates the **Undead curse**: people resurrect after death, slowly lose their minds, and “go hollow.”\n\n- **You play an Undead** who’s part of a prophecy/plan. You gather powerful souls, ring bells, and eventually reach the Kiln of the First Flame.\n\n- **The core choice at the end**:\n  - **Link the Fire**: keep the current order going (but it’s a temporary patch; it will fade again).\n  - **Walk away / usher in Dark**: let the Age of Fire end and allow a new age to begin.\n\n## The main theme\nIt’s a story about **clinging to a dying age vs accepting change**, and how trying to preserve “the good old days” causes a lot of suffering—especially for humans/Undead.\n\nIf you tell me which game you mean (**Dark Souls 1, 2, or 3**), I can summarize the key characters and what’s “actually happening” in that specific one.",
+      "toolsUsed": [],
+      "responseTimeMs": 8611,
+      "inputTokens": 1965,
+      "outputTokens": 456,
+      "totalTokens": 2421
+    },
+    {
+      "id": 24,
+      "category": "lore",
+      "prompt": "What's the story behind Bloodborne?",
+      "content": "## Bloodborne — story overview (spoiler-light)\n\n**Bloodborne** is set in the decaying Gothic city of **Yharnam**, famous for a “miracle” medical treatment: **healing blood**. You arrive as an outsider (“the Hunter”) seeking this cure, but the city is in the middle of a catastrophic **plague-like outbreak** that turns people into beasts.\n\n### The core premise\n- Yharnam’s salvation—**blood ministration**—is also its downfall.\n- The **Hunt** is a recurring night where hunters are tasked with culling beasts, but it’s unclear whether the Hunt is a solution, a ritual, or part of something much worse.\n- As you push deeper, the story shifts from **werewolf-style horror** into **cosmic/Lovecraftian horror**, where the true forces behind the city’s fate are not human.\n\n### Key factions and ideas (without deep spoilers)\n- **The Healing Church**: The religious-medical institution that spread blood healing and built Yharnam’s power. Their experiments and secrets sit at the center of the crisis.\n- **Hunters**: Some are dutiful protectors, others are trapped in cycles of violence; many are tied to the Church in complicated ways.\n- **Scholars/Byrgenwerth**: An academic root to the Church’s beliefs—obsessed with “truth,” evolution, and contact with higher beings.\n- **The Great Ones**: Mysterious cosmic entities whose influence warps reality, dreams, and the boundaries of life and death.\n\n### What the story is “about” thematically\n- **Hubris and forbidden knowledge**: People trying to transcend humanity through blood, insight, and communion with higher powers.\n- **Faith vs. science**: The Church blends both, and the consequences are horrific.\n- **Cycles and dreams**: Reality is layered; understanding what’s “real” becomes part of the mystery.\n\nIf you tell me how spoiler-y you want it (none / some / full), I can summarize the **full plot**, explain the **ending(s)**, or break down the **lore** (Healing Church, Byrgenwerth, Great Ones) in a clearer timeline.",
+      "toolsUsed": [],
+      "responseTimeMs": 8792,
+      "inputTokens": 1963,
+      "outputTokens": 465,
+      "totalTokens": 2428
+    },
+    {
+      "id": 25,
+      "category": "lore",
+      "prompt": "Summarize the Mass Effect trilogy story without spoilers",
+      "content": "I can’t summarize the **Mass Effect trilogy** story in a meaningful way *without* spoilers, because the core premise, the central threat, and the big turning points are themselves spoilers.\n\nIf you want a truly spoiler-free pitch, here’s the safest overview:\n\n## Mass Effect Trilogy (spoiler-free)\n- You play **Commander Shepard**, a human operative working with an interspecies organization to handle escalating threats in a politically tense galaxy.\n- The trilogy is a **sci‑fi action RPG** focused on **choice and consequence**: decisions you make about alliances, diplomacy, and sacrifice can carry across all three games.\n- The story blends:\n  - **Military sci‑fi** (missions, investigations, command decisions)\n  - **Space opera politics** (species rivalries, fragile treaties, bureaucracy)\n  - **Character-driven arcs** (a squad of companions with personal stories that evolve over time)\n- Across the three games, the scope expands from **local crises** to **galaxy-spanning stakes**, with your relationships and past choices shaping how prepared (and unified) the galaxy is when things get dire.\n\nIf you tell me what you consider a spoiler (e.g., “Is naming the main antagonist a spoiler?”), I can give a tighter summary that still stays within your comfort zone.",
+      "toolsUsed": [],
+      "responseTimeMs": 5758,
+      "inputTokens": 1966,
+      "outputTokens": 268,
+      "totalTokens": 2234
+    },
+    {
+      "id": 26,
+      "category": "lore",
+      "prompt": "What's the connection between Portal and Half-Life?",
+      "content": "## Connection between **Portal** and **Half‑Life**\n\nThey’re set in the **same universe** (Valve’s shared “Half‑Life/Portal” continuity), but they focus on different corners of it.\n\n- **Same world, different places**\n  - **Half‑Life** centers on **Black Mesa** and the alien invasion/cascade aftermath.\n  - **Portal** takes place at **Aperture Science**, a rival research company.\n\n- **Aperture vs. Black Mesa rivalry**\n  - Portal’s backstory (especially in **Portal 2**) heavily implies Aperture and Black Mesa competed for **government funding/contracts**, with very different cultures and tech priorities.\n\n- **Timeline overlap**\n  - Portal’s events happen **after** Aperture has largely collapsed/been abandoned.\n  - Portal 2 is set **much later**, after long decay—while Half‑Life’s world situation remains unresolved in the games.\n\n- **Shared tech themes (and hints)**\n  - Both series revolve around dangerous experimental science and the consequences of pushing it too far.\n  - There are **references and easter eggs** that nod to the other series (documents, names, and environmental storytelling), but the main plots don’t directly intersect on-screen.\n\nIf you tell me which games you’ve played (**HL1/HL2/Episodes, Portal 1/2**), I can map a clearer “how it fits” timeline without spoilers (or with spoilers if you want).",
+      "toolsUsed": [],
+      "responseTimeMs": 6499,
+      "inputTokens": 1965,
+      "outputTokens": 304,
+      "totalTokens": 2269
+    },
+    {
+      "id": 27,
+      "category": "gameplay-tips",
+      "prompt": "Tips for beginners in Dark Souls 3",
+      "content": "## Dark Souls III — beginner tips\n\n### Core habits that make the game click\n- **Stamina is life.** Don’t empty the bar—leave enough to **roll once or twice** after attacking.\n- **Roll timing > roll distance.** You get invincibility frames; roll *through* swings, not away.\n- **Lock-on is optional.** Great for 1v1; for big enemies/crowds, try **unlocking** to control your camera and rolls.\n\n### Leveling (safe early priorities)\n- **Vigor** first (more HP = more learning time).  \n- **Endurance** next (stamina for attacks/rolls).  \n- Pick **one damage stat** to focus:\n  - **Strength** (big weapons, great shields)\n  - **Dex** (faster weapons)\n  - **Int/Faith** (spells)\n- Don’t spread points across everything early.\n\n### Gear and upgrades\n- **Upgrade your weapon** as soon as you can; upgrades matter more than a few levels.\n- Infusions: if you’re unsure, **Raw** can be strong early (good base damage), then swap later when your stats are higher.\n- **Armor is secondary**—wear what keeps you under **70% equip load** (so you don’t “fat roll”).\n\n### Combat fundamentals\n- **Circle and punish**, don’t trade hits. Most enemies have a “combo → pause” window.\n- **Backstabs** are powerful: get behind humanoids, light attack.\n- **Shields:** 100% physical block shields help early, but don’t turtle forever—stamina chip will get you killed.\n- **Learn parries** on predictable humanoids (optional). If it’s frustrating, skip it—rolling is enough.\n\n### Exploration and resources\n- **Talk to NPCs repeatedly** until dialogue repeats; many quests advance that way.\n- **Spend souls** before risky areas; if you’re carrying a lot, level or buy upgrades.\n- If you die, your souls are recoverable—**don’t panic**, just take the safest route back.\n\n### Boss approach\n- Do a few attempts where you **barely attack**—just watch patterns and practice dodges.\n- When stuck: try **different spacing** (closer can be safer), or switch weapon speed (fast weapons help learning).\n- **Embers** boost HP; use them when you’re ready to push for a win, not while learning phase 1.\n\n### Common early mistakes\n- Attacking **one extra time** and getting punished.\n- Fighting groups head-on—use **pulling** (throwing knives/bow) or doorways/chokepoints.\n- Ignoring equip load and ending up with slow rolls.\n\nIf you tell me your **starting class** and what kind of weapon you like (sword/shield, greatsword, spear, etc.), I can suggest a simple early build and upgrade path.",
+      "toolsUsed": [],
+      "responseTimeMs": 12220,
+      "inputTokens": 1964,
+      "outputTokens": 617,
+      "totalTokens": 2581
+    },
+    {
+      "id": 28,
+      "category": "gameplay-tips",
+      "prompt": "How do I get good at Sekiro?",
+      "content": "## Getting good at *Sekiro*: the core skills\n\n### 1) Treat it like a rhythm game: **deflect > dodge**\n- Your main win condition is **Posture break**, not HP depletion.\n- Stand your ground and **tap block right as the hit lands** (deflect).  \n- **Holding block** is fine between strings to reduce posture buildup, then deflect the next hit.\n\n### 2) Learn the 3 perilous counters (this is huge)\nWhen you see the red **危**:\n- **Thrust** → **Mikiri Counter** (step into it). Practice until it’s automatic.\n- **Sweep** → **Jump**, then **jump again** on their head for posture damage.\n- **Grab** → **Run/step away** (no counter; spacing wins).\n\n### 3) Be aggressive—don’t “take turns” for long\n- Most enemies crumble when you keep them busy: **1–2 hits → be ready to deflect**.\n- If you back off too much, their posture recovers and fights get longer/harder.\n\n### 4) Fix posture management\n- Your posture recovers faster when your **HP is high**. Healing isn’t just “not dying”—it’s posture control.\n- If your posture is near breaking, **hold block** briefly and create a small reset window.\n\n### 5) Drill the basics in a safe place\n- Use **Hanbei the Undying** at the Dilapidated Temple to grind:\n  - Deflect timing\n  - Mikiri\n  - Sweep jump-kick\n- Aim to beat his drills without panic-blocking.\n\n### 6) Use prosthetics as “problem solvers,” not DPS\nA few high-impact ones:\n- **Shuriken**: stops jumps / interrupts some moves / punishes distance.\n- **Firecrackers**: great for beasts and many humanoids to create free hits/heals.\n- **Umbrella** (later): turns scary strings into safe deflects.\n\n### 7) Boss learning loop (fast improvement)\nFor a boss you’re stuck on:\n1. Do 2–3 attempts where you **only defend** (deflect + perilous counters).\n2. Identify **one** punish window you can always take.\n3. Add damage in small, consistent bites (don’t get greedy).\n\n---\n\n### Quick questions so I can tailor advice\n1) Where are you stuck (boss/enemy name)?  \n2) Are you struggling more with **Mikiri**, **sweeps**, or **deflect timing**?",
+      "toolsUsed": [],
+      "responseTimeMs": 10420,
+      "inputTokens": 1965,
+      "outputTokens": 540,
+      "totalTokens": 2505
+    },
+    {
+      "id": 29,
+      "category": "gameplay-tips",
+      "prompt": "Best strategies for surviving in Subnautica",
+      "content": "## Subnautica: survival strategies that reliably carry a run\n\n### Early priorities (first 1–2 hours)\n- **Scan everything**: the Scanner is progression. Focus on fragments for **Seaglide**, **Mobile Vehicle Bay**, **Radiation Suit**, **Habitat Builder**.\n- **Stabilize food + water** fast:\n  - Catch **Bladderfish → filtered water** (or cured fish for travel).\n  - If you find **Salt**, make **bleach** for better water.\n- **O2 is your real “health”**: craft extra **O₂ tanks** early; upgrade them ASAP.\n\n### Safe exploration habits\n- **Always carry**: 1–2 medkits, a couple waters, a knife, a beacon, and at least one battery.\n- **Use beacons aggressively**: mark wrecks, caves, thermal vents, and anything you want to revisit.\n- **Go deeper in deliberate steps**: upgrade O2/vehicle depth first, then push depth. Don’t “wing it” on a deep dive.\n\n### Base building that helps (not just aesthetics)\n- Build a small base early with:\n  - **Solar panels** (easy power)\n  - **Fabricator + lockers**\n  - **Radio** (story progression)\n- Place it near key resources (good early spots are near **Kelp Forest + Grassy Plateaus** edges).\n- Add a **Scanner Room** when you can; it’s one of the biggest power spikes for finding rare materials.\n\n### Resource + crafting efficiency\n- **Inventory space is progression**: craft the **High Capacity Tank** and **Ultra-High Capacity** when available; add **fins** upgrades.\n- **Prioritize these materials** because they unlock everything:\n  - **Copper** (batteries, wiring kits)\n  - **Silver** (wiring kit, advanced tools)\n  - **Gold** (electronics)\n  - **Lead** (radiation, base parts)\n- **Carry a spare power cell/battery** once you start using vehicles/tools heavily.\n\n### Dealing with threats (without fighting)\n- Most danger is avoided, not “beaten”:\n  - **Keep your lights off** when you’re trying to slip past certain predators.\n  - **Move along terrain**, not open water, when you’re in hostile biomes.\n  - If something is circling, **change direction and break line of sight** behind rocks/wrecks.\n- Use the environment: narrow caves and wreck interiors can be safer than open areas—just watch oxygen.\n\n### Vehicles: what to aim for and how to use them\n- **Seaglide**: your first major mobility upgrade—get it ASAP.\n- **Seamoth** (when you get it): treat it as an oxygen extension; park it above where you’re diving.\n- Don’t push a vehicle past its depth rating—**crush depth** deaths are avoidable and expensive.\n\n### “Don’t get stuck” progression tips (spoiler-light)\n- **Follow the radio signals** and fully explore those areas.\n- When you feel gated, it’s usually one of:\n  - missing a **tool** (laser cutter, propulsion cannon, etc.)\n  - missing a **depth upgrade**\n  - not exploring enough **wrecks** for fragments\n\nIf you tell me where you are (early game / Seamoth acquired / “I keep dying in X biome”), I can give a tighter plan for that stage without spoilers.",
+      "toolsUsed": [],
+      "responseTimeMs": 15803,
+      "inputTokens": 1964,
+      "outputTokens": 724,
+      "totalTokens": 2688
+    },
+    {
+      "id": 30,
+      "category": "gameplay-tips",
+      "prompt": "What are the best builds in Elden Ring for a first playthrough?",
+      "content": "## Best Elden Ring builds for a first playthrough (easy, flexible, strong)\n\n### 1) **Vigor-first “Quality” melee (STR/DEX)**\n**Why it’s great:** simple, tanky, works with tons of weapons, no complex setup.  \n**Stats to aim for (early → midgame):**\n- **Vigor:** push to **30–40** ASAP (survivability is king)\n- **Endurance:** **15–25** (stamina + equip load)\n- **Strength/Dex:** level whichever your weapon scales with; later you can go “quality” (both)\n**Playstyle:** 1H + shield or 2H; learn enemy moves, punish safely.  \n**Good weapon types:** straight swords, greatswords, halberds.  \n**Beginner tip:** don’t neglect **Vigor**—it’s the #1 reason new players struggle.\n\n---\n\n### 2) **Dex + Bleed (fast weapons)**\n**Why it’s great:** very strong damage vs many bosses, forgiving because fights end faster.  \n**Stats to aim for:**\n- **Vigor:** 30–40\n- **Dex:** your main damage stat\n- **Arcane:** optional later if you lean hard into bleed scaling\n**Playstyle:** quick hits, build up bleed, dodge-focused.  \n**Good weapon types:** katanas, curved swords, twinblades.  \n**Notes:** some enemies resist bleed, so keep a non-bleed option available.\n\n---\n\n### 3) **Strength “bonk” (big weapon, high poise damage)**\n**Why it’s great:** staggers enemies, fewer hits needed, excellent for learning spacing.  \n**Stats to aim for:**\n- **Vigor:** 35–45\n- **Strength:** main\n- **Endurance:** higher than other builds (big weapons/heavier armor)\n**Playstyle:** slower swings, but huge stagger; trade carefully and punish openings.  \n**Good weapon types:** colossal swords/weapons, greataxes, great hammers.\n\n---\n\n### 4) **Intelligence sorcery (ranged safety)**\n**Why it’s great:** safest “learn the game” option; you can control fights at range.  \n**Stats to aim for:**\n- **Vigor:** still 25–40 (don’t go glass cannon)\n- **Intelligence:** main\n- **Mind:** for FP (comfort stat)\n**Playstyle:** kite, cast, use a simple melee backup for close quarters.  \n**Notes:** some fights force closer play—having a basic melee weapon helps.\n\n---\n\n## Universal first-run rules (make any build work)\n- **Vigor early** beats damage stats early.\n- Upgrade your **weapon** (or staff/seal) whenever you can—upgrades usually outscale stats.\n- Keep **equip load** at **Medium** (avoid Heavy roll).\n- Don’t over-invest in too many damage stats at once.\n\n## Quick pick\n- Want **straightforward melee**: **Vigor-first Quality**  \n- Want **fast + strong**: **Dex/Bleed**  \n- Want **stagger and big hits**: **Strength**  \n- Want **safer ranged**: **Int Sorcery**\n\nTell me what you prefer (fast vs heavy, melee vs magic), and what starting class you picked (or plan to), and I’ll suggest a clean stat path + weapon direction without spoilers.",
+      "toolsUsed": [],
+      "responseTimeMs": 12850,
+      "inputTokens": 1971,
+      "outputTokens": 724,
+      "totalTokens": 2695
+    },
+    {
+      "id": 31,
+      "category": "walkthrough",
+      "prompt": "Where do I find the first boss in Hollow Knight?",
+      "content": "### First boss location (Hollow Knight)\n\nMost players consider the **first boss** to be the **False Knight**.\n\n- **Area:** **Forgotten Crossroads**\n- **Where exactly:** Head to the **big room with the suspended platform and the armored “maggot” enemies**. You’ll see a **large closed gate** on the left side of that room—go through and you’ll enter the boss arena.\n- **Requirement:** You need the **Vengefly King** encounter first? (No—False Knight is accessible early without special abilities; you just need to reach that room.)\n\nIf you tell me where you are right now (e.g., just got the map, at Dirtmouth, found the Stag Station), I can give step-by-step directions from your current spot.",
+      "toolsUsed": [],
+      "responseTimeMs": 4192,
+      "inputTokens": 1967,
+      "outputTokens": 168,
+      "totalTokens": 2135
+    },
+    {
+      "id": 32,
+      "category": "walkthrough",
+      "prompt": "How do I beat the Orphan of Kos in Bloodborne?",
+      "content": "## Orphan of Kos (Bloodborne) — reliable way to win\n\n### Prep (makes the fight much easier)\n- **Fight on the waterline** (phase 2 especially). The open space makes his leaps/charges easier to read and avoids getting clipped by terrain.\n- **Bolt Paper** is usually strong here; keep **Beast Blood Pellets** only if you’re already consistent (they punish mistakes).\n- Bring **20 Vials**, **20 Bullets**, and consider **Clockwise Metamorphosis** (HP) + **Anti-Clockwise** (stamina) runes.\n- If you use a gun a lot: **Blunderbuss** is safer for close-range interrupts; **Pistol** is better for clean parry timing.\n\n### Core plan\n- **Stay close-to-mid range**, slightly off his lead side. Backing straight up invites his long, tracking strings.\n- **Dodge into/through him**, not away. Most of his swings carry forward; dodging back often still gets tagged.\n- **Punish the recovery**, not the start-up. One or two hits, then reset—greed is the main killer.\n\n---\n\n## Phase 1 (more parryable)\n**Best approach:** fish for safe parries + quick punishes.\n\n**Parry windows to learn**\n- The **overhead slam** and many of his **single, committed swings** are parryable.\n- Don’t try to parry the fastest flails in a full combo until you’ve learned the rhythm—parry the “big” hits.\n\n**Safe punish rules**\n- After his **jumping slam**: dodge in, hit **1–2 times**, back to neutral.\n- After his **projectile toss** (the placenta throw): sidestep, close distance, quick punish.\n- If he starts a **multi-hit chain**, dodge through the last hit and punish once.\n\nIf you’re not comfortable parrying: two-hand/transform attacks with good reach (spear/cleaver forms, etc.) and stick to **one-hit punishes**.\n\n---\n\n## Phase 2 (chaotic, but consistent if you position right)\nHe becomes much more mobile and aggressive. The goal is to **keep him in front of you** and punish landings.\n\n**Positioning**\n- Pull him out onto the **flat water area**. Camera and spacing are far easier.\n- Stay close enough that his leap attacks land near you (so you can punish), but not so close you eat point-blank flails.\n\n**What to punish**\n- **Leaps / diving slams**: dodge *toward* the landing, punish **1 hit** (maybe 2 with fast weapons).\n- **Long charge/slide**: dodge diagonally through, punish once.\n- **Aerial hang-time attacks**: don’t swing early—wait for the landing.\n\n**Lightning/“storm” attack**\n- When he summons the big lightning waves, the simplest answer is:\n  - **Sprint away along the shoreline** to create space, or\n  - If you’re already far out on the waterline, **keep moving laterally** and don’t lock yourself into long animations.\n(Exact safe spots depend on where you are; the key is: **don’t commit to attacks** when it starts.)\n\n---\n\n## Common mistakes to avoid\n- **Healing at long range**: he has fast gap-closers. Heal after a dodge through an attack or after a slam.\n- **Overcommitting**: treat every punish as “**one-and-done**” unless you clearly see a long recovery.\n- **Fighting on the slope/near the corpse**: it makes his movement and your dodges worse.\n\n---\n\n## Quick questions so I can tailor it\n1. What’s your **weapon** (and upgrade level)?\n2. Are you trying to **parry**, or playing mostly dodge-only?\n3. Roughly what **level/VIT** are you at?",
+      "toolsUsed": [],
+      "responseTimeMs": 16148,
+      "inputTokens": 1969,
+      "outputTokens": 827,
+      "totalTokens": 2796
+    },
+    {
+      "id": 33,
+      "category": "walkthrough",
+      "prompt": "Step-by-step guide to get the true ending in NieR Automata",
+      "content": "## NieR:Automata — step-by-step to the **true ending (Ending E)**\n\n### 1) Finish Route A (Ending A)\n1. Start a new game and play through as **2B**.\n2. Beat the final boss of this route.\n3. Watch credits → you’ll get **Ending A**.\n4. **Save** when prompted.\n\n### 2) Load the cleared save to start Route B (Ending B)\n1. From the title screen, **load** the save that has Ending A.\n2. You’ll begin Route B playing mainly as **9S** (many events repeat with new context/hacking).\n3. Finish the route → get **Ending B**.\n4. **Save** again.\n\n### 3) Load again to start Route C/D (this is where endings branch)\n1. Load the same cleared save (now with A + B).\n2. You’ll enter the later-story continuation (commonly called Route C).\n3. Keep playing until you reach the **final major choice** near the end.\n\n### 4) Get Endings C and D (both are required for Ending E)\nAt the last choice, you’ll be asked to choose between two characters (no spoilers on who, but it’s obvious in-game).\n\n- Choose **Option 1** → finish the game → you’ll get **Ending C**.  \n  Then:\n  1. Reload your cleared save.\n  2. Use **Chapter Select** (it unlocks after you clear Route C once) to jump back to the final choice.\n- Choose the **other option** → finish the game → you’ll get **Ending D**.\n\nYou need **both C and D** recorded on your save.\n\n### 5) Trigger the true ending (Ending E)\n1. After you have **Endings C and D**, load your cleared save again.\n2. You’ll be prompted to proceed into the final sequence that leads to **Ending E**.\n3. During the end credits sequence, **keep trying** when asked / when you fail—don’t quit out.\n\n### 6) Important note about the final prompt\nAt the very end, the game may ask you a big question related to your save data.  \n- **Answering “yes”** has a permanent effect on that save (you’ll know what it is when it appears).  \n- If you want to keep everything, consider backing up your save first (PC/console cloud save).\n\n---\n\nIf you tell me what ending letters you currently have (A/B/C/D?), I can give you the exact shortest path from where you are without spoiling story beats.",
+      "toolsUsed": [],
+      "responseTimeMs": 11638,
+      "inputTokens": 1970,
+      "outputTokens": 549,
+      "totalTokens": 2519
+    },
+    {
+      "id": 34,
+      "category": "walkthrough",
+      "prompt": "How do I unlock all characters in Slay the Spire?",
+      "content": "## Slay the Spire: unlocking all characters\n\nIn the base game there are **4 playable characters**. You start with **The Ironclad**, and unlock the rest by progressing.\n\n- **Unlock The Silent**: **Win a run** with **The Ironclad**.\n- **Unlock The Defect**: **Win a run** with **The Silent**.\n- **Unlock The Watcher**: **Win a run** with **The Defect**.\n\n### Notes\n- “Win a run” means **defeat the Act 3 boss** and finish the run.\n- You **don’t** need Ascension levels to unlock characters; a normal win is enough.\n- If you’re trying to unlock **Act 4** content (not a character), that’s separate: you must win once with **Ironclad, Silent, and Defect** to unlock the keys/Act 4.\n\nIf you tell me which characters you have unlocked so far, I can give the fastest path for your next unlock.",
+      "toolsUsed": [],
+      "responseTimeMs": 4634,
+      "inputTokens": 1969,
+      "outputTokens": 216,
+      "totalTokens": 2185
+    },
+    {
+      "id": 35,
+      "category": "search",
+      "prompt": "Find games called something like \"Dead Cells\"",
+      "content": "## Steam search: “Dead Cells”\nI’m not getting any results back from Steam search right now (looks like the search service returned an empty list).\n\nIf you want, I can still help in a couple ways—tell me which you prefer:\n\n1. **Try again** with a slightly different query (e.g. `\"DeadCells\"`, `\"Dead Cell\"`, or the developer `\"Motion Twin\"`).\n2. Tell me whether you meant:\n   - games **similar to Dead Cells** (roguelite action platformers), or\n   - games with a **similar name** (titles containing “Dead”, “Cells”, etc.).",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 4459,
+      "inputTokens": 2001,
+      "outputTokens": 134,
+      "totalTokens": 2135
+    },
+    {
+      "id": 36,
+      "category": "search",
+      "prompt": "Search for Metroidvania games on Steam",
+      "content": "## Metroidvania games on Steam\nSteam search doesn’t support a reliable “genre keyword” lookup via my in-app search (it returns results for *game names*, and **“Metroidvania”** didn’t match any titles).\n\nIf you tell me a couple preferences, I can suggest a tight list and pull full Steam details for each:\n- **2D vs 3D**\n- **Combat-heavy vs exploration-heavy**\n- **Hard** (Soulslike) or **chill**\n- Any favorites (e.g., *Hollow Knight*, *Ori*, *Castlevania*, *Metroid*)\n\nMeanwhile, here are popular Metroidvanias you can search by name and I can add to your Ark library:\n- **Hollow Knight**\n- **Ori and the Blind Forest / Ori and the Will of the Wisps**\n- **Blasphemous / Blasphemous 2**\n- **Dead Cells** (roguelite MV-adjacent)\n- **Axiom Verge**\n- **Bloodstained: Ritual of the Night**\n- **Ender Lilies: Quietus of the Knights**\n- **SteamWorld Dig 2**\n- **Guacamelee! 1 & 2**\n- **The Messenger** (MV-adjacent)\n\nSay “show me details for *Hollow Knight* and *Ender Lilies*” (or any names) and I’ll pull their Steam pages, pricing, and reviews.",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 7836,
+      "inputTokens": 2001,
+      "outputTokens": 302,
+      "totalTokens": 2303
+    },
+    {
+      "id": 37,
+      "category": "library",
+      "prompt": "Put this game on hold",
+      "content": "Which game do you mean?\n\nSend either:\n- the **game name**, or\n- the **Ark entry ID** you showed earlier (e.g. `steam-2698940` or `steam-1601570`).",
+      "toolsUsed": [],
+      "responseTimeMs": 2413,
+      "inputTokens": 1961,
+      "outputTokens": 50,
+      "totalTokens": 2011
+    },
+    {
+      "id": 38,
+      "category": "library",
+      "prompt": "Mark Celeste as Completed",
+      "content": "## I couldn’t find **Celeste** on Steam via search\nTo mark it **Completed**, I need its **Steam App ID** from your Ark library.\n\nPlease do one of these:\n1. Tell me the entry exactly as it appears in your library (e.g. `steam-XXXXX`), or  \n2. Paste the Celeste line from your library list.\n\nOnce you send the `steam-...` ID, I’ll mark it **Completed**.",
+      "toolsUsed": [
+        "searchSteamGames"
+      ],
+      "responseTimeMs": 3408,
+      "inputTokens": 1997,
+      "outputTokens": 99,
+      "totalTokens": 2096
+    },
+    {
+      "id": 39,
+      "category": "recommendations",
+      "prompt": "Recommend a short game I can finish in a weekend",
+      "content": "## Weekend-length game recommendation\nI can recommend something short, but right now Ark can’t generate **library-based** picks because your library is coming through as **empty/unlinked** on my side.\n\n### Tell me one thing and I’ll tailor it:\n1) Preferred vibe: **story**, **puzzle**, **action**, **horror**, or **cozy**?  \n2) Platform/store: **Steam** or **Epic**?\n\n### If you just want a solid short pick (no library needed)\n- **A Short Hike** (2–4 hours, cozy exploration)\n- **Inside** (3–5 hours, atmospheric puzzle-platformer)\n- **Firewatch** (4–6 hours, narrative adventure)\n- **What Remains of Edith Finch** (2–3 hours, story anthology)\n\nSay which vibe you want and I’ll give 3–5 best matches (and I can pull Steam details/reviews if you want).",
+      "toolsUsed": [
+        "getGameRecommendations"
+      ],
+      "responseTimeMs": 4623,
+      "inputTokens": 2005,
+      "outputTokens": 199,
+      "totalTokens": 2204
+    },
+    {
+      "id": 40,
+      "category": "recommendations",
+      "prompt": "What are the best indie games from the last few years?",
+      "content": "## Best indie games from the last few years (roughly 2020–2025)\n\n### Widely acclaimed “must-plays”\n- **Hades** (Supergiant) — fast roguelite action + story\n- **Disco Elysium – The Final Cut** (ZA/UM) — best-in-class narrative RPG\n- **Outer Wilds** (Mobius) — exploration/puzzle masterpiece (a bit older, but essential)\n- **Inscryption** (Daniel Mullins) — card game that keeps evolving\n- **Dave the Diver** (Mintrocket) — cozy loop with surprising depth\n- **Dredge** (Black Salt Games) — fishing + cosmic horror vibes\n- **Slay the Spire** (Mega Crit) — genre-defining deckbuilder (older, still top-tier)\n\n### Action / challenge\n- **Pizza Tower** — frantic, inventive 2D platforming\n- **Ultrakill** — ultra-fast FPS with style scoring\n- **Dead Cells** (still updated) — slick action roguelite\n- **Sifu** — martial-arts mastery run-based structure\n- **Risk of Rain 2** — co-op roguelike shooter\n\n### Cozy / life / craft\n- **Spiritfarer** — management + heartfelt story\n- **A Short Hike** — small, perfect exploration game\n- **Unpacking** — cozy environmental storytelling\n- **Cult of the Lamb** — roguelite + base-building\n\n### Strategy / sim / management\n- **Against the Storm** — roguelite city-builder\n- **Factorio** (older, but evergreen) — automation perfection\n- **RimWorld** (older, but endlessly replayable) — colony storytelling\n\n### Narrative / puzzle / “thinky”\n- **Return of the Obra Dinn** (older, but essential) — deduction like nothing else\n- **The Case of the Golden Idol** — pure detective logic\n- **Chants of Sennaar** — language-decoding puzzles\n- **Pentiment** — historical mystery with strong writing\n\n### Horror / spooky\n- **Signalis** — classic survival horror modernized\n- **Amnesia: The Bunker** — systemic horror sandbox\n\nIf you tell me what you’re in the mood for (genre + “short vs long” + solo/co-op), I can narrow this to ~5 picks—and I can also check Steam details/reviews for any titles you’re considering.",
+      "toolsUsed": [],
+      "responseTimeMs": 8016,
+      "inputTokens": 1968,
+      "outputTokens": 516,
+      "totalTokens": 2484
+    },
+    {
+      "id": 41,
+      "category": "comparison",
+      "prompt": "Should I get Factorio or Satisfactory?",
+      "content": "## Factorio vs. Satisfactory (which to get)\n\n### Pick **Factorio** if you want…\n- **Deep, tight automation** and logistics (belts, trains, circuits) with tons of optimization.\n- A game that’s **feature-complete, extremely polished**, and scales to huge factories.\n- More of a **top-down “engineering puzzle”** vibe; combat exists but isn’t the focus for many players.\n\n### Pick **Satisfactory** if you want…\n- **First-person building** and the “walk through your factory” feeling.\n- More emphasis on **exploration and scenic base-building** (vertical builds, big vistas).\n- A more relaxed vibe moment-to-moment, especially if you enjoy **3D layout** challenges.\n\n### Practical differences\n- **Complexity ceiling:** Factorio higher (especially with trains/circuits and megabases).\n- **Readability:** Factorio is clearer at scale; 3D factories in Satisfactory can get visually messy unless you’re organized.\n- **Time to “fun automation”:** Satisfactory can feel slower early; Factorio ramps faster.\n- **Co-op:** Both support it; Satisfactory is often the more “hang out and build” co-op experience.\n\n### My recommendation (based on what most people end up preferring)\n- If you’re choosing **one** and you care most about **systems depth and long-term replayability** → **Factorio**.\n- If you care most about **immersion, building in 3D, and exploration** → **Satisfactory**.\n\nIf you tell me what you liked/disliked in similar games (Minecraft tech mods, DSP, Oxygen Not Included, etc.), I can give a sharper pick.",
+      "toolsUsed": [],
+      "responseTimeMs": 6771,
+      "inputTokens": 1965,
+      "outputTokens": 355,
+      "totalTokens": 2320
+    },
+    {
+      "id": 42,
+      "category": "game-info",
+      "prompt": "How long is Persona 5?",
+      "content": "**Persona 5** is a long JRPG.\n\n- **Main story:** ~**95–110 hours**\n- **Main + side content:** ~**120–160 hours**\n- **Completionist:** ~**160–200+ hours**\n\nIf you mean **Persona 5 Royal**, it’s typically **longer**:\n- **Main story:** ~**100–130 hours**\n- **Main + extras:** ~**140–180 hours**",
+      "toolsUsed": [],
+      "responseTimeMs": 3035,
+      "inputTokens": 1963,
+      "outputTokens": 96,
+      "totalTokens": 2059
+    },
+    {
+      "id": 43,
+      "category": "game-info",
+      "prompt": "Does this game have multiplayer?",
+      "content": "Which game do you mean?  \n\nIf you tell me the **name**, or paste the **Ark ID** (e.g. `steam-532790` or `epic-...`), I’ll check whether it has multiplayer (and what type: co-op, online PvP, split-screen, etc.).",
+      "toolsUsed": [],
+      "responseTimeMs": 1720,
+      "inputTokens": 1962,
+      "outputTokens": 68,
+      "totalTokens": 2030
+    },
+    {
+      "id": 44,
+      "category": "review",
+      "prompt": "Is this game good for someone who doesn't usually play RPGs?",
+      "content": "Which game do you mean? Paste the **name** or the **store ID** from your library (e.g., `steam-532790` or `steam-1601570`, or the Epic one).\n\nOnce I have that, I can pull its Steam/Epic details and tell you:\n- how RPG-heavy it is (stats/gear/builds, dialogue choices, etc.)\n- how approachable it is for non-RPG players\n- what players say in Steam reviews (if it’s on Steam)",
+      "toolsUsed": [],
+      "responseTimeMs": 2403,
+      "inputTokens": 1969,
+      "outputTokens": 107,
+      "totalTokens": 2076
+    },
+    {
+      "id": 45,
+      "category": "gameplay-tips",
+      "prompt": "What's the best order to do the regions in Elden Ring?",
+      "content": "## Elden Ring: best region/progression order (typical first playthrough)\n\n1. **Limgrave (West/East) + Weeping Peninsula**\n   - Do this first to build levels, flasks, and gear.\n2. **Stormveil Castle**\n   - First major “legacy dungeon” for most players.\n3. **Liurnia of the Lakes**\n   - Includes **Academy of Raya Lucaria** as the next big dungeon.\n4. **Caelid (southern first)**\n   - Caelid can be brutal early; poke the easier edges before deep Caelid.\n5. **Altus Plateau**\n   - You’ll start seeing a difficulty jump and more late-game upgrade materials.\n6. **Mt. Gelmir / Volcano Manor**\n   - Optional-ish, but fits well around Altus difficulty-wise.\n7. **Leyndell, Royal Capital**\n   - Major progression gate; usually best after Altus/Gelmir.\n8. **Mountaintops of the Giants**\n   - Noticeable step up in enemy damage/HP.\n9. **Crumbling Farum Azula**\n   - Late-game legacy dungeon.\n10. **Leyndell, Ashen Capital (endgame)**\n   - Final stretch and bosses.\n\n### Optional/side regions (when to slot them)\n- **Siofra River / Ainsel River (early–mid):** after Limgrave/Liurnia.\n- **Nokron / Deeproot Depths (mid):** after you’re comfortable in Liurnia/Caelid.\n- **Lake of Rot (mid–late):** after Ainsel progression.\n- **Mohgwyn Palace (late):** can be accessed earlier, but it’s rough; great for late-game.\n- **Consecrated Snowfield + Miquella’s Haligtree (very late):** among the hardest content.\n\n### Quick “level vibe” guide (very approximate)\n- Limgrave/Weeping: **1–40**\n- Stormveil/Liurnia: **30–60**\n- Caelid/Altus/Gelmir: **50–90**\n- Leyndell → endgame: **80–150+**\n\nIf you tell me your **current region + level + weapon upgrade** (e.g., “level 45, +6 weapon, in Liurnia”), I can suggest the next best area and a couple good dungeons to hit.",
+      "toolsUsed": [],
+      "responseTimeMs": 8521,
+      "inputTokens": 1969,
+      "outputTokens": 507,
+      "totalTokens": 2476
+    },
+    {
+      "id": 46,
+      "category": "lore",
+      "prompt": "What happens at the end of Outer Wilds? No spoilers, just tone",
+      "content": "**Tone only:** it lands as a quiet, awe-filled, bittersweet ending—more **acceptance than victory**. It’s **cosmic and intimate at the same time**, with a strong sense of **closure**, a touch of **melancholy**, and ultimately a **hopeful, reflective calm** rather than a triumphant “you saved everything” payoff.",
+      "toolsUsed": [],
+      "responseTimeMs": 2936,
+      "inputTokens": 1971,
+      "outputTokens": 79,
+      "totalTokens": 2050
+    },
+    {
+      "id": 47,
+      "category": "walkthrough",
+      "prompt": "I'm stuck on the Water Temple in Ocarina of Time — any hints?",
+      "content": "## Water Temple hints (Ocarina of Time) — spoiler-light\n\n- **Track your water level.** Most progress is “raise/lower water → reach a new door.” If you’re stuck, revisit the **three water-level spots** and re-check nearby doors at each level.\n- **Use the map/compass to find one missed key.** The Water Temple is infamous for **one small key** people skip.\n- **Look for bombable/cracked walls** and **hookshot targets** in the **central pillar room** (the big hub). That room connects to almost everything.\n- **Iron Boots + Hookshot is the core combo.** Any time you see:\n  - a **deep shaft** → sink with Iron Boots\n  - a **ledge just out of reach** → Hookshot\n  - a **diamond switch/eye** behind grates → often reachable from underwater angles\n- **Listen for hidden passages.** Some corridors are easy to miss because they’re partially blocked or only visible at one water level.\n\n### Common “where do I go now?” checkpoints\n- If you **can’t find a key**: re-check the **hub room** at **mid water level** and look for a path that’s only accessible when you can **float up** from underwater.\n- If you **reached Dark Link**: you’re on track for the **Longshot**. After that, revisit earlier rooms—new Hookshot range unlocks several targets.\n\nIf you tell me **what you have** (water level right now, items like Hookshot/Longshot, how many small keys, and whether you beat Dark Link), I can give a more precise nudge without fully spoiling it.",
+      "toolsUsed": [],
+      "responseTimeMs": 8151,
+      "inputTokens": 1972,
+      "outputTokens": 358,
+      "totalTokens": 2330
+    },
+    {
+      "id": 48,
+      "category": "news",
+      "prompt": "When does the next Steam sale start?",
+      "content": "I don’t have live Steam sale dates available in Ark right now, so I can’t reliably tell you when the *next* one starts without web context.\n\nIf you tell me which sale you mean (e.g., **Spring**, **Summer**, **Autumn**, **Winter**, or a **publisher/genre** sale), I can help you identify it and suggest games from your library to watchlist for discounts.",
+      "toolsUsed": [],
+      "responseTimeMs": 2808,
+      "inputTokens": 1964,
+      "outputTokens": 88,
+      "totalTokens": 2052
+    },
+    {
+      "id": 49,
+      "category": "library",
+      "prompt": "Add this game to my library",
+      "content": "Which game do you mean?\n\nTell me the **game name** (e.g., “Hades”) or share a **Steam App ID** (e.g., `12345`) / **Epic offer link**, and also what status you want: **Want to Play**, **Playing**, **Completed**, or **On Hold**.",
+      "toolsUsed": [],
+      "responseTimeMs": 1810,
+      "inputTokens": 1962,
+      "outputTokens": 71,
+      "totalTokens": 2033
+    },
+    {
+      "id": 50,
+      "category": "recommendations",
+      "prompt": "Recommend something relaxing like Stardew Valley or Spiritfarer",
+      "content": "## Relaxing recommendations (Stardew Valley / Spiritfarer vibes)\n\nI can’t generate **library-based** recs right now because Ark is seeing your library as **empty**. If you tell me a couple games you own (or add them), I’ll tailor this to your tastes.\n\nIn the meantime, here are strong “cozy + low-stress” picks:\n\n- **Dinkum** — Stardew-like life sim with a laid-back Australian outback vibe, crafting and town building.\n- **Sun Haven** — Like Stardew but with more fantasy, magic, and RPG progression (still cozy).\n- **Coral Island** — Farming + community + ocean cleanup themes; very Stardew-adjacent.\n- **Littlewood** — Post-adventure town building; super chill, simple loops, minimal pressure.\n- **A Short Hike** — Short, wholesome exploration with gentle goals and great vibes.\n- **Slime Rancher** — Relaxing exploration + collecting cute slimes; satisfying without being stressful.\n- **Dorfromantik** — Meditative tile-laying; perfect “unwind” game.\n- **Unpacking** — Cozy, story-through-objects; zero pressure.\n\nIf you answer these two, I’ll narrow it to 3–5 perfect picks:\n1) Do you want **farming/life sim**, **management**, or **pure exploration/puzzle**?  \n2) Prefer **no combat at all**, or **light/easy combat is fine**?",
+      "toolsUsed": [
+        "getGameRecommendations"
+      ],
+      "responseTimeMs": 6371,
+      "inputTokens": 2006,
+      "outputTokens": 311,
+      "totalTokens": 2317
+    }
+  ]
+}

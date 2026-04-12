@@ -192,7 +192,7 @@ describe('MyProgressTab', () => {
     
     render(<MyProgressTab gameId="steam-730" />);
     
-    expect(screen.getByText(/Added/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Added/).length).toBeGreaterThan(0);
   });
 
   it('handles zero hours played', () => {

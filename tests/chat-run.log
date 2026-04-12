@@ -1,0 +1,15 @@
+
+[Cache:steam-cache] Loaded 0 entries from disk
+[Cache:epic-cache] Loaded 4 entries from disk
+[ChatStore] Initialized — 1 conversation(s) loaded from disk
+[dotenv@17.3.1] injecting env (7) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+[Startup] Auto-launch is enabled
+[EpicAPI] Solving Cloudflare challenge (hidden browser)...
+[Tray] Icon candidates: [
+  'C:\\Projects\\Tracker\\build\\icon-16.png',
+  'C:\\Projects\\Tracker\\build\\icon-32.png',
+  'C:\\Projects\\Tracker\\build\\icon.png',
+  'C:\\Projects\\Tracker\\build\\icon-256.png'
+] | resolved: C:\Projects\Tracker\build\icon-16.png
+[Tray] Loaded icon: C:\Projects\Tracker\build\icon-16.png | size: 16 x 16 | empty: false
+[Tray] System tray initialized

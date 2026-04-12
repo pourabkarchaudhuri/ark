@@ -6,14 +6,16 @@ const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
-import { processMessage, searchGamesForContext, chatStore } from '../ai-chat.js';
+import { processMessage, searchGamesForContext, chatStore, type ChatProviderOptions } from '../ai-chat.js';
+import { settingsStore } from '../settings-store.js';
 
 export function register(): void {
   /**
    * Send a message to the AI chat
    * Supports streaming responses via 'ai:streamChunk' event
    */
-  ipcMain.handle('ai:sendMessage', async (event: any, { message, gameContext, libraryData }: any) => {
+  ipcMain.handle('ai:sendMessage', async (event: any, payload: any) => {
+    const { message, gameContext, libraryData, azureEndpoint, azureKey, azureDeployment, azureApiVersion, imageAttachment } = payload || {};
     try {
       const MAX_MSG_LEN = 4000;
       if (typeof message !== 'string' || message.length > MAX_MSG_LEN) {
@@ -25,16 +27,42 @@ export function register(): void {
         ? libraryData.slice(0, MAX_LIBRARY_ITEMS)
         : undefined;
 
-      logger.log(`[AI IPC] sendMessage: "${message.substring(0, 50)}..."`);
+      const preferredProvider = settingsStore.getPreferredChatProvider();
+      let providerOptions: ChatProviderOptions | undefined;
+      if (preferredProvider === 'azure-openai' && azureEndpoint && azureKey && azureDeployment) {
+        providerOptions = {
+          azure: {
+            endpoint: String(azureEndpoint).trim(),
+            apiKey: String(azureKey).trim(),
+            deployment: String(azureDeployment).trim(),
+            ...(azureApiVersion?.trim() ? { apiVersion: String(azureApiVersion).trim() } : {}),
+          },
+        };
+      }
+
+      const safeImageAttachment =
+        preferredProvider === 'azure-openai' &&
+        typeof imageAttachment === 'string' &&
+        imageAttachment.startsWith('data:image/') &&
+        imageAttachment.length < 10_000_000
+          ? imageAttachment
+          : undefined;
+      if (typeof imageAttachment === 'string' && !safeImageAttachment) {
+        if (preferredProvider !== 'azure-openai') logger.log('[AI IPC] Image attachment ignored (only Azure OpenAI supports vision).');
+        else if (imageAttachment.length >= 10_000_000) logger.warn('[AI IPC] Image attachment too large (>10MB), skipped.');
+      }
+
+      logger.log(`[AI IPC] sendMessage: "${message.substring(0, 50)}..." provider=${preferredProvider}` + (safeImageAttachment ? ' +image' : ''));
       
       const onStreamChunk = (chunk: string, fullContent: string) => {
         event.sender.send('ai:streamChunk', { chunk, fullContent });
       };
       
-      const result = await processMessage(message, gameContext, safeLibraryData, onStreamChunk);
+      const result = await processMessage(message, gameContext, safeLibraryData, onStreamChunk, undefined, providerOptions, safeImageAttachment);
       
-      // Store the message in chat history
-      chatStore.addMessage({ role: 'user', content: message, gameContext });
+      // Persist to the same conversation regardless of provider so context survives model switches
+      const storedContent = message + (safeImageAttachment ? ' [Image attached]' : '');
+      chatStore.addMessage({ role: 'user', content: storedContent, gameContext });
       chatStore.addMessage({ role: 'assistant', content: result.content, toolCalls: result.toolsUsed.map((name: string) => ({ name, args: {} })) });
       
       return result;

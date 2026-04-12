@@ -783,10 +783,13 @@ const BroadcastsStrip = memo(function BroadcastsStrip({
   }, [hasActivity]);
 
   return (
-    <div className={cn(
+    <div
+      data-tour="buzz-broadcasts"
+      className={cn(
       'border-b flex-shrink-0 transition-colors',
       hasActivity ? 'border-white/10 bg-white/[0.02]' : 'border-white/[0.06]',
-    )}>
+    )}
+    >
       <button
         onClick={() => setExpanded((e) => !e)}
         className={cn(
@@ -883,7 +886,12 @@ const StreamColumn = memo(function StreamColumn({
       <div className="flex items-center gap-2 p-2.5 border-b border-white/[0.06] flex-shrink-0">
         <div className="flex-1" />
         <TooltipCard content="Refresh all news feeds and re-scrape event schedules. Clears the cache and fetches the latest transmissions.">
-          <button onClick={onRefresh} className="w-7 h-7 rounded-lg flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 transition-colors flex-shrink-0">
+          <button
+            type="button"
+            data-tour="buzz-refresh"
+            onClick={onRefresh}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 transition-colors flex-shrink-0"
+          >
             <AnimateIcon hover="spin"><RefreshCw className="w-3.5 h-3.5" /></AnimateIcon>
           </button>
         </TooltipCard>
@@ -907,7 +915,10 @@ const StreamColumn = memo(function StreamColumn({
       </div>
 
       {/* Stream */}
-      <div className="flex-1 overflow-y-auto p-2 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10">
+      <div
+        data-tour="buzz-stream"
+        className="flex-1 overflow-y-auto p-2 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10"
+      >
         {filteredNews.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
             <p className="text-xs text-white/40">No transmissions match.</p>
@@ -1060,21 +1071,24 @@ export const BuzzView = memo(function BuzzView() {
     return (
       <div className="relative w-full overflow-hidden p-1" style={{ height: 'calc(100vh - 180px)' }}>
         <div className="h-full rounded-2xl border border-white/[0.06] bg-black/30 backdrop-blur-sm overflow-hidden flex flex-col">
-          {/* Toolbar skeleton */}
+          {/* Toolbar skeleton — data-tour matches loaded StreamColumn so Joyride targets exist */}
           <div className="flex items-center gap-2 p-2.5 border-b border-white/[0.06] flex-shrink-0">
             <div className="flex gap-1.5">
               <div className="w-10 h-6 rounded bg-white/5 animate-pulse" />
               <div className="w-16 h-6 rounded bg-white/5 animate-pulse" />
             </div>
-            <div className="ml-auto w-7 h-7 rounded-lg bg-white/5 animate-pulse" />
+            <div className="ml-auto w-7 h-7 rounded-lg bg-white/5 animate-pulse" data-tour="buzz-refresh" />
           </div>
           {/* Broadcasts skeleton */}
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06] flex-shrink-0">
+          <div
+            className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06] flex-shrink-0"
+            data-tour="buzz-broadcasts"
+          >
             <div className="w-3 h-3 rounded-full bg-white/5 animate-pulse" />
             <div className="w-32 h-4 rounded bg-white/5 animate-pulse" />
           </div>
           {/* Card grid skeleton */}
-          <div className="flex-1 overflow-hidden p-2">
+          <div className="flex-1 overflow-hidden p-2" data-tour="buzz-stream">
             <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
               {[1, 2, 3, 4, 5, 6].map((i) => (
                 <div key={i} className="rounded-xl border border-white/[0.06] bg-black/40 overflow-hidden animate-pulse">
@@ -1103,7 +1117,13 @@ export const BuzzView = memo(function BuzzView() {
 
   if (error || news.length === 0) {
     return (
-      <div className="relative w-full flex flex-col items-center justify-center text-center" style={{ height: 'calc(100vh - 180px)' }}>
+      <div
+        className="relative w-full flex flex-col items-center justify-center text-center"
+        style={{ height: 'calc(100vh - 180px)' }}
+        data-tour="buzz-stream"
+      >
+        {/* Joyride anchor when Scheduled Broadcasts strip is absent (error / empty) */}
+        <div className="sr-only" data-tour="buzz-broadcasts" aria-hidden />
         <div className="w-20 h-20 rounded-full bg-white/5 flex items-center justify-center mb-6 shadow-lg shadow-fuchsia-500/10 backdrop-blur-sm">
           <Newspaper className="w-10 h-10 text-fuchsia-500" />
         </div>
@@ -1111,7 +1131,12 @@ export const BuzzView = memo(function BuzzView() {
         <p className="text-white/60 mb-6 max-w-md">
           {error || 'Signals from the Comms Array will appear here once Steam and RSS feeds are received.'}
         </p>
-        <Button onClick={handleRefresh} className="bg-fuchsia-500 hover:bg-fuchsia-600 text-white gap-1.5">
+        <Button
+          type="button"
+          data-tour="buzz-refresh"
+          onClick={handleRefresh}
+          className="bg-fuchsia-500 hover:bg-fuchsia-600 text-white gap-1.5"
+        >
           <AnimateIcon hover="spin"><RefreshCw className="w-4 h-4" /></AnimateIcon>
           Try again
         </Button>

@@ -12,6 +12,7 @@ import {
   Clock,
   ExternalLink,
   Heart,
+  HelpCircle,
   ChevronLeft,
   ChevronRight,
   ChevronDown,
@@ -40,10 +41,70 @@ import { epicService } from '@/services/epic-service';
 import { gameService } from '@/services/game-service';
 import { findGameById, searchPrefetchedGames, getPrefetchedGames } from '@/services/prefetch-store';
 import { WindowControls } from '@/components/window-controls';
+import { GuidedTour, getTourSteps, useTourState } from '@/components/guided-tour';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { MyProgressTab, MyProgressSkeleton } from '@/components/my-progress-tab';
 import { Gamepad2, BarChart3 } from 'lucide-react';
 import { Carousel, BlurImage, type CardType } from '@/components/ui/apple-cards-carousel';
+
+// ─── Minimal SteamAppDetails from cached Game (fallback when API returns null) ─
+function gameToMinimalSteamDetails(g: Game, steamAppId: number): SteamAppDetails {
+  const hasWindows = g.platform?.some(p => /win|pc/i.test(p)) ?? true;
+  const hasMac = g.platform?.some(p => /mac|osx/i.test(p)) ?? false;
+  const hasLinux = g.platform?.some(p => /linux/i.test(p)) ?? false;
+  return {
+    type: 'game',
+    name: g.title ?? 'Unknown Game',
+    steam_appid: steamAppId,
+    required_age: 0,
+    is_free: false,
+    detailed_description: g.longDescription ?? g.summary ?? '',
+    about_the_game: g.longDescription ?? g.summary ?? '',
+    short_description: g.summary ?? '',
+    supported_languages: '',
+    header_image: g.coverUrl ?? g.headerImage ?? '',
+    capsule_image: g.coverUrl ?? g.headerImage ?? '',
+    capsule_imagev5: '',
+    website: null,
+    developers: g.developer ? [g.developer] : [],
+    publishers: g.publisher ? [g.publisher] : [],
+    platforms: { windows: hasWindows, mac: hasMac, linux: hasLinux },
+    genres: g.genre?.map((name, i) => ({ id: String(i), description: name })) ?? [],
+    screenshots: g.screenshots?.map((url, i) => ({ id: i, path_thumbnail: url, path_full: url })) ?? [],
+    movies: [],
+    release_date: g.releaseDate ? { coming_soon: false, date: g.releaseDate } : undefined,
+    pc_requirements: {},
+  };
+}
+
+/** Convert Epic CMS product content requirements to Steam-style pc_requirements HTML. */
+function epicRequirementsToPcRequirements(requirements: Array<{
+  systemType: string;
+  details: Array<{
+    title: string;
+    minimum: Record<string, string>;
+    recommended: Record<string, string>;
+  }>;
+}>): { minimum?: string; recommended?: string } {
+  const isTbd = (v: unknown): boolean =>
+    v === null || v === undefined || String(v).trim().toUpperCase() === 'TBD';
+  const out: { minimum?: string; recommended?: string } = {};
+  for (const system of requirements) {
+    if (!/windows|pc/i.test(system.systemType)) continue;
+    const minParts: string[] = [];
+    const recParts: string[] = [];
+    for (const detail of system.details) {
+      const title = (detail.title && String(detail.title).trim()) || 'Spec';
+      const minVal = detail.minimum != null ? String(detail.minimum).trim() : '';
+      const recVal = detail.recommended != null ? String(detail.recommended).trim() : '';
+      if (minVal && !isTbd(minVal)) minParts.push(`<li><strong>${title}:</strong> ${minVal}</li>`);
+      if (recVal && !isTbd(recVal)) recParts.push(`<li><strong>${title}:</strong> ${recVal}</li>`);
+    }
+    if (minParts.length > 0 && !out.minimum) out.minimum = '<ul class="bb_ul">' + minParts.join('') + '</ul>';
+    if (recParts.length > 0 && !out.recommended) out.recommended = '<ul class="bb_ul">' + recParts.join('') + '</ul>';
+  }
+  return out;
+}
 
 // ─── Epic → SteamAppDetails Normalizer ───────────────────────────────────────
 // Converts an Epic `Game` object into a `SteamAppDetails`-compatible shape so
@@ -88,43 +149,28 @@ function epicToSteamDetails(
   // Convert to HTML strings matching Steam's pc_requirements format.
   let pcRequirements: { minimum?: string; recommended?: string } = {};
 
-  /** Convert a CMS spec value (object | string | array | unknown) to an HTML string */
-  const specsToHtml = (specs: unknown): string | undefined => {
-    if (!specs) return undefined;
-    // Plain string — render as-is (wrapped in a paragraph)
-    if (typeof specs === 'string') {
-      const trimmed = specs.trim();
-      return trimmed ? `<p>${trimmed}</p>` : undefined;
-    }
-    // Array of strings — join with line breaks
-    if (Array.isArray(specs)) {
-      const items = specs.filter(s => typeof s === 'string' && s.trim());
-      return items.length > 0
-        ? '<ul class="bb_ul">' + items.map(s => `<li>${s}</li>`).join('') + '</ul>'
-        : undefined;
-    }
-    // Object with key-value pairs — render as definition list
-    if (typeof specs === 'object') {
-      const entries = Object.entries(specs as Record<string, unknown>)
-        .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '');
-      return entries.length > 0
-        ? '<ul class="bb_ul">' + entries.map(([k, v]) => `<li><strong>${k}:</strong> ${String(v)}</li>`).join('') + '</ul>'
-        : undefined;
-    }
-    return undefined;
-  };
+  /** True if the value is effectively "TBD" (Epic placeholder — store page may show real specs). */
+  const isTbd = (v: unknown): boolean =>
+    v === null || v === undefined || String(v).trim().toUpperCase() === 'TBD';
 
   if (productContent?.requirements) {
     for (const system of productContent.requirements) {
-      if (/windows|pc/i.test(system.systemType)) {
-        for (const detail of system.details) {
-          if (!pcRequirements.minimum) {
-            pcRequirements.minimum = specsToHtml(detail.minimum);
-          }
-          if (!pcRequirements.recommended) {
-            pcRequirements.recommended = specsToHtml(detail.recommended);
-          }
-        }
+      if (!/windows|pc/i.test(system.systemType)) continue;
+      // Aggregate all details (OS, Processor, Memory, etc.); skip TBD so we don't show placeholder text
+      const minParts: string[] = [];
+      const recParts: string[] = [];
+      for (const detail of system.details) {
+        const title = (detail.title && String(detail.title).trim()) || 'Spec';
+        const minVal = detail.minimum != null ? String(detail.minimum).trim() : '';
+        const recVal = detail.recommended != null ? String(detail.recommended).trim() : '';
+        if (minVal && !isTbd(minVal)) minParts.push(`<li><strong>${title}:</strong> ${minVal}</li>`);
+        if (recVal && !isTbd(recVal)) recParts.push(`<li><strong>${title}:</strong> ${recVal}</li>`);
+      }
+      if (minParts.length > 0 && !pcRequirements.minimum) {
+        pcRequirements.minimum = '<ul class="bb_ul">' + minParts.join('') + '</ul>';
+      }
+      if (recParts.length > 0 && !pcRequirements.recommended) {
+        pcRequirements.recommended = '<ul class="bb_ul">' + recParts.join('') + '</ul>';
       }
     }
   }
@@ -294,6 +340,30 @@ function markdownToHtml(md: string): string {
   });
 
   return html;
+}
+
+// ---------------------------------------------------------------------------
+// Normalize media URLs in Steam/Epic description HTML so images and videos load.
+// - Protocol-relative URLs (src="//cdn...") resolve to file:// in Electron and
+//   break; rewrite to https:// so they load from the CDN.
+// - Path-relative Steam URLs (src="/steam/apps/...") resolve to the app origin;
+//   rewrite to absolute Steam CDN so they load.
+// ---------------------------------------------------------------------------
+const STEAM_CDN_BASE = 'https://cdn.akamai.steamstatic.com';
+const STEAM_STORE_BASE = 'https://store.steampowered.com';
+
+function normalizeDescriptionMediaUrls(html: string): string {
+  if (!html) return html;
+  let out = html;
+  // Protocol-relative: //host/path → https://host/path (double-quoted and single-quoted)
+  out = out.replace(/src="\/\//gi, 'src="https://');
+  out = out.replace(/src='\/\//gi, "src='https://");
+  // Steam path-relative: /steam/... → absolute CDN (store assets like /images/ use store host)
+  out = out.replace(/src="\/steam\//gi, `src="${STEAM_CDN_BASE}/steam/`);
+  out = out.replace(/src='\/steam\//gi, `src='${STEAM_CDN_BASE}/steam/`);
+  out = out.replace(/src="\/images\//gi, `src="${STEAM_STORE_BASE}/images/`);
+  out = out.replace(/src='\/images\//gi, `src='${STEAM_STORE_BASE}/images/`);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +628,18 @@ export function GameDetailsPage() {
   const [, params] = useRoute('/game/:id') as [boolean, Record<string, string> | null];
   const [, navigate] = useLocation();
 
+  const {
+    tourRunning: gameTourRunning,
+    tourKey: gameTourKey,
+    activeTourId: gameTourActiveId,
+    startTour: startGameTour,
+    stopTour: stopGameTour,
+  } = useTourState({ autoStartOverview: false });
+
+  const startGameDetailsTour = useCallback(() => {
+    startGameTour('game-details');
+  }, [startGameTour]);
+
   // Decode the URL param — supports "steam-730", "epic-namespace:offerId", or legacy numeric "730"
   const rawId = params?.id ? decodeURIComponent(params.id) : null;
   const gameId = rawId
@@ -749,6 +831,7 @@ export function GameDetailsPage() {
           publicReviews: libEntry?.publicReviews ?? customEntry?.publicReviews ?? '',
           recommendationSource: libEntry?.recommendationSource ?? customEntry?.recommendationSource ?? 'Personal Discovery',
           executablePath: libEntry?.executablePath ?? customEntry?.executablePath,
+          addedAt: libEntry?.addedAt ?? customEntry?.addedAt,
         });
       } else {
         setDialogInitialEntry(null);
@@ -759,7 +842,7 @@ export function GameDetailsPage() {
   }, [createGameFromDetails, gameId, gameInLibrary, isCustomGame]);
   
   // Handle saving library entry from dialog
-  const handleSaveLibraryEntry = useCallback(async (gameData: Partial<Game> & { executablePath?: string }) => {
+  const handleSaveLibraryEntry = useCallback(async (gameData: Partial<Game> & { executablePath?: string; addedAt?: Date }) => {
     if (!gameId) return;
 
     const isNewAdd = !gameInLibrary && !isCustomGame;
@@ -772,6 +855,7 @@ export function GameDetailsPage() {
         publicReviews: gameData.publicReviews,
         recommendationSource: gameData.recommendationSource,
         executablePath: gameData.executablePath,
+        addedAt: gameData.addedAt,
       });
     } else if (gameInLibrary) {
       updateEntry(gameId, {
@@ -780,6 +864,7 @@ export function GameDetailsPage() {
         publicReviews: gameData.publicReviews,
         recommendationSource: gameData.recommendationSource,
         executablePath: gameData.executablePath,
+        addedAt: gameData.addedAt,
       });
     } else {
       // Add to library — always cache metadata; resolve from API if dialog didn't have it
@@ -793,12 +878,13 @@ export function GameDetailsPage() {
         }
       }
       addToLibrary(gameId, gameData.status || 'Want to Play', meta);
-      if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath) {
+      if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath || gameData.addedAt) {
         updateEntry(gameId, {
           priority: gameData.priority,
           publicReviews: gameData.publicReviews,
           recommendationSource: gameData.recommendationSource,
           executablePath: gameData.executablePath,
+          addedAt: gameData.addedAt,
         });
       }
     }
@@ -1164,7 +1250,38 @@ export function GameDetailsPage() {
             setDetails(detailsData);
             if (reviewsData) setReviews(reviewsData);
           } else {
-            setError('Game not found');
+            // Steam API returned null (e.g. delisted, wrong region, or transient failure).
+            // Try Epic if this game is cross-store, then fall back to cached prefetched data.
+            const resolvedEpicNs = prefetched?.epicNamespace || epicMeta?.epicNamespace;
+            const resolvedEpicOid = prefetched?.epicOfferId || epicMeta?.epicOfferId;
+            if (resolvedEpicNs && resolvedEpicOid && window.epic?.getGameDetails) {
+              try {
+                const epicGameData = await epicService.getGameDetails(resolvedEpicNs, resolvedEpicOid);
+                if (!controller.signal.aborted && epicGameData) {
+                  setEpicGame(epicGameData);
+                  setDetails(epicToSteamDetails(epicGameData, null));
+                  if (isCrossStoreEpic) {
+                    setCrossStoreGame({
+                      ...prefetched,
+                      epicSlug: prefetched?.epicSlug,
+                      epicNamespace: prefetched?.epicNamespace,
+                      epicOfferId: prefetched?.epicOfferId,
+                      store: 'epic',
+                      price: epicGameData.price ?? prefetched?.epicPrice ?? epicMeta?.epicPrice,
+                    } as Game);
+                  }
+                  setLoading(false);
+                  return;
+                }
+              } catch (_) {
+                // Fall through to prefetched minimal
+              }
+            }
+            if (prefetched?.title) {
+              setDetails(gameToMinimalSteamDetails(prefetched, appId));
+            } else {
+              setError('Game not found');
+            }
             setLoading(false);
             return;
           }
@@ -1375,6 +1492,24 @@ export function GameDetailsPage() {
 
     return () => { controller.abort(); };
   }, [isEpicGame, crossStoreGame?.epicNamespace, crossStoreGame?.store]);
+
+  // ── Epic: fetch requirements from store page when details have none (no redirect)
+  useEffect(() => {
+    const slug = epicGame?.epicSlug;
+    if (!slug || !details || details.pc_requirements?.minimum || details.pc_requirements?.recommended) return;
+    if (!window.epic?.getProductContent) return;
+
+    const controller = new AbortController();
+    window.epic.getProductContent(slug).then((productContent) => {
+      if (controller.signal.aborted || !productContent?.requirements?.length) return;
+      const pcReq = epicRequirementsToPcRequirements(productContent.requirements);
+      if (pcReq.minimum || pcReq.recommended) {
+        setDetails((prev) => prev ? { ...prev, pc_requirements: pcReq } : prev);
+      }
+    }).catch((err) => { console.warn('[GameDetails] Epic product content (requirements):', err); });
+
+    return () => { controller.abort(); };
+  }, [epicGame?.epicSlug, details?.pc_requirements?.minimum, details?.pc_requirements?.recommended]);
 
   // Media items (screenshots + movies)
   const mediaItems = useMemo(() => {
@@ -1730,6 +1865,7 @@ export function GameDetailsPage() {
         <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-3 app-drag-region">
           {/* Back Button — return to the view we came from (library, journey, browse, etc.) */}
           <Button
+            data-tour="game-details-back"
             onClick={() => navigate(getBackToDashboardUrl())}
             variant="ghost"
             className="bg-black/50 hover:bg-black/70 backdrop-blur-sm no-drag"
@@ -1738,12 +1874,23 @@ export function GameDetailsPage() {
             Back
           </Button>
 
-          {/* Window Controls */}
-          <WindowControls />
+          <div className="flex items-center gap-2 no-drag">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9 text-white/70 hover:text-white hover:bg-cyan-500/20 border border-white/10"
+              onClick={() => startGameDetailsTour()}
+              aria-label="Game page tour"
+            >
+              <HelpCircle className="h-4 w-4 text-cyan-400 pointer-events-none" />
+            </Button>
+            <WindowControls />
+          </div>
         </div>
 
         {/* Title and Basic Info */}
-        <div className="absolute bottom-0 left-0 right-0 p-6 z-10">
+        <div className="absolute bottom-0 left-0 right-0 p-6 z-10" data-tour="game-details-hero">
           <div className="max-w-7xl mx-auto">
             <div className="flex items-center gap-3 mb-3">
               <h1 className="text-3xl md:text-4xl font-bold font-['Orbitron']">
@@ -1840,7 +1987,7 @@ export function GameDetailsPage() {
       </div>
 
       {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 py-6">
+      <div className="max-w-7xl mx-auto px-4 py-6" data-tour="game-details-main">
         {/* Tabbed view — only when game was already in library on page load */}
         {showProgressTabs && gameId ? (
           <Tabs defaultValue="progress" className="w-full">
@@ -1961,6 +2108,14 @@ export function GameDetailsPage() {
         genres={dialogGenres}
         platforms={dialogPlatforms}
         initialEntry={dialogInitialEntry}
+      />
+
+      <GuidedTour
+        run={gameTourRunning}
+        tourKey={gameTourKey}
+        tourId={gameTourActiveId}
+        steps={getTourSteps(gameTourActiveId)}
+        onFinish={stopGameTour}
       />
     </div>
   );
@@ -2337,7 +2492,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
                     "prose prose-invert prose-sm max-w-none prose-img:rounded-lg prose-img:my-4 prose-img:max-w-full",
                     !showFullDescription && "max-h-[10rem] overflow-hidden"
                   )}
-                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(embedDescriptionImages(details.detailed_description || details.about_the_game)) }}
+                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(embedDescriptionImages(normalizeDescriptionMediaUrls(details.detailed_description || details.about_the_game))) }}
                   onClick={handleContentLinkClick}
                 />
                 {/* Gradient fade at bottom when collapsed */}
@@ -2390,7 +2545,6 @@ const GameDetailsContent = memo(function GameDetailsContent({
                 </div>
               </section>
             )}
-
             {/* ── Unified Reviews (Tabbed) ─────────────────────────────── */}
             {(metacriticReviews || metacriticLoading || (reviews && reviews.reviews.length > 0) || (epicReviews && (epicReviews.totalReviews > 0 || epicReviews.averageRating > 0))) && (
               <section>

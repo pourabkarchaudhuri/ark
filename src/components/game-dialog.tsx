@@ -19,9 +19,21 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { Plus, Library, ChevronDown, ChevronUp, FolderOpen, X } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Plus, Library, ChevronDown, ChevronUp, FolderOpen, X, Calendar } from 'lucide-react';
+
+/** Format date for display (local) */
+function formatAddedAt(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/** Get days in month for year (handles leap years) */
+function daysInMonth(year: number, month: number): number {
+  return new Date(year, month, 0).getDate();
+}
 interface GameDialogSaveData extends Partial<Game> {
   executablePath?: string;
+  addedAt?: Date;
 }
 
 /** Pre-fill data for edit mode. When provided, the dialog shows "Edit Library Entry" instead of "Add to Library". */
@@ -31,6 +43,7 @@ export interface GameDialogInitialEntry {
   publicReviews: string;
   recommendationSource: string;
   executablePath?: string;
+  addedAt?: Date;
 }
 
 interface GameDialogProps {
@@ -186,6 +199,7 @@ export function GameDialog({
     recommendationSource: 'Personal Discovery',
   });
   const [executablePath, setExecutablePath] = useState<string | undefined>(undefined);
+  const [addedAt, setAddedAt] = useState<Date | undefined>(undefined);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const isEditing = !!initialEntry;
@@ -202,11 +216,13 @@ export function GameDialog({
           recommendationSource: initialEntry.recommendationSource,
         });
         setExecutablePath(initialEntry.executablePath);
+        setAddedAt(initialEntry.addedAt);
         // Auto-expand advanced section if any advanced field is populated
         const hasAdvanced =
           initialEntry.priority !== 'Medium' ||
           !!initialEntry.publicReviews ||
           !!initialEntry.executablePath ||
+          !!initialEntry.addedAt ||
           (initialEntry.recommendationSource && initialEntry.recommendationSource !== 'Personal Discovery');
         setShowAdvanced(!!hasAdvanced);
       } else {
@@ -217,6 +233,7 @@ export function GameDialog({
           recommendationSource: 'Personal Discovery',
         });
         setExecutablePath(undefined);
+        setAddedAt(undefined);
         setShowAdvanced(false);
       }
     }
@@ -227,8 +244,9 @@ export function GameDialog({
     onSave({
       ...formData,
       executablePath,
+      addedAt: isEditing ? addedAt : undefined,
     });
-  }, [formData, executablePath, onSave]);
+  }, [formData, executablePath, addedAt, isEditing, onSave]);
 
   const handleBrowseExecutable = useCallback(async () => {
     if (!window.fileDialog?.selectExecutable) return;
@@ -425,6 +443,94 @@ export function GameDialog({
                   className="bg-white/5 border-white/10 min-h-[80px] resize-none"
                 />
               </div>
+
+              {/* Added to library date (edit only) — popover date picker */}
+              {isEditing && (
+                <div className="space-y-2">
+                  <Label className="text-white/70 flex items-center gap-2">
+                    <Calendar className="h-3.5 w-3.5" />
+                    Added to library
+                  </Label>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="w-full justify-start gap-2 bg-white/5 border-white/10 text-left font-normal text-white/80 hover:bg-white/10 hover:text-white"
+                      >
+                        <Calendar className="h-4 w-4 shrink-0" />
+                        {addedAt ? formatAddedAt(addedAt) : 'Pick date'}
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-auto p-4" align="start">
+                      <div className="grid gap-3">
+                        <div className="grid grid-cols-3 gap-2">
+                          <div className="space-y-1.5">
+                            <Label className="text-xs text-white/50">Month</Label>
+                            <Select
+                              value={String((addedAt ?? new Date()).getMonth() + 1)}
+                              onValueChange={(v) => {
+                                const d = addedAt ?? new Date();
+                                const day = Math.min(d.getDate(), daysInMonth(d.getFullYear(), parseInt(v, 10)));
+                                setAddedAt(new Date(d.getFullYear(), parseInt(v, 10) - 1, day));
+                              }}
+                            >
+                              <SelectTrigger className="bg-white/5 border-white/10 h-9" />
+                              <SelectContent>
+                                {[
+                                  'January', 'February', 'March', 'April', 'May', 'June',
+                                  'July', 'August', 'September', 'October', 'November', 'December',
+                                ].map((name, i) => (
+                                  <SelectItem key={name} value={String(i + 1)}>{name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs text-white/50">Day</Label>
+                            <Select
+                              value={String((addedAt ?? new Date()).getDate())}
+                              onValueChange={(v) => {
+                                const d = addedAt ?? new Date();
+                                setAddedAt(new Date(d.getFullYear(), d.getMonth(), parseInt(v, 10)));
+                              }}
+                            >
+                              <SelectTrigger className="bg-white/5 border-white/10 h-9" />
+                              <SelectContent>
+                                {Array.from(
+                                  { length: daysInMonth((addedAt ?? new Date()).getFullYear(), (addedAt ?? new Date()).getMonth() + 1) },
+                                  (_, i) => i + 1
+                                ).map((day) => (
+                                  <SelectItem key={day} value={String(day)}>{day}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs text-white/50">Year</Label>
+                            <Select
+                              value={String((addedAt ?? new Date()).getFullYear())}
+                              onValueChange={(v) => {
+                                const d = addedAt ?? new Date();
+                                const year = parseInt(v, 10);
+                                const day = Math.min(d.getDate(), daysInMonth(year, d.getMonth() + 1));
+                                setAddedAt(new Date(year, d.getMonth(), day));
+                              }}
+                            >
+                              <SelectTrigger className="bg-white/5 border-white/10 h-9" />
+                              <SelectContent>
+                                {Array.from({ length: 21 }, (_, i) => new Date().getFullYear() - 10 + i).map((y) => (
+                                  <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+              )}
             </div>
           )}
 

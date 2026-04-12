@@ -148,7 +148,7 @@ export type CreateLibraryEntry = Omit<LibraryGameEntry, 'addedAt' | 'updatedAt' 
   hoursPlayed?: number;
   rating?: number;
 };
-export type UpdateLibraryEntry = Partial<Omit<LibraryGameEntry, 'addedAt'>>;
+export type UpdateLibraryEntry = Partial<Omit<LibraryGameEntry, 'gameId'>>;
 
 // Custom game entry (user-added games not from Steam/Epic)
 export interface CustomGameEntry {
@@ -169,7 +169,7 @@ export interface CustomGameEntry {
 }
 
 export type CreateCustomGameEntry = Omit<CustomGameEntry, 'id' | 'addedAt' | 'updatedAt'>;
-export type UpdateCustomGameEntry = Partial<Omit<CustomGameEntry, 'id' | 'addedAt'>>;
+export type UpdateCustomGameEntry = Partial<Omit<CustomGameEntry, 'id'>>;
 
 /** Helper to determine the store from a universal game ID */
 export function getStoreFromId(gameId: string): GameStore {

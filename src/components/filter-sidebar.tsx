@@ -312,7 +312,7 @@ export const FilterPanel = memo(function FilterPanel({
           <div className={cn('space-y-2', isCatalog && 'opacity-40 pointer-events-none')}>
             <Label className="text-sm font-medium">Sort By</Label>
             <div className="flex gap-2">
-              <Select value={sortBy === 'default' ? 'rating' : sortBy} onValueChange={(value) => setSortBy(value as SortOption)} disabled={isCatalog}>
+              <Select value={sortBy} onValueChange={(value) => setSortBy(value as SortOption)} disabled={isCatalog}>
                 <SelectTrigger className="flex-1 bg-background/50" aria-label="Sort by">
                   <ArrowUpDown className="h-4 w-4 mr-2 pointer-events-none" />
                   <SelectValue />

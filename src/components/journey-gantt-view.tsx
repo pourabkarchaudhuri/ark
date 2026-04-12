@@ -38,6 +38,7 @@ import { useDebounce } from '@/hooks/useGameStore';
 import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
+import { resolveJourneyDisplayTitle } from '@/lib/journey-display-title';
 
 // ─── Fallback cover image ────────────────────────────────────────────────────
 // Walks through a chain of URLs on error (Steam CDN cover → header → capsule).
@@ -382,7 +383,7 @@ function buildGanttRows(
 
     return {
       gameId: je.gameId,
-      title: je.title,
+      title: resolveJourneyDisplayTitle(je.gameId, je.title),
       coverUrl: je.coverUrl,
       addedAt: je.addedAt,
       removedAt: je.removedAt,

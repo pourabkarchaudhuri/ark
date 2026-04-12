@@ -13,6 +13,8 @@ import crypto from 'crypto';
 import { logger } from './safe-logger.js';
 import { atomicWriteFileSync } from './safe-write.js';
 
+export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
+
 interface Settings {
   version: number;
   apiKeys: {
@@ -20,14 +22,26 @@ interface Settings {
   };
   preferences: {
     autoLaunch: boolean; // Launch app on system startup (default: true)
+    preferredChatProvider?: PreferredChatProvider; // Single source of truth for chat model
   };
   ollama: {
     enabled: boolean;
     url: string;
     model: string;
-    useGeminiInstead: boolean; // When true, use Gemini API instead of Ollama
+    useGeminiInstead: boolean; // Deprecated: use preferences.preferredChatProvider instead
+    /** Ollama library name for POST /api/rerank (Embedding Space neighbor ordering). */
+    rerankModel?: string;
+    /** Refine Embedding Space neighbor lists with /api/rerank (default true). */
+    neighborRerankEnabled?: boolean;
+    /** Refine Oracle shelves with /api/rerank (default true). */
+    oracleRerankEnabled?: boolean;
+    /** 0 = keep worker order within shelves, 1 = full rerank ordering (default 1). */
+    oracleRerankBlend?: number;
   };
 }
+
+/** Default rerank model — keep string in sync with `src/services/ollama-rerank.ts` `DEFAULT_OLLAMA_RERANK_MODEL`. */
+export const DEFAULT_OLLAMA_RERANK_MODEL = 'dengcao/bge-reranker-v2-m3';
 
 const SETTINGS_VERSION = 1;
 
@@ -49,35 +63,45 @@ class SettingsStore {
   }
 
   private loadSettings(): Settings {
+    const defaults = (): Settings => ({
+      version: SETTINGS_VERSION,
+      apiKeys: {},
+      preferences: { autoLaunch: true, preferredChatProvider: 'ollama' },
+      ollama: {
+        enabled: true,
+        url: 'http://localhost:11434',
+        model: 'gemma3:12b',
+        useGeminiInstead: false,
+        rerankModel: DEFAULT_OLLAMA_RERANK_MODEL,
+        neighborRerankEnabled: true,
+        oracleRerankEnabled: true,
+        oracleRerankBlend: 1,
+      },
+    });
     try {
       const settingsFile = getSettingsFilePath();
       if (fs.existsSync(settingsFile)) {
         const data = fs.readFileSync(settingsFile, 'utf-8');
         const parsed = JSON.parse(data) as Settings;
-        
         if (parsed.version === SETTINGS_VERSION) {
-          return parsed;
+          const merged: Settings = {
+            ...defaults(),
+            ...parsed,
+            preferences: { ...defaults().preferences, ...parsed.preferences },
+            ollama: { ...defaults().ollama, ...parsed.ollama },
+          };
+          if (!merged.preferences.preferredChatProvider) {
+            merged.preferences.preferredChatProvider =
+              parsed.ollama?.useGeminiInstead && parsed.apiKeys?.googleAI ? 'gemini' : 'ollama';
+          }
+          return merged;
         }
-        
         logger.warn('[SettingsStore] Settings version mismatch, using defaults');
       }
     } catch (error) {
       logger.error('[SettingsStore] Failed to load settings:', error);
     }
-
-    return {
-      version: SETTINGS_VERSION,
-      apiKeys: {},
-      preferences: {
-        autoLaunch: true, // Default: launch on startup
-      },
-      ollama: {
-        enabled: true,
-        url: 'http://localhost:11434',
-        model: 'gemma3:12b',
-        useGeminiInstead: false, // Default: use Ollama as main provider
-      },
-    };
+    return defaults();
   }
 
   private saveSettings(): void {
@@ -148,23 +172,64 @@ class SettingsStore {
   }
 
   // Ollama settings
-  getOllamaSettings(): { enabled: boolean; url: string; model: string; useGeminiInstead: boolean } {
+  getOllamaSettings(): {
+    enabled: boolean;
+    url: string;
+    model: string;
+    useGeminiInstead: boolean;
+    rerankModel: string;
+    neighborRerankEnabled: boolean;
+    oracleRerankEnabled: boolean;
+    oracleRerankBlend: number;
+  } {
     const defaults = {
       enabled: true,
       url: 'http://localhost:11434',
       model: 'gemma3:12b',
       useGeminiInstead: false,
+      rerankModel: DEFAULT_OLLAMA_RERANK_MODEL,
+      neighborRerankEnabled: true,
+      oracleRerankEnabled: true,
+      oracleRerankBlend: 1,
     };
+    const o = this.settings.ollama;
+    let blend =
+      typeof o?.oracleRerankBlend === 'number' && Number.isFinite(o.oracleRerankBlend)
+        ? o.oracleRerankBlend
+        : defaults.oracleRerankBlend;
+    blend = Math.min(1, Math.max(0, blend));
     return {
       ...defaults,
-      ...this.settings.ollama,
+      ...o,
+      rerankModel: o?.rerankModel?.trim() || defaults.rerankModel,
+      neighborRerankEnabled: o?.neighborRerankEnabled !== false,
+      oracleRerankEnabled: o?.oracleRerankEnabled !== false,
+      oracleRerankBlend: blend,
     };
   }
 
-  setOllamaSettings(settings: { enabled?: boolean; url?: string; model?: string; useGeminiInstead?: boolean }): void {
+  setOllamaSettings(settings: {
+    enabled?: boolean;
+    url?: string;
+    model?: string;
+    useGeminiInstead?: boolean;
+    rerankModel?: string;
+    neighborRerankEnabled?: boolean;
+    oracleRerankEnabled?: boolean;
+    oracleRerankBlend?: number;
+  }): void {
+    const next = { ...settings };
+    if (next.rerankModel !== undefined) {
+      const t = String(next.rerankModel).trim();
+      next.rerankModel = t.length > 200 ? t.slice(0, 200) : t;
+    }
+    if (next.oracleRerankBlend !== undefined) {
+      const b = Number(next.oracleRerankBlend);
+      next.oracleRerankBlend = Number.isFinite(b) ? Math.min(1, Math.max(0, b)) : 1;
+    }
     this.settings.ollama = {
       ...this.settings.ollama,
-      ...settings,
+      ...next,
     };
     this.saveSettings();
     logger.log('[SettingsStore] Ollama settings updated');
@@ -174,9 +239,22 @@ class SettingsStore {
     return this.settings.ollama?.enabled ?? true;
   }
 
-  // Check if Gemini should be used instead of Ollama
+  // Check if Gemini should be used instead of Ollama (deprecated: use getPreferredChatProvider)
   shouldUseGemini(): boolean {
-    return this.hasGoogleAIKey() && (this.settings.ollama?.useGeminiInstead ?? false);
+    return this.getPreferredChatProvider() === 'gemini';
+  }
+
+  getPreferredChatProvider(): PreferredChatProvider {
+    const p = this.settings.preferences?.preferredChatProvider;
+    if (p === 'ollama' || p === 'gemini' || p === 'azure-openai' || p === 'anthropic') return p;
+    return 'ollama';
+  }
+
+  setPreferredChatProvider(provider: PreferredChatProvider): void {
+    if (!this.settings.preferences) this.settings.preferences = { autoLaunch: true };
+    this.settings.preferences.preferredChatProvider = provider;
+    this.saveSettings();
+    logger.log('[SettingsStore] Preferred chat provider set to', provider);
   }
 
   // Auto-launch settings

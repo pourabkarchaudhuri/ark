@@ -104,7 +104,7 @@ export function getAdjustedRatingForSort(game: Game | null | undefined): number 
  * process input (e.g. hover) before running the sort phase.
  */
 function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult {
-  const { currentGames, searchResults, isSearching, viewMode, searchQuery, filters, librarySearchIndex, allowAdultContent } = input;
+  const { currentGames, searchResults, isSearching, viewMode, searchQuery, filters, librarySearchIndex, allowAdultContent, liveGameIds } = input;
 
   // ── 1. displayedGames ────────────────────────────────────────────────
   let games: Game[];
@@ -159,7 +159,16 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
       games = games.filter(game => {
         if (hasGenre && !game.genre.includes(filters.genre)) return false;
         if (hasPlatform && !game.platform.some(p => p.toLowerCase().includes(platformLower))) return false;
-        if (hasStatus && !(game.isInLibrary && game.status === filters.status)) return false;
+        if (hasStatus) {
+          if (!game.isInLibrary) return false;
+          // "Playing Now" filter = only games actually running (tracked), not stored status
+          if (filters.status === 'Playing Now') {
+            const isLive = liveGameIds?.has(game.id) || (game.steamAppId ? liveGameIds?.has(`steam-${game.steamAppId}`) : false);
+            if (!isLive) return false;
+          } else if (game.status !== filters.status) {
+            return false;
+          }
+        }
         if (hasPriority && !(game.isInLibrary && game.priority === filters.priority)) return false;
         if (hasYear) {
           if (!game.releaseDate) return false;
@@ -237,7 +246,15 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
 
     if (anyBaseFilter) {
       baseGames = baseGames.filter(game => {
-        if (hasStatus && !(game.isInLibrary && game.status === filters.status)) return false;
+        if (hasStatus) {
+          if (!game.isInLibrary) return false;
+          if (filters.status === 'Playing Now') {
+            const isLive = liveGameIds?.has(game.id) || (game.steamAppId ? liveGameIds?.has(`steam-${game.steamAppId}`) : false);
+            if (!isLive) return false;
+          } else if (game.status !== filters.status) {
+            return false;
+          }
+        }
         if (hasPriority && !(game.isInLibrary && game.priority === filters.priority)) return false;
         if (storeSet2) {
           const isBothStores = storeSet2.has('steam') && storeSet2.has('epic');
@@ -332,6 +349,8 @@ function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
       const aStatus = a.isInLibrary ? statusPriority(a) : 5;
       const bStatus = b.isInLibrary ? statusPriority(b) : 5;
       if (aStatus !== bStatus) return aStatus - bStatus;
+      // Within each status section: always alphabetical by title
+      return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
     }
 
     let comparison = 0;

@@ -12,17 +12,22 @@ import {
   Brain, BookOpen, Info, Users, Scale, ExternalLink,
   Library, Compass, Globe, Newspaper, Calendar, Gamepad2,
   Zap, Search, Star, Trophy, Map, MessageCircle, Shield,
-  Layers, Wand2, TrendingUp, Heart, Package,
+  Layers, Wand2, TrendingUp, Heart, Package, HelpCircle, Play, CheckCircle2, RotateCcw, Rocket,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { libraryStore } from '@/services/library-store';
 import { gameService } from '@/services/game-service';
 import { useDevMode } from '@/hooks/useDevMode';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
+import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
+import { isTourCompleted, type TourId } from '@/components/guided-tour';
+
+export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
 
 declare global {
   interface Window {
@@ -31,10 +36,30 @@ declare global {
       setApiKey: (key: string) => Promise<void>;
       removeApiKey: () => Promise<void>;
       hasApiKey: () => Promise<boolean>;
-      getOllamaSettings: () => Promise<{ enabled: boolean; url: string; model: string; useGeminiInstead: boolean }>;
-      setOllamaSettings: (settings: { enabled?: boolean; url?: string; model?: string; useGeminiInstead?: boolean }) => Promise<void>;
+      getOllamaSettings: () => Promise<{
+        enabled: boolean;
+        url: string;
+        model: string;
+        useGeminiInstead: boolean;
+        rerankModel: string;
+        neighborRerankEnabled: boolean;
+        oracleRerankEnabled: boolean;
+        oracleRerankBlend: number;
+      }>;
+      setOllamaSettings: (settings: {
+        enabled?: boolean;
+        url?: string;
+        model?: string;
+        useGeminiInstead?: boolean;
+        rerankModel?: string;
+        neighborRerankEnabled?: boolean;
+        oracleRerankEnabled?: boolean;
+        oracleRerankBlend?: number;
+      }) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
       setAutoLaunch: (enabled: boolean) => Promise<void>;
+      getPreferredChatProvider: () => Promise<PreferredChatProvider>;
+      setPreferredChatProvider: (provider: PreferredChatProvider) => Promise<{ success: boolean; error?: string }>;
     };
   }
 }
@@ -260,13 +285,26 @@ const GeneralTab = memo(function GeneralTab() {
 
 // ─── AI Models Tab ────────────────────────────────────────────────────────────
 
+const CHAT_PROVIDER_LABELS: Record<PreferredChatProvider, string> = {
+  'ollama': 'Ollama (local)',
+  'gemini': 'Google Gemini',
+  'azure-openai': 'Azure OpenAI',
+  'anthropic': 'Anthropic (Claude)',
+};
+
 const AIModelsTab = memo(function AIModelsTab() {
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
-  const [useGeminiInstead, setUseGeminiInstead] = useState(false);
+  const [ollamaRerankModel, setOllamaRerankModel] = useState(DEFAULT_OLLAMA_RERANK_MODEL);
+  const [neighborRerankEnabled, setNeighborRerankEnabled] = useState(true);
+  const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
+  const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
   const initialLoadRef = useRef(true);
+
+  const [preferredChatProvider, setPreferredChatProviderState] = useState<PreferredChatProvider>('ollama');
+  const [availableProviders, setAvailableProviders] = useState<PreferredChatProvider[]>([]);
 
   const [apiKey, setApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
@@ -286,6 +324,11 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [azureDeployment, setAzureDeployment] = useState(() => {
     try { return localStorage.getItem('ark-azure-deployment') || ''; } catch { return ''; }
   });
+  const [azureApiVersion, setAzureApiVersion] = useState(() => {
+    try { return localStorage.getItem('ark-azure-api-version') || ''; } catch { return ''; }
+  });
+  const [azureTestStatus, setAzureTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [azureTestMessage, setAzureTestMessage] = useState('');
 
   // Anthropic state
   const [anthropicKey, setAnthropicKey] = useState(() => {
@@ -299,11 +342,24 @@ const AIModelsTab = memo(function AIModelsTab() {
     const load = async () => {
       if (!window.settings) return;
       try {
-        const exists = await window.settings.hasApiKey();
+        const [exists, s, preferred] = await Promise.all([
+          window.settings.hasApiKey(),
+          window.settings.getOllamaSettings(),
+          window.settings.getPreferredChatProvider(),
+        ]);
         setHasExistingKey(exists);
         if (exists) { const key = await window.settings.getApiKey(); if (key) setApiKey(key); }
-        const s = await window.settings.getOllamaSettings();
-        setOllamaUrl(s.url); setOllamaModel(s.model); setUseGeminiInstead(s.useGeminiInstead ?? false);
+        setOllamaUrl(s.url);
+        setOllamaModel(s.model);
+        setOllamaRerankModel(s.rerankModel ?? DEFAULT_OLLAMA_RERANK_MODEL);
+        setNeighborRerankEnabled(s.neighborRerankEnabled !== false);
+        setOracleRerankEnabled(s.oracleRerankEnabled !== false);
+        setOracleRerankBlend(
+          typeof s.oracleRerankBlend === 'number' && Number.isFinite(s.oracleRerankBlend)
+            ? Math.min(1, Math.max(0, s.oracleRerankBlend))
+            : 1,
+        );
+        setPreferredChatProviderState(preferred);
         initialLoadRef.current = false;
       } catch { initialLoadRef.current = false; }
     };
@@ -311,15 +367,36 @@ const AIModelsTab = memo(function AIModelsTab() {
     return () => { if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current); if (ollamaDebounceRef.current) clearTimeout(ollamaDebounceRef.current); };
   }, []);
 
+  // Compute available providers whenever credentials change
+  useEffect(() => {
+    const list: PreferredChatProvider[] = [];
+    if (azureEndpoint.trim() && azureKey.trim() && azureDeployment.trim()) list.push('azure-openai');
+    if (anthropicKey.trim()) list.push('anthropic');
+    if (hasExistingKey) list.push('gemini');
+    if (ollamaUrl.trim()) list.push('ollama');
+    setAvailableProviders(list);
+  }, [azureEndpoint, azureKey, azureDeployment, azureApiVersion, anthropicKey, hasExistingKey, ollamaUrl]);
+
   useEffect(() => {
     if (initialLoadRef.current || !window.settings) return;
     if (ollamaDebounceRef.current) clearTimeout(ollamaDebounceRef.current);
     setOllamaSaveStatus('saving');
     ollamaDebounceRef.current = setTimeout(async () => {
-      try { await window.settings!.setOllamaSettings({ url: ollamaUrl, model: ollamaModel, useGeminiInstead }); setOllamaSaveStatus('saved'); setTimeout(() => setOllamaSaveStatus('idle'), 2000); }
+      try {
+        await window.settings!.setOllamaSettings({
+          url: ollamaUrl,
+          model: ollamaModel,
+          rerankModel: ollamaRerankModel,
+          neighborRerankEnabled,
+          oracleRerankEnabled,
+          oracleRerankBlend,
+        });
+        setOllamaSaveStatus('saved');
+        setTimeout(() => setOllamaSaveStatus('idle'), 2000);
+      }
       catch { /* ignore */ }
     }, 800);
-  }, [ollamaUrl, ollamaModel, useGeminiInstead]);
+  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend]);
 
   useEffect(() => {
     if (initialLoadRef.current || !window.settings || !apiKey.trim()) { setSaveStatus('idle'); return; }
@@ -333,7 +410,7 @@ const AIModelsTab = memo(function AIModelsTab() {
   }, [apiKey]);
 
   // Persist Azure & Anthropic to localStorage
-  useEffect(() => { try { localStorage.setItem('ark-azure-endpoint', azureEndpoint); localStorage.setItem('ark-azure-key', azureKey); localStorage.setItem('ark-azure-deployment', azureDeployment); } catch {} }, [azureEndpoint, azureKey, azureDeployment]);
+  useEffect(() => { try { localStorage.setItem('ark-azure-endpoint', azureEndpoint); localStorage.setItem('ark-azure-key', azureKey); localStorage.setItem('ark-azure-deployment', azureDeployment); localStorage.setItem('ark-azure-api-version', azureApiVersion); } catch {} }, [azureEndpoint, azureKey, azureDeployment, azureApiVersion]);
   useEffect(() => { try { localStorage.setItem('ark-anthropic-key', anthropicKey); localStorage.setItem('ark-anthropic-model', anthropicModel); } catch {} }, [anthropicKey, anthropicModel]);
 
   const handleRemoveApiKey = useCallback(async () => {
@@ -346,28 +423,147 @@ const AIModelsTab = memo(function AIModelsTab() {
 
   const getMaskedKey = (key: string) => (!key || key.length < 10) ? key : key.substring(0, 8) + '•'.repeat(16) + key.substring(key.length - 4);
 
+  const handlePreferredProviderChange = useCallback(async (value: PreferredChatProvider) => {
+    setPreferredChatProviderState(value);
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem('ark-preferred-chat-provider', value);
+      await window.settings?.setPreferredChatProvider(value);
+    } catch { /* ignore */ }
+  }, []);
+
+  const effectivePreferred = availableProviders.includes(preferredChatProvider)
+    ? preferredChatProvider
+    : (availableProviders[0] ?? 'ollama');
+
+  useEffect(() => {
+    if (effectivePreferred !== preferredChatProvider && availableProviders.length > 0) {
+      setPreferredChatProviderState(effectivePreferred);
+      if (typeof localStorage !== 'undefined') localStorage.setItem('ark-preferred-chat-provider', effectivePreferred);
+      window.settings?.setPreferredChatProvider(effectivePreferred).catch(() => {});
+    }
+  }, [effectivePreferred, preferredChatProvider, availableProviders.length]);
+
+  const testAzureConnection = useCallback(async () => {
+    const endpoint = azureEndpoint.trim().replace(/\/+$/, '');
+    const key = azureKey.trim();
+    const deployment = azureDeployment.trim();
+    const apiVersion = azureApiVersion.trim() || '2024-12-01-preview';
+    if (!endpoint || !key || !deployment) {
+      setAzureTestStatus('error');
+      setAzureTestMessage('Endpoint, API key, and deployment name are required.');
+      return;
+    }
+    setAzureTestStatus('testing');
+    setAzureTestMessage('');
+    try {
+      const url = `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'api-key': key,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: [
+            { role: 'user', content: 'Hi' },
+          ],
+          max_completion_tokens: 20,
+        }),
+      });
+      if (res.ok) {
+        setAzureTestStatus('success');
+        setAzureTestMessage('Connection successful. Azure OpenAI is reachable.');
+      } else {
+        const body = await res.text();
+        setAzureTestStatus('error');
+        setAzureTestMessage(body || `HTTP ${res.status} ${res.statusText}`);
+      }
+    } catch (err) {
+      setAzureTestStatus('error');
+      setAzureTestMessage(err instanceof Error ? err.message : 'Network or request failed.');
+    }
+  }, [azureEndpoint, azureKey, azureDeployment, azureApiVersion]);
+
   return (
     <div className="space-y-6">
+      {/* Chat model — single source of truth for which LLM the app uses */}
+      <SectionHeading icon={Brain}>Chat model</SectionHeading>
+      <SectionCard>
+        <p className="text-xs text-white/35 mb-3">Choose which provider to use for the AI Chat. Only configured providers are listed. If no keys are set, Ollama (local) is the default.</p>
+        {availableProviders.length > 0 ? (
+          <Select value={effectivePreferred} onValueChange={handlePreferredProviderChange}>
+            <SelectTrigger className="bg-white/[0.03] border-white/[0.06] text-white/90">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {availableProviders.map((id) => (
+                <SelectItem key={id} value={id}>
+                  {CHAT_PROVIDER_LABELS[id]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <p className="text-xs text-amber-400/80">Configure at least one provider below (Ollama URL, Gemini key, Azure OpenAI, or Anthropic) to enable chat.</p>
+        )}
+      </SectionCard>
+
       {/* Ollama */}
       <SectionHeading icon={Bot}>Ollama (Local AI)</SectionHeading>
-      <SectionCard className={useGeminiInstead ? 'opacity-50' : undefined}>
+      <SectionCard>
         <div>
-          <div className="flex items-center gap-2">
-            <p className="text-sm font-medium text-white/90">Local AI with Ollama</p>
-            {!useGeminiInstead && <span className="text-[10px] text-white/40 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.06]">Default</span>}
-          </div>
+          <p className="text-sm font-medium text-white/90">Local AI with Ollama</p>
           <p className="text-xs text-white/35 mt-0.5">Runs on your computer for privacy. Make sure Ollama is running.</p>
         </div>
         <div>
           <label className="text-xs text-white/40 mb-1 block">Ollama URL</label>
           <Input type="text" value={ollamaUrl} onChange={(e) => setOllamaUrl(e.target.value)} placeholder="http://localhost:11434"
-            className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" disabled={useGeminiInstead} />
+            className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
         </div>
         <div>
           <label className="text-xs text-white/40 mb-1 block">Model Name</label>
           <Input type="text" value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} placeholder="gemma3:12b"
-            className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" disabled={useGeminiInstead} />
+            className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
         </div>
+        <div>
+          <label className="text-xs text-white/40 mb-1 block">Rerank model (Embedding Space)</label>
+          <Input type="text" value={ollamaRerankModel} onChange={(e) => setOllamaRerankModel(e.target.value)} placeholder={DEFAULT_OLLAMA_RERANK_MODEL}
+            className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
+          <p className="text-[11px] text-white/25 mt-1">
+            Neighbor ordering via <code className="text-white/35">/api/rerank</code>. Run{' '}
+            <code className="text-white/35">ollama pull {DEFAULT_OLLAMA_RERANK_MODEL}</code>
+          </p>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-white/70">Embedding Space neighbor rerank</p>
+            <p className="text-[11px] text-white/30 mt-0.5">Cross-encoder refinement for neighbor lists.</p>
+          </div>
+          <Toggle value={neighborRerankEnabled} onChange={() => setNeighborRerankEnabled(!neighborRerankEnabled)} />
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-white/70">Oracle recommendation rerank</p>
+            <p className="text-[11px] text-white/30 mt-0.5">Reorder shelves after the scoring worker.</p>
+          </div>
+          <Toggle value={oracleRerankEnabled} onChange={() => setOracleRerankEnabled(!oracleRerankEnabled)} />
+        </div>
+        {oracleRerankEnabled && (
+          <div>
+            <label className="text-xs text-white/40 mb-1 block">
+              Oracle rerank vs worker order ({Math.round(oracleRerankBlend * 100)}% rerank)
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(oracleRerankBlend * 100)}
+              onChange={(e) => setOracleRerankBlend(Number(e.target.value) / 100)}
+              className="w-full accent-fuchsia-500"
+            />
+            <p className="text-[11px] text-white/25 mt-1">0% keeps worker order; 100% uses the reranker fully.</p>
+          </div>
+        )}
         <div className="flex items-center gap-2 text-xs">
           {ollamaSaveStatus === 'saving' && <><Loader2 className="h-3 w-3 animate-spin text-white/40" /><span className="text-white/40">Saving...</span></>}
           {ollamaSaveStatus === 'saved' && <><Check className="h-3 w-3 text-emerald-400/60" /><span className="text-white/40">Saved</span></>}
@@ -379,41 +575,34 @@ const AIModelsTab = memo(function AIModelsTab() {
       {/* Gemini */}
       <SectionHeading icon={Key}>Google Gemini</SectionHeading>
       <SectionCard>
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-medium text-white/90">Use Gemini Instead</p>
-            <p className="text-xs text-white/35 mt-0.5">Switch to Google Gemini for enhanced features (tools, search)</p>
-          </div>
-          <Toggle value={useGeminiInstead} onChange={() => setUseGeminiInstead(!useGeminiInstead)} />
+        <div>
+          <p className="text-sm font-medium text-white/90">Google Gemini</p>
+          <p className="text-xs text-white/35 mt-0.5">Cloud AI with tools and search. Add your API key and select it above as the chat model.</p>
         </div>
-        {useGeminiInstead && (
-          <div className="space-y-3 pt-2 border-t border-white/[0.04]">
-            <div className="relative">
-              <label className="text-xs text-white/40 mb-1 block">Gemini API Key</label>
-              <Input type={showApiKey ? 'text' : 'password'} placeholder="Enter your Google AI API key..."
-                value={showApiKey ? apiKey : (hasExistingKey && apiKey ? getMaskedKey(apiKey) : apiKey)}
-                onChange={(e) => setApiKey(e.target.value)} className="pr-10 bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" disabled={isLoading} />
-              <button type="button" onClick={() => setShowApiKey(!showApiKey)} className="absolute right-3 bottom-2.5 text-white/40 hover:text-white/70 transition-colors">
-                {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
-            </div>
-            {error && <div className="flex items-center gap-2 text-red-400/70 text-xs"><AlertCircle className="h-3 w-3" />{error}</div>}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs">
-                {saveStatus === 'saving' && <><Loader2 className="h-3 w-3 animate-spin text-white/40" /><span className="text-white/40">Saving...</span></>}
-                {saveStatus === 'saved' && <><Check className="h-3 w-3 text-emerald-400/60" /><span className="text-white/40">Saved</span></>}
-                {saveStatus === 'idle' && hasExistingKey && <><Check className="h-3 w-3 text-white/30" /><span className="text-white/30">Key configured</span></>}
-                {saveStatus === 'idle' && !hasExistingKey && <span className="text-white/25">Changes save automatically</span>}
-              </div>
-              {hasExistingKey && (
-                <Button variant="ghost" size="sm" onClick={handleRemoveApiKey} disabled={isLoading} className="h-7 text-white/30 hover:text-red-400/70 hover:bg-red-500/10">
-                  <Trash2 className="h-3 w-3 mr-1" /> Remove
-                </Button>
-              )}
-            </div>
-            <p className="text-xs text-white/25">Get your API key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Google AI Studio</a></p>
+        <div className="relative">
+          <label className="text-xs text-white/40 mb-1 block">Gemini API Key</label>
+          <Input type={showApiKey ? 'text' : 'password'} placeholder="Enter your Google AI API key..."
+            value={showApiKey ? apiKey : (hasExistingKey && apiKey ? getMaskedKey(apiKey) : apiKey)}
+            onChange={(e) => setApiKey(e.target.value)} className="pr-10 bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" disabled={isLoading} />
+          <button type="button" onClick={() => setShowApiKey(!showApiKey)} className="absolute right-3 bottom-2.5 text-white/40 hover:text-white/70 transition-colors">
+            {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
+        </div>
+        {error && <div className="flex items-center gap-2 text-red-400/70 text-xs"><AlertCircle className="h-3 w-3" />{error}</div>}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs">
+            {saveStatus === 'saving' && <><Loader2 className="h-3 w-3 animate-spin text-white/40" /><span className="text-white/40">Saving...</span></>}
+            {saveStatus === 'saved' && <><Check className="h-3 w-3 text-emerald-400/60" /><span className="text-white/40">Saved</span></>}
+            {saveStatus === 'idle' && hasExistingKey && <><Check className="h-3 w-3 text-white/30" /><span className="text-white/30">Key configured</span></>}
+            {saveStatus === 'idle' && !hasExistingKey && <span className="text-white/25">Changes save automatically</span>}
           </div>
-        )}
+          {hasExistingKey && (
+            <Button variant="ghost" size="sm" onClick={handleRemoveApiKey} disabled={isLoading} className="h-7 text-white/30 hover:text-red-400/70 hover:bg-red-500/10">
+              <Trash2 className="h-3 w-3 mr-1" /> Remove
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-white/25">Get your API key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Google AI Studio</a></p>
       </SectionCard>
 
       {/* Azure OpenAI */}
@@ -437,6 +626,19 @@ const AIModelsTab = memo(function AIModelsTab() {
           <label className="text-xs text-white/40 mb-1 block">Deployment Name</label>
           <Input type="text" value={azureDeployment} onChange={(e) => setAzureDeployment(e.target.value)} placeholder="gpt-4o"
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
+        </div>
+        <div>
+          <label className="text-xs text-white/40 mb-1 block">API Version (optional)</label>
+          <Input type="text" value={azureApiVersion} onChange={(e) => setAzureApiVersion(e.target.value)} placeholder="2025-04-01-preview"
+            className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button type="button" variant="outline" size="sm" onClick={testAzureConnection} disabled={azureTestStatus === 'testing' || !azureEndpoint.trim() || !azureKey.trim() || !azureDeployment.trim()}
+            className="border-white/10 text-white/70 hover:bg-white/5 hover:text-white/90">
+            {azureTestStatus === 'testing' ? <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> Testing…</> : <>Test connection</>}
+          </Button>
+          {azureTestStatus === 'success' && <span className="text-xs text-emerald-400/80 flex items-center gap-1"><Check className="h-3.5 w-3.5" />{azureTestMessage}</span>}
+          {azureTestStatus === 'error' && azureTestMessage && <span className="text-xs text-red-400/80 flex items-center gap-1"><AlertCircle className="h-3.5 w-3.5 shrink-0" />{azureTestMessage}</span>}
         </div>
         <p className="text-xs text-white/25">Configure your Azure OpenAI resource in the <a href="https://portal.azure.com/" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Azure Portal</a>.</p>
       </SectionCard>
@@ -491,29 +693,131 @@ const GUIDE_STEPS: GuideStep[] = [
   { title: 'Earn Medals', description: 'Track your gaming achievements with the Medals system. Earn badges for milestones like playing streaks, genre diversity, completing games, and building your collection. Your play streak heatmap shows consistency.', icon: Trophy, color: 'text-yellow-400' },
 ];
 
-const GuideTab = memo(function GuideTab() {
+const ALL_TOURS: { id: TourId; label: string; description: string; icon: React.ElementType; color: string; devOnly?: boolean }[] = [
+  { id: 'welcome',   label: 'Welcome',         description: 'Quick orientation — command strip, Browse vs Library, search, filters, and settings.',         icon: Rocket,    color: 'text-fuchsia-400' },
+  { id: 'browse',    label: 'Browse',           description: 'Deep dive into the catalog: categories, search, filters, Embedding Space, and the game grid.', icon: Search,    color: 'text-sky-400' },
+  { id: 'library',   label: 'Library',          description: 'Your shelf: custom games, status chips, search, filters, and the Voyage link.',                icon: Library,   color: 'text-emerald-400' },
+  { id: 'journey',   label: 'Voyage',           description: 'Timeline, Captain\'s Log, OCD Gantt, and Medals.',                                             icon: Compass,   color: 'text-violet-400' },
+  { id: 'oracle',    label: 'Oracle',           description: 'AI recommendation engine and taste profiling.',                                                icon: Brain,     color: 'text-fuchsia-400' },
+  { id: 'ann-graph', label: 'Embedding Space',  description: '3D galaxy map with ANN search and neighbor paths.',                                            icon: Map,       color: 'text-amber-400' },
+  { id: 'buzz',      label: 'Transmissions',    description: 'Gaming news stream, Decode Bay reader, and events.',                                           icon: Newspaper, color: 'text-rose-400' },
+  { id: 'calendar',  label: 'Releases',         description: 'Upcoming launches by month, week, or day.',                                                    icon: Calendar,  color: 'text-cyan-400' },
+  { id: 'settings',  label: 'Settings',         description: 'This page — AI providers, data, and preferences.',                                             icon: Settings,  color: 'text-white/60' },
+  { id: 'data-flow', label: 'Data Flow',        description: 'Live subsystem status diagram.',                                                               icon: Zap,       color: 'text-amber-400',  devOnly: true },
+  { id: 'devlog',    label: 'Dev Log',          description: 'Construction journal timeline.',                                                                icon: Code2,     color: 'text-amber-400',  devOnly: true },
+];
+
+function TourButton({ tour, onRun }: { tour: typeof ALL_TOURS[number]; onRun: (id: TourId) => void }) {
+  const completed = isTourCompleted(tour.id);
+  const TourIcon = tour.icon;
+
   return (
-    <div className="space-y-6">
-      <SectionHeading icon={BookOpen}>Getting Started</SectionHeading>
-      <p className="text-sm text-white/40 -mt-2 mb-4">Follow these steps to get the most out of Ark. Each section of the app is designed to work together — your library feeds recommendations, which feed the galaxy, which helps you discover more.</p>
-      <div className="space-y-4">
-        {GUIDE_STEPS.map((step, i) => (
-          <div key={step.title} className="flex gap-4 group">
-            <div className="flex flex-col items-center">
-              <div className={cn('w-10 h-10 rounded-xl bg-white/[0.04] border border-white/[0.08] flex items-center justify-center', step.color)}>
-                <step.icon className="h-5 w-5" />
-              </div>
-              {i < GUIDE_STEPS.length - 1 && <div className="w-px flex-1 bg-white/[0.06] mt-2" />}
-            </div>
-            <div className="pb-6 flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-[10px] font-mono text-white/20">STEP {String(i + 1).padStart(2, '0')}</span>
-              </div>
-              <h4 className="text-sm font-semibold text-white/90 mb-1.5">{step.title}</h4>
-              <p className="text-xs text-white/40 leading-relaxed">{step.description}</p>
-            </div>
+    <button
+      type="button"
+      onClick={() => onRun(tour.id)}
+      className={cn(
+        'group relative flex items-center gap-3 w-full rounded-lg px-3 py-2.5 text-left transition-all',
+        'border hover:border-fuchsia-500/30',
+        completed
+          ? 'bg-white/[0.02] border-white/[0.06]'
+          : 'bg-white/[0.03] border-white/[0.08]',
+        'hover:bg-fuchsia-500/[0.06]',
+      )}
+    >
+      <div className={cn(
+        'flex items-center justify-center w-8 h-8 rounded-lg shrink-0 transition-colors',
+        completed ? 'bg-emerald-500/10' : 'bg-white/[0.04]',
+      )}>
+        {completed
+          ? <CheckCircle2 className="h-4 w-4 text-emerald-400/70" />
+          : <TourIcon className={cn('h-4 w-4', tour.color)} />
+        }
+      </div>
+
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5">
+          <span className={cn(
+            'text-[13px] font-medium truncate',
+            completed ? 'text-white/50' : 'text-white/90',
+          )}>
+            {tour.label}
+          </span>
+          {tour.devOnly && (
+            <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-amber-500/10 text-amber-400/70 uppercase tracking-wider shrink-0">Dev</span>
+          )}
+        </div>
+        <p className={cn(
+          'text-[11px] leading-snug truncate',
+          completed ? 'text-white/25' : 'text-white/35',
+        )}>
+          {tour.description}
+        </p>
+      </div>
+
+      <div className={cn(
+        'flex items-center justify-center w-7 h-7 rounded-md shrink-0 transition-all',
+        completed
+          ? 'bg-white/[0.03] group-hover:bg-fuchsia-500/15'
+          : 'bg-fuchsia-500/15 group-hover:bg-fuchsia-500/25',
+      )}>
+        {completed
+          ? <RotateCcw className="h-3 w-3 text-white/30 group-hover:text-fuchsia-400 transition-colors" />
+          : <Play className="h-3 w-3 text-fuchsia-400 ml-0.5" />
+        }
+      </div>
+    </button>
+  );
+}
+
+const GuideTab = memo(function GuideTab({ onRunGuidedTour }: { onRunGuidedTour?: (tourId: TourId) => void }) {
+  const [devMode] = useDevMode();
+
+  const visibleTours = ALL_TOURS.filter((t) => !t.devOnly || devMode);
+
+  return (
+    <div className="space-y-8">
+      {/* ── Interactive Tours ─────────────────────────────────────── */}
+      {onRunGuidedTour && (
+        <div data-tour="settings-guided-tours">
+          <SectionHeading icon={HelpCircle}>Guided tours</SectionHeading>
+          <p className="text-sm text-white/40 -mt-2 mb-4">
+            Click any tour to start an interactive walkthrough. Ark switches to the right tab first.
+            Press <kbd className="px-1 py-0.5 rounded bg-white/10 text-white/60 text-[10px] font-mono">Esc</kbd> anytime to exit.
+            The <span className="text-cyan-400/80 font-medium">?</span> button on the dashboard does the same for the active view.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {visibleTours.map((t) => (
+              <TourButton key={t.id} tour={t} onRun={onRunGuidedTour} />
+            ))}
           </div>
-        ))}
+        </div>
+      )}
+
+      {/* ── Getting Started ───────────────────────────────────────── */}
+      <div>
+        <SectionHeading icon={BookOpen}>Getting started</SectionHeading>
+        <p className="text-sm text-white/40 -mt-2 mb-4">
+          How the pieces fit together — your library feeds recommendations, which feed the galaxy, which helps you discover more.
+        </p>
+        <div className="space-y-3">
+          {GUIDE_STEPS.map((step, i) => (
+            <div key={step.title} className="flex gap-3.5">
+              <div className="flex flex-col items-center">
+                <div className={cn('w-9 h-9 rounded-lg bg-white/[0.03] border border-white/[0.06] flex items-center justify-center', step.color)}>
+                  <step.icon className="h-4 w-4" />
+                </div>
+                {i < GUIDE_STEPS.length - 1 && <div className="w-px flex-1 bg-white/[0.04] mt-1.5" />}
+              </div>
+              <div className="pb-4 flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-[9px] font-mono text-white/15 uppercase tracking-wider">Step {i + 1}</span>
+                </div>
+                <h4 className="text-[13px] font-semibold text-white/85 mb-1">{step.title}</h4>
+                <p className="text-[11px] text-white/35 leading-relaxed">{step.description}</p>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -703,26 +1007,29 @@ const AboutTab = memo(function AboutTab() {
 
 // ─── Tab content router ───────────────────────────────────────────────────────
 
-const TAB_COMPONENTS: Record<SettingsTab, React.ComponentType> = {
+const TAB_COMPONENTS: Record<Exclude<SettingsTab, 'guide'>, React.ComponentType> = {
   general: GeneralTab,
   'ai-models': AIModelsTab,
-  guide: GuideTab,
   features: FeaturesTab,
   about: AboutTab,
 };
 
 // ─── Main Settings Screen ─────────────────────────────────────────────────────
 
-interface SettingsScreenProps { onBack: () => void }
+interface SettingsScreenProps {
+  onBack: () => void;
+  /** Start a Joyride tour after switching to the correct dashboard view (Browse, Library, etc.). */
+  onRunGuidedTour?: (tourId: TourId) => void;
+}
 
-export const SettingsScreen = memo(function SettingsScreen({ onBack }: SettingsScreenProps) {
+export const SettingsScreen = memo(function SettingsScreen({ onBack, onRunGuidedTour }: SettingsScreenProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
-  const ActiveComponent = TAB_COMPONENTS[activeTab];
+  const ActiveComponent = activeTab === 'guide' ? null : TAB_COMPONENTS[activeTab];
 
   return (
     <div className="fixed inset-0 top-[52px] z-30 bg-black flex">
       {/* Sidebar */}
-      <aside className="w-[220px] border-r border-white/[0.06] flex flex-col bg-black/40 shrink-0">
+      <aside className="w-[220px] border-r border-white/[0.06] flex flex-col bg-black/40 shrink-0" data-tour="settings-sidebar">
         <div className="px-4 pt-5 pb-4">
           <Button onClick={onBack} variant="ghost" size="sm"
             className="h-8 text-white/40 hover:text-white hover:bg-white/10 border border-white/[0.06] gap-1.5 font-mono text-[11px] w-full justify-start">
@@ -762,13 +1069,17 @@ export const SettingsScreen = memo(function SettingsScreen({ onBack }: SettingsS
       </aside>
 
       {/* Content */}
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 overflow-y-auto" data-tour="settings-content">
         <div className="max-w-3xl mx-auto px-8 py-8">
           <div className="mb-6">
             <h1 className="text-xl font-bold text-white/90">{TABS.find(t => t.id === activeTab)?.label}</h1>
             <div className="h-px bg-white/[0.06] mt-3" />
           </div>
-          <ActiveComponent />
+          {activeTab === 'guide' ? (
+            <GuideTab onRunGuidedTour={onRunGuidedTour} />
+          ) : (
+            ActiveComponent && <ActiveComponent />
+          )}
         </div>
       </main>
     </div>

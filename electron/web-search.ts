@@ -29,8 +29,9 @@ export function needsWebSearch(message: string): boolean {
   // Questions about current/recent things
   if (/\b(latest|recent|current|upcoming|new|today|this (week|month|year)|202[4-9]|203\d)\b/.test(lower)) return true;
 
-  // Price / deal queries
-  if (/\b(price|cost|deal|discount|sale|free|how much)\b/.test(lower)) return true;
+  // Price / deal queries (including Steam sale dates)
+  if (/\b(price|cost|deal|discount|sale|free|how much|steam sale|next sale)\b/.test(lower)) return true;
+  if (/\bhow long (is|to beat|does .+ take)\b/.test(lower)) return true;
 
   // Review / opinion aggregation
   if (/\b(review|rating|worth|should i (buy|play|get)|is .+ good|metacritic|opencritic)\b/.test(lower)) return true;

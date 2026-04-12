@@ -281,6 +281,7 @@ These are needed because the corporate network blocks downloads from `github.com
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.0.36 | 2026-04-12 | Guided tour spotlight fix, rerank badges, Ollama reranking pipeline, AI chat improvements, tour flow audit |
 | 1.0.35 | 2026-03-14 | Playtime baseline fix (no more reset when tracking exe), Transmissions improvements |
 | 1.0.31 | 2026-02-18 | Medals system, Oracle recommendations, Ollama embeddings, Year Wrapped, Gantt virtualization, perf fixes |
 | 1.0.30 | 2026-02-17 | UI rebrand, release calendar redesign, IPC refactor, Metacritic rewrite, loading screen removal |

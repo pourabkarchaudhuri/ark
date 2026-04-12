@@ -10,7 +10,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useDeferredValue, startTransition, type FC } from 'react';
 import { toPng } from 'html-to-image';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, Search, Filter, Loader2, Check, RotateCcw, X, Library, ChevronLeft, ChevronRight, Crosshair, Route, Waypoints, Info, Clock, MousePointer, Move, ZoomIn, Plus, Camera, CornerDownRight, Undo2 } from 'lucide-react';
+import { ArrowLeft, Search, Filter, Loader2, Check, RotateCcw, X, Library, ChevronLeft, ChevronRight, Crosshair, Route, Waypoints, Info, Clock, MousePointer, Move, ZoomIn, Plus, Camera, CornerDownRight, Undo2, AlertTriangle } from 'lucide-react';
 import type { SteamAppDetails } from '@/types/steam';
 import type { EpicCatalogItem, EpicProductReviews } from '@/types/epic';
 import { libraryStore } from '@/services/library-store';
@@ -42,6 +42,20 @@ import {
 } from '@/services/galaxy-cache';
 import { scoreGame, type SearchIndexEntry } from '@/services/prefetch-store';
 import { generateMockGalaxy } from '@/services/mock-galaxy';
+import {
+  applyOllamaNeighborRerank,
+  NEIGHBOR_HEURISTIC_POOL,
+  type NeighborRerankStatus,
+} from '@/services/ollama-rerank';
+
+function neighborRerankBadge(status: NeighborRerankStatus): { label: string; title: string } | null {
+  if (status === 'applied' || status === 'fallback') return null;
+  if (status === 'skipped_settings') return { label: 'Rerank off', title: 'Neighbor rerank is off in Settings' };
+  if (status === 'skipped_no_client') return { label: 'Rerank unavailable', title: 'Ollama rerank not available — connect in Settings' };
+  if (status === 'empty_results') return { label: 'No rerank scores', title: 'Rerank returned no scores; using heuristic order' };
+  if (status === 'error') return { label: 'Rerank failed', title: 'Rerank failed; using heuristic order' };
+  return null;
+}
 
 // ─── Genre IDF (Inverse Document Frequency) Weights ─────────────────────────
 // Approximate frequency of each genre across the gaming ecosystem.
@@ -877,9 +891,18 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
   const [libVersion, setLibVersion] = useState(0);
   const traversalStackRef = useRef<GraphNode[]>([]);
   const [traversalDepth, setTraversalDepth] = useState(0);
+  const neighborRerankEnabledRef = useRef(true);
+  const [neighborRerankHint, setNeighborRerankHint] = useState<{ label: string; title: string } | null>(null);
 
   useEffect(() => {
     return libraryStore.subscribe(() => setLibVersion(v => v + 1));
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.settings?.getOllamaSettings) return;
+    void window.settings.getOllamaSettings().then((s) => {
+      neighborRerankEnabledRef.current = s.neighborRerankEnabled !== false;
+    }).catch(() => {});
   }, []);
 
   activeGenresRef.current = activeGenres;
@@ -2006,7 +2029,15 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
           const results = await annIndex.queryWithDistances(vec, overFetch);
           if (selectedIdRef.current !== node.id) return;
           const filtered = results.filter(r => r.id !== node.id);
-          nbList = rerankNeighbors(node, filtered, s.nodeMap, neighborK.current);
+          const poolK = Math.min(NEIGHBOR_HEURISTIC_POOL, filtered.length);
+          nbList = rerankNeighbors(node, filtered, s.nodeMap, poolK);
+          if (selectedIdRef.current !== node.id) return;
+          const rrPath = await applyOllamaNeighborRerank(node, nbList, neighborK.current, {
+            neighborRerankEnabled: neighborRerankEnabledRef.current,
+          });
+          nbList = rrPath.neighbors;
+          setNeighborRerankHint(neighborRerankBadge(rrPath.status));
+          if (selectedIdRef.current !== node.id) return;
         }
       }
       neighborIdsRef.current = new Set(nbList.map(nb => nb.id));
@@ -2265,7 +2296,15 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         const results = await annIndex.queryWithDistances(vec, overFetch);
         if (selectedIdRef.current !== node.id) return;
         const filtered = results.filter(r => r.id !== node.id);
-        nbList = rerankNeighbors(node, filtered, s.nodeMap, neighborK.current);
+        const poolK = Math.min(NEIGHBOR_HEURISTIC_POOL, filtered.length);
+        nbList = rerankNeighbors(node, filtered, s.nodeMap, poolK);
+        if (selectedIdRef.current !== node.id) return;
+        const rrSel = await applyOllamaNeighborRerank(node, nbList, neighborK.current, {
+          neighborRerankEnabled: neighborRerankEnabledRef.current,
+        });
+        nbList = rrSel.neighbors;
+        setNeighborRerankHint(neighborRerankBadge(rrSel.status));
+        if (selectedIdRef.current !== node.id) return;
       }
     }
 
@@ -2672,11 +2711,16 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         const filtered = results
           .filter(r => r.id !== focNode.id && r.id !== selId && !primaryNbs.has(r.id) && r.distance <= 1.5);
 
-        nbList = filtered.slice(0, k).map(r => ({
-          id: r.id,
-          distance: +r.distance.toFixed(4),
-          node: s.nodeMap.get(r.id),
-        }));
+        const poolK = Math.min(NEIGHBOR_HEURISTIC_POOL, filtered.length);
+        nbList = rerankNeighbors(focNode, filtered, s.nodeMap, poolK);
+        if (cancelled) return;
+        const rrFocus = await applyOllamaNeighborRerank(focNode, nbList, k, {
+          neighborRerankEnabled: neighborRerankEnabledRef.current,
+        });
+        nbList = rrFocus.neighbors;
+        const badge = neighborRerankBadge(rrFocus.status);
+        if (badge) setNeighborRerankHint(badge);
+        if (cancelled) return;
       }
 
       if (cancelled) return;
@@ -2684,7 +2728,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     })();
 
     return () => { cancelled = true; };
-  }, [focusedNbIdx, neighbors, clearFocusedConnections, drawFocusedConnections, useMock]);
+  }, [focusedNbIdx, neighbors, clearFocusedConnections, drawFocusedConnections, useMock, rerankNeighbors]);
 
   const detailOpenRef = useRef(false);
   detailOpenRef.current = detailOpen;
@@ -2813,8 +2857,12 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/[0.06] bg-black/60 backdrop-blur-md shrink-0 z-30">
         <div className="flex items-center gap-3">
           <TooltipCard content="Return to the Oracle view — your AI recommendation hub.">
-            <button onClick={onBack}
-              className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-white/40 hover:text-white/70 hover:bg-white/5 rounded-md transition-colors cursor-pointer">
+            <button
+              type="button"
+              data-tour="ann-graph-back"
+              onClick={onBack}
+              className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-white/40 hover:text-white/70 hover:bg-white/5 rounded-md transition-colors cursor-pointer"
+            >
               <ArrowLeft className="w-3.5 h-3.5" />
               Oracle
             </button>
@@ -2833,7 +2881,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="relative" title={loading ? 'Galaxy is still loading…' : undefined}>
+          <div className="relative" data-tour="ann-graph-search" title={loading ? 'Galaxy is still loading…' : undefined}>
             <Search className={`absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 z-10 ${loading ? 'text-white/10' : 'text-white/30'}`} />
             <input
               type="text"
@@ -2883,7 +2931,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       </div>
 
       {/* 3D Canvas */}
-      <div ref={screenshotAreaRef} className="flex-1 relative overflow-hidden">
+      <div ref={screenshotAreaRef} className="flex-1 relative overflow-hidden" data-tour="ann-graph-canvas">
         <div
           ref={canvasRef}
           className="absolute inset-0"
@@ -3101,7 +3149,10 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
                   </div>
                   <div className={`transition-all duration-300 ${focusedNbIdx === -1 ? 'px-3.5 py-3' : 'px-1.5 py-1'}`}>
                     <div className={`flex items-center gap-1.5 transition-all duration-300 ${focusedNbIdx === -1 ? '' : ''}`}>
-                      <div className={`font-semibold text-white leading-tight flex-1 min-w-0 transition-all duration-300 ${focusedNbIdx === -1 ? 'text-[15px] text-white line-clamp-2 min-h-[2lh]' : 'text-[7px] text-white/20 truncate'}`}>
+                      <div
+                        className={`font-semibold text-white leading-tight flex-1 min-w-0 transition-all duration-300 ${focusedNbIdx === -1 ? 'text-[15px] text-white line-clamp-2' : 'text-[7px] text-white/20 truncate'}`}
+                        style={focusedNbIdx === -1 ? { minHeight: '2lh' } : undefined}
+                      >
                         {selectedNode.title}
                       </div>
                       {focusedNbIdx === -1 && <StoreLogos nodeId={selectedNode.id} />}
@@ -3268,7 +3319,10 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
                     </div>
                     <div className={`transition-all duration-300 ${isFocused ? 'px-3.5 py-3' : 'px-1.5 py-1'}`}>
                       <div className="flex items-center gap-1.5">
-                        <div className={`font-semibold leading-tight flex-1 min-w-0 transition-all duration-300 ${isFocused ? 'text-[15px] text-white line-clamp-2 min-h-[2lh]' : 'text-[7px] text-white/30 truncate'}`}>
+                        <div
+                          className={`font-semibold leading-tight flex-1 min-w-0 transition-all duration-300 ${isFocused ? 'text-[15px] text-white line-clamp-2' : 'text-[7px] text-white/30 truncate'}`}
+                          style={isFocused ? { minHeight: '2lh' } : undefined}
+                        >
                           {nb.node!.title}
                         </div>
                         {isFocused && <StoreLogos nodeId={nb.node!.id} />}
@@ -3423,6 +3477,15 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
                   <Waypoints className="w-3.5 h-3.5 text-cyan-400/70" />
                   <span className="text-[11px] font-medium text-white/60">Neighbors</span>
                   <span className="text-[9px] text-white/25 tabular-nums">{cycleableNeighbors.length}</span>
+                  {neighborRerankHint && (
+                    <span
+                      className="flex items-center gap-1 text-[8px] text-amber-400/70 bg-amber-400/[0.08] border border-amber-400/15 rounded px-1.5 py-0.5"
+                      title={neighborRerankHint.title}
+                    >
+                      <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+                      {neighborRerankHint.label}
+                    </span>
+                  )}
                 </div>
                 <button
                   onClick={() => { setShowNeighbors(false); setNbSearch(''); }}

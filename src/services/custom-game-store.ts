@@ -51,6 +51,13 @@ class CustomGameStore {
     }
   }
 
+  /** Ensure we always have a valid Date (never Invalid Date). Old data may lack updatedAt. */
+  private static toValidDate(value: unknown, fallback: Date): Date {
+    if (value == null) return fallback;
+    const d = value instanceof Date ? value : new Date(value as string | number);
+    return Number.isNaN(d.getTime()) ? fallback : d;
+  }
+
   private initialize() {
     if (this.isInitialized) return;
 
@@ -61,11 +68,13 @@ class CustomGameStore {
         stored.entries.forEach((entry) => {
           // Migrate legacy negative numeric IDs to "custom-N" format
           const id = this.migrateId(entry.id);
+          const addedAt = CustomGameStore.toValidDate(entry.addedAt, new Date());
+          const updatedAt = CustomGameStore.toValidDate(entry.updatedAt, addedAt);
           this.entries.set(id, {
             ...entry,
             id,
-            addedAt: new Date(entry.addedAt),
-            updatedAt: new Date(entry.updatedAt),
+            addedAt,
+            updatedAt,
           });
         });
         if (stored.version < STORAGE_VERSION) {
@@ -251,8 +260,11 @@ class CustomGameStore {
     const updated: CustomGameEntry = {
       ...existing,
       ...input,
-      updatedAt: new Date(),
+      updatedAt: new Date(), // Always app-managed (last save time)
     };
+    if (input.addedAt !== undefined) {
+      updated.addedAt = CustomGameStore.toValidDate(input.addedAt, existing.addedAt);
+    }
 
     // When user edits hours, set baseline so session updates add on top instead of overwriting
     if (input.hoursPlayed !== undefined) {
@@ -265,7 +277,7 @@ class CustomGameStore {
     this.notifyListeners();
 
     const hasJourney = journeyStore.has(id);
-    const addedAtIso = existing.addedAt instanceof Date ? existing.addedAt.toISOString() : String(existing.addedAt);
+    const addedAtIso = (updated.addedAt instanceof Date ? updated.addedAt : new Date(updated.addedAt)).toISOString();
     const nowIso = new Date().toISOString();
 
     // Create journey entry when status first becomes Playing, Playing Now, or Completed (so they appear in Your Ark / Logs)
@@ -307,6 +319,10 @@ class CustomGameStore {
         rating: updated.rating ?? 0,
         lastPlayedAt: updated.lastPlayedAt,
       });
+    }
+
+    if (journeyStore.has(id) && input.title !== undefined) {
+      journeyStore.syncJourneyTitle(id, updated.title);
     }
 
     return updated;

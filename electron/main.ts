@@ -7,6 +7,7 @@ const { app, BrowserWindow, shell, session, Tray, Menu, nativeImage } = electron
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
 import path from 'path';
+import https from 'node:https';
 
 let tray: any = null;
 let isQuitting = false;
@@ -68,7 +69,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 import { steamAPI } from './steam-api.js';
 import { epicAPI } from './epic-api.js';
-import { chatStore } from './ai-chat.js';
+import { chatStore, processMessage } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
 import { trackAppLaunch } from './analytics.js';
 import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
@@ -120,11 +121,11 @@ app.setAppUserModelId('com.ark.gametracker');
 // Single Instance Lock — prevent multiple instances from running
 // ---------------------------------------------------------------------------
 const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
-  // Another instance already owns the lock — quit immediately.
-  // The 'second-instance' event on the first instance will focus its window.
+const isChatPromptsTest = process.argv.includes('--run-chat-prompts');
+if (!gotTheLock && !isChatPromptsTest) {
+  // Another instance already owns the lock — quit immediately (unless we're the chat-prompts test runner).
   app.quit();
-} else {
+} else if (gotTheLock) {
   app.on('second-instance', () => {
     // A second instance was attempted — bring the existing window to front
     if (mainWindow) {
@@ -331,11 +332,10 @@ function createWindow() {
 }
 
 // ---------------------------------------------------------------------------
-// Register all IPC handlers (extracted to electron/ipc/ modules)
+// IPC handlers registered at start of whenReady (see below) so they exist before any window loads
 // ---------------------------------------------------------------------------
 import { registerAllHandlers, webviewHandlers } from './ipc/index.js';
 import { runFullCatalogAdultFilterTest } from './ipc/catalog-handlers.js';
-registerAllHandlers(() => mainWindow);
 
 // Access the webview's destroy function for window cleanup
 function destroyWebContentsView() {
@@ -348,6 +348,133 @@ function destroyWebContentsView() {
 // ============================================================================
 
 app.whenReady().then(async () => {
+  // Register IPC handlers first so renderer can call them as soon as the window loads
+  registerAllHandlers(() => mainWindow);
+
+  // CLI: run chat prompts test (Azure OpenAI) then exit. Keep one hidden window so the app doesn't exit on some platforms.
+  if (process.argv.includes('--run-chat-prompts')) {
+    const keepAliveWindow = new BrowserWindow({ width: 1, height: 1, show: false });
+    keepAliveWindow.setMenuBarVisibility(false);
+    keepAliveWindow.loadURL('about:blank').catch(() => {});
+    const promptIndexEnv = process.env.CHAT_PROMPT_INDEX != null ? parseInt(process.env.CHAT_PROMPT_INDEX, 10) : -1;
+    const singleRun = promptIndexEnv >= 0;
+    const resultsPath = path.join(
+      process.cwd(),
+      'tests',
+      singleRun ? `chat-prompts-results-${promptIndexEnv}.json` : 'chat-prompts-results.json'
+    );
+    const results: Array<{
+      id: number;
+      category: string;
+      prompt: string;
+      content: string;
+      toolsUsed: string[];
+      responseTimeMs?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      totalTokens?: number;
+      error?: string;
+    }> = [];
+    const writeResults = (partial = false) => {
+      try {
+        fs.writeFileSync(resultsPath, JSON.stringify({
+          description: partial ? 'Chat prompt test results (partial)' : 'Chat prompt test results',
+          ranAt: new Date().toISOString(),
+          results,
+          ...(partial ? { runError: 'Run failed before completion' } : {}),
+        }, null, 2), 'utf-8');
+      } catch (e) {
+        logger.error('[ChatPrompts] Failed to write results:', e);
+      }
+    };
+    // Keep process alive on unhandled rejection during test (log only)
+    const rejectHandler = (reason: unknown) => {
+      logger.error('[ChatPrompts] Unhandled rejection:', reason);
+    };
+    process.prependListener('unhandledRejection', rejectHandler);
+    try {
+      const promptsPath = path.join(process.cwd(), 'tests', 'chat-prompts.json');
+      if (!fs.existsSync(promptsPath)) {
+        logger.error('[ChatPrompts] File not found: ' + promptsPath);
+        app.quit();
+        return;
+      }
+      // .env is loaded at startup; set AZURE_OPENAI_* env vars
+      const strip = (s: string) => s.replace(/^[\s`'"]+|[\s`'"]+$/g, '').trim();
+      const endpoint = strip(process.env.AZURE_OPENAI_ENDPOINT || process.env.AZURE_OPENAI_API_ENDPOINT || '');
+      const apiKey = strip(process.env.AZURE_OPENAI_KEY || process.env.AZURE_OPENAI_API_KEY || '');
+      const deployment = strip(process.env.AZURE_OPENAI_DEPLOYMENT || process.env.AZURE_OPENAI_DEPLOYMENT_NAME || '');
+      const apiVersion = strip(process.env.AZURE_OPENAI_KEY_VERSION || process.env.AZURE_OPENAI_API_VERSION || '');
+      if (!endpoint || !apiKey || !deployment) {
+        logger.error('[ChatPrompts] Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT (or AZURE_OPENAI_* variants). Use .env in project root or export in shell.');
+        app.quit();
+        return;
+      }
+      settingsStore.setPreferredChatProvider('azure-openai');
+      const raw = fs.readFileSync(promptsPath, 'utf-8');
+      const { prompts } = JSON.parse(raw) as { description?: string; prompts: Array<{ id: number; category: string; prompt: string }> };
+      const limitArg = process.argv.find((a) => a.startsWith('--run-chat-prompts='));
+      const promptLimit = limitArg ? Math.max(1, parseInt(limitArg.split('=')[1], 10) || 50) : 50;
+      const promptsToRun = singleRun && promptIndexEnv < prompts.length
+        ? [prompts[promptIndexEnv]]
+        : prompts.slice(0, promptLimit);
+      logger.log(`[ChatPrompts] Running ${promptsToRun.length} prompts with Azure OpenAI (no window)...`);
+      writeResults(); // create file immediately so we can see if process exits before first prompt
+      const providerOptions = { azure: { endpoint: endpoint.replace(/\/+$/, ''), apiKey, deployment, ...(apiVersion ? { apiVersion } : {}) } };
+      const PER_PROMPT_MS = 120_000; // 2 min per prompt (tool loops + web search can be slow)
+      for (let i = 0; i < promptsToRun.length; i++) {
+        const { id, category, prompt } = promptsToRun[i];
+        logger.log(`[ChatPrompts] Starting ${i + 1}/${promptsToRun.length} id=${id}...`);
+        const startMs = Date.now();
+        try {
+          const out = await Promise.race([
+            processMessage(prompt, undefined, [], undefined, undefined, providerOptions),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error(`Timeout after ${PER_PROMPT_MS / 1000}s`)), PER_PROMPT_MS)
+            ),
+          ]);
+          const responseTimeMs = Date.now() - startMs;
+          results.push({
+            id,
+            category,
+            prompt,
+            content: out.content,
+            toolsUsed: out.toolsUsed || [],
+            responseTimeMs,
+            ...(out.usage && {
+              inputTokens: out.usage.inputTokens,
+              outputTokens: out.usage.outputTokens,
+              totalTokens: out.usage.totalTokens,
+            }),
+          });
+          logger.log(`[ChatPrompts] ${i + 1}/${promptsToRun.length} id=${id} category=${category} tools=${(out.toolsUsed || []).join(',') || 'none'} ${responseTimeMs}ms ${out.usage?.totalTokens ?? '-'} tok`);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          results.push({
+            id,
+            category,
+            prompt,
+            content: '',
+            toolsUsed: [],
+            responseTimeMs: Date.now() - startMs,
+            error: msg,
+          });
+          logger.warn(`[ChatPrompts] ${i + 1}/${promptsToRun.length} id=${id} ERROR:`, msg);
+        }
+        writeResults();
+      }
+      logger.log('[ChatPrompts] Results written to ' + resultsPath);
+    } catch (err) {
+      logStartupError(err);
+      if (results.length > 0) writeResults(true);
+    } finally {
+      process.removeListener('unhandledRejection', rejectHandler);
+      try { keepAliveWindow.destroy(); } catch { /* ignore */ }
+    }
+    app.quit();
+    return;
+  }
+
   // CLI: run full-catalog adult filter test then exit
   if (process.argv.includes('--run-adult-filter-test')) {
     // Keep one hidden window so the process is not killed by OS/tooling during long runs
@@ -360,6 +487,155 @@ app.whenReady().then(async () => {
       logStartupError(err);
     }
     testWindow.destroy();
+    app.quit();
+    return;
+  }
+
+  // CLI: fetch Epic system requirements for a game (e.g. Death Stranding 2) then exit
+  // Uses same Epic APIs as the app (getProductContent = CMS REST; searchGames = GraphQL).
+  // Run: npm run fetch-epic-requirements   or   electron . --fetch-epic-requirements [slug]
+  if (process.argv.includes('--fetch-epic-requirements')) {
+    const idx = process.argv.indexOf('--fetch-epic-requirements');
+    const slugArg = process.argv[idx + 1];
+    const defaultSlug = 'death-stranding-2-on-the-beach-7773ec';
+    const slugsToTry: string[] = slugArg && !slugArg.startsWith('--') ? [slugArg] : [defaultSlug];
+    const testWindow = new BrowserWindow({ width: 1, height: 1, show: false });
+    const outPath = path.join(app.getPath('userData'), 'epic-requirements-output.txt');
+    try {
+      const append = (s: string) => { fs.appendFileSync(outPath, s + '\n', 'utf-8'); };
+      fs.writeFileSync(outPath, '[fetch-epic-requirements] Slugs: ' + slugsToTry.join(', ') + '\n', 'utf-8');
+      let result: Awaited<ReturnType<typeof epicAPI.getProductContent>> = null;
+      let usedSlug: string | null = null;
+
+      // Bypass: direct HTTPS with TLS verification disabled (for strict/proxy environments)
+      const directFetch = (slug: string): Promise<typeof result> =>
+        new Promise((resolve) => {
+          const url = `https://store-content.ak.epicgames.com/api/en-US/content/products/${slug}`;
+          const req = https.get(
+            url,
+            { rejectUnauthorized: false, headers: { 'Accept': 'application/json' } },
+            (res) => {
+              let body = '';
+              res.on('data', (ch) => { body += ch; });
+              res.on('end', () => {
+                try {
+                  const json = JSON.parse(body);
+                  const pages = json?.pages ?? [];
+                  let requirements: any[] | undefined;
+                  for (const page of pages) {
+                    const data = page?.data;
+                    if (data?.requirements?.systems) {
+                      requirements = data.requirements.systems;
+                      break;
+                    }
+                  }
+                  resolve(requirements?.length ? { requirements } : null);
+                } catch {
+                  resolve(null);
+                }
+              });
+            }
+          );
+          req.on('error', () => resolve(null));
+          req.setTimeout(15000, () => { req.destroy(); resolve(null); });
+        });
+
+      for (const slug of slugsToTry) {
+        append('Trying direct HTTPS (bypass): ' + slug);
+        try {
+          result = await Promise.race([
+            directFetch(slug),
+            new Promise<null>((resolve) => {
+              setTimeout(() => {
+                append('  -> bypass timeout 10s');
+                resolve(null);
+              }, 10000);
+            }),
+          ]);
+          append('  -> requirements: ' + (result?.requirements?.length ?? 0));
+          if (result?.requirements?.length) {
+            usedSlug = slug;
+            break;
+          }
+        } catch (e) {
+          append('  -> error: ' + (e as Error).message);
+        }
+      }
+      if (!result?.requirements?.length) {
+        for (const slug of slugsToTry) {
+          append('Trying getProductContent: ' + slug);
+          try {
+            result = await Promise.race([
+              epicAPI.getProductContent(slug),
+              new Promise<null>((_, rej) => setTimeout(() => rej(new Error('timeout 12s')), 12000)),
+            ]);
+            append('  -> requirements: ' + (result?.requirements?.length ?? 0));
+            if (result?.requirements?.length) {
+              usedSlug = slug;
+              break;
+            }
+          } catch (e) {
+            append('  -> error: ' + (e as Error).message);
+          }
+        }
+      }
+      if (!result?.requirements?.length) {
+        append('Trying searchGames("Death Stranding 2")...');
+        try {
+          const searchResults = await epicAPI.searchGames('Death Stranding 2', 10);
+          append('  -> results: ' + (searchResults?.length ?? 0));
+          for (const el of searchResults) {
+            const s = el.catalogNs?.mappings?.[0]?.pageSlug || el.offerMappings?.[0]?.pageSlug || el.productSlug || (el.urlSlug && !/^[0-9a-f]{32}$/i.test(el.urlSlug || '') ? el.urlSlug : undefined);
+            if (s && !slugsToTry.includes(s)) {
+              const content = await epicAPI.getProductContent(s);
+              if (content?.requirements?.length) {
+                result = content;
+                usedSlug = s;
+                break;
+              }
+            }
+          }
+        } catch (e) {
+          append('  -> error: ' + (e as Error).message);
+        }
+      }
+      if (!result?.requirements?.length) {
+        for (const s of ['death-stranding-2-on-the-beach', 'death-stranding-2']) {
+          if (slugsToTry.includes(s)) continue;
+          const content = await epicAPI.getProductContent(s);
+          if (content?.requirements?.length) {
+            result = content;
+            usedSlug = s;
+            break;
+          }
+        }
+      }
+      const lines: string[] = [];
+      if (result?.requirements?.length) {
+        lines.push('\n=== Epic system requirements (Death Stranding 2) ===');
+        lines.push('Slug: ' + (usedSlug ?? slugsToTry[0]));
+        for (const sys of result.requirements) {
+          lines.push('\nPlatform: ' + (sys.systemType || 'unknown'));
+          for (const d of sys.details || []) {
+            const title = d.title || 'Spec';
+            const min = d.minimum && typeof d.minimum === 'object' ? Object.entries(d.minimum).map(([k, v]) => `${k}: ${v}`).join(', ') : String(d.minimum ?? '—');
+            const rec = d.recommended && typeof d.recommended === 'object' ? Object.entries(d.recommended).map(([k, v]) => `${k}: ${v}`).join(', ') : String(d.recommended ?? '—');
+            lines.push(`  ${title} — Min: ${min} | Rec: ${rec}`);
+          }
+        }
+        lines.push('\n=== End ===\n');
+      } else {
+        lines.push('\nNo system requirements returned. Try running the full app once (Epic Cloudflare clearance), then run this again.\n');
+      }
+      fs.appendFileSync(outPath, lines.join('\n'), 'utf-8');
+      for (const line of lines) console.log(line);
+    } catch (err) {
+      try {
+        fs.appendFileSync(outPath, 'FATAL: ' + (err as Error).message + '\n', 'utf-8');
+      } catch (_) {}
+      console.error('Fetch Epic requirements failed:', err);
+    }
+    try { testWindow.destroy(); } catch (_) {}
     app.quit();
     return;
   }

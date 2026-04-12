@@ -18,6 +18,12 @@ import {
   getEmbeddingModelSize,
   EMBEDDING_MODEL_NAME,
 } from '../ollama-setup.js';
+import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
+import { normalizeOllamaRerankRows } from '../ollama-rerank-normalize.js';
+
+const RERANK_MAX_DOCS = 100;
+const RERANK_MAX_CHARS = 8000;
+const RERANK_TIMEOUT_MS = 120_000;
 
 export function register(): void {
   // Check if Ollama is running
@@ -124,6 +130,71 @@ export function register(): void {
         parameterSize: '568M',
         quantization: 'F16',
       };
+    }
+  });
+
+  /**
+   * POST /api/rerank — cross-encoder relevance for Embedding Space neighbor ordering.
+   * Returns { results: [{ index, relevance_score }] } or null on failure.
+   */
+  ipcMain.handle('ollama:rerank', async (_event: any, payload: unknown) => {
+    try {
+      if (!payload || typeof payload !== 'object') return null;
+      const p = payload as { query?: unknown; documents?: unknown; topN?: unknown };
+      const query = typeof p.query === 'string' ? p.query.trim() : '';
+      const documents = Array.isArray(p.documents) ? p.documents : [];
+      if (!query || documents.length === 0) return null;
+
+      const slice = documents.slice(0, RERANK_MAX_DOCS).map((d) => {
+        const s = typeof d === 'string' ? d : String(d ?? '');
+        return s.length > RERANK_MAX_CHARS ? s.slice(0, RERANK_MAX_CHARS) : s;
+      });
+      const q = query.length > RERANK_MAX_CHARS ? query.slice(0, RERANK_MAX_CHARS) : query;
+
+      const topNRaw = p.topN;
+      const topN =
+        typeof topNRaw === 'number' && Number.isFinite(topNRaw)
+          ? Math.min(Math.max(1, Math.floor(topNRaw)), slice.length)
+          : slice.length;
+
+      const ollama = settingsStore.getOllamaSettings();
+      const baseUrl = ollama.url.replace(/\/$/, '');
+      const model = ollama.rerankModel?.trim() || DEFAULT_OLLAMA_RERANK_MODEL;
+
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), RERANK_TIMEOUT_MS);
+      let res: Response;
+      try {
+        res = await fetch(`${baseUrl}/api/rerank`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            query: q,
+            documents: slice,
+            top_n: topN,
+          }),
+          signal: ac.signal,
+        });
+      } finally {
+        clearTimeout(t);
+      }
+
+      if (!res.ok) {
+        logger.warn(`[Ollama] rerank HTTP ${res.status} for model ${model}`);
+        return null;
+      }
+
+      const data = (await res.json()) as {
+        results?: Array<{ index?: number; relevance_score?: number; score?: number }>;
+      };
+      const raw = data.results;
+      const results = normalizeOllamaRerankRows(raw, slice.length);
+      if (!results) return null;
+      return { results };
+    } catch (error) {
+      logger.warn('[Ollama] rerank failed:', error);
+      return null;
     }
   });
 }

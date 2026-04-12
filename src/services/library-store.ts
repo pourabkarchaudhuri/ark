@@ -7,6 +7,17 @@ import {
   migrateGameId,
 } from '@/types/game';
 import { journeyStore } from './journey-store';
+
+function resolveJourneyTitleForRecord(
+  updated: LibraryGameEntry,
+  existing: LibraryGameEntry
+): string {
+  const fromUpdated = updated.cachedMeta?.title?.trim();
+  if (fromUpdated) return fromUpdated;
+  const fromExisting = existing.cachedMeta?.title?.trim();
+  if (fromExisting) return fromExisting;
+  return 'Unknown';
+}
 import { statusHistoryStore } from './status-history-store';
 import { sessionStore } from './session-store';
 
@@ -57,6 +68,13 @@ class LibraryStore {
     this._sortedCache = null;
   }
 
+  /** Ensure we always have a valid Date (never Invalid Date). Old data may lack updatedAt. */
+  private static toValidDate(value: unknown, fallback: Date): Date {
+    if (value == null) return fallback;
+    const d = value instanceof Date ? value : new Date(value as string | number);
+    return Number.isNaN(d.getTime()) ? fallback : d;
+  }
+
   private initialize() {
     if (this.isInitialized) return;
 
@@ -74,14 +92,16 @@ class LibraryStore {
               status = 'On Hold';
               needsResave = true;
             }
+            const addedAt = LibraryStore.toValidDate(entry.addedAt, new Date());
+            const updatedAt = LibraryStore.toValidDate(entry.updatedAt, addedAt);
             this.entries.set(id, {
               ...entry,
               gameId: id,
               status,
               hoursPlayed: entry.hoursPlayed ?? 0,
               rating: entry.rating ?? 0,
-              addedAt: new Date(entry.addedAt),
-              updatedAt: new Date(entry.updatedAt),
+              addedAt,
+              updatedAt,
             });
           }
         });
@@ -228,8 +248,11 @@ class LibraryStore {
     const updated: LibraryGameEntry = {
       ...existing,
       ...input,
-      updatedAt: new Date(),
+      updatedAt: new Date(), // Always app-managed (last save time)
     };
+    if (input.addedAt !== undefined) {
+      updated.addedAt = LibraryStore.toValidDate(input.addedAt, existing.addedAt);
+    }
 
     // When user edits hours, set baseline so session updates add on top instead of overwriting
     if (input.hoursPlayed !== undefined) {
@@ -243,15 +266,15 @@ class LibraryStore {
     this.notifyListeners();
 
     const hasJourney = journeyStore.has(gameId);
-    const addedAtIso = existing.addedAt instanceof Date ? existing.addedAt.toISOString() : String(existing.addedAt);
+    const addedAtIso = (updated.addedAt instanceof Date ? updated.addedAt : new Date(updated.addedAt)).toISOString();
     const nowIso = new Date().toISOString();
 
     // Create journey entry when game first reaches Playing (or Playing Now) so it appears in Your Ark / Logs
     if (statusChanged && isNowPlaying && !hasJourney) {
-      const meta = existing.cachedMeta;
+      const meta = updated.cachedMeta ?? existing.cachedMeta;
       journeyStore.record({
         gameId,
-        title: meta?.title ?? 'Unknown',
+        title: resolveJourneyTitleForRecord(updated, existing),
         coverUrl: meta?.coverUrl,
         genre: meta?.genre ?? [],
         platform: meta?.platform ?? [],
@@ -264,10 +287,10 @@ class LibraryStore {
         addedAt: addedAtIso,
       });
     } else if (statusChanged && isCompleted && !hasJourney) {
-      const meta = existing.cachedMeta;
+      const meta = updated.cachedMeta ?? existing.cachedMeta;
       journeyStore.record({
         gameId,
-        title: meta?.title ?? 'Unknown',
+        title: resolveJourneyTitleForRecord(updated, existing),
         coverUrl: meta?.coverUrl,
         genre: meta?.genre ?? [],
         platform: meta?.platform ?? [],
@@ -280,10 +303,10 @@ class LibraryStore {
         addedAt: addedAtIso,
       });
     } else if (statusChanged && isWantToPlay && !hasJourney) {
-      const meta = existing.cachedMeta;
+      const meta = updated.cachedMeta ?? existing.cachedMeta;
       journeyStore.record({
         gameId,
-        title: meta?.title ?? 'Unknown',
+        title: resolveJourneyTitleForRecord(updated, existing),
         coverUrl: meta?.coverUrl,
         genre: meta?.genre ?? [],
         platform: meta?.platform ?? [],
@@ -308,6 +331,11 @@ class LibraryStore {
       const journeyEntry = journeyStore.getEntry(gameId);
       const title = journeyEntry?.title || `Game ${gameId}`;
       statusHistoryStore.record(gameId, title, existing.status, updated.status);
+    }
+
+    if (journeyStore.has(gameId)) {
+      const t = updated.cachedMeta?.title?.trim();
+      if (t) journeyStore.syncTitleIfPlaceholder(gameId, t);
     }
 
     return updated;

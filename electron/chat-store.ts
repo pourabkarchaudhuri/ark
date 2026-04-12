@@ -1,6 +1,8 @@
 /**
  * Chat History Store — persisted to disk
  * Conversations survive app restarts via a JSON file in userData.
+ * A single active conversation is used regardless of which LLM provider
+ * the user selects; switching providers mid-conversation keeps full context.
  */
 
 import * as fs from 'fs';

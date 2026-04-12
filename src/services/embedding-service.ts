@@ -43,6 +43,12 @@ declare global {
       getModelInfo: () => Promise<OllamaModelInfo | null>;
       /** Subscribe to setup progress (status, pct) during ollama:setup. Returns unsubscribe. */
       onSetupProgress?: (callback: (data: { status: string; pct: number }) => void) => () => void;
+      /** POST /api/rerank — returns ranked indices or null if unavailable. */
+      rerank: (payload: {
+        query: string;
+        documents: string[];
+        topN?: number;
+      }) => Promise<{ results: Array<{ index: number; relevance_score: number }> } | null>;
     };
   }
 }

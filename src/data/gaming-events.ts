@@ -28,6 +28,7 @@ export const GAMING_EVENTS: GamingEvent[] = [
   { id: 'summer-game-fest', name: 'Summer Game Fest', url: 'https://www.summergamefest.com/', location: 'Online' },
   { id: 'xbox-games-showcase', name: 'Xbox Games Showcase', location: 'Online' },
   { id: 'pc-gaming-show', name: 'PC Gaming Show', url: 'https://www.pcgamingshow.com/', location: 'Online' },
+  { id: 'future-games-show', name: 'Future Games Show', url: 'https://www.gamesradar.com/future-games-show/', location: 'Online' },
   { id: 'gamescom-opening-night-live', name: 'Gamescom Opening Night Live', url: 'https://www.gamescom.global/', location: 'Cologne' },
   { id: 'tokyo-game-show', name: 'Tokyo Game Show', url: 'https://tgs.nikkeibp.co.jp/tgs/english/', location: 'Chiba' },
   { id: 'the-game-awards', name: 'The Game Awards', url: 'https://thegameawards.com/', location: 'Online' },

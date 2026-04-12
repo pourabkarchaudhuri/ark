@@ -18,7 +18,10 @@ export function register(): void {
       const root = app.isPackaged
         ? path.dirname(process.execPath)
         : app.getAppPath();
-      const journalPath = path.join(root, 'docs', 'dev-journal.json');
+      // When packaged, extraResources put docs at <installDir>/resources/docs/
+      const journalPath = app.isPackaged
+        ? path.join(root, 'resources', 'docs', 'dev-journal.json')
+        : path.join(root, 'docs', 'dev-journal.json');
 
       if (!fs.existsSync(journalPath)) return DEFAULT_JOURNAL;
 

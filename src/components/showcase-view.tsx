@@ -18,6 +18,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Clock, Calendar, Star, Library, ChevronLeft, ChevronRight, Mouse } from 'lucide-react';
 import type { JourneyEntry, GameStatus } from '@/types/game';
 import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
+import { resolveJourneyDisplayTitle } from '@/lib/journey-display-title';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
 
@@ -66,7 +67,8 @@ function getImageChain(entry: JourneyEntry): string[] {
   const meta = libEntry?.cachedMeta;
   const coverUrl = entry.coverUrl || meta?.coverUrl;
   const headerImage = meta?.headerImage;
-  return buildGameImageChain(entry.gameId, entry.title, coverUrl, headerImage);
+  const displayTitle = resolveJourneyDisplayTitle(entry.gameId, entry.title);
+  return buildGameImageChain(entry.gameId, displayTitle, coverUrl, headerImage);
 }
 
 function buildGenreGroups(entries: JourneyEntry[]): GenreGroup[] {
@@ -846,7 +848,7 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
                 els.push(
                   <WaveItem key="title" index={idx++}>
                     <span className="text-white text-sm font-semibold tracking-wide">
-                      {entry.title}
+                      {resolveJourneyDisplayTitle(entry.gameId, entry.title)}
                     </span>
                   </WaveItem>
                 );

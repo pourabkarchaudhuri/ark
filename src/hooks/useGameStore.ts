@@ -1149,25 +1149,21 @@ export function useGameSearch(query: string, debounceMs: number = 300) {
 
     debounceRef.current = setTimeout(async () => {
       try {
-        // 1. Instant in-memory search from prefetched data
+        // 1. Instant in-memory search from prefetched data (optional fast first paint)
         const memResults = searchPrefetchedGames(query, 20);
-        if (memResults && memResults.length > 0) {
-          if (currentId === requestIdRef.current) {
-            setResults(memResults);
-            setError(null);
-            setLoading(false);
-            completedQueryRef.current = query;
-          }
-          // If we got good in-memory results, no need for API calls
-          if (memResults.length >= 5) return;
+        if (memResults && memResults.length > 0 && currentId === requestIdRef.current) {
+          setResults(memResults);
+          setError(null);
+          setLoading(false);
+          completedQueryRef.current = query;
         }
 
-        // 2. Supplement with API search for broader coverage
+        // 2. Always run API search so Steam/Epic hits appear (e.g. Planet of Lana not in prefetch)
         const apiResults = await gameService.searchGames(query, 20);
         if (currentId !== requestIdRef.current) return;
 
         if (memResults && memResults.length > 0) {
-          // Merge: in-memory results first, then API results not already present
+          // Merge: prefetch first, then API results not already present
           const seenIds = new Set(memResults.map(g => g.id));
           const extra = apiResults.filter(g => !seenIds.has(g.id));
           setResults([...memResults, ...extra].slice(0, 30));
@@ -1515,6 +1511,8 @@ export function useLibraryGames() {
         rating: libEntry?.rating ?? jEntry.rating,
         lastPlayedAt: libEntry?.lastPlayedAt ?? jEntry.lastPlayedAt,
       });
+      const libTitle = libEntry?.cachedMeta?.title?.trim();
+      if (libTitle) journeyStore.syncTitleIfPlaceholder(game.id, libTitle);
     }
 
     for (const game of validGames) {
@@ -1656,6 +1654,16 @@ export function ensureArkBackfill() {
 
   if (batch.length > 0) {
     journeyStore.recordBatch(batch);
+  }
+
+  for (const lib of libraryStore.getAllEntries()) {
+    const t = lib.cachedMeta?.title?.trim();
+    if (t) journeyStore.syncTitleIfPlaceholder(lib.gameId, t);
+  }
+
+  for (const entry of customGameStore.getAllGames()) {
+    const t = entry.title?.trim();
+    if (t) journeyStore.syncJourneyTitle(entry.id, t);
   }
 }
 

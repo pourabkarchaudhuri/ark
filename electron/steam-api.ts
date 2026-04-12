@@ -1,9 +1,13 @@
 /**
  * Steam Web API Client
- * Handles all Steam API requests with rate limiting and caching
- * 
- * Note: Uses native fetch available in Node.js 18+ (Electron 28+)
+ * Handles all Steam API requests with rate limiting and caching.
+ * Uses Electron's net.fetch when available so corporate proxies and
+ * self-signed certificates are handled by Chromium's network stack.
  */
+
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const electron = require('electron');
 
 // Steam API Configuration — key loaded from .env via dotenv in main.ts
 // Read lazily: ESM imports hoist above dotenv's loadEnv() call, so
@@ -293,11 +297,12 @@ import { logger } from './safe-logger.js';
 // Alias for backwards compatibility
 const Cache = PersistentCache;
 
-/** Fetch with a timeout (default 30s). Aborts the request if it exceeds the limit. */
+/** Fetch with a timeout (default 30s). Uses Electron net.fetch when available for correct TLS/certificate handling. */
 function fetchWithTimeout(url: string, timeoutMs: number = 30000): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+  const fetchFn: typeof globalThis.fetch = electron?.net?.fetch ?? globalThis.fetch;
+  return fetchFn(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
 // Steam API Client
@@ -563,7 +568,7 @@ class SteamAPIClient {
       return items;
     } catch (error) {
       logger.error(`[Steam] Search error:`, error);
-      return [];
+      throw error;
     }
   }
 

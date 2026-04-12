@@ -1,0 +1,255 @@
+{
+  "description": "Sample user prompts for AI chat test cases. Covers library, reviews, comparisons, recommendations, news, lore, tips, and walkthroughs.",
+  "prompts": [
+    {
+      "id": 1,
+      "category": "library",
+      "prompt": "Add Cyberpunk 2077 to my library as Want to Play"
+    },
+    {
+      "id": 2,
+      "category": "library",
+      "prompt": "What games do I have in my library?"
+    },
+    {
+      "id": 3,
+      "category": "library",
+      "prompt": "Remove Hollow Knight from my library"
+    },
+    {
+      "id": 4,
+      "category": "library",
+      "prompt": "Add Elden Ring with status Playing"
+    },
+    {
+      "id": 5,
+      "category": "library",
+      "prompt": "Show me everything I've marked as Completed"
+    },
+    {
+      "id": 6,
+      "category": "review",
+      "prompt": "Is Baldur's Gate 3 worth buying? Give me a quick review"
+    },
+    {
+      "id": 7,
+      "category": "review",
+      "prompt": "What do critics say about Hades?"
+    },
+    {
+      "id": 8,
+      "category": "review",
+      "prompt": "Review Stardew Valley for me"
+    },
+    {
+      "id": 9,
+      "category": "comparison",
+      "prompt": "Compare The Witcher 3 and Skyrim — which one should I play first?"
+    },
+    {
+      "id": 10,
+      "category": "comparison",
+      "prompt": "What's the difference between Dark Souls and Elden Ring?"
+    },
+    {
+      "id": 11,
+      "category": "comparison",
+      "prompt": "Which is better for co-op: It Takes Two or Overcooked 2?"
+    },
+    {
+      "id": 12,
+      "category": "recommendations",
+      "prompt": "Recommend games similar to what I have in my library"
+    },
+    {
+      "id": 13,
+      "category": "recommendations",
+      "prompt": "Suggest something like Disco Elysium"
+    },
+    {
+      "id": 14,
+      "category": "recommendations",
+      "prompt": "What should I play next based on my library?"
+    },
+    {
+      "id": 15,
+      "category": "recommendations",
+      "prompt": "I like roguelikes — any recommendations?"
+    },
+    {
+      "id": 16,
+      "category": "game-info",
+      "prompt": "Tell me about Red Dead Redemption 2"
+    },
+    {
+      "id": 17,
+      "category": "game-info",
+      "prompt": "What's the release date for Half-Life Alyx?"
+    },
+    {
+      "id": 18,
+      "category": "game-info",
+      "prompt": "Who made Celeste?"
+    },
+    {
+      "id": 19,
+      "category": "game-info",
+      "prompt": "What genres is Slay the Spire?"
+    },
+    {
+      "id": 20,
+      "category": "news",
+      "prompt": "Any recent news or updates about GTA VI?"
+    },
+    {
+      "id": 21,
+      "category": "news",
+      "prompt": "What's the latest on Silksong?"
+    },
+    {
+      "id": 22,
+      "category": "news",
+      "prompt": "Has Elden Ring had any DLC or patches lately?"
+    },
+    {
+      "id": 23,
+      "category": "lore",
+      "prompt": "Explain the lore of Dark Souls in simple terms"
+    },
+    {
+      "id": 24,
+      "category": "lore",
+      "prompt": "What's the story behind Bloodborne?"
+    },
+    {
+      "id": 25,
+      "category": "lore",
+      "prompt": "Summarize the Mass Effect trilogy story without spoilers"
+    },
+    {
+      "id": 26,
+      "category": "lore",
+      "prompt": "What's the connection between Portal and Half-Life?"
+    },
+    {
+      "id": 27,
+      "category": "gameplay-tips",
+      "prompt": "Tips for beginners in Dark Souls 3"
+    },
+    {
+      "id": 28,
+      "category": "gameplay-tips",
+      "prompt": "How do I get good at Sekiro?"
+    },
+    {
+      "id": 29,
+      "category": "gameplay-tips",
+      "prompt": "Best strategies for surviving in Subnautica"
+    },
+    {
+      "id": 30,
+      "category": "gameplay-tips",
+      "prompt": "What are the best builds in Elden Ring for a first playthrough?"
+    },
+    {
+      "id": 31,
+      "category": "walkthrough",
+      "prompt": "Where do I find the first boss in Hollow Knight?"
+    },
+    {
+      "id": 32,
+      "category": "walkthrough",
+      "prompt": "How do I beat the Orphan of Kos in Bloodborne?"
+    },
+    {
+      "id": 33,
+      "category": "walkthrough",
+      "prompt": "Step-by-step guide to get the true ending in NieR Automata"
+    },
+    {
+      "id": 34,
+      "category": "walkthrough",
+      "prompt": "How do I unlock all characters in Slay the Spire?"
+    },
+    {
+      "id": 35,
+      "category": "search",
+      "prompt": "Find games called something like \"Dead Cells\""
+    },
+    {
+      "id": 36,
+      "category": "search",
+      "prompt": "Search for Metroidvania games on Steam"
+    },
+    {
+      "id": 37,
+      "category": "library",
+      "prompt": "Put this game on hold"
+    },
+    {
+      "id": 38,
+      "category": "library",
+      "prompt": "Mark Celeste as Completed"
+    },
+    {
+      "id": 39,
+      "category": "recommendations",
+      "prompt": "Recommend a short game I can finish in a weekend"
+    },
+    {
+      "id": 40,
+      "category": "recommendations",
+      "prompt": "What are the best indie games from the last few years?"
+    },
+    {
+      "id": 41,
+      "category": "comparison",
+      "prompt": "Should I get Factorio or Satisfactory?"
+    },
+    {
+      "id": 42,
+      "category": "game-info",
+      "prompt": "How long is Persona 5?"
+    },
+    {
+      "id": 43,
+      "category": "game-info",
+      "prompt": "Does this game have multiplayer?"
+    },
+    {
+      "id": 44,
+      "category": "review",
+      "prompt": "Is this game good for someone who doesn't usually play RPGs?"
+    },
+    {
+      "id": 45,
+      "category": "gameplay-tips",
+      "prompt": "What's the best order to do the regions in Elden Ring?"
+    },
+    {
+      "id": 46,
+      "category": "lore",
+      "prompt": "What happens at the end of Outer Wilds? No spoilers, just tone"
+    },
+    {
+      "id": 47,
+      "category": "walkthrough",
+      "prompt": "I'm stuck on the Water Temple in Ocarina of Time — any hints?"
+    },
+    {
+      "id": 48,
+      "category": "news",
+      "prompt": "When does the next Steam sale start?"
+    },
+    {
+      "id": 49,
+      "category": "library",
+      "prompt": "Add this game to my library"
+    },
+    {
+      "id": 50,
+      "category": "recommendations",
+      "prompt": "Recommend something relaxing like Stardew Valley or Spiritfarer"
+    }
+  ]
+}

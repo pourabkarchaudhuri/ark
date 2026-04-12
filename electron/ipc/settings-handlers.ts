@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
-import { settingsStore } from '../settings-store.js';
+import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
 
 export function register(): void {
   ipcMain.handle('settings:getApiKey', async () => {
@@ -55,11 +55,29 @@ export function register(): void {
       return settingsStore.getOllamaSettings();
     } catch (error) {
       logger.error('[Settings] Error getting Ollama settings:', error);
-      return { enabled: true, url: 'http://localhost:11434', model: 'gemma3:12b' };
+      return {
+        enabled: true,
+        url: 'http://localhost:11434',
+        model: 'gemma3:12b',
+        useGeminiInstead: false,
+        rerankModel: DEFAULT_OLLAMA_RERANK_MODEL,
+        neighborRerankEnabled: true,
+        oracleRerankEnabled: true,
+        oracleRerankBlend: 1,
+      };
     }
   });
 
-  ipcMain.handle('settings:setOllamaSettings', async (_event: any, settings: { enabled?: boolean; url?: string; model?: string }) => {
+  ipcMain.handle('settings:setOllamaSettings', async (_event: any, settings: {
+    enabled?: boolean;
+    url?: string;
+    model?: string;
+    useGeminiInstead?: boolean;
+    rerankModel?: string;
+    neighborRerankEnabled?: boolean;
+    oracleRerankEnabled?: boolean;
+    oracleRerankBlend?: number;
+  }) => {
     try {
       // Security: validate URL scheme (allow http/https only — do NOT block localhost/private IPs
       // since Ollama runs locally by default on http://localhost:11434)
@@ -98,6 +116,29 @@ export function register(): void {
     } catch (error) {
       logger.error('[Settings] Error setting auto-launch:', error);
       return { success: false, error: 'Failed to save setting' };
+    }
+  });
+
+  ipcMain.handle('settings:getPreferredChatProvider', async () => {
+    try {
+      return settingsStore.getPreferredChatProvider();
+    } catch (error) {
+      logger.error('[Settings] Error getting preferred chat provider:', error);
+      return 'ollama';
+    }
+  });
+
+  ipcMain.handle('settings:setPreferredChatProvider', async (_event: any, provider: string) => {
+    try {
+      const valid = ['ollama', 'gemini', 'azure-openai', 'anthropic'];
+      if (typeof provider !== 'string' || !valid.includes(provider)) {
+        return { success: false, error: 'Invalid provider' };
+      }
+      settingsStore.setPreferredChatProvider(provider as 'ollama' | 'gemini' | 'azure-openai' | 'anthropic');
+      return { success: true };
+    } catch (error) {
+      logger.error('[Settings] Error setting preferred chat provider:', error);
+      return { success: false, error: 'Failed to save' };
     }
   });
 }

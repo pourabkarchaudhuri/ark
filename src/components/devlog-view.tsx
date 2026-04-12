@@ -423,7 +423,7 @@ export function DevLogView({ onBack }: DevLogViewProps) {
     <div className="flex flex-col max-w-3xl xl:max-w-4xl mx-auto" style={{ height: 'calc(100vh - 11rem)' }}>
       {/* ── Header ─────────────────────────────────────────────── */}
       <div className="shrink-0 pb-5">
-        <div className="flex items-center justify-between gap-3 mb-4">
+        <div className="flex items-center justify-between gap-3 mb-4" data-tour="devlog-header">
           <div className="flex items-center gap-3">
             <Button
               onClick={onBack}
@@ -475,7 +475,12 @@ export function DevLogView({ onBack }: DevLogViewProps) {
       </div>
 
       {/* ── Scrollable Timeline ────────────────────────────────── */}
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar" style={{ overflowX: 'clip' }}>
+      <div
+        ref={scrollRef}
+        data-tour="devlog-timeline"
+        className="flex-1 min-h-0 overflow-y-auto custom-scrollbar"
+        style={{ overflowX: 'clip' }}
+      >
         {loading ? (
           <div className="flex flex-col items-center justify-center h-full gap-3">
             <div className="w-6 h-6 border border-white/20 border-t-white/50 rounded-full animate-spin" />

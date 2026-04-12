@@ -78,7 +78,7 @@ function makeDatedGame(day: number, name: string): Game {
   const month = now.getMonth();
   const date = new Date(year, month, day);
   return makeGame({
-    id: `steam-${1000 + day}`,
+    id: `steam-${1000 + day}-${name.replace(/[^a-zA-Z0-9]/g, '')}`,
     title: name,
     releaseDate: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
     comingSoon: date > now,

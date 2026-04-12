@@ -4,6 +4,27 @@
 
 ---
 
+## Saturday, April 12, 2026
+
+*fix, polish*
+
+Moved rerank status messages from standalone warning paragraphs to **inline badges** in both Oracle and Embedding Space. In Oracle, the rerank status (off, unavailable, no scores, failed) now appears as a compact amber badge in the metadata row alongside recommendation count and compute time — hover reveals the full explanation. In Embedding Space's neighbor panel, the same treatment: a tiny badge sits next to the "Neighbors" header count instead of eating a full row. Verified both reranker pipelines end-to-end — IPC handler, normalization, query building, score blending — all solid.
+
+Did a full audit of every Joyride tour flow, cross-referencing every `data-tour` target selector against actual DOM attributes across all components. Found and fixed several issues: **handleCallback** had overlapping conditions where `TOUR_END` and `STEP_AFTER` could both trigger `endTour` — rewrote to explicitly handle each event type (`TOUR_END`, `STEP_AFTER` with `CLOSE` action, `STEP_AFTER` with terminal status) so the flow is deterministic. **Journey loading/empty states** were missing `data-tour` anchors for `journey-view-styles` and `journey-medals-tab` — the skeleton now carries the attributes on placeholder elements and the empty state uses `sr-only` anchors, so the Voyage tour resolves all 5 steps regardless of data state. **Library status chips** were hidden during loading (`!currentLoading` guard) which meant the library tour's `library-status-chips` step would get filtered out on slow connections — removed the loading guard so the chips render immediately. **Lazy Suspense timing** — the step resolver only had a single 280ms retry, too tight for lazy-loaded views (Embedding Space, Oracle, Data Flow, DevLog) started from Settings → Guide. Replaced with 4 progressive retries (0, 150, 350, 700ms) giving ~1.2s total for chunks to load and mount. 150 tests pass.
+
+Fixed the **spotlight** — Joyride wasn't highlighting the element it was pointing at because the component was bypassing Joyride's overlay entirely with a custom full-screen overlay (`ark-tour-overlay`) that sat on top at z-index 9999. This opaque overlay covered the spotlight cutout that Joyride draws around each target, making the whole screen uniformly dim with no visual cue for what the tooltip was referencing. Ripped out the custom overlay system completely (removed `OVERLAY_ID`, `ensureOverlay`, `overlayRef`, DOM creation/removal) and let Joyride handle dimming natively via `overlayColor: rgba(0,0,0,0.75)`. Added `spotlightPadding: 6` and a reinforced `boxShadow` on the spotlight for a crisp cutout glow. This also eliminates the `removeChild` crash vector entirely — no more manual DOM mutation racing React's portal teardown. 640 tests pass.
+
+---
+
+## Tuesday, March 31, 2026
+
+*milestone, progress, fix*
+
+Squashed the `removeChild` crash that plagued guided tours — `removeJoyrideLeftovers` was ripping Joyride’s portal nodes out before React’s unmount cycle, causing a double-removal crash. Deferred orphan cleanup to `setTimeout(0)` so React unmounts first. Tooltip content now renders **bold** and *italic* markdown properly instead of showing raw asterisks. The Browse tour dropped its flaky `browse-catalog-jump` step; `TARGET_NOT_FOUND` no longer kills the whole tour — Joyride auto-skips gracefully. The Settings Guide tab got a full redesign: unified 2-column tour list with play/replay icons, completion checkmarks, and dev-only tags. Getting Started steps are visually distinct and non-interactive. 150 tests pass.
+
+
+---
+
 ## Monday, February 23, 2026
 
 *milestone, progress, decision*

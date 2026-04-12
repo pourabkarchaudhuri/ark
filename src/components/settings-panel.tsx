@@ -15,8 +15,9 @@ import { gameService } from '@/services/game-service';
 import { useDevMode } from '@/hooks/useDevMode';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
+import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
 
-// Declare settings API type
+// Declare settings API type (must match settings-screen.tsx global augmentation)
 declare global {
   interface Window {
     settings?: {
@@ -24,10 +25,30 @@ declare global {
       setApiKey: (key: string) => Promise<void>;
       removeApiKey: () => Promise<void>;
       hasApiKey: () => Promise<boolean>;
-      getOllamaSettings: () => Promise<{ enabled: boolean; url: string; model: string; useGeminiInstead: boolean }>;
-      setOllamaSettings: (settings: { enabled?: boolean; url?: string; model?: string; useGeminiInstead?: boolean }) => Promise<void>;
+      getOllamaSettings: () => Promise<{
+        enabled: boolean;
+        url: string;
+        model: string;
+        useGeminiInstead: boolean;
+        rerankModel: string;
+        neighborRerankEnabled: boolean;
+        oracleRerankEnabled: boolean;
+        oracleRerankBlend: number;
+      }>;
+      setOllamaSettings: (settings: {
+        enabled?: boolean;
+        url?: string;
+        model?: string;
+        useGeminiInstead?: boolean;
+        rerankModel?: string;
+        neighborRerankEnabled?: boolean;
+        oracleRerankEnabled?: boolean;
+        oracleRerankBlend?: number;
+      }) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
       setAutoLaunch: (enabled: boolean) => Promise<void>;
+      getPreferredChatProvider: () => Promise<'ollama' | 'gemini' | 'azure-openai' | 'anthropic'>;
+      setPreferredChatProvider: (provider: 'ollama' | 'gemini' | 'azure-openai' | 'anthropic') => Promise<{ success: boolean; error?: string }>;
     };
   }
 }
@@ -52,6 +73,10 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [ollamaEnabled, setOllamaEnabled] = useState(true);
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
+  const [ollamaRerankModel, setOllamaRerankModel] = useState(DEFAULT_OLLAMA_RERANK_MODEL);
+  const [neighborRerankEnabled, setNeighborRerankEnabled] = useState(true);
+  const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
+  const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
   const [useGeminiInstead, setUseGeminiInstead] = useState(false);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
@@ -92,6 +117,14 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         setOllamaEnabled(ollamaSettings.enabled);
         setOllamaUrl(ollamaSettings.url);
         setOllamaModel(ollamaSettings.model);
+        setOllamaRerankModel(ollamaSettings.rerankModel ?? DEFAULT_OLLAMA_RERANK_MODEL);
+        setNeighborRerankEnabled(ollamaSettings.neighborRerankEnabled !== false);
+        setOracleRerankEnabled(ollamaSettings.oracleRerankEnabled !== false);
+        setOracleRerankBlend(
+          typeof ollamaSettings.oracleRerankBlend === 'number' && Number.isFinite(ollamaSettings.oracleRerankBlend)
+            ? Math.min(1, Math.max(0, ollamaSettings.oracleRerankBlend))
+            : 1,
+        );
         setUseGeminiInstead(ollamaSettings.useGeminiInstead ?? false);
         
         // Load auto-launch setting
@@ -136,6 +169,10 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
           enabled: ollamaEnabled,
           url: ollamaUrl,
           model: ollamaModel,
+          rerankModel: ollamaRerankModel,
+          neighborRerankEnabled,
+          oracleRerankEnabled,
+          oracleRerankBlend,
           useGeminiInstead,
         });
         setOllamaSaveStatus('saved');
@@ -144,7 +181,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         console.error('Failed to save Ollama settings:', err);
       }
     }, 800);
-  }, [ollamaEnabled, ollamaUrl, ollamaModel, useGeminiInstead]);
+  }, [ollamaEnabled, ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, useGeminiInstead]);
 
   // Auto-save API key with debounce
   useEffect(() => {
@@ -478,6 +515,90 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       disabled={useGeminiInstead}
                     />
                   </div>
+
+                  <div>
+                    <label className="text-xs text-white/40 mb-1 block">Rerank model (Embedding Space)</label>
+                    <Input
+                      type="text"
+                      value={ollamaRerankModel}
+                      onChange={(e) => setOllamaRerankModel(e.target.value)}
+                      placeholder={DEFAULT_OLLAMA_RERANK_MODEL}
+                      className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]"
+                      disabled={useGeminiInstead}
+                    />
+                    <p className="text-[11px] text-white/25 mt-1">
+                      Ollama <code className="text-white/40">/api/rerank</code> — run{' '}
+                      <code className="text-white/40">ollama pull {DEFAULT_OLLAMA_RERANK_MODEL}</code>
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-white/50">Embedding Space neighbor rerank</p>
+                      <p className="text-[11px] text-white/25 mt-0.5">Refine neighbor lists with the cross-encoder model.</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={useGeminiInstead}
+                      onClick={() => setNeighborRerankEnabled(!neighborRerankEnabled)}
+                      className={cn(
+                        'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
+                        neighborRerankEnabled ? 'bg-fuchsia-500/40' : 'bg-white/[0.08]',
+                        useGeminiInstead && 'opacity-40 cursor-not-allowed',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                          neighborRerankEnabled ? 'translate-x-6' : 'translate-x-1',
+                        )}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-white/50">Oracle recommendation rerank</p>
+                      <p className="text-[11px] text-white/25 mt-0.5">Reorder shelf games after the worker finishes.</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={useGeminiInstead}
+                      onClick={() => setOracleRerankEnabled(!oracleRerankEnabled)}
+                      className={cn(
+                        'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
+                        oracleRerankEnabled ? 'bg-fuchsia-500/40' : 'bg-white/[0.08]',
+                        useGeminiInstead && 'opacity-40 cursor-not-allowed',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                          oracleRerankEnabled ? 'translate-x-6' : 'translate-x-1',
+                        )}
+                      />
+                    </button>
+                  </div>
+
+                  {oracleRerankEnabled && (
+                    <div>
+                      <label className="text-xs text-white/40 mb-1 block">
+                        Oracle rerank vs worker order ({Math.round(oracleRerankBlend * 100)}% rerank)
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={Math.round(oracleRerankBlend * 100)}
+                        disabled={useGeminiInstead}
+                        onChange={(e) => setOracleRerankBlend(Number(e.target.value) / 100)}
+                        className="w-full accent-fuchsia-500 disabled:opacity-40"
+                      />
+                      <p className="text-[11px] text-white/25 mt-1">
+                        0% keeps the worker order within each shelf; 100% uses the reranker fully.
+                      </p>
+                    </div>
+                  )}
                   
                   <div className="flex items-center gap-2 text-xs">
                     {ollamaSaveStatus === 'saving' && (

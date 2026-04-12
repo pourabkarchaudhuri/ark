@@ -16,6 +16,7 @@ import type {
   RecoShelf,
   RecoWorkerInput,
   RecoWorkerMessage,
+  RecoWorkerResult,
   UserGameSnapshot,
   CandidateGame,
   EngagementPattern,
@@ -30,6 +31,7 @@ import { catalogStore } from './catalog-store';
 import { epicCatalogStore } from './epic-catalog-store';
 import { annIndex } from './ann-index';
 import { embeddingService } from './embedding-service';
+import type { OracleRerankStatus } from '@/services/oracle-rerank';
 
 // ─── Embedding cache (populated externally by embedding-service) ────────────
 
@@ -59,6 +61,8 @@ interface RecoState {
   libraryCount: number;
   /** How many candidate games were available to score. */
   candidateCount: number;
+  /** Last Oracle /api/rerank outcome (for UI transparency). */
+  oracleRerankStatus: OracleRerankStatus;
 }
 
 const INITIAL_STATE: RecoState = {
@@ -71,6 +75,7 @@ const INITIAL_STATE: RecoState = {
   error: null,
   libraryCount: 0,
   candidateCount: 0,
+  oracleRerankStatus: 'none',
 };
 
 // ─── Store ─────────────────────────────────────────────────────────────────────
@@ -79,6 +84,8 @@ class RecoStore {
   private state: RecoState = { ...INITIAL_STATE };
   private listeners: Set<() => void> = new Set();
   private worker: Worker | null = null;
+  /** Incremented each time `runWorker` starts; stale async `finishWorkerResult` must not apply. */
+  private computeGeneration = 0;
 
   // Cold-start result caching — persists across app restarts
   private static readonly RESULT_CACHE_KEY = 'ark-oracle-results';
@@ -181,6 +188,7 @@ class RecoStore {
         lastComputed: (cached.lastComputed as number) ?? Date.now(),
         libraryCount: (cached.libraryCount as number) ?? 0,
         candidateCount: (cached.candidateCount as number) ?? 0,
+        oracleRerankStatus: 'none',
       };
       this.notify();
       return;
@@ -191,6 +199,7 @@ class RecoStore {
       status: 'computing',
       progress: { stage: 'Gathering data...', percent: 5 },
       error: null,
+      oracleRerankStatus: 'none',
     };
     this.notify();
 
@@ -1270,8 +1279,63 @@ class RecoStore {
     }, RecoStore.WORKER_IDLE_TIMEOUT_MS);
   }
 
+  /** Apply Ollama /api/rerank to shelf game order when available (after worker completes). */
+  private async finishWorkerResult(msg: RecoWorkerResult, runId: number) {
+    let shelves = msg.shelves;
+    let oracleRerankStatus: OracleRerankStatus = 'none';
+    try {
+      let settings: {
+        oracleRerankEnabled?: boolean;
+        oracleRerankBlend?: number;
+      } | null = null;
+      if (typeof window !== 'undefined' && window.settings?.getOllamaSettings) {
+        settings = await window.settings.getOllamaSettings();
+      }
+      const enabled = settings?.oracleRerankEnabled !== false;
+      const blend =
+        typeof settings?.oracleRerankBlend === 'number' && Number.isFinite(settings.oracleRerankBlend)
+          ? Math.min(1, Math.max(0, settings.oracleRerankBlend))
+          : 1;
+
+      if (typeof window !== 'undefined' && window.ollama?.rerank && enabled && blend > 0) {
+        this.state = {
+          ...this.state,
+          progress: { stage: 'Refining recommendations (Ollama)...', percent: 92 },
+        };
+        this.notify();
+        const { applyOracleRerankShelves } = await import('@/services/oracle-rerank');
+        const out = await applyOracleRerankShelves(msg.tasteProfile, msg.shelves, { enabled: true, blend });
+        shelves = out.shelves;
+        oracleRerankStatus = out.status;
+      } else {
+        if (!enabled) oracleRerankStatus = 'skipped_disabled';
+        else if (blend <= 0) oracleRerankStatus = 'skipped_blend_zero';
+        else if (typeof window !== 'undefined' && !window.ollama?.rerank) oracleRerankStatus = 'skipped_no_client';
+      }
+    } catch (e) {
+      console.warn('[RecoStore] Oracle rerank skipped:', e);
+      oracleRerankStatus = 'error';
+    }
+
+    if (runId !== this.computeGeneration) return;
+
+    this.state = {
+      ...this.state,
+      status: 'done',
+      progress: { stage: 'Complete', percent: 100 },
+      tasteProfile: msg.tasteProfile,
+      shelves,
+      computeTimeMs: msg.computeTimeMs,
+      lastComputed: Date.now(),
+      oracleRerankStatus,
+    };
+    this.notify();
+    this.saveResultsToCache();
+  }
+
   private runWorker(input: RecoWorkerInput) {
     this.killWorker();
+    const runId = ++this.computeGeneration;
 
     try {
       this.worker = new Worker(
@@ -1310,19 +1374,9 @@ class RecoStore {
 
         if (msg.type === 'result') {
           if (this.workerTimeout) { clearTimeout(this.workerTimeout); this.workerTimeout = null; }
-          this.state = {
-            ...this.state,
-            status: 'done',
-            progress: { stage: 'Complete', percent: 100 },
-            tasteProfile: msg.tasteProfile,
-            shelves: msg.shelves,
-            computeTimeMs: msg.computeTimeMs,
-            lastComputed: Date.now(),
-          };
-          this.notify();
-          this.saveResultsToCache();
           this.worker?.terminate();
           this.worker = null;
+          void this.finishWorkerResult(msg, runId);
         }
       };
 

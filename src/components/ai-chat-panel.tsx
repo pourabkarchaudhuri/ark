@@ -3,16 +3,13 @@
  * Cursor-like polished AI assistant interface
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   X, 
   Send, 
   Bot, 
   Trash2, 
-  Gamepad2,
-  Search,
-  ChevronDown,
   ChevronRight,
   Loader2,
   Plus,
@@ -23,7 +20,8 @@ import {
   Zap,
   Eye,
   Copy,
-  Check
+  Check,
+  Paperclip
 } from 'lucide-react';
 import Picker from '@emoji-mart/react';
 import data from '@emoji-mart/data';
@@ -31,25 +29,25 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import type { 
   ChatMessage, 
   GameContext, 
+  SendMessagePayload,
   ThoughtStep 
 } from '@/types/chat';
 import { GameStatus, type CachedGameMeta } from '@/types/game';
 import { useLibrary, extractCachedMeta } from '@/hooks/useGameStore';
 import { gameService } from '@/services/game-service';
+import { journeyStore } from '@/services/journey-store';
 
 interface AIChatPanelProps {
   isOpen: boolean;
   onClose: () => void;
   initialGameContext?: GameContext;
 }
-
-// Steam CDN image URLs
-const STEAM_CDN = 'https://cdn.akamai.steamstatic.com/steam/apps';
 
 // Format relative time
 function formatRelativeTime(date: Date): string {
@@ -83,45 +81,6 @@ function CopyButton({ text }: { text: string }) {
     >
       {copied ? <Check className="h-3 w-3 text-green-400" /> : <AnimateIcon tap="pop"><Copy className="h-3 w-3" /></AnimateIcon>}
     </button>
-  );
-}
-
-// Game image with fallback
-function GameImage({ game, size = 'sm' }: { game: GameContext; size?: 'sm' | 'md' }) {
-  const [imgSrc, setImgSrc] = useState(game.headerImage || `${STEAM_CDN}/${game.appId}/header.jpg`);
-  const [imgError, setImgError] = useState(false);
-  
-  const fallbackUrls = [
-    `${STEAM_CDN}/${game.appId}/header.jpg`,
-    `${STEAM_CDN}/${game.appId}/capsule_231x87.jpg`,
-  ];
-  
-  const handleError = () => {
-    const currentIndex = fallbackUrls.indexOf(imgSrc);
-    if (currentIndex < fallbackUrls.length - 1) {
-      setImgSrc(fallbackUrls[currentIndex + 1]);
-    } else {
-      setImgError(true);
-    }
-  };
-  
-  const sizeClasses = size === 'sm' ? 'h-5 w-8' : 'h-8 w-14';
-  
-  if (imgError) {
-    return (
-      <div className={cn(sizeClasses, "bg-zinc-800 rounded flex items-center justify-center")}>
-        <Gamepad2 className="h-3 w-3 text-zinc-500" />
-      </div>
-    );
-  }
-  
-  return (
-    <img 
-      src={imgSrc}
-      alt={game.name}
-      className={cn(sizeClasses, "object-cover rounded")}
-      onError={handleError}
-    />
   );
 }
 
@@ -302,7 +261,7 @@ const ChainOfThought = React.memo(function ChainOfThought({ steps, isStreaming }
 });
 
 // Message bubble - Clean and minimal
-const MessageBubble = React.memo(function MessageBubble({ message }: { message: ChatMessage }) {
+const MessageBubble = React.memo(function MessageBubble({ message, onFollowUpClick }: { message: ChatMessage; onFollowUpClick?: (text: string) => void }) {
   const isUser = message.role === 'user';
   
   return (
@@ -318,8 +277,13 @@ const MessageBubble = React.memo(function MessageBubble({ message }: { message: 
       )}>
         {/* User message */}
         {isUser ? (
-          <div className="inline-block bg-blue-600 text-white rounded-2xl rounded-tr-sm px-4 py-2 text-sm">
-            {message.content}
+          <div className="inline-block bg-blue-600 text-white rounded-2xl rounded-tr-sm px-4 py-2 text-sm max-w-[85%]">
+            {message.attachedImageUrl && (
+              <div className="mb-2 rounded-lg overflow-hidden border border-white/20">
+                <img src={message.attachedImageUrl} alt="Attached" className="max-h-32 w-auto max-w-full object-contain" />
+              </div>
+            )}
+            <span>{message.attachedImageUrl ? message.content.replace(/\s*\[Image attached\]\s*$/, '').trim() || ' ' : message.content}</span>
           </div>
         ) : (
           <div className="space-y-2">
@@ -364,10 +328,10 @@ const MessageBubble = React.memo(function MessageBubble({ message }: { message: 
               <div className={cn(
                 "text-sm text-zinc-200 leading-relaxed prose prose-invert prose-sm max-w-none",
                 "prose-p:my-1.5 prose-p:leading-relaxed",
-                "prose-headings:text-white prose-headings:font-semibold prose-headings:mt-3 prose-headings:mb-1.5",
-                "prose-h1:text-lg prose-h2:text-base prose-h3:text-sm",
-                "prose-ul:my-1.5 prose-ul:pl-4 prose-ol:my-1.5 prose-ol:pl-4",
-                "prose-li:my-0.5 prose-li:marker:text-fuchsia-400",
+                "prose-headings:text-white prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-2 prose-headings:leading-tight",
+                "prose-h1:text-xl prose-h1:mt-4 prose-h2:text-lg prose-h2:mt-4 prose-h3:text-base prose-h3:mt-3",
+                "prose-ul:my-2 prose-ul:pl-5 prose-ol:my-2 prose-ol:pl-5",
+                "prose-li:my-1 prose-li:marker:text-fuchsia-400 prose-li:leading-relaxed",
                 "prose-strong:text-white prose-strong:font-semibold",
                 "prose-em:text-zinc-300",
                 "prose-code:text-fuchsia-300 prose-code:bg-white/10 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-xs prose-code:before:content-none prose-code:after:content-none",
@@ -377,7 +341,16 @@ const MessageBubble = React.memo(function MessageBubble({ message }: { message: 
                 "prose-hr:border-white/10",
                 "prose-table:text-xs prose-th:text-white prose-td:text-zinc-300"
               )}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    a: ({ href, children, ...props }) => (
+                      <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+                        {children}
+                      </a>
+                    ),
+                  }}
+                >
                   {message.content}
                 </ReactMarkdown>
                 {/* Blinking cursor for streaming */}
@@ -398,6 +371,21 @@ const MessageBubble = React.memo(function MessageBubble({ message }: { message: 
                     <Wrench className="h-2.5 w-2.5" />
                     {tool.name}
                   </span>
+                ))}
+              </div>
+            )}
+            {/* Suggested follow-ups as clickable chips */}
+            {!isUser && message.suggestedFollowUps && message.suggestedFollowUps.length > 0 && onFollowUpClick && (
+              <div className="flex flex-wrap gap-2 mt-3">
+                {message.suggestedFollowUps.map((q, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => onFollowUpClick(q)}
+                    className="text-xs px-3 py-1.5 rounded-full bg-zinc-800 text-zinc-300 border border-zinc-600 hover:bg-zinc-700 hover:border-zinc-500 hover:text-white transition-colors"
+                  >
+                    {q}
+                  </button>
                 ))}
               </div>
             )}
@@ -423,131 +411,12 @@ const MessageBubble = React.memo(function MessageBubble({ message }: { message: 
   );
 });
 
-// Game context selector
-function GameContextSelector({ 
-  selected, 
-  onSelect, 
-  onClear 
-}: { 
-  selected?: GameContext; 
-  onSelect: (game: GameContext) => void;
-  onClear: () => void;
-}) {
-  const [isOpen, setIsOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<GameContext[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const searchTimeout = useRef<NodeJS.Timeout>();
-  
-  const handleSearch = useCallback(async (query: string) => {
-    if (!query.trim() || !window.aiChat) {
-      setSearchResults([]);
-      return;
-    }
-    
-    setIsLoading(true);
-    try {
-      const results = await window.aiChat.searchGamesForContext(query);
-      setSearchResults(results);
-    } catch (error) {
-      console.error('Failed to search games:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-  
-  useEffect(() => {
-    if (searchTimeout.current) clearTimeout(searchTimeout.current);
-    searchTimeout.current = setTimeout(() => handleSearch(searchQuery), 300);
-    return () => {
-      if (searchTimeout.current) clearTimeout(searchTimeout.current);
-    };
-  }, [searchQuery, handleSearch]);
-  
-  return (
-    <div className="relative">
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/50 border border-zinc-700/50 hover:border-zinc-600 transition-colors text-left"
-      >
-        {selected ? (
-          <>
-            <GameImage game={selected} />
-            <span className="flex-1 text-sm text-zinc-200 truncate">{selected.name}</span>
-            <button
-              onClick={(e) => { e.stopPropagation(); onClear(); }}
-              className="p-1 rounded hover:bg-zinc-700 text-zinc-400"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </>
-        ) : (
-          <>
-            <Gamepad2 className="h-4 w-4 text-zinc-500" />
-            <span className="flex-1 text-sm text-zinc-500">Select game context...</span>
-            <ChevronDown className="h-4 w-4 text-zinc-500" />
-          </>
-        )}
-      </button>
-      
-      <AnimatePresence>
-        {isOpen && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="absolute top-full left-0 right-0 mt-1 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl z-[100] overflow-hidden"
-          >
-            <div className="p-2 border-b border-zinc-800">
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500" />
-                <input
-                  type="text"
-                  placeholder="Search games..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-7 pr-3 py-1.5 bg-zinc-800 rounded text-sm text-zinc-200 placeholder:text-zinc-500 border-0 focus:outline-none focus:ring-1 focus:ring-zinc-600"
-                  autoFocus
-                />
-              </div>
-            </div>
-            
-            <div className="max-h-48 overflow-y-auto">
-              {isLoading ? (
-                <div className="flex items-center justify-center py-6 text-zinc-500">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                </div>
-              ) : searchResults.length > 0 ? (
-                searchResults.map((game) => (
-                  <button
-                    key={game.appId}
-                    onClick={() => {
-                      onSelect(game);
-                      setIsOpen(false);
-                      setSearchQuery('');
-                    }}
-                    className="w-full flex items-center gap-2 px-3 py-2 hover:bg-zinc-800 transition-colors"
-                  >
-                    <GameImage game={game} />
-                    <span className="text-sm text-zinc-200 truncate">{game.name}</span>
-                  </button>
-                ))
-              ) : searchQuery ? (
-                <div className="text-center py-6 text-zinc-500 text-sm">
-                  No games found
-                </div>
-              ) : (
-                <div className="text-center py-6 text-zinc-500 text-sm">
-                  Type to search games
-                </div>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
+const CHAT_PROVIDER_LABELS: Record<string, string> = {
+  'ollama': 'Ollama',
+  'gemini': 'Gemini',
+  'azure-openai': 'Azure OpenAI',
+  'anthropic': 'Claude',
+};
 
 // Quick prompts
 const QUICK_PROMPTS = [
@@ -563,12 +432,18 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
   const [isLoading, setIsLoading] = useState(false);
   const [gameContext, setGameContext] = useState<GameContext | undefined>(initialGameContext);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [preferredProvider, setPreferredProvider] = useState<string>('ollama');
+  const [availableProviders, setAvailableProviders] = useState<string[]>([]);
+  const [attachedImage, setAttachedImage] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
   const emojiButtonRef = useRef<HTMLButtonElement>(null);
   const { getAllEntries, addToLibrary, removeFromLibrary } = useLibrary();
-  
+
+  const isAzureOpenAI = preferredProvider === 'azure-openai';
+
   // Close emoji picker when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -593,7 +468,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
     inputRef.current?.focus();
   };
   
-  // Load conversation history
+  // Load conversation history and preferred provider / available providers
   useEffect(() => {
     const loadHistory = async () => {
       if (!window.aiChat) return;
@@ -613,9 +488,42 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
         console.error('Failed to load chat history:', error);
       }
     };
+
+    const loadProviders = async () => {
+      const list: string[] = [];
+      try {
+        const azureEndpoint = localStorage.getItem('ark-azure-endpoint')?.trim();
+        const azureKey = localStorage.getItem('ark-azure-key')?.trim();
+        const azureDeployment = localStorage.getItem('ark-azure-deployment')?.trim();
+        if (azureEndpoint && azureKey && azureDeployment) list.push('azure-openai');
+        const anthropicKey = localStorage.getItem('ark-anthropic-key')?.trim();
+        if (anthropicKey) list.push('anthropic');
+        if (window.settings) {
+          const [hasGemini, ollamaSettings] = await Promise.all([
+            window.settings.hasApiKey(),
+            window.settings.getOllamaSettings(),
+          ]);
+          if (hasGemini) list.push('gemini');
+          if (ollamaSettings?.url?.trim()) list.push('ollama');
+        }
+      } catch {
+        // fallback from localStorage only
+        if (localStorage.getItem('ark-azure-endpoint') && localStorage.getItem('ark-azure-key') && localStorage.getItem('ark-azure-deployment')) list.push('azure-openai');
+        if (localStorage.getItem('ark-anthropic-key')) list.push('anthropic');
+      }
+      setAvailableProviders(list.length ? list : ['ollama']);
+      try {
+        const current = window.settings ? await window.settings.getPreferredChatProvider() : localStorage.getItem('ark-preferred-chat-provider') ?? 'ollama';
+        setPreferredProvider(list.length && list.includes(current) ? current : (list[0] ?? 'ollama'));
+      } catch {
+        const current = localStorage.getItem('ark-preferred-chat-provider') ?? 'ollama';
+        setPreferredProvider(list.length && list.includes(current) ? current : (list[0] ?? 'ollama'));
+      }
+    };
     
     if (isOpen) {
       loadHistory();
+      loadProviders();
     }
   }, [isOpen]);
   
@@ -639,16 +547,34 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
     }
   }, [initialGameContext]);
   
-  // Send message
-  const handleSend = async () => {
-    if (!inputValue.trim() || isLoading || !window.aiChat) return;
+  const handleAttachmentClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      if (typeof dataUrl === 'string') setAttachedImage(dataUrl);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Send message (optional override = e.g. follow-up chip text; sends immediately without using input)
+  const handleSend = async (overrideMessage?: string) => {
+    const text = (overrideMessage ?? inputValue).trim();
+    if (!text || isLoading || !window.aiChat) return;
     
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       role: 'user',
-      content: inputValue.trim(),
+      content: text + (attachedImage ? ' [Image attached]' : ''),
       timestamp: new Date(),
       gameContext,
+      ...(attachedImage ? { attachedImageUrl: attachedImage } : {}),
     };
     
     // Add user message and loading state
@@ -665,14 +591,11 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
     setIsLoading(true);
     
     try {
-      // Get library data with game names from Electron cache
+      // Get library data with game names — use same sources as Library page (cachedMeta, journey, then Steam cache)
       const libraryEntries = getAllEntries();
-      // Extract numeric Steam appIds for the name cache lookup
       const numericAppIds = libraryEntries
         .map(e => e.steamAppId ?? 0)
         .filter((id): id is number => id > 0);
-      
-      // Fetch cached game names from Electron backend
       let gameNames: Record<number, string> = {};
       if (window.steam && numericAppIds.length > 0) {
         try {
@@ -681,22 +604,49 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
           console.warn('[AI Chat] Failed to fetch cached game names:', err);
         }
       }
-      
       const libraryData = libraryEntries.map(e => {
+        const name =
+          e.cachedMeta?.title ??
+          journeyStore.getEntry(e.gameId)?.title ??
+          (e.steamAppId ? gameNames[e.steamAppId] : undefined);
         return {
           gameId: e.gameId,
-          name: e.steamAppId ? gameNames[e.steamAppId] || undefined : undefined,
+          name: name || undefined,
           status: e.status,
           priority: e.priority,
           addedAt: e.addedAt.toISOString(),
         };
       });
       
-      const payload = {
-        message: userMessage.content,
+      let preferredProvider: string = 'ollama';
+      try {
+        if (window.settings) preferredProvider = await window.settings.getPreferredChatProvider() ?? 'ollama';
+        else preferredProvider = (typeof localStorage !== 'undefined' ? localStorage.getItem('ark-preferred-chat-provider') : null) ?? 'ollama';
+      } catch {
+        preferredProvider = (typeof localStorage !== 'undefined' ? localStorage.getItem('ark-preferred-chat-provider') : null) ?? 'ollama';
+      }
+      const payload: SendMessagePayload = {
+        message: text,
         gameContext,
         libraryData,
+        ...(attachedImage ? { imageAttachment: attachedImage } : {}),
       };
+      if (preferredProvider === 'azure-openai') {
+        try {
+          const endpoint = localStorage.getItem('ark-azure-endpoint')?.trim();
+          const key = localStorage.getItem('ark-azure-key')?.trim();
+          const deployment = localStorage.getItem('ark-azure-deployment')?.trim();
+          const apiVersion = localStorage.getItem('ark-azure-api-version')?.trim();
+          if (endpoint && key && deployment) {
+            payload.azureEndpoint = endpoint;
+            payload.azureKey = key;
+            payload.azureDeployment = deployment;
+            if (apiVersion) payload.azureApiVersion = apiVersion;
+          }
+        } catch {
+          // ignore
+        }
+      }
       
       // Subscribe to streaming chunks for real-time updates
       let unsubscribe: (() => void) | null = null;
@@ -718,26 +668,37 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
       try {
         const response = await window.aiChat.sendMessage(payload);
         
+        setAttachedImage(null);
         // Unsubscribe from streaming
         if (unsubscribe) unsubscribe();
         
         // Handle library actions
         if (response.actions && response.actions.length > 0) {
           for (const action of response.actions) {
-            // Support both Steam (appId) and Epic (gameId) from backend
+            const actionWithMeta = action as { gameId?: string; appId?: number; gameName?: string };
             const stringId =
-              typeof (action as { gameId?: string }).gameId === 'string'
-                ? (action as { gameId: string }).gameId
-                : `steam-${action.appId}`;
+              typeof actionWithMeta.gameId === 'string' && actionWithMeta.gameId.length > 0
+                ? actionWithMeta.gameId
+                : typeof actionWithMeta.appId === 'number' && Number.isFinite(actionWithMeta.appId)
+                  ? `steam-${actionWithMeta.appId}`
+                  : '';
+            if (!stringId || stringId === 'steam-undefined' || stringId === 'steam-NaN') {
+              console.warn('[AI Chat] Skipping action with invalid gameId/appId:', action);
+              continue;
+            }
             if (action.type === 'add') {
               try {
                 let cachedMeta: CachedGameMeta;
                 try {
                   const game = await gameService.getGameDetails(stringId);
                   if (game) cachedMeta = extractCachedMeta(game);
-                  else cachedMeta = { title: 'Unknown Game', store: stringId.startsWith('epic-') ? 'epic' : 'steam' };
+                  else {
+                    const store = stringId.startsWith('epic-') ? 'epic' : 'steam';
+                    cachedMeta = { title: actionWithMeta.gameName || 'Unknown Game', store };
+                  }
                 } catch {
-                  cachedMeta = { title: 'Unknown Game', store: stringId.startsWith('epic-') ? 'epic' : 'steam' };
+                  const store = stringId.startsWith('epic-') ? 'epic' : 'steam';
+                  cachedMeta = { title: actionWithMeta.gameName || 'Unknown Game', store };
                 }
                 const steamAppId = stringId.startsWith('steam-') ? parseInt(stringId.slice(6), 10) : undefined;
                 const validAppId = typeof steamAppId === 'number' && !isNaN(steamAppId) ? steamAppId : undefined;
@@ -748,7 +709,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   cachedMeta,
                 });
               } catch (e) {
-                console.error('Failed to add game:', e);
+                console.error('Failed to add game:', stringId, e);
               }
             } else if (action.type === 'remove') {
               try {
@@ -769,6 +730,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
           toolCalls: response.toolsUsed?.map(name => ({ name, args: {} })),
           chainOfThought: response.chainOfThought,
           model: response.model,
+          suggestedFollowUps: response.suggestedFollowUps?.length ? response.suggestedFollowUps : undefined,
         };
         
         setMessages(prev => 
@@ -881,16 +843,47 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                 </Button>
               </div>
             </div>
-            
-            {/* Game context */}
-            <div className="px-4 py-2 border-b border-zinc-800/50">
-              <GameContextSelector
-                selected={gameContext}
-                onSelect={setGameContext}
-                onClear={() => setGameContext(undefined)}
-              />
-            </div>
-            
+
+            {gameContext && (
+              <div
+                className="px-4 py-2 border-b border-zinc-800/50 flex items-center gap-2 min-h-[36px]"
+                data-testid="ai-chat-game-context"
+              >
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wide">Context</span>
+                <span className="text-xs text-zinc-200 font-medium truncate">{gameContext.name}</span>
+              </div>
+            )}
+
+            {/* LLM provider selection */}
+            {availableProviders.length > 0 && (
+              <div className="px-4 py-2 border-b border-zinc-800/50 flex items-center gap-2">
+                <span className="text-xs text-zinc-500 whitespace-nowrap">Model</span>
+                <Select
+                  value={preferredProvider}
+                  onValueChange={async (value) => {
+                    setPreferredProvider(value);
+                    try {
+                      if (typeof localStorage !== 'undefined') localStorage.setItem('ark-preferred-chat-provider', value);
+                      await window.settings?.setPreferredChatProvider(value as 'ollama' | 'gemini' | 'azure-openai' | 'anthropic');
+                    } catch {
+                      // ignore
+                    }
+                  }}
+                >
+                  <SelectTrigger className="h-8 bg-zinc-800/50 border-zinc-700/50 text-zinc-200 text-xs flex-1 max-w-[180px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableProviders.map((id) => (
+                      <SelectItem key={id} value={id}>
+                        {CHAT_PROVIDER_LABELS[id] ?? id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
             {/* Messages */}
             <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 custom-scrollbar">
               {messages.length === 0 ? (
@@ -921,7 +914,13 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                 </div>
               ) : (
                 messages.map((message) => (
-                  <MessageBubble key={message.id} message={message} />
+                  <MessageBubble
+                    key={message.id}
+                    message={message}
+                    onFollowUpClick={(question) => {
+                      handleSend(question);
+                    }}
+                  />
                 ))
               )}
               <div ref={messagesEndRef} />
@@ -950,7 +949,44 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                 )}
               </AnimatePresence>
               
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handleFileChange}
+              />
               <div className="flex items-center gap-2">
+                {isAzureOpenAI && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={handleAttachmentClick}
+                    className={cn(
+                      'h-8 w-8 flex-shrink-0',
+                      attachedImage ? 'text-blue-400 hover:text-blue-300 hover:bg-zinc-800' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
+                    )}
+                    title={attachedImage ? 'Change image' : 'Attach image (Azure OpenAI)'}
+                  >
+                    <Paperclip className="h-4 w-4 pointer-events-none" />
+                  </Button>
+                )}
+                {attachedImage && (
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <img src={attachedImage} alt="Attached" className="h-8 w-8 rounded object-cover border border-zinc-600" />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setAttachedImage(null)}
+                      className="h-6 w-6 text-zinc-500 hover:text-red-400"
+                      title="Remove image"
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </div>
+                )}
                 <Button
                   ref={emojiButtonRef}
                   type="button"
@@ -972,7 +1008,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   disabled={isLoading}
                 />
                 <Button
-                  onClick={handleSend}
+                  onClick={() => void handleSend()}
                   disabled={!inputValue.trim() || isLoading}
                   className="h-8 w-8 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 p-0"
                 >

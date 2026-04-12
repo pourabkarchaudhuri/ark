@@ -1,0 +1,15 @@
+{
+  "description": "Chat prompt test results",
+  "ranAt": "2026-03-14T14:41:05.454Z",
+  "results": [
+    {
+      "id": 1,
+      "category": "library",
+      "prompt": "Add Cyberpunk 2077 to my library as Want to Play",
+      "content": "## Add to library: Cyberpunk 2077\n\nI couldn’t find **Cyberpunk 2077** via Steam search right now (the search returned **no results**), so I don’t have an App ID to add.\n\nIf you want, you can:\n1. Share the game’s **Steam store link**, or\n2. Tell me the **Steam App ID** (the number in the URL, e.g. `.../app/#######`)\n\n…and I’ll add it to your library as **Want to Play**.",
+      "toolsUsed": [
+        "searchSteamGames"
+      ]
+    }
+  ]
+}

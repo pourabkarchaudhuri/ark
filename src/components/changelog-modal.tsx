@@ -9,6 +9,18 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.36': {
+    title: "What's New in Ark 1.0.36",
+    changes: [
+      'Guided tour spotlight — Tours now highlight the element being referenced with a crisp cutout glow instead of uniform dimming',
+      'Rerank status badges — Oracle and Embedding Space show compact inline badges for rerank status (off, unavailable, no scores) instead of standalone warning paragraphs',
+      'Tour flow fixes — Deterministic event handling, data-tour anchors for loading/empty states, lazy-loaded view retry timing, and Settings Guide tab redesign',
+      'AI chat improvements — Enhanced chat provider support, availability detection, and panel UX',
+      'Ollama reranking pipeline — Full reranker integration for Oracle recommendations and Embedding Space neighbors with score normalization and graceful fallback',
+      'Journey display titles — Smarter display names for Voyage timeline entries',
+      'removeChild crash eliminated — No more DOM mutation errors when ending guided tours',
+    ],
+  },
   '1.0.35': {
     title: "What's New in Ark 1.0.35",
     changes: [

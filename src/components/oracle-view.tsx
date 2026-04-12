@@ -52,7 +52,19 @@ import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import { EncryptedText } from '@/components/ui/encrypted-text';
 import { recoStore } from '@/services/reco-store';
+import type { OracleRerankStatus } from '@/services/oracle-rerank';
 import { shelfBanditStore } from '@/services/shelf-bandit-store';
+
+function oracleRerankBadge(status: OracleRerankStatus): { label: string; title: string } | null {
+  if (status === 'none' || status === 'applied') return null;
+  if (status === 'skipped_disabled') return { label: 'Rerank off', title: 'Oracle rerank is off in Settings; shelves use the worker order' };
+  if (status === 'skipped_no_client') return { label: 'Rerank unavailable', title: 'Ollama rerank is not available; shelves use the worker order' };
+  if (status === 'skipped_blend_zero') return { label: 'Rerank blend 0', title: 'Oracle rerank blend is 0; shelves keep the worker order' };
+  if (status === 'skipped_empty_pool') return { label: 'Rerank skipped', title: 'Nothing to rerank; shelves unchanged' };
+  if (status === 'empty_results') return { label: 'No rerank scores', title: 'Rerank returned no scores; shelves use the worker order' };
+  if (status === 'error') return { label: 'Rerank failed', title: 'Rerank failed; shelves use the worker order' };
+  return null;
+}
 import { recoHistoryStore } from '@/services/reco-history-store';
 import { normalizeLayerScores, generateExplanation } from '@/services/reco-explainer';
 import { embeddingService } from '@/services/embedding-service';
@@ -1387,9 +1399,10 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
   const otherShelves = shelfBanditStore.reorderShelves(
     filteredShelves.filter(s => s.type !== 'hero'),
   );
+  const oracleRerankBadgeInfo = oracleRerankBadge(state.oracleRerankStatus);
 
   return (
-    <div className="relative h-[calc(100vh-10rem)] overflow-hidden">
+    <div className="relative h-[calc(100vh-10rem)] overflow-hidden" data-tour="oracle-view-root">
       <div className="h-full overflow-y-auto overflow-x-hidden scrollbar-hide">
       <AnimatePresence mode="wait" initial={!alreadyDone.current}>
         {/* Computing state — skeleton background + detailed progress overlay */}
@@ -1535,6 +1548,15 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                 {dismissedIds.size > 0 && (
                   <span className="text-[9px] text-white/20">
                     {dismissedIds.size} dismissed
+                  </span>
+                )}
+                {oracleRerankBadgeInfo && (
+                  <span
+                    className="flex items-center gap-1 text-[9px] text-amber-400/70 bg-amber-400/[0.08] border border-amber-400/15 rounded px-1.5 py-0.5"
+                    title={oracleRerankBadgeInfo.title}
+                  >
+                    <AlertTriangle className="w-3 h-3 shrink-0" />
+                    {oracleRerankBadgeInfo.label}
                   </span>
                 )}
               </div>

@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { SettingsPanel } from '@/components/settings-panel';
+import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
 
 // Mock window.settings
 const mockSettings = {
@@ -14,19 +15,26 @@ const mockSettings = {
   hasApiKey: vi.fn(),
   getOllamaSettings: vi.fn(),
   setOllamaSettings: vi.fn(),
+  getAutoLaunch: vi.fn(),
+  setAutoLaunch: vi.fn(),
 };
 
 // Setup window mock before each test
 beforeEach(() => {
   vi.clearAllMocks();
   window.settings = mockSettings;
-  
+  mockSettings.getAutoLaunch.mockResolvedValue(false);
+
   // Default Ollama settings - useGeminiInstead: true so API key section is visible
   mockSettings.getOllamaSettings.mockResolvedValue({
     enabled: true,
     url: 'http://localhost:11434',
     model: 'gemma3:12b',
     useGeminiInstead: true,
+    rerankModel: DEFAULT_OLLAMA_RERANK_MODEL,
+    neighborRerankEnabled: true,
+    oracleRerankEnabled: true,
+    oracleRerankBlend: 1,
   });
 });
 

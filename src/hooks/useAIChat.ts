@@ -150,7 +150,30 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
         gameContext,
         libraryData,
       };
-      
+      try {
+        let preferredProvider: string = 'ollama';
+        try {
+          if (window.settings) preferredProvider = await window.settings.getPreferredChatProvider() ?? 'ollama';
+          else preferredProvider = localStorage.getItem('ark-preferred-chat-provider') ?? 'ollama';
+        } catch {
+          preferredProvider = localStorage.getItem('ark-preferred-chat-provider') ?? 'ollama';
+        }
+        if (preferredProvider === 'azure-openai') {
+          const endpoint = localStorage.getItem('ark-azure-endpoint')?.trim();
+          const key = localStorage.getItem('ark-azure-key')?.trim();
+          const deployment = localStorage.getItem('ark-azure-deployment')?.trim();
+          const apiVersion = localStorage.getItem('ark-azure-api-version')?.trim();
+          if (endpoint && key && deployment) {
+            payload.azureEndpoint = endpoint;
+            payload.azureKey = key;
+            payload.azureDeployment = deployment;
+            if (apiVersion) payload.azureApiVersion = apiVersion;
+          }
+        }
+      } catch {
+        // ignore
+      }
+
       const response: AIResponse = await window.aiChat.sendMessage(payload);
       
       // Execute any library actions

@@ -23,6 +23,9 @@ interface ComboboxProps {
   emptyMessage?: string;
   className?: string;
   disabled?: boolean;
+  'aria-label'?: string;
+  /** When true, uses smaller trigger/content (text-[10px], h-6 input, compact list items) to match compact Selects. */
+  compact?: boolean;
 }
 
 export function Combobox({
@@ -34,6 +37,8 @@ export function Combobox({
   emptyMessage = 'No option found.',
   className,
   disabled,
+  'aria-label': ariaLabel,
+  compact,
 }: ComboboxProps) {
   const [open, setOpen] = React.useState(false);
   const [searchQuery, setSearchQuery] = React.useState('');
@@ -55,6 +60,7 @@ export function Combobox({
           variant="outline"
           role="combobox"
           aria-expanded={open}
+          aria-label={ariaLabel}
           disabled={disabled}
           className={cn(
             'w-full justify-between bg-background/50',
@@ -63,24 +69,30 @@ export function Combobox({
           )}
         >
           {selectedOption?.label || placeholder}
-          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          <ChevronsUpDown className={cn('shrink-0 opacity-50', compact ? 'ml-1 h-3 w-3' : 'ml-2 h-4 w-4')} />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-[280px] p-0" align="start">
-        <div className="p-2 border-b border-white/10">
+      <PopoverContent
+        className={cn(compact ? 'w-[200px] p-0' : 'w-[280px] p-0')}
+        align="start"
+      >
+        <div className={cn('border-b border-white/10', compact ? 'p-1.5' : 'p-2')}>
           <div className="relative">
-            <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Search className={cn('absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground', compact ? 'h-3 w-3' : 'h-4 w-4')} />
             <Input
               placeholder={searchPlaceholder}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8 h-8 bg-transparent border-white/10"
+              className={cn(
+                'pl-8 bg-transparent border-white/10',
+                compact ? 'h-6 text-[10px]' : 'h-8'
+              )}
             />
           </div>
         </div>
-        <div className="max-h-60 overflow-y-auto p-1">
+        <div className={cn('overflow-y-auto', compact ? 'max-h-48 p-0.5' : 'max-h-60 p-1')}>
           {filteredOptions.length === 0 ? (
-            <p className="py-4 text-center text-sm text-muted-foreground">
+            <p className={cn('py-4 text-center text-muted-foreground', compact ? 'text-[10px]' : 'text-sm')}>
               {emptyMessage}
             </p>
           ) : (
@@ -93,14 +105,15 @@ export function Combobox({
                   setSearchQuery('');
                 }}
                 className={cn(
-                  'w-full flex items-center gap-2 px-2 py-1.5 rounded-sm text-sm text-left hover:bg-white/10 transition-colors',
+                  'w-full flex items-center gap-2 rounded-sm text-left hover:bg-white/10 transition-colors',
+                  compact ? 'px-2 py-1 text-[10px]' : 'px-2 py-1.5 text-sm',
                   value === option.value && 'bg-fuchsia-500/20'
                 )}
               >
                 <Check
                   className={cn(
-                    'h-4 w-4',
-                    value === option.value ? 'opacity-100' : 'opacity-0'
+                    value === option.value ? 'opacity-100' : 'opacity-0',
+                    compact ? 'h-3 w-3' : 'h-4 w-4'
                   )}
                 />
                 {option.label}

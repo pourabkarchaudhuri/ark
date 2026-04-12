@@ -10,7 +10,7 @@
  *  - Poster-card feed — games displayed directly as visual poster cards
  *  - Grouped by time period with sticky section headers
  *  - "My Radar" filter — highlights library / Want-to-Play games
- *  - Genre / platform quick-filter chips
+ *  - Store, platform (OS), and genre (Tags) dropdown/combobox filters
  *  - Heat-map density on section headers
  *  - Countdown chips (3d, Tomorrow, Today!) for library games
  *  - One-click "Add to Library" from poster hover
@@ -55,6 +55,14 @@ import { useToast } from '@/components/ui/toast';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { isAdultContentByDescription } from '@/services/adult-content-filter';
 import { GameCard } from '@/components/game-card';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Combobox } from '@/components/ui/combobox';
 import type { CachedGameMeta, Game, GameStatus } from '@/types/game';
 
 // ─── Lazy fade-in image ─────────────────────────────────────────────────────
@@ -395,6 +403,17 @@ const STORE_FILTER_OPTIONS: { id: StoreFilter; label: string; icon?: typeof FaSt
   { id: 'both', label: 'Both' },
 ];
 
+const PLATFORM_OPTIONS: { value: string; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'windows', label: 'Win' },
+  { value: 'mac', label: 'Mac' },
+  { value: 'linux', label: 'Linux' },
+];
+
+/** Compact trigger height/padding to match original chip row. */
+const COMPACT_TRIGGER_CLASS =
+  'h-6 min-w-0 px-2 text-[10px] font-medium rounded-md border-white/[0.08] bg-white/[0.04] text-white/80 hover:bg-white/10 hover:text-white [&>svg]:w-3 [&>svg]:h-3';
+
 const FilterChips = memo(function FilterChips({
   platformFilter,
   setPlatformFilter,
@@ -426,18 +445,18 @@ const FilterChips = memo(function FilterChips({
   }, []);
 
   return (
-    <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+    <>
       {hasActiveFilters && (
         <>
           <TooltipCard content="Clear all active genre, platform, and radar filters and return to the default view.">
-          <button
-            onClick={handleResetFilters}
-            className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium text-white/50 hover:text-white/80 hover:bg-white/10 transition-colors"
-            aria-label="Reset all filters"
-          >
-            <AnimateIcon hover="spin"><RotateCcw className="w-3 h-3" /></AnimateIcon>
-            Reset
-          </button>
+            <button
+              onClick={handleResetFilters}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium text-white/50 hover:text-white/80 hover:bg-white/10 transition-colors"
+              aria-label="Reset all filters"
+            >
+              <AnimateIcon hover="spin"><RotateCcw className="w-3 h-3" /></AnimateIcon>
+              Reset
+            </button>
           </TooltipCard>
           <div className="w-px h-4 bg-white/10" />
         </>
@@ -458,60 +477,91 @@ const FilterChips = memo(function FilterChips({
       <div className="w-px h-4 bg-white/10" />
 
       {/* Store filter */}
-      {STORE_FILTER_OPTIONS.map(({ id, label, icon: Icon }) => (
-        <button
-          key={id}
-          onClick={() => setStoreFilter(id)}
-          className={cn(
-            'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
-            storeFilter === id
-              ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
-              : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
-          )}
+      <Select value={storeFilter} onValueChange={(v) => setStoreFilter(v as StoreFilter)}>
+        <SelectTrigger
+          className={cn(COMPACT_TRIGGER_CLASS, 'w-auto gap-1')}
+          aria-label="Filter by store"
         >
-          {Icon && <Icon className="w-3 h-3" />}
-          {label}
-        </button>
-      ))}
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {STORE_FILTER_OPTIONS.map(({ id, label, icon: Icon }) => (
+            <SelectItem key={id} value={id} className="text-[10px]">
+              {Icon ? (
+                <span className="flex items-center gap-2">
+                  <Icon className="w-3 h-3" />
+                  {label}
+                </span>
+              ) : (
+                label
+              )}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
 
       <div className="w-px h-4 bg-white/10" />
 
-      {/* Platform filter */}
-      {(['all', 'windows', 'mac', 'linux'] as const).map((p) => (
-        <button
-          key={p}
-          onClick={() => setPlatformFilter(p)}
-          className={cn(
-            'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
-            platformFilter === p
-              ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
-              : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
-          )}
+      {/* Platform (OS) filter */}
+      <Select value={platformFilter} onValueChange={setPlatformFilter}>
+        <SelectTrigger
+          className={cn(COMPACT_TRIGGER_CLASS, 'w-auto gap-1')}
+          aria-label="Filter by platform"
         >
-          {p === 'all' ? 'All' : p === 'windows' ? <><Monitor className="w-3 h-3" /> Win</> : p === 'mac' ? <><Apple className="w-3 h-3" /> Mac</> : <><Terminal className="w-3 h-3" /> Linux</>}
-        </button>
-      ))}
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {PLATFORM_OPTIONS.map((p) => (
+            <SelectItem key={p.value} value={p.value} className="text-[10px]">
+              {p.value === 'all'
+                ? p.label
+                : p.value === 'windows'
+                  ? (
+                    <span className="flex items-center gap-2">
+                      <Monitor className="w-3 h-3" />
+                      {p.label}
+                    </span>
+                    )
+                  : p.value === 'mac'
+                    ? (
+                      <span className="flex items-center gap-2">
+                        <Apple className="w-3 h-3" />
+                        {p.label}
+                      </span>
+                    )
+                    : (
+                      <span className="flex items-center gap-2">
+                        <Terminal className="w-3 h-3" />
+                        {p.label}
+                      </span>
+                    )}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
 
       {topGenres.length > 0 && (
         <>
           <div className="w-px h-4 bg-white/10" />
-          {topGenres.map((g) => (
-            <button
-                        key={g}
-              onClick={() => setGenreFilter(genreFilter === g ? null : g)}
-              className={cn(
-                'px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
-                genreFilter === g
-                  ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
-                  : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
-              )}
-            >
-              {g}
-            </button>
-          ))}
+          <Combobox
+            options={[
+              { value: '', label: 'All Genres' },
+              ...topGenres.map((g) => ({ value: g, label: g })),
+            ]}
+            value={genreFilter ?? ''}
+            onValueChange={(v) => setGenreFilter(v === '' ? null : v)}
+            placeholder="All Genres"
+            searchPlaceholder="Search genres..."
+            emptyMessage="No genre found."
+            className={cn(COMPACT_TRIGGER_CLASS, 'w-auto min-w-[5rem]')}
+            aria-label="Filter by genre"
+            compact
+          />
         </>
       )}
-                  </div>
+
+      <div className="w-px h-4 bg-white/10" />
+    </>
   );
 });
 
@@ -563,7 +613,11 @@ const GroupedFeed = memo(function GroupedFeed({
 
   if (!hasAnyReleases) {
   return (
-      <div className="flex flex-col items-center justify-center h-full text-center">
+      <div
+        className="flex flex-col items-center justify-center h-full text-center"
+        data-tour="calendar-feed"
+        data-calendar-feed
+      >
         <CalendarDays className="w-10 h-10 text-white/[0.06] mb-3" />
         <p className="text-sm text-white/20">No releases match your filters</p>
       </div>
@@ -571,7 +625,11 @@ const GroupedFeed = memo(function GroupedFeed({
   }
 
           return (
-    <div data-calendar-feed className="overflow-y-auto h-full pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10">
+    <div
+      data-calendar-feed
+      data-tour="calendar-feed"
+      className="overflow-y-auto h-full pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10"
+    >
       {groups.map((group) => {
         const isExpanded = expandedGroups.has(group.key);
         const hasMore = group.releases.length > INITIAL_CARD_COUNT;
@@ -1512,7 +1570,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       {/* ── Header ────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between mb-2">
         {isInitialLoading ? (
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3" data-tour="calendar-header">
             <div className="flex items-center gap-1">
               <div className="w-7 h-7 rounded-md bg-white/5 animate-pulse" />
               <div className="w-[180px] h-6 rounded-md bg-white/[0.06] animate-pulse" />
@@ -1520,7 +1578,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
             </div>
           </div>
         ) : (
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3" data-tour="calendar-header">
             <div className="flex items-center gap-1">
               <button
                 onClick={goPrev}
@@ -1554,11 +1612,24 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
           </div>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {!isInitialLoading && (
+            <FilterChips
+              platformFilter={platformFilter}
+              setPlatformFilter={setPlatformFilter}
+              storeFilter={storeFilter}
+              setStoreFilter={setStoreFilter}
+              genreFilter={genreFilter}
+              setGenreFilter={setGenreFilter}
+              topGenres={topGenres}
+              radarActive={radarActive}
+              setRadarActive={setRadarActive}
+            />
+          )}
           {!isInitialLoading && (
             <div className="flex items-center rounded-md border border-white/[0.08] overflow-hidden">
               {VIEW_TOGGLE_OPTIONS.map(({ id, icon: Icon, label }) => (
-            <button
+                <button
                   key={id}
                   onClick={() => { setCalView(id); setWeekOffset(0); }}
                   className={cn(
@@ -1592,21 +1663,6 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
           )}
         </div>
       </div>
-
-      {/* ── Filter chips ──────────────────────────────────────────────── */}
-      {!isInitialLoading && (
-        <FilterChips
-          platformFilter={platformFilter}
-          setPlatformFilter={setPlatformFilter}
-          storeFilter={storeFilter}
-          setStoreFilter={setStoreFilter}
-          genreFilter={genreFilter}
-          setGenreFilter={setGenreFilter}
-          topGenres={topGenres}
-          radarActive={radarActive}
-          setRadarActive={setRadarActive}
-        />
-      )}
 
       {error && (
         <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 text-xs text-red-400 mb-3">{error}</div>

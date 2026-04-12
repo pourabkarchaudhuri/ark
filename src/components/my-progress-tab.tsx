@@ -5,12 +5,13 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { Star, Clock, Save, CheckCircle } from 'lucide-react';
+import { Star, Clock, Save, CheckCircle, FolderOpen, X, Calendar } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Slider } from '@/components/ui/slider';
 import { Badge } from '@/components/ui/badge';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   Select,
   SelectContent,
@@ -36,7 +37,9 @@ interface ProgressData {
   rating: number;
   publicReviews: string;
   recommendationSource: string;
+  executablePath?: string;
   addedAt: Date;
+  updatedAt: Date;
 }
 
 const statusOptions: GameStatus[] = [
@@ -59,6 +62,14 @@ const recommendationSources = [
   'Other',
 ];
 
+function formatProgressDateLabel(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(year, month, 0).getDate();
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function isCustomId(gameId: string): boolean {
@@ -77,7 +88,9 @@ function loadProgressData(gameId: string): ProgressData | null {
       rating: entry.rating ?? 0,
       publicReviews: entry.publicReviews ?? '',
       recommendationSource: entry.recommendationSource || 'Personal Discovery',
+      executablePath: entry.executablePath,
       addedAt: entry.addedAt instanceof Date ? entry.addedAt : new Date(entry.addedAt),
+      updatedAt: entry.updatedAt instanceof Date ? entry.updatedAt : new Date(entry.updatedAt),
     };
   }
 
@@ -90,7 +103,9 @@ function loadProgressData(gameId: string): ProgressData | null {
     rating: entry.rating || 0,
     publicReviews: entry.publicReviews || '',
     recommendationSource: entry.recommendationSource || 'Personal Discovery',
+    executablePath: entry.executablePath,
     addedAt: entry.addedAt instanceof Date ? entry.addedAt : new Date(entry.addedAt),
+    updatedAt: entry.updatedAt instanceof Date ? entry.updatedAt : new Date(entry.updatedAt),
   };
 }
 
@@ -104,6 +119,9 @@ function saveProgressData(
     rating: number;
     publicReviews: string;
     recommendationSource: string;
+    executablePath?: string;
+    addedAt?: Date;
+    updatedAt?: Date;
   },
 ): void {
   if (isCustomId(gameId)) {
@@ -114,6 +132,9 @@ function saveProgressData(
       rating: data.rating,
       publicReviews: data.publicReviews,
       recommendationSource: data.recommendationSource,
+      executablePath: data.executablePath,
+      addedAt: data.addedAt,
+      updatedAt: data.updatedAt,
     });
   } else {
     libraryStore.updateEntry(gameId, {
@@ -123,6 +144,9 @@ function saveProgressData(
       priority: data.priority,
       publicReviews: data.publicReviews,
       recommendationSource: data.recommendationSource,
+      executablePath: data.executablePath,
+      addedAt: data.addedAt,
+      updatedAt: data.updatedAt,
     });
   }
 }
@@ -253,6 +277,9 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
   const [recommendationSource, setRecommendationSource] = useState(
     initialData?.recommendationSource || 'Personal Discovery'
   );
+  const [executablePath, setExecutablePath] = useState(initialData?.executablePath ?? '');
+  const [addedAt, setAddedAt] = useState<Date>(initialData?.addedAt ?? new Date());
+  // updatedAt is read-only (app-managed); we display it from loaded data
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
@@ -268,6 +295,8 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
       setPriority(loaded.priority);
       setNotes(loaded.publicReviews);
       setRecommendationSource(loaded.recommendationSource);
+      setExecutablePath(loaded.executablePath ?? '');
+      setAddedAt(loaded.addedAt);
     }
   }, [gameId]);
 
@@ -280,9 +309,11 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
       status !== data.status ||
       priority !== data.priority ||
       notes !== data.publicReviews ||
-      recommendationSource !== data.recommendationSource;
+      recommendationSource !== data.recommendationSource ||
+      executablePath !== (data.executablePath ?? '') ||
+      addedAt.getTime() !== data.addedAt.getTime();
     setHasChanges(changed);
-  }, [data, hoursPlayed, rating, status, priority, notes, recommendationSource]);
+  }, [data, hoursPlayed, rating, status, priority, notes, recommendationSource, executablePath, addedAt]);
 
   // Save changes
   const handleSave = useCallback(() => {
@@ -297,6 +328,9 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
       rating,
       publicReviews: notes,
       recommendationSource,
+      executablePath: executablePath || undefined,
+      addedAt,
+      // updatedAt is not passed — stores set it to now on save (app-managed)
     });
 
     // Show success feedback
@@ -314,7 +348,13 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
         setSaveSuccess(false);
       }, 2000);
     }, 300);
-  }, [data, gameId, hoursPlayed, rating, status, priority, notes, recommendationSource]);
+  }, [data, gameId, hoursPlayed, rating, status, priority, notes, recommendationSource, executablePath, addedAt]);
+
+  const handleBrowseExecutable = useCallback(async () => {
+    if (!window.fileDialog?.selectExecutable) return;
+    const result = await window.fileDialog.selectExecutable();
+    if (result.success && result.filePath) setExecutablePath(result.filePath);
+  }, []);
 
   // Star rating component
   const StarRating = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => {
@@ -477,6 +517,123 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
                 ))}
               </SelectContent>
             </Select>
+          </div>
+
+          {/* Game Executable (same as Edit Library Entry) */}
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2">Game Executable</Label>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 min-w-0 px-3 py-2 rounded-md bg-white/5 border border-white/10 text-sm truncate">
+                {executablePath ? (
+                  <span className="text-white/80" title={executablePath}>
+                    {executablePath.split(/[\\/]/).pop()}
+                  </span>
+                ) : (
+                  <span className="text-white/40">No executable selected</span>
+                )}
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleBrowseExecutable}
+                className="border-white/10 gap-1.5 flex-shrink-0"
+              >
+                <FolderOpen className="h-3.5 w-3.5" />
+                Browse
+              </Button>
+              {executablePath && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setExecutablePath('')}
+                  className="h-8 w-8 p-0 text-white/40 hover:text-white/80 flex-shrink-0"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+            {executablePath && (
+              <p className="text-[11px] text-white/40 truncate" title={executablePath}>
+                {executablePath}
+              </p>
+            )}
+          </div>
+
+          {/* Added to library — same date picker as Edit Entry */}
+          <div className="space-y-2">
+            <Label className="text-white/70 flex items-center gap-2">
+              <Calendar className="h-3.5 w-3.5" />
+              Added to library
+            </Label>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full justify-start gap-2 bg-white/5 border-white/10 text-left font-normal text-white/80 hover:bg-white/10 hover:text-white"
+                >
+                  <Calendar className="h-4 w-4 shrink-0" />
+                  {formatProgressDateLabel(addedAt)}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-4" align="start">
+                <div className="grid gap-3">
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-white/50">Month</Label>
+                      <Select
+                        value={String(addedAt.getMonth() + 1)}
+                        onValueChange={(v) => {
+                          const day = Math.min(addedAt.getDate(), daysInMonth(addedAt.getFullYear(), parseInt(v, 10)));
+                          setAddedAt(new Date(addedAt.getFullYear(), parseInt(v, 10) - 1, day));
+                        }}
+                      >
+                        <SelectTrigger className="bg-white/5 border-white/10 h-9" />
+                        <SelectContent>
+                          {['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map((name, i) => (
+                            <SelectItem key={name} value={String(i + 1)}>{name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-white/50">Day</Label>
+                      <Select
+                        value={String(addedAt.getDate())}
+                        onValueChange={(v) => setAddedAt(new Date(addedAt.getFullYear(), addedAt.getMonth(), parseInt(v, 10)))}
+                      >
+                        <SelectTrigger className="bg-white/5 border-white/10 h-9" />
+                        <SelectContent>
+                          {Array.from({ length: daysInMonth(addedAt.getFullYear(), addedAt.getMonth() + 1) }, (_, i) => i + 1).map((day) => (
+                            <SelectItem key={day} value={String(day)}>{day}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-white/50">Year</Label>
+                      <Select
+                        value={String(addedAt.getFullYear())}
+                        onValueChange={(v) => {
+                          const year = parseInt(v, 10);
+                          const day = Math.min(addedAt.getDate(), daysInMonth(year, addedAt.getMonth() + 1));
+                          setAddedAt(new Date(year, addedAt.getMonth(), day));
+                        }}
+                      >
+                        <SelectTrigger className="bg-white/5 border-white/10 h-9" />
+                        <SelectContent>
+                          {Array.from({ length: 21 }, (_, i) => new Date().getFullYear() - 10 + i).map((y) => (
+                            <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
 
           {/* Notes */}

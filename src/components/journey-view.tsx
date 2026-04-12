@@ -25,6 +25,7 @@ import { statusHistoryStore } from '@/services/status-history-store';
 import { sessionStore } from '@/services/session-store';
 import { JourneyGanttView } from '@/components/journey-gantt-view';
 import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
+import { resolveJourneyDisplayTitle } from '@/lib/journey-display-title';
 import { ShowcaseView } from '@/components/showcase-view';
 import { MedalsView } from '@/components/medals-view';
 
@@ -43,8 +44,9 @@ function getJourneyImageChain(entry: { gameId: string; title: string; coverUrl?:
   // Merge coverUrl: prefer entry's, then cachedMeta's
   const coverUrl = entry.coverUrl || meta?.coverUrl;
   const headerImage = meta?.headerImage;
+  const displayTitle = resolveJourneyDisplayTitle(entry.gameId, entry.title);
 
-  return buildGameImageChain(entry.gameId, entry.title, coverUrl, headerImage);
+  return buildGameImageChain(entry.gameId, displayTitle, coverUrl, headerImage);
 }
 
 /** Format player count with K/M suffixes */
@@ -95,11 +97,15 @@ const StarRating = memo(function StarRating({ rating }: { rating: number }) {
 
 /** Cover image with multi-step fallback chain (cover → header → capsule → logo) */
 const JourneyCoverImage = memo(function JourneyCoverImage({ entry }: { entry: JourneyEntry }) {
+  const displayTitle = useMemo(
+    () => resolveJourneyDisplayTitle(entry.gameId, entry.title),
+    [entry.gameId, entry.title],
+  );
   // Stable dependency: gameId + coverUrl don't change during backfill re-renders
   const chain = useMemo(
     () => getJourneyImageChain(entry),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [entry.gameId, entry.coverUrl],
+    [entry.gameId, entry.coverUrl, entry.title],
   );
   const [attempt, setAttempt] = useState(0);
   const chainKey = chain.join('|');
@@ -121,7 +127,7 @@ const JourneyCoverImage = memo(function JourneyCoverImage({ entry }: { entry: Jo
         <img
           key={currentSrc}
           src={currentSrc}
-          alt={entry.title}
+          alt={displayTitle}
           loading="lazy"
           decoding="async"
           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
@@ -148,6 +154,10 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'Ju
 const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCount?: number }) {
   const [, navigate] = useLocation();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const displayTitle = useMemo(
+    () => resolveJourneyDisplayTitle(entry.gameId, entry.title),
+    [entry.gameId, entry.title],
+  );
   const addedDate = entry.addedAt
     ? new Date(entry.addedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
     : '';
@@ -210,7 +220,7 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
         <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
           <div>
             <h4 className={cn('font-semibold text-sm truncate transition-colors pr-5', !isRemoved && 'group-hover:text-fuchsia-400')}>
-              {entry.title}
+              {displayTitle}
             </h4>
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
               <Badge
@@ -502,7 +512,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // Loading state — skeleton matches Voyage header + content (Your Ark / Log / OCD / Medals)
   if (loading) {
     return (
-      <div className="relative w-full overflow-clip">
+      <div className="relative w-full overflow-clip" data-tour="journey-main">
         {/* Header skeleton */}
         <div className="max-w-7xl mx-auto py-10 px-4 md:px-8 lg:px-10">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -511,9 +521,9 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
               <div className="h-4 w-40 bg-white/5 rounded animate-pulse" />
             </div>
             <div className="flex items-center gap-3">
-              <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10 gap-0.5">
+              <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10 gap-0.5" data-tour="journey-view-styles">
                 {[1, 2, 3, 4].map((i) => (
-                  <div key={i} className="h-9 w-16 md:w-20 bg-white/10 rounded-md animate-pulse" />
+                  <div key={i} className="h-9 w-16 md:w-20 bg-white/10 rounded-md animate-pulse" data-tour={i === 4 ? 'journey-medals-tab' : undefined} />
                 ))}
               </div>
             </div>
@@ -539,7 +549,9 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // Empty state
   if (entries.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-32 text-center">
+      <div className="flex flex-col items-center justify-center py-32 text-center" data-tour="journey-main">
+        <span className="sr-only" data-tour="journey-view-styles" aria-hidden />
+        <span className="sr-only" data-tour="journey-medals-tab" aria-hidden />
         <div className="w-20 h-20 rounded-full bg-white/5 flex items-center justify-center mb-6 shadow-lg shadow-fuchsia-500/10">
           <Gamepad2 className="w-10 h-10 text-fuchsia-500" />
         </div>
@@ -560,7 +572,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   }
 
   return (
-    <div className="relative w-full overflow-clip">
+    <div className="relative w-full overflow-clip" data-tour="journey-main">
       {/* Header */}
       <div className="max-w-7xl mx-auto py-10 px-4 md:px-8 lg:px-10">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -575,7 +587,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
 
           {/* View style toggle + data source toggle */}
           <div className="flex items-center gap-3">
-            <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
+            <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10" data-tour="journey-view-styles">
               <button
                 onClick={() => setViewStyle('ark')}
                 className={cn(
@@ -614,6 +626,8 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
                 OCD
               </button>
               <button
+                type="button"
+                data-tour="journey-medals-tab"
                 onClick={() => setViewStyle('medals')}
                 className={cn(
                   'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',

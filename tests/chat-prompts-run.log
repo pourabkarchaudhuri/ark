@@ -1,0 +1,18 @@
+
+> ark@1.0.35 test:chat-prompts
+> npm run electron:compile && electron . --run-chat-prompts
+
+
+> ark@1.0.35 electron:compile
+> tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs
+
+
+[Cache:steam-cache] Loaded 0 entries from disk
+[Cache:epic-cache] Loaded 0 entries from disk
+[ChatStore] Initialized — 0 conversation(s) loaded from disk
+[dotenv@17.3.1] injecting env (7) from .env -- tip: 🔐 encrypt with Dotenvx: https://dotenvx.com
+[SettingsStore] Preferred chat provider set to azure-openai
+[ChatPrompts] Running 50 prompts with Azure OpenAI (no window)...
+[ChatPrompts] Starting 1/50 id=1...
+[AI Proxy] Processing: "Add Cyberpunk 2077 to my library as Want to Play..." provider=azure-openai
+[AI Proxy] Creating Azure OpenAI model: gpt-5.2 api-version: 2025-04-01-preview

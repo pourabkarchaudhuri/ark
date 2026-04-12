@@ -19,6 +19,10 @@ export interface ChatMessage {
   isStreaming?: boolean; // Currently receiving streaming content
   error?: string;
   model?: string; // Which model was used for this message
+  /** Suggested follow-up questions shown as clickable chips (assistant messages only). */
+  suggestedFollowUps?: string[];
+  /** Data URL of attached image (user messages); shown as thumbnail in chat. */
+  attachedImageUrl?: string;
 }
 
 // Game context for the chat
@@ -90,7 +94,12 @@ export interface AIResponse {
   actions: LibraryAction[];
   chainOfThought: ThoughtStep[];
   model?: string; // Which model was used (e.g., "Gemini 2.5 Flash", "Ollama gemma3:12b")
+  /** Parsed from reply; shown as clickable follow-up chips in the UI. */
+  suggestedFollowUps?: string[];
 }
+
+// LLM provider identifier (for chat panel selector and backend routing)
+export type ChatProviderId = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
 
 // Request object for sending messages
 export interface SendMessagePayload {
@@ -103,6 +112,16 @@ export interface SendMessagePayload {
     priority: string;
     addedAt?: string;
   }>;
+  /** Selected LLM provider; backend uses this when implemented */
+  provider?: ChatProviderId;
+  /** Required when provider is 'azure-openai'; sent from renderer (Settings store in localStorage) */
+  azureEndpoint?: string;
+  azureKey?: string;
+  azureDeployment?: string;
+  /** Optional API version (e.g. 2025-04-01-preview). From Settings > Azure OpenAI. */
+  azureApiVersion?: string;
+  /** Image attachment as data URL (e.g. data:image/png;base64,...). Only used when provider is Azure OpenAI (vision). */
+  imageAttachment?: string;
 }
 
 // Streaming chunk data

@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef, useSyncExternalStore, lazy, Suspense, startTransition } from 'react';
 import { useLocation } from 'wouter';
+
 import { useSteamGames, useGameSearch, useLibrary, useLibraryGames, useJourneyHistory, useSteamFilters, useFilteredGames, extractCachedMeta, useDebounce } from '@/hooks/useGameStore';
 import { useDeferredFilterSort, getAdjustedRatingForSort } from '@/hooks/useDeferredFilterSort';
 import { useDetailEnricher } from '@/hooks/useDetailEnricher';
@@ -67,13 +68,14 @@ import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
 import { SettingsScreen } from '@/components/settings-screen';
-import { GuidedTour, useTourState } from '@/components/guided-tour';
+import { GuidedTour, getTourSteps, useTourState, viewModeToTourId, type TourId } from '@/components/guided-tour';
 import { YearWrapped, WrappedSnackbar } from '@/components/year-wrapped';
 import { AnimateIcon, MagneticWrap } from '@/components/ui/animate-icon';
 import { useSessionTracker } from '@/hooks/useSessionTracker';
 import { NavbarStatusIndicator } from '@/components/system-status-panel';
 import { useDevMode } from '@/hooks/useDevMode';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
+import { useChatAvailability } from '@/hooks/useChatAvailability';
 import { scheduleBackgroundPrecompute, getBuildStage, subscribeGalaxy } from '@/services/galaxy-cache';
 import { embeddingService } from '@/services/embedding-service';
 import { prewarmNews } from '@/services/news-service';
@@ -115,7 +117,11 @@ export function Dashboard() {
   });
 
   // Guided tour state
-  const { tourRunning, tourKey, startTour, stopTour } = useTourState();
+  const { tourRunning, tourKey, activeTourId, startTour, stopTour } = useTourState();
+
+  const startTourForCurrentView = useCallback(() => {
+    startTour(viewModeToTourId(viewMode));
+  }, [viewMode, startTour]);
 
   // Persist current view so it survives navigation to game details and back
   useEffect(() => {
@@ -179,6 +185,7 @@ export function Dashboard() {
   // Session tracking (live "Playing Now" status)
   const { isPlayingNow, liveGames } = useSessionTracker();
   const [devMode] = useDevMode();
+  const chatAvailability = useChatAvailability();
 
   // Background precompute for Embedding Space galaxy data (runs once, 20s after mount)
   useEffect(() => { scheduleBackgroundPrecompute(); }, []);
@@ -335,7 +342,17 @@ export function Dashboard() {
     const sortedIsFromLibrary =
       sortedGames.length > 0 && sortedGames.every((g: Game) => libIds.has(g.id));
     if (sortedIsFromLibrary) return sortedGames;
-    const effectiveSort = (sortBy === 'default' ? 'rating' : sortBy) as 'rating' | 'releaseDate' | 'title';
+    // Fallback: apply same status filter as hook so "Playing Now" shows only live games
+    let list = mergedLibraryGames;
+    if (filters.status !== 'All') {
+      if (filters.status === 'Playing Now') {
+        list = list.filter(
+          (g) => liveGames?.has(g.id) || (g.steamAppId ? liveGames?.has(`steam-${g.steamAppId}`) : false)
+        );
+      } else {
+        list = list.filter((g) => g.status === filters.status);
+      }
+    }
     const statusOrder = (g: Game) => {
       const isLive = liveGames?.has(g.id) || (g.steamAppId ? liveGames?.has(`steam-${g.steamAppId}`) : false);
       if (isLive || g.status === 'Playing Now') return 0;
@@ -345,12 +362,15 @@ export function Dashboard() {
       if (g.status === 'Completed') return 4;
       return 5;
     };
-    const releaseTs = (g: Game) => (g.releaseDate ? new Date(g.releaseDate).getTime() : 0);
-    return [...mergedLibraryGames].sort((a, b) => {
+    return [...list].sort((a, b) => {
       if (filters.status === 'All') {
         const diff = statusOrder(a) - statusOrder(b);
         if (diff !== 0) return diff;
+        // Within each status section: alphabetical by title
+        return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
       }
+      const effectiveSort = sortBy as 'rating' | 'releaseDate' | 'title';
+      const releaseTs = (g: Game) => (g.releaseDate ? new Date(g.releaseDate).getTime() : 0);
       let cmp = 0;
       if (effectiveSort === 'title') cmp = a.title.localeCompare(b.title);
       else if (effectiveSort === 'rating') cmp = getAdjustedRatingForSort(a) - getAdjustedRatingForSort(b);
@@ -367,7 +387,7 @@ export function Dashboard() {
     if (sortedGames.length === 0 && steamGames.length === 0) return sortedGames;
     // Hook not yet populated for browse: show steamGames so user sees something
     if (sortedGames.length === 0 && steamGames.length > 0) {
-      const effectiveSort = sortBy === 'default' ? 'rating' : sortBy;
+      const effectiveSort = sortBy;
       const releaseTs = (g: Game) => (g.releaseDate ? new Date(g.releaseDate).getTime() : 0);
       return [...steamGames].sort((a, b) => {
         let cmp = 0;
@@ -384,7 +404,7 @@ export function Dashboard() {
       sortedGames.every((g: Game) => libIds.has(g.id));
     if (!sortedIsStaleLibrary) return sortedGames;
     // Fallback only when hook clearly returned library list (same count, all in library)
-    const effectiveSort = sortBy === 'default' ? 'rating' : sortBy;
+    const effectiveSort = sortBy;
     const releaseTs = (g: Game) => (g.releaseDate ? new Date(g.releaseDate).getTime() : 0);
     return [...steamGames].sort((a, b) => {
       let cmp = 0;
@@ -519,7 +539,68 @@ export function Dashboard() {
   const switchToDataFlow = useCallback(() => { setViewMode('data-flow'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   const switchToDevLog = useCallback(() => { setViewMode('devlog'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
 
-
+  /** Switch to the view that has the right DOM anchors, then start Joyride (used from Settings → Guide). */
+  const runGuidedTour = useCallback(
+    (tourId: TourId) => {
+      stopTour();
+      switch (tourId) {
+        case 'welcome':
+        case 'browse':
+        case 'overview':
+        case 'game-details':
+          switchToBrowse();
+          break;
+        case 'library':
+          switchToLibrary();
+          break;
+        case 'journey':
+          switchToJourney();
+          break;
+        case 'buzz':
+          switchToBuzz();
+          break;
+        case 'calendar':
+          switchToCalendar();
+          break;
+        case 'oracle':
+          switchToOracle();
+          break;
+        case 'ann-graph':
+          switchToAnnGraph();
+          break;
+        case 'data-flow':
+          switchToDataFlow();
+          break;
+        case 'devlog':
+          switchToDevLog();
+          break;
+        case 'settings':
+          switchToSettings();
+          break;
+        default:
+          switchToBrowse();
+      }
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          window.setTimeout(() => startTour(tourId), 150);
+        });
+      });
+    },
+    [
+      stopTour,
+      startTour,
+      switchToBrowse,
+      switchToLibrary,
+      switchToJourney,
+      switchToBuzz,
+      switchToCalendar,
+      switchToOracle,
+      switchToAnnGraph,
+      switchToDataFlow,
+      switchToDevLog,
+      switchToSettings,
+    ],
+  );
 
   // Handle adding game to library
   const handleAddToLibrary = useCallback((game: Game) => {
@@ -539,7 +620,7 @@ export function Dashboard() {
   }, [isInLibrary, updateEntry]);
 
   // Handle saving library entry
-  const handleSave = useCallback((gameData: Partial<Game> & { executablePath?: string }) => {
+  const handleSave = useCallback((gameData: Partial<Game> & { executablePath?: string; addedAt?: Date }) => {
     try {
       if (editingGame) {
         const gameId = editingGame.id;
@@ -558,6 +639,7 @@ export function Dashboard() {
             publicReviews: gameData.publicReviews,
             recommendationSource: gameData.recommendationSource,
             executablePath: gameData.executablePath,
+            addedAt: gameData.addedAt,
           });
           success(`"${editingGame.title}" updated successfully`);
         } else if (isInLibrary(gameId)) {
@@ -568,6 +650,7 @@ export function Dashboard() {
             publicReviews: gameData.publicReviews,
             recommendationSource: gameData.recommendationSource,
             executablePath: gameData.executablePath,
+            addedAt: gameData.addedAt,
           });
           success(`"${editingGame.title}" updated successfully`);
         } else {
@@ -575,13 +658,14 @@ export function Dashboard() {
           // the game even when the remote API is unreachable (e.g. Epic/Cloudflare).
           const cachedMeta = extractCachedMeta(editingGame);
           addToLibrary(gameId, gameData.status || 'Want to Play', cachedMeta);
-          // Update with additional fields including executablePath
-          if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath) {
+          // Update with additional fields including executablePath and addedAt
+          if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath || gameData.addedAt) {
             updateEntry(gameId, {
               priority: gameData.priority,
               publicReviews: gameData.publicReviews,
               recommendationSource: gameData.recommendationSource,
               executablePath: gameData.executablePath,
+              addedAt: gameData.addedAt,
             });
           }
           success(`"${editingGame.title}" added to your library`);
@@ -623,6 +707,7 @@ export function Dashboard() {
       publicReviews: libEntry?.publicReviews ?? customEntry?.publicReviews ?? '',
       recommendationSource: libEntry?.recommendationSource ?? customEntry?.recommendationSource ?? 'Personal Discovery',
       executablePath: libEntry?.executablePath ?? customEntry?.executablePath,
+      addedAt: libEntry?.addedAt ?? customEntry?.addedAt,
     };
 
     setEditingGame(game);
@@ -672,7 +757,8 @@ export function Dashboard() {
     for (const game of libraryDisplayGames) {
       const isLive = liveGames?.has(game.id) ||
         (game.steamAppId ? liveGames?.has(`steam-${game.steamAppId}`) : false);
-      const effectiveStatus = (isLive || game.status === 'Playing Now') ? 'Playing Now' : (game.status || 'Want to Play');
+      // "Playing Now" section = only games actually running (tracked); other statuses use stored value
+      const effectiveStatus = isLive ? 'Playing Now' : (game.status || 'Want to Play');
       if (groups[effectiveStatus]) groups[effectiveStatus].push(game);
       else groups['Want to Play'].push(game);
     }
@@ -797,6 +883,7 @@ export function Dashboard() {
     return count;
   }, [filters.status, filters.priority, filters.genre, filters.platform, filters.category, filters.store.length, viewMode]);
 
+  const guidedTourSteps = useMemo(() => getTourSteps(activeTourId), [activeTourId]);
 
   return (
     <div className="min-h-screen bg-black">
@@ -974,32 +1061,47 @@ export function Dashboard() {
 
             {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && viewMode !== 'devlog' && viewMode !== 'settings' && (
               <>
-                <p className="text-sm text-white/60 items-center gap-1.5 whitespace-nowrap shrink-0 hidden lg:flex">
-                  {viewMode === 'library' ? (
+                {viewMode === 'browse' ? (
+                  <div data-tour="browse-toolbar" className="min-w-0 shrink flex flex-col justify-center">
+                    <p className="text-sm text-white/60 items-center gap-1.5 whitespace-nowrap shrink-0 hidden lg:flex">
+                      {filters.category === 'catalog' ? (
+                        catalogTotalCount > 0 ? (
+                          <><span className="text-white font-medium">{catalogTotalCount.toLocaleString()}</span> games</>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-white/50">
+                            <svg className="h-3.5 w-3.5 animate-spin text-fuchsia-400 shrink-0" viewBox="0 0 24 24" fill="none">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                            </svg>
+                            <span className="text-[11px] tabular-nums">Indexing catalog…</span>
+                          </span>
+                        )
+                      ) : (
+                        <>
+                          <span className="text-white font-medium" data-testid="browse-game-count">
+                            {browseDisplayGames.length.toLocaleString()}
+                          </span>{' '}
+                          games of{' '}
+                          <button
+                            type="button"
+                            onClick={openFilters}
+                            className="text-white/80 hover:text-fuchsia-400 transition-colors cursor-pointer underline decoration-white/20 hover:decoration-fuchsia-400/50 underline-offset-2"
+                          >
+                            {{ trending: 'Top Sellers', 'most-played': 'Most Played', free: 'Free Games', recent: 'New Releases', 'award-winning': 'Coming Soon', catalog: 'Catalog', all: 'All' }[filters.category] ?? filters.category}
+                          </button>
+                        </>
+                      )}
+                    </p>
+                    <p className="flex lg:hidden text-[11px] text-white/55 whitespace-nowrap items-center gap-1 shrink-0">
+                      <span className="text-white font-medium tabular-nums">{browseDisplayGames.length.toLocaleString()}</span>
+                      <span>games</span>
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-sm text-white/60 items-center gap-1.5 whitespace-nowrap shrink-0 hidden lg:flex">
                     <><span className="text-white font-medium">{libraryDisplayGames.length.toLocaleString()}</span> games</>
-                  ) : filters.category === 'catalog' ? (
-                    /* Catalog A–Z: show the absolute full catalog count */
-                    catalogTotalCount > 0 ? (
-                      <><span className="text-white font-medium">{catalogTotalCount.toLocaleString()}</span> games</>
-                    ) : (
-                      /* Catalog count still loading — show spinner */
-                      <span className="inline-flex items-center gap-1.5 text-white/50">
-                        <svg className="h-3.5 w-3.5 animate-spin text-fuchsia-400 shrink-0" viewBox="0 0 24 24" fill="none">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                        </svg>
-                        <span className="text-[11px] tabular-nums">Indexing catalog…</span>
-                      </span>
-                    )
-                  ) : (
-                    /* Other browse categories: "X games of {filter}" */
-                    <>
-                      <span className="text-white font-medium" data-testid="browse-game-count">
-                        {browseDisplayGames.length.toLocaleString()}
-                      </span> games of <button onClick={openFilters} className="text-white/80 hover:text-fuchsia-400 transition-colors cursor-pointer underline decoration-white/20 hover:decoration-fuchsia-400/50 underline-offset-2">{{ trending: 'Top Sellers', 'most-played': 'Most Played', free: 'Free Games', recent: 'New Releases', 'award-winning': 'Coming Soon', catalog: 'Catalog', all: 'All' }[filters.category] ?? filters.category}</button>
-                    </>
-                  )}
-                </p>
+                  </p>
+                )}
                 {hasActiveFilters && (
                   <Badge 
                     variant="secondary" 
@@ -1141,10 +1243,10 @@ export function Dashboard() {
             })()}
 
             {/* Tour Help Button */}
-            <TooltipCard content="Take a guided tour of the Ark's features. Great for first-time visitors or rediscovering hidden capabilities.">
+            <TooltipCard content="Starts a guided tour for the current tab (Browse, Library, Voyage, etc.). Press Esc anytime to exit and clear the overlay. Replay any tour from Settings → Guide.">
               <MagneticWrap strength={0.25}>
                 <Button
-                  onClick={startTour}
+                  onClick={startTourForCurrentView}
                   variant="ghost"
                   size="icon"
                   className="h-9 w-9 text-white/70 hover:text-white hover:bg-cyan-500/20 border border-white/10 hover:border-cyan-500/50 transition-all"
@@ -1154,16 +1256,17 @@ export function Dashboard() {
               </MagneticWrap>
             </TooltipCard>
 
-            {/* AI Chat Button (dev mode only) */}
+            {/* AI Chat Button (dev mode only); disabled when no provider configured */}
             {devMode && (
-              <TooltipCard content="Chat with the AI Assistant — ask about games, get personalized recommendations, or explore your library data conversationally.">
+              <TooltipCard content={chatAvailability.message}>
                 <MagneticWrap strength={0.25}>
                   <Button
                     data-tour="ai-chat"
                     onClick={toggleAIChat}
+                    disabled={!chatAvailability.available}
                     variant="ghost"
                     size="icon"
-                    className="h-9 w-9 text-white/70 hover:text-white hover:bg-purple-500/20 border border-white/10 hover:border-purple-500/50 transition-all"
+                    className="h-9 w-9 text-white/70 hover:text-white hover:bg-purple-500/20 border border-white/10 hover:border-purple-500/50 transition-all disabled:opacity-50 disabled:pointer-events-none"
                   >
                     <AnimateIcon hover="sparkle"><Sparkles className="h-4 w-4 text-purple-400 pointer-events-none" /></AnimateIcon>
                   </Button>
@@ -1175,6 +1278,7 @@ export function Dashboard() {
             {viewMode === 'library' && (
               <TooltipCard content="Add a non-Steam game to your library — perfect for DRM-free, indie, or emulated titles. Track them alongside your Steam collection.">
                 <Button
+                  data-tour="library-add-custom"
                   onClick={() => setIsCustomGameDialogOpen(true)}
                   className="h-9 bg-fuchsia-500 hover:bg-fuchsia-600 text-white gap-1.5"
                 >
@@ -1235,7 +1339,7 @@ export function Dashboard() {
             <DataFlowView onBack={switchToBrowse} />
           </Suspense>
         ) : viewMode === 'settings' ? (
-          <SettingsScreen onBack={switchToBrowse} />
+          <SettingsScreen onBack={switchToBrowse} onRunGuidedTour={runGuidedTour} />
         ) : viewMode === 'ann-graph' ? (
           <div key="ann-graph-shell" className="fixed inset-0 top-[52px] z-30 bg-black">
             <Suspense fallback={<LazyViewFallback />}>
@@ -1275,17 +1379,53 @@ export function Dashboard() {
                 {'#ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => (
                   <button
                     key={letter}
+                    type="button"
                     onClick={() => jumpToLetter(letter === '#' ? '0' : letter)}
                     className={cn(
-                      "w-7 h-7 text-xs font-medium rounded transition-colors flex items-center justify-center",
+                      'w-7 h-7 text-xs font-medium rounded transition-colors flex items-center justify-center',
                       catalogLetter?.toUpperCase() === (letter === '#' ? '0' : letter)
-                        ? "bg-fuchsia-500 text-white"
-                        : "bg-white/5 text-white/60 hover:bg-white/10 hover:text-white"
+                        ? 'bg-fuchsia-500 text-white'
+                        : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white',
                     )}
                   >
                     {letter}
                   </button>
                 ))}
+              </div>
+            )}
+
+            {/* Library status quick filters — above collapsible sections */}
+            {viewMode === 'library' && (
+              <div className="flex items-center gap-1.5 mb-3 flex-wrap" data-tour="library-status-chips">
+                <button
+                  onClick={() => updateFilter('status', 'All')}
+                  className={cn(
+                    'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
+                    filters.status === 'All'
+                      ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
+                      : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
+                  )}
+                >
+                  All
+                </button>
+                {STATUS_SECTIONS.map((section) => {
+                  const SectionIcon = section.icon;
+                  return (
+                    <button
+                      key={section.key}
+                      onClick={() => updateFilter('status', section.key as GameStatus)}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
+                        filters.status === section.key
+                          ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
+                          : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
+                      )}
+                    >
+                      <SectionIcon className={cn('w-3 h-3', section.color)} />
+                      {section.label}
+                    </button>
+                  );
+                })}
               </div>
             )}
 
@@ -1507,7 +1647,13 @@ export function Dashboard() {
       {/* Settings Screen is now a full-page view rendered via viewMode === 'settings' */}
 
       {/* Guided Tour */}
-      <GuidedTour run={tourRunning} tourKey={tourKey} onFinish={stopTour} />
+      <GuidedTour
+        run={tourRunning}
+        tourKey={tourKey}
+        tourId={activeTourId}
+        steps={guidedTourSteps}
+        onFinish={stopTour}
+      />
 
       {/* Year Wrapped */}
       <YearWrapped isOpen={showWrapped} onClose={() => setShowWrapped(false)} />
