@@ -36,6 +36,8 @@ export interface FilterSortInput {
   currentGames: Game[];
   searchResults: Game[];
   isSearching: boolean;
+  /** Browse: typed query not yet debounced — avoid showing category list under the search dropdown. */
+  browseSearchPending?: boolean;
   viewMode: string;
   searchQuery: string;
   filters: GameFilters;
@@ -104,7 +106,18 @@ export function getAdjustedRatingForSort(game: Game | null | undefined): number 
  * process input (e.g. hover) before running the sort phase.
  */
 function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult {
-  const { currentGames, searchResults, isSearching, viewMode, searchQuery, filters, librarySearchIndex, allowAdultContent, liveGameIds } = input;
+  const {
+    currentGames,
+    searchResults,
+    isSearching,
+    browseSearchPending = false,
+    viewMode,
+    searchQuery,
+    filters,
+    librarySearchIndex,
+    allowAdultContent,
+    liveGameIds,
+  } = input;
 
   // ── 1. displayedGames ────────────────────────────────────────────────
   let games: Game[];
@@ -130,9 +143,11 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
       libraryGames = scored.map(s => s.game);
     }
     games = libraryGames;
+  } else if (viewMode === 'browse' && browseSearchPending) {
+    games = [];
   } else if (viewMode === 'browse' && isSearching) {
     games = searchResults;
-    skipBrowseFilters = true;
+    // Apply same browse filters (genre, platform, year, store, sentinels) as non-search; relevance order preserved in computeSort.
   } else {
     games = currentGames;
   }
@@ -228,9 +243,10 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
       );
     }
     baseGames = lib;
+  } else if (viewMode === 'browse' && browseSearchPending) {
+    baseGames = [];
   } else if (viewMode === 'browse' && isSearching) {
     baseGames = searchResults;
-    skipDynamic = true;
   } else {
     baseGames = currentGames;
   }
@@ -324,6 +340,10 @@ function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
   const { filters, sortBy, sortDirection, viewMode, isSearching, liveGameIds } = input;
 
   if (filters.category === 'catalog') {
+    return displayedGames;
+  }
+  // Browse search results are already relevance-sorted; do not re-order by title/rating.
+  if (viewMode === 'browse' && isSearching) {
     return displayedGames;
   }
   if (viewMode === 'browse' && sortBy === 'releaseDate' && sortDirection === 'desc' && !isSearching) {
@@ -474,7 +494,8 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
   // prevents player-count updates from re-running the effect and overwriting store order.
   const livePart = input.viewMode === 'library' ? liveCount : '';
   const adultPart = input.allowAdultContent === true ? '1' : '0';
-  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${storeKey}|${input.filters.category}|${input.sortBy}|${input.sortDirection}|${livePart}|${adultPart}`;
+  const pendingPart = input.browseSearchPending ? '1' : '0';
+  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${pendingPart}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${storeKey}|${input.filters.category}|${input.sortBy}|${input.sortDirection}|${livePart}|${adultPart}`;
 
   // ── Inline recompute on viewMode transition ───────────────────────────
   // For small datasets we compute synchronously so the grid paints immediately.

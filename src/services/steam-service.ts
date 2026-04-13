@@ -366,6 +366,8 @@ class SteamService {
         console.log('[Steam Service] No search results found');
         return [];
       }
+
+      const rankByAppId = new Map(results.map((r, i) => [r.id, i]));
       
       // Get full details for search results
       const appIds = results.map(r => r.id);
@@ -378,7 +380,11 @@ class SteamService {
       for (const { appId, details } of detailsArray) {
         if (details) {
           const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
-          games.push(transformSteamGame(details, libraryEntry));
+          const rank = rankByAppId.get(appId) ?? 999;
+          games.push({
+            ...transformSteamGame(details, libraryEntry),
+            searchResultRank: rank + 1,
+          });
         }
       }
       // Do not filter by hasValidDeveloperInfo for search: user-initiated search should show

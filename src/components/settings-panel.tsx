@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2 } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2, Rocket } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
 import { gameService } from '@/services/game-service';
 import { useDevMode } from '@/hooks/useDevMode';
+import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
@@ -49,6 +50,8 @@ declare global {
       setAutoLaunch: (enabled: boolean) => Promise<void>;
       getPreferredChatProvider: () => Promise<'ollama' | 'gemini' | 'azure-openai' | 'anthropic'>;
       setPreferredChatProvider: (provider: 'ollama' | 'gemini' | 'azure-openai' | 'anthropic') => Promise<{ success: boolean; error?: string }>;
+      getBetaFeatures: () => Promise<boolean>;
+      setBetaFeatures: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
     };
   }
 }
@@ -90,8 +93,20 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [exportStatus, setExportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
 
+  const [betaFeatures, setBetaFeatures] = useBetaFeatures();
+
   // Developer mode
   const [devMode, setDevMode] = useDevMode();
+
+  const geminiBlocksOllama = useGeminiInstead && betaFeatures;
+
+  useEffect(() => {
+    if (!betaFeatures && useGeminiInstead) {
+      setUseGeminiInstead(false);
+      window.settings?.setOllamaSettings?.({ useGeminiInstead: false })?.catch(() => {});
+      window.settings?.setPreferredChatProvider?.('ollama')?.catch(() => {});
+    }
+  }, [betaFeatures, useGeminiInstead]);
 
   // Year Wrapped state
   const [showWrapped, setShowWrapped] = useState(false);
@@ -442,6 +457,34 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                     </button>
                   </div>
 
+                  {/* Beta features toggle */}
+                  <div className="flex items-center justify-between pt-2 border-t border-white/[0.04]">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <Rocket className="h-3.5 w-3.5 text-white/40" />
+                        <p className="text-sm font-medium text-white/90">Beta features</p>
+                      </div>
+                      <p className="text-xs text-white/30 mt-0.5">
+                        Enables the AI Chat button and cloud model options (Gemini, Azure OpenAI, Anthropic). Ollama stays available without this.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setBetaFeatures(!betaFeatures)}
+                      className={cn(
+                        'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
+                        betaFeatures ? 'bg-fuchsia-500/40' : 'bg-white/[0.08]',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                          betaFeatures ? 'translate-x-6' : 'translate-x-1',
+                        )}
+                      />
+                    </button>
+                  </div>
+
                   {/* Developer Mode toggle */}
                   <div className="flex items-center justify-between pt-2 border-t border-white/[0.04]">
                     <div>
@@ -476,14 +519,14 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                 <div className="flex items-center gap-2">
                   <AnimateIcon hover="pulse"><Bot className="h-3.5 w-3.5 text-white/40" /></AnimateIcon>
                   <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">AI Assistant (Ollama)</h3>
-                  {!useGeminiInstead && (
+                  {!geminiBlocksOllama && (
                     <span className="text-[10px] text-white/40 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.06]">Default</span>
                   )}
                 </div>
                 
                 <div className={cn(
                   "bg-white/[0.03] rounded-xl p-4 space-y-3 border border-white/[0.06]",
-                  useGeminiInstead && "opacity-40"
+                  geminiBlocksOllama && "opacity-40"
                 )}>
                   <div>
                     <p className="text-sm font-medium text-white/90">Local AI with Ollama</p>
@@ -500,7 +543,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       onChange={(e) => setOllamaUrl(e.target.value)}
                       placeholder="http://localhost:11434"
                       className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]"
-                      disabled={useGeminiInstead}
+                      disabled={geminiBlocksOllama}
                     />
                   </div>
                   
@@ -512,7 +555,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       onChange={(e) => setOllamaModel(e.target.value)}
                       placeholder="gemma3:12b"
                       className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]"
-                      disabled={useGeminiInstead}
+                      disabled={geminiBlocksOllama}
                     />
                   </div>
 
@@ -524,7 +567,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       onChange={(e) => setOllamaRerankModel(e.target.value)}
                       placeholder={DEFAULT_OLLAMA_RERANK_MODEL}
                       className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]"
-                      disabled={useGeminiInstead}
+                      disabled={geminiBlocksOllama}
                     />
                     <p className="text-[11px] text-white/25 mt-1">
                       Ollama <code className="text-white/40">/api/rerank</code> — run{' '}
@@ -539,12 +582,12 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                     </div>
                     <button
                       type="button"
-                      disabled={useGeminiInstead}
+                      disabled={geminiBlocksOllama}
                       onClick={() => setNeighborRerankEnabled(!neighborRerankEnabled)}
                       className={cn(
                         'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
                         neighborRerankEnabled ? 'bg-fuchsia-500/40' : 'bg-white/[0.08]',
-                        useGeminiInstead && 'opacity-40 cursor-not-allowed',
+                        geminiBlocksOllama && 'opacity-40 cursor-not-allowed',
                       )}
                     >
                       <span
@@ -563,12 +606,12 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                     </div>
                     <button
                       type="button"
-                      disabled={useGeminiInstead}
+                      disabled={geminiBlocksOllama}
                       onClick={() => setOracleRerankEnabled(!oracleRerankEnabled)}
                       className={cn(
                         'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
                         oracleRerankEnabled ? 'bg-fuchsia-500/40' : 'bg-white/[0.08]',
-                        useGeminiInstead && 'opacity-40 cursor-not-allowed',
+                        geminiBlocksOllama && 'opacity-40 cursor-not-allowed',
                       )}
                     >
                       <span
@@ -590,7 +633,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                         min={0}
                         max={100}
                         value={Math.round(oracleRerankBlend * 100)}
-                        disabled={useGeminiInstead}
+                        disabled={geminiBlocksOllama}
                         onChange={(e) => setOracleRerankBlend(Number(e.target.value) / 100)}
                         className="w-full accent-fuchsia-500 disabled:opacity-40"
                       />
@@ -632,8 +675,9 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                 </div>
               </div>
 
-              {/* Gemini Cloud AI Toggle + Settings */}
-              <div className="space-y-3">
+              {betaFeatures && (
+                <div className="space-y-3">
+                  {/* Gemini Cloud AI Toggle + Settings */}
                 <div className="flex items-center gap-2">
                   <Key className="h-3.5 w-3.5 text-white/40" />
                   <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">Gemini Cloud AI</h3>
@@ -771,7 +815,8 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                     </>
                   )}
                 </div>
-              </div>
+                </div>
+              )}
 
               {/* Library Data Section */}
               <div className="space-y-3">
@@ -844,11 +889,16 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
               {/* Info Section */}
               <div className="bg-white/[0.02] border border-white/[0.05] rounded-xl p-4">
                 <h4 className="text-xs font-medium text-white/50 mb-2">About AI Providers</h4>
-                <ul className="text-xs text-white/30 space-y-1">
-                  <li>• <strong className="text-white/40">Ollama</strong> runs locally on your computer (default)</li>
-                  <li>• <strong className="text-white/40">Gemini</strong> is optional cloud AI with enhanced features</li>
-                  <li>• Gemini can search games, get details, and manage your library</li>
-                  <li>• Your API key is stored securely and encrypted on your device</li>
+                <ul className="text-xs text-white/30 space-y-1.5">
+                  <li>• <strong className="text-white/40">Ollama</strong> — Runs locally on your machine. Private, free, no cloud dependency.</li>
+                  {betaFeatures && (
+                    <>
+                      <li>• <strong className="text-white/40">Gemini</strong> — Google Cloud AI with tool calling, web search grounding, and validation.</li>
+                      <li>• <strong className="text-white/40">Azure OpenAI</strong> — Enterprise-grade GPT models hosted in your Azure subscription.</li>
+                      <li>• <strong className="text-white/40">Anthropic Claude</strong> — Advanced reasoning and nuanced responses with safety focus.</li>
+                    </>
+                  )}
+                  <li>• All API keys are stored securely and encrypted on your device.</li>
                 </ul>
               </div>
 

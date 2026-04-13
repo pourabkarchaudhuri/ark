@@ -17,13 +17,23 @@ const mockSettings = {
   setOllamaSettings: vi.fn(),
   getAutoLaunch: vi.fn(),
   setAutoLaunch: vi.fn(),
+  getBetaFeatures: vi.fn(),
+  setBetaFeatures: vi.fn(),
+  getPreferredChatProvider: vi.fn(),
+  setPreferredChatProvider: vi.fn(),
 };
 
 // Setup window mock before each test
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.setItem('ark-beta-features', '1');
   window.settings = mockSettings;
   mockSettings.getAutoLaunch.mockResolvedValue(false);
+  mockSettings.getBetaFeatures.mockResolvedValue(true);
+  mockSettings.setBetaFeatures.mockResolvedValue({ success: true });
+  mockSettings.getPreferredChatProvider.mockResolvedValue('ollama');
+  mockSettings.setPreferredChatProvider.mockResolvedValue({ success: true });
+  mockSettings.setOllamaSettings.mockResolvedValue(undefined);
 
   // Default Ollama settings - useGeminiInstead: true so API key section is visible
   mockSettings.getOllamaSettings.mockResolvedValue({
@@ -216,6 +226,20 @@ describe('SettingsPanel', () => {
       const link = screen.getByText('Google AI Studio');
       expect(link).toHaveAttribute('href', 'https://aistudio.google.com/apikey');
     });
+  });
+
+  it('hides Gemini Cloud AI when Beta features are off', async () => {
+    localStorage.setItem('ark-beta-features', '0');
+    mockSettings.getBetaFeatures.mockResolvedValue(false);
+    mockSettings.hasApiKey.mockResolvedValue(false);
+
+    render(<SettingsPanel isOpen={true} onClose={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Settings')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('Gemini Cloud AI')).not.toBeInTheDocument();
   });
 });
 

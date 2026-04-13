@@ -4,6 +4,14 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.37] - 2026-04-13
+
+### Added
+- **Similar Games** on game details — Ark ANN nearest neighbors with Steam/Epic metadata enrichment, embedding distance badge, loading states, and cross-store / same-title deduplication.
+
+### Fixed
+- **Browse search** — Grid and dropdown use the same debounced query and ranking; no Top Sellers ordering shown under an active search; toolbar shows Search results while searching.
+
 ## [1.0.27] - 2026-02-09
 
 ### Fixed

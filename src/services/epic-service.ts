@@ -316,13 +316,18 @@ class EpicService {
         const result = await window.egdata.getAutocomplete(query, Math.min(limit, 20));
         const elements = (result?.elements ?? []) as EgdataOfferLike[];
         const games: Game[] = [];
-        for (const el of elements.slice(0, 20)) {
+        const slice = elements.slice(0, 20);
+        for (let ei = 0; ei < slice.length; ei++) {
+          const el = slice[ei];
           const id = el?.id;
           if (!id) continue;
           const full = await window.egdata.getOffer(id) as EgdataOfferLike | null;
           const item = full ? egdataOfferToEpicCatalogItem(full) : null;
           if (item) {
-            games.push(transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)));
+            games.push({
+              ...transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
+              searchResultRank: ei + 1,
+            });
           }
         }
         return games;
@@ -330,7 +335,10 @@ class EpicService {
 
       console.log(`[Epic Service] searchGames: "${query}" (limit ${limit})`);
       const items = await window.epic!.searchGames(query, limit);
-      return items.map(item => transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)));
+      return items.map((item, i) => ({
+        ...transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
+        searchResultRank: i + 1,
+      }));
     } catch (error) {
       console.error('[Epic Service] Search error:', error);
       return [];

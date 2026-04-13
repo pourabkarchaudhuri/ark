@@ -102,6 +102,10 @@ export function deduplicateGames(games: Game[]): Game[] {
 
         seen.set(key, {
           ...primary,
+          searchResultRank: Math.min(
+            existing.searchResultRank ?? 9999,
+            game.searchResultRank ?? 9999,
+          ),
           availableOn: Array.from(stores) as ('steam' | 'epic')[],
           secondaryId: secondary.id,
           // Always keep both stores' key identifiers

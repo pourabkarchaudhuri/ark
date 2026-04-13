@@ -190,6 +190,9 @@ function GameCardComponent({
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null); // right-click menu
   const cardRef = useRef<HTMLDivElement>(null);
   const ctxMenuRef = useRef<HTMLDivElement>(null);
+  /** After a dropdown closes, ignore card onClick briefly so layout reflow doesn't navigate a different game. */
+  const suppressCardNavigationUntilRef = useRef(0);
+  const prevCtxMenuRef = useRef<{ x: number; y: number } | null>(null);
 
   // Check library status from game prop or explicit prop
   const inLibrary = isInLibrary !== undefined ? isInLibrary : game.isInLibrary;
@@ -234,6 +237,14 @@ function GameCardComponent({
     };
   }, [ctxMenu]);
 
+  // Same ghost-click guard as dropdowns when the context menu closes (layout may shift).
+  useEffect(() => {
+    if (prevCtxMenuRef.current !== null && ctxMenu === null) {
+      suppressCardNavigationUntilRef.current = Date.now() + 300;
+    }
+    prevCtxMenuRef.current = ctxMenu;
+  }, [ctxMenu]);
+
   // --- Detail enricher: observe this card so its metadata is lazy-loaded (Steam only) ---
   useEffect(() => {
     const el = cardRef.current;
@@ -245,6 +256,7 @@ function GameCardComponent({
   }, [game.steamAppId, game.developer, game.store]);
 
   const handleCardClick = useCallback(() => {
+    if (Date.now() < suppressCardNavigationUntilRef.current) return;
     if (game.id) {
       setNavigatingGame(game);
       navigate(`/game/${encodeURIComponent(game.id)}`);
@@ -252,6 +264,20 @@ function GameCardComponent({
       onClick();
     }
   }, [game, navigate, onClick]);
+
+  const handleMainMenuOpenChange = useCallback((open: boolean) => {
+    setMenuOpen(open);
+    if (!open) {
+      suppressCardNavigationUntilRef.current = Date.now() + 300;
+    }
+  }, []);
+
+  const handleStatusMenuOpenChange = useCallback((open: boolean) => {
+    setStatusMenuOpen(open);
+    if (!open) {
+      suppressCardNavigationUntilRef.current = Date.now() + 300;
+    }
+  }, []);
 
   const handleHeartClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -508,7 +534,7 @@ function GameCardComponent({
           {/* Ellipsis Menu - button only for library games (right-click uses custom context menu below) */}
           <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
             {inLibrary && (
-              <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+              <DropdownMenu open={menuOpen} onOpenChange={handleMainMenuOpenChange}>
                 <DropdownMenuTrigger asChild>
                   <Button
                     size="icon"
@@ -562,7 +588,7 @@ function GameCardComponent({
             const displayStatus: GameStatus = isPlayingNow ? 'Playing Now' : (game.status as GameStatus);
             return (
             <div onClick={(e) => e.stopPropagation()}>
-              <DropdownMenu open={statusMenuOpen} onOpenChange={setStatusMenuOpen}>
+              <DropdownMenu open={statusMenuOpen} onOpenChange={handleStatusMenuOpenChange}>
                 <DropdownMenuTrigger asChild>
                   <button
                     className={cn(

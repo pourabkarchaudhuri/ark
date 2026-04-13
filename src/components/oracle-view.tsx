@@ -1271,6 +1271,7 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
   const state = useRecoStore();
   const [, navigate] = useLocation();
   const hasTriggered = useRef(false);
+  const lastInvalidationGen = useRef(state.invalidationGeneration);
 
   // If the store already has results (e.g. returning to the Oracle tab),
   // skip the initial animation and restore the embedding badge immediately.
@@ -1334,6 +1335,10 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
       hasTriggered.current = true;
       return;
     }
+    if (state.invalidationGeneration !== lastInvalidationGen.current) {
+      lastInvalidationGen.current = state.invalidationGeneration;
+      hasTriggered.current = false;
+    }
     if (!hasTriggered.current && state.status === 'idle') {
       hasTriggered.current = true;
 
@@ -1369,7 +1374,7 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
         );
       })();
     }
-  }, [state.status]);
+  }, [state.status, state.invalidationGeneration]);
 
   const handleNavigate = useCallback((gameId: string) => {
     navigate(`/game/${gameId}`);

@@ -5,11 +5,15 @@
  */
 
 import { useState, useEffect } from 'react';
+import { useBetaFeatures, isBetaFeatures } from '@/hooks/useBetaFeatures';
 
 export interface ChatAvailability {
   available: boolean;
   message: string;
 }
+
+const BETA_OFF_MESSAGE =
+  'Turn on Beta features in Settings → General to use AI Chat.';
 
 const UNAVAILABLE_MESSAGE =
   'No AI provider configured. Add at least one in Settings → AI Models: Ollama (local), Google Gemini, Azure OpenAI, or Anthropic.';
@@ -17,9 +21,18 @@ const OLLAMA_ONLY_MESSAGE =
   'Chat uses Ollama by default. Ensure Ollama is running, or add another provider in Settings → AI Models.';
 
 export function useChatAvailability(): ChatAvailability {
-  const [state, setState] = useState<ChatAvailability>({ available: false, message: UNAVAILABLE_MESSAGE });
+  const [betaFeatures] = useBetaFeatures();
+  const [state, setState] = useState<ChatAvailability>(() => ({
+    available: false,
+    message: !isBetaFeatures() ? BETA_OFF_MESSAGE : UNAVAILABLE_MESSAGE,
+  }));
 
   useEffect(() => {
+    if (!betaFeatures) {
+      setState({ available: false, message: BETA_OFF_MESSAGE });
+      return;
+    }
+
     let cancelled = false;
     (async () => {
       const list: string[] = [];
@@ -55,7 +68,7 @@ export function useChatAvailability(): ChatAvailability {
       setState({ available: true, message: 'Chat with the AI Assistant — ask about games, get recommendations, or explore your library.' });
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [betaFeatures]);
 
   return state;
 }

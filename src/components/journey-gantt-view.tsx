@@ -629,7 +629,8 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
   const viewportWidthRef = useRef(0);
   const vpIndicatorRef = useRef<HTMLDivElement>(null);
   const scrollRaf = useRef(0);
-  const hasAnimated = useRef(false);
+  /** Segment bars that have already played their entrance — avoids re-animating on virtualizer remount while allowing first paint for scrolled-in rows. */
+  const ganttBarEntranceDoneRef = useRef<Set<string>>(new Set());
   const tooltipRef = useRef<HTMLDivElement>(null);
   const tooltipDataRef = useRef<TooltipData | null>(null);
   const [isNowVisible, setIsNowVisible] = useState(true);
@@ -1149,14 +1150,6 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     completedCount: rows.filter((r) => r.currentStatus === 'Completed').length,
   }), [rows]);
 
-  // ── Mark first animation done ─────────────────────────────────────────
-  useEffect(() => {
-    if (rows.length > 0 && !hasAnimated.current) {
-      const timer = setTimeout(() => { hasAnimated.current = true; }, 800);
-      return () => clearTimeout(timer);
-    }
-  }, [rows.length]);
-
   // ── Empty state ───────────────────────────────────────────────────────
   if (allRows.length === 0) {
     return (
@@ -1618,22 +1611,30 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                   const showSegmentSeparator = i > 0 && prevStatus !== seg.status;
                   const isThin = isTealBar && width < THIN_BAR_THRESHOLD;
 
-                  const shouldAnimate = !hasAnimated.current;
-
-                  const BarEl = shouldAnimate ? motion.div : 'div';
-
-                  const barProps = shouldAnimate
+                  const barKey = `${row.gameId}:${i}`;
+                  const entranceDone = ganttBarEntranceDoneRef.current.has(barKey);
+                  const barMotionProps = entranceDone
                     ? {
+                        initial: false as const,
+                        animate: { scaleX: 1, opacity: 1 } as const,
+                      }
+                    : {
                         initial: { scaleX: 0, opacity: 0 } as const,
                         animate: { scaleX: 1, opacity: 1 } as const,
-                        transition: { duration: 0.4, delay: rowIndex * 0.03 + i * 0.02, ease: 'easeOut' as const },
-                      }
-                    : {};
+                        transition: {
+                          duration: 0.4,
+                          delay: rowIndex * 0.03 + i * 0.02,
+                          ease: 'easeOut' as const,
+                        },
+                        onAnimationComplete: () => {
+                          ganttBarEntranceDoneRef.current.add(barKey);
+                        },
+                      };
 
                   return (
-                    <BarEl
+                    <motion.div
                       key={i}
-                      {...barProps}
+                      {...barMotionProps}
                       role="gridcell"
                       aria-label={`${row.title}: ${seg.status} from ${formatShortDate(seg.startDate)} to ${isOngoing ? 'Present' : formatShortDate(seg.endDate)}, ${formatSegmentDuration(seg)}`}
                       className={cn(
@@ -1794,7 +1795,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                           </div>
                         </div>
                       )}
-                    </BarEl>
+                    </motion.div>
                   );
                 })}
 

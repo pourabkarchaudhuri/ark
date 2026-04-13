@@ -2,6 +2,26 @@
   "project": "Tracker",
   "days": [
     {
+      "date": "2026-04-13",
+      "title": "OCD sync, Beta split, and Joyride Guide reliability",
+      "tags": ["fix", "progress", "decision"],
+      "summary": "OCD Gantt stays fresh via store subscriptions while active. Beta vs Developer mode split for AI Chat and cloud settings. Joyride: wait for DOM before starting tours from Guide, TARGET_NOT_FOUND exits cleanly, extended retries, Suspense fallbacks carry data-tour anchors for lazy views.",
+      "filesChanged": [
+        "src/components/journey-view.tsx",
+        "src/pages/dashboard.tsx",
+        "src/hooks/useChatAvailability.ts",
+        "src/components/settings-panel.tsx",
+        "src/test/components/settings-panel.test.tsx",
+        "src/components/guided-tour.tsx",
+        "src/test/components/guided-tour-wait.test.ts",
+        "docs/dev-journal.md",
+        "docs/dev-journal.json"
+      ],
+      "milestones": [],
+      "challenges": [],
+      "lookingAhead": null
+    },
+    {
       "date": "2026-04-12",
       "title": "Spotlight fix, rerank badges, and full Joyride tour audit",
       "tags": ["fix", "polish"],

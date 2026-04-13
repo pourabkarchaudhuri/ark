@@ -67,6 +67,9 @@ export interface SystemStatusSnapshot {
 
 type Listener = () => void;
 
+/** Must match `EMBEDDING_MODEL_NAME` in electron/ollama-setup.ts (splash embedding row). */
+const EMBEDDING_MODEL_DISPLAY_NAME = 'snowflake-arctic-embed2';
+
 // ─── IDB Size Estimation ────────────────────────────────────────────────────────
 
 const IDB_DATABASES: Array<{ label: string; subtitle?: string; dbName: string; version: number; stores: string[] }> = [
@@ -171,6 +174,9 @@ export function reportOllamaDone(available: boolean) {
     percent: 100,
     elapsed,
   };
+  if (available) {
+    systemStatus.seedEmbeddingModelKnownInstalled();
+  }
   systemStatus._notify();
   systemStatus.refreshStorage();
 }
@@ -288,6 +294,8 @@ class SystemStatus {
   private _storageTimer: ReturnType<typeof setInterval> | null = null;
   private _modelTimer: ReturnType<typeof setInterval> | null = null;
   private _mlModelTimer: ReturnType<typeof setInterval> | null = null;
+  /** Bumps when a newer model-info request supersedes older in-flight IPC — avoids stale "not installed". */
+  private _modelInfoSeq = 0;
 
   subscribe(fn: Listener): () => void {
     this._listeners.add(fn);
@@ -375,14 +383,34 @@ class SystemStatus {
   }
 
   private async _refreshModelInfo() {
+    const seq = ++this._modelInfoSeq;
     try {
       if (!window.ollama?.getModelInfo) return;
       const info = await window.ollama.getModelInfo();
+      if (seq !== this._modelInfoSeq) return;
       if (info) {
         this._embeddingModelCache = info;
         this._notify();
       }
     } catch { /* non-fatal */ }
+  }
+
+  /**
+   * Called when `ollama:setup` reports the embedding model is ready. Prevents the splash
+   * panel from showing "Not installed" while an earlier timed-out `getModelInfo` is still
+   * in flight, and supplies a correct row before Ollama responds to `/api/show` again.
+   */
+  seedEmbeddingModelKnownInstalled(): void {
+    this._modelInfoSeq++;
+    const prev = this._embeddingModelCache;
+    this._embeddingModelCache = {
+      name: EMBEDDING_MODEL_DISPLAY_NAME,
+      installed: true,
+      sizeBytes: prev?.sizeBytes ?? 0,
+      parameterSize: prev?.parameterSize ?? '568M',
+      quantization: prev?.quantization ?? 'F16',
+    };
+    this._notify();
   }
 
   private _mlLoadAttempts = 0;

@@ -10,14 +10,14 @@
  *  - "OCD": horizontally scrollable Gantt chart with status-colored bars
  *  - "Medals": gamified progression with Taste DNA and badge vault (analytics in Overview)
  */
-import { useMemo, useState, useEffect, memo, useCallback, useRef } from 'react';
+import { useMemo, useState, useEffect, memo, useCallback } from 'react';
 import { useLocation } from 'wouter';
 import { motion } from 'framer-motion';
 import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, ScrollText, X, Box, Award } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Timeline, TimelineEntry } from '@/components/ui/timeline';
-import { JourneyEntry, GameStatus } from '@/types/game';
+import { JourneyEntry, GameStatus, StatusChangeEntry, GameSession } from '@/types/game';
 import { steamService } from '@/services/steam-service';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
@@ -30,6 +30,13 @@ import { ShowcaseView } from '@/components/showcase-view';
 import { MedalsView } from '@/components/medals-view';
 
 type JourneyViewStyle = 'log' | 'ocd' | 'ark' | 'medals';
+
+/** Parses journey date strings; invalid values yield null so we never use NaN for year/month grouping. */
+function parseJourneyIso(iso: string | undefined): Date | null {
+  if (iso == null || String(iso).trim() === '') return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 /**
  * Build a full fallback chain of image URLs for a journey entry.
@@ -335,32 +342,44 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entryIdsKey]);
 
-  // Cache store snapshots to avoid creating new array references on every render.
-  // Only recalculate when the view actually needs it and dependencies change.
-  const statusHistoryRef = useRef(statusHistoryStore.getAll());
-  const sessionsRef = useRef(sessionStore.getAll());
-  const libraryEntriesRef = useRef(libraryStore.getAllEntries());
+  // OCD (Gantt) merges journey entries with status history + sessions. Those stores
+  // update without changing `entries`, so we keep snapshots in state while OCD is
+  // active; subscribing only in OCD avoids re-rendering Ark/Log on every session tick.
+  const [ocdStoreSnap, setOcdStoreSnap] = useState<{
+    statusHistory: StatusChangeEntry[];
+    sessions: GameSession[];
+  } | null>(null);
 
-  // Subscribe once and update refs (no state, so no re-render from here)
   useEffect(() => {
-    const unsubHistory = statusHistoryStore.subscribe(() => {
-      statusHistoryRef.current = statusHistoryStore.getAll();
+    if (viewStyle !== 'ocd') {
+      setOcdStoreSnap(null);
+      return;
+    }
+    const read = () => ({
+      statusHistory: statusHistoryStore.getAll(),
+      sessions: sessionStore.getAll(),
     });
-    const unsubSessions = sessionStore.subscribe(() => {
-      sessionsRef.current = sessionStore.getAll();
-    });
-    const unsubLibrary = libraryStore.subscribe(() => {
-      libraryEntriesRef.current = libraryStore.getAllEntries();
-    });
-    return () => { unsubHistory(); unsubSessions(); unsubLibrary(); };
-  }, []);
+    setOcdStoreSnap(read());
+    const onStore = () => setOcdStoreSnap(read());
+    const unsubHistory = statusHistoryStore.subscribe(onStore);
+    const unsubSessions = sessionStore.subscribe(onStore);
+    return () => {
+      unsubHistory();
+      unsubSessions();
+    };
+  }, [viewStyle]);
 
   // Ark and Log: entries with firstPlayedAt or lastPlayedAt; sort: Playing first, then by latest activity (lastPlayedAt ?? firstPlayedAt) desc
   const arkAndLogEntries = useMemo(() => {
     const playingStatuses: GameStatus[] = ['Playing', 'Playing Now'];
     const withActivity = entries.filter((e) => e.firstPlayedAt || e.lastPlayedAt);
-    const latest = (e: JourneyEntry) =>
-      new Date(e.lastPlayedAt ?? e.firstPlayedAt ?? e.addedAt).getTime();
+    const latest = (e: JourneyEntry) => {
+      for (const iso of [e.lastPlayedAt, e.firstPlayedAt, e.addedAt]) {
+        const d = parseJourneyIso(iso);
+        if (d) return d.getTime();
+      }
+      return 0;
+    };
     return withActivity.sort((a, b) => {
       const aPlaying = playingStatuses.includes(a.status);
       const bPlaying = playingStatuses.includes(b.status);
@@ -383,19 +402,33 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         if (!monthToEntries.has(key)) monthToEntries.set(key, []);
         monthToEntries.get(key)!.push({ entry, sortDate });
       };
+      let placedFromActivity = false;
+
       if (entry.firstPlayedAt) {
-        const d = new Date(entry.firstPlayedAt);
-        addToMonth(d.getFullYear(), d.getMonth(), entry.firstPlayedAt);
+        const d = parseJourneyIso(entry.firstPlayedAt);
+        if (d) {
+          addToMonth(d.getFullYear(), d.getMonth(), entry.firstPlayedAt);
+          placedFromActivity = true;
+        }
       }
       if (entry.lastPlayedAt) {
-        const d = new Date(entry.lastPlayedAt);
-        const key = `${d.getFullYear()}-${d.getMonth()}`;
-        const existing = monthToEntries.get(key);
-        if (existing?.some((x) => x.entry.gameId === entry.gameId)) {
-          const cell = existing.find((x) => x.entry.gameId === entry.gameId)!;
-          cell.sortDate = entry.lastPlayedAt;
-        } else {
-          addToMonth(d.getFullYear(), d.getMonth(), entry.lastPlayedAt);
+        const d = parseJourneyIso(entry.lastPlayedAt);
+        if (d) {
+          const key = `${d.getFullYear()}-${d.getMonth()}`;
+          const existing = monthToEntries.get(key);
+          if (existing?.some((x) => x.entry.gameId === entry.gameId)) {
+            const cell = existing.find((x) => x.entry.gameId === entry.gameId)!;
+            cell.sortDate = entry.lastPlayedAt;
+          } else {
+            addToMonth(d.getFullYear(), d.getMonth(), entry.lastPlayedAt);
+          }
+          placedFromActivity = true;
+        }
+      }
+      if (!placedFromActivity) {
+        const d = parseJourneyIso(entry.addedAt);
+        if (d) {
+          addToMonth(d.getFullYear(), d.getMonth(), entry.addedAt);
         }
       }
     }
@@ -404,6 +437,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     const byYear = new Map<number, Array<{ month: number; list: Array<{ entry: JourneyEntry; sortDate: string }> }>>();
     for (const [key, list] of monthToEntries) {
       const [y, m] = key.split('-').map(Number);
+      if (!Number.isFinite(y) || !Number.isFinite(m)) continue;
       if (!byYear.has(y)) byYear.set(y, []);
       list.sort((a, b) => new Date(b.sortDate).getTime() - new Date(a.sortDate).getTime());
       byYear.get(y)!.push({ month: m, list });
@@ -501,13 +535,14 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // Prepare Gantt data (only when OCD view is active)
   const ganttData = useMemo(() => {
     if (viewStyle !== 'ocd') return null;
+    const statusHistory = ocdStoreSnap?.statusHistory ?? statusHistoryStore.getAll();
+    const sessions = ocdStoreSnap?.sessions ?? sessionStore.getAll();
     return {
       journeyEntries: entries,
-      statusHistory: statusHistoryRef.current,
-      sessions: sessionsRef.current,
-      libraryEntries: libraryEntriesRef.current,
+      statusHistory,
+      sessions,
     };
-  }, [viewStyle, entries]);
+  }, [viewStyle, entries, ocdStoreSnap]);
 
   // Loading state — skeleton matches Voyage header + content (Your Ark / Log / OCD / Medals)
   if (loading) {

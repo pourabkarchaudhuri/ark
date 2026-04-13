@@ -303,13 +303,12 @@ function GenreArc({
 }) {
   const { entries: genreEntries, from, len } = group;
   const count = genreEntries.length;
-  const yOffset = count % 2 === 0 ? 0.4 : -0.3;
 
   return (
     <group>
       <GenreFloorArc from={from} len={len} radius={radius} />
 
-      <group position={[0, yOffset, 0]}>
+      <group>
       {genreEntries.map((entry, i) => {
         const angle = from + (i / count) * len;
         const urls = getImageChain(entry);
@@ -834,9 +833,10 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
             <motion.div
               key={entry.gameId}
               className="flex items-center justify-center gap-3 flex-wrap"
-              initial="hidden"
-              animate="visible"
-              exit="exit"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
             >
               <SweepLine />
               {(() => {
@@ -1034,22 +1034,20 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
           )}
         </AnimatePresence>
 
-        {/* Controls hint — bottom-right */}
-        <div className="absolute bottom-3 right-4 flex flex-col gap-1.5 pointer-events-none select-none">
-          <div className="flex items-center gap-2 text-[10px] text-white/20 font-mono">
-            <ChevronLeft className="w-3 h-3 flex-shrink-0" />
-            <ChevronRight className="w-3 h-3 flex-shrink-0 -ml-1.5" />
-            <span>Arrow keys to cycle</span>
-          </div>
-          <div className="flex items-center gap-2 text-[10px] text-white/20 font-mono">
-            <Mouse className="w-3 h-3 flex-shrink-0" />
-            <span>Scroll to browse</span>
-          </div>
-        </div>
-
-        {/* View mode label — terminal-style, bottom-left */}
-        <div className="absolute bottom-3 left-4 pointer-events-none">
+        {/* View label + controls hints — bottom-left (FAB is fixed bottom-right on dashboard) */}
+        <div className="absolute bottom-3 left-4 flex flex-col gap-2 pointer-events-none select-none max-w-[min(100%,18rem)]">
           <span className="font-mono text-[10px] tracking-wider text-fuchsia-400/25">// MY ARK</span>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2 text-[10px] text-white/20 font-mono">
+              <ChevronLeft className="w-3 h-3 flex-shrink-0" />
+              <ChevronRight className="w-3 h-3 flex-shrink-0 -ml-1.5" />
+              <span>Arrow keys to cycle</span>
+            </div>
+            <div className="flex items-center gap-2 text-[10px] text-white/20 font-mono">
+              <Mouse className="w-3 h-3 flex-shrink-0" />
+              <span>Scroll to browse</span>
+            </div>
+          </div>
         </div>
       </div>
 

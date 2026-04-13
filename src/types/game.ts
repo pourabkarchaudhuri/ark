@@ -42,6 +42,8 @@ export interface Game {
   steamListPosition?: number;
   /** 1-based position in Epic top-sellers list (for Store order in Epic-only view). */
   epicListPosition?: number;
+  /** 1-based rank in store search API order (lower = earlier). Used for zero-score relevance fallback. */
+  searchResultRank?: number;
   price?: {
     isFree: boolean;
     finalFormatted?: string;

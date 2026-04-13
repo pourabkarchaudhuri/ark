@@ -141,4 +141,24 @@ export function register(): void {
       return { success: false, error: 'Failed to save' };
     }
   });
+
+  ipcMain.handle('settings:getBetaFeatures', async () => {
+    try {
+      return settingsStore.getBetaFeatures();
+    } catch (error) {
+      logger.error('[Settings] Error getting beta features:', error);
+      return false;
+    }
+  });
+
+  ipcMain.handle('settings:setBetaFeatures', async (_event: any, enabled: boolean) => {
+    try {
+      if (typeof enabled !== 'boolean') return { success: false, error: 'Invalid value' };
+      settingsStore.setBetaFeatures(enabled);
+      return { success: true };
+    } catch (error) {
+      logger.error('[Settings] Error setting beta features:', error);
+      return { success: false, error: 'Failed to save' };
+    }
+  });
 }

@@ -20,6 +20,7 @@ import type { EpicCatalogItem } from '@/types/epic';
 export { normalizeTitle, deduplicateGames } from './dedup';
 // Local import for use within this module
 import { deduplicateGames } from './dedup';
+import { scoreGame, buildSingleSearchIndex, compareBrowseSearchZeroScore } from './game-search-scoring';
 
 /**
  * Order deduped top-sellers for "both stores" view: cross-store (common) first by Steam order,
@@ -103,7 +104,8 @@ async function fetchEgdataTopSellersFromRenderer(): Promise<(EgdataOfferLike & {
 
 class GameService {
   /**
-   * Search both stores in parallel, deduplicate results.
+   * Search both stores in parallel, deduplicate, then rank by local relevance score
+   * (title-first; dev/genre are small tie-breakers only).
    */
   async searchGames(query: string, limit: number = 20): Promise<Game[]> {
     const [steamResults, epicResults] = await Promise.allSettled([
@@ -116,7 +118,22 @@ class GameService {
       ...(epicResults.status === 'fulfilled' ? epicResults.value : []),
     ];
 
-    return deduplicateGames(allGames);
+    const deduped = deduplicateGames(allGames);
+    const q = query.toLowerCase().trim();
+    const tokens = q.split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return deduped.slice(0, limit);
+
+    const scored = deduped.map((game) => ({
+      game,
+      score: scoreGame(buildSingleSearchIndex(game), tokens, q, game),
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    const positive = scored.filter((s) => s.score > 0);
+    let ordered = positive.length > 0 ? positive : scored;
+    if (positive.length === 0 && ordered.length > 1) {
+      ordered = [...ordered].sort((a, b) => compareBrowseSearchZeroScore(a.game, b.game, query));
+    }
+    return ordered.slice(0, limit).map((s) => s.game);
   }
 
   /**

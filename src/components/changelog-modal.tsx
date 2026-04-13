@@ -9,6 +9,14 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.37': {
+    title: "What's New in Ark 1.0.37",
+    changes: [
+      'Similar Games — Game details uses Ark embedding neighbors (Steam, Epic, cross-store) with real titles, art, and cosine distance; replaces Steam-only recommendations',
+      'Browse search alignment — Grid matches search dropdown order; 400ms debounce; no Top Sellers leak while typing; toolbar shows Search results when searching',
+      'Neighbor dedupe — Hides duplicate store twins and same-title duplicates in Similar Games',
+    ],
+  },
   '1.0.36': {
     title: "What's New in Ark 1.0.36",
     changes: [

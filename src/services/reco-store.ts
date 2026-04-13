@@ -23,6 +23,7 @@ import type {
 } from '@/types/reco';
 import type { GameSession, StatusChangeEntry } from '@/types/game';
 import { libraryStore } from './library-store';
+import { customGameStore } from './custom-game-store';
 import { journeyStore } from './journey-store';
 import { sessionStore } from './session-store';
 import { statusHistoryStore } from './status-history-store';
@@ -47,6 +48,40 @@ export function getEmbeddingCache(): ReadonlyMap<string, number[]> {
   return embeddingCache;
 }
 
+/** Compact fingerprint for user notes (embedding input); avoids huge cache keys. */
+function djb2Fingerprint(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h) ^ s.charCodeAt(i);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/**
+ * Stable string over library + custom games — used for Oracle invalidation and
+ * matching persisted reco cache to the current library (incl. notes that affect embeddings).
+ */
+export function buildOracleLibrarySignature(): string {
+  const libLines = libraryStore
+    .getAllGameIds()
+    .slice()
+    .sort()
+    .map((id) => {
+      const e = libraryStore.getEntry(id);
+      const notes = e?.publicReviews ?? '';
+      return `L:${id}:${e?.status ?? ''}:${e?.priority ?? ''}:${djb2Fingerprint(notes)}`;
+    });
+  const customLines = customGameStore
+    .getAllGames()
+    .slice()
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((e) => {
+      const notes = e.publicReviews ?? '';
+      return `C:${e.id}:${e.status}:${e.priority}:${djb2Fingerprint(notes)}`;
+    });
+  return [...libLines, ...customLines].join('\n');
+}
+
 // ─── State ─────────────────────────────────────────────────────────────────────
 
 interface RecoState {
@@ -63,6 +98,8 @@ interface RecoState {
   candidateCount: number;
   /** Last Oracle /api/rerank outcome (for UI transparency). */
   oracleRerankStatus: OracleRerankStatus;
+  /** Bumps when library-derived Oracle results are invalidated (UI resets pipeline). */
+  invalidationGeneration: number;
 }
 
 const INITIAL_STATE: RecoState = {
@@ -76,6 +113,7 @@ const INITIAL_STATE: RecoState = {
   libraryCount: 0,
   candidateCount: 0,
   oracleRerankStatus: 'none',
+  invalidationGeneration: 0,
 };
 
 // ─── Store ─────────────────────────────────────────────────────────────────────
@@ -119,6 +157,7 @@ class RecoStore {
         lastComputed: this.state.lastComputed,
         libraryCount: this.state.libraryCount,
         candidateCount: this.state.candidateCount,
+        librarySignature: buildOracleLibrarySignature(),
       };
       localStorage.setItem(RecoStore.RESULT_CACHE_KEY, JSON.stringify(cache));
     } catch {
@@ -135,6 +174,13 @@ class RecoStore {
         return null;
       }
       if (!cache.shelves || cache.shelves.length === 0) return null;
+      // Drop stale disk cache if library/notes no longer match (cold-start correctness).
+      if (
+        typeof cache.librarySignature !== 'string' ||
+        cache.librarySignature !== buildOracleLibrarySignature()
+      ) {
+        return null;
+      }
       return cache;
     } catch {
       return null;
@@ -1426,7 +1472,8 @@ class RecoStore {
   refresh() {
     this.killWorker();
     this.clearResultsCache();
-    this.state = { ...INITIAL_STATE };
+    const nextGen = this.state.invalidationGeneration + 1;
+    this.state = { ...INITIAL_STATE, invalidationGeneration: nextGen };
     this.notify();
     // Don't call compute() directly — let the OracleView useEffect
     // re-trigger it so embeddings are reloaded too.
@@ -1446,3 +1493,30 @@ class RecoStore {
 
 // Singleton
 export const recoStore = new RecoStore();
+
+// ── Invalidate Oracle reco when library/custom data used by reco changes ──
+// Hours-only updates do not change buildOracleLibrarySignature(), so session tracking won't thrash Oracle.
+
+let oracleLibrarySnapBaseline: string | null = null;
+let oracleLibraryInvalidateTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleOracleInvalidateOnLibraryChange() {
+  if (typeof window === 'undefined') return;
+  if (oracleLibraryInvalidateTimer) clearTimeout(oracleLibraryInvalidateTimer);
+  oracleLibraryInvalidateTimer = setTimeout(() => {
+    oracleLibraryInvalidateTimer = null;
+    const snap = buildOracleLibrarySignature();
+    if (oracleLibrarySnapBaseline === null) {
+      oracleLibrarySnapBaseline = snap;
+      return;
+    }
+    if (snap === oracleLibrarySnapBaseline) return;
+    oracleLibrarySnapBaseline = snap;
+    recoStore.refresh();
+  }, 400);
+}
+
+if (typeof window !== 'undefined') {
+  libraryStore.subscribe(scheduleOracleInvalidateOnLibraryChange);
+  customGameStore.subscribe(scheduleOracleInvalidateOnLibraryChange);
+}

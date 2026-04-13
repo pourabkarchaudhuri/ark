@@ -27,7 +27,14 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { GameDialog } from '@/components/game-dialog';
 import { cn } from '@/lib/utils';
-import { SteamAppDetails, SteamReviewsResponse, GameRecommendation, SteamNewsItem } from '@/types/steam';
+import { annIndex } from '@/services/ann-index';
+import {
+  getSimilarGamesForDetails,
+  formatNeighborDistance,
+  type SimilarGameCard,
+  type SimilarGamesSectionPhase,
+} from '@/services/similar-games';
+import { SteamAppDetails, SteamReviewsResponse, SteamNewsItem } from '@/types/steam';
 import { MetacriticGameResponse } from '@/types/metacritic';
 import { Game } from '@/types/game';
 import { useLibrary, extractCachedMeta } from '@/hooks/useGameStore';
@@ -480,40 +487,37 @@ function formatDate(timestamp: number): string {
 }
 
 /**
- * Recommendation image with React-controlled fallback chain.
- * Uses state instead of direct DOM mutation so parent re-renders don't reset the chain.
+ * Ark similar-game image: walks a precomputed URL chain (Steam + Epic + CDN fallbacks).
  */
-function RecommendationImage({ appId, name }: { appId: number; name: string }) {
-  const cdnBase = 'https://cdn.akamai.steamstatic.com/steam/apps';
-  const urls = useMemo(() => [
-    `${cdnBase}/${appId}/header.jpg`,
-    `${cdnBase}/${appId}/capsule_616x353.jpg`,
-    `${cdnBase}/${appId}/library_hero.jpg`,
-  ], [appId]);
-
+function SimilarGameCarouselImage({ imageChain, title }: { imageChain: string[]; title: string }) {
   const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
+  const chainKey = imageChain.join('\u0001');
+  useEffect(() => {
+    setAttempt(0);
+    setFailed(false);
+  }, [chainKey]);
 
   const advance = useCallback(() => {
-    if (attempt < urls.length - 1) {
-      setAttempt(prev => prev + 1);
+    if (attempt < imageChain.length - 1) {
+      setAttempt((prev) => prev + 1);
     } else {
       setFailed(true);
     }
-  }, [attempt, urls.length]);
+  }, [attempt, imageChain.length]);
 
-  if (failed) {
+  if (failed || imageChain.length === 0) {
     return (
-      <div className="w-full h-full flex items-center justify-center bg-white/5 text-white/30 text-xs">
-        {name}
+      <div className="w-full h-full flex items-center justify-center bg-white/5 text-white/30 text-xs px-2 text-center">
+        {title}
       </div>
     );
   }
 
   return (
     <img
-      src={urls[attempt]}
-      alt={name}
+      src={imageChain[attempt]}
+      alt={title}
       className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
       onLoad={(e) => {
         const img = e.currentTarget;
@@ -689,8 +693,10 @@ export function GameDetailsPage() {
   const [headerImageError, setHeaderImageError] = useState(false);
   const [headerImageLoaded, setHeaderImageLoaded] = useState(false);
   const [heroBgLoaded, setHeroBgLoaded] = useState(false);
-  const [recommendations, setRecommendations] = useState<GameRecommendation[]>([]);
-  const [recommendationsLoading, setRecommendationsLoading] = useState(false);
+  const [similarGames, setSimilarGames] = useState<SimilarGameCard[]>([]);
+  const [similarGamesPhase, setSimilarGamesPhase] = useState<SimilarGamesSectionPhase>('hidden');
+  const [annReady, setAnnReady] = useState(() => annIndex.isReady);
+  const [annBuilding, setAnnBuilding] = useState(() => annIndex.isBuilding);
   const [fitgirlRepack, setFitgirlRepack] = useState<{ url: string; downloadLink: string | null } | null>(null);
   const [fitgirlLoading, setFitgirlLoading] = useState(false);
   const [isRecommendationsPaused, setIsRecommendationsPaused] = useState(false);
@@ -705,8 +711,8 @@ export function GameDetailsPage() {
   
   const autoplayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const resumeAutoplayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const recommendationsScrollRef = useRef<HTMLDivElement>(null);
-  const recommendationsAutoScrollRef = useRef<NodeJS.Timeout | null>(null);
+  const similarGamesScrollRef = useRef<HTMLDivElement>(null);
+  const similarGamesAutoScrollRef = useRef<NodeJS.Timeout | null>(null);
   
   // Ref mirror of currentMediaIndex — lets callbacks read the latest value
   // without adding it as a dependency (prevents needless re-creation every 5s
@@ -721,7 +727,7 @@ export function GameDetailsPage() {
   }, [gameId]);
   
   // Library management
-  const { addToLibrary, removeFromLibrary, isInLibrary, updateEntry, getAllGameIds } = useLibrary();
+  const { addToLibrary, removeFromLibrary, isInLibrary, updateEntry } = useLibrary();
   const gameInLibrary = gameId ? isInLibrary(gameId) : false;
   const { success: toastSuccess } = useToast();
 
@@ -928,8 +934,8 @@ export function GameDetailsPage() {
       setHeaderImageError(false);
       setHeaderImageLoaded(false);
       setHeroBgLoaded(false);
-      setRecommendations([]);
-      setRecommendationsLoading(false);
+      setSimilarGames([]);
+      setSimilarGamesPhase('hidden');
       setFitgirlRepack(null);
       setFitgirlLoading(false);
       setIsRecommendationsPaused(false);
@@ -1328,54 +1334,91 @@ export function GameDetailsPage() {
   // Epic-primary games (from details.steam_appid set during dual-store resolution)
   const resolvedSteamAppId = appId || details?.steam_appid || null;
 
-  // Fetch recommendations (asynchronously, after main content)
-  // Use a boolean gate (!!details) instead of the object reference so that
-  // swapping from one details object to another doesn't trigger a refetch
-  // when the appId hasn't changed.
+  // Similar games via Ark ANN (universal gameId — Steam, Epic, cross-store).
   const hasDetails = !!details;
   useEffect(() => {
-    // Use resolvedSteamAppId so dual-store Epic-primary games also get recommendations
-    if (!resolvedSteamAppId || !hasDetails) {
+    setAnnReady(annIndex.isReady);
+    setAnnBuilding(annIndex.isBuilding);
+    return annIndex.subscribe(() => {
+      setAnnReady(annIndex.isReady);
+      setAnnBuilding(annIndex.isBuilding);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!gameId || !hasDetails) {
+      setSimilarGamesPhase('hidden');
+      setSimilarGames([]);
       return;
     }
-    
-    // Check if the API is available
-    if (!isElectron()) {
+
+    if (typeof window === 'undefined' || !window.ann) {
+      setSimilarGamesPhase('hidden');
+      setSimilarGames([]);
       return;
     }
-    
-    if (!window.steam?.getRecommendations) {
+
+    if (annIndex.isBuilding) {
+      setSimilarGamesPhase('index_building');
+      setSimilarGames([]);
+      return;
+    }
+
+    if (!annIndex.isReady) {
+      setSimilarGamesPhase('index_loading');
+      setSimilarGames([]);
+      void annIndex.refreshStatus();
       return;
     }
 
     const controller = new AbortController();
 
-    const fetchRecommendations = async () => {
-      setRecommendationsLoading(true);
+    const fetchSimilar = async () => {
+      setSimilarGamesPhase('fetching');
+      setSimilarGames([]);
       try {
-        const libraryIds = getAllGameIds();
-        // Extract numeric Steam appIds from string gameIds for the recommendations API
-        const numericLibIds = libraryIds
-          .map(id => { const m = id.match(/^(?:steam-)?(\d+)$/); return m ? Number(m[1]) : null; })
-          .filter((id): id is number => id !== null);
-        const recs = await window.steam!.getRecommendations(resolvedSteamAppId, numericLibIds, 8);
-        if (!controller.signal.aborted) {
-          setRecommendations(recs);
+        const result = await getSimilarGamesForDetails(gameId, 8, {
+          sourceDisplayTitle: details?.name ?? epicGame?.title,
+        });
+        if (controller.signal.aborted) return;
+
+        if (result.status === 'no_embedding') {
+          setSimilarGamesPhase('no_embedding');
+          setSimilarGames([]);
+          return;
         }
+
+        if (result.status === 'ann_unavailable') {
+          setSimilarGamesPhase('index_loading');
+          setSimilarGames([]);
+          void annIndex.refreshStatus();
+          return;
+        }
+
+        if (result.items.length === 0) {
+          setSimilarGamesPhase('hidden');
+          setSimilarGames([]);
+          return;
+        }
+
+        setSimilarGames(result.items);
+        setSimilarGamesPhase('ready');
       } catch (err) {
-        console.warn('[GameDetails] Failed to fetch recommendations:', err);
-      } finally {
-        if (!controller.signal.aborted) setRecommendationsLoading(false);
+        console.warn('[GameDetails] Similar games:', err);
+        if (!controller.signal.aborted) {
+          setSimilarGames([]);
+          setSimilarGamesPhase('hidden');
+        }
       }
     };
 
-    fetchRecommendations();
+    void fetchSimilar();
 
     return () => {
       controller.abort();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedSteamAppId, hasDetails]);
+  }, [gameId, hasDetails, annReady, annBuilding, details?.name, epicGame?.title]);
 
   // Fetch FitGirl repack link (asynchronously, after main content)
   useEffect(() => {
@@ -1620,41 +1663,40 @@ export function GameDetailsPage() {
       if (resumeAutoplayTimeoutRef.current) {
         clearTimeout(resumeAutoplayTimeoutRef.current);
       }
-      if (recommendationsAutoScrollRef.current) {
-        clearTimeout(recommendationsAutoScrollRef.current);
+      if (similarGamesAutoScrollRef.current) {
+        clearInterval(similarGamesAutoScrollRef.current);
       }
     };
   }, []);
 
-  // Auto-scroll recommendations every 10 seconds
+  // Auto-scroll similar games every 10 seconds
   useEffect(() => {
-    if (!recommendationsScrollRef.current || recommendations.length === 0 || isRecommendationsPaused) {
+    if (!similarGamesScrollRef.current || similarGames.length === 0 || isRecommendationsPaused) {
       return;
     }
 
-    const scrollContainer = recommendationsScrollRef.current;
-    const cardWidth = 280; // w-64 (256px) + gap-4 (16px) = 272px, rounded to 280 for smooth scroll
-    
-    recommendationsAutoScrollRef.current = setInterval(() => {
+    const scrollContainer = similarGamesScrollRef.current;
+    const cardWidth = 280;
+
+    similarGamesAutoScrollRef.current = setInterval(() => {
       if (scrollContainer && !isRecommendationsPaused) {
         const maxScroll = scrollContainer.scrollWidth - scrollContainer.clientWidth;
         const currentScroll = scrollContainer.scrollLeft;
-        
-        // If we've reached the end, scroll back to the beginning
+
         if (currentScroll >= maxScroll - 10) {
           scrollContainer.scrollTo({ left: 0, behavior: 'smooth' });
         } else {
           scrollContainer.scrollBy({ left: cardWidth, behavior: 'smooth' });
         }
       }
-    }, 10000); // 10 seconds
+    }, 10000);
 
     return () => {
-      if (recommendationsAutoScrollRef.current) {
-        clearInterval(recommendationsAutoScrollRef.current);
+      if (similarGamesAutoScrollRef.current) {
+        clearInterval(similarGamesAutoScrollRef.current);
       }
     };
-  }, [recommendations, isRecommendationsPaused]);
+  }, [similarGames, isRecommendationsPaused]);
 
 
   // Memoize derived arrays to avoid creating new references on every render
@@ -2030,13 +2072,13 @@ export function GameDetailsPage() {
                 setHeaderImageError={setHeaderImageError}
                 headerImageLoaded={headerImageLoaded}
                 setHeaderImageLoaded={setHeaderImageLoaded}
-                recommendations={recommendations}
-                recommendationsLoading={recommendationsLoading}
+                similarGames={similarGames}
+                similarGamesPhase={similarGamesPhase}
                 fitgirlRepack={fitgirlRepack}
                 fitgirlLoading={fitgirlLoading}
                 isRecommendationsPaused={isRecommendationsPaused}
                 setIsRecommendationsPaused={setIsRecommendationsPaused}
-                recommendationsScrollRef={recommendationsScrollRef}
+                similarGamesScrollRef={similarGamesScrollRef}
                 steamNews={steamNews}
                 steamNewsLoading={steamNewsLoading}
                 epicNews={epicNews}
@@ -2075,13 +2117,13 @@ export function GameDetailsPage() {
             setHeaderImageError={setHeaderImageError}
             headerImageLoaded={headerImageLoaded}
             setHeaderImageLoaded={setHeaderImageLoaded}
-            recommendations={recommendations}
-            recommendationsLoading={recommendationsLoading}
+            similarGames={similarGames}
+            similarGamesPhase={similarGamesPhase}
             fitgirlRepack={fitgirlRepack}
             fitgirlLoading={fitgirlLoading}
             isRecommendationsPaused={isRecommendationsPaused}
             setIsRecommendationsPaused={setIsRecommendationsPaused}
-            recommendationsScrollRef={recommendationsScrollRef}
+            similarGamesScrollRef={similarGamesScrollRef}
             steamNews={steamNews}
             steamNewsLoading={steamNewsLoading}
             epicNews={epicNews}
@@ -2143,13 +2185,13 @@ interface GameDetailsContentProps {
   setHeaderImageError: (error: boolean) => void;
   headerImageLoaded: boolean;
   setHeaderImageLoaded: (loaded: boolean) => void;
-  recommendations: GameRecommendation[];
-  recommendationsLoading: boolean;
+  similarGames: SimilarGameCard[];
+  similarGamesPhase: SimilarGamesSectionPhase;
   fitgirlRepack: { url: string; downloadLink: string | null } | null;
   fitgirlLoading: boolean;
   isRecommendationsPaused: boolean;
   setIsRecommendationsPaused: (paused: boolean) => void;
-  recommendationsScrollRef: React.RefObject<HTMLDivElement>;
+  similarGamesScrollRef: React.RefObject<HTMLDivElement>;
   steamNews: SteamNewsItem[];
   steamNewsLoading: boolean;
   epicNews: import('@/types/epic').EpicNewsArticle[];
@@ -2186,13 +2228,13 @@ const GameDetailsContent = memo(function GameDetailsContent({
   setHeaderImageError,
   headerImageLoaded,
   setHeaderImageLoaded,
-  recommendations,
-  recommendationsLoading,
+  similarGames,
+  similarGamesPhase,
   fitgirlRepack,
   fitgirlLoading,
   isRecommendationsPaused: _isRecommendationsPaused, // Used for scrolling pause state
   setIsRecommendationsPaused,
-  recommendationsScrollRef,
+  similarGamesScrollRef,
   steamNews,
   steamNewsLoading,
   epicNews,
@@ -2285,48 +2327,53 @@ const GameDetailsContent = memo(function GameDetailsContent({
     return [];
   }, [steamNews, epicNews, details.header_image]);
 
-  const recommendationsRendered = useMemo(() => {
-    if (recommendations.length === 0) return [];
-    const maxScore = Math.max(...recommendations.map(r => r.score), 1);
-    return recommendations.map((rec) => {
-      const matchPercentage = Math.min(Math.round((rec.score / maxScore) * 95), 99);
+  const similarGamesRendered = useMemo(() => {
+    if (similarGames.length === 0) return [];
+    const dists = similarGames.map((r) => r.distance);
+    const minD = Math.min(...dists);
+    const maxD = Math.max(...dists);
+    const span = maxD - minD || 1;
+    return similarGames.map((rec) => {
+      const closeness = 1 - (rec.distance - minD) / span;
+      const tier =
+        closeness >= 0.66 ? 'bg-fuchsia-600' :
+        closeness >= 0.33 ? 'bg-purple-600' : 'bg-purple-800';
       return (
         <motion.div
-          key={rec.appId}
+          key={rec.gameId}
           className="flex-shrink-0 w-64 cursor-pointer group"
-          onClick={() => navigate(`/game/steam-${rec.appId}`)}
+          onClick={() => navigate(`/game/${encodeURIComponent(rec.gameId)}`)}
           whileHover={{ scale: 1.02 }}
           transition={{ duration: 0.2 }}
         >
           <div className="relative aspect-[460/215] rounded-lg overflow-hidden bg-white/5">
-            <RecommendationImage appId={rec.appId} name={rec.name} />
+            <SimilarGameCarouselImage imageChain={rec.imageChain} title={rec.title} />
             <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
           </div>
           <h3 className="mt-2 font-semibold text-sm truncate group-hover:text-fuchsia-400 transition-colors">
-            {rec.name}
+            {rec.title}
           </h3>
           <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-            <Badge className={cn(
-              "text-[10px] px-1.5 py-0.5 font-semibold",
-              matchPercentage >= 80 ? "bg-fuchsia-600" :
-              matchPercentage >= 60 ? "bg-purple-600" : "bg-purple-800"
-            )}>
-              {matchPercentage}% Match
+            <Badge
+              className={cn('text-[10px] px-1.5 py-0.5 font-semibold tabular-nums', tier)}
+              title="Cosine distance from this game in Ark's embedding index (lower = closer)"
+            >
+              d = {formatNeighborDistance(rec.distance)}
             </Badge>
-            {rec.reasons.slice(0, 2).map((reason, i) => (
+            {rec.genreTags.map((tag, i) => (
               <Badge
                 key={i}
                 variant="outline"
                 className="text-[10px] px-1.5 py-0.5 border-white/20 text-white/70"
               >
-                {reason}
+                {tag}
               </Badge>
             ))}
           </div>
         </motion.div>
       );
     });
-  }, [recommendations, navigate]);
+  }, [similarGames, navigate]);
 
   return (
     <>
@@ -3392,32 +3439,53 @@ const GameDetailsContent = memo(function GameDetailsContent({
         </div>
       </div>
 
-      {/* Recommended by Steam Section */}
-      {(recommendations.length > 0 || recommendationsLoading) && (
+      {/* Similar games (Ark ANN neighbors) */}
+      {similarGamesPhase !== 'hidden' && (
         <div className="bg-black/50 py-8">
           <div className="max-w-7xl mx-auto px-4">
-            <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">Recommended by Steam</h2>
-            
-            {recommendationsLoading ? (
-              <div className="flex gap-4 overflow-x-auto pb-4">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <div key={i} className="flex-shrink-0 w-64 animate-pulse">
-                    <div className="aspect-[460/215] bg-white/10 rounded-lg border border-white/5" />
-                    <div className="mt-2 h-4 bg-white/10 rounded w-3/4" />
-                    <div className="mt-1 flex items-center gap-2">
-                      <div className="h-3 bg-white/5 rounded w-12" />
-                      <div className="h-2 bg-fuchsia-500/10 rounded-full w-16" />
+            <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">Similar Games</h2>
+
+            {(similarGamesPhase === 'index_building' ||
+              similarGamesPhase === 'index_loading' ||
+              similarGamesPhase === 'fetching') && (
+              <>
+                <p className="text-sm text-white/50 mb-4">
+                  {similarGamesPhase === 'index_building'
+                    ? 'Updating the similar-game index…'
+                    : similarGamesPhase === 'index_loading'
+                      ? "Loading Ark's neighbor index…"
+                      : 'Finding similar games…'}
+                </p>
+                <div className="flex gap-4 overflow-x-auto pb-4">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <div key={i} className="flex-shrink-0 w-64 animate-pulse">
+                      <div className="aspect-[460/215] bg-white/10 rounded-lg border border-white/5" />
+                      <div className="mt-2 h-4 bg-white/10 rounded w-3/4" />
+                      <div className="mt-1 flex items-center gap-2">
+                        <div className="h-3 bg-white/5 rounded w-16" />
+                        <div className="h-2 bg-fuchsia-500/10 rounded-full w-20" />
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
+                  ))}
+                </div>
+              </>
+            )}
+
+            {similarGamesPhase === 'no_embedding' && (
+              <p className="text-sm text-white/55 max-w-2xl">
+                Embeddings for this title are not in Ark's cache yet. Open{' '}
+                <span className="text-fuchsia-300/90">Oracle</span> or wait until indexing finishes — similar
+                games will appear here once this game has a vector and neighbors are enriched.
+              </p>
+            )}
+
+            {similarGamesPhase === 'ready' && similarGames.length > 0 && (
               <div className="relative group/recs">
-                {/* Left Arrow */}
                 <button
+                  type="button"
                   onClick={() => {
-                    if (recommendationsScrollRef.current) {
-                      recommendationsScrollRef.current.scrollBy({ left: -280, behavior: 'smooth' });
+                    if (similarGamesScrollRef.current) {
+                      similarGamesScrollRef.current.scrollBy({ left: -280, behavior: 'smooth' });
                     }
                   }}
                   className="absolute left-0 top-1/2 -translate-y-1/2 z-10 p-2 rounded-full bg-black/70 hover:bg-black/90 text-white opacity-0 group-hover/recs:opacity-100 transition-opacity -translate-x-4"
@@ -3426,11 +3494,11 @@ const GameDetailsContent = memo(function GameDetailsContent({
                   <ChevronLeft className="w-5 h-5 pointer-events-none" />
                 </button>
 
-                {/* Right Arrow */}
                 <button
+                  type="button"
                   onClick={() => {
-                    if (recommendationsScrollRef.current) {
-                      recommendationsScrollRef.current.scrollBy({ left: 280, behavior: 'smooth' });
+                    if (similarGamesScrollRef.current) {
+                      similarGamesScrollRef.current.scrollBy({ left: 280, behavior: 'smooth' });
                     }
                   }}
                   className="absolute right-0 top-1/2 -translate-y-1/2 z-10 p-2 rounded-full bg-black/70 hover:bg-black/90 text-white opacity-0 group-hover/recs:opacity-100 transition-opacity translate-x-4"
@@ -3439,14 +3507,13 @@ const GameDetailsContent = memo(function GameDetailsContent({
                   <ChevronRight className="w-5 h-5 pointer-events-none" />
                 </button>
 
-                {/* Scrollable Container */}
-                <div 
-                  ref={recommendationsScrollRef}
+                <div
+                  ref={similarGamesScrollRef}
                   onMouseEnter={() => setIsRecommendationsPaused(true)}
                   onMouseLeave={() => setIsRecommendationsPaused(false)}
                   className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin scrollbar-thumb-white/20 scrollbar-track-transparent scroll-smooth"
                 >
-                  {recommendationsRendered}
+                  {similarGamesRendered}
                 </div>
               </div>
             )}

@@ -86,6 +86,18 @@ function makeDatedGame(day: number, name: string): Game {
   });
 }
 
+/** Dated release on an arbitrary calendar day (for window / filter tests). */
+function makeDatedGameOnDate(year: number, month: number, day: number, name: string): Game {
+  const date = new Date(year, month, day);
+  return makeGame({
+    id: `steam-${year}-${month}-${day}-${name.replace(/[^a-zA-Z0-9]/g, '')}`,
+    title: name,
+    releaseDate: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    comingSoon: false,
+    store: 'steam',
+  });
+}
+
 /** Render the calendar wrapped in required providers. */
 function renderCalendar() {
   return render(
@@ -172,6 +184,8 @@ describe('ReleaseCalendar', () => {
   });
 
   it('renders month names as section headers in year view', async () => {
+    // Feb 15 so the visible window starts Jan 1 and Year feed still lists January (not trimmed).
+    vi.setSystemTime(new Date(2026, 1, 15, 12, 0, 0));
     mockIsPrefetchReady.mockReturnValue(true);
     mockGetPrefetchedGames.mockReturnValue([makeDatedGame(15, 'Test Game')]);
 
@@ -307,6 +321,58 @@ describe('ReleaseCalendar', () => {
     // Game name appears on the poster card
     const matches = screen.getAllByText('Mid Month Game');
     expect(matches.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('includes releases from the previous calendar month (not only from today)', async () => {
+    // March 15, 2026 — window includes Feb 1 onward
+    vi.setSystemTime(new Date(2026, 2, 15, 12, 0, 0));
+    const games = [makeDatedGameOnDate(2026, 1, 20, 'Late February Game')];
+    mockIsPrefetchReady.mockReturnValue(true);
+    mockGetPrefetchedGames.mockReturnValue(games);
+
+    await act(async () => {
+      renderCalendar();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    expect(screen.getByText('Late February Game')).toBeInTheDocument();
+  });
+
+  it('includes earlier days in the current month (not only from today)', async () => {
+    vi.setSystemTime(new Date(2026, 2, 20, 12, 0, 0)); // March 20
+    const games = [makeDatedGameOnDate(2026, 2, 5, 'Early March Game')];
+    mockIsPrefetchReady.mockReturnValue(true);
+    mockGetPrefetchedGames.mockReturnValue(games);
+
+    await act(async () => {
+      renderCalendar();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    expect(screen.getByText('Early March Game')).toBeInTheDocument();
+  });
+
+  it('excludes releases before the previous calendar month', async () => {
+    vi.setSystemTime(new Date(2026, 2, 15, 12, 0, 0)); // March — window from Feb 1
+    const games = [makeDatedGameOnDate(2026, 0, 10, 'January Too Old')];
+    mockIsPrefetchReady.mockReturnValue(true);
+    mockGetPrefetchedGames.mockReturnValue(games);
+
+    await act(async () => {
+      renderCalendar();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    expect(screen.queryByText('January Too Old')).not.toBeInTheDocument();
   });
 
   it('shows correct count for multiple games on the same day', async () => {

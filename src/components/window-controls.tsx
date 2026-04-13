@@ -56,17 +56,6 @@ export function WindowControls({ className }: WindowControlsProps) {
         variant="ghost"
         size="icon"
         className="group min-w-[44px] min-h-[44px] p-0 flex items-center justify-center rounded-full bg-transparent hover:bg-transparent transition-[background-color] duration-0"
-        onClick={handleClose}
-        aria-label="Close window"
-      >
-        <span className="h-6 w-6 rounded-full bg-gray-700/80 group-hover:bg-gray-600 flex items-center justify-center transition-[background-color] duration-0">
-          <X className="h-3 w-3 text-white pointer-events-none" />
-        </span>
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="group min-w-[44px] min-h-[44px] p-0 flex items-center justify-center rounded-full bg-transparent hover:bg-transparent transition-[background-color] duration-0"
         onClick={handleMinimize}
         aria-label="Minimize window"
       >
@@ -87,6 +76,17 @@ export function WindowControls({ className }: WindowControlsProps) {
           ) : (
             <Square className="h-3 w-3 text-white pointer-events-none" />
           )}
+        </span>
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="group min-w-[44px] min-h-[44px] p-0 flex items-center justify-center rounded-full bg-transparent hover:bg-transparent transition-[background-color] duration-0"
+        onClick={handleClose}
+        aria-label="Close window"
+      >
+        <span className="h-6 w-6 rounded-full bg-gray-700/80 group-hover:bg-gray-600 flex items-center justify-center transition-[background-color] duration-0">
+          <X className="h-3 w-3 text-white pointer-events-none" />
         </span>
       </Button>
     </div>

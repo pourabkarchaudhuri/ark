@@ -68,12 +68,13 @@ import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { AIChatPanel } from '@/components/ai-chat-panel';
 import { SettingsScreen } from '@/components/settings-screen';
-import { GuidedTour, getTourSteps, useTourState, viewModeToTourId, type TourId } from '@/components/guided-tour';
+import { GuidedTour, getTourSteps, useTourState, viewModeToTourId, waitForTourDomReady, type TourId } from '@/components/guided-tour';
 import { YearWrapped, WrappedSnackbar } from '@/components/year-wrapped';
 import { AnimateIcon, MagneticWrap } from '@/components/ui/animate-icon';
 import { useSessionTracker } from '@/hooks/useSessionTracker';
 import { NavbarStatusIndicator } from '@/components/system-status-panel';
 import { useDevMode } from '@/hooks/useDevMode';
+import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { useChatAvailability } from '@/hooks/useChatAvailability';
 import { scheduleBackgroundPrecompute, getBuildStage, subscribeGalaxy } from '@/services/galaxy-cache';
@@ -95,10 +96,29 @@ function getScrollStorageKey(view: ViewMode): string {
   return `ark-dashboard-scroll-${view}`;
 }
 
-function LazyViewFallback() {
+/** Default: long grids. Journey/Voyage: lower bar — 3D canvas captures wheel, so users need the FAB after modest page scroll. */
+const SCROLL_TOP_FAB_THRESHOLD_DEFAULT = 500;
+const SCROLL_TOP_FAB_THRESHOLD_JOURNEY = 180;
+
+/** Optional `data-tour` anchors so Joyride can resolve lazy-view steps while Suspense shows a spinner. */
+function LazyViewFallback({
+  tourAnchors,
+  className,
+}: {
+  tourAnchors?: readonly string[];
+  className?: string;
+}) {
   return (
-    <div className="flex items-center justify-center h-64 text-white/30">
+    <div
+      className={cn(
+        'relative flex items-center justify-center h-64 text-white/30',
+        className,
+      )}
+    >
       <Loader2 className="h-5 w-5 animate-spin" />
+      {tourAnchors?.map((id) => (
+        <span key={id} className="sr-only" data-tour={id} aria-hidden />
+      ))}
     </div>
   );
 }
@@ -133,6 +153,9 @@ export function Dashboard() {
   // Pending scroll restore when returning to a view whose content loads async (e.g. Library)
   const pendingScrollRestoreRef = useRef<{ view: ViewMode; pos: number } | null>(null);
 
+  /** Cancels stale `waitForTourDomReady` when the user starts another tour from Settings → Guide. */
+  const guidedTourRunGenRef = useRef(0);
+
   // Seed the pending scroll restore on mount
   useEffect(() => {
     if (location !== '/') return;
@@ -164,10 +187,9 @@ export function Dashboard() {
   
   // Note: Cache clearing removed - useSteamGames handles data fetching on mount
   
-  // Search functionality — input is immediate, but filtering/API calls wait
-  // until the user pauses typing (3s debounce).
+  // Search — short debounce so grid + dropdown stay aligned with useGameSearch (~300ms internal).
   const [searchQuery, setSearchQuery] = useState('');
-  const debouncedSearch = useDebounce(searchQuery, 3000);
+  const debouncedSearch = useDebounce(searchQuery, 400);
   const { results: searchResults, loading: searchLoading, isSearching } = useGameSearch(debouncedSearch);
   // Show "searching" until debounce kicks in (avoids flashing full list then no-results)
   const browseSearchPending = viewMode === 'browse' && searchQuery.trim() !== '' && debouncedSearch !== searchQuery;
@@ -185,6 +207,7 @@ export function Dashboard() {
   // Session tracking (live "Playing Now" status)
   const { isPlayingNow, liveGames } = useSessionTracker();
   const [devMode] = useDevMode();
+  const [betaFeatures] = useBetaFeatures();
   const chatAvailability = useChatAvailability();
 
   // Background precompute for Embedding Space galaxy data (runs once, 20s after mount)
@@ -227,6 +250,10 @@ export function Dashboard() {
   }, []);
 
   const closeAIChat = useCallback(() => setIsAIChatOpen(false), []);
+
+  useEffect(() => {
+    if (!betaFeatures) setIsAIChatOpen(false);
+  }, [betaFeatures]);
   
   const switchToSettings = useCallback(() => { setViewMode('settings'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
   
@@ -323,6 +350,7 @@ export function Dashboard() {
       currentGames,
       searchResults,
       isSearching,
+      browseSearchPending,
       viewMode,
       searchQuery: debouncedSearch,
       filters,
@@ -383,8 +411,13 @@ export function Dashboard() {
   // sortedGames is clearly stale library data (same length as library and all ids in library).
   const browseDisplayGames = useMemo(() => {
     if (viewMode !== 'browse') return sortedGames;
+    const userSearchingBrowse = searchQuery.trim().length > 0;
     // Empty browse: show nothing or let hook fill in next frame
     if (sortedGames.length === 0 && steamGames.length === 0) return sortedGames;
+    // While searching, never substitute Top Sellers order for search relevance (avoids grid/dropdown mismatch).
+    if (sortedGames.length === 0 && steamGames.length > 0 && userSearchingBrowse) {
+      return sortedGames;
+    }
     // Hook not yet populated for browse: show steamGames so user sees something
     if (sortedGames.length === 0 && steamGames.length > 0) {
       const effectiveSort = sortBy;
@@ -413,7 +446,7 @@ export function Dashboard() {
       else cmp = releaseTs(a) - releaseTs(b);
       return sortDirection === 'desc' ? -cmp : cmp;
     });
-  }, [viewMode, sortedGames, mergedLibraryGames, steamGames, sortBy, sortDirection]);
+  }, [viewMode, sortedGames, mergedLibraryGames, steamGames, sortBy, sortDirection, searchQuery]);
 
   // Deferred scroll restore when grid content finishes loading.
   const rawGameCount = currentGames.length;
@@ -505,7 +538,9 @@ export function Dashboard() {
   useEffect(() => {
     let scrollSaveTimeout: ReturnType<typeof setTimeout>;
     function handleScroll() {
-      setShowScrollTop(window.scrollY > 500);
+      const threshold =
+        viewModeRef.current === 'journey' ? SCROLL_TOP_FAB_THRESHOLD_JOURNEY : SCROLL_TOP_FAB_THRESHOLD_DEFAULT;
+      setShowScrollTop(window.scrollY > threshold);
       if (location !== '/') return;
       clearTimeout(scrollSaveTimeout);
       scrollSaveTimeout = setTimeout(() => {
@@ -513,6 +548,7 @@ export function Dashboard() {
       }, 150);
     }
 
+    handleScroll();
     window.addEventListener('scroll', handleScroll, { passive: true });
     return () => {
       window.removeEventListener('scroll', handleScroll);
@@ -543,6 +579,7 @@ export function Dashboard() {
   const runGuidedTour = useCallback(
     (tourId: TourId) => {
       stopTour();
+      const generation = ++guidedTourRunGenRef.current;
       switch (tourId) {
         case 'welcome':
         case 'browse':
@@ -580,11 +617,16 @@ export function Dashboard() {
         default:
           switchToBrowse();
       }
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          window.setTimeout(() => startTour(tourId), 150);
+      void (async () => {
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => resolve());
+          });
         });
-      });
+        await waitForTourDomReady(tourId);
+        if (guidedTourRunGenRef.current !== generation) return;
+        startTour(tourId);
+      })();
     },
     [
       stopTour,
@@ -945,7 +987,7 @@ export function Dashboard() {
 
       <main className={cn(
         "px-3 lg:px-6 py-4 lg:py-6 transition-all duration-300 relative z-10",
-        (isFilterOpen || (devMode && isAIChatOpen)) && "lg:pr-[424px]"
+        (isFilterOpen || (betaFeatures && isAIChatOpen)) && "lg:pr-[424px]"
       )}>
         {/* Results Header */}
         <div className="flex items-center justify-between mb-6 gap-4">
@@ -1009,7 +1051,7 @@ export function Dashboard() {
                   )}
                 >
                   <AnimateIcon hover="pulse" className="shrink-0"><CalendarDays className="h-3 w-3" /></AnimateIcon>
-                  <span className="hidden lg:inline">Releases</span>
+                  <span className="hidden lg:inline">Upcoming</span>
                 </button>
               </TooltipCard>
               <TooltipCard content="A visual timeline of your gaming journey — see when you added, played, and completed games across the months.">
@@ -1076,6 +1118,13 @@ export function Dashboard() {
                             <span className="text-[11px] tabular-nums">Indexing catalog…</span>
                           </span>
                         )
+                      ) : isSearching ? (
+                        <>
+                          <span className="text-white font-medium" data-testid="browse-game-count">
+                            {browseDisplayGames.length.toLocaleString()}
+                          </span>{' '}
+                          games — <span className="text-white/90">Search results</span>
+                        </>
                       ) : (
                         <>
                           <span className="text-white font-medium" data-testid="browse-game-count">
@@ -1094,7 +1143,7 @@ export function Dashboard() {
                     </p>
                     <p className="flex lg:hidden text-[11px] text-white/55 whitespace-nowrap items-center gap-1 shrink-0">
                       <span className="text-white font-medium tabular-nums">{browseDisplayGames.length.toLocaleString()}</span>
-                      <span>games</span>
+                      <span>{isSearching ? 'results' : 'games'}</span>
                     </p>
                   </div>
                 ) : (
@@ -1256,8 +1305,8 @@ export function Dashboard() {
               </MagneticWrap>
             </TooltipCard>
 
-            {/* AI Chat Button (dev mode only); disabled when no provider configured */}
-            {devMode && (
+            {/* AI Chat Button (beta features); disabled when no provider configured */}
+            {betaFeatures && (
               <TooltipCard content={chatAvailability.message}>
                 <MagneticWrap strength={0.25}>
                   <Button
@@ -1327,22 +1376,29 @@ export function Dashboard() {
         ) : viewMode === 'calendar' ? (
           <ReleaseCalendar />
         ) : viewMode === 'oracle' ? (
-          <Suspense fallback={<LazyViewFallback />}>
+          <Suspense fallback={<LazyViewFallback tourAnchors={['oracle-view-root']} />}>
             <OracleView onSwitchToBrowse={switchToBrowse} />
           </Suspense>
         ) : viewMode === 'devlog' ? (
-          <Suspense fallback={<LazyViewFallback />}>
+          <Suspense fallback={<LazyViewFallback tourAnchors={['devlog-header', 'devlog-timeline']} />}>
             <DevLogView onBack={switchToBrowse} />
           </Suspense>
         ) : viewMode === 'data-flow' ? (
-          <Suspense fallback={<LazyViewFallback />}>
+          <Suspense fallback={<LazyViewFallback tourAnchors={['dataflow-back', 'dataflow-panel']} />}>
             <DataFlowView onBack={switchToBrowse} />
           </Suspense>
         ) : viewMode === 'settings' ? (
           <SettingsScreen onBack={switchToBrowse} onRunGuidedTour={runGuidedTour} />
         ) : viewMode === 'ann-graph' ? (
           <div key="ann-graph-shell" className="fixed inset-0 top-[52px] z-30 bg-black">
-            <Suspense fallback={<LazyViewFallback />}>
+            <Suspense
+              fallback={
+                <LazyViewFallback
+                  className="h-auto min-h-[calc(100vh-52px)] flex-1 w-full"
+                  tourAnchors={['ann-graph-back', 'ann-graph-search', 'ann-graph-canvas']}
+                />
+              }
+            >
               <AnnGraphView onBack={switchToOracle} />
             </Suspense>
           </div>
@@ -1588,11 +1644,14 @@ export function Dashboard() {
         onConfirm={handleClearLibraryFinalConfirm}
       />
 
-      {/* Scroll to Top FAB - z-60 to stay above filter sidebar (z-50) */}
+      {/* Scroll to Top FAB — z-60 normally; z-[100] on Journey so Ark canvas (full-bleed WebGL) does not sit above the button */}
       {showScrollTop && (
         <button
           onClick={scrollToTop}
-          className="fixed bottom-6 right-6 h-12 w-12 rounded-full bg-fuchsia-500 hover:bg-fuchsia-600 text-white shadow-lg shadow-fuchsia-500/30 flex items-center justify-center transition-all duration-300 z-[60]"
+          className={cn(
+            'fixed bottom-6 right-6 h-12 w-12 rounded-full bg-fuchsia-500 hover:bg-fuchsia-600 text-white shadow-lg shadow-fuchsia-500/30 flex items-center justify-center transition-all duration-300',
+            viewMode === 'journey' ? 'z-[100]' : 'z-[60]',
+          )}
           aria-label="Scroll to top"
         >
           <ArrowUp className="h-5 w-5" />
@@ -1636,8 +1695,8 @@ export function Dashboard() {
         viewMode={viewMode}
       />
 
-      {/* AI Chat Panel (dev mode only) */}
-      {devMode && (
+      {/* AI Chat Panel (beta features) */}
+      {betaFeatures && (
         <AIChatPanel
           isOpen={isAIChatOpen}
           onClose={closeAIChat}

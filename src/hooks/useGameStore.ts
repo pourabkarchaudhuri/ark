@@ -14,6 +14,7 @@ import {
   clearBrowseCache,
   searchPrefetchedGames,
 } from '@/services/prefetch-store';
+import { scoreGame, buildSingleSearchIndex, compareBrowseSearchZeroScore } from '@/services/game-search-scoring';
 import { Game, GameFilters, GameCategory, UpdateLibraryEntry, CreateCustomGameEntry, GameStatus, CachedGameMeta } from '@/types/game';
 import { SteamAppListItem } from '@/types/steam';
 import { detailEnricher } from '@/services/detail-enricher';
@@ -1106,8 +1107,8 @@ export function useComingSoon() {
 
 /**
  * Custom hook for searching games.
- * Searches in-memory prefetched data first (instant) and falls back to API
- * calls only if the in-memory search yields no results.
+ * Shows prefetched hits immediately when available, always merges in Steam/Epic API results,
+ * then re-scores the combined pool so relevance order is unified (not "prefetch first, API tail").
  * Uses a request counter to avoid stale responses overwriting newer results.
  */
 export function useGameSearch(query: string, debounceMs: number = 300) {
@@ -1148,38 +1149,55 @@ export function useGameSearch(query: string, debounceMs: number = 300) {
     const currentId = ++requestIdRef.current;
 
     debounceRef.current = setTimeout(async () => {
+      const mergeAndRank = (mem: Game[] | null, api: Game[]): Game[] => {
+        const q = query.toLowerCase().trim();
+        const tokens = q.split(/\s+/).filter(Boolean);
+        const seen = new Set<string>();
+        const pool: Game[] = [];
+        for (const g of [...(mem ?? []), ...api]) {
+          if (!seen.has(g.id)) {
+            seen.add(g.id);
+            pool.push(g);
+          }
+        }
+        if (tokens.length === 0) return pool.slice(0, 30);
+        const scored = pool.map((game) => ({
+          game,
+          score: scoreGame(buildSingleSearchIndex(game), tokens, q, game),
+        }));
+        scored.sort((a, b) => b.score - a.score);
+        const positive = scored.filter((s) => s.score > 0);
+        let pick = positive.length > 0 ? positive : scored;
+        if (positive.length === 0 && pick.length > 1) {
+          pick = [...pick].sort((a, b) => compareBrowseSearchZeroScore(a.game, b.game, query));
+        }
+        return pick.slice(0, 30).map((s) => s.game);
+      };
+
       try {
-        // 1. Instant in-memory search from prefetched data (optional fast first paint)
-        const memResults = searchPrefetchedGames(query, 20);
+        // 1. Instant in-memory search (optional fast first paint; same ranking applied after API returns)
+        const memResults = searchPrefetchedGames(query, 40);
         if (memResults && memResults.length > 0 && currentId === requestIdRef.current) {
-          setResults(memResults);
+          setResults(memResults.slice(0, 30));
           setError(null);
           setLoading(false);
           completedQueryRef.current = query;
         }
 
-        // 2. Always run API search so Steam/Epic hits appear (e.g. Planet of Lana not in prefetch)
+        // 2. Always run API search so Steam/Epic hits appear (e.g. titles not in prefetch)
         const apiResults = await gameService.searchGames(query, 20);
         if (currentId !== requestIdRef.current) return;
 
-        if (memResults && memResults.length > 0) {
-          // Merge: prefetch first, then API results not already present
-          const seenIds = new Set(memResults.map(g => g.id));
-          const extra = apiResults.filter(g => !seenIds.has(g.id));
-          setResults([...memResults, ...extra].slice(0, 30));
-        } else {
-          setResults(apiResults);
-        }
+        setResults(mergeAndRank(memResults, apiResults));
         setError(null);
         setLoading(false);
         completedQueryRef.current = query;
       } catch (err) {
         console.error('[useGameSearch] Search error:', err);
         if (currentId === requestIdRef.current) {
-          // If we already had in-memory results, keep showing them
-          const memFallback = searchPrefetchedGames(query, 20);
+          const memFallback = searchPrefetchedGames(query, 40);
           if (memFallback && memFallback.length > 0) {
-            setResults(memFallback);
+            setResults(memFallback.slice(0, 30));
             setError(null);
           } else {
             setError(err instanceof Error ? err.message : 'Search failed');

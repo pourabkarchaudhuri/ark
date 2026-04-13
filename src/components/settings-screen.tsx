@@ -21,6 +21,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { libraryStore } from '@/services/library-store';
 import { gameService } from '@/services/game-service';
 import { useDevMode } from '@/hooks/useDevMode';
+import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
@@ -60,6 +61,8 @@ declare global {
       setAutoLaunch: (enabled: boolean) => Promise<void>;
       getPreferredChatProvider: () => Promise<PreferredChatProvider>;
       setPreferredChatProvider: (provider: PreferredChatProvider) => Promise<{ success: boolean; error?: string }>;
+      getBetaFeatures: () => Promise<boolean>;
+      setBetaFeatures: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
     };
   }
 }
@@ -124,6 +127,7 @@ function Toggle({ value, onChange, disabled }: { value: boolean; onChange: () =>
 
 const GeneralTab = memo(function GeneralTab() {
   const [autoLaunch, setAutoLaunchState] = useState(true);
+  const [betaFeatures, setBetaFeatures] = useBetaFeatures();
   const [devMode, setDevMode] = useDevMode();
   const [allowAdultContent, setAllowAdultContent] = useAllowAdultContent();
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
@@ -228,6 +232,20 @@ const GeneralTab = memo(function GeneralTab() {
             <div className="flex items-center justify-between">
               <div>
                 <div className="flex items-center gap-1.5">
+                  <Rocket className="h-3.5 w-3.5 text-white/40" />
+                  <p className="text-sm font-medium text-white/90">Beta features</p>
+                </div>
+                <p className="text-xs text-white/35 mt-0.5">
+                  Enables the AI Chat button and cloud model options (Gemini, Azure OpenAI, Anthropic). Ollama stays available without this.
+                </p>
+              </div>
+              <Toggle value={betaFeatures} onChange={() => setBetaFeatures(!betaFeatures)} />
+            </div>
+          </div>
+          <div className="border-t border-white/[0.04] pt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-1.5">
                   <Code2 className="h-3.5 w-3.5 text-white/40" />
                   <p className="text-sm font-medium text-white/90">Developer Mode</p>
                 </div>
@@ -293,6 +311,7 @@ const CHAT_PROVIDER_LABELS: Record<PreferredChatProvider, string> = {
 };
 
 const AIModelsTab = memo(function AIModelsTab() {
+  const [betaFeatures] = useBetaFeatures();
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
   const [ollamaRerankModel, setOllamaRerankModel] = useState(DEFAULT_OLLAMA_RERANK_MODEL);
@@ -367,15 +386,17 @@ const AIModelsTab = memo(function AIModelsTab() {
     return () => { if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current); if (ollamaDebounceRef.current) clearTimeout(ollamaDebounceRef.current); };
   }, []);
 
-  // Compute available providers whenever credentials change
+  // Compute available providers whenever credentials change (cloud only when Beta is on)
   useEffect(() => {
     const list: PreferredChatProvider[] = [];
-    if (azureEndpoint.trim() && azureKey.trim() && azureDeployment.trim()) list.push('azure-openai');
-    if (anthropicKey.trim()) list.push('anthropic');
-    if (hasExistingKey) list.push('gemini');
     if (ollamaUrl.trim()) list.push('ollama');
+    if (betaFeatures) {
+      if (hasExistingKey) list.push('gemini');
+      if (azureEndpoint.trim() && azureKey.trim() && azureDeployment.trim()) list.push('azure-openai');
+      if (anthropicKey.trim()) list.push('anthropic');
+    }
     setAvailableProviders(list);
-  }, [azureEndpoint, azureKey, azureDeployment, azureApiVersion, anthropicKey, hasExistingKey, ollamaUrl]);
+  }, [azureEndpoint, azureKey, azureDeployment, azureApiVersion, anthropicKey, hasExistingKey, ollamaUrl, betaFeatures]);
 
   useEffect(() => {
     if (initialLoadRef.current || !window.settings) return;
@@ -489,7 +510,11 @@ const AIModelsTab = memo(function AIModelsTab() {
       {/* Chat model — single source of truth for which LLM the app uses */}
       <SectionHeading icon={Brain}>Chat model</SectionHeading>
       <SectionCard>
-        <p className="text-xs text-white/35 mb-3">Choose which provider to use for the AI Chat. Only configured providers are listed. If no keys are set, Ollama (local) is the default.</p>
+        <p className="text-xs text-white/35 mb-3">
+          {betaFeatures
+            ? 'Choose which provider to use for AI Chat. Only configured providers are listed. Ollama (local) is the default when others are not set up.'
+            : 'With Beta features off, only Ollama is used for AI. Turn on Beta features in General to pick Gemini, Azure OpenAI, or Anthropic and to show the AI Chat button in the toolbar.'}
+        </p>
         {availableProviders.length > 0 ? (
           <Select value={effectivePreferred} onValueChange={handlePreferredProviderChange}>
             <SelectTrigger className="bg-white/[0.03] border-white/[0.06] text-white/90">
@@ -504,7 +529,7 @@ const AIModelsTab = memo(function AIModelsTab() {
             </SelectContent>
           </Select>
         ) : (
-          <p className="text-xs text-amber-400/80">Configure at least one provider below (Ollama URL, Gemini key, Azure OpenAI, or Anthropic) to enable chat.</p>
+          <p className="text-xs text-amber-400/80">Set an Ollama URL below to use local AI. Enable Beta features in General for cloud providers and the chat toolbar button.</p>
         )}
       </SectionCard>
 
@@ -572,7 +597,9 @@ const AIModelsTab = memo(function AIModelsTab() {
         <p className="text-xs text-white/25">Don&apos;t have Ollama? <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Download Ollama</a></p>
       </SectionCard>
 
-      {/* Gemini */}
+      {/* Gemini — Beta only */}
+      {betaFeatures && (
+        <>
       <SectionHeading icon={Key}>Google Gemini</SectionHeading>
       <SectionCard>
         <div>
@@ -605,7 +632,6 @@ const AIModelsTab = memo(function AIModelsTab() {
         <p className="text-xs text-white/25">Get your API key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Google AI Studio</a></p>
       </SectionCard>
 
-      {/* Azure OpenAI */}
       <SectionHeading icon={Globe}>Azure OpenAI</SectionHeading>
       <SectionCard>
         <div>
@@ -662,15 +688,21 @@ const AIModelsTab = memo(function AIModelsTab() {
         </div>
         <p className="text-xs text-white/25">Get API keys from <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Anthropic Console</a>.</p>
       </SectionCard>
+        </>
+      )}
 
       {/* Provider info */}
       <div className="bg-white/[0.02] border border-white/[0.05] rounded-xl p-4">
         <h4 className="text-xs font-medium text-white/50 mb-2">About AI Providers</h4>
         <ul className="text-xs text-white/30 space-y-1.5">
           <li>• <strong className="text-white/40">Ollama</strong> — Runs locally on your machine. Private, free, no cloud dependency.</li>
-          <li>• <strong className="text-white/40">Gemini</strong> — Google Cloud AI with tool calling, web search grounding, and validation.</li>
-          <li>• <strong className="text-white/40">Azure OpenAI</strong> — Enterprise-grade GPT models hosted in your Azure subscription.</li>
-          <li>• <strong className="text-white/40">Anthropic Claude</strong> — Advanced reasoning and nuanced responses with safety focus.</li>
+          {betaFeatures && (
+            <>
+              <li>• <strong className="text-white/40">Gemini</strong> — Google Cloud AI with tool calling, web search grounding, and validation.</li>
+              <li>• <strong className="text-white/40">Azure OpenAI</strong> — Enterprise-grade GPT models hosted in your Azure subscription.</li>
+              <li>• <strong className="text-white/40">Anthropic Claude</strong> — Advanced reasoning and nuanced responses with safety focus.</li>
+            </>
+          )}
           <li>• All API keys are stored securely and encrypted on your device.</li>
         </ul>
       </div>
@@ -689,7 +721,7 @@ const GUIDE_STEPS: GuideStep[] = [
   { title: 'Get AI Recommendations', description: 'The Oracle analyzes your library, play history, genres, and ratings to recommend games you\'ll love. Recommendations improve as you add more games and ratings. Each suggestion comes with an explanation.', icon: Brain, color: 'text-fuchsia-400' },
   { title: 'Explore the Galaxy', description: 'The Embedding Space is a 3D galaxy map where every game is a star. Games that are similar cluster together. Fly through genre regions, discover neighbors, and find hidden gems based on game DNA — not just tags.', icon: Map, color: 'text-amber-400' },
   { title: 'Stay Informed', description: 'Transmissions aggregates gaming news from 20+ sources (Steam, PC Gamer, IGN, etc.). Articles are deduplicated, thumbnails are auto-extracted, and you can archive favorites. The Decode Bay opens articles inline.', icon: Newspaper, color: 'text-rose-400' },
-  { title: 'Plan Ahead', description: 'The Releases calendar shows upcoming game launches grouped by month, week, or day. Filter by store (Steam/Epic) and see countdowns to releases you\'re watching.', icon: Calendar, color: 'text-cyan-400' },
+  { title: 'Plan Ahead', description: 'The Upcoming calendar shows upcoming game launches grouped by month, week, or day. Filter by store (Steam/Epic) and see countdowns to releases you\'re watching.', icon: Calendar, color: 'text-cyan-400' },
   { title: 'Earn Medals', description: 'Track your gaming achievements with the Medals system. Earn badges for milestones like playing streaks, genre diversity, completing games, and building your collection. Your play streak heatmap shows consistency.', icon: Trophy, color: 'text-yellow-400' },
 ];
 
@@ -701,7 +733,7 @@ const ALL_TOURS: { id: TourId; label: string; description: string; icon: React.E
   { id: 'oracle',    label: 'Oracle',           description: 'AI recommendation engine and taste profiling.',                                                icon: Brain,     color: 'text-fuchsia-400' },
   { id: 'ann-graph', label: 'Embedding Space',  description: '3D galaxy map with ANN search and neighbor paths.',                                            icon: Map,       color: 'text-amber-400' },
   { id: 'buzz',      label: 'Transmissions',    description: 'Gaming news stream, Decode Bay reader, and events.',                                           icon: Newspaper, color: 'text-rose-400' },
-  { id: 'calendar',  label: 'Releases',         description: 'Upcoming launches by month, week, or day.',                                                    icon: Calendar,  color: 'text-cyan-400' },
+  { id: 'calendar',  label: 'Upcoming',         description: 'Upcoming launches by month, week, or day.',                                                    icon: Calendar,  color: 'text-cyan-400' },
   { id: 'settings',  label: 'Settings',         description: 'This page — AI providers, data, and preferences.',                                             icon: Settings,  color: 'text-white/60' },
   { id: 'data-flow', label: 'Data Flow',        description: 'Live subsystem status diagram.',                                                               icon: Zap,       color: 'text-amber-400',  devOnly: true },
   { id: 'devlog',    label: 'Dev Log',          description: 'Construction journal timeline.',                                                                icon: Code2,     color: 'text-amber-400',  devOnly: true },

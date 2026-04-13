@@ -52,6 +52,15 @@ function progress(stage: string, percent: number) {
 const norm = (s: string) => s.toLowerCase().trim();
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
+/** Backlog Advisor: only games that are already released (playable). Unknown/unparseable dates kept. */
+function isReleasedPlayableForBacklog(releaseDate: string, nowMs: number): boolean {
+  const trimmed = releaseDate?.trim();
+  if (!trimmed) return true;
+  const t = new Date(trimmed).getTime();
+  if (Number.isNaN(t)) return true;
+  return t <= nowMs;
+}
+
 // ─── Layer 1: Taste Profile ────────────────────────────────────────────────────
 
 const STATUS_WEIGHTS: Record<string, number> = {
@@ -1313,7 +1322,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const tasteProfile = buildTasteProfile(userGames, now);
 
   if (filteredCandidates.length === 0) {
-    return { tasteProfile, shelves: buildShelvesFromScored([], [], userGames, tasteProfile, [], [], null) };
+    return { tasteProfile, shelves: buildShelvesFromScored([], [], userGames, tasteProfile, [], [], null, now) };
   }
 
   // ── 2. Classify engagement curves ──
@@ -1684,7 +1693,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   // ── 17. Shelf assembly ──
   progress('Building shelves...', 84);
-  const shelves = buildShelvesFromScored(reranked, scored, userGames, tasteProfile, clusters, franchises, tasteCentroid);
+  const shelves = buildShelvesFromScored(reranked, scored, userGames, tasteProfile, clusters, franchises, tasteCentroid, now);
 
   return { tasteProfile, shelves };
 }
@@ -1699,6 +1708,7 @@ function buildShelvesFromScored(
   clusters: TasteCluster[],
   franchises: FranchiseCluster[],
   tasteCentroid: Float64Array | null,
+  nowMs: number,
 ): RecoShelf[] {
   const shelves: RecoShelf[] = [];
   const usedGameIds = new Set<string>();
@@ -2049,7 +2059,11 @@ function buildShelvesFromScored(
   // current taste profile — effectively a prioritized play-next queue.
   // Uses the same semantic centroid + content similarity as the main pipeline.
   const backlogCandidates = userGames
-    .filter(g => g.status === 'Want to Play' && g.hoursPlayed === 0)
+    .filter(g =>
+      g.status === 'Want to Play'
+      && g.hoursPlayed === 0
+      && isReleasedPlayableForBacklog(g.releaseDate, nowMs),
+    )
     .map((g): ScoredGame => {
       const genreOverlapCount = g.genres.filter(gn => {
         const cn = toCanonicalGenre(gn) ?? gn;

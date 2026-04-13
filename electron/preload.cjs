@@ -301,6 +301,12 @@ contextBridge.exposeInMainWorld('settings', {
 
   setPreferredChatProvider: (provider) =>
     ipcRenderer.invoke('settings:setPreferredChatProvider', provider),
+
+  getBetaFeatures: () =>
+    ipcRenderer.invoke('settings:getBetaFeatures'),
+
+  setBetaFeatures: (enabled) =>
+    ipcRenderer.invoke('settings:setBetaFeatures', enabled),
 });
 
 // Expose auto-updater API to renderer

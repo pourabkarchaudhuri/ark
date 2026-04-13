@@ -2,8 +2,9 @@
  * Release Calendar Component
  *
  * Year / Month / Week calendar showing upcoming game releases from Steam
- * and Epic Games Store APIs. Forward-only navigation starting from the
- * current month.
+ * and Epic Games Store APIs. Dated releases include the **previous calendar
+ * month through future** (not only from today onward), so Month view’s prior
+ * month section and early-in-month launches stay visible.
  *
  * Features:
  *  - Three view modes: Year (default), Month, Week
@@ -12,7 +13,7 @@
  *  - "My Radar" filter — highlights library / Want-to-Play games
  *  - Store, platform (OS), and genre (Tags) dropdown/combobox filters
  *  - Heat-map density on section headers
- *  - Countdown chips (3d, Tomorrow, Today!) for library games
+ *  - Release dates on poster cards (e.g. “Today” when launch day matches)
  *  - One-click "Add to Library" from poster hover
  *  - Multi-month mini-map for quick navigation (month view)
  *  - Coming Soon sidebar with virtualized list
@@ -20,7 +21,7 @@
  *  - Dynamic viewport-fill height so the feed always fits the screen
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
@@ -279,6 +280,32 @@ function isSameDay(a: Date, b: Date): boolean {
 
 function isToday(date: Date): boolean {
   return isSameDay(date, new Date());
+}
+
+/**
+ * First instant of the previous calendar month (local). Together with the
+ * current month, this defines the visible window for dated releases.
+ */
+function getCalendarWindowStart(now: Date): Date {
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  if (m === 0) return new Date(y - 1, 11, 1, 0, 0, 0, 0);
+  return new Date(y, m - 1, 1, 0, 0, 0, 0);
+}
+
+/** True if the release’s calendar day is on or after {@link getCalendarWindowStart}. */
+function isReleaseInCalendarWindow(parsedDate: Date, now: Date): boolean {
+  const startMs = getCalendarWindowStart(now).getTime();
+  const dayMs = new Date(
+    parsedDate.getFullYear(),
+    parsedDate.getMonth(),
+    parsedDate.getDate(),
+    0,
+    0,
+    0,
+    0,
+  ).getTime();
+  return dayMs >= startMs;
 }
 
 // ─── Human-readable date formatter ───────────────────────────────────────────
@@ -573,14 +600,28 @@ const FilterChips = memo(function FilterChips({
 const NOOP_EDIT = () => {};
 const NOOP_DELETE = () => {};
 
+/** Per view mode so Year scroll position doesn’t block Month “focus current month”. */
+function calendarScrollStorageKey(cal: CalendarView): string {
+  return `ark-calendar-scroll-${cal}`;
+}
+
 const GroupedFeed = memo(function GroupedFeed({
   groups,
   libraryIds,
   onAddToLibrary,
+  fillViewport = true,
+  attachDataAttrs = true,
+  markCurrentPeriodFocusAnchor = false,
 }: {
   groups: FeedGroup[];
   libraryIds: Set<string>;
   onAddToLibrary: (game: ParsedRelease) => void;
+  /** When false, feed grows with content (nested in a parent scroll area). */
+  fillViewport?: boolean;
+  /** When false, omit data-calendar-feed / data-tour (parent owns them). */
+  attachDataAttrs?: boolean;
+  /** Year view: mark the current calendar month row for initial scroll-into-view. */
+  markCurrentPeriodFocusAnchor?: boolean;
 }) {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
@@ -611,12 +652,18 @@ const GroupedFeed = memo(function GroupedFeed({
 
   const hasAnyReleases = groups.some(g => g.releases.length > 0);
 
+  const dataAttrs = attachDataAttrs
+    ? { 'data-tour': 'calendar-feed' as const, 'data-calendar-feed': true as const }
+    : {};
+
   if (!hasAnyReleases) {
   return (
       <div
-        className="flex flex-col items-center justify-center h-full text-center"
-        data-tour="calendar-feed"
-        data-calendar-feed
+        {...dataAttrs}
+        className={cn(
+          'flex flex-col items-center justify-center text-center',
+          fillViewport ? 'h-full' : 'py-12',
+        )}
       >
         <CalendarDays className="w-10 h-10 text-white/[0.06] mb-3" />
         <p className="text-sm text-white/20">No releases match your filters</p>
@@ -626,9 +673,11 @@ const GroupedFeed = memo(function GroupedFeed({
 
           return (
     <div
-      data-calendar-feed
-      data-tour="calendar-feed"
-      className="overflow-y-auto h-full pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10"
+      {...dataAttrs}
+      className={cn(
+        'pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10',
+        fillViewport ? 'overflow-y-auto h-full' : 'overflow-visible',
+      )}
     >
       {groups.map((group) => {
         const isExpanded = expandedGroups.has(group.key);
@@ -638,7 +687,13 @@ const GroupedFeed = memo(function GroupedFeed({
         const density = Math.min(group.releases.length / 10, 1);
 
         return (
-          <div key={group.key} className="mb-6 last:mb-2">
+          <div
+            key={group.key}
+            className="mb-6 last:mb-2"
+            {...(markCurrentPeriodFocusAnchor && group.isCurrentPeriod
+              ? { 'data-calendar-month-focus': '' as const }
+              : {})}
+          >
             {/* Sticky section header */}
             <div
               className="sticky top-0 z-10 flex items-center gap-3 py-2 px-1 -mx-1 bg-black"
@@ -678,7 +733,7 @@ const GroupedFeed = memo(function GroupedFeed({
             {group.releases.length === 0 ? (
               group.isPast ? null : (
                 <div className="py-6 text-center">
-                  <p className="text-[11px] text-white/15">No releases</p>
+                  <p className="text-[11px] text-white/15">Finalized dates to be announced</p>
                 </div>
               )
             ) : (
@@ -766,15 +821,28 @@ const YearFeed = memo(function YearFeed({
       }
     }
     for (const b of buckets) b.sort((a, b) => (a.parsedDate?.getTime() ?? 0) - (b.parsedDate?.getTime() ?? 0));
-    const nowMonth = new Date().getMonth();
-    const nowYear = new Date().getFullYear();
-    return buckets.map((games, i) => ({
-      key: `month-${i}`,
-      label: MONTH_NAMES[i],
-      isCurrentPeriod: year === nowYear && i === nowMonth,
-      isPast: year < nowYear || (year === nowYear && i < nowMonth),
-      releases: games,
-    }));
+    const now = new Date();
+    const nowMonth = now.getMonth();
+    const nowYear = now.getFullYear();
+    const winStart = getCalendarWindowStart(now);
+
+    const groupsOut: FeedGroup[] = [];
+    for (let i = 0; i < 12; i++) {
+      // Current year: omit months that end entirely before the visible date window
+      // (avoids empty January–… strips when the window starts in February, etc.)
+      if (year === nowYear) {
+        const lastDayOfMonth = new Date(year, i + 1, 0, 23, 59, 59, 999);
+        if (lastDayOfMonth < winStart) continue;
+      }
+      groupsOut.push({
+        key: `month-${i}`,
+        label: MONTH_NAMES[i],
+        isCurrentPeriod: year === nowYear && i === nowMonth,
+        isPast: year < nowYear || (year === nowYear && i < nowMonth),
+        releases: buckets[i],
+      });
+    }
+    return groupsOut;
   }, [releases, year]);
 
   return (
@@ -782,6 +850,7 @@ const YearFeed = memo(function YearFeed({
       groups={groups}
       libraryIds={libraryIds}
       onAddToLibrary={onAddToLibrary}
+      markCurrentPeriodFocusAnchor
     />
   );
 });
@@ -794,12 +863,16 @@ const MonthFeed = memo(function MonthFeed({
   month,
   libraryIds,
   onAddToLibrary,
+  fillViewport = true,
+  attachDataAttrs = true,
 }: {
   releases: ParsedRelease[];
   year: number;
   month: number;
   libraryIds: Set<string>;
   onAddToLibrary: (game: ParsedRelease) => void;
+  fillViewport?: boolean;
+  attachDataAttrs?: boolean;
 }) {
   const groups = useMemo((): FeedGroup[] => {
     const lastDay = new Date(year, month + 1, 0);
@@ -817,7 +890,8 @@ const MonthFeed = memo(function MonthFeed({
     }
 
     for (const r of releases) {
-      if (!r.parsedDate || r.parsedDate.getMonth() !== month) continue;
+      if (!r.parsedDate) continue;
+      if (r.parsedDate.getFullYear() !== year || r.parsedDate.getMonth() !== month) continue;
       for (const w of weeks) {
         const rd = new Date(r.parsedDate);
         rd.setHours(12, 0, 0, 0);
@@ -855,7 +929,110 @@ const MonthFeed = memo(function MonthFeed({
       groups={groups}
       libraryIds={libraryIds}
       onAddToLibrary={onAddToLibrary}
+      fillViewport={fillViewport}
+      attachDataAttrs={attachDataAttrs}
     />
+  );
+});
+
+// ─── Month view: previous calendar month (collapsed) + selected month ────────
+
+const MonthWithPreviousFeed = memo(function MonthWithPreviousFeed({
+  releases,
+  currentYear,
+  currentMonth,
+  libraryIds,
+  onAddToLibrary,
+}: {
+  releases: ParsedRelease[];
+  currentYear: number;
+  currentMonth: number;
+  libraryIds: Set<string>;
+  onAddToLibrary: (game: ParsedRelease) => void;
+}) {
+  const { prevYear, prevMonth } = useMemo(() => {
+    let py = currentYear;
+    let pm = currentMonth - 1;
+    if (pm < 0) {
+      pm = 11;
+      py -= 1;
+    }
+    return { prevYear: py, prevMonth: pm };
+  }, [currentYear, currentMonth]);
+
+  const [prevExpanded, setPrevExpanded] = useState(false);
+
+  const prevCount = useMemo(() => {
+    let n = 0;
+    for (const r of releases) {
+      if (!r.parsedDate) continue;
+      if (r.parsedDate.getFullYear() === prevYear && r.parsedDate.getMonth() === prevMonth) n++;
+    }
+    return n;
+  }, [releases, prevYear, prevMonth]);
+
+  return (
+    <div
+      data-calendar-feed
+      data-tour="calendar-feed"
+      className="overflow-y-auto h-full pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10"
+    >
+      <div className="mb-4 pb-3 border-b border-white/[0.08]">
+        <button
+          type="button"
+          onClick={() => setPrevExpanded((e) => !e)}
+          className="w-full flex items-center gap-2 py-2 px-1 rounded-lg hover:bg-white/[0.04] text-left transition-colors"
+          aria-expanded={prevExpanded}
+        >
+          <ChevronDown
+            className={cn('w-4 h-4 text-white/40 shrink-0 transition-transform', prevExpanded && 'rotate-180')}
+          />
+          <span className="text-sm font-semibold text-white/40">
+            {MONTH_NAMES[prevMonth]} {prevYear}
+          </span>
+          <span
+            className={cn(
+              'text-[10px] px-2 py-0.5 rounded-full font-medium',
+              prevExpanded ? 'bg-fuchsia-500/20 text-fuchsia-400' : 'bg-white/[0.06] text-white/35',
+            )}
+          >
+            {prevCount}
+          </span>
+          <span className="text-[10px] text-white/25 ml-auto">{prevExpanded ? 'Hide' : 'Show'}</span>
+        </button>
+        {prevExpanded && (
+          <div className="mt-3">
+            <MonthFeed
+              releases={releases}
+              year={prevYear}
+              month={prevMonth}
+              libraryIds={libraryIds}
+              onAddToLibrary={onAddToLibrary}
+              fillViewport={false}
+              attachDataAttrs={false}
+            />
+          </div>
+        )}
+      </div>
+
+      <div className="pt-1" data-calendar-month-focus="">
+        <div className="sticky top-0 z-10 flex items-center gap-2 py-2 mb-3 -mx-1 px-1 bg-black/95 backdrop-blur-sm border-b border-fuchsia-500/25">
+          <span className="text-[10px] font-semibold text-fuchsia-400/90 uppercase tracking-wide">This month</span>
+          <span className="text-sm font-semibold text-white">
+            {MONTH_NAMES[currentMonth]} {currentYear}
+          </span>
+        </div>
+        <MonthFeed
+          releases={releases}
+          year={currentYear}
+          month={currentMonth}
+          libraryIds={libraryIds}
+          onAddToLibrary={onAddToLibrary}
+          fillViewport={false}
+          attachDataAttrs={false}
+        />
+      </div>
+    </div>
   );
 });
 
@@ -1149,12 +1326,29 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   const toastCtx = useToast();
   const toastRef = useRef(toastCtx);
   toastRef.current = toastCtx;
-  const today = useMemo(() => new Date(), []);
-  const minYear = today.getFullYear();
-  const minMonth = today.getMonth();
+  // Bump periodically so “today” / window floor stay correct across long sessions and tab returns.
+  const [calendarTick, setCalendarTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setCalendarTick((x) => x + 1), 60_000);
+    const onVis = () => {
+      if (document.visibilityState === 'visible') setCalendarTick((x) => x + 1);
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, []);
+  void calendarTick;
+  const calendarNow = new Date();
+  const todayYear = calendarNow.getFullYear();
+  const todayMonth = calendarNow.getMonth();
+  const navFloor = getCalendarWindowStart(calendarNow);
+  const floorYear = navFloor.getFullYear();
+  const floorMonth = navFloor.getMonth();
 
-  const [currentYear, setCurrentYear] = useState(minYear);
-  const [currentMonth, setCurrentMonth] = useState(minMonth);
+  const [currentYear, setCurrentYear] = useState(() => new Date().getFullYear());
+  const [currentMonth, setCurrentMonth] = useState(() => new Date().getMonth());
   const [releases, setReleases] = useState<ParsedRelease[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1211,14 +1405,14 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       saveTimer = setTimeout(() => {
         const feed = document.querySelector('[data-calendar-feed]');
         if (feed) {
-          sessionStorage.setItem('ark-calendar-scroll', String(Math.round(feed.scrollTop)));
+          sessionStorage.setItem(calendarScrollStorageKey(calView), String(Math.round(feed.scrollTop)));
         }
       }, 150);
     };
     const flushSave = () => {
       const feed = document.querySelector('[data-calendar-feed]');
       if (feed && feed.scrollTop > 0) {
-        sessionStorage.setItem('ark-calendar-scroll', String(Math.round(feed.scrollTop)));
+        sessionStorage.setItem(calendarScrollStorageKey(calView), String(Math.round(feed.scrollTop)));
       }
     };
     // Defer attachment so the feed DOM is available after the render
@@ -1255,11 +1449,9 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
 
   const filteredReleases = useMemo(() => {
     const now = new Date();
-    const tY = now.getFullYear(), tM = now.getMonth(), tD = now.getDate();
     let result = baseReleases.filter((r) => {
       if (!r.parsedDate) return true;
-      const y = r.parsedDate.getFullYear(), m = r.parsedDate.getMonth(), d = r.parsedDate.getDate();
-      return y > tY || (y === tY && (m > tM || (m === tM && d >= tD)));
+      return isReleaseInCalendarWindow(r.parsedDate, now);
     });
     if (storeFilter === 'steam') {
       result = result.filter((r) => r._stores.has('steam'));
@@ -1292,8 +1484,8 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     if (!prefetched || prefetched.length === 0) return null;
 
     const now = Date.now();
-    const pastCutoff = now - 30 * 24 * 60 * 60 * 1000;
-    const futureCutoff = now + 90 * 24 * 60 * 60 * 1000;
+    const windowStartMs = getCalendarWindowStart(new Date(now)).getTime();
+    const futureCutoff = now + MAX_REASONABLE_MS;
     const results: UpcomingRelease[] = [];
     let comingSoonCount = 0;
 
@@ -1338,7 +1530,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
 
       const ts = (game as any)._releaseTs ?? new Date(game.releaseDate).getTime();
       if (isNaN(ts) || ts === 0) continue;
-      if (ts < pastCutoff || ts > futureCutoff) continue;
+      if (ts < windowStartMs || ts > futureCutoff) continue;
 
       results.push({ id: game.id, name: game.title, image, headerImage, screenshots, epicNamespace, epicOfferId, epicSlug, releaseDate: game.releaseDate, comingSoon: ts > now, genres, platforms, store });
     }
@@ -1459,37 +1651,60 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   }, [calView]);
 
   const goPrev = useCallback(() => {
-    if (calView === 'year') { if (currentYear <= minYear) return; setCurrentYear(y => y - 1); return; }
-    if (calView === 'week') { setWeekOffset((w) => Math.max(w - 1, 0)); return; }
-    if (currentYear === minYear && currentMonth === minMonth) return;
+    const floor = getCalendarWindowStart(new Date());
+    const fy = floor.getFullYear();
+    const fm = floor.getMonth();
+    if (calView === 'year') {
+      if (currentYear <= fy) return;
+      setCurrentYear((y) => y - 1);
+      return;
+    }
+    if (calView === 'week') {
+      setWeekOffset((w) => Math.max(w - 1, 0));
+      return;
+    }
+    if (currentYear === fy && currentMonth === fm) return;
     setCurrentMonth((m) => {
-      if (m === 0) { setCurrentYear((y) => y - 1); return 11; }
+      if (m === 0) {
+        setCurrentYear((y) => y - 1);
+        return 11;
+      }
       return m - 1;
     });
-  }, [calView, currentYear, currentMonth, minYear, minMonth]);
+  }, [calView, currentYear, currentMonth]);
 
   const goToday = useCallback(() => {
-    setCurrentYear(minYear);
-    setCurrentMonth(minMonth);
+    const n = new Date();
+    setCurrentYear(n.getFullYear());
+    setCurrentMonth(n.getMonth());
     setWeekOffset(0);
-  }, [minYear, minMonth]);
-
-  const navigateToMonth = useCallback((year: number, month: number) => {
-    setCurrentYear(year);
-    setCurrentMonth(month);
   }, []);
 
-  const canGoPrev = calView === 'year'
-    ? currentYear > minYear
-    : calView === 'week'
-      ? weekOffset > 0
-      : (currentYear > minYear || currentMonth > minMonth);
+  const navigateToMonth = useCallback((year: number, month: number) => {
+    const floor = getCalendarWindowStart(new Date());
+    let y = year;
+    let m = month;
+    if (y < floor.getFullYear() || (y === floor.getFullYear() && m < floor.getMonth())) {
+      y = floor.getFullYear();
+      m = floor.getMonth();
+    }
+    setCurrentYear(y);
+    setCurrentMonth(m);
+  }, []);
 
-  const isCurrentPeriod = calView === 'year'
-    ? currentYear === minYear
-    : calView === 'week'
-      ? (currentYear === minYear && currentMonth === minMonth && weekOffset === 0)
-      : (currentYear === minYear && currentMonth === minMonth);
+  const canGoPrev =
+    calView === 'year'
+      ? currentYear > floorYear
+      : calView === 'week'
+        ? weekOffset > 0
+        : currentYear > floorYear || (currentYear === floorYear && currentMonth > floorMonth);
+
+  const isCurrentPeriod =
+    calView === 'year'
+      ? currentYear === todayYear
+      : calView === 'week'
+        ? currentYear === todayYear && currentMonth === todayMonth && weekOffset === 0
+        : currentYear === todayYear && currentMonth === todayMonth;
 
   const weekStart = useMemo(() => {
     const d = new Date(currentYear, currentMonth, 1);
@@ -1511,16 +1726,51 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     return `${MONTH_NAMES[currentMonth]} ${currentYear}`;
   }, [calView, currentYear, currentMonth, weekLabel]);
 
+  const autoScrollFocusKeyRef = useRef('');
+
+  // Scroll Year / Month feed so the current month section is in view when there is
+  // no saved position for this view (avoids stale global scroll blocking focus).
+  useLayoutEffect(() => {
+    if (isInitialLoading) return;
+    if (calView !== 'year' && calView !== 'month') {
+      autoScrollFocusKeyRef.current = '';
+      return;
+    }
+    if (!isCurrentPeriod) {
+      autoScrollFocusKeyRef.current = '';
+      return;
+    }
+    const raw = sessionStorage.getItem(calendarScrollStorageKey(calView));
+    if (raw != null) {
+      const pos = parseInt(raw, 10);
+      if (!isNaN(pos) && pos > 0) return;
+    }
+
+    const navKey = `${calView}-${currentYear}-${currentMonth}-${filteredReleases.length}`;
+    if (autoScrollFocusKeyRef.current === navKey) return;
+
+    const feed = document.querySelector('[data-calendar-feed]');
+    const anchor = document.querySelector('[data-calendar-month-focus]');
+    if (!(feed instanceof HTMLElement) || !(anchor instanceof HTMLElement)) return;
+    if (!feed.contains(anchor)) return;
+
+    const nextTop =
+      anchor.getBoundingClientRect().top - feed.getBoundingClientRect().top + feed.scrollTop;
+    feed.scrollTop = Math.max(0, nextTop);
+    autoScrollFocusKeyRef.current = navKey;
+  }, [isInitialLoading, calView, isCurrentPeriod, currentYear, currentMonth, filteredReleases.length]);
+
   // Restore feed scroll position after returning from game details.
   // Uses a generous retry loop because the feed DOM may not have its
   // full content height on the first frame after loading clears.
   useEffect(() => {
     if (isInitialLoading) return;
-    const saved = sessionStorage.getItem('ark-calendar-scroll');
+    const key = calendarScrollStorageKey(calView);
+    const saved = sessionStorage.getItem(key);
     if (!saved) return;
     const pos = parseInt(saved, 10);
     if (isNaN(pos) || pos <= 0) {
-      sessionStorage.removeItem('ark-calendar-scroll');
+      sessionStorage.removeItem(key);
       return;
     }
 
@@ -1531,22 +1781,22 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       if (feed) {
         feed.scrollTop = pos;
         if (Math.abs(feed.scrollTop - pos) <= 10) {
-          sessionStorage.removeItem('ark-calendar-scroll');
+          sessionStorage.removeItem(key);
         } else if (attempts < maxAttempts) {
           attempts++;
           requestAnimationFrame(tryRestore);
         } else {
-          sessionStorage.removeItem('ark-calendar-scroll');
+          sessionStorage.removeItem(key);
         }
       } else if (attempts < maxAttempts) {
         attempts++;
         requestAnimationFrame(tryRestore);
       } else {
-        sessionStorage.removeItem('ark-calendar-scroll');
+        sessionStorage.removeItem(key);
       }
     };
     requestAnimationFrame(tryRestore);
-  }, [isInitialLoading]);
+  }, [isInitialLoading, calView]);
 
   useEffect(() => {
     const measure = () => {
@@ -1682,12 +1932,12 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
                                     onAddToLibrary={handleAddToLibrary}
             />
           ) : calView === 'month' ? (
-            <MonthFeed
-            releases={filteredReleases}
-              year={currentYear}
-              month={currentMonth}
-            libraryIds={libraryIds}
-            onAddToLibrary={handleAddToLibrary}
+            <MonthWithPreviousFeed
+              releases={filteredReleases}
+              currentYear={currentYear}
+              currentMonth={currentMonth}
+              libraryIds={libraryIds}
+              onAddToLibrary={handleAddToLibrary}
             />
           ) : (
             <WeekFeed

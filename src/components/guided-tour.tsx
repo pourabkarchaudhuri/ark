@@ -414,7 +414,7 @@ const welcomeSteps: Step[] = [
   {
     target: '[data-tour="view-toggle"]',
     content:
-      'Use this strip to switch the whole app. **Browse** and **Library** show game grids; **Oracle**, **Releases**, **Voyage**, and **Transmissions** open focused tools — each has its own ? tour when you are there.',
+      'Use this strip to switch the whole app. **Browse** and **Library** show game grids; **Oracle**, **Upcoming**, **Voyage**, and **Transmissions** open focused tools — each has its own ? tour when you are there.',
     placement: 'bottom',
     title: 'Your command strip',
   },
@@ -456,7 +456,7 @@ const welcomeSteps: Step[] = [
   {
     target: '[data-tour="app-logo"]',
     content:
-      'You are oriented. Switch to **Browse** or **Library** and tap **?** again for a full walkthrough of that mode — Oracle, Voyage, Transmissions, and Releases each have their own tour too.',
+      'You are oriented. Switch to **Browse** or **Library** and tap **?** again for a full walkthrough of that mode — Oracle, Voyage, Transmissions, and Upcoming each have their own tour too.',
     placement: 'bottom',
     disableBeacon: true,
     title: 'Go deeper',
@@ -658,7 +658,7 @@ const calendarSteps: Step[] = [
   },
   {
     target: '[data-tour="calendar-button"]',
-    content: 'Releases lives next to Voyage — one click from the main navigation.',
+    content: 'Upcoming lives next to Voyage — one click from the main navigation.',
     placement: 'bottom',
     title: 'Release Calendar',
   },
@@ -899,6 +899,28 @@ export function resolveStepsWithExistingTargets(steps: Step[]): Step[] {
   });
 }
 
+/**
+ * After switching dashboard view (often via startTransition), tour targets may not exist yet.
+ * Poll until every step target is in the DOM or `timeoutMs` elapses — then GuidedTour’s own
+ * retries still filter if something is still missing.
+ */
+export async function waitForTourDomReady(
+  tourId: TourId,
+  options?: { timeoutMs?: number; intervalMs?: number },
+): Promise<void> {
+  if (typeof document === 'undefined') return;
+  const timeoutMs = options?.timeoutMs ?? 12_000;
+  const intervalMs = options?.intervalMs ?? 50;
+  const full = getTourSteps(tourId);
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const resolved = resolveStepsWithExistingTargets(full);
+    if (resolved.length === full.length) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTourProps) {
   const finishedRef = useRef(false);
   const safetyTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -946,7 +968,8 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
     let cancelled = false;
     const timers: number[] = [];
 
-    const RETRY_DELAYS = [0, 150, 350, 700];
+    /** Extra tail delays for lazy-loaded views (Suspense chunks). */
+    const RETRY_DELAYS = [0, 80, 200, 450, 800, 1400, 2400, 3800];
 
     const attempt = (idx: number) => {
       if (cancelled) return;
@@ -1009,6 +1032,11 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
       const { status, action, type } = data;
 
       if (status === STATUS.ERROR || type === EVENTS.ERROR) {
+        endTour({ persistCompletion: false });
+        return;
+      }
+
+      if (type === EVENTS.TARGET_NOT_FOUND) {
         endTour({ persistCompletion: false });
         return;
       }

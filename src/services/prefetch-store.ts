@@ -16,6 +16,11 @@ import { steamService } from './steam-service';
 import { epicService } from './epic-service';
 import { gameService } from './game-service';
 import { dedupSortInWorker } from '@/workers/use-dedup-worker';
+import { scoreGame, buildSingleSearchIndex, normalizeSearchText } from './game-search-scoring';
+import type { SearchIndexEntry } from './game-search-scoring';
+
+export { scoreGame, buildSingleSearchIndex } from './game-search-scoring';
+export type { SearchIndexEntry } from './game-search-scoring';
 
 // ---------------------------------------------------------------------------
 // IndexedDB via Web Worker (avoids structured-clone jank on main thread)
@@ -40,16 +45,6 @@ function getIdbWorker(): Worker {
 // During development, Vite HMR re-executes this module on every save, which
 // would wipe the in-memory game cache and break the browse grid.  We stash
 // the state on globalThis so it survives module re-initialization.
-export interface SearchIndexEntry {
-  titleLower: string;
-  /** Title stripped of all non-alphanumeric characters for fuzzy/token matching */
-  titleNorm: string;
-  /** Individual lowercase words from the title */
-  titleWords: string[];
-  devLower: string;
-  pubLower: string;
-  genresLower: string[];
-}
 
 interface PrefetchHmrState {
   games: Game[] | null;
@@ -82,10 +77,10 @@ function buildSearchIndex(games: Game[]): void {
     const end = Math.min(offset + CHUNK_SIZE, games.length);
     for (let i = offset; i < end; i++) {
       const g = games[i];
-      const titleLower = g.title.toLowerCase();
+      const titleLower = g.title.toLowerCase().trim();
       result[i] = {
         titleLower,
-        titleNorm: titleLower.replace(/[^a-z0-9\s]/g, ''),
+        titleNorm: normalizeSearchText(g.title),
         titleWords: titleLower.split(/\s+/).filter(Boolean),
         devLower: (g.developer || '').toLowerCase(),
         pubLower: (g.publisher || '').toLowerCase(),
@@ -112,10 +107,10 @@ function buildSearchIndex(games: Game[]): void {
   if (games.length <= CHUNK_SIZE) {
     for (let i = 0; i < games.length; i++) {
       const g = games[i];
-      const titleLower = g.title.toLowerCase();
+      const titleLower = g.title.toLowerCase().trim();
       result[i] = {
         titleLower,
-        titleNorm: titleLower.replace(/[^a-z0-9\s]/g, ''),
+        titleNorm: normalizeSearchText(g.title),
         titleWords: titleLower.split(/\s+/).filter(Boolean),
         devLower: (g.developer || '').toLowerCase(),
         pubLower: (g.publisher || '').toLowerCase(),
@@ -128,181 +123,6 @@ function buildSearchIndex(games: Game[]): void {
   }
 
   processChunk();
-}
-
-// ---------------------------------------------------------------------------
-// Scoring helpers — used by searchPrefetchedGames and exported for library
-// ---------------------------------------------------------------------------
-
-/**
- * Simple edit-distance check: returns true if `a` and `b` are within
- * `maxDist` Levenshtein edits.  Uses an early-exit bounded algorithm
- * so it stays fast even on long strings (O(n * maxDist) instead of O(n*m)).
- */
-function isWithinEditDistance(a: string, b: string, maxDist: number): boolean {
-  const la = a.length;
-  const lb = b.length;
-  if (Math.abs(la - lb) > maxDist) return false;
-  if (la === 0) return lb <= maxDist;
-  if (lb === 0) return la <= maxDist;
-
-  // Bounded Levenshtein using two rows
-  let prev = new Uint16Array(lb + 1);
-  let curr = new Uint16Array(lb + 1);
-  for (let j = 0; j <= lb; j++) prev[j] = j;
-
-  for (let i = 1; i <= la; i++) {
-    curr[0] = i;
-    let minVal = curr[0];
-    const jStart = Math.max(1, i - maxDist);
-    const jEnd = Math.min(lb, i + maxDist);
-    // Fill out-of-band cells with maxDist+1 so they're never picked
-    if (jStart > 1) curr[jStart - 1] = maxDist + 1;
-    for (let j = jStart; j <= jEnd; j++) {
-      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
-      curr[j] = Math.min(
-        prev[j] + 1,        // deletion
-        curr[j - 1] + 1,    // insertion
-        prev[j - 1] + cost, // substitution
-      );
-      if (curr[j] < minVal) minVal = curr[j];
-    }
-    // Fill remaining out-of-band
-    if (jEnd < lb) curr[jEnd + 1] = maxDist + 1;
-    if (minVal > maxDist) return false; // early exit
-    [prev, curr] = [curr, prev];
-  }
-  return prev[lb] <= maxDist;
-}
-
-/**
- * Returns true if query is a subsequence of text (each char of query appears
- * in text in order, with possible gaps). Used for shorthand matching (rdr2, gtav, fnaf).
- */
-function isSubsequence(query: string, text: string): boolean {
-  let j = 0;
-  const q = query.toLowerCase();
-  const t = text.toLowerCase();
-  for (let i = 0; i < t.length && j < q.length; i++) {
-    if (t[i] === q[j]) j++;
-  }
-  return j === q.length;
-}
-
-/**
- * Score a game against a set of query tokens.  Higher is more relevant.
- * Returns 0 if no match.
- *
- * Scoring tiers (cumulative across tokens):
- *   200 — exact full-title match
- *   100 — title starts with the full query
- *    60 — every token starts a word boundary in the title
- *    40 — every token is a substring of the title
- *    20 — token matches developer or publisher
- *    10 — token matches a genre
- *     5 — fuzzy match (within 1-2 edit distance of a title word)
- *
- * Bonus:  +1 per 1000 metacriticScore (subtle tiebreaker for popular games)
- *
- * Shorthand (browse only): single-token queries of 4+ chars can match as
- * subsequence of title (rdr2 → Red Dead Redemption 2, gtav → GTA V).
- */
-export function scoreGame(
-  idx: SearchIndexEntry,
-  tokens: string[],
-  fullQuery: string,
-  game?: Game | null,
-  options?: { allowShorthand?: boolean },
-): number {
-  const allowShorthand = options?.allowShorthand !== false;
-  let score = 0;
-
-  // Exact full-title match
-  if (idx.titleLower === fullQuery) return 200 + (game?.metacriticScore ?? 0) / 1000;
-  // Title starts with full query
-  if (idx.titleLower.startsWith(fullQuery)) score = Math.max(score, 100);
-
-  let allTokensMatchTitle = true;
-  let allTokensWordBoundary = true;
-
-  for (const token of tokens) {
-    const tLen = token.length;
-    let tokenMatchedTitle = false;
-    let tokenWordBoundary = false;
-
-    // Shorthand: single token 4+ chars as subsequence of title (rdr2, gtav, fnaf)
-    if (allowShorthand && tokens.length === 1 && tLen >= 4 && isSubsequence(token, idx.titleLower)) {
-      tokenMatchedTitle = true;
-      score = Math.max(score, 80);
-    }
-
-    // Word-boundary check: does a title word start with this token?
-    if (!tokenMatchedTitle) {
-      for (const word of idx.titleWords) {
-        if (word.startsWith(token)) {
-          tokenWordBoundary = true;
-          tokenMatchedTitle = true;
-          break;
-        }
-      }
-    }
-
-    // Substring check
-    if (!tokenMatchedTitle && idx.titleLower.includes(token)) {
-      tokenMatchedTitle = true;
-    }
-
-    if (!tokenMatchedTitle) allTokensMatchTitle = false;
-    if (!tokenWordBoundary) allTokensWordBoundary = false;
-
-    // Developer / publisher substring
-    if (idx.devLower.includes(token) || idx.pubLower.includes(token)) {
-      score += 20;
-    }
-
-    // Genre match
-    if (idx.genresLower.some(g => g.includes(token))) {
-      score += 10;
-    }
-
-    // Fuzzy match against title words (only for tokens of 4+ chars to avoid false positives)
-    if (!tokenMatchedTitle && tLen >= 4) {
-      const maxDist = tLen <= 5 ? 1 : 2;
-      for (const word of idx.titleWords) {
-        if (isWithinEditDistance(token, word, maxDist)) {
-          score += 5;
-          tokenMatchedTitle = true; // count it for the "all tokens" check
-          break;
-        }
-      }
-    }
-  }
-
-  if (allTokensMatchTitle && allTokensWordBoundary) score = Math.max(score, 60);
-  else if (allTokensMatchTitle) score = Math.max(score, 40);
-
-  // Small tiebreaker for popular games
-  if (score > 0 && game) {
-    score += (game.metacriticScore ?? 0) / 1000;
-    if (game.playerCount) score += Math.min(game.playerCount / 100_000, 0.5);
-  }
-
-  return score;
-}
-
-/**
- * Build search index entry for a single game (used by library search).
- */
-export function buildSingleSearchIndex(g: Game): SearchIndexEntry {
-  const titleLower = g.title.toLowerCase();
-  return {
-    titleLower,
-    titleNorm: titleLower.replace(/[^a-z0-9\s]/g, ''),
-    titleWords: titleLower.split(/\s+/).filter(Boolean),
-    devLower: (g.developer || '').toLowerCase(),
-    pubLower: (g.publisher || '').toLowerCase(),
-    genresLower: (g.genre || []).map(genre => genre.toLowerCase()),
-  };
 }
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,8 @@ interface Settings {
   preferences: {
     autoLaunch: boolean; // Launch app on system startup (default: true)
     preferredChatProvider?: PreferredChatProvider; // Single source of truth for chat model
+    /** When false (default), AI Chat UI and cloud LLM providers are hidden; only Ollama is used. */
+    betaFeatures?: boolean;
   };
   ollama: {
     enabled: boolean;
@@ -66,7 +68,7 @@ class SettingsStore {
     const defaults = (): Settings => ({
       version: SETTINGS_VERSION,
       apiKeys: {},
-      preferences: { autoLaunch: true, preferredChatProvider: 'ollama' },
+      preferences: { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: false },
       ollama: {
         enabled: true,
         url: 'http://localhost:11434',
@@ -244,13 +246,37 @@ class SettingsStore {
     return this.getPreferredChatProvider() === 'gemini';
   }
 
+  getBetaFeatures(): boolean {
+    return this.settings.preferences?.betaFeatures === true;
+  }
+
+  setBetaFeatures(enabled: boolean): void {
+    if (!this.settings.preferences) {
+      this.settings.preferences = { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: enabled };
+    } else {
+      this.settings.preferences.betaFeatures = enabled;
+      if (!enabled && this.settings.preferences.preferredChatProvider && this.settings.preferences.preferredChatProvider !== 'ollama') {
+        this.settings.preferences.preferredChatProvider = 'ollama';
+      }
+    }
+    this.saveSettings();
+    logger.log(`[SettingsStore] Beta features set to ${enabled}`);
+  }
+
   getPreferredChatProvider(): PreferredChatProvider {
     const p = this.settings.preferences?.preferredChatProvider;
-    if (p === 'ollama' || p === 'gemini' || p === 'azure-openai' || p === 'anthropic') return p;
-    return 'ollama';
+    const valid =
+      p === 'ollama' || p === 'gemini' || p === 'azure-openai' || p === 'anthropic';
+    const raw: PreferredChatProvider = valid ? p! : 'ollama';
+    if (!this.getBetaFeatures() && raw !== 'ollama') return 'ollama';
+    return raw;
   }
 
   setPreferredChatProvider(provider: PreferredChatProvider): void {
+    if (!this.getBetaFeatures() && provider !== 'ollama') {
+      logger.warn('[SettingsStore] Rejecting non-Ollama provider while beta features are off');
+      provider = 'ollama';
+    }
     if (!this.settings.preferences) this.settings.preferences = { autoLaunch: true };
     this.settings.preferences.preferredChatProvider = provider;
     this.saveSettings();

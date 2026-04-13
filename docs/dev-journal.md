@@ -4,6 +4,18 @@
 
 ---
 
+## Monday, April 13, 2026
+
+*fix, progress, decision*
+
+The OCD (Gantt) view was showing **stale** bars because status history and play sessions live in their own stores — they could update without touching journey entries, so React never recomputed the chart. I wired fresh snapshots only while OCD is active so the timeline stays honest when sessions or status logs change, without extra churn on Ark or Log.
+
+Then I finished splitting **Beta features** from **Developer mode** the way the product always wanted it: DevLog, Data Flow, and system status stay behind developer mode; **AI Chat** (toolbar button, panel, and main-layout padding when chat is open) is its own toggle, default off, mirrored in the slide-out settings panel with Gemini tucked behind the same flag. Chat availability and the renderer now agree with the main process—when Beta is off, you get a straight path to turn it on in Settings instead of a dead control.
+
+Guided tours from **Settings → Guide** were skipping steps or leaving a dead gray overlay because `startTransition` and lazy chunks mounted **after** Joyride’s one-shot resolve. I added **`waitForTourDomReady`** (poll until every step’s selector exists, up to 12s) before `startTour`, a generation guard so rapid tour picks don’t race, **`TARGET_NOT_FOUND` → clean exit**, longer mount retries, and **invisible `data-tour` anchors** on Suspense fallbacks for Oracle, Embedding Space, Data Flow, and Dev Log so the walkthrough can resolve while chunks load. **656 tests** green.
+
+---
+
 ## Saturday, April 12, 2026
 
 *fix, polish*
@@ -13,6 +25,8 @@ Moved rerank status messages from standalone warning paragraphs to **inline badg
 Did a full audit of every Joyride tour flow, cross-referencing every `data-tour` target selector against actual DOM attributes across all components. Found and fixed several issues: **handleCallback** had overlapping conditions where `TOUR_END` and `STEP_AFTER` could both trigger `endTour` — rewrote to explicitly handle each event type (`TOUR_END`, `STEP_AFTER` with `CLOSE` action, `STEP_AFTER` with terminal status) so the flow is deterministic. **Journey loading/empty states** were missing `data-tour` anchors for `journey-view-styles` and `journey-medals-tab` — the skeleton now carries the attributes on placeholder elements and the empty state uses `sr-only` anchors, so the Voyage tour resolves all 5 steps regardless of data state. **Library status chips** were hidden during loading (`!currentLoading` guard) which meant the library tour's `library-status-chips` step would get filtered out on slow connections — removed the loading guard so the chips render immediately. **Lazy Suspense timing** — the step resolver only had a single 280ms retry, too tight for lazy-loaded views (Embedding Space, Oracle, Data Flow, DevLog) started from Settings → Guide. Replaced with 4 progressive retries (0, 150, 350, 700ms) giving ~1.2s total for chunks to load and mount. 150 tests pass.
 
 Fixed the **spotlight** — Joyride wasn't highlighting the element it was pointing at because the component was bypassing Joyride's overlay entirely with a custom full-screen overlay (`ark-tour-overlay`) that sat on top at z-index 9999. This opaque overlay covered the spotlight cutout that Joyride draws around each target, making the whole screen uniformly dim with no visual cue for what the tooltip was referencing. Ripped out the custom overlay system completely (removed `OVERLAY_ID`, `ensureOverlay`, `overlayRef`, DOM creation/removal) and let Joyride handle dimming natively via `overlayColor: rgba(0,0,0,0.75)`. Added `spotlightPadding: 6` and a reinforced `boxShadow` on the spotlight for a crisp cutout glow. This also eliminates the `removeChild` crash vector entirely — no more manual DOM mutation racing React's portal teardown. 640 tests pass.
+
+**Shipped v1.0.36** — committed, tagged, built the NSIS installer (300 MB), created the GitHub release, and uploaded all 3 assets (exe, blockmap, latest.yml). Release live at https://github.com/pourabkarchaudhuri/ark/releases/tag/v1.0.36.
 
 ---
 
