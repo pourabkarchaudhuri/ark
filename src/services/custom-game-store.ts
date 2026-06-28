@@ -338,11 +338,20 @@ class CustomGameStore {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
+    const safeSessionHours = Number.isFinite(sessionTotalHours) ? Math.max(0, sessionTotalHours) : 0;
+
+    // Guard against accidental reset-to-zero (see library-store for rationale):
+    // this method only adds tracked session time and must never wipe a positive
+    // total when sessions are cleared or a live update reports ~0 minutes.
+    if (safeSessionHours === 0 && (existing.hoursBaseline ?? 0) === 0 && (existing.hoursPlayed ?? 0) > 0) {
+      return;
+    }
+
     if (existing.hoursBaseline === undefined) {
-      existing.hoursBaseline = Math.max(0, (existing.hoursPlayed ?? 0) - sessionTotalHours);
+      existing.hoursBaseline = Math.max(0, (existing.hoursPlayed ?? 0) - safeSessionHours);
     }
     const baseline = existing.hoursBaseline ?? 0;
-    const effectiveHours = baseline + sessionTotalHours;
+    const effectiveHours = baseline + safeSessionHours;
     const updated: CustomGameEntry = {
       ...existing,
       hoursPlayed: effectiveHours,

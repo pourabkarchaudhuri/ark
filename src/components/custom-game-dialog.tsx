@@ -96,8 +96,10 @@ export function CustomGameDialog({
       setSelectedPlatforms([]);
       setStatus('Want to Play');
       setExecutablePath('');
+      // Close on successful submit so the dialog always dismisses after adding.
+      onOpenChange(false);
     },
-    [title, selectedPlatforms, status, executablePath, onSave]
+    [title, selectedPlatforms, status, executablePath, onSave, onOpenChange]
   );
 
   const handleClose = () => {
@@ -111,7 +113,7 @@ export function CustomGameDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleClose}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) handleClose(); }}>
       <DialogContent className="max-w-md max-h-[85vh] flex flex-col overflow-hidden">
         <DialogHeader className="flex-shrink-0">
           <div className="flex items-center gap-2">

@@ -19,6 +19,25 @@ interface StoredStatusHistoryData {
  *
  * This data powers future tracking / analytics features.
  */
+/** The only status values the rest of the app knows how to render. */
+const VALID_STATUSES: ReadonlySet<string> = new Set<GameStatus>([
+  'Playing Now',
+  'Playing',
+  'On Hold',
+  'Want to Play',
+  'Completed',
+]);
+
+/** A stored entry is usable only if it has the fields the timeline/Gantt rely on. */
+function isValidStatusEntry(entry: unknown): entry is StatusChangeEntry {
+  if (!entry || typeof entry !== 'object') return false;
+  const e = entry as Record<string, unknown>;
+  if (typeof e.gameId !== 'string' || !e.gameId) return false;
+  if (typeof e.newStatus !== 'string' || !VALID_STATUSES.has(e.newStatus)) return false;
+  if (typeof e.timestamp !== 'string' || !Number.isFinite(new Date(e.timestamp).getTime())) return false;
+  return true;
+}
+
 class StatusHistoryStore {
   private entries: StatusChangeEntry[] = [];
   private listeners: Set<() => void> = new Set();
@@ -37,11 +56,14 @@ class StatusHistoryStore {
       if (raw) {
         const parsed = JSON.parse(raw) as StoredStatusHistoryData;
         if (Array.isArray(parsed.entries)) {
-          this.entries = parsed.entries.map(entry => ({
+          const migrated = parsed.entries.map(entry => ({
             ...entry,
             gameId: migrateGameId(entry as any),
           }));
-          if (parsed.version < STORAGE_VERSION) {
+          // Drop corrupt/legacy entries so a bad status or timestamp can never
+          // reach (and crash) the Voyage/OCD timeline.
+          this.entries = migrated.filter(isValidStatusEntry);
+          if (parsed.version < STORAGE_VERSION || this.entries.length !== migrated.length) {
             needsResave = true;
           }
         }

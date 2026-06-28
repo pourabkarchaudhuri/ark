@@ -68,21 +68,6 @@ git tag v1.0.NEW_VERSION
 git push origin main --tags
 ```
 
-**Important:** Do NOT include `Co-authored-by: Cursor` or similar AI tool trailers in the commit message.
-
-If the commit was auto-tagged with a Cursor trailer, amend it:
-
-```bash
-# Only if the commit has NOT been pushed yet:
-git commit --amend  # (edit message to remove trailer)
-
-# If already pushed, amend then force push:
-git commit --amend
-git tag -d v1.0.NEW_VERSION
-git tag v1.0.NEW_VERSION
-git push origin main --tags --force
-```
-
 ---
 
 ## 5. Build the Electron NSIS Installer

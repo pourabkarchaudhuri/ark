@@ -377,6 +377,10 @@ contextBridge.exposeInMainWorld('sessionTracker', {
   getActiveSessions: () =>
     ipcRenderer.invoke('session:getActive'),
 
+  // Drain sessions recovered from a previous crashed run
+  getRecoveredSessions: () =>
+    ipcRenderer.invoke('session:getRecovered'),
+
   // Subscribe to live status changes (Playing Now / Playing)
   onStatusChange: (callback) => {
     const handler = (_event, data) => callback(data);

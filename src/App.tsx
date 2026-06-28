@@ -8,6 +8,7 @@ import { UpdateSnackbar } from '@/components/update-snackbar';
 import { ChangelogModal } from '@/components/changelog-modal';
 import { trackPageView } from '@/services/analytics';
 import { SplashScreen } from '@/components/splash-screen';
+import { SessionTrackerProvider } from '@/hooks/session-tracker-context';
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded heavy components — split into separate chunks for faster initial load.
@@ -71,8 +72,12 @@ function AppContent() {
               animate={{ opacity: 1 }}
               transition={{ duration: 0.4 }}
             >
-              <AppRoutes />
-              <ChangelogModal />
+              {/* Provider sits above the route-level ErrorBoundary so session
+                  tracking keeps running across navigation. */}
+              <SessionTrackerProvider>
+                <AppRoutes />
+                <ChangelogModal />
+              </SessionTrackerProvider>
             </motion.div>
           )}
         </AnimatePresence>

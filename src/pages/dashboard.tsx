@@ -23,6 +23,7 @@ import { APP_VERSION } from '@/components/changelog-modal';
 import { WindowControls } from '@/components/window-controls';
 import { EmptyState } from '@/components/empty-state';
 import { JourneyView } from '@/components/journey-view';
+import { ViewErrorBoundary } from '@/components/view-error-boundary';
 import { BuzzView } from '@/components/buzz-view';
 import { ReleaseCalendar } from '@/components/release-calendar';
 const OracleView = lazy(() => import('@/components/oracle-view').then(m => ({ default: m.OracleView })));
@@ -71,7 +72,7 @@ import { SettingsScreen } from '@/components/settings-screen';
 import { GuidedTour, getTourSteps, useTourState, viewModeToTourId, waitForTourDomReady, type TourId } from '@/components/guided-tour';
 import { YearWrapped, WrappedSnackbar } from '@/components/year-wrapped';
 import { AnimateIcon, MagneticWrap } from '@/components/ui/animate-icon';
-import { useSessionTracker } from '@/hooks/useSessionTracker';
+import { useSessionTrackerContext } from '@/hooks/session-tracker-context';
 import { NavbarStatusIndicator } from '@/components/system-status-panel';
 import { useDevMode } from '@/hooks/useDevMode';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
@@ -205,7 +206,7 @@ export function Dashboard() {
   const journeyEntries = useJourneyHistory();
   
   // Session tracking (live "Playing Now" status)
-  const { isPlayingNow, liveGames } = useSessionTracker();
+  const { isPlayingNow, liveGames } = useSessionTrackerContext();
   const [devMode] = useDevMode();
   const [betaFeatures] = useBetaFeatures();
   const chatAvailability = useChatAvailability();
@@ -713,11 +714,14 @@ export function Dashboard() {
           success(`"${editingGame.title}" added to your library`);
         }
       }
+    } catch (err) {
+      showError('Failed to save. Please try again.');
+    } finally {
+      // Always dismiss the dialog, even if a post-add side effect threw — the
+      // game has already been persisted at this point.
       setIsDialogOpen(false);
       setEditingGame(null);
       setEditInitialEntry(null);
-    } catch (err) {
-      showError('Failed to save. Please try again.');
     }
   }, [editingGame, isInLibrary, updateEntry, addToLibrary, success, showError]);
 
@@ -1366,11 +1370,13 @@ export function Dashboard() {
 
         {/* Journey View */}
         {viewMode === 'journey' ? (
-          <JourneyView
-            entries={journeyEntries}
-            loading={libraryLoading}
-            onSwitchToBrowse={switchToBrowse}
-          />
+          <ViewErrorBoundary label="Voyage" onBack={switchToBrowse}>
+            <JourneyView
+              entries={journeyEntries}
+              loading={libraryLoading}
+              onSwitchToBrowse={switchToBrowse}
+            />
+          </ViewErrorBoundary>
         ) : viewMode === 'buzz' ? (
           <BuzzView />
         ) : viewMode === 'calendar' ? (
@@ -1380,9 +1386,11 @@ export function Dashboard() {
             <OracleView onSwitchToBrowse={switchToBrowse} />
           </Suspense>
         ) : viewMode === 'devlog' ? (
-          <Suspense fallback={<LazyViewFallback tourAnchors={['devlog-header', 'devlog-timeline']} />}>
-            <DevLogView onBack={switchToBrowse} />
-          </Suspense>
+          <ViewErrorBoundary label="DevLogs" onBack={switchToBrowse}>
+            <Suspense fallback={<LazyViewFallback tourAnchors={['devlog-header', 'devlog-timeline']} />}>
+              <DevLogView onBack={switchToBrowse} />
+            </Suspense>
+          </ViewErrorBoundary>
         ) : viewMode === 'data-flow' ? (
           <Suspense fallback={<LazyViewFallback tourAnchors={['dataflow-back', 'dataflow-panel']} />}>
             <DataFlowView onBack={switchToBrowse} />

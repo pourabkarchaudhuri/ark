@@ -61,6 +61,7 @@ interface ElectronAPI {
 interface SessionTrackerAPI {
   setTrackedGames: (games: Array<{ gameId: string; executablePath: string }>) => Promise<{ success: boolean }>;
   getActiveSessions: () => Promise<Array<{ gameId: string; startTime: string; elapsedMinutes: number }>>;
+  getRecoveredSessions: () => Promise<Array<import('@/types/game').GameSession>>;
   onStatusChange: (callback: (data: { gameId: string; status: string }) => void) => () => void;
   onSessionStarted: (callback: (data: { gameId: string; startTime: string }) => void) => () => void;
   onLiveUpdate: (callback: (data: { gameId: string; activeMinutes: number }) => void) => () => void;

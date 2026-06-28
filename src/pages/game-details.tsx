@@ -854,6 +854,7 @@ export function GameDetailsPage() {
     const isNewAdd = !gameInLibrary && !isCustomGame;
     const gameName = details?.name || epicGame?.title || 'Game';
 
+    try {
     if (isCustomGame) {
       customGameStore.updateGame(gameId, {
         status: gameData.status,
@@ -895,14 +896,16 @@ export function GameDetailsPage() {
       }
     }
 
-    setIsDialogOpen(false);
-    setDialogGame(null);
-    setDialogInitialEntry(null);
-
-    if (isNewAdd) {
-      toastSuccess(`${gameName} added to your library!`);
-    } else {
-      toastSuccess(`${gameName} updated successfully`);
+      if (isNewAdd) {
+        toastSuccess(`${gameName} added to your library!`);
+      } else {
+        toastSuccess(`${gameName} updated successfully`);
+      }
+    } finally {
+      // Always dismiss the dialog regardless of any async/side-effect failure.
+      setIsDialogOpen(false);
+      setDialogGame(null);
+      setDialogInitialEntry(null);
     }
   }, [gameId, gameInLibrary, isCustomGame, addToLibrary, updateEntry, details, epicGame, toastSuccess, dialogGame]);
 

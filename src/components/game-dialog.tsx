@@ -246,7 +246,11 @@ export function GameDialog({
       executablePath,
       addedAt: isEditing ? addedAt : undefined,
     });
-  }, [formData, executablePath, addedAt, isEditing, onSave]);
+    // Close on submit. The save path persists the game synchronously (or fires
+    // an async write that can't fail the add), so closing here guarantees the
+    // dialog dismisses even if a parent handler's later step throws.
+    onOpenChange(false);
+  }, [formData, executablePath, addedAt, isEditing, onSave, onOpenChange]);
 
   const handleBrowseExecutable = useCallback(async () => {
     if (!window.fileDialog?.selectExecutable) return;

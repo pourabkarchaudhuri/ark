@@ -55,6 +55,32 @@ export function useSessionTracker() {
       });
     }).catch(() => { /* non-critical — fresh start has no sessions */ });
 
+    // Record a completed session into the store + update hours. Shared by both
+    // the live "session ended" event and crash-recovered sessions.
+    const recordCompletedSession = (raw: GameSession) => {
+      const session: GameSession = {
+        ...raw,
+        gameId: typeof raw.gameId === 'number' ? `steam-${raw.gameId}` : String(raw.gameId),
+      };
+      sessionStore.record(session);
+      const totalHours = sessionStore.getTotalHours(session.gameId);
+      const lastPlayedAt = session.endTime;
+      if (session.gameId.startsWith('custom-')) {
+        if (customGameStore.getGame(session.gameId)) {
+          customGameStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
+        }
+      } else {
+        libraryStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
+      }
+    };
+
+    // Drain any sessions recovered from a previous crashed/force-killed run so
+    // their playtime is not lost.
+    window.sessionTracker.getRecoveredSessions?.().then((recovered) => {
+      if (!recovered || recovered.length === 0) return;
+      for (const s of recovered) recordCompletedSession(s);
+    }).catch(() => { /* non-critical */ });
+
     // Re-sync whenever the library or custom games change
     const unsubLibrary = libraryStore.subscribe(syncTrackedGames);
     const unsubCustom = customGameStore.subscribe(syncTrackedGames);
@@ -92,34 +118,18 @@ export function useSessionTracker() {
 
     // Listen for completed sessions
     const unsubEnded = window.sessionTracker.onSessionEnded((data) => {
-      const session: GameSession = {
-        ...data.session,
-        gameId: typeof data.session.gameId === 'number'
-          ? `steam-${data.session.gameId}`
-          : String(data.session.gameId),
-      };
-
-      // Record the session
-      sessionStore.record(session);
-
-      const totalHours = sessionStore.getTotalHours(session.gameId);
-      const lastPlayedAt = session.endTime;
-      if (session.gameId.startsWith('custom-')) {
-        const existing = customGameStore.getGame(session.gameId);
-        if (existing) {
-          customGameStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
-        }
-      } else {
-        libraryStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
-      }
+      recordCompletedSession(data.session);
     });
 
     cleanupRef.current = [unsubLibrary, unsubCustom, unsubStatus, unsubLive, unsubEnded];
 
     return () => {
+      // Only detach the listeners this effect registered. Do NOT call the global
+      // removeAllListeners() — that wipes every session:* listener for the whole
+      // process and previously caused completed sessions to be silently dropped
+      // whenever this hook unmounted (e.g. navigating off the dashboard).
       cleanupRef.current.forEach((fn) => fn());
       cleanupRef.current = [];
-      window.sessionTracker?.removeAllListeners();
     };
   }, [syncTrackedGames]);
 

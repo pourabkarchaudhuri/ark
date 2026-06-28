@@ -175,6 +175,16 @@ const segmentStyles: Record<GameStatus, SegmentStyle> = {
   },
 };
 
+/**
+ * Safe lookup for a segment's visual style. Status history is loaded from
+ * localStorage and is not schema-validated, so a corrupt/legacy status value
+ * would otherwise make `segmentStyles[status]` undefined and crash the whole
+ * Gantt (and the app) on property access. Fall back to the neutral style.
+ */
+function getSegmentStyle(status: GameStatus | string): SegmentStyle {
+  return segmentStyles[status as GameStatus] ?? segmentStyles['Want to Play'];
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const DAY_MS = 86_400_000;
@@ -182,9 +192,26 @@ const DAY_MS = 86_400_000;
 const MIN_DAY_WIDTH = 8;
 /** Minimum px per day in Day view so each of the 24 hour columns is readable */
 const MIN_HOURLY_DAY_WIDTH = 720;
+/**
+ * Hard caps to keep the timeline renderable. Markers (hour/day/month columns)
+ * and gridlines are NOT virtualized, so an unbounded data span (years of
+ * history) used to generate tens of thousands of DOM nodes and freeze the app.
+ * When a marker type would exceed its cap we degrade to a coarser granularity.
+ */
+const MAX_HOUR_MARKERS = 24 * 62; // ~2 months of hourly columns
+const MAX_DAY_MARKERS = 366 * 4; // ~4 years of daily columns
+/** Absolute ceiling on the scrollable canvas width (px) to avoid layout blowups. */
+const MAX_TIMELINE_WIDTH = 200_000;
+
+/** True only for a finite, real timestamp. */
+function isValidDate(d: Date): boolean {
+  return d instanceof Date && Number.isFinite(d.getTime());
+}
 
 function daysBetween(a: string | Date, b: string | Date): number {
-  return Math.max(1, Math.round((new Date(b).getTime() - new Date(a).getTime()) / DAY_MS));
+  const diff = (new Date(b).getTime() - new Date(a).getTime()) / DAY_MS;
+  if (!Number.isFinite(diff)) return 1;
+  return Math.max(1, Math.round(diff));
 }
 
 function formatShortDate(iso: string): string {
@@ -539,7 +566,7 @@ const GanttMinimap = memo(function GanttMinimap({ rows, timelineWidth, viewportW
                   width,
                   top: 2 + ri * (MINIMAP_ROW_HEIGHT + 1),
                   height: MINIMAP_ROW_HEIGHT,
-                  backgroundColor: segmentStyles[seg.status].minimapColor,
+                  backgroundColor: getSegmentStyle(seg.status).minimapColor,
                   opacity: 0.7,
                 }}
               />
@@ -753,22 +780,55 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     let minDate: Date;
     let maxDate: Date;
     if (allRows.length > 0) {
-      const allDates = allRows.flatMap((r) => [
-        new Date(r.addedAt),
-        ...r.segments.flatMap((s) => [new Date(s.startDate), new Date(s.endDate)]),
-      ]);
-      minDate = new Date(Math.min(...allDates.map((d) => d.getTime())));
-      maxDate = new Date(Math.max(...allDates.map((d) => d.getTime()), now.getTime()));
+      // Only consider real timestamps — corrupt/missing dates would otherwise
+      // poison Math.min/Math.max with NaN and break all downstream layout math.
+      const allDates = allRows
+        .flatMap((r) => [
+          new Date(r.addedAt),
+          ...r.segments.flatMap((s) => [new Date(s.startDate), new Date(s.endDate)]),
+        ])
+        .filter(isValidDate);
+      if (allDates.length > 0) {
+        minDate = new Date(Math.min(...allDates.map((d) => d.getTime())));
+        maxDate = new Date(Math.max(...allDates.map((d) => d.getTime()), now.getTime()));
+      } else {
+        minDate = now;
+        maxDate = now;
+      }
     } else {
       minDate = now;
       maxDate = now;
     }
+
+    // Build day markers (one per day) for the [start, end) range.
+    const buildDayMarkers = (start: Date, total: number): Date[] => {
+      const list: Date[] = [];
+      for (let i = 0; i < total; i++) list.push(addDays(start, i));
+      return list;
+    };
+    // Build month markers spanning [start, end).
+    const buildMonthMarkers = (start: Date, end: Date): Date[] => {
+      const list: Date[] = [];
+      let cursor = new Date(startOfMonth(start));
+      while (cursor < end) {
+        list.push(new Date(cursor));
+        cursor = addMonths(cursor, 1);
+      }
+      return list;
+    };
 
     if (rangePreset === 'day') {
       const start = startOfDay(minDate);
       const endDay = startOfDay(maxDate > now ? maxDate : now);
       const end = addDays(endDay, 1);
       const total = daysBetween(start.toISOString(), end.toISOString());
+      // Degrade gracefully when the span is far too large for hourly columns.
+      if (total * 24 > MAX_HOUR_MARKERS) {
+        if (total > MAX_DAY_MARKERS) {
+          return { timelineStart: start, timelineEnd: end, totalDays: total, months: buildMonthMarkers(start, end), dayMarkers: undefined as Date[] | undefined, hourMarkers: undefined as Date[] | undefined, spanDays: total };
+        }
+        return { timelineStart: start, timelineEnd: end, totalDays: total, months: [] as Date[], dayMarkers: buildDayMarkers(start, total), hourMarkers: undefined as Date[] | undefined, spanDays: total };
+      }
       const hourMarkersList: Date[] = [];
       for (let d = 0; d < total; d++) {
         const dayStart = addDays(start, d);
@@ -787,49 +847,46 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
       const endOfCurrentWeek = addDays(startOfWeek(now), 7);
       const end = endOfDataWeek > endOfCurrentWeek ? endOfDataWeek : endOfCurrentWeek;
       const total = daysBetween(start.toISOString(), end.toISOString());
-      const monthMarkers: Date[] = [];
-      let cursor = new Date(startOfMonth(start));
-      while (cursor < end) {
-        monthMarkers.push(new Date(cursor));
-        cursor = addMonths(cursor, 1);
+      const monthMarkers = buildMonthMarkers(start, end);
+      // Degrade to month-only markers when daily columns would explode.
+      if (total > MAX_DAY_MARKERS) {
+        return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: undefined as Date[] | undefined, hourMarkers: undefined as Date[] | undefined, spanDays: total };
       }
-      const dayMarkersList: Date[] = [];
-      for (let i = 0; i < total; i++) {
-        dayMarkersList.push(addDays(start, i));
-      }
-      return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: dayMarkersList, hourMarkers: undefined as Date[] | undefined, spanDays: total };
+      return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: buildDayMarkers(start, total), hourMarkers: undefined as Date[] | undefined, spanDays: total };
     }
 
     if (rangePreset === 'month') {
       const start = startOfMonth(minDate);
       const end = endOfMonth(maxDate > now ? maxDate : now);
       const total = daysBetween(start.toISOString(), end.toISOString());
-      const dayMarkersList: Date[] = [];
-      for (let i = 0; i < total; i++) {
-        dayMarkersList.push(addDays(start, i));
+      // Degrade to month-only markers when daily columns would explode.
+      if (total > MAX_DAY_MARKERS) {
+        return { timelineStart: start, timelineEnd: end, totalDays: total, months: buildMonthMarkers(start, end), dayMarkers: undefined as Date[] | undefined, hourMarkers: undefined as Date[] | undefined, spanDays: total };
       }
-      return { timelineStart: start, timelineEnd: end, totalDays: total, months: [new Date(start)], dayMarkers: dayMarkersList, hourMarkers: undefined as Date[] | undefined, spanDays: total };
+      return { timelineStart: start, timelineEnd: end, totalDays: total, months: [new Date(start)], dayMarkers: buildDayMarkers(start, total), hourMarkers: undefined as Date[] | undefined, spanDays: total };
     }
 
     // rangePreset === 'year'
     const start = startOfYear(minDate);
     const end = endOfYear(maxDate > now ? maxDate : now);
     const total = daysBetween(start.toISOString(), end.toISOString());
-    const monthMarkers: Date[] = [];
-    let cursor = new Date(start);
-    while (cursor < end) {
-      monthMarkers.push(new Date(cursor));
-      cursor = addMonths(cursor, 1);
-    }
-    return { timelineStart: start, timelineEnd: end, totalDays: total, months: monthMarkers, dayMarkers: undefined, hourMarkers: undefined as Date[] | undefined, spanDays: total };
+    return { timelineStart: start, timelineEnd: end, totalDays: total, months: buildMonthMarkers(start, end), dayMarkers: undefined, hourMarkers: undefined as Date[] | undefined, spanDays: total };
   }, [rangePreset, allRows]);
 
-  // Scale: fill viewport when range is small; otherwise min px/day so timeline is scrollable
+  // Scale: fill viewport when range is small; otherwise min px/day so timeline is scrollable.
+  // Whichever width we pick, clamp it so totalDays * width can never exceed
+  // MAX_TIMELINE_WIDTH — otherwise an extreme span produces a multi-million px
+  // scroll region that breaks layout/scroll math.
   const effectiveDayWidth = useMemo(() => {
     if (viewportWidth <= 0 || totalDays <= 0) return 4;
     const fillWidth = viewportWidth / totalDays;
-    const minWidth = rangePreset === 'day' ? MIN_HOURLY_DAY_WIDTH : MIN_DAY_WIDTH;
-    return Math.max(minWidth, fillWidth);
+    // Only require the wide hourly columns when hour markers are actually shown
+    // (small spans). For degraded large spans, fall back to the compact min.
+    const wantsHourly = rangePreset === 'day' && totalDays * 24 <= MAX_HOUR_MARKERS;
+    const minWidth = wantsHourly ? MIN_HOURLY_DAY_WIDTH : MIN_DAY_WIDTH;
+    const desired = Math.max(minWidth, fillWidth);
+    const maxWidthPerDay = MAX_TIMELINE_WIDTH / totalDays;
+    return Math.min(desired, Math.max(1, maxWidthPerDay));
   }, [viewportWidth, totalDays, rangePreset]);
 
   const timelineWidth = totalDays * effectiveDayWidth;
@@ -911,7 +968,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     el.style.top = `${top}px`;
 
     const isOngoing = new Date(data.endDate).getTime() >= Date.now() - DAY_MS;
-    const style = segmentStyles[data.status];
+    const style = getSegmentStyle(data.status);
 
     let dateRangeHtml: string;
     let durationHtml: string;
@@ -1603,7 +1660,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                   const left = dateToX(seg.startDate);
                   const right = dateToX(seg.endDate);
                   const width = Math.max(MIN_BAR_WIDTH, right - left);
-                  const style = segmentStyles[seg.status];
+                  const style = getSegmentStyle(seg.status);
                   const isInfoSegment = i === infoSegIdx;
                   const isTealBar = seg.status === 'Playing Now';
                   const isOngoing = new Date(seg.endDate).getTime() >= Date.now() - DAY_MS;

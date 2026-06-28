@@ -16,6 +16,10 @@ out/
 .env.test.local
 .env.production.local
 
+# Secrets — never commit local token files
+GIT_TOKEN_DONT_COMMIT.txt
+*token*.txt
+
 # IDE
 .idea/
 .vscode/

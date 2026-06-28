@@ -240,6 +240,49 @@ describe('LibraryStore', () => {
       expect(after?.hoursBaseline).toBe(40);
       expect(after?.hoursPlayed).toBe(52);
     });
+
+    it('does NOT reset a positive total to zero when session total is 0 and baseline is 0', () => {
+      // Repro for the "tracking resets to 0" bug: a session-only game accrues
+      // hours (baseline 0), then session history is cleared/import drops it, and
+      // a live update arrives with 0 minutes. The total must be preserved.
+      libraryStore.addToLibrary({
+        gameId: 'steam-12345',
+        status: 'Playing',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+      });
+      // Simulate session-only accrual: baseline 0, hours accumulated.
+      vi.mocked(sessionStore.getTotalHours).mockReturnValue(5);
+      libraryStore.updateHoursFromSessions('steam-12345', 5);
+      const mid = libraryStore.getEntry('steam-12345');
+      expect(mid?.hoursBaseline).toBe(0);
+      expect(mid?.hoursPlayed).toBe(5);
+
+      // Sessions cleared → a 0-hour update must not wipe the 5 hours.
+      libraryStore.updateHoursFromSessions('steam-12345', 0);
+
+      const after = libraryStore.getEntry('steam-12345');
+      expect(after?.hoursPlayed).toBe(5);
+    });
+
+    it('ignores non-finite session totals instead of corrupting hours', () => {
+      // No prior tracked sessions, so the manual hours become the baseline.
+      vi.mocked(sessionStore.getTotalHours).mockReturnValue(0);
+      libraryStore.addToLibrary({
+        gameId: 'steam-12345',
+        status: 'Playing',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+      });
+      libraryStore.updateEntry('steam-12345', { hoursPlayed: 30 });
+
+      libraryStore.updateHoursFromSessions('steam-12345', Number.NaN);
+
+      const after = libraryStore.getEntry('steam-12345');
+      expect(after?.hoursPlayed).toBe(30);
+    });
   });
 
   describe('isInLibrary', () => {

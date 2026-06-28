@@ -7,7 +7,7 @@ const electron = require('electron');
 const { ipcMain } = electron;
 import path from 'path';
 import { logger } from '../safe-logger.js';
-import { setTrackedGames, getActiveSessions } from '../session-tracker.js';
+import { setTrackedGames, getActiveSessions, drainRecoveredSessions } from '../session-tracker.js';
 
 export function register(): void {
   /**
@@ -35,5 +35,13 @@ export function register(): void {
    */
   ipcMain.handle('session:getActive', async () => {
     return getActiveSessions();
+  });
+
+  /**
+   * Drain sessions recovered from a previous run that crashed before finalizing.
+   * The renderer records these so crashed-session playtime is not lost.
+   */
+  ipcMain.handle('session:getRecovered', async () => {
+    return drainRecoveredSessions();
   });
 }

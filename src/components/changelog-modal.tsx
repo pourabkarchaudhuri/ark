@@ -9,6 +9,18 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.38': {
+    title: "What's New in Ark 1.0.38",
+    changes: [
+      'Add to Library fixed — The dialog now reliably closes after you add a game, whether from the dashboard or a game details page',
+      'Dev Logs fixed — The construction log opens correctly again; it now tolerates older journal formats and is reliably bundled into the installed app',
+      'Playtime no longer resets to zero — A stray zero-length tracking update can never wipe your accumulated hours',
+      'Tracking works everywhere — Session tracking keeps running as you navigate between screens, so play sessions are no longer lost when you leave the dashboard',
+      'More accurate durations — Brief process hiccups no longer split or cut short a session, idle time is measured more fairly, and sessions interrupted by a crash are recovered on the next launch',
+      'Voyage / OCD timeline stability — Large libraries and long histories no longer freeze or crash the timeline; corrupt or missing data is handled gracefully',
+      'Crash isolation — An error in one view (e.g. Voyage or Dev Logs) now shows a contained, recoverable message instead of taking down the whole app',
+    ],
+  },
   '1.0.37': {
     title: "What's New in Ark 1.0.37",
     changes: [

@@ -22,6 +22,52 @@ interface DevJournalData {
   project: string;
   days: DevJournalDay[];
 }
+
+/**
+ * Normalize raw journal JSON into a fully-populated shape.
+ *
+ * The on-disk journal has drifted over time: newer entries use `summary`
+ * instead of `narrative`, and some entries omit array fields entirely. The UI
+ * accesses `day.narrative.split(...)`, `day.tags.length`, etc. unconditionally,
+ * so any missing field would throw and crash the whole view (and the app, via
+ * the error boundary). Coerce everything to safe defaults here.
+ */
+export function normalizeJournal(raw: unknown): DevJournalData {
+  const obj = (raw ?? {}) as Record<string, unknown>;
+  const rawDays = Array.isArray(obj.days) ? obj.days : [];
+  const toStringArray = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+
+  const days: DevJournalDay[] = rawDays
+    .map((d): DevJournalDay | null => {
+      if (!d || typeof d !== 'object') return null;
+      const day = d as Record<string, unknown>;
+      const date = typeof day.date === 'string' ? day.date : '';
+      if (!date) return null;
+      const narrative =
+        typeof day.narrative === 'string'
+          ? day.narrative
+          : typeof day.summary === 'string'
+            ? day.summary
+            : '';
+      return {
+        date,
+        title: typeof day.title === 'string' ? day.title : '(untitled)',
+        tags: toStringArray(day.tags),
+        narrative,
+        filesChanged: toStringArray(day.filesChanged),
+        milestones: toStringArray(day.milestones),
+        challenges: toStringArray(day.challenges),
+        lookingAhead: typeof day.lookingAhead === 'string' ? day.lookingAhead : null,
+      };
+    })
+    .filter((d): d is DevJournalDay => d !== null);
+
+  return {
+    project: typeof obj.project === 'string' ? obj.project : 'ark',
+    days,
+  };
+}
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft,
@@ -404,7 +450,7 @@ export function DevLogView({ onBack }: DevLogViewProps) {
     setError(null);
     try {
       const data = await window.devlog.getJournal();
-      setJournal(data ?? null);
+      setJournal(normalizeJournal(data));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load journal');
     } finally {

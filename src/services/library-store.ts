@@ -422,12 +422,23 @@ class LibraryStore {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
+    const safeSessionHours = Number.isFinite(sessionTotalHours) ? Math.max(0, sessionTotalHours) : 0;
+
+    // Guard against accidental reset-to-zero. This method only ever ADDS tracked
+    // session time on top of a baseline, so it must never reduce a positive total
+    // to 0. That can happen when session history is cleared (e.g. an import with
+    // no sessionHistory) or a live update arrives with ~0 active minutes while
+    // baseline is also 0. Explicit user resets go through updateEntry instead.
+    if (safeSessionHours === 0 && (existing.hoursBaseline ?? 0) === 0 && (existing.hoursPlayed ?? 0) > 0) {
+      return;
+    }
+
     // Migrate: if no baseline yet, treat current hoursPlayed as effective and infer baseline
     if (existing.hoursBaseline === undefined) {
-      existing.hoursBaseline = Math.max(0, (existing.hoursPlayed ?? 0) - sessionTotalHours);
+      existing.hoursBaseline = Math.max(0, (existing.hoursPlayed ?? 0) - safeSessionHours);
     }
     const baseline = existing.hoursBaseline ?? 0;
-    const effectiveHours = baseline + sessionTotalHours;
+    const effectiveHours = baseline + safeSessionHours;
     existing.hoursPlayed = effectiveHours;
     if (lastPlayedAt !== undefined) existing.lastPlayedAt = lastPlayedAt;
     existing.updatedAt = new Date();

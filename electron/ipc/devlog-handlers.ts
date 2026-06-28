@@ -1,7 +1,11 @@
 /**
- * DevLog IPC — reads docs/dev-journal.json from the project root.
- * When packaged, that file is not shipped; return a default empty journal
- * so the devlog page always shows valid content (empty state) for first-time installs.
+ * DevLog IPC — reads docs/dev-journal.json.
+ *
+ * In dev the file lives at <projectRoot>/docs/dev-journal.json. When packaged
+ * it is shipped via electron-builder `extraResources` and lands under
+ * `process.resourcesPath`/docs/dev-journal.json (the cross-platform-correct
+ * location — `dirname(execPath)/resources` is wrong on macOS). If the file is
+ * genuinely missing we still return a valid empty journal so the page renders.
  */
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
@@ -15,15 +19,19 @@ const DEFAULT_JOURNAL = { project: 'ark', days: [] };
 export function register(): void {
   ipcMain.handle('devlog:getJournal', async () => {
     try {
-      const root = app.isPackaged
-        ? path.dirname(process.execPath)
-        : app.getAppPath();
-      // When packaged, extraResources put docs at <installDir>/resources/docs/
-      const journalPath = app.isPackaged
-        ? path.join(root, 'resources', 'docs', 'dev-journal.json')
-        : path.join(root, 'docs', 'dev-journal.json');
+      // Candidate paths in priority order so a stale build layout still resolves.
+      const candidates = app.isPackaged
+        ? [
+            path.join(process.resourcesPath, 'docs', 'dev-journal.json'),
+            path.join(path.dirname(process.execPath), 'resources', 'docs', 'dev-journal.json'),
+          ]
+        : [path.join(app.getAppPath(), 'docs', 'dev-journal.json')];
 
-      if (!fs.existsSync(journalPath)) return DEFAULT_JOURNAL;
+      const journalPath = candidates.find((p: string) => fs.existsSync(p));
+      if (!journalPath) {
+        logger.warn('[DevLog] Journal file not found. Looked in:', candidates);
+        return DEFAULT_JOURNAL;
+      }
 
       const raw = fs.readFileSync(journalPath, 'utf-8');
       return JSON.parse(raw);

@@ -14,6 +14,7 @@
 
 import { execSync } from 'child_process';
 import path from 'path';
+import * as fs from 'fs';
 import { logger } from './safe-logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
@@ -21,7 +22,7 @@ import type { BrowserWindow as BrowserWindowType } from 'electron';
 const createRequire = (await import('node:module')).createRequire;
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { powerMonitor } = electron;
+const { powerMonitor, app } = electron;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +39,8 @@ interface ActiveSession {
   startTime: Date;
   idleAccumulatedMs: number; // Total idle time accumulated during the session
   lastIdleCheck: boolean;    // Whether system was idle on the previous tick
+  missedPolls: number;       // Consecutive polls where the process was not seen
+  lastSeenMs: number;        // Timestamp (ms) of the last poll where the process was running
 }
 
 export interface CompletedSession {
@@ -56,6 +59,14 @@ export interface CompletedSession {
 
 const POLL_INTERVAL_MS = 15_000;   // Check every 15 seconds
 const IDLE_THRESHOLD_S = 300;      // 5 minutes idle threshold
+/**
+ * Number of consecutive polls a process must be missing before we end the
+ * session. `tasklist` can momentarily miss a process (CPU spike, AV scan, fast
+ * relaunch), and basename matching can flicker. Requiring 2 misses (~30s)
+ * before ending prevents a single hiccup from fragmenting one play session into
+ * many tiny ones — a major cause of "duration looks too short / resets".
+ */
+const MISSES_BEFORE_END = 2;
 
 // ---------------------------------------------------------------------------
 // Process detection — single OS call per poll tick, not per game
@@ -113,6 +124,91 @@ let mainWindowRef: BrowserWindowType | null = null;
 let trackedGames: TrackedGame[] = [];
 const activeSessions: Map<string, ActiveSession> = new Map(); // gameId -> session
 
+// Sessions recovered from a previous run that crashed/was force-killed before it
+// could finalize them. Buffered here until the renderer drains them on mount.
+let recoveredSessions: CompletedSession[] = [];
+
+// ---------------------------------------------------------------------------
+// Crash-recovery persistence
+//
+// Active sessions live only in memory, so a crash or force-kill used to lose
+// the entire in-progress play block. We snapshot them to disk every tick and,
+// on the next startup, finalize any leftover sessions up to their last-seen
+// timestamp (never counting the time the app was not running).
+// ---------------------------------------------------------------------------
+
+interface PersistedSession {
+  gameId: string;
+  executablePath: string;
+  startTime: string;
+  idleAccumulatedMs: number;
+  lastSeenMs: number;
+}
+
+function getPersistPath(): string | null {
+  try {
+    return path.join(app.getPath('userData'), 'active-sessions.json');
+  } catch {
+    return null;
+  }
+}
+
+function persistActiveSessions(): void {
+  const file = getPersistPath();
+  if (!file) return;
+  try {
+    if (activeSessions.size === 0) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+      return;
+    }
+    const data: PersistedSession[] = Array.from(activeSessions.values()).map((s) => ({
+      gameId: s.gameId,
+      executablePath: s.executablePath,
+      startTime: s.startTime.toISOString(),
+      idleAccumulatedMs: s.idleAccumulatedMs,
+      lastSeenMs: s.lastSeenMs,
+    }));
+    fs.writeFileSync(file, JSON.stringify(data), 'utf-8');
+  } catch (err) {
+    logger.error('[SessionTracker] Failed to persist active sessions:', err);
+  }
+}
+
+function recoverPersistedSessions(): void {
+  const file = getPersistPath();
+  if (!file) return;
+  try {
+    if (!fs.existsSync(file)) return;
+    const raw = fs.readFileSync(file, 'utf-8');
+    const parsed: unknown = JSON.parse(raw);
+    fs.unlinkSync(file); // consume once
+    if (!Array.isArray(parsed)) return;
+
+    for (const item of parsed as PersistedSession[]) {
+      if (!item || typeof item.gameId !== 'string' || typeof item.startTime !== 'string') continue;
+      const startMs = new Date(item.startTime).getTime();
+      const endMs = Number.isFinite(item.lastSeenMs) ? item.lastSeenMs : startMs;
+      if (!Number.isFinite(startMs) || endMs <= startMs) continue;
+      const idleMs = Number.isFinite(item.idleAccumulatedMs) ? Math.max(0, item.idleAccumulatedMs) : 0;
+      const activeMs = Math.max(0, endMs - startMs - idleMs);
+      recoveredSessions.push({
+        id: uuidv4(),
+        gameId: item.gameId,
+        executablePath: item.executablePath ?? '',
+        startTime: new Date(startMs).toISOString(),
+        endTime: new Date(endMs).toISOString(),
+        durationMinutes: Math.round((activeMs / 60_000) * 100) / 100,
+        idleMinutes: Math.round((idleMs / 60_000) * 100) / 100,
+      });
+    }
+    if (recoveredSessions.length > 0) {
+      logger.log(`[SessionTracker] Recovered ${recoveredSessions.length} unfinalized session(s) from previous run`);
+    }
+  } catch (err) {
+    logger.error('[SessionTracker] Failed to recover persisted sessions:', err);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Core poll loop
 // ---------------------------------------------------------------------------
@@ -134,6 +230,7 @@ function pollTick() {
     // powerMonitor may not be available in all environments
   }
   const isSystemIdle = systemIdleS >= IDLE_THRESHOLD_S;
+  const nowMs = Date.now();
 
   for (const game of trackedGames) {
     const running = isProcessRunning(game.executablePath);
@@ -147,6 +244,8 @@ function pollTick() {
         startTime: new Date(),
         idleAccumulatedMs: 0,
         lastIdleCheck: false,
+        missedPolls: 0,
+        lastSeenMs: nowMs,
       };
       activeSessions.set(game.gameId, session);
 
@@ -157,13 +256,20 @@ function pollTick() {
 
     } else if (running && existingSession) {
       // ---- Game still running — accumulate idle if applicable ----
-      if (isSystemIdle) {
+      // Recovered from a transient miss: clear the counter.
+      existingSession.missedPolls = 0;
+      existingSession.lastSeenMs = nowMs;
+
+      // Only count idle once it has been sustained across two consecutive polls,
+      // so a single idle blip (or controller-only play crossing the threshold for
+      // one tick) doesn't unfairly subtract active time.
+      if (isSystemIdle && existingSession.lastIdleCheck) {
         existingSession.idleAccumulatedMs += POLL_INTERVAL_MS;
       }
       existingSession.lastIdleCheck = isSystemIdle;
 
       // Send live playtime update to the renderer
-      const rawMs = Date.now() - existingSession.startTime.getTime();
+      const rawMs = nowMs - existingSession.startTime.getTime();
       const activeMs = Math.max(0, rawMs - existingSession.idleAccumulatedMs);
       sendToRenderer('session:liveUpdate', {
         gameId: game.gameId,
@@ -171,9 +277,18 @@ function pollTick() {
       });
 
     } else if (!running && existingSession) {
-      // ---- Game stopped ----
-      const endTime = new Date();
-      const rawDurationMs = endTime.getTime() - existingSession.startTime.getTime();
+      // ---- Process not seen this tick ----
+      // Debounce: require several consecutive misses before ending so a single
+      // dropped poll doesn't split one session into fragments.
+      existingSession.missedPolls += 1;
+      if (existingSession.missedPolls < MISSES_BEFORE_END) {
+        continue;
+      }
+
+      // End the session at the LAST time we actually saw it running, so the
+      // missed-poll window is not counted as playtime.
+      const endMs = existingSession.lastSeenMs;
+      const rawDurationMs = endMs - existingSession.startTime.getTime();
       const activeDurationMs = Math.max(0, rawDurationMs - existingSession.idleAccumulatedMs);
 
       const completed: CompletedSession = {
@@ -181,7 +296,7 @@ function pollTick() {
         gameId: game.gameId,
         executablePath: game.executablePath,
         startTime: existingSession.startTime.toISOString(),
-        endTime: endTime.toISOString(),
+        endTime: new Date(endMs).toISOString(),
         durationMinutes: Math.round(activeDurationMs / 60_000 * 100) / 100,
         idleMinutes: Math.round(existingSession.idleAccumulatedMs / 60_000 * 100) / 100,
       };
@@ -198,6 +313,9 @@ function pollTick() {
     }
     // If !running && !existingSession → nothing to do
   }
+
+  // Snapshot in-progress sessions for crash recovery on the next launch.
+  persistActiveSessions();
 }
 
 // ---------------------------------------------------------------------------
@@ -221,12 +339,25 @@ function sendToRenderer(channel: string, data: unknown) {
 export function startSessionTracker(mainWindow: BrowserWindowType) {
   mainWindowRef = mainWindow;
 
+  // Recover any sessions left unfinalized by a previous crash/force-kill.
+  recoverPersistedSessions();
+
   if (pollTimer) {
     clearInterval(pollTimer);
   }
 
   pollTimer = setInterval(pollTick, POLL_INTERVAL_MS);
   logger.log('[SessionTracker] Started (polling every 15s)');
+}
+
+/**
+ * Drain sessions recovered from a previous run. The renderer calls this once on
+ * mount and records them, so playtime from a crashed session is not lost.
+ */
+export function drainRecoveredSessions(): CompletedSession[] {
+  const out = recoveredSessions;
+  recoveredSessions = [];
+  return out;
 }
 
 export function stopSessionTracker() {
@@ -256,6 +387,9 @@ export function stopSessionTracker() {
   }
 
   activeSessions.clear();
+  // We finalized everything cleanly — drop the crash-recovery snapshot so we
+  // don't double-count these sessions on the next launch.
+  persistActiveSessions();
   mainWindowRef = null;
   logger.log('[SessionTracker] Stopped');
 }
