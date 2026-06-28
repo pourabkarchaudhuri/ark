@@ -1386,6 +1386,18 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const useSemantics = embeddingCoverage > 0;
   const hasPrecomputedScores = !!input.precomputedSemanticScores;
   const precomputedScores = input.precomputedSemanticScores ?? {};
+
+  // Graph metrics from persisted neighbor graph (optional — present when gameGraphStore has built it)
+  const graphScores = input.graphScores ?? {};
+  const userCommunityCounts = input.userCommunityCounts ?? {};
+  const userCommunityTotal = Math.max(1, input.userCommunityTotal ?? 0);
+  const hasGraphScores = Object.keys(graphScores).length > 0;
+  let maxGraphPageRank = 1e-9;
+  if (hasGraphScores) {
+    for (const g of Object.values(graphScores)) {
+      if (g.pageRank > maxGraphPageRank) maxGraphPageRank = g.pageRank;
+    }
+  }
   // Always build the centroid when available — backlog advisor + cluster detection need it
   // even when per-candidate scoring uses precomputed scores.
   const tasteCentroid: Float64Array | null = useSemantics && input.tasteCentroid
@@ -1471,6 +1483,11 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const W_FRANCHISE    = 0.08;
   const W_STUDIO       = 0.05;
   const W_SEQUENCING   = 0.04;
+  // Graph metrics — only active when gameGraphStore has built the persisted neighbor graph.
+  // Split a 0.06 budget: 60% community affinity (sharper signal), 40% PageRank quality propagation.
+  const graphBudget    = hasGraphScores ? 0.06 : 0;
+  const W_GRAPH_COMMUNITY = graphBudget * 0.60;
+  const W_GRAPH_PAGERANK  = graphBudget * 0.40;
 
   // ML model weight — proportional to coverage. Unused budget goes to content + quality.
   const mlCoverage = filteredCandidates.filter(c => c.mlScore != null).length / Math.max(1, filteredCandidates.length);
@@ -1594,6 +1611,18 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     // ML model signal: P(recommended) from Kaggle-trained LightGBM (0..1)
     const mlSignal = c.mlScore ?? 0.5;
 
+    // Layer 14: Graph metrics (PageRank quality propagation + Louvain community affinity)
+    let graphPageRankSignal = 0;
+    let graphCommunityAffinity = 0;
+    if (hasGraphScores) {
+      const gs = graphScores[c.gameId];
+      if (gs) {
+        graphPageRankSignal = clamp01(gs.pageRank / maxGraphPageRank);
+        const inCommunity = userCommunityCounts[gs.community] ?? 0;
+        graphCommunityAffinity = clamp01(inCommunity / userCommunityTotal);
+      }
+    }
+
     // Final composite score
     const score = clamp01(
       contentSimilarity * (W_CONTENT + W_CONTENT_ML) +
@@ -1609,7 +1638,9 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
       franchiseBoost * W_FRANCHISE +
       studioLoyaltyBoost * W_STUDIO +
       sequencingBoost * W_SEQUENCING +
-      mlSignal * W_ML -
+      mlSignal * W_ML +
+      graphPageRankSignal * W_GRAPH_PAGERANK +
+      graphCommunityAffinity * W_GRAPH_COMMUNITY -
       negativeSignal * W_NEGATIVE
     );
     if (!Number.isFinite(score)) continue;
@@ -1646,6 +1677,8 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
         studioLoyaltyBoost,
         sequencingBoost,
         mlSignal,
+        graphPageRankSignal,
+        graphCommunityAffinity,
       },
       reasons: {
         sharedGenres,

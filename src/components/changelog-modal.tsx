@@ -9,6 +9,19 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.40': {
+    title: "What's New in Ark 1.0.40",
+    changes: [
+      'Embedding speed — Switched to single-request array batching, GPU mode auto-detected at boot, full layer offload forced (num_gpu=999), Ollama internal batch raised to 2048, and concurrent in-flight requests on GPU. Catalog embedding passes are dramatically faster on machines with a GPU and stay polite on CPU-only setups.',
+      'Polite background mode — When you alt-tab or minimize Ark, embedding work automatically throttles to a small batch, single in-flight request, and 100 ms cooldown between bursts. The foreground app (game, browser, anything) gets uncontended GPU time. Returning to Ark snaps embedding back to full throughput.',
+      'VRAM auto-fallback — On GPUs with tight VRAM, the embedding worker now silently steps the internal batch size down (2048 → 1024 → 512 → Ollama default) on the first all-null response. No more silent zero-embed runs.',
+      'Length-sorted batching — Embedding sub-batches are now sorted by text length so similar-length items cluster together. Tighter per-batch timing; small throughput win when running 2 concurrent batches.',
+      'Embed diagnostic — New IPC probe (`window.ollama.embedDiagnostic()`) returns GPU mode, VRAM bytes, embeds/sec, ms/embed, and the live profile (num_batch, sub_batch, polite flag). Use from devtools when speed feels off.',
+      'Auto-install embedding model — First-launch updaters get the 1.2 GB arctic-embed2 model pulled automatically during splash. The "Enter Ark" button is gated while the pull is in progress so you do not enter into a half-ready reco engine. Already-installed users see no extra wait.',
+      'Configurable model quantization — Power users can override the embedding model tag via the `ARK_EMBEDDING_MODEL_TAG` env var (e.g. a manually quantized Q8 GGUF) for ~2× faster inference at near-zero accuracy loss. Default is unchanged; only opt-in.',
+      'Model kept hot — Ollama embedding model now pinned with `keep_alive: -1` so you never pay the ~80 s reload cost between embedding bursts.',
+    ],
+  },
   '1.0.39': {
     title: "What's New in Ark 1.0.39",
     changes: [

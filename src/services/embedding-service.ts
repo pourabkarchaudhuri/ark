@@ -49,6 +49,37 @@ declare global {
         documents: string[];
         topN?: number;
       }) => Promise<{ results: Array<{ index: number; relevance_score: number }> } | null>;
+      /** Diagnostic probe — surfaces exactly why rerank is failing (Ollama down, model missing, etc.). */
+      rerankDiagnostic?: () => Promise<{
+        ollamaUp: boolean;
+        modelName: string;
+        modelInstalled: boolean;
+        rerankWorking: boolean;
+        latencyMs?: number;
+        error?: string;
+      }>;
+      /** Embed perf probe — concrete numbers (embeds/sec, GPU mode, VRAM, current profile). */
+      embedDiagnostic?: () => Promise<{
+        ollamaUp: boolean;
+        ollamaVersion: string | null;
+        modelLoaded: boolean;
+        onGpu: boolean;
+        sizeVramBytes: number;
+        sizeBytes: number;
+        probe: {
+          items: number;
+          avgTextChars: number;
+          totalMs: number;
+          embedsPerSec: number;
+          msPerEmbed: number;
+          successful: number;
+          numBatchUsed: number | 'default';
+          subBatchUsed: number;
+          inFlight: number;
+          backgroundMode: boolean;
+        } | null;
+        error: string | null;
+      }>;
     };
   }
 }
@@ -63,11 +94,16 @@ interface CachedEmbedding {
 // ─── IDB Helpers ───────────────────────────────────────────────────────────────
 
 const DB_NAME = 'ark-embeddings';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const LIBRARY_STORE = 'embeddings';
 const CATALOG_STORE = 'catalog-embeddings';
+const META_STORE = 'embedding-meta'; // small key/value store for watermarks
 const LIBRARY_TTL = 30 * 24 * 60 * 60 * 1000;  // 30 days
 const CATALOG_TTL = 90 * 24 * 60 * 60 * 1000;  // 90 days
+
+// Refresh an entry's IDB timestamp lazily only when it's older than this.
+// Avoids hammering IDB with timestamp-only updates on every launch.
+const TTL_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 let embDbInstance: IDBDatabase | null = null;
 let embDbPromise: Promise<IDBDatabase> | null = null;
@@ -86,6 +122,9 @@ function getDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(CATALOG_STORE)) {
         db.createObjectStore(CATALOG_STORE, { keyPath: 'gameId' });
+      }
+      if (!db.objectStoreNames.contains(META_STORE)) {
+        db.createObjectStore(META_STORE, { keyPath: 'key' });
       }
     };
     req.onsuccess = () => {
@@ -138,12 +177,87 @@ async function saveCachedEmbeddings(
   });
 }
 
+// ─── Embedding meta (watermark / per-store small key-value) ─────────────────
+
+interface EmbeddingPassWatermark {
+  key: string;
+  /** Catalog sync timestamp at the time the embedding pass completed. */
+  syncTimestamp: number;
+  /** Embedding text + model version stamp valid at the time of the pass. */
+  versionStamp: string;
+  /** When the pass completed (debug). */
+  completedAt: number;
+}
+
+async function getEmbeddingMeta<T extends { key: string }>(key: string): Promise<T | null> {
+  const db = await getDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(META_STORE, 'readonly');
+    const req = tx.objectStore(META_STORE).get(key);
+    req.onsuccess = () => resolve((req.result as T | undefined) ?? null);
+    req.onerror = () => resolve(null);
+  });
+}
+
+async function setEmbeddingMeta<T extends { key: string }>(value: T): Promise<void> {
+  const db = await getDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(META_STORE, 'readwrite');
+    tx.objectStore(META_STORE).put(value);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+  });
+}
+
+/**
+ * Refresh just the IDB `timestamp` field on a set of cached entries so they don't
+ * expire from TTL — without re-embedding. Used when hash matched but the cached
+ * vector is getting close to TTL expiry.
+ */
+async function refreshCachedTimestamps(
+  ids: string[],
+  storeName: string,
+): Promise<void> {
+  if (ids.length === 0) return;
+  const db = await getDB();
+  const now = Date.now();
+  return new Promise((resolve) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    for (const id of ids) {
+      const getReq = store.get(id);
+      getReq.onsuccess = () => {
+        const entry = getReq.result as CachedEmbedding | undefined;
+        if (entry) {
+          entry.timestamp = now;
+          store.put(entry);
+        }
+      };
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+  });
+}
+
 // ─── Text Hashing (simple djb2) ────────────────────────────────────────────────
 
+/**
+ * Bump when the prompt-construction layout changes (gen text shape, field set, ordering).
+ * Pure cache invalidation — does not depend on the embedding model.
+ */
 export const EMBEDDING_TEXT_VERSION = 10;
 
+/**
+ * Bump when the embedding model itself changes (Ollama model swap, dimensionality
+ * change). Invalidates all cached vectors even if prompt text is unchanged.
+ */
+export const EMBEDDING_MODEL_VERSION = 1;
+
+/** Combined version stamp folded into every hash. */
+const HASH_VERSION_PREFIX = `t${EMBEDDING_TEXT_VERSION}m${EMBEDDING_MODEL_VERSION}`;
+
 function hashText(text: string): string {
-  const versioned = `v${EMBEDDING_TEXT_VERSION}:${text}`;
+  const versioned = `${HASH_VERSION_PREFIX}:${text}`;
   let hash = 5381;
   for (let i = 0; i < versioned.length; i++) {
     hash = ((hash << 5) + hash + versioned.charCodeAt(i)) & 0xFFFFFFFF;
@@ -333,6 +447,30 @@ async function getCatalogHashIndex(): Promise<Map<string, string>> {
 }
 
 /**
+ * Load only gameId → timestamp from the catalog embedding store. Used in
+ * conjunction with the hash index to decide which unchanged entries are
+ * approaching TTL expiry and need a timestamp refresh.
+ */
+async function getCatalogTimestampIndex(): Promise<Map<string, number>> {
+  const db = await getDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(CATALOG_STORE, 'readonly');
+    const store = tx.objectStore(CATALOG_STORE);
+    const req = store.openCursor();
+    const map = new Map<string, number>();
+
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) { resolve(map); return; }
+      const entry = cursor.value as CachedEmbedding;
+      map.set(entry.gameId, entry.timestamp);
+      cursor.continue();
+    };
+    req.onerror = () => resolve(new Map());
+  });
+}
+
+/**
  * Fetch catalog embeddings for a specific set of game IDs (on-demand).
  * Avoids loading the entire catalog embedding store into memory.
  */
@@ -371,11 +509,31 @@ let embeddingCacheRef = new Map<string, number[]>();
 
 // ─── Embedding Service ─────────────────────────────────────────────────────────
 
+const PAUSE_LS_KEY = 'ark-embedding-paused';
+
+function readPausedFromStorage(): boolean {
+  try { return localStorage.getItem(PAUSE_LS_KEY) === '1'; } catch { return false; }
+}
+
+function writePausedToStorage(paused: boolean): void {
+  try {
+    if (paused) localStorage.setItem(PAUSE_LS_KEY, '1');
+    else localStorage.removeItem(PAUSE_LS_KEY);
+  } catch { /* quota */ }
+}
+
 class EmbeddingService {
   private ollamaAvailable: boolean | null = null;
   private embeddingModelReady = false;
   private _embeddingsLoaded = false;
   private _loadedCount = 0;
+
+  // ── Pause/Resume state (dev-mode controllable) ──
+  // Persisted in localStorage so a pause survives app reloads.
+  private _paused = readPausedFromStorage();
+  private _pauseDeferred: { promise: Promise<void>; resolve: () => void } | null = null;
+
+  private _libraryAbort: AbortController | null = null;
 
   private _listeners = new Set<() => void>();
 
@@ -385,6 +543,50 @@ class EmbeddingService {
   }
 
   private _notify() { this._listeners.forEach(fn => fn()); }
+
+  // ── Pause / Resume ──
+  /** True when all embedding gen loops are halted between batches. */
+  get isPaused(): boolean { return this._paused; }
+
+  /** Halt all embedding gen loops at the next batch boundary. Persists across reloads. */
+  pause(): void {
+    if (this._paused) return;
+    this._paused = true;
+    if (!this._pauseDeferred) {
+      let resolve!: () => void;
+      const promise = new Promise<void>(r => { resolve = r; });
+      this._pauseDeferred = { promise, resolve };
+    }
+    writePausedToStorage(true);
+    this._notify();
+  }
+
+  /** Resume any embedding gen loops that were waiting at a pause point. */
+  resume(): void {
+    if (!this._paused) return;
+    this._paused = false;
+    const deferred = this._pauseDeferred;
+    this._pauseDeferred = null;
+    writePausedToStorage(false);
+    deferred?.resolve();
+    this._notify();
+  }
+
+  /**
+   * Await this between loop iterations to honor a pause. Returns immediately
+   * when not paused; otherwise blocks until resume() is called. Lazily creates
+   * the deferred when paused state was restored from localStorage on startup.
+   */
+  private async _awaitIfPaused(): Promise<void> {
+    while (this._paused) {
+      if (!this._pauseDeferred) {
+        let resolve!: () => void;
+        const promise = new Promise<void>(r => { resolve = r; });
+        this._pauseDeferred = { promise, resolve };
+      }
+      await this._pauseDeferred.promise;
+    }
+  }
 
   /** Number of embeddings currently loaded (survives across component mounts). */
   get loadedCount(): number {
@@ -605,6 +807,8 @@ class EmbeddingService {
     if (games.length === 0) return 0;
 
     this._setLibraryStatus('generating');
+    this._libraryAbort = new AbortController();
+    const librarySignal = this._libraryAbort.signal;
 
     try {
       const cached = await getCachedEmbeddings();
@@ -638,6 +842,9 @@ class EmbeddingService {
       let completed = 0;
 
       for (let i = 0; i < needsEmbedding.length; i += BATCH_SIZE) {
+        await this._awaitIfPaused();
+        if (librarySignal.aborted) break;
+
         const batch = needsEmbedding.slice(i, i + BATCH_SIZE);
         const items = batch.map(b => ({ id: b.id, text: b.text }));
 
@@ -666,7 +873,7 @@ class EmbeddingService {
         onProgress?.(completed, needsEmbedding.length);
 
         if (i + BATCH_SIZE < needsEmbedding.length) {
-          await new Promise(r => setTimeout(r, 0));
+          await new Promise(r => setTimeout(r, 50));
         }
       }
 
@@ -692,6 +899,8 @@ class EmbeddingService {
       console.warn('[EmbeddingService] Error generating embeddings:', err);
       this._setLibraryStatus('unavailable');
       return 0;
+    } finally {
+      this._libraryAbort = null;
     }
   }
 
@@ -727,21 +936,35 @@ class EmbeddingService {
     this._catalogAbort = null;
   }
 
+  /** Cancel an in-flight library embedding run. */
+  cancelLibraryEmbeddings() {
+    this._libraryAbort?.abort();
+    this._libraryAbort = null;
+  }
+
   /**
    * Background Tier 2: generate embeddings for catalog entries streamed from
    * the catalog store. Idempotent — if already running, returns the existing
    * promise so navigation away and back doesn't restart the work.
+   *
+   * @param opts.storeKey            Watermark key, e.g. 'steam-catalog'. Required
+   *                                 to use the skip-scan optimization.
+   * @param opts.lastSyncTimestamp   When the source catalog was last synced. If
+   *                                 ≤ the recorded watermark AND version stamp
+   *                                 matches, the cursor scan is skipped entirely.
    */
   generateCatalogEmbeddings(
     catalogIterator: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>,
+    opts?: { storeKey?: string; lastSyncTimestamp?: number },
   ): Promise<number> {
     if (this._catalogPromise) return this._catalogPromise;
-    this._catalogPromise = this._runCatalogEmbeddings(catalogIterator);
+    this._catalogPromise = this._runCatalogEmbeddings(catalogIterator, opts);
     return this._catalogPromise;
   }
 
   private async _runCatalogEmbeddings(
     catalogIterator: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>,
+    opts?: { storeKey?: string; lastSyncTimestamp?: number },
   ): Promise<number> {
     if (!(await this.isAvailable())) { this._catalogPromise = null; return 0; }
 
@@ -750,11 +973,36 @@ class EmbeddingService {
     const signal = this._catalogAbort.signal;
     this._notify();
 
+    const storeKey = opts?.storeKey ?? 'steam-catalog';
+    const lastSyncTimestamp = opts?.lastSyncTimestamp ?? 0;
+
     try {
+      // ─── Watermark short-circuit ──────────────────────────────────────────
+      // If the source catalog hasn't been re-synced since our last embedding
+      // pass AND the version stamp is unchanged, skip the entire cursor scan.
+      const watermark = await getEmbeddingMeta<EmbeddingPassWatermark>(storeKey);
+      const canSkipScan =
+        watermark &&
+        lastSyncTimestamp > 0 &&
+        lastSyncTimestamp <= watermark.syncTimestamp &&
+        watermark.versionStamp === HASH_VERSION_PREFIX;
+
+      if (canSkipScan) {
+        console.log(`[EmbeddingService] Catalog unchanged since last pass — skipping scan (${storeKey})`);
+        if (!annIndex.isReady) {
+          await this._backfillAnnIndex();
+        }
+        annIndex.finishBuild();
+        return 0;
+      }
+
       const cachedHashes = await getCatalogHashIndex();
+      const cachedTimestamps = await getCatalogTimestampIndex();
 
       const needsEmbedding: Array<{ id: string; text: string; hash: string }> = [];
+      const refreshTimestampIds: string[] = [];
       let scannedTotal = 0;
+      const refreshCutoff = Date.now() - TTL_REFRESH_THRESHOLD_MS;
 
       await catalogIterator((batch) => {
         for (const entry of batch) {
@@ -762,13 +1010,26 @@ class EmbeddingService {
           const text = buildCatalogEmbeddingText(entry);
           const hash = hashText(text);
           const existingHash = cachedHashes.get(id);
-          if (existingHash === hash) continue;
+          if (existingHash === hash) {
+            // Same content — just touch the timestamp if it's getting stale.
+            const ts = cachedTimestamps.get(id) ?? 0;
+            if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
+            continue;
+          }
           needsEmbedding.push({ id, text, hash });
         }
         scannedTotal += batch.length;
       });
 
       cachedHashes.clear();
+      cachedTimestamps.clear();
+
+      if (refreshTimestampIds.length > 0) {
+        // Fire-and-forget — purely a TTL extension, never blocks user-facing work.
+        refreshCachedTimestamps(refreshTimestampIds, CATALOG_STORE)
+          .then(() => console.log(`[EmbeddingService] Refreshed TTL for ${refreshTimestampIds.length} unchanged catalog entries`))
+          .catch(() => { /* non-fatal */ });
+      }
 
       if (needsEmbedding.length === 0) {
         console.log(`[EmbeddingService] All ${scannedTotal} catalog embeddings already cached`);
@@ -777,6 +1038,15 @@ class EmbeddingService {
           await this._backfillAnnIndex();
         }
         annIndex.finishBuild();
+        // Write watermark — scan was clean, no work needed for current sync state.
+        if (lastSyncTimestamp > 0) {
+          await setEmbeddingMeta<EmbeddingPassWatermark>({
+            key: storeKey,
+            syncTimestamp: lastSyncTimestamp,
+            versionStamp: HASH_VERSION_PREFIX,
+            completedAt: Date.now(),
+          });
+        }
         return 0;
       }
 
@@ -785,11 +1055,12 @@ class EmbeddingService {
       this._notify();
 
       const EMBED_BATCH = 100;
-      const IDLE_DELAY_MS = 50;
+      const IDLE_DELAY_MS = 200;
       let totalGenerated = 0;
       let completed = 0;
 
       for (let i = 0; i < needsEmbedding.length; i += EMBED_BATCH) {
+        await this._awaitIfPaused();
         if (signal.aborted) break;
 
         const batch = needsEmbedding.slice(i, i + EMBED_BATCH);
@@ -844,6 +1115,17 @@ class EmbeddingService {
       }
       annIndex.finishBuild();
 
+      // Only write the watermark when the pass ran to completion (not aborted).
+      // A partial pass would otherwise look like full coverage on next launch.
+      if (!signal.aborted && lastSyncTimestamp > 0) {
+        await setEmbeddingMeta<EmbeddingPassWatermark>({
+          key: storeKey,
+          syncTimestamp: lastSyncTimestamp,
+          versionStamp: HASH_VERSION_PREFIX,
+          completedAt: Date.now(),
+        });
+      }
+
       console.log(`[EmbeddingService] Catalog embeddings done: ${totalGenerated} generated`);
       return totalGenerated;
     } catch (err) {
@@ -868,14 +1150,16 @@ class EmbeddingService {
 
   generateEpicCatalogEmbeddings(
     epicIterator: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>,
+    opts?: { storeKey?: string; lastSyncTimestamp?: number },
   ): Promise<number> {
     if (this._epicCatalogPromise) return this._epicCatalogPromise;
-    this._epicCatalogPromise = this._runEpicCatalogEmbeddings(epicIterator);
+    this._epicCatalogPromise = this._runEpicCatalogEmbeddings(epicIterator, opts);
     return this._epicCatalogPromise;
   }
 
   private async _runEpicCatalogEmbeddings(
     epicIterator: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>,
+    opts?: { storeKey?: string; lastSyncTimestamp?: number },
   ): Promise<number> {
     // Wait for any in-flight Steam catalog embedding run to finish first
     if (this._catalogPromise) {
@@ -889,11 +1173,30 @@ class EmbeddingService {
     const signal = this._catalogAbort.signal;
     this._notify();
 
+    const storeKey = opts?.storeKey ?? 'epic-catalog';
+    const lastSyncTimestamp = opts?.lastSyncTimestamp ?? 0;
+
     try {
+      // Watermark short-circuit (see Steam loop for full explanation).
+      const watermark = await getEmbeddingMeta<EmbeddingPassWatermark>(storeKey);
+      const canSkipScan =
+        watermark &&
+        lastSyncTimestamp > 0 &&
+        lastSyncTimestamp <= watermark.syncTimestamp &&
+        watermark.versionStamp === HASH_VERSION_PREFIX;
+
+      if (canSkipScan) {
+        console.log(`[EmbeddingService] Epic catalog unchanged since last pass — skipping scan`);
+        return 0;
+      }
+
       const cachedHashes = await getCatalogHashIndex();
+      const cachedTimestamps = await getCatalogTimestampIndex();
 
       const needsEmbedding: Array<{ id: string; text: string; hash: string }> = [];
+      const refreshTimestampIds: string[] = [];
       let scannedTotal = 0;
+      const refreshCutoff = Date.now() - TTL_REFRESH_THRESHOLD_MS;
 
       await epicIterator((batch) => {
         for (const entry of batch) {
@@ -901,16 +1204,35 @@ class EmbeddingService {
           const text = buildEpicCatalogEmbeddingText(entry);
           const hash = hashText(text);
           const existingHash = cachedHashes.get(id);
-          if (existingHash === hash) continue;
+          if (existingHash === hash) {
+            const ts = cachedTimestamps.get(id) ?? 0;
+            if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
+            continue;
+          }
           needsEmbedding.push({ id, text, hash });
         }
         scannedTotal += batch.length;
       });
 
       cachedHashes.clear();
+      cachedTimestamps.clear();
+
+      if (refreshTimestampIds.length > 0) {
+        refreshCachedTimestamps(refreshTimestampIds, CATALOG_STORE)
+          .then(() => console.log(`[EmbeddingService] Refreshed TTL for ${refreshTimestampIds.length} unchanged Epic entries`))
+          .catch(() => { /* non-fatal */ });
+      }
 
       if (needsEmbedding.length === 0) {
         console.log(`[EmbeddingService] All ${scannedTotal} Epic catalog embeddings already cached`);
+        if (lastSyncTimestamp > 0) {
+          await setEmbeddingMeta<EmbeddingPassWatermark>({
+            key: storeKey,
+            syncTimestamp: lastSyncTimestamp,
+            versionStamp: HASH_VERSION_PREFIX,
+            completedAt: Date.now(),
+          });
+        }
         return 0;
       }
 
@@ -919,11 +1241,12 @@ class EmbeddingService {
       this._notify();
 
       const EMBED_BATCH = 100;
-      const IDLE_DELAY_MS = 50;
+      const IDLE_DELAY_MS = 200;
       let totalGenerated = 0;
       let completed = 0;
 
       for (let i = 0; i < needsEmbedding.length; i += EMBED_BATCH) {
+        await this._awaitIfPaused();
         if (signal.aborted) break;
 
         const batch = needsEmbedding.slice(i, i + EMBED_BATCH);
@@ -971,6 +1294,15 @@ class EmbeddingService {
         console.log(`[EmbeddingService] ANN index saved (Epic): ${annIndex.vectorCount} vectors`);
       }
 
+      if (!signal.aborted && lastSyncTimestamp > 0) {
+        await setEmbeddingMeta<EmbeddingPassWatermark>({
+          key: storeKey,
+          syncTimestamp: lastSyncTimestamp,
+          versionStamp: HASH_VERSION_PREFIX,
+          completedAt: Date.now(),
+        });
+      }
+
       console.log(`[EmbeddingService] Epic catalog embeddings done: ${totalGenerated} generated`);
       return totalGenerated;
     } catch (err) {
@@ -995,6 +1327,16 @@ class EmbeddingService {
     const now = Date.now();
     const seen = new Set<string>();
     let sent = 0;
+
+    // Yield to the main thread so the cursor sweep + ANN.addVectors calls
+    // don't block UI / IPC for the ~30s a full 150K backfill takes.
+    const yieldToEventLoop = () => new Promise<void>(resolve => {
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(() => resolve(), { timeout: 50 });
+      } else {
+        setTimeout(resolve, 0);
+      }
+    });
 
     const streamStore = (storeName: string, ttl: number) =>
       new Promise<void>((resolve, reject) => {
@@ -1028,7 +1370,10 @@ class EmbeddingService {
             batch.push({ id: entry.gameId, vector: entry.embedding });
           }
           if (batch.length >= BATCH) {
-            flushBatch().then(() => cursor.continue(), reject);
+            // Yield after each flush so other work (UI, IPC, sync) gets cycles.
+            flushBatch()
+              .then(yieldToEventLoop)
+              .then(() => cursor.continue(), reject);
           } else {
             cursor.continue();
           }

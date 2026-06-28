@@ -141,6 +141,10 @@ export interface ScoredGame {
     studioLoyaltyBoost: number;
     sequencingBoost: number;
     mlSignal?: number;
+    /** PageRank propagation through persisted ANN edges (only when gameGraphStore is ready). */
+    graphPageRankSignal?: number;
+    /** Fraction of user library in candidate's Louvain community (only when gameGraphStore is ready). */
+    graphCommunityAffinity?: number;
   };
   reasons: MatchReasons;
   /** Human-readable explanation of why this was recommended. */
@@ -160,6 +164,17 @@ export interface LayerBreakdown {
   rawScore: number;
   normalizedScore: number;
   percentage: number;
+}
+
+/**
+ * Per-game graph metric scores set by reco.worker.ts when graphScores is supplied.
+ * Optional — absent when the persisted graph isn't built yet.
+ */
+export interface GraphLayerScores {
+  /** PageRank propagation: candidate's score boosted by quality of its ANN neighbors. */
+  graphPageRankSignal?: number;
+  /** Community affinity: fraction of user library that lives in this candidate's community. */
+  graphCommunityAffinity?: number;
 }
 
 // ─── Shelves ───────────────────────────────────────────────────────────────────
@@ -298,6 +313,27 @@ export interface RecoWorkerInput {
    * payload to avoid expensive structured-clone serialization.
    */
   precomputedSemanticScores?: Record<string, number>;
+  /**
+   * Per-game graph metrics from the persisted neighbor graph.
+   * When present, the worker can apply PageRank propagation, community-affinity, and
+   * personalized-PageRank-derived scoring.
+   * Built by `gameGraphStore`; omitted if the graph isn't ready yet.
+   */
+  graphScores?: Record<string, {
+    pageRank: number;
+    personalizedPageRank: number;
+    authority: number;
+    hub: number;
+    community: number;
+    degree: number;
+  }>;
+  /**
+   * Map of the user's library game IDs to their Louvain community.
+   * Lets the worker compute "fraction of library in same community as candidate" cheaply.
+   */
+  userCommunityCounts?: Record<number, number>;
+  /** Total number of user library games that had a graph community assignment. */
+  userCommunityTotal?: number;
 }
 
 /** Progress updates from the worker. */

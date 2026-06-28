@@ -335,13 +335,31 @@ vi.mock('@/services/epic-service', async (importOriginal) => {
 });
 
 describe('getTopSellers', () => {
+  let originalFetch: typeof globalThis.fetch | undefined;
+
   beforeEach(() => {
     (globalThis as typeof window & { window?: Window }).window = globalThis.window ?? ({} as Window);
     (globalThis.window as Window & { egdata?: unknown }).egdata = undefined;
+
+    // Stub global fetch so `fetchEgdataTopSellersFromRenderer` (which talks to
+    // api.egdata.app) returns an empty list deterministically. Without this,
+    // jsdom hits the real network and may return live top-sellers data —
+    // causing the catalog mock (which is what we're actually testing) to
+    // never fire because the renderer path already filled `epicGames`.
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ elements: [] }),
+    }) as unknown as typeof globalThis.fetch;
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    if (originalFetch) {
+      globalThis.fetch = originalFetch;
+    } else {
+      delete (globalThis as { fetch?: unknown }).fetch;
+    }
   });
 
   it('uses Epic catalog when egdata unavailable and returns many Epic games', async () => {

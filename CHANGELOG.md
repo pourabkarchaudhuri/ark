@@ -4,6 +4,23 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.40] - 2026-06-28
+
+### Performance
+- **Embedding throughput** — Single-request array batching to Ollama (replaces 20-way parallel requests). GPU mode auto-detected at boot; full layer offload forced (`num_gpu=999`); Ollama internal batch raised to 2048; two concurrent in-flight requests on GPU. Catalog embedding passes are dramatically faster on GPU-capable machines and stay polite on CPU-only setups.
+- **Length-sorted batching** — Embedding sub-batches sorted by text length so similar-length items cluster together, improving worker-queue utilisation when concurrent in-flight is active.
+- **Model kept hot** — Ollama embedding model pinned with `keep_alive: -1` so the ~80 s reload cost between bursts is gone.
+
+### Added
+- **Polite background mode** — When Ark is unfocused/minimised for ≥2 s (or instantly on hide), embedding work drops to a small sub-batch + single in-flight + 100 ms cooldown so a foreground game gets uncontended GPU time. Snaps back to full throughput on refocus.
+- **VRAM auto-fallback** — On tight-VRAM GPUs, the embedding worker silently steps the internal batch size down (2048 → 1024 → 512 → Ollama default) on the first all-null response. No more silent zero-embed runs.
+- **Embed diagnostic IPC** — `window.ollama.embedDiagnostic()` returns GPU mode, VRAM bytes, embeds/sec, ms/embed, and the live profile. Run from devtools to get concrete throughput numbers.
+- **Auto-install embedding model in splash** — First-launch updaters get the 1.2 GB arctic-embed2 model pulled automatically during splash. "Enter Ark" is gated while the pull is in progress so the reco engine isn't half-ready when the user enters. Already-installed users see no extra wait.
+- **Configurable model quantization (opt-in)** — `ARK_EMBEDDING_MODEL_TAG` env var overrides the embedding model tag (validation enforces `snowflake-arctic-embed2:*` prefix to preserve embedding-space compatibility). Power users running their own quantized GGUF can opt in without touching code.
+
+### Fixed
+- **`getTopSellers` Epic catalog tests** — Stubbed global fetch in test setup so `fetchEgdataTopSellersFromRenderer` returns empty deterministically instead of hitting api.egdata.app over the live network. Catalog mock now fires reliably; both `epic catalog when egdata unavailable` and `epic catalog when egdata would throw` tests pass.
+
 ## [1.0.37] - 2026-04-13
 
 ### Added

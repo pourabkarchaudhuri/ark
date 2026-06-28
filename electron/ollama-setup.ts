@@ -17,7 +17,42 @@ import { logger } from './safe-logger.js';
 import { settingsStore } from './settings-store.js';
 import http from 'http';
 
+// Base model name (no tag). Used for matching loaded/installed models in
+// /api/tags and /api/ps listings — we accept any quantization variant of
+// arctic-embed2 since they all produce 1024-dim vectors in the same space.
 const EMBEDDING_MODEL = 'snowflake-arctic-embed2';
+
+/**
+ * Resolve the active embedding-model TAG (name + optional quantization suffix).
+ *
+ * Priority:
+ *   1. `ARK_EMBEDDING_MODEL_TAG` env var — power-user override for quantized variants
+ *      (e.g. `snowflake-arctic-embed2:568m-q8_0`). Pre-pull the tag with
+ *      `ollama pull <tag>` before setting the env var.
+ *   2. Default `snowflake-arctic-embed2` (Ollama resolves to :latest, F16).
+ *
+ * VALIDATION: tag must start with `snowflake-arctic-embed2` so users can't
+ * accidentally swap to a different model — embedding-space compatibility
+ * (1024 dims, same training distribution) must hold across cached vectors.
+ * If you swap models intentionally, also bump EMBEDDING_MODEL_VERSION in
+ * src/services/embedding-service.ts to invalidate cached vectors.
+ */
+let _resolvedTag: string | null = null;
+export function getEmbeddingModelTag(): string {
+  if (_resolvedTag) return _resolvedTag;
+  const envTag = process.env.ARK_EMBEDDING_MODEL_TAG?.trim();
+  if (envTag && envTag.length > 0) {
+    if (envTag === EMBEDDING_MODEL || envTag.startsWith(`${EMBEDDING_MODEL}:`)) {
+      _resolvedTag = envTag;
+      logger.log(`[Ollama Setup] Using embedding model tag from env: ${envTag}`);
+      return envTag;
+    }
+    logger.warn(`[Ollama Setup] ARK_EMBEDDING_MODEL_TAG="${envTag}" rejected — must start with "${EMBEDDING_MODEL}" to preserve embedding-space compatibility. Falling back to default.`);
+  }
+  _resolvedTag = EMBEDDING_MODEL;
+  return _resolvedTag;
+}
+
 const PULL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max for model pull (1.2 GB)
 const HEALTH_TIMEOUT_MS = 15_000; // 15s — Ollama can be slow to respond on loaded machines
 const LIST_TIMEOUT_MS = 15_000; // 15s for listing models
@@ -67,13 +102,14 @@ export async function isOllamaRunning(): Promise<{ running: boolean; version: st
 }
 
 /**
- * List currently installed models.
+ * List currently installed models. Returns both bare base names AND full tagged
+ * forms so callers can match either pattern.
  */
-async function listModels(): Promise<string[]> {
+async function listModels(): Promise<{ baseNames: string[]; fullTags: string[] }> {
   const settings = settingsStore.getOllamaSettings();
   const url = settings.url || 'http://localhost:11434';
 
-  return new Promise<string[]>((resolve) => {
+  return new Promise<{ baseNames: string[]; fullTags: string[] }>((resolve) => {
     const urlObj = new URL(url);
     const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
     const port = parseInt(urlObj.port) || 11434;
@@ -86,17 +122,18 @@ async function listModels(): Promise<string[]> {
         res.on('end', () => {
           try {
             const parsed = JSON.parse(data) as { models?: Array<{ name: string }> };
-            const names = (parsed.models || []).map((m) => m.name.split(':')[0]);
-            resolve(names);
+            const fullTags = (parsed.models || []).map((m) => m.name);
+            const baseNames = fullTags.map((n) => n.split(':')[0]);
+            resolve({ baseNames, fullTags });
           } catch {
-            resolve([]);
+            resolve({ baseNames: [], fullTags: [] });
           }
         });
       },
     );
 
-    req.on('error', () => resolve([]));
-    req.on('timeout', () => { req.destroy(); resolve([]); });
+    req.on('error', () => resolve({ baseNames: [], fullTags: [] }));
+    req.on('timeout', () => { req.destroy(); resolve({ baseNames: [], fullTags: [] }); });
   });
 }
 
@@ -206,23 +243,75 @@ async function pullModel(
  * Returns null if Ollama is unavailable.
  */
 export async function generateEmbedding(text: string): Promise<number[] | null> {
+  const results = await generateEmbeddingsBatch([text]);
+  return results[0];
+}
+
+export interface EmbedBatchOptions {
+  /** CPU thread cap. Ignored when GPU does the work. */
+  numThread?: number;
+  /** Internal Ollama batch size — tokens processed per inference pass.
+   *  Higher = more GPU throughput, costs VRAM. ~2048 is a sweet spot on
+   *  consumer GPUs for arctic-embed2; default Ollama uses 512. */
+  numBatch?: number;
+  /** Layer offload count. Pass 999 to force ALL layers to GPU when GPU mode
+   *  is detected — Ollama's auto-detection sometimes leaves layers on CPU
+   *  on hybrid/Optimus laptops, capping throughput. */
+  numGpu?: number;
+}
+
+/**
+ * Generate embeddings for multiple texts in a single Ollama request.
+ * Ollama processes the array sequentially internally — one inference at a time —
+ * so this avoids the CPU spike caused by many parallel single-text requests.
+ *
+ * @param texts    Texts to embed (order preserved in output).
+ * @param opts     Tuning knobs — see EmbedBatchOptions. Pass {} on CPU mode
+ *                 with a numThread cap; pass {numGpu:999, numBatch:2048} on GPU.
+ */
+export async function generateEmbeddingsBatch(
+  texts: string[],
+  opts: EmbedBatchOptions = {},
+): Promise<(number[] | null)[]> {
+  if (texts.length === 0) return [];
+
   const settings = settingsStore.getOllamaSettings();
   const url = settings.url || 'http://localhost:11434';
   const urlObj = new URL(url);
   const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
   const port = parseInt(urlObj.port) || 11434;
 
-  return new Promise<number[] | null>((resolve) => {
-    const body = JSON.stringify({ model: EMBEDDING_MODEL, input: text });
+  // Scale timeout: base + per-item allowance so large batches don't time out.
+  const timeout = EMBED_TIMEOUT_MS + texts.length * 4_000;
 
+  const ollamaOpts: Record<string, unknown> = {};
+  if (opts.numThread) ollamaOpts.num_thread = opts.numThread;
+  if (opts.numBatch) ollamaOpts.num_batch = opts.numBatch;
+  if (opts.numGpu) ollamaOpts.num_gpu = opts.numGpu;
+
+  const bodyObj: Record<string, unknown> = {
+    model: getEmbeddingModelTag(),
+    input: texts,
+    // Pin model in memory forever — without this, Ollama unloads after 5min idle
+    // and the next embed call pays an ~80s model reload cost. Pinned is free
+    // (it's already loaded for embedding work anyway).
+    keep_alive: -1,
+  };
+  if (Object.keys(ollamaOpts).length > 0) bodyObj.options = ollamaOpts;
+  const bodyStr = JSON.stringify(bodyObj);
+
+  return new Promise<(number[] | null)[]>((resolve) => {
     const req = http.request(
       {
         hostname,
         port,
         path: '/api/embed',
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        timeout: EMBED_TIMEOUT_MS,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(bodyStr),
+        },
+        timeout,
       },
       (res) => {
         let data = '';
@@ -230,21 +319,21 @@ export async function generateEmbedding(text: string): Promise<number[] | null> 
         res.on('end', () => {
           try {
             const parsed = JSON.parse(data) as { embeddings?: number[][] };
-            if (parsed.embeddings && parsed.embeddings.length > 0) {
-              resolve(parsed.embeddings[0]);
+            if (parsed.embeddings?.length) {
+              resolve(parsed.embeddings.map(e => e ?? null));
             } else {
-              resolve(null);
+              resolve(texts.map(() => null));
             }
           } catch {
-            resolve(null);
+            resolve(texts.map(() => null));
           }
         });
       },
     );
 
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
-    req.write(body);
+    req.on('error', () => resolve(texts.map(() => null)));
+    req.on('timeout', () => { req.destroy(); resolve(texts.map(() => null)); });
+    req.write(bodyStr);
     req.end();
   });
 }
@@ -261,6 +350,72 @@ async function warmUpEmbeddingModel(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// ─── GPU mode detection ─────────────────────────────────────────────────────
+// Probes Ollama's /api/ps to see whether the embedding model is loaded into
+// VRAM. When it is, the CPU `num_thread` cap is meaningless — GPU does the
+// work and we can drop the throttle for a 10-50x speedup at near-zero CPU.
+
+let _gpuModeChecked = false;
+let _gpuModeAvailable = false;
+let _gpuDetectInFlight: Promise<boolean> | null = null;
+
+/**
+ * Detect whether the embedding model is running on GPU.
+ * Result is cached for the session — call after the model has been loaded
+ * at least once (warm-up or first embed call). Returns false if Ollama is
+ * down, the model isn't loaded yet, or the response can't be parsed.
+ */
+export async function detectGpuMode(): Promise<boolean> {
+  if (_gpuModeChecked) return _gpuModeAvailable;
+  if (_gpuDetectInFlight) return _gpuDetectInFlight;
+
+  _gpuDetectInFlight = (async () => {
+    const settings = settingsStore.getOllamaSettings();
+    const url = settings.url || 'http://localhost:11434';
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
+    const port = parseInt(urlObj.port) || 11434;
+
+    return new Promise<boolean>((resolve) => {
+      const req = http.get(
+        { hostname, port, path: '/api/ps', timeout: 5000 },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+          res.on('end', () => {
+            try {
+              const parsed = JSON.parse(data) as {
+                models?: Array<{ name?: string; size?: number; size_vram?: number }>;
+              };
+              const model = parsed.models?.find(m => {
+                const n = (m.name || '').toLowerCase();
+                return n.startsWith(EMBEDDING_MODEL) || n.split(':')[0] === EMBEDDING_MODEL;
+              });
+              const onGpu = !!(model && model.size_vram && model.size_vram > 0);
+              _gpuModeChecked = true;
+              _gpuModeAvailable = onGpu;
+              logger.log(`[Ollama Setup] Embedding model GPU mode: ${onGpu ? 'yes' : 'no (CPU)'}`);
+              resolve(onGpu);
+            } catch {
+              resolve(false);
+            }
+          });
+        },
+      );
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+    });
+  })().finally(() => { _gpuDetectInFlight = null; });
+
+  return _gpuDetectInFlight;
+}
+
+/** Reset cached GPU detection — call when Ollama settings change. */
+export function resetGpuModeCache(): void {
+  _gpuModeChecked = false;
+  _gpuModeAvailable = false;
 }
 
 /**
@@ -301,41 +456,50 @@ export async function runOllamaSetup(
 
     // Step 2: Check installed models
     onProgress?.('Checking models...', 20);
-    const installedModels = await listModels();
-    logger.log(`[Ollama Setup] Installed models: ${installedModels.join(', ') || 'none'}`);
+    const { baseNames, fullTags } = await listModels();
+    logger.log(`[Ollama Setup] Installed models: ${baseNames.join(', ') || 'none'}`);
 
-    const hasEmbeddingModel = installedModels.some((m) =>
-      m.startsWith('snowflake-arctic-embed2') || m === EMBEDDING_MODEL,
-    );
+    // If a custom tag is requested via ARK_EMBEDDING_MODEL_TAG, require an EXACT
+    // tag match (e.g. snowflake-arctic-embed2:568m-q8_0) so we'll pull it if the
+    // user only has the default F16 installed. For the default tag, any
+    // arctic-embed2 variant satisfies (back-compat with existing installs).
+    const activeTag = getEmbeddingModelTag();
+    const wantsCustomTag = activeTag !== EMBEDDING_MODEL;
+    const hasEmbeddingModel = wantsCustomTag
+      ? fullTags.includes(activeTag)
+      : baseNames.some((m) => m.startsWith('snowflake-arctic-embed2') || m === EMBEDDING_MODEL);
 
     if (hasEmbeddingModel) {
       logger.log('[Ollama Setup] Embedding model already installed');
       result.embeddingModelReady = true;
+      // Warm up + detect GPU mode even in the "already installed" path so the
+      // first real embedding batch hits a loaded-and-mode-known model.
+      // Fire-and-forget — never blocks the splash.
+      warmUpAndDetectGpu();
       onProgress?.('Embedding model ready', 100);
       return result;
     }
 
     // Step 3: Pull embedding model
-    logger.log(`[Ollama Setup] Pulling ${EMBEDDING_MODEL}...`);
-    onProgress?.(`Pulling ${EMBEDDING_MODEL}...`, 30);
+    const tagToPull = getEmbeddingModelTag();
+    logger.log(`[Ollama Setup] Pulling ${tagToPull}...`);
+    onProgress?.(`Pulling ${tagToPull}...`, 30);
 
-    const pulled = await pullModel(EMBEDDING_MODEL, (status, pct) => {
-      onProgress?.(`Pulling ${EMBEDDING_MODEL}: ${status}`, 30 + Math.round(pct * 0.7));
+    const pulled = await pullModel(tagToPull, (status, pct) => {
+      onProgress?.(`Pulling ${tagToPull}: ${status}`, 30 + Math.round(pct * 0.7));
     });
 
     result.embeddingModelReady = pulled;
 
     if (pulled) {
-      // Warm up the model in the background — the first /api/embed call
-      // after install forces Ollama to load the 1.1 GB model into RAM
-      // (~80s on slow machines). Fire-and-forget so splash isn't blocked.
+      // Warm up the model + detect GPU mode in the background. First embed call
+      // after install would otherwise force a ~80s model load AND a CPU-mode
+      // round-trip on slow machines. Fire-and-forget so splash isn't blocked.
       onProgress?.('Warming up embedding model...', 95);
-      warmUpEmbeddingModel().then(ok => {
-        logger.log(`[Ollama Setup] Model warm-up: ${ok ? 'ready' : 'deferred'}`);
-      });
+      warmUpAndDetectGpu();
       onProgress?.('Embedding model ready', 100);
     } else {
-      result.error = `Failed to pull ${EMBEDDING_MODEL}`;
+      result.error = `Failed to pull ${tagToPull}`;
       onProgress?.('Model pull failed — continuing without embeddings', 100);
     }
   } catch (err) {
@@ -344,6 +508,22 @@ export async function runOllamaSetup(
   }
 
   return result;
+}
+
+/**
+ * Background chain: warm up the embedding model, then probe whether it landed
+ * on GPU or CPU. Both steps fire-and-forget — splash never waits on them.
+ * Idempotent across calls (warmUp is cheap once loaded; detectGpuMode caches).
+ */
+function warmUpAndDetectGpu(): void {
+  warmUpEmbeddingModel().then(async ok => {
+    logger.log(`[Ollama Setup] Model warm-up: ${ok ? 'ready' : 'deferred'}`);
+    if (ok) {
+      // Only meaningful once the model is loaded — /api/ps reports VRAM
+      // only for currently-loaded models.
+      try { await detectGpuMode(); } catch { /* non-fatal */ }
+    }
+  });
 }
 
 /** Exported model name for IPC consumers. */
@@ -369,7 +549,8 @@ export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
   const port = parseInt(urlObj.port) || 11434;
 
   return new Promise<OllamaModelInfo | null>((resolve) => {
-    const body = JSON.stringify({ name: EMBEDDING_MODEL });
+    const activeTag = getEmbeddingModelTag();
+    const body = JSON.stringify({ name: activeTag });
 
     const req = http.request(
       {
@@ -397,7 +578,7 @@ export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
 
             // Sum blob sizes from the model listing API for accurate on-disk size
             resolve({
-              name: EMBEDDING_MODEL,
+              name: activeTag,
               installed: true,
               sizeBytes: parsed.size ?? 0,
               parameterSize: parsed.details?.parameter_size ?? '568M',

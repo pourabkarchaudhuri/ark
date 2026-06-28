@@ -491,6 +491,11 @@ contextBridge.exposeInMainWorld('ollama', {
   // Rich diagnostic probe — tells you exactly why rerank is failing
   rerankDiagnostic: () =>
     ipcRenderer.invoke('ollama:rerankDiagnostic'),
+
+  // Embed performance probe — concrete numbers (embeds/sec, GPU mode, VRAM).
+  // Run from dev tools: await window.ollama.embedDiagnostic()
+  embedDiagnostic: () =>
+    ipcRenderer.invoke('ollama:embedDiagnostic'),
 });
 
 // Expose ANN Index API to renderer (HNSW nearest-neighbor search)

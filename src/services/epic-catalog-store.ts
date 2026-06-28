@@ -251,6 +251,15 @@ class EpicCatalogStore {
   }
 
   /**
+   * Timestamp of the last successful Epic catalog sync (ms since epoch).
+   * Returns 0 if no sync has completed. Used as the embedding watermark.
+   */
+  async getLastSyncTimestamp(): Promise<number> {
+    const state = await idbGetMeta<EpicCatalogSyncState>('sync-state');
+    return state?.lastSyncTimestamp ?? 0;
+  }
+
+  /**
    * Sync the Epic catalog. Fetches all items from the Epic GraphQL API
    * via IPC, transforms them, and persists to IndexedDB.
    */

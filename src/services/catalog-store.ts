@@ -228,6 +228,16 @@ class CatalogStore {
   }
 
   /**
+   * Timestamp of the last successful catalog sync (ms since epoch).
+   * Returns 0 if no sync has ever completed. Used by the embedding service
+   * as a watermark to skip the cursor scan when the catalog is unchanged.
+   */
+  async getLastSyncTimestamp(): Promise<number> {
+    const state = await idbGetMeta<CatalogSyncState>('sync-state');
+    return state?.lastSyncTimestamp ?? 0;
+  }
+
+  /**
    * Run a full catalog sync. Safe to call multiple times — skips if fresh.
    * Progress is published via subscribe().
    */

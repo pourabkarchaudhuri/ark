@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useSyncExternalStore } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Activity,
@@ -10,9 +10,43 @@ import {
   ChevronDown,
   Minus,
   BrainCircuit,
+  Pause,
+  Play,
 } from 'lucide-react';
 import { systemStatus, type SyncStatus, type SystemStatusSnapshot, type StorageMetric } from '@/services/system-status';
 import { TooltipCard } from '@/components/ui/tooltip-card';
+import { embeddingService } from '@/services/embedding-service';
+import { useDevMode } from '@/hooks/useDevMode';
+
+function useEmbeddingPaused(): boolean {
+  return useSyncExternalStore(
+    cb => embeddingService.subscribe(cb),
+    () => embeddingService.isPaused,
+    () => false,
+  );
+}
+
+function EmbeddingPauseControl() {
+  const [devMode] = useDevMode();
+  const paused = useEmbeddingPaused();
+  if (!devMode) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => (paused ? embeddingService.resume() : embeddingService.pause())}
+      title={paused ? 'Resume catalog embeddings' : 'Pause catalog embeddings'}
+      className={`flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded border transition-colors ${
+        paused
+          ? 'text-amber-300/80 border-amber-400/30 bg-amber-400/10 hover:bg-amber-400/20'
+          : 'text-white/40 border-white/10 hover:bg-white/5 hover:text-white/60'
+      }`}
+    >
+      {paused
+        ? (<><Play className="w-2.5 h-2.5" /> Resume</>)
+        : (<><Pause className="w-2.5 h-2.5" /> Pause</>)}
+    </button>
+  );
+}
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
@@ -141,6 +175,9 @@ function StatusPanelContent({ snap, compact }: { snap: SystemStatusSnapshot; com
         <SyncRow sync={snap.steamCatalogSync} />
         <SyncRow sync={snap.recoPipeline} />
         <SyncRow sync={snap.catalogEmbeddings} />
+        <div className="flex justify-end -mt-0.5">
+          <EmbeddingPauseControl />
+        </div>
         <SyncRow sync={snap.annIndexStatus} />
         <SyncRow sync={snap.galaxyBuild} />
         <SyncRow sync={snap.ollamaSetup} />

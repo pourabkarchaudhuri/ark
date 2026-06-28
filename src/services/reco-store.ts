@@ -32,6 +32,7 @@ import { catalogStore } from './catalog-store';
 import { epicCatalogStore } from './epic-catalog-store';
 import { annIndex } from './ann-index';
 import { embeddingService } from './embedding-service';
+import { gameGraphStore } from './game-graph-store';
 import type { OracleRerankStatus } from '@/services/oracle-rerank';
 
 // ─── Embedding cache (populated externally by embedding-service) ────────────
@@ -398,6 +399,47 @@ class RecoStore {
       // 4. Get dismissed game IDs
       const dismissedGameIds = recoHistoryStore.getDismissedIds();
 
+      // 4.5. Graph metrics — pulled from gameGraphStore if it has finished building.
+      // When unavailable (first run, still building, or graph disabled), these are undefined and
+      // the worker's graph budget collapses to 0 — other layers absorb the weight naturally.
+      let graphScoresMap: Record<string, {
+        pageRank: number;
+        personalizedPageRank: number;
+        authority: number;
+        hub: number;
+        community: number;
+        degree: number;
+      }> | undefined;
+      let userCommunityCounts: Record<number, number> | undefined;
+      let userCommunityTotal: number | undefined;
+      if (gameGraphStore.isReady) {
+        graphScoresMap = gameGraphStore.getAllScores() ?? undefined;
+        if (graphScoresMap) {
+          userCommunityCounts = {};
+          let total = 0;
+          for (const ug of userGames) {
+            const gs = graphScoresMap[ug.gameId];
+            if (!gs || gs.community < 0) continue;
+            userCommunityCounts[gs.community] = (userCommunityCounts[gs.community] ?? 0) + 1;
+            total++;
+          }
+          userCommunityTotal = total;
+        }
+      } else if (annIndex.isReady && gameGraphStore.state.phase === 'idle') {
+        // Kick off background build with PPR seed = engagement-weighted user library.
+        // First compute won't have graph signals, future runs will. PPR seed makes the
+        // graph encode "what's structurally close to this player" — foundation for Frontier Aurora.
+        const sig = `ann-${annIndex.vectorCount}`;
+        const seedWeights = new Map<string, number>();
+        for (const ug of userGames) {
+          const w = this.computeEngagementWeight(ug);
+          if (w > 0) seedWeights.set(ug.gameId, w);
+        }
+        gameGraphStore
+          .build(sig, { librarySeed: seedWeights.size > 0 ? { weights: seedWeights } : null })
+          .catch((err) => console.warn('[RecoStore] graph build failed:', err));
+      }
+
       // 5. Dispatch to worker
       const input: RecoWorkerInput = {
         userGames,
@@ -408,6 +450,9 @@ class RecoStore {
         dismissedGameIds,
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
         precomputedSemanticScores,
+        graphScores: graphScoresMap,
+        userCommunityCounts,
+        userCommunityTotal,
       };
 
       this.runWorker(input);

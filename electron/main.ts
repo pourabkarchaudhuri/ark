@@ -75,6 +75,7 @@ import { trackAppLaunch } from './analytics.js';
 import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
 import { startSessionTracker, stopSessionTracker } from './session-tracker.js';
 import { logger } from './safe-logger.js';
+import { setEmbeddingBackgroundMode } from './ipc/ollama-handlers.js';
 let mainWindow: BrowserWindowType | null = null;
 
 // ---------- Data migration: game-tracker → ark ----------
@@ -328,6 +329,47 @@ function createWindow() {
   mainWindow.on('closed', () => {
     destroyWebContentsView();
     mainWindow = null;
+  });
+
+  // ─── Polite-to-foreground-game mode ──────────────────────────────────────
+  // When our window loses focus for ≥2s, assume the user is in another app
+  // (likely a fullscreen game). Switch the embedding pipeline to a polite
+  // GPU profile (smaller batches, single in-flight, cooldown) so the game
+  // gets uncontended GPU windows. Focus instantly restores full throughput.
+  // The 2s debounce avoids flickering profile on quick alt-tabs.
+  const BG_DEBOUNCE_MS = 2_000;
+  let bgTimer: NodeJS.Timeout | null = null;
+
+  mainWindow.on('blur', () => {
+    if (bgTimer) clearTimeout(bgTimer);
+    bgTimer = setTimeout(() => {
+      setEmbeddingBackgroundMode(true);
+      bgTimer = null;
+    }, BG_DEBOUNCE_MS);
+  });
+
+  mainWindow.on('focus', () => {
+    if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
+    setEmbeddingBackgroundMode(false);
+  });
+
+  // Minimize / hide are also "user is elsewhere" signals — apply immediately,
+  // no debounce (intentional action, not an incidental click-away).
+  mainWindow.on('minimize', () => {
+    if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
+    setEmbeddingBackgroundMode(true);
+  });
+  mainWindow.on('hide', () => {
+    if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
+    setEmbeddingBackgroundMode(true);
+  });
+  mainWindow.on('restore', () => {
+    if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
+    setEmbeddingBackgroundMode(false);
+  });
+  mainWindow.on('show', () => {
+    if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
+    if (mainWindow?.isFocused()) setEmbeddingBackgroundMode(false);
   });
 }
 

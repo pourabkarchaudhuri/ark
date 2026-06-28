@@ -98,15 +98,21 @@ function startCatalogEmbeddingPipeline() {
     const entryCount = await catalogStore.getEntryCount();
     if (entryCount === 0) { _pipelineStarted = false; return; }
 
+    const steamSyncTs = await catalogStore.getLastSyncTimestamp();
     await embeddingService.generateCatalogEmbeddings(
       (onBatch) => catalogStore.getAllEntries(onBatch),
+      { storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs },
     );
 
-    // Chain Epic catalog embeddings
+    // Chain Epic catalog: sync first, then embedding gen — same throttle gate
+    // as the Steam path above.
+    try { await epicCatalogStore.sync(); } catch { /* non-fatal */ }
     const epicCount = await epicCatalogStore.getEntryCount();
     if (epicCount > 0) {
+      const epicSyncTs = await epicCatalogStore.getLastSyncTimestamp();
       await embeddingService.generateEpicCatalogEmbeddings(
         (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+        { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs },
       );
     }
 

@@ -286,9 +286,18 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const unsubOllamaRef = useRef<(() => void) | null>(null);
 
-  // Button is only shown when BOTH conditions are met:
-  // the boot animation has completed AND the data is in memory.
-  const showButton = bootDone && dataReady;
+  // Embedding-model gate: only block "Enter Ark" while the model is ACTIVELY
+  // being pulled (multi-GB download on first launch). When already installed
+  // OR Ollama is unavailable, setup resolves fast and this never blocks.
+  const [modelPulling, setModelPulling] = useState(false);
+  const [setupSettled, setSetupSettled] = useState(false);
+
+  // Button is shown when boot animation finished AND data prefetch ready AND
+  // (we're not in the middle of a model pull OR setup has resolved). The
+  // model-pull gate exists so first-time installers can't enter while the
+  // 1.2 GB arctic-embed2 download is still streaming — that download is the
+  // "no-brainer auto-install" for updates.
+  const showButton = bootDone && dataReady && (!modelPulling || setupSettled);
 
   // ---- Kick off data prefetch and track readiness ----
   useEffect(() => {
@@ -417,8 +426,32 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
         const isOk = /ready|model already installed/i.test(status) || (pct >= 100 && status.length > 0);
         const suffix = pct > 0 && pct < 100 ? ` ${pct}%` : '';
         setOllamaLine(isOk ? `[  OK  ] ${status}` : `> ${status}${suffix}`);
+        // Flip the gate ON while an actual pull is in progress (status starts
+        // with "Pulling ..."). Already-installed users skip this branch entirely
+        // — they go straight from "Checking models..." to "Embedding model ready".
+        if (/Pulling/i.test(status) && pct < 100) {
+          setModelPulling(true);
+        }
       });
     }
+
+    // Steam catalog sync — runs independently of Ollama availability.
+    // Embedding gen below awaits this so they don't fight for IDB.
+    // Non-blocking, skips if data is fresh (< 24h).
+    const steamSyncDone = catalogStore.sync().then(() => {
+      const p = catalogStore.syncProgress;
+      if (p.gamesStored > 0) {
+        console.log(`[Splash] Catalog ready: ${p.gamesStored.toLocaleString()} games`);
+      }
+    }).catch((err) => { console.warn('[Splash] Catalog sync:', err); });
+
+    // Epic catalog sync — runs independently of Ollama availability.
+    const epicSyncDone = epicCatalogStore.sync().then(() => {
+      const p = epicCatalogStore.syncProgress;
+      if (p.itemsStored > 0) {
+        console.log(`[Splash] Epic catalog ready: ${p.itemsStored.toLocaleString()} games`);
+      }
+    }).catch((err) => { console.warn('[Splash] Epic catalog sync:', err); });
 
     embeddingLoadPromise.then(() => {
       return embeddingService.isAvailable();
@@ -426,59 +459,62 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
       console.log(`[Splash] Embedding engine: ${available ? 'Ollama detected' : 'running without embeddings'}`);
       setOllamaLine(null);
       reportOllamaDone(available);
+      // Unblock the "Enter Ark" button — setup is fully resolved (success or
+      // graceful unavailable). If we were in mid-pull, this is the moment
+      // the model finished downloading.
+      setSetupSettled(true);
       unsubOllamaRef.current?.();
       unsubOllamaRef.current = null;
 
-      // Start catalog embedding pipeline in background — populates the
-      // catalog-embeddings IDB store and ANN index so the galaxy map,
-      // embedding space, and ANN-based recommendation retrieval all work.
-      // Previously this only ran when the Oracle tab was opened.
       if (available) {
-        catalogStore.getEntryCount().then(count => {
+        (async () => {
+          // Wait for Steam catalog sync to finish — sync writes new entries to
+          // IDB while embedding gen reads them. Running concurrent risks
+          // scanning a partial catalog and re-scanning the rest on next launch.
+          await steamSyncDone;
+
+          const count = await catalogStore.getEntryCount();
           if (count > 0) {
             console.log(`[Splash] Starting catalog embedding pipeline (${count.toLocaleString()} entries)`);
-            embeddingService.generateCatalogEmbeddings(
+            const steamSyncTs = await catalogStore.getLastSyncTimestamp();
+            await embeddingService.generateCatalogEmbeddings(
               (onBatch) => catalogStore.getAllEntries(onBatch),
-            ).then(() => {
-              // Chain Epic catalog embeddings after Steam finishes
-              return epicCatalogStore.getEntryCount().then(epicCount => {
-                if (epicCount > 0) {
-                  console.log(`[Splash] Starting Epic catalog embeddings (${epicCount.toLocaleString()} entries)`);
-                  return embeddingService.generateEpicCatalogEmbeddings(
-                    (onBatch) => epicCatalogStore.getAllEntries(onBatch),
-                  );
-                }
-                return 0;
-              });
-            }).catch(err => console.warn('[Splash] Catalog embeddings:', err));
+              { storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs },
+            );
           }
-        }).catch(() => {});
+
+          // Same gate for Epic.
+          await epicSyncDone;
+          const epicCount = await epicCatalogStore.getEntryCount();
+          if (epicCount > 0) {
+            console.log(`[Splash] Starting Epic catalog embeddings (${epicCount.toLocaleString()} entries)`);
+            const epicSyncTs = await epicCatalogStore.getLastSyncTimestamp();
+            await embeddingService.generateEpicCatalogEmbeddings(
+              (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+              { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs },
+            );
+          }
+        })().catch(err => console.warn('[Splash] Catalog embeddings:', err));
       }
     }).catch((err) => {
       console.warn('[Splash] Embedding check:', err);
       setOllamaLine(null);
       reportOllamaDone(false);
+      setSetupSettled(true); // unblock even on error path
       unsubOllamaRef.current?.();
       unsubOllamaRef.current = null;
     });
 
-    // Steam catalog sync — download full game metadata in background.
-    // Non-blocking, skips if data is fresh (< 24h). Runs via IPC to main
-    // process so it's immune to renderer CORS restrictions.
-    catalogStore.sync().then(() => {
-      const p = catalogStore.syncProgress;
-      if (p.gamesStored > 0) {
-        console.log(`[Splash] Catalog ready: ${p.gamesStored.toLocaleString()} games`);
+    // Hard ceiling: never block the user behind a stuck Ollama pull. After
+    // 10 min (longest realistic 1.2 GB download on slow networks), let them
+    // in regardless. The pull continues in the background — they'll just
+    // get reco without embeddings until it finishes.
+    const ollamaSafetyTimer = setTimeout(() => {
+      if (!cancelled && !setupSettled) {
+        console.warn('[Splash] Ollama setup taking too long — letting user enter');
+        setSetupSettled(true);
       }
-    }).catch((err) => { console.warn('[Splash] Catalog sync:', err); });
-
-    // Epic catalog sync — download Epic Games Store catalog in background.
-    epicCatalogStore.sync().then(() => {
-      const p = epicCatalogStore.syncProgress;
-      if (p.itemsStored > 0) {
-        console.log(`[Splash] Epic catalog ready: ${p.itemsStored.toLocaleString()} games`);
-      }
-    }).catch((err) => { console.warn('[Splash] Epic catalog sync:', err); });
+    }, 10 * 60 * 1000);
 
     // Safety timeout: don't strand the user on the splash screen forever.
     // If data still hasn't arrived after 30s, let them in anyway.
@@ -493,6 +529,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
       cancelled = true;
       clearTimeout(initTimer);
       clearTimeout(safetyTimer);
+      clearTimeout(ollamaSafetyTimer);
       if (cacheTimeoutId !== null) clearTimeout(cacheTimeoutId);
       unsubOllamaRef.current?.();
       unsubOllamaRef.current = null;
@@ -665,7 +702,11 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
                         : 'text-amber-400/70 animate-pulse'
                   }`}
                 >
-                  {showButton ? '● ONLINE' : bootDone ? '◌ SYNCING DATA...' : '◌ BOOTING...'}
+                  {showButton
+                    ? '● ONLINE'
+                    : bootDone
+                      ? (modelPulling && !setupSettled ? '◌ INSTALLING AI MODEL...' : '◌ SYNCING DATA...')
+                      : '◌ BOOTING...'}
                 </span>
               </div>
             </motion.div>
@@ -695,6 +736,13 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
                 {bootDone && !dataReady && (
                   <div className="boot-line-fade text-cyan-400/70 animate-pulse" style={{ animationDuration: '0.3s' }}>
                     {'> Synchronising game vault — stand by...'}
+                  </div>
+                )}
+
+                {/* Waiting for embedding model install — multi-GB download on first launch */}
+                {bootDone && dataReady && modelPulling && !setupSettled && (
+                  <div className="boot-line-fade text-amber-400/80 animate-pulse" style={{ animationDuration: '0.3s' }}>
+                    {'> Installing AI embedding model (one-time, ~1.2 GB)...'}
                   </div>
                 )}
 
