@@ -8,6 +8,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo, useDeferredValue, startTransition, type FC } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { toPng } from 'html-to-image';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowLeft, Search, Filter, Loader2, Check, RotateCcw, X, Library, ChevronLeft, ChevronRight, Crosshair, Route, Waypoints, Info, Clock, MousePointer, Move, ZoomIn, Plus, Camera, CornerDownRight, Undo2, AlertTriangle } from 'lucide-react';
@@ -42,6 +43,13 @@ import {
 } from '@/services/galaxy-cache';
 import { scoreGame, type SearchIndexEntry } from '@/services/prefetch-store';
 import { generateMockGalaxy } from '@/services/mock-galaxy';
+import { gameGraphStore, type GraphScores } from '@/services/game-graph-store';
+import { generateConstellationNames, type ConstellationName } from '@/services/constellation-namer';
+import { narratorBus } from '@/services/narrator-bus';
+import { scannerSelectionStore, type ScannerMode } from '@/services/scanner-selection-store';
+import { userMarksStore, type BannerColor, BANNER_COLORS, BANNER_RGB } from '@/services/user-marks-store';
+import { type LassoPoint, pathLength, toSvgPath, findNodesInsidePolygon, simplifyPath } from '@/services/lasso-geometry';
+import { TIMESHEAR_WEEKS, buildTimelineMatrix, formatWeekLabel } from '@/services/timeshear-store';
 import {
   applyOllamaNeighborRerank,
   NEIGHBOR_HEURISTIC_POOL,
@@ -468,14 +476,46 @@ const NODE_VERTEX = /* glsl */ `
   attribute vec3 aColor;
   attribute float aSize;
   attribute float aBrightness;
+  // Commit #1 — community-color, PageRank-glow, twinkle.
+  // Phase 0 fallback: when graph isn't built, these are zeros and the shader degrades to the original.
+  attribute vec3 aCommunityColor;
+  attribute float aPRBoost;
+  attribute float aTwinklePhase;
+  // Commit #6 — signed PR delta (-1..1) for PageRank Aurora warm/cold tint
+  attribute float aPRDelta;
+  uniform float u_time;
+  uniform float u_communityMix;
+  uniform float u_prAuroraMix;
+  uniform float u_galacticTimeOfDay;
   varying vec3 vColor;
   varying float vBrightness;
 
   void main() {
-    vColor = aColor;
-    vBrightness = aBrightness;
+    // Mix the genre-derived color with the community-derived color.
+    vec3 baseColor = mix(aColor, aCommunityColor, u_communityMix);
+
+    // Commit #6 — PageRank Aurora. Warm (yellow→orange→red) where player outranks world; cold (violet→magenta) where world overrates.
+    // Strength scales with |aPRDelta| so neutral nodes keep their community color intact.
+    vec3 warm = mix(vec3(0.98, 0.85, 0.40), vec3(1.00, 0.45, 0.30), clamp(aPRDelta, 0.0, 1.0));
+    vec3 cold = mix(vec3(0.55, 0.30, 0.85), vec3(0.90, 0.30, 0.80), clamp(-aPRDelta, 0.0, 1.0));
+    vec3 auroraTint = aPRDelta >= 0.0 ? warm : cold;
+    float auroraStrength = abs(aPRDelta) * u_prAuroraMix;
+    baseColor = mix(baseColor, auroraTint, auroraStrength);
+    // Phase 2 — Living Weather. Subtle slow tint over a galactic 30-min cycle.
+    float dayPhase = 0.15 * sin(u_galacticTimeOfDay * 6.2831853);
+    baseColor = mix(baseColor, baseColor * vec3(0.92, 0.88, 1.05), abs(dayPhase));
+    vColor = baseColor;
+
+    // Twinkle: per-node phase-offset shimmer.
+    float twinkle = 0.85 + 0.15 * sin(u_time * 1.4 + aTwinklePhase * 6.2831853);
+
+    // PageRank boosts brightness — central hubs feel like "weight" in the field.
+    float prBoostMul = 1.0 + aPRBoost * 0.6;
+    vBrightness = aBrightness * twinkle * prBoostMul;
+
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = aSize * (400.0 / -mv.z);
+    float prSizeMul = 1.0 + aPRBoost * 0.35;
+    gl_PointSize = aSize * prSizeMul * (400.0 / -mv.z);
     gl_Position = projectionMatrix * mv;
   }
 `;
@@ -492,6 +532,218 @@ const NODE_FRAGMENT = /* glsl */ `
     float alpha = mix(glow, core, 0.4) * vBrightness;
     vec3 color = mix(vColor, vec3(1.0), core * 0.35);
     gl_FragColor = vec4(color * alpha, alpha);
+  }
+`;
+
+// ─── Named Stars (Commit #2 — Stellar Classification flavor) ──
+// Top ~50 PageRank nodes get a low-poly icosahedron with per-instance color + slow pulse.
+// One InstancedMesh = one draw call. Far simpler shader than the focused sun (no fbm).
+// Class drives flavor copy in the selected-node card, NOT the 60K-point encoding.
+
+export type StellarClass =
+  | 'Quasar'           // top PR + high hub  — canonical entry point
+  | 'Pulsar'           // top PR + low hub   — cult masterpiece
+  | 'Hypergiant'       // top PR + high luminance — universally adored heavy
+  | 'NeutronStar'      // high authority + small community — niche-cluster icon
+  | 'MDwarf';          // everything else in the top 50
+
+export const STELLAR_CLASS_LABELS: Record<StellarClass, string> = {
+  Quasar: 'Q-class Quasar',
+  Pulsar: 'P-IV Pulsar',
+  Hypergiant: 'O-class Hypergiant',
+  NeutronStar: 'N-II Neutron Star',
+  MDwarf: 'M-IV Crimson Dwarf',
+};
+
+export const STELLAR_CLASS_BLURBS: Record<StellarClass, string> = {
+  Quasar: 'Bright across every map. The canonical entry point.',
+  Pulsar: 'Burns hot in its own corner of the field. A cult masterpiece.',
+  Hypergiant: 'Massive, universally adored. The gravity well its genre orbits.',
+  NeutronStar: 'Tight, dense, devoted following. A niche-cluster icon.',
+  MDwarf: 'Steady warm light. Notable in this region of the cosmos.',
+};
+
+const STELLAR_CLASS_RGB: Record<StellarClass, [number, number, number]> = {
+  Quasar:      [0.75, 0.85, 1.00],
+  Pulsar:      [0.65, 0.40, 1.00],
+  Hypergiant:  [1.00, 0.92, 0.65],
+  NeutronStar: [0.55, 0.95, 1.00],
+  MDwarf:      [1.00, 0.55, 0.45],
+};
+
+const NAMED_STAR_VERTEX = /* glsl */ `
+  attribute vec3 aInstColor;
+  attribute float aInstPhase;
+  uniform float u_time;
+  uniform float u_globalIntensity;
+  varying vec3 vColor;
+  varying float vRim;
+  varying float vPulse;
+
+  void main() {
+    vColor = aInstColor;
+    // Slow pulse per-instance so all 50 stars don't flash together
+    vPulse = 0.85 + 0.15 * sin(u_time * 0.7 + aInstPhase * 6.2831853);
+    vec4 mv = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+    vec3 vn = normalize(normalMatrix * mat3(instanceMatrix) * normal);
+    vRim = 1.0 - abs(normalize(-mv.xyz).z * vn.z + normalize(-mv.xyz).x * vn.x + normalize(-mv.xyz).y * vn.y);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+
+const NAMED_STAR_FRAGMENT = /* glsl */ `
+  uniform float u_globalIntensity;
+  varying vec3 vColor;
+  varying float vRim;
+  varying float vPulse;
+
+  void main() {
+    // Soft edge glow + emissive core; no expensive noise
+    float rimGlow = pow(clamp(vRim, 0.0, 1.0), 1.6);
+    vec3 col = mix(vColor * 1.8, vColor + vec3(0.25), rimGlow);
+    float a = clamp(0.65 + rimGlow * 0.4, 0.0, 1.0) * vPulse * u_globalIntensity;
+    gl_FragColor = vec4(col * a, a);
+  }
+`;
+
+/**
+ * Classify a node's stellar type for flavor copy. Pure function — no side effects.
+ * Inputs are pre-normalized (0..1 except community size which is raw count).
+ */
+export function stellarClassify(
+  prNorm: number,
+  authNorm: number,
+  hubNorm: number,
+  luminance: number,
+  communitySize: number,
+): StellarClass {
+  // Pulsar/Quasar/Hypergiant only for the top PageRank tier (above 0.92 normalized)
+  if (prNorm >= 0.92) {
+    if (luminance >= 0.78) return 'Hypergiant';
+    if (hubNorm >= 0.70) return 'Quasar';
+    if (hubNorm <= 0.35) return 'Pulsar';
+  }
+  // Niche-cluster icons: high authority AND small community
+  if (authNorm >= 0.75 && communitySize > 0 && communitySize < 80) return 'NeutronStar';
+  return 'MDwarf';
+}
+
+// ─── Fault Lines (Commit #5) — top 1% edges by sampled Brandes betweenness ──
+// Single merged LineSegments draw. Each segment carries its normalized betweenness
+// (0..1) as a per-vertex attribute; the vertex shader pulses brightness over u_time.
+// Endpoint colors come from each end's community palette so fissures fade between
+// territories naturally.
+
+const FISSURE_VERTEX = /* glsl */ `
+  attribute float aBetweenness;
+  attribute vec3 aFissureColor;
+  uniform float u_time;
+  uniform float u_globalIntensity;
+  varying vec3 vColor;
+  varying float vBeat;
+
+  void main() {
+    vColor = aFissureColor;
+    // Per-edge pulse — betweenness phase-offsets the wave so high-load edges flicker faster.
+    float pulse = 0.55 + 0.45 * sin(u_time * 1.8 + aBetweenness * 3.14159);
+    vBeat = pulse * u_globalIntensity * (0.45 + aBetweenness * 0.55);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const FISSURE_FRAGMENT = /* glsl */ `
+  varying vec3 vColor;
+  varying float vBeat;
+
+  void main() {
+    if (vBeat < 0.02) discard;
+    // Mix toward white at peak intensity — hot core, colored tail
+    vec3 col = mix(vColor, vec3(1.0), clamp(vBeat * 0.55, 0.0, 0.6));
+    gl_FragColor = vec4(col * vBeat, vBeat);
+  }
+`;
+
+const FAULT_LINE_TOP_PERCENT = 0.01;
+const FAULT_LINE_MAX_COUNT = 6000;
+
+/** Quickselect threshold — returns kth largest in-place without full sort. */
+function quickselectThreshold(values: Float32Array, kFromTop: number): number {
+  if (values.length === 0 || kFromTop <= 0) return Infinity;
+  if (kFromTop >= values.length) return -Infinity;
+  // Copy and partial-sort to find the (k-1)th largest. For 600K elements this is ~O(n) average.
+  const arr = Array.from(values);
+  const k = arr.length - kFromTop; // kth smallest
+  let lo = 0, hi = arr.length - 1;
+  while (lo < hi) {
+    const pivot = arr[(lo + hi) >> 1];
+    let i = lo, j = hi;
+    while (i <= j) {
+      while (arr[i] < pivot) i++;
+      while (arr[j] > pivot) j--;
+      if (i <= j) {
+        const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+        i++; j--;
+      }
+    }
+    if (k <= j) hi = j;
+    else if (k >= i) lo = i;
+    else break;
+  }
+  return arr[k];
+}
+
+// ─── Frontier Aurora — soft cold blobs marking unexplored Personalized-PageRank space ──
+// One Points layer, additive blending, large soft sprites. Where many unexplored nodes
+// cluster, the overlapping blobs read as cyan-violet "aurora ribbons" without a real
+// volumetric solve. Drifts subtly with u_time so the field never reads dead.
+
+const FRONTIER_VERTEX = /* glsl */ `
+  attribute float aIntensity;          // 0..1 — frontier-ness (1 - PPR, weighted by mlRecRate)
+  attribute float aPhase;              // per-node phase, hash-seeded
+  uniform float u_time;
+  uniform float u_globalIntensity;     // 0..1 ramp once graph is built
+  varying float vIntensity;
+  varying float vHue;
+
+  void main() {
+    // Slow per-node breath so the aurora pulses like a real sky.
+    float breath = 0.82 + 0.18 * sin(u_time * 0.35 + aPhase * 6.2831853);
+    vIntensity = aIntensity * u_globalIntensity * breath;
+
+    // Hue drifts cyan → violet → magenta along intensity gradient.
+    // Phase tweaks it per-node so adjacent blobs don't all match exactly.
+    vHue = clamp(aIntensity + 0.08 * sin(aPhase * 19.0 + u_time * 0.2), 0.0, 1.0);
+
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    // Huge soft sprites — radius scales with intensity so frontier regions truly bloom.
+    float size = 70.0 + aIntensity * 180.0;
+    gl_PointSize = size * (400.0 / -mv.z);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+
+const FRONTIER_FRAGMENT = /* glsl */ `
+  varying float vIntensity;
+  varying float vHue;
+
+  void main() {
+    if (vIntensity < 0.02) discard;
+    vec2 uv = gl_PointCoord - vec2(0.5);
+    float d = length(uv);
+    if (d > 0.5) discard;
+
+    // Long, soft falloff so blobs blend into ribbons when overlapping.
+    float falloff = exp(-9.0 * d * d);
+
+    // Cyan (low intensity, deepest frontier) → violet → magenta (highest intensity, stretch picks).
+    vec3 cyan    = vec3(0.18, 0.55, 0.92);
+    vec3 violet  = vec3(0.45, 0.30, 0.90);
+    vec3 magenta = vec3(0.90, 0.30, 0.75);
+    vec3 col = mix(cyan, violet, smoothstep(0.0, 0.55, vHue));
+    col = mix(col, magenta, smoothstep(0.55, 1.0, vHue));
+
+    float a = falloff * vIntensity * 0.42;
+    gl_FragColor = vec4(col * a, a);
   }
 `;
 
@@ -583,6 +835,88 @@ function getGlowTexture(): THREE.Texture {
   ctx.fillRect(0, 0, size, size);
   _glowTexture = new THREE.CanvasTexture(canvas);
   return _glowTexture;
+}
+
+// ─── Monument scaffolding (Commit #4) ──
+// Completed games will eventually crystallize into permanent architectural forms by genre.
+// This commit ships ONLY the empty InstancedMesh batches + the contract — no visible geometry.
+// Five archetypes; capacity 1000 each. count=0 → fully invisible until Phase 2 wires the spawner.
+
+export type GenreArchetype = 'obelisk' | 'ring' | 'crystal' | 'spire' | 'disc';
+
+const ARCHETYPE_LOOKUP: Record<string, GenreArchetype> = {
+  // Obelisks for RPGs and narrative-heavy genres
+  'rpg': 'obelisk', 'crpg': 'obelisk', 'role-playing': 'obelisk', 'role playing': 'obelisk',
+  // Rings for cyclical / loop-based experiences
+  'roguelike': 'ring', 'roguelite': 'ring', 'rogue-like': 'ring', 'rogue-lite': 'ring',
+  // Crystals for narrative + atmospheric / introspective games
+  'visual novel': 'crystal', 'narration': 'crystal', 'walking simulator': 'crystal', 'adventure': 'crystal', 'point and click': 'crystal',
+  // Spires for vertical strategy / management
+  'strategy': 'spire', 'rts': 'spire', 'real-time strategy': 'spire', 'turn-based': 'spire', 'grand strategy': 'spire', 'tower defense': 'spire', 'city builder': 'spire',
+  // Discs for action / racing / fighting
+  'action': 'disc', 'action-adventure': 'disc', 'shooter': 'disc', 'fps': 'disc',
+  'fighting': 'disc', 'racing': 'disc', 'platformer': 'disc', 'sports': 'disc',
+};
+
+export function mapGenreToArchetype(genres: string[]): GenreArchetype {
+  for (const g of genres) {
+    const arch = ARCHETYPE_LOOKUP[g.toLowerCase()];
+    if (arch) return arch;
+  }
+  return 'crystal'; // safe fallback — visually neutral
+}
+
+const MONUMENT_CAPACITY_PER_BATCH = 1000;
+
+interface MonumentBatch {
+  archetype: GenreArchetype;
+  mesh: THREE.InstancedMesh;
+  geo: THREE.BufferGeometry;
+  mat: THREE.MeshStandardMaterial;
+  /** Next free instance index. Incremented when a game completes. */
+  cursor: number;
+}
+
+/**
+ * Build the empty InstancedMesh batches that future monuments will populate.
+ * Standard PBR material (NOT additive) so monuments don't blow out in clusters.
+ * Geometry choices are intentionally simple — final aesthetic comes in Phase 2.
+ */
+function createMonumentBatches(): Map<GenreArchetype, MonumentBatch> {
+  const batches = new Map<GenreArchetype, MonumentBatch>();
+  // Per-archetype color + emissive intensity. Subtle, self-illuminating; AmbientLight gives
+  // them just enough ambient lift so they're readable without DirectionalLight (which would
+  // flatten the additive starfield aesthetic).
+  const specs: Array<{
+    archetype: GenreArchetype;
+    geo: () => THREE.BufferGeometry;
+    color: number;
+    emissive: number;
+    emissiveIntensity: number;
+  }> = [
+    { archetype: 'obelisk', geo: () => new THREE.ConeGeometry(0.6, 4, 4),                color: 0xb38cff, emissive: 0x6e3cff, emissiveIntensity: 0.20 },
+    { archetype: 'ring',    geo: () => new THREE.TorusGeometry(1.4, 0.3, 8, 24),         color: 0x6cd9ff, emissive: 0x18b3d9, emissiveIntensity: 0.20 },
+    { archetype: 'crystal', geo: () => new THREE.OctahedronGeometry(1.0, 0),             color: 0xff8fd8, emissive: 0xc83cc8, emissiveIntensity: 0.25 },
+    { archetype: 'spire',   geo: () => new THREE.CylinderGeometry(0.2, 0.6, 3.5, 6),     color: 0xffd870, emissive: 0xd49a30, emissiveIntensity: 0.18 },
+    { archetype: 'disc',    geo: () => new THREE.CylinderGeometry(1.4, 1.4, 0.2, 24),    color: 0xff7060, emissive: 0xc83c2c, emissiveIntensity: 0.22 },
+  ];
+  for (const spec of specs) {
+    const geo = spec.geo();
+    const mat = new THREE.MeshStandardMaterial({
+      color: spec.color,
+      emissive: spec.emissive,
+      emissiveIntensity: spec.emissiveIntensity,
+      metalness: 0.25,
+      roughness: 0.55,
+      transparent: false,
+    });
+    const mesh = new THREE.InstancedMesh(geo, mat, MONUMENT_CAPACITY_PER_BATCH);
+    mesh.count = 0;
+    mesh.instanceMatrix.usage = THREE.DynamicDrawUsage;
+    mesh.renderOrder = 100;
+    batches.set(spec.archetype, { archetype: spec.archetype, mesh, geo, mat, cursor: 0 });
+  }
+  return batches;
 }
 
 function createSunGroup(radius: number) {
@@ -761,6 +1095,8 @@ interface RendererBundle {
   backend: RendererBackend;
   nodeMat: THREE.ShaderMaterial;
   starMat: THREE.ShaderMaterial;
+  frontierMat: THREE.ShaderMaterial;
+  namedStarMat: THREE.ShaderMaterial;
 }
 
 function createRendererBundle(w: number, h: number): RendererBundle {
@@ -779,12 +1115,79 @@ function createRendererBundle(w: number, h: number): RendererBundle {
     new THREE.ShaderMaterial({
       vertexShader: NODE_VERTEX,
       fragmentShader: NODE_FRAGMENT,
+      uniforms: {
+        u_time: { value: 0 },
+        // 0 = pure genre palette, 1 = pure Louvain community palette. We ramp up
+        // to 0.85 when the graph is ready so genre still bleeds through faintly.
+        u_communityMix: { value: 0 },
+        // Commit #6 — 0 = no PR Aurora; 1 = full warm/cold tint from PR delta
+        u_prAuroraMix: { value: 0 },
+        // Phase 2 — Living Weather day/night cycle (0..1, ~30min period)
+        u_galacticTimeOfDay: { value: 0 },
+      },
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
 
-  return { renderer, backend, nodeMat: createMat(), starMat: createMat() };
+  const frontierMat = new THREE.ShaderMaterial({
+    vertexShader: FRONTIER_VERTEX,
+    fragmentShader: FRONTIER_FRAGMENT,
+    uniforms: {
+      u_time: { value: 0 },
+      // Stays 0 until gameGraphStore reports >=60% coverage. Prevents an uncolored
+      // first-paint flash before PPR scores arrive.
+      u_globalIntensity: { value: 0 },
+    },
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+  });
+
+  const namedStarMat = new THREE.ShaderMaterial({
+    vertexShader: NAMED_STAR_VERTEX,
+    fragmentShader: NAMED_STAR_FRAGMENT,
+    uniforms: {
+      u_time: { value: 0 },
+      // Ramps to 1 once graph + classification land. Keeps the layer invisible by default.
+      u_globalIntensity: { value: 0 },
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+
+  return { renderer, backend, nodeMat: createMat(), starMat: createMat(), frontierMat, namedStarMat };
+}
+
+const NAMED_STAR_CAPACITY = 50;
+const NAMED_STAR_RADIUS = 2.4;
+
+/** Golden-angle HSL → RGB for Louvain community ids. Gives maximally distinct hues even at 100+ communities. */
+function communityHueToRGB(communityId: number, out: Float32Array, offset: number): void {
+  if (communityId < 0) {
+    out[offset] = 0.6; out[offset + 1] = 0.6; out[offset + 2] = 0.62;
+    return;
+  }
+  // 137.5° golden angle for maximally-different adjacent hues
+  const h = ((communityId * 137.508) % 360) / 360;
+  const s = 0.62;
+  const l = 0.58;
+  // HSL → RGB
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h * 6) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 1/6) { r = c; g = x; }
+  else if (h < 2/6) { r = x; g = c; }
+  else if (h < 3/6) { g = c; b = x; }
+  else if (h < 4/6) { g = x; b = c; }
+  else if (h < 5/6) { r = x; b = c; }
+  else { r = c; b = x; }
+  out[offset] = r + m;
+  out[offset + 1] = g + m;
+  out[offset + 2] = b + m;
 }
 
 // ─── Main component ─────────────────────────────────────────────────────────
@@ -799,6 +1202,25 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     controls: OrbitControls;
     points: THREE.Points;
     starField: THREE.Points;
+    frontierPoints: THREE.Points;
+    namedStarsMesh: THREE.InstancedMesh;
+    namedStarMeta: Array<{ gameId: string; stellarClass: StellarClass } | null>;
+    /** gameId → stellar class for fast lookup from the UI side panel. */
+    stellarClassByGameId: Map<string, StellarClass>;
+    /** Empty monument batches scaffolded in Commit #4. Visible geometry lands in Phase 2. */
+    monumentBatches: Map<GenreArchetype, MonumentBatch>;
+    /** Fault Lines (Commit #5) — null when betweenness not yet computed. */
+    faultLines: THREE.LineSegments | null;
+    faultLinesMat: THREE.ShaderMaterial | null;
+    /** Eccentricity arrow (Commit #6) — null when no PR delta. */
+    eccentricityArrow: THREE.ArrowHelper | null;
+    /** Constellation labels at Louvain community centroids (Commit #7). */
+    constellationLabels: THREE.Group | null;
+    /** Banner InstancedMeshes by color (Phase 2). */
+    bannerMeshes: Map<BannerColor, THREE.InstancedMesh>;
+    /** User-authored constellation line segments (Phase 2). */
+    constellationLines: THREE.LineSegments;
+    constellationLineMat: THREE.LineBasicMaterial;
     lines: THREE.LineSegments | null;
     linesMat: THREE.LineDashedMaterial | null;
     focusedLines: THREE.LineSegments | null;
@@ -832,6 +1254,49 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
   );
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [neighbors, setNeighbors] = useState<NeighborInfo[]>([]);
+  // Phase 2 — Cartographer HUD + Probe + Stargazer + Banners + Whisper
+  const [streamedLine, setStreamedLine] = useState('');
+  const [scannerMode, setScannerMode] = useState<ScannerMode>('observer');
+  const [stargazerPath, setStargazerPath] = useState<string[]>([]);
+  const [stargazerNamePrompt, setStargazerNamePrompt] = useState(false);
+  const [stargazerNameInput, setStargazerNameInput] = useState('');
+  const [bannerMenu, setBannerMenu] = useState<{ x: number; y: number; gameId: string } | null>(null);
+  const [whisperState, setWhisperState] = useState<{ gameId: string; phrase: string; x: number; y: number; key: number } | null>(null);
+  const [codexOpen, setCodexOpen] = useState(false);
+  const [codexUnlockedCount, setCodexUnlockedCount] = useState(0);
+  // Phase 3.0 — Lasso
+  const [lassoActive, setLassoActive] = useState(false);
+  const [lassoPath, setLassoPath] = useState<LassoPoint[]>([]);
+  const [lassoCapture, setLassoCapture] = useState<{ nodeIds: string[]; genres: { name: string; count: number }[] } | null>(null);
+  const [lassoNamePrompt, setLassoNamePrompt] = useState(false);
+  const [lassoNameInput, setLassoNameInput] = useState('');
+  const lassoDrawingRef = useRef(false);
+  // Phase 3.0 — Timeshear
+  const [timeshearActive, setTimeshearActive] = useState(false);
+  const [timeshearWeek, setTimeshearWeek] = useState(TIMESHEAR_WEEKS - 1);
+  const timeshearMatrixRef = useRef<Uint8Array | null>(null);
+  const timeshearRafRef = useRef<number>(0);
+  // Phase 3.0 — Year Wrapped Flythrough
+  const [flythroughActive, setFlythroughActive] = useState(false);
+  const [flythroughLowerThird, setFlythroughLowerThird] = useState<{ title: string; subtitle: string; index: number } | null>(null);
+  const flythroughStateRef = useRef<{
+    curve: THREE.CatmullRomCurve3;
+    targets: Array<{ pos: THREE.Vector3; gameId: string; title: string; subtitle: string }>;
+    startMs: number;
+    durationMs: number;
+    bloomWasEnabled: boolean;
+    abort: { aborted: boolean };
+  } | null>(null);
+  const [userMarksVersion, setUserMarksVersion] = useState(0);
+  const charStreamAbortRef = useRef<{ aborted: boolean } | null>(null);
+  const probeActiveRef = useRef(false);
+  const probeVelocityRef = useRef<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
+  const whisperSeenRef = useRef<Set<string>>(new Set());
+  const whisperDismissRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const componentMountedRef = useRef(true);
+  const stargazerActiveRef = useRef(false);
+  const keysDownRef = useRef<Set<string>>(new Set());
+  const probeSvgRef = useRef<SVGSVGElement>(null);
   const hoveredNodeRef2 = useRef<GraphNode | null>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -898,11 +1363,880 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     return libraryStore.subscribe(() => setLibVersion(v => v + 1));
   }, []);
 
+  // Commit #4 — track completion count. No render yet; this is the contract handshake
+  // that future monument-spawning code (Phase 2) will read from.
+  useEffect(() => {
+    const logCompletions = () => {
+      const completed = libraryStore.filterByStatus('Completed');
+      console.log(`[Monuments] Completed games tracked: ${completed.length}`);
+    };
+    logCompletions();
+    return libraryStore.subscribe(logCompletions);
+  }, []);
+
   useEffect(() => {
     if (typeof window === 'undefined' || !window.settings?.getOllamaSettings) return;
     void window.settings.getOllamaSettings().then((s) => {
       neighborRerankEnabledRef.current = s.neighborRerankEnabled !== false;
     }).catch(() => {});
+  }, []);
+
+  // ─── Phase 2 — Witness layer setup ───
+  useEffect(() => {
+    componentMountedRef.current = true;
+    narratorBus.init();
+    void userMarksStore.init();
+    const unsubMarks = userMarksStore.subscribe(() => setUserMarksVersion((v) => v + 1));
+    // Phase 2.1 — load codex unlock count from localStorage
+    try {
+      const raw = localStorage.getItem('ark.codex.unlocked.v1');
+      if (raw) {
+        const set = new Set(JSON.parse(raw) as string[]);
+        setCodexUnlockedCount(set.size);
+      }
+    } catch { /* swallow */ }
+    return () => {
+      componentMountedRef.current = false;
+      narratorBus.dispose();
+      unsubMarks();
+      scannerSelectionStore.cancelAll();
+      if (whisperDismissRef.current) {
+        clearTimeout(whisperDismissRef.current);
+        whisperDismissRef.current = null;
+      }
+      if (timeshearRafRef.current) {
+        cancelAnimationFrame(timeshearRafRef.current);
+        timeshearRafRef.current = 0;
+      }
+      timeshearMatrixRef.current = null;
+    };
+  }, []);
+
+  // Phase 2.1 — Codex unlock tracker. On selectedNode change, mark that game's codex as unlocked.
+  useEffect(() => {
+    if (!selectedNode) return;
+    try {
+      const raw = localStorage.getItem('ark.codex.unlocked.v1');
+      const set = new Set<string>(raw ? JSON.parse(raw) as string[] : []);
+      if (!set.has(selectedNode.id)) {
+        set.add(selectedNode.id);
+        localStorage.setItem('ark.codex.unlocked.v1', JSON.stringify(Array.from(set)));
+        setCodexUnlockedCount(set.size);
+      }
+    } catch { /* swallow */ }
+  }, [selectedNode?.id]);
+
+  // Phase 3.0 — Year Wrapped Flythrough: builds a CatmullRom camera curve through
+  // the supplied keyframe gameIds and animates over 60s. Disables OrbitControls + Bloom.
+  const launchFlythrough = useCallback((keyframes: Array<{ gameId: string; title: string; subtitle: string }>) => {
+    const sRef = sceneRef.current;
+    if (!sRef || keyframes.length < 2) return;
+    const targets = keyframes
+      .map((k) => {
+        const node = sRef.nodeMap.get(k.gameId);
+        if (!node) return null;
+        return { pos: new THREE.Vector3(node.x, node.y, node.z), gameId: k.gameId, title: k.title, subtitle: k.subtitle };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+    if (targets.length < 2) return;
+
+    // Build a smooth curve through all keyframe positions. Push each control point
+    // slightly outward from origin so the camera flies AROUND rather than INTO stars.
+    const controlPoints = targets.map((t) => {
+      const len = t.pos.length() || 1;
+      const out = (len + 35) / len;
+      return new THREE.Vector3(t.pos.x * out, t.pos.y * out + 12, t.pos.z * out);
+    });
+    const curve = new THREE.CatmullRomCurve3(controlPoints, false, 'catmullrom', 0.35);
+
+    // Toggle bloom OFF for perf headroom during flythrough
+    let bloomWasEnabled = true;
+    for (const pass of sRef.composer.passes) {
+      const anyPass = pass as { enabled?: boolean; name?: string };
+      if (anyPass.name === 'UnrealBloomPass') {
+        bloomWasEnabled = anyPass.enabled !== false;
+        anyPass.enabled = false;
+      }
+    }
+
+    sRef.controls.enabled = false;
+    setScannerMode('observer');
+    setFlythroughActive(true);
+    flythroughStateRef.current = {
+      curve,
+      targets,
+      startMs: performance.now(),
+      durationMs: 60_000,
+      bloomWasEnabled,
+      abort: { aborted: false },
+    };
+  }, []);
+
+  // Phase 3.0 — Timeshear: build timeline matrix on entry; update brightness on scrub.
+  const applyTimeshearWeek = useCallback((week: number) => {
+    const sRef = sceneRef.current;
+    if (!sRef) return;
+    const matrix = timeshearMatrixRef.current;
+    if (!matrix) return;
+    const w = Math.max(0, Math.min(TIMESHEAR_WEEKS - 1, Math.floor(week)));
+    const brightArr = sRef.brightnessAttr.array as Float32Array;
+    const colorArr = sRef.colorAttr.array as Float32Array;
+    const baseBright = sRef.baseBright;
+    const baseColors = sRef.baseColors;
+    // Per-state multipliers: 0=ghost, 1=normal, 2=completion tint
+    for (let i = 0; i < sRef.nodes.length; i++) {
+      const state = matrix[i * TIMESHEAR_WEEKS + w];
+      if (state === 0) {
+        brightArr[i] = baseBright[i] * 0.06;
+        // Keep color but desaturated — leaves base palette intact for reset
+        colorArr[i * 3] = baseColors[i * 3] * 0.45;
+        colorArr[i * 3 + 1] = baseColors[i * 3 + 1] * 0.45;
+        colorArr[i * 3 + 2] = baseColors[i * 3 + 2] * 0.55;
+      } else if (state === 2) {
+        // Completed — warm gold tint, slight brightness boost
+        brightArr[i] = Math.min(1, baseBright[i] * 1.3);
+        colorArr[i * 3] = Math.min(1, baseColors[i * 3] * 0.6 + 1.0 * 0.4);
+        colorArr[i * 3 + 1] = Math.min(1, baseColors[i * 3 + 1] * 0.6 + 0.78 * 0.4);
+        colorArr[i * 3 + 2] = Math.min(1, baseColors[i * 3 + 2] * 0.6 + 0.30 * 0.4);
+      } else {
+        // Owned, not completed — original brightness + color
+        brightArr[i] = baseBright[i];
+        colorArr[i * 3] = baseColors[i * 3];
+        colorArr[i * 3 + 1] = baseColors[i * 3 + 1];
+        colorArr[i * 3 + 2] = baseColors[i * 3 + 2];
+      }
+    }
+    sRef.brightnessAttr.needsUpdate = true;
+    sRef.colorAttr.needsUpdate = true;
+  }, []);
+
+  const enterTimeshear = useCallback(() => {
+    const sRef = sceneRef.current;
+    if (!sRef) return;
+    const nodeIds = sRef.nodes.map((n) => n.id);
+    timeshearMatrixRef.current = buildTimelineMatrix(nodeIds);
+    setTimeshearActive(true);
+    setTimeshearWeek(TIMESHEAR_WEEKS - 1);
+    applyTimeshearWeek(TIMESHEAR_WEEKS - 1);
+  }, [applyTimeshearWeek]);
+
+  const exitTimeshear = useCallback(() => {
+    const sRef = sceneRef.current;
+    if (!sRef) return;
+    // Restore base brightness + colors
+    sRef.brightnessAttr.array.set(sRef.baseBright);
+    sRef.colorAttr.array.set(sRef.baseColors);
+    sRef.brightnessAttr.needsUpdate = true;
+    sRef.colorAttr.needsUpdate = true;
+    timeshearMatrixRef.current = null;
+    setTimeshearActive(false);
+  }, []);
+
+  const exitFlythrough = useCallback(() => {
+    const sRef = sceneRef.current;
+    const state = flythroughStateRef.current;
+    if (state) state.abort.aborted = true;
+    flythroughStateRef.current = null;
+    setFlythroughActive(false);
+    setFlythroughLowerThird(null);
+    if (sRef) {
+      sRef.controls.enabled = true;
+      if (state?.bloomWasEnabled) {
+        for (const pass of sRef.composer.passes) {
+          const anyPass = pass as { enabled?: boolean; name?: string };
+          if (anyPass.name === 'UnrealBloomPass') anyPass.enabled = true;
+        }
+      }
+    }
+  }, []);
+
+  // Phase 3.0 — Check for one-shot flythrough trigger written by Year Wrapped finale.
+  useEffect(() => {
+    if (!sceneRef.current || loading) return;
+    try {
+      const raw = localStorage.getItem('ark.flythrough.pending');
+      if (!raw) return;
+      const payload = JSON.parse(raw) as { keyframes?: Array<{ gameId: string; title: string; subtitle: string }> };
+      localStorage.removeItem('ark.flythrough.pending');
+      if (payload.keyframes && payload.keyframes.length >= 2) {
+        // Small delay so the scene is fully painted before the camera flies
+        setTimeout(() => launchFlythrough(payload.keyframes!), 600);
+      }
+    } catch { /* swallow */ }
+  }, [loading, launchFlythrough]);
+
+  // Phase 3.0 — Escape exits flythrough
+  useEffect(() => {
+    if (!flythroughActive) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') exitFlythrough();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [flythroughActive, exitFlythrough]);
+
+  // ─── Phase 2 — Rebuild banner InstancedMeshes when userMarksStore mutates ───
+  useEffect(() => {
+    const sRef = sceneRef.current;
+    if (!sRef) return;
+    const banners = userMarksStore.banners;
+    const byColor = new Map<BannerColor, Array<{ gameId: string; node: GraphNode; plantedAt: string }>>();
+    for (const b of banners.values()) {
+      const node = sRef.nodeMap.get(b.gameId);
+      if (!node) continue;
+      if (!byColor.has(b.color)) byColor.set(b.color, []);
+      byColor.get(b.color)!.push({ gameId: b.gameId, node, plantedAt: b.plantedAt });
+    }
+    const dummy = new THREE.Object3D();
+    const now = Date.now();
+    for (const [color, mesh] of sRef.bannerMeshes) {
+      const list = byColor.get(color) ?? [];
+      let n = 0;
+      let oldestAgeDays = 0;
+      for (const { node, plantedAt } of list) {
+        if (n >= 1000) break;
+        const ageDays = (now - new Date(plantedAt).getTime()) / 86_400_000;
+        if (ageDays > oldestAgeDays) oldestAgeDays = ageDays;
+        // Position slightly above the node along its normalized radial direction
+        const len = Math.sqrt(node.x * node.x + node.y * node.y + node.z * node.z) || 1;
+        const offset = 6 / len;
+        dummy.position.set(
+          node.x + node.x * offset * 0.04 + 0,
+          node.y + node.y * offset * 0.04 + 6,
+          node.z + node.z * offset * 0.04 + 0,
+        );
+        dummy.rotation.set(0, 0, 0);
+        dummy.scale.setScalar(1);
+        dummy.updateMatrix();
+        mesh.setMatrixAt(n, dummy.matrix);
+        n++;
+      }
+      mesh.count = n;
+      mesh.instanceMatrix.needsUpdate = true;
+
+      // Phase 2.1 — Bone banner decay. Other colors are permanent; bone tatters as the
+      // oldest bone banner ages. Global per-color dim (not per-instance — Phase 3 polish).
+      if (color === 'bone') {
+        const mat = mesh.material as THREE.MeshStandardMaterial;
+        // Decay over 365 days. Floor at 0.18 so they never fully vanish.
+        const decay = Math.max(0.18, 1 - Math.min(1, oldestAgeDays / 365) * 0.82);
+        mat.emissiveIntensity = 0.25 * decay;
+        mat.opacity = decay;
+        mat.transparent = decay < 1;
+        mat.needsUpdate = true;
+      }
+    }
+  }, [userMarksVersion]);
+
+  // ─── Phase 2 — Rebuild constellation LineSegments when userMarksStore mutates ───
+  useEffect(() => {
+    const sRef = sceneRef.current;
+    if (!sRef) return;
+    const constellations = userMarksStore.constellations;
+    // Flatten all constellations into a single segment list: for each path of N nodes,
+    // emit N-1 segments (each segment = 2 vertices). Plus the in-flight stargazer path.
+    const allPaths: string[][] = [];
+    for (const c of constellations.values()) allPaths.push(c.nodeIds);
+    if (stargazerPath.length >= 2) allPaths.push(stargazerPath);
+
+    let segmentCount = 0;
+    for (const path of allPaths) segmentCount += Math.max(0, path.length - 1);
+
+    const positions = new Float32Array(segmentCount * 2 * 3);
+    let cursor = 0;
+    for (const path of allPaths) {
+      for (let i = 0; i < path.length - 1; i++) {
+        const a = sRef.nodeMap.get(path[i]);
+        const b = sRef.nodeMap.get(path[i + 1]);
+        if (!a || !b) continue;
+        positions[cursor++] = a.x; positions[cursor++] = a.y; positions[cursor++] = a.z;
+        positions[cursor++] = b.x; positions[cursor++] = b.y; positions[cursor++] = b.z;
+      }
+    }
+    sRef.constellationLines.geometry.dispose();
+    const newGeo = new THREE.BufferGeometry();
+    newGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions.subarray(0, cursor), 3));
+    sRef.constellationLines.geometry = newGeo;
+  }, [userMarksVersion, stargazerPath]);
+
+  // ─── Phase 2 — Cartographer HUD char-stream on selectedNode change ───
+  useEffect(() => {
+    if (!selectedNode || scannerMode === 'stargazer') {
+      setStreamedLine('');
+      return;
+    }
+    const constellationName = sceneRef.current?.constellationLabels?.children?.find(
+      (c) => c.userData.communityId === gameGraphStore.getScores(selectedNode.id)?.community,
+    )?.userData.name as string | undefined;
+    const stellarClass = sceneRef.current?.stellarClassByGameId.get(selectedNode.id);
+    const line = narratorBus.getCartographerLine(selectedNode.id, constellationName, stellarClass);
+    setStreamedLine('');
+    const abort = { aborted: false };
+    charStreamAbortRef.current = abort;
+    let i = 0;
+    const intervalId = setInterval(() => {
+      if (abort.aborted) { clearInterval(intervalId); return; }
+      i++;
+      setStreamedLine(line.slice(0, i));
+      if (i >= line.length) clearInterval(intervalId);
+    }, 25);
+    return () => {
+      abort.aborted = true;
+      clearInterval(intervalId);
+    };
+  }, [selectedNode?.id, scannerMode]);
+
+  // ─── Phase 2 — Keyboard mode toggles (P = Probe, S = Stargazer, L = Lasso, Esc = Observer) ───
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tgt = e.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+      if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        setScannerMode((m) => m === 'probe' ? 'observer' : 'probe');
+      } else if (e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        setScannerMode((m) => m === 'stargazer' ? 'observer' : 'stargazer');
+      } else if (e.key === 'l' || e.key === 'L') {
+        e.preventDefault();
+        setLassoActive((v) => {
+          const next = !v;
+          if (next) {
+            // Entering lasso — disable orbit + clear prior capture
+            setLassoPath([]);
+            setLassoCapture(null);
+            const sRef = sceneRef.current;
+            if (sRef) sRef.controls.enabled = false;
+          } else {
+            const sRef = sceneRef.current;
+            if (sRef) sRef.controls.enabled = true;
+          }
+          return next;
+        });
+      } else if (e.key === 'Escape') {
+        if (stargazerActiveRef.current && stargazerNamePrompt) return; // let the prompt dismiss naturally
+        if (lassoNamePrompt) return;
+        if (lassoActive) {
+          setLassoActive(false);
+          setLassoPath([]);
+          setLassoCapture(null);
+          const sRef = sceneRef.current;
+          if (sRef) sRef.controls.enabled = true;
+          return;
+        }
+        setScannerMode('observer');
+        setStargazerPath([]);
+        setStargazerNamePrompt(false);
+      } else if (e.key === 'Enter' && stargazerActiveRef.current && stargazerPath.length >= 2) {
+        e.preventDefault();
+        setStargazerNamePrompt(true);
+      }
+      keysDownRef.current.add(e.key.toLowerCase());
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      keysDownRef.current.delete(e.key.toLowerCase());
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, [stargazerNamePrompt, stargazerPath.length, lassoActive, lassoNamePrompt]);
+
+  // Phase 3.0 — Lasso close handler. Projects all nodes once, runs P-in-P, captures.
+  const closeLasso = useCallback((rawPath: LassoPoint[]) => {
+    const sRef = sceneRef.current;
+    if (!sRef || rawPath.length < 5) { setLassoPath([]); return; }
+    const path = simplifyPath(rawPath, 3);
+    setLassoPath(path);
+    // Project 60K nodes to screen coords in one pass
+    const rect = sRef.renderer.domElement.getBoundingClientRect();
+    const projVec = new THREE.Vector3();
+    const projected: Array<{ x: number; y: number; behindCamera: boolean }> = [];
+    for (const node of sRef.nodes) {
+      projVec.set(node.x, node.y, node.z).project(sRef.camera);
+      const sx = (projVec.x * 0.5 + 0.5) * rect.width + rect.left;
+      const sy = (-projVec.y * 0.5 + 0.5) * rect.height + rect.top;
+      projected.push({ x: sx, y: sy, behindCamera: projVec.z > 1 });
+    }
+    const inside = findNodesInsidePolygon(projected, path);
+    const capturedIds: string[] = [];
+    const genreCounts = new Map<string, number>();
+    for (const i of inside) {
+      const n = sRef.nodes[i];
+      capturedIds.push(n.id);
+      for (const g of n.genres) genreCounts.set(g, (genreCounts.get(g) ?? 0) + 1);
+    }
+    const topGenres = [...genreCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count }));
+    setLassoCapture({ nodeIds: capturedIds, genres: topGenres });
+  }, []);
+
+  // ─── Phase 2 — sync scannerMode to store + OrbitControls.enabled ───
+  useEffect(() => {
+    probeActiveRef.current = scannerMode === 'probe';
+    stargazerActiveRef.current = scannerMode === 'stargazer';
+    scannerSelectionStore.setMode(scannerMode);
+    const sRef = sceneRef.current;
+    if (sRef) {
+      sRef.controls.enabled = scannerMode === 'observer' || scannerMode === 'hover';
+    }
+    if (scannerMode !== 'stargazer') {
+      setStargazerPath([]);
+      setStargazerNamePrompt(false);
+    }
+  }, [scannerMode]);
+
+  // Commit #1 — subscribe to the persisted neighbor graph. When it's ready,
+  // paint each node by its Louvain community and boost halo size by PageRank.
+  // Re-applies when the graph rebuilds (e.g., after ANN index regeneration).
+  useEffect(() => {
+    const apply = () => {
+      const sRef = sceneRef.current;
+      if (!sRef || !gameGraphStore.isReady) return;
+      const scores = gameGraphStore.getAllScores();
+      if (!scores) return;
+
+      const geo = sRef.points.geometry;
+      const communityAttr = geo.getAttribute('aCommunityColor') as THREE.BufferAttribute | undefined;
+      const prAttr = geo.getAttribute('aPRBoost') as THREE.BufferAttribute | undefined;
+      const frontierGeo = sRef.frontierPoints.geometry;
+      const frontierIntensityAttr = frontierGeo.getAttribute('aIntensity') as THREE.BufferAttribute | undefined;
+      if (!communityAttr || !prAttr || !frontierIntensityAttr) return;
+
+      // Find max PageRank + max PPR for normalization (soft cap to avoid one outlier flattening everything)
+      let maxPR = 1e-9;
+      let maxPPR = 1e-9;
+      let hasPPR = false;
+      for (const k of Object.keys(scores)) {
+        const gs = scores[k];
+        if (gs.pageRank > maxPR) maxPR = gs.pageRank;
+        if (gs.personalizedPageRank > 0) {
+          hasPPR = true;
+          if (gs.personalizedPageRank > maxPPR) maxPPR = gs.personalizedPageRank;
+        }
+      }
+      const prCap = maxPR * 0.85;
+      const pprCap = maxPPR * 0.85;
+
+      const communityArr = communityAttr.array as Float32Array;
+      const prArr = prAttr.array as Float32Array;
+      const frontierArr = frontierIntensityAttr.array as Float32Array;
+      const tmp = new Float32Array(3);
+      let matchCount = 0;
+      for (let i = 0; i < sRef.nodes.length; i++) {
+        const node = sRef.nodes[i];
+        const gs = scores[node.id];
+        if (!gs) {
+          // No graph data for this node — leave neutral so nothing visibly changes for it
+          frontierArr[i] = 0;
+          continue;
+        }
+        matchCount++;
+        communityHueToRGB(gs.community, tmp, 0);
+        communityArr[i * 3] = tmp[0];
+        communityArr[i * 3 + 1] = tmp[1];
+        communityArr[i * 3 + 2] = tmp[2];
+        prArr[i] = Math.min(1, gs.pageRank / prCap);
+
+        // Frontier intensity: (1 - normalized PPR), boosted where the node has strong quality signals
+        // (luminance = review-quality aggregate). This makes the deepest aurora hide unexplored gems.
+        const pprNorm = hasPPR ? Math.min(1, gs.personalizedPageRank / pprCap) : 0.5;
+        const baseFrontier = 1 - pprNorm;
+        const stretchBoost = 0.5 + (node.luminance ?? 0.5) * 0.5;
+        // Cube the curve so only the deep frontier glows brightly; explored core stays dim.
+        frontierArr[i] = Math.pow(baseFrontier, 1.8) * stretchBoost;
+      }
+      communityAttr.needsUpdate = true;
+      prAttr.needsUpdate = true;
+      frontierIntensityAttr.needsUpdate = true;
+
+      // Ramp up community tint + aurora visibility once enough nodes have graph data.
+      // Keeps the visual fallback graceful while the graph is still building.
+      const coverage = sRef.nodes.length > 0 ? matchCount / sRef.nodes.length : 0;
+      const mix = coverage >= 0.6 ? 0.85 : 0;
+      const mat = sRef.points.material as THREE.ShaderMaterial;
+      if (mat.uniforms.u_communityMix) mat.uniforms.u_communityMix.value = mix;
+      const fmat = sRef.frontierPoints.material as THREE.ShaderMaterial;
+      // Aurora intensity ramps up only when we have PPR (real "you vs not-you" signal).
+      // Without PPR, intensity stays at 0 — no aurora glow until library seed lands.
+      if (fmat.uniforms.u_globalIntensity) {
+        fmat.uniforms.u_globalIntensity.value = (coverage >= 0.6 && hasPPR) ? 1.0 : 0;
+      }
+
+      // Commit #2 — Stellar Classification flavor. Top 50 by PageRank become Named Stars.
+      enrollNamedStars(sRef, scores, prCap, coverage);
+
+      // Commit #5 — Fault Lines. Top 1% edges by betweenness as glowing fissures.
+      buildFaultLines(sRef, scores);
+
+      // Commit #6 — PageRank Aurora delta + eccentricity arrow.
+      applyPRAurora(sRef);
+
+      // Commit #7 — Constellation labels at Louvain centroids. Async due to IDB read.
+      void buildConstellationLabels(sRef);
+    };
+
+    let constellationBuildToken = 0;
+    async function buildConstellationLabels(sRef: NonNullable<typeof sceneRef.current>): Promise<void> {
+      const token = ++constellationBuildToken;
+      const buffers = gameGraphStore.getScoreBuffers();
+      if (!buffers) return;
+      let names: ConstellationName[] = [];
+      try {
+        names = await generateConstellationNames(sRef.nodes, buffers.community, buffers.nodeIds, buffers.pageRank);
+      } catch (err) {
+        console.warn('[Constellations] naming failed:', err);
+        return;
+      }
+      if (token !== constellationBuildToken) return; // newer build in flight
+      if (!names.length) return;
+
+      // Dispose any prior constellation labels
+      if (sRef.constellationLabels) {
+        sRef.scene.remove(sRef.constellationLabels);
+        sRef.constellationLabels.traverse((obj) => {
+          if (obj instanceof THREE.Sprite) {
+            obj.material.map?.dispose();
+            obj.material.dispose();
+          }
+        });
+      }
+
+      const group = new THREE.Group();
+      group.renderOrder = 999;
+      for (const n of names.slice(0, 30)) { // cap label count for readability
+        const pos = new THREE.Vector3(n.centroid.x, n.centroid.y, n.centroid.z);
+        // Color from community palette so each label visually anchors to its territory
+        const rgb = new Float32Array(3);
+        communityHueToRGB(n.communityId, rgb, 0);
+        const sprite = createGenreLabelSprite(n.name, [rgb[0], rgb[1], rgb[2]], pos);
+        sprite.userData.communityId = n.communityId;
+        group.add(sprite);
+      }
+      sRef.scene.add(group);
+      sRef.constellationLabels = group;
+
+      // Once constellation labels exist, dispose the static genre labels — they'd compete
+      // AND each rebuild would leak ~15 CanvasTextures + materials if we only hid them.
+      if (sRef.genreLabels) {
+        sRef.scene.remove(sRef.genreLabels);
+        sRef.genreLabels.traverse((obj) => {
+          if (obj instanceof THREE.Sprite) {
+            obj.material.map?.dispose();
+            obj.material.dispose();
+          }
+        });
+        sRef.genreLabels = null;
+      }
+      console.log(`[Constellations] Rendered ${names.length} community labels`);
+    }
+
+    function applyPRAurora(
+      sRef: NonNullable<typeof sceneRef.current>,
+    ): void {
+      const prDelta = gameGraphStore.getPRDelta();
+      const prDeltaAttr = sRef.points.geometry.getAttribute('aPRDelta') as THREE.BufferAttribute | undefined;
+      const prDeltaArr = prDeltaAttr ? (prDeltaAttr.array as Float32Array) : undefined;
+      const mat = sRef.points.material as THREE.ShaderMaterial;
+
+      if (!prDelta || !prDeltaArr || !prDeltaAttr) {
+        // Graceful fallback — zero everything, hide arrow
+        if (prDeltaArr && prDeltaAttr) {
+          prDeltaArr.fill(0);
+          prDeltaAttr.needsUpdate = true;
+        }
+        if (mat.uniforms.u_prAuroraMix) mat.uniforms.u_prAuroraMix.value = 0;
+        if (sRef.eccentricityArrow) {
+          sRef.scene.remove(sRef.eccentricityArrow);
+          sRef.eccentricityArrow.dispose();
+          sRef.eccentricityArrow = null;
+        }
+        return;
+      }
+
+      // Map prDelta (indexed by graph node order) onto rendered node order
+      const buffers = gameGraphStore.getScoreBuffers();
+      if (!buffers) return;
+      const idToGraphIdx = new Map<string, number>();
+      for (let i = 0; i < buffers.nodeIds.length; i++) idToGraphIdx.set(buffers.nodeIds[i], i);
+
+      // Compute eccentricity vector = Σ(prDelta_i × position_i)
+      let ex = 0, ey = 0, ez = 0;
+      let activeCount = 0;
+      for (let i = 0; i < sRef.nodes.length; i++) {
+        const gIdx = idToGraphIdx.get(sRef.nodes[i].id);
+        const d = gIdx !== undefined ? prDelta[gIdx] : 0;
+        prDeltaArr[i] = d;
+        if (d !== 0) {
+          activeCount++;
+          ex += d * sRef.nodes[i].x;
+          ey += d * sRef.nodes[i].y;
+          ez += d * sRef.nodes[i].z;
+        }
+      }
+      prDeltaAttr.needsUpdate = true;
+
+      const coverage = sRef.nodes.length > 0 ? activeCount / sRef.nodes.length : 0;
+      if (coverage < 0.6) {
+        if (mat.uniforms.u_prAuroraMix) mat.uniforms.u_prAuroraMix.value = 0;
+        if (sRef.eccentricityArrow) {
+          sRef.scene.remove(sRef.eccentricityArrow);
+          sRef.eccentricityArrow.dispose();
+          sRef.eccentricityArrow = null;
+        }
+        return;
+      }
+
+      if (mat.uniforms.u_prAuroraMix) mat.uniforms.u_prAuroraMix.value = 0.55;
+
+      // Eccentricity arrow at origin pointing toward the player's preferred region
+      const mag = Math.sqrt(ex * ex + ey * ey + ez * ez);
+      if (mag < 1e-3) {
+        if (sRef.eccentricityArrow) {
+          sRef.scene.remove(sRef.eccentricityArrow);
+          sRef.eccentricityArrow.dispose();
+          sRef.eccentricityArrow = null;
+        }
+        return;
+      }
+      const dir = new THREE.Vector3(ex / mag, ey / mag, ez / mag);
+      const arrowLen = Math.min(50, mag * 0.5);
+      if (sRef.eccentricityArrow) {
+        sRef.eccentricityArrow.setDirection(dir);
+        sRef.eccentricityArrow.setLength(arrowLen, arrowLen * 0.15, arrowLen * 0.08);
+      } else {
+        sRef.eccentricityArrow = new THREE.ArrowHelper(
+          dir,
+          new THREE.Vector3(0, 0, 0),
+          arrowLen,
+          0xffaa44,
+          arrowLen * 0.15,
+          arrowLen * 0.08,
+        );
+        sRef.eccentricityArrow.renderOrder = 50;
+        sRef.scene.add(sRef.eccentricityArrow);
+      }
+    }
+
+    function buildFaultLines(
+      sRef: NonNullable<typeof sceneRef.current>,
+      scores: Record<string, GraphScores>,
+    ): void {
+      const eb = gameGraphStore.getEdgeBetweenness();
+      const edges = gameGraphStore.getEdges();
+      if (!eb || !edges) {
+        if (sRef.faultLines) {
+          sRef.scene.remove(sRef.faultLines);
+          sRef.faultLines.geometry.dispose();
+          sRef.faultLines = null;
+          sRef.faultLinesMat?.dispose();
+          sRef.faultLinesMat = null;
+        }
+        return;
+      }
+
+      // Threshold = top FAULT_LINE_TOP_PERCENT, capped at FAULT_LINE_MAX_COUNT
+      const targetCount = Math.min(FAULT_LINE_MAX_COUNT, Math.floor(eb.length * FAULT_LINE_TOP_PERCENT));
+      if (targetCount === 0) return;
+      const threshold = quickselectThreshold(eb, targetCount);
+
+      // Collect edge indices that survive the threshold (may slightly exceed targetCount due to ties)
+      const survivors: number[] = [];
+      for (let i = 0; i < eb.length; i++) {
+        if (eb[i] >= threshold) survivors.push(i);
+        if (survivors.length >= FAULT_LINE_MAX_COUNT) break;
+      }
+      if (survivors.length === 0) return;
+
+      // Normalize for shader (0..1 across survivors)
+      let maxBC = 1e-9;
+      for (const idx of survivors) if (eb[idx] > maxBC) maxBC = eb[idx];
+
+      const positions = new Float32Array(survivors.length * 6);
+      const colors = new Float32Array(survivors.length * 6);
+      const betweenness = new Float32Array(survivors.length * 2);
+      const tmp = new Float32Array(3);
+
+      for (let i = 0; i < survivors.length; i++) {
+        const eIdx = survivors[i];
+        const fromIdx = edges[eIdx * 3];
+        const toIdx = edges[eIdx * 3 + 1];
+        const fromId = sRef.points.geometry.userData.gameIds?.[fromIdx] as string | undefined;
+        const toId = sRef.points.geometry.userData.gameIds?.[toIdx] as string | undefined;
+        // Resolve via gameGraphStore nodeIds — same ordering as the edges
+        const graphNodeIds = gameGraphStore.state.phase === 'ready' ? gameGraphStore.getScoreBuffers()?.nodeIds : undefined;
+        const fromGid = fromId ?? graphNodeIds?.[fromIdx];
+        const toGid = toId ?? graphNodeIds?.[toIdx];
+        const fromNode = fromGid ? sRef.nodes.find((n) => n.id === fromGid) : undefined;
+        const toNode = toGid ? sRef.nodes.find((n) => n.id === toGid) : undefined;
+        if (!fromNode || !toNode) {
+          // Degenerate fallback — skip but pad zeros
+          continue;
+        }
+        positions[i * 6]     = fromNode.x;
+        positions[i * 6 + 1] = fromNode.y;
+        positions[i * 6 + 2] = fromNode.z;
+        positions[i * 6 + 3] = toNode.x;
+        positions[i * 6 + 4] = toNode.y;
+        positions[i * 6 + 5] = toNode.z;
+
+        const fromCommunity = scores[fromGid!]?.community ?? -1;
+        const toCommunity = scores[toGid!]?.community ?? -1;
+        communityHueToRGB(fromCommunity, tmp, 0);
+        colors[i * 6]     = tmp[0];
+        colors[i * 6 + 1] = tmp[1];
+        colors[i * 6 + 2] = tmp[2];
+        communityHueToRGB(toCommunity, tmp, 0);
+        colors[i * 6 + 3] = tmp[0];
+        colors[i * 6 + 4] = tmp[1];
+        colors[i * 6 + 5] = tmp[2];
+
+        const bn = eb[eIdx] / maxBC;
+        betweenness[i * 2] = bn;
+        betweenness[i * 2 + 1] = bn;
+      }
+
+      // Dispose any prior fault-lines mesh before swapping in a new one
+      if (sRef.faultLines) {
+        sRef.scene.remove(sRef.faultLines);
+        sRef.faultLines.geometry.dispose();
+      }
+      const fGeo = new THREE.BufferGeometry();
+      fGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      fGeo.setAttribute('aFissureColor', new THREE.Float32BufferAttribute(colors, 3));
+      fGeo.setAttribute('aBetweenness', new THREE.Float32BufferAttribute(betweenness, 1));
+
+      // Reuse the material across rebuilds — only swap when first creating
+      if (!sRef.faultLinesMat) {
+        sRef.faultLinesMat = new THREE.ShaderMaterial({
+          vertexShader: FISSURE_VERTEX,
+          fragmentShader: FISSURE_FRAGMENT,
+          uniforms: {
+            u_time: { value: 0 },
+            u_globalIntensity: { value: 1.0 },
+          },
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          vertexColors: false,
+        });
+      }
+      sRef.faultLines = new THREE.LineSegments(fGeo, sRef.faultLinesMat);
+      sRef.faultLines.renderOrder = -5; // above frontier (-10), below points (0)
+      sRef.scene.add(sRef.faultLines);
+      console.log(`[FaultLines] Rendered ${survivors.length} fissures (top ${(FAULT_LINE_TOP_PERCENT * 100).toFixed(1)}% of ${eb.length} edges)`);
+    }
+
+    function enrollNamedStars(
+      sRef: NonNullable<typeof sceneRef.current>,
+      scores: Record<string, GraphScores>,
+      prCap: number,
+      coverage: number,
+    ): void {
+      const colorAttr = sRef.namedStarsMesh.geometry.getAttribute('aInstColor') as THREE.InstancedBufferAttribute;
+      const phaseAttr = sRef.namedStarsMesh.geometry.getAttribute('aInstPhase') as THREE.InstancedBufferAttribute;
+      const namedStarInstColors = colorAttr.array as Float32Array;
+      const namedStarInstPhases = phaseAttr.array as Float32Array;
+
+      // Need at least 60% coverage AND a non-trivial PageRank spread to be meaningful
+      if (coverage < 0.6) {
+        (sRef.namedStarsMesh.material as THREE.ShaderMaterial).uniforms.u_globalIntensity.value = 0;
+        sRef.namedStarsMesh.count = 0;
+        return;
+      }
+
+      // Pre-compute community sizes for NeutronStar classification
+      const communitySizes = new Map<number, number>();
+      for (const k of Object.keys(scores)) {
+        const cId = scores[k].community;
+        if (cId >= 0) communitySizes.set(cId, (communitySizes.get(cId) ?? 0) + 1);
+      }
+
+      // Auth/hub normalization caps
+      let maxAuth = 1e-9, maxHub = 1e-9;
+      for (const k of Object.keys(scores)) {
+        const gs = scores[k];
+        if (gs.authority > maxAuth) maxAuth = gs.authority;
+        if (gs.hub > maxHub) maxHub = gs.hub;
+      }
+      const authCap = maxAuth * 0.85;
+      const hubCap = maxHub * 0.85;
+
+      // Rank candidates by PageRank — only nodes we actually render qualify
+      type Candidate = { node: typeof sRef.nodes[number]; pr: number; gs: GraphScores };
+      const candidates: Candidate[] = [];
+      for (const node of sRef.nodes) {
+        const gs = scores[node.id];
+        if (!gs || gs.pageRank <= 0) continue;
+        candidates.push({ node, pr: gs.pageRank, gs });
+      }
+      candidates.sort((a, b) => b.pr - a.pr);
+      const topN = Math.min(NAMED_STAR_CAPACITY, candidates.length);
+
+      const dummy = new THREE.Object3D();
+      sRef.stellarClassByGameId.clear();
+      for (let i = 0; i < topN; i++) {
+        const c = candidates[i];
+        const prNorm = Math.min(1, c.pr / prCap);
+        const authNorm = Math.min(1, c.gs.authority / authCap);
+        const hubNorm = Math.min(1, c.gs.hub / hubCap);
+        const communitySize = communitySizes.get(c.gs.community) ?? 0;
+        const cls = stellarClassify(prNorm, authNorm, hubNorm, c.node.luminance ?? 0.5, communitySize);
+
+        dummy.position.set(c.node.x, c.node.y, c.node.z);
+        // Slightly larger for Hypergiant/Quasar; smaller for Pulsar/NeutronStar
+        const scale = cls === 'Hypergiant' || cls === 'Quasar' ? 1.35
+          : cls === 'Pulsar' || cls === 'NeutronStar' ? 0.85
+          : 1.0;
+        dummy.scale.setScalar(scale);
+        dummy.updateMatrix();
+        sRef.namedStarsMesh.setMatrixAt(i, dummy.matrix);
+
+        const rgb = STELLAR_CLASS_RGB[cls];
+        namedStarInstColors[i * 3] = rgb[0];
+        namedStarInstColors[i * 3 + 1] = rgb[1];
+        namedStarInstColors[i * 3 + 2] = rgb[2];
+        // Phase: hash from gameId for stability across reloads
+        let h = 5381;
+        for (let k = 0; k < c.node.id.length; k++) h = ((h << 5) + h + c.node.id.charCodeAt(k)) >>> 0;
+        namedStarInstPhases[i] = (h % 1000) / 1000;
+
+        sRef.namedStarMeta[i] = { gameId: c.node.id, stellarClass: cls };
+        sRef.stellarClassByGameId.set(c.node.id, cls);
+      }
+      for (let i = topN; i < NAMED_STAR_CAPACITY; i++) sRef.namedStarMeta[i] = null;
+
+      sRef.namedStarsMesh.count = topN;
+      sRef.namedStarsMesh.instanceMatrix.needsUpdate = true;
+      colorAttr.needsUpdate = true;
+      phaseAttr.needsUpdate = true;
+      (sRef.namedStarsMesh.material as THREE.ShaderMaterial).uniforms.u_globalIntensity.value = 1;
+    }
+
+    // Try immediate apply (graph may already be built from a prior session)
+    apply();
+    const unsub = gameGraphStore.subscribe(apply);
+
+    // If the graph hasn't been built yet but ANN is ready, kick off a background build.
+    // No library seed here — Galaxy doesn't need PPR for the community tint; Oracle will
+    // rebuild with seed when it next computes (and the cache will pick it up).
+    if (
+      gameGraphStore.state.phase === 'idle'
+      && typeof window !== 'undefined'
+      && window.ann
+    ) {
+      (async () => {
+        try {
+          const status = await window.ann!.status();
+          if (status.ready && status.vectorCount > 0) {
+            const sig = `ann-${status.vectorCount}`;
+            void gameGraphStore.build(sig).catch(() => {});
+          }
+        } catch { /* ignore */ }
+      })();
+    }
+    return unsub;
   }, []);
 
   activeGenresRef.current = activeGenres;
@@ -944,7 +2278,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     const w = container.clientWidth;
     const h = container.clientHeight;
 
-    const { renderer, backend, nodeMat, starMat } = createRendererBundle(w, h);
+    const { renderer, backend, nodeMat, starMat, frontierMat, namedStarMat } = createRendererBundle(w, h);
     container.appendChild(renderer.domElement);
 
     const camera = new THREE.PerspectiveCamera(60, w / h, 1, 5000);
@@ -953,6 +2287,10 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x020208);
     scene.fog = new THREE.FogExp2(0x020208, 0.0008);
+
+    // Commit #8 — Ambient only; DirectionalLight would flatten the additive starfield.
+    // Monuments' emissive component carries most of their visual presence.
+    scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
     let hdrTex: THREE.Texture | null = null;
     let destroyed = false;
@@ -1012,6 +2350,12 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     starGeo.setAttribute('aColor', new THREE.Float32BufferAttribute(starColors, 3));
     starGeo.setAttribute('aSize', new THREE.Float32BufferAttribute(starSizes, 1));
     starGeo.setAttribute('aBrightness', new THREE.Float32BufferAttribute(new Float32Array(STAR_COUNT).fill(0.2), 1));
+    // Backdrop stars don't participate in graph metrics — feed zeros so the shared shader compiles.
+    const starZeros = new Float32Array(STAR_COUNT);
+    starGeo.setAttribute('aCommunityColor', new THREE.Float32BufferAttribute(starColors, 3));
+    starGeo.setAttribute('aPRBoost', new THREE.Float32BufferAttribute(starZeros, 1));
+    starGeo.setAttribute('aTwinklePhase', new THREE.Float32BufferAttribute(starZeros.slice(), 1));
+    starGeo.setAttribute('aPRDelta', new THREE.Float32BufferAttribute(starZeros.slice(), 1));
     const starField = new THREE.Points(starGeo, starMat);
     scene.add(starField);
 
@@ -1051,8 +2395,109 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     const brightnessAttr = new THREE.Float32BufferAttribute(brightArr, 1);
     geo.setAttribute('aBrightness', brightnessAttr);
 
+    // Commit #1 attributes — initialized to neutral so shader degrades to pre-Phase-1 look
+    // until gameGraphStore.subscribe() fills them with real community/PageRank data.
+    const communityColorArr = new Float32Array(n * 3);
+    const prBoostArr = new Float32Array(n);
+    const twinklePhaseArr = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      // Start neutral: copy genre color so u_communityMix=0 produces identical output to before.
+      communityColorArr[i * 3] = colArr[i * 3];
+      communityColorArr[i * 3 + 1] = colArr[i * 3 + 1];
+      communityColorArr[i * 3 + 2] = colArr[i * 3 + 2];
+      prBoostArr[i] = 0;
+      // Phase set once at init from id — same seed across reloads keeps twinkle stable.
+      const seed = nodes[i].id;
+      let h = 5381;
+      for (let k = 0; k < seed.length; k++) h = ((h << 5) + h + seed.charCodeAt(k)) >>> 0;
+      twinklePhaseArr[i] = (h % 1000) / 1000;
+    }
+    const communityColorAttr = new THREE.Float32BufferAttribute(communityColorArr, 3);
+    geo.setAttribute('aCommunityColor', communityColorAttr);
+    const prBoostAttr = new THREE.Float32BufferAttribute(prBoostArr, 1);
+    geo.setAttribute('aPRBoost', prBoostAttr);
+    const twinklePhaseAttr = new THREE.Float32BufferAttribute(twinklePhaseArr, 1);
+    geo.setAttribute('aTwinklePhase', twinklePhaseAttr);
+    // Commit #6 — signed PR delta. Zero until graph + library seed produce real values.
+    const prDeltaArr = new Float32Array(n);
+    const prDeltaAttr = new THREE.Float32BufferAttribute(prDeltaArr, 1);
+    geo.setAttribute('aPRDelta', prDeltaAttr);
+
     const points = new THREE.Points(geo, nodeMat);
     scene.add(points);
+
+    // ── Phase 2 — Banner InstancedMeshes (one per color) ──
+    const BANNER_CAPACITY = 1000;
+    const bannerGeo = new THREE.ConeGeometry(0.6, 2.4, 6);
+    const bannerMeshes = new Map<BannerColor, THREE.InstancedMesh>();
+    for (const color of BANNER_COLORS) {
+      const rgb = BANNER_RGB[color];
+      const mat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(rgb[0], rgb[1], rgb[2]),
+        emissive: new THREE.Color(rgb[0] * 0.6, rgb[1] * 0.6, rgb[2] * 0.6),
+        emissiveIntensity: 0.25,
+        metalness: 0.1,
+        roughness: 0.5,
+      });
+      const mesh = new THREE.InstancedMesh(bannerGeo, mat, BANNER_CAPACITY);
+      mesh.count = 0;
+      mesh.instanceMatrix.usage = THREE.DynamicDrawUsage;
+      mesh.renderOrder = 60;
+      scene.add(mesh);
+      bannerMeshes.set(color, mesh);
+    }
+
+    // ── Phase 2 — User Constellations LineSegments (single draw call) ──
+    const constellationLineGeo = new THREE.BufferGeometry();
+    constellationLineGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(0), 3));
+    const constellationLineMat = new THREE.LineBasicMaterial({
+      color: 0x9ce0ff,
+      transparent: true,
+      opacity: 0.45,
+      depthWrite: false,
+    });
+    const constellationLines = new THREE.LineSegments(constellationLineGeo, constellationLineMat);
+    constellationLines.renderOrder = 5;
+    scene.add(constellationLines);
+
+    // ── Monument scaffolding (Commit #4) — empty batches, no visible geometry yet ──
+    const monumentBatches = createMonumentBatches();
+    for (const batch of monumentBatches.values()) scene.add(batch.mesh);
+    console.log(`[Monuments] Initialized ${monumentBatches.size} empty batches (capacity=${MONUMENT_CAPACITY_PER_BATCH} each)`);
+
+    // ── Named Stars layer (Commit #2) ──
+    // 50-instance icosahedron, invisible until gameGraphStore enrolls top-PR nodes.
+    const namedStarGeo = new THREE.IcosahedronGeometry(NAMED_STAR_RADIUS, 2);
+    const namedStarsMesh = new THREE.InstancedMesh(namedStarGeo, namedStarMat, NAMED_STAR_CAPACITY);
+    namedStarsMesh.count = 0; // hidden until enrollNamedStars() writes matrices
+    const namedStarInstColors = new Float32Array(NAMED_STAR_CAPACITY * 3);
+    const namedStarInstPhases = new Float32Array(NAMED_STAR_CAPACITY);
+    namedStarGeo.setAttribute('aInstColor', new THREE.InstancedBufferAttribute(namedStarInstColors, 3));
+    namedStarGeo.setAttribute('aInstPhase', new THREE.InstancedBufferAttribute(namedStarInstPhases, 1));
+    namedStarsMesh.instanceMatrix.usage = THREE.DynamicDrawUsage;
+    namedStarsMesh.renderOrder = 1; // sits just above star points; below selected sun (which lives in scene without explicit order)
+    scene.add(namedStarsMesh);
+    const namedStarMeta: Array<{ gameId: string; stellarClass: StellarClass } | null> = new Array(NAMED_STAR_CAPACITY).fill(null);
+    const stellarClassByGameId = new Map<string, StellarClass>();
+
+    // ── Frontier Aurora layer (Commit #3) ──
+    // Shares positions with the main star field; intensity attribute is filled from PPR
+    // when the graph is ready. Render order < star points so it sits BENEATH them.
+    const frontierGeo = new THREE.BufferGeometry();
+    frontierGeo.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3));
+    const frontierIntensityArr = new Float32Array(n);
+    // Phase per node — reuse the twinkle phase computation so adjacent stars + aurora
+    // breathe at different rates (no synchronized strobing).
+    const frontierPhaseArr = new Float32Array(n);
+    for (let i = 0; i < n; i++) frontierPhaseArr[i] = twinklePhaseArr[i] * 1.7 + 0.13;
+    const frontierIntensityAttr = new THREE.Float32BufferAttribute(frontierIntensityArr, 1);
+    frontierGeo.setAttribute('aIntensity', frontierIntensityAttr);
+    const frontierPhaseAttr = new THREE.Float32BufferAttribute(frontierPhaseArr, 1);
+    frontierGeo.setAttribute('aPhase', frontierPhaseAttr);
+    const frontierPoints = new THREE.Points(frontierGeo, frontierMat);
+    // Sits visually below the star field. Lower renderOrder = drawn first.
+    frontierPoints.renderOrder = -10;
+    scene.add(frontierPoints);
 
     const raycaster = new THREE.Raycaster();
     raycaster.params.Points!.threshold = 4;
@@ -1090,7 +2535,16 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     const nodeMap = new Map<string, GraphNode>(nodes.map(nd => [nd.id, nd]));
 
     const sRef = {
-      renderer, scene, camera, controls, points, starField,
+      renderer, scene, camera, controls, points, starField, frontierPoints,
+      namedStarsMesh, namedStarMeta, stellarClassByGameId,
+      monumentBatches,
+      faultLines: null as THREE.LineSegments | null,
+      faultLinesMat: null as THREE.ShaderMaterial | null,
+      eccentricityArrow: null as THREE.ArrowHelper | null,
+      constellationLabels: null as THREE.Group | null,
+      bannerMeshes,
+      constellationLines,
+      constellationLineMat,
       lines: null as THREE.LineSegments | null,
       linesMat: null as THREE.LineDashedMaterial | null,
       focusedLines: null as THREE.LineSegments | null,
@@ -1106,6 +2560,167 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       animFrameId: 0,
       composer, sunSelected, sunFocused,
     };
+
+    // ── Monument backfill + live spawn (Commit #8) ──
+    // Source of truth: libraryStore. On mount we backfill Completed games in chunked rAF
+    // bursts; afterwards, subscription diffs detect newly-completed games and spawn one matrix
+    // each. cursors live on each MonumentBatch — no per-spawn full-rebuild.
+    const monumentSeenIds = new Set<string>();
+    function spawnMonumentForGame(gameId: string): boolean {
+      const node = nodeMap.get(gameId);
+      if (!node) return false;
+      const archetype = mapGenreToArchetype(node.genres);
+      const batch = monumentBatches.get(archetype);
+      if (!batch || batch.cursor >= MONUMENT_CAPACITY_PER_BATCH) return false;
+      const matrix = new THREE.Matrix4();
+      // Slight outward offset along normalized position so monuments don't sit ON the star;
+      // 2.5 units (≈ named-star radius) gives breathing room without losing association.
+      const len = Math.sqrt(node.x * node.x + node.y * node.y + node.z * node.z) || 1;
+      const offset = 2.5 / len;
+      matrix.setPosition(
+        node.x + node.x * offset * 0.06,
+        node.y + node.y * offset * 0.06,
+        node.z + node.z * offset * 0.06,
+      );
+      batch.mesh.setMatrixAt(batch.cursor, matrix);
+      batch.cursor++;
+      batch.mesh.count = batch.cursor;
+      return true;
+    }
+    function flushMonumentBatchUpdates(): void {
+      for (const batch of monumentBatches.values()) {
+        if (batch.cursor > 0) batch.mesh.instanceMatrix.needsUpdate = true;
+      }
+    }
+
+    // Backfill — chunked at 50 per frame
+    const completedAtMount = libraryStore.filterByStatus('Completed');
+    let backfillIdx = 0;
+    const backfillChunkSize = 50;
+    function backfillTick(): void {
+      const end = Math.min(backfillIdx + backfillChunkSize, completedAtMount.length);
+      for (let i = backfillIdx; i < end; i++) {
+        const entry = completedAtMount[i];
+        if (monumentSeenIds.has(entry.gameId)) continue;
+        if (spawnMonumentForGame(entry.gameId)) monumentSeenIds.add(entry.gameId);
+      }
+      backfillIdx = end;
+      flushMonumentBatchUpdates();
+      if (backfillIdx < completedAtMount.length) {
+        requestAnimationFrame(backfillTick);
+      } else {
+        console.log(`[Monuments] Backfill complete — ${monumentSeenIds.size}/${completedAtMount.length} placed`);
+      }
+    }
+    if (completedAtMount.length > 0) requestAnimationFrame(backfillTick);
+
+    // Phase 2.1 — Completion event chain. Each new completion fires:
+    //   t=0:   supernova billboard at node position (expanding glow)
+    //   t=0.5: shockwave ring (one-hop ANN burst — visual only)
+    //   t=2:   monument lands (existing Wave B path)
+    // EventActors are transient sprites added/removed inline; no new pass, no draw-call budget cost.
+    // Track in-flight RAFs so cleanup can cancel them and short-circuit ticks
+    const eventRafIds = new Set<number>();
+    function spawnSupernova(node: GraphNode): void {
+      if (destroyed) return;
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 256;
+      const ctx = canvas.getContext('2d')!;
+      const grad = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+      grad.addColorStop(0, 'rgba(255, 240, 200, 1)');
+      grad.addColorStop(0.3, 'rgba(255, 200, 120, 0.6)');
+      grad.addColorStop(1, 'rgba(255, 120, 80, 0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 256, 256);
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.set(node.x, node.y, node.z);
+      sprite.scale.setScalar(10);
+      sprite.renderOrder = 90;
+      scene.add(sprite);
+      const start = performance.now();
+      const tick = () => {
+        if (destroyed) {
+          scene.remove(sprite);
+          mat.dispose();
+          tex.dispose();
+          return;
+        }
+        const t = (performance.now() - start) / 1800;
+        if (t >= 1) {
+          scene.remove(sprite);
+          mat.dispose();
+          tex.dispose();
+          return;
+        }
+        sprite.scale.setScalar(10 + t * 110);
+        mat.opacity = Math.max(0, 1 - t);
+        const id = requestAnimationFrame(tick);
+        eventRafIds.add(id);
+      };
+      eventRafIds.add(requestAnimationFrame(tick));
+    }
+
+    function spawnShockwave(node: GraphNode): void {
+      if (destroyed) return;
+      const ringGeo = new THREE.RingGeometry(0.9, 1.0, 48);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0xffd080,
+        transparent: true,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.position.set(node.x, node.y, node.z);
+      ring.renderOrder = 89;
+      ring.lookAt(camera.position);
+      scene.add(ring);
+      const start = performance.now();
+      const tick = () => {
+        if (destroyed) {
+          scene.remove(ring);
+          ringGeo.dispose();
+          ringMat.dispose();
+          return;
+        }
+        const t = (performance.now() - start) / 1400;
+        if (t >= 1) {
+          scene.remove(ring);
+          ringGeo.dispose();
+          ringMat.dispose();
+          return;
+        }
+        const scale = 1 + t * 80;
+        ring.scale.setScalar(scale);
+        ring.lookAt(camera.position);
+        ringMat.opacity = Math.max(0, 0.9 * (1 - t));
+        const id = requestAnimationFrame(tick);
+        eventRafIds.add(id);
+      };
+      eventRafIds.add(requestAnimationFrame(tick));
+    }
+
+    // Live diff — fires on every libraryStore mutation; only spawns NEW completions.
+    const unsubMonumentDiff = libraryStore.subscribe(() => {
+      const current = libraryStore.filterByStatus('Completed');
+      let dirty = false;
+      for (const entry of current) {
+        if (monumentSeenIds.has(entry.gameId)) continue;
+        const node = nodeMap.get(entry.gameId);
+        if (node) {
+          // Visual prelude — supernova now, shockwave at t+0.5s, monument lands at t+2s
+          spawnSupernova(node);
+          setTimeout(() => spawnShockwave(node), 500);
+        }
+        if (spawnMonumentForGame(entry.gameId)) {
+          monumentSeenIds.add(entry.gameId);
+          dirty = true;
+        }
+      }
+      if (dirty) flushMonumentBatchUpdates();
+    });
 
     // ── Animation loop ──
     const _projVec = new THREE.Vector3();
@@ -1167,6 +2782,102 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       // ── Update sun meshes from reactive state ──
       const _sunState = sunStateRef.current;
       const _t = now * 0.001;
+
+      // Commit #1 — drive the node shader's u_time so twinkle animates.
+      if ((sRef.points.material as THREE.ShaderMaterial).uniforms.u_time) {
+        (sRef.points.material as THREE.ShaderMaterial).uniforms.u_time.value = _t;
+        // Phase 2 — Living Weather: ~30-min cycle (= 1800s)
+        const tod = (_t % 1800) / 1800;
+        (sRef.points.material as THREE.ShaderMaterial).uniforms.u_galacticTimeOfDay.value = tod;
+        // starField shares the same NODE_VERTEX shader and needs the same uniform updated,
+        // otherwise the backdrop misses the day/night tint contract.
+        const starMatUniforms = (sRef.starField.material as THREE.ShaderMaterial).uniforms;
+        if (starMatUniforms.u_time) starMatUniforms.u_time.value = _t;
+        if (starMatUniforms.u_galacticTimeOfDay) starMatUniforms.u_galacticTimeOfDay.value = tod;
+      }
+      // Drive scanner dwell timers in step with the same heartbeat
+      scannerSelectionStore.processDwellTimers(now);
+      // Commit #3 — drive the frontier aurora's u_time so the cold ribbons drift.
+      if (sRef.frontierPoints) {
+        const fmat = sRef.frontierPoints.material as THREE.ShaderMaterial;
+        if (fmat.uniforms.u_time) fmat.uniforms.u_time.value = _t;
+      }
+      // Commit #2 — drive the named-star pulse.
+      if (sRef.namedStarsMesh) {
+        const nmat = sRef.namedStarsMesh.material as THREE.ShaderMaterial;
+        if (nmat.uniforms.u_time) nmat.uniforms.u_time.value = _t;
+      }
+
+      // Phase 3.0 — Year Wrapped Flythrough camera animation.
+      // Drives camera along a CatmullRomCurve3 through 6-8 keyframe stars over 60s.
+      if (flythroughStateRef.current) {
+        const fs = flythroughStateRef.current;
+        const elapsed = now - fs.startMs;
+        const t = Math.min(1, elapsed / fs.durationMs);
+        // Ease in/out so the camera doesn't snap at the boundaries
+        const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        const point = fs.curve.getPointAt(ease);
+        camera.position.copy(point);
+
+        // Aim ahead on the curve — small lookahead for natural camera framing
+        const lookT = Math.min(1, ease + 0.012);
+        const lookPoint = fs.curve.getPointAt(lookT);
+        // Target is between lookahead point and the nearest keyframe star, so the camera
+        // glances toward the actual star rather than empty curve space.
+        const seg = ease * (fs.targets.length - 1);
+        const segIdx = Math.min(fs.targets.length - 1, Math.floor(seg));
+        const targetMix = new THREE.Vector3().lerpVectors(lookPoint, fs.targets[segIdx].pos, 0.55);
+        controls.target.copy(targetMix);
+
+        // Update lower-third when crossing into a new keyframe segment
+        const lowerIdx = Math.min(fs.targets.length - 1, Math.floor(seg + 0.15));
+        if (!flythroughLowerThird || flythroughLowerThird.index !== lowerIdx) {
+          const k = fs.targets[lowerIdx];
+          setFlythroughLowerThird({ title: k.title, subtitle: k.subtitle, index: lowerIdx });
+        }
+
+        if (t >= 1 && !fs.abort.aborted) {
+          // Auto-exit at the end. setTimeout so the final frame lands first.
+          fs.abort.aborted = true;
+          setTimeout(() => exitFlythrough(), 800);
+        }
+      }
+
+      // Phase 2.1 — Probe drift physics. WASD impulse → camera + target offset, damped.
+      if (probeActiveRef.current) {
+        const keys = keysDownRef.current;
+        const thrust = 4.5;
+        const forward = new THREE.Vector3();
+        camera.getWorldDirection(forward);
+        const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+        const up = camera.up.clone().normalize();
+        const vel = probeVelocityRef.current;
+        if (keys.has('w')) { vel.x += forward.x * thrust; vel.y += forward.y * thrust; vel.z += forward.z * thrust; }
+        if (keys.has('s')) { vel.x -= forward.x * thrust; vel.y -= forward.y * thrust; vel.z -= forward.z * thrust; }
+        if (keys.has('a')) { vel.x -= right.x * thrust; vel.y -= right.y * thrust; vel.z -= right.z * thrust; }
+        if (keys.has('d')) { vel.x += right.x * thrust; vel.y += right.y * thrust; vel.z += right.z * thrust; }
+        if (keys.has('q')) { vel.x -= up.x * thrust; vel.y -= up.y * thrust; vel.z -= up.z * thrust; }
+        if (keys.has('e')) { vel.x += up.x * thrust; vel.y += up.y * thrust; vel.z += up.z * thrust; }
+        // Damp + integrate. Clamp position to ±2000 to keep within galaxy.
+        vel.x *= 0.92; vel.y *= 0.92; vel.z *= 0.92;
+        if (Math.abs(vel.x) > 0.01 || Math.abs(vel.y) > 0.01 || Math.abs(vel.z) > 0.01) {
+          camera.position.x = Math.max(-2000, Math.min(2000, camera.position.x + vel.x));
+          camera.position.y = Math.max(-2000, Math.min(2000, camera.position.y + vel.y));
+          camera.position.z = Math.max(-2000, Math.min(2000, camera.position.z + vel.z));
+          controls.target.x += vel.x;
+          controls.target.y += vel.y;
+          controls.target.z += vel.z;
+        }
+      } else {
+        // Decay any residual velocity when exiting probe
+        const vel = probeVelocityRef.current;
+        if (vel.x || vel.y || vel.z) { vel.x = vel.y = vel.z = 0; }
+      }
+      // Commit #5 — drive Fault Lines pulse; dim when neighbor panel active.
+      if (sRef.faultLinesMat) {
+        sRef.faultLinesMat.uniforms.u_time.value = _t;
+        sRef.faultLinesMat.uniforms.u_globalIntensity.value = sRef.lines ? 0.3 : 1.0;
+      }
 
       if (_sunState.selectedPos) {
         sRef.sunSelected.group.visible = true;
@@ -1272,8 +2983,37 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       renderer.dispose();
       geo.dispose();
       starGeo.dispose();
+      frontierGeo.dispose();
+      namedStarGeo.dispose();
       nodeMat.dispose();
       starMat.dispose();
+      frontierMat.dispose();
+      namedStarMat.dispose();
+      for (const batch of monumentBatches.values()) {
+        batch.geo.dispose();
+        batch.mat.dispose();
+      }
+      if (sRef.faultLines) {
+        sRef.faultLines.geometry.dispose();
+      }
+      if (sRef.faultLinesMat) sRef.faultLinesMat.dispose();
+      if (sRef.eccentricityArrow) sRef.eccentricityArrow.dispose();
+      if (sRef.constellationLabels) {
+        sRef.constellationLabels.traverse((obj) => {
+          if (obj instanceof THREE.Sprite) {
+            obj.material.map?.dispose();
+            obj.material.dispose();
+          }
+        });
+      }
+      // Phase 2.1 audit fix — cancel pending event RAFs so they don't tick after dispose
+      for (const id of eventRafIds) cancelAnimationFrame(id);
+      eventRafIds.clear();
+      bannerGeo.dispose();
+      for (const m of bannerMeshes.values()) (m.material as THREE.Material).dispose();
+      constellationLines.geometry.dispose();
+      constellationLineMat.dispose();
+      unsubMonumentDiff();
       sunSelected.surfaceGeo.dispose();
       sunSelected.surfaceMat.dispose();
       sunSelected.glowSpriteMat.dispose();
@@ -2371,6 +4111,21 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
   const handleCanvasClick = useCallback(async (e: React.MouseEvent) => {
     const s = sceneRef.current;
     if (!s) return;
+
+    // Phase 2 — Stargazer mode: click anywhere to append the nearest node to the path.
+    if (stargazerActiveRef.current) {
+      const rect = cachedRectRef.current ?? s.renderer.domElement.getBoundingClientRect();
+      s.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      s.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      s.raycaster.setFromCamera(s.mouse, s.camera);
+      const hits = s.raycaster.intersectObject(s.points);
+      if (hits.length > 0 && hits[0].index !== undefined) {
+        const node = s.nodes[hits[0].index];
+        setStargazerPath((p) => (p[p.length - 1] === node.id ? p : [...p, node.id]));
+      }
+      return;
+    }
+
     if (!selectedIdRef.current) return;
 
     const rect = cachedRectRef.current ?? s.renderer.domElement.getBoundingClientRect();
@@ -2403,6 +4158,41 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       const s = sceneRef.current;
       if (!s) return;
       const tip = tooltipRef.current;
+
+      // Phase 2.1 — Whisper trigger. Runs regardless of selection state.
+      // Raycast once; if hovering a broker node, register dwell timer.
+      const rect0 = cachedRectRef.current ?? s.renderer.domElement.getBoundingClientRect();
+      const mx = ((cx - rect0.left) / rect0.width) * 2 - 1;
+      const my = -((cy - rect0.top) / rect0.height) * 2 + 1;
+      s.mouse.set(mx, my);
+      s.raycaster.setFromCamera(s.mouse, s.camera);
+      const whisperHits = s.raycaster.intersectObject(s.points);
+      if (whisperHits.length > 0 && whisperHits[0].index !== undefined) {
+        const hoverNode = s.nodes[whisperHits[0].index];
+        const brokers = gameGraphStore.getBrokerSet();
+        if (brokers.has(hoverNode.id) && !whisperSeenRef.current.has(hoverNode.id)) {
+          scannerSelectionStore.registerDwell(hoverNode.id, 1200, (gameId) => {
+            if (!componentMountedRef.current) return;
+            whisperSeenRef.current.add(gameId);
+            void (async () => {
+              const phrasesModule = await import('@/data/whisper-phrases.json');
+              if (!componentMountedRef.current) return; // bailed out during import
+              const bank = (phrasesModule.default as { broker: string[] }).broker;
+              let h = 5381;
+              for (let i = 0; i < gameId.length; i++) h = ((h << 5) + h + gameId.charCodeAt(i)) >>> 0;
+              const phrase = bank[h % bank.length];
+              setWhisperState({ gameId, phrase, x: cx + 18, y: cy - 12, key: Date.now() });
+              if (whisperDismissRef.current) clearTimeout(whisperDismissRef.current);
+              whisperDismissRef.current = setTimeout(() => {
+                if (!componentMountedRef.current) return;
+                setWhisperState((w) => (w && w.gameId === gameId ? null : w));
+                whisperDismissRef.current = null;
+              }, 2600);
+            })();
+          });
+        }
+      }
+
       if (!selectedIdRef.current) {
         if (hoveredNodeRef2.current) {
           hoveredNodeRef2.current = null;
@@ -2563,14 +4353,24 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     return libraryNodes.filter(n => n.title.toLowerCase().includes(q));
   }, [libraryNodes, libSearch]);
 
+  // Virtualize the library side-panel list — only the rows actually in view get
+  // mounted. Without this, 500+ Steam libraries mount 15K+ DOM nodes on open.
+  // Row height: image (72) + padding-y (16) + title (~16) + dev (~10) + genres
+  // (~22) + gap (6) ≈ 168. The 6px row gap is folded into estimateSize so each
+  // virtual slot reserves space for the gap.
+  const LIB_ROW_HEIGHT = 168;
+  const libRowVirtualizer = useVirtualizer({
+    count: filteredLibNodes.length,
+    getScrollElement: () => libScrollRef.current,
+    estimateSize: () => LIB_ROW_HEIGHT,
+    overscan: 6,
+  });
+
   useEffect(() => {
     if (!showLibrary || !selectedNode || !libScrollRef.current) return;
-    const container = libScrollRef.current;
-    const activeEl = container.querySelector('[data-active="true"]') as HTMLElement | null;
-    if (activeEl) {
-      activeEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-  }, [selectedNode, showLibrary]);
+    const idx = filteredLibNodes.findIndex(n => n.id === selectedNode.id);
+    if (idx >= 0) libRowVirtualizer.scrollToIndex(idx, { align: 'auto', behavior: 'smooth' });
+  }, [selectedNode, showLibrary, filteredLibNodes, libRowVirtualizer]);
 
   // ─── Neighbor cycling (cinematic tour) ─────────────────────────────
 
@@ -2938,7 +4738,398 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
           onClick={handleCanvasClick}
           onMouseMove={handleCanvasMove}
           onMouseLeave={handleCanvasLeave}
+          onContextMenu={(e) => {
+            // Phase 2 — Banner picker on right-click. Only fires for already-selected/hovered node.
+            const tgt = hoveredNodeRef2.current ?? selectedNode;
+            if (!tgt) return;
+            e.preventDefault();
+            setBannerMenu({ x: e.clientX, y: e.clientY, gameId: tgt.id });
+          }}
         />
+
+        {/* Phase 2 — Cartographer HUD */}
+        {streamedLine && scannerMode !== 'stargazer' && (
+          <div className="absolute left-4 bottom-4 z-30 max-w-[420px]">
+            <div className="bg-white/[0.04] backdrop-blur-md border border-white/[0.08] rounded-lg px-4 py-3 shadow-2xl shadow-black/40 pointer-events-auto">
+              <div className="flex items-center justify-between mb-1">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-fuchsia-300/55">CARTOGRAPHER</div>
+                {selectedNode && (
+                  <button
+                    onClick={() => setCodexOpen(true)}
+                    className="text-[9px] uppercase tracking-[0.15em] text-cyan-300/60 hover:text-cyan-300 transition-colors"
+                  >
+                    Open Codex ▸
+                  </button>
+                )}
+              </div>
+              <div className="text-[13px] text-white/85 font-light leading-snug">
+                {streamedLine}
+                <span className="inline-block w-[6px] h-[12px] ml-0.5 align-middle bg-fuchsia-300/70 animate-pulse" />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Phase 3.0 — Lasso draw + HUD overlay */}
+        {lassoActive && (
+          <>
+            <svg
+              className="absolute inset-0 z-30 pointer-events-auto cursor-crosshair"
+              style={{ touchAction: 'none' }}
+              onPointerDown={(e) => {
+                lassoDrawingRef.current = true;
+                setLassoCapture(null);
+                setLassoPath([{ x: e.clientX, y: e.clientY }]);
+                (e.target as SVGSVGElement).setPointerCapture(e.pointerId);
+              }}
+              onPointerMove={(e) => {
+                if (!lassoDrawingRef.current) return;
+                setLassoPath((p) => [...p, { x: e.clientX, y: e.clientY }]);
+              }}
+              onPointerUp={(e) => {
+                if (!lassoDrawingRef.current) return;
+                lassoDrawingRef.current = false;
+                (e.target as SVGSVGElement).releasePointerCapture(e.pointerId);
+                closeLasso(lassoPath);
+              }}
+            >
+              {lassoPath.length >= 2 && (
+                <path
+                  d={toSvgPath(lassoPath, !lassoDrawingRef.current && pathLength(lassoPath) > 60)}
+                  fill={lassoCapture ? 'rgba(168, 85, 247, 0.08)' : 'rgba(168, 85, 247, 0.04)'}
+                  stroke="rgba(217, 70, 239, 0.85)"
+                  strokeWidth={1.6}
+                  strokeDasharray="5 4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              )}
+            </svg>
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 pointer-events-none">
+              <div className="bg-white/[0.04] backdrop-blur-md border border-fuchsia-400/30 rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-fuchsia-300/80">
+                Lasso · drag to draw · Esc to exit · L to toggle
+              </div>
+            </div>
+            {lassoCapture && (
+              <div className="absolute bottom-4 right-4 z-40 w-80 bg-black/85 backdrop-blur-xl border border-fuchsia-400/30 rounded-xl p-4 shadow-2xl shadow-fuchsia-500/10 pointer-events-auto">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-fuchsia-300/60 mb-2">Lasso Capture</div>
+                <div className="text-2xl font-light text-white/95 mb-1">{lassoCapture.nodeIds.length.toLocaleString()} stars</div>
+                {lassoCapture.genres.length > 0 && (
+                  <div className="text-[11px] text-white/55 mb-3">
+                    Top genres: {lassoCapture.genres.slice(0, 3).map((g) => `${g.name} (${g.count})`).join(', ')}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setLassoNamePrompt(true)}
+                    disabled={lassoCapture.nodeIds.length < 2}
+                    className="flex-1 px-3 py-1.5 rounded-md bg-fuchsia-500/25 hover:bg-fuchsia-500/40 border border-fuchsia-400/30 text-[12px] text-white/90 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    Save as Constellation
+                  </button>
+                  <button
+                    onClick={() => { setLassoPath([]); setLassoCapture(null); }}
+                    className="px-3 py-1.5 rounded-md bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-[12px] text-white/70 transition-colors"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            )}
+            {lassoNamePrompt && lassoCapture && (
+              <>
+                <div className="fixed inset-0 z-50 bg-black/40" onClick={() => setLassoNamePrompt(false)} />
+                <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-black/95 backdrop-blur-2xl border border-fuchsia-400/30 rounded-xl p-5 w-80 shadow-2xl">
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-fuchsia-300/70 mb-2">Name this constellation</div>
+                  <input
+                    autoFocus
+                    value={lassoNameInput}
+                    onChange={(e) => setLassoNameInput(e.target.value)}
+                    onKeyDown={async (e) => {
+                      if (e.key === 'Enter' && lassoNameInput.trim()) {
+                        const ok = await userMarksStore.addConstellation(lassoNameInput, lassoCapture.nodeIds);
+                        if (!ok) console.warn('[Lasso] constellation cap reached');
+                        setLassoNamePrompt(false);
+                        setLassoNameInput('');
+                        setLassoPath([]);
+                        setLassoCapture(null);
+                        setLassoActive(false);
+                        const sRef = sceneRef.current;
+                        if (sRef) sRef.controls.enabled = true;
+                      } else if (e.key === 'Escape') {
+                        setLassoNamePrompt(false);
+                      }
+                    }}
+                    placeholder="The..."
+                    className="w-full bg-white/[0.04] border border-white/[0.1] rounded-md px-3 py-2 text-sm text-white/90 placeholder-white/30 focus:outline-none focus:border-fuchsia-400/40"
+                  />
+                  <div className="text-[10px] text-white/30 mt-2">{lassoCapture.nodeIds.length} stars · Enter to save · Esc to dismiss</div>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {/* Phase 3.0 — Timeshear scrubber */}
+        {timeshearActive && (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 w-[min(640px,80vw)] pointer-events-auto">
+            <div className="bg-black/70 backdrop-blur-xl border border-cyan-400/25 rounded-xl p-3 shadow-2xl shadow-cyan-500/10">
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-cyan-300/65">
+                  Timeshear · {formatWeekLabel(timeshearWeek)}
+                </div>
+                <button
+                  onClick={exitTimeshear}
+                  className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white/80 transition-colors"
+                >
+                  Return to now ✕
+                </button>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={TIMESHEAR_WEEKS - 1}
+                step={1}
+                value={timeshearWeek}
+                onChange={(e) => {
+                  const w = Number(e.target.value);
+                  setTimeshearWeek(w);
+                  if (timeshearRafRef.current) cancelAnimationFrame(timeshearRafRef.current);
+                  timeshearRafRef.current = requestAnimationFrame(() => {
+                    timeshearRafRef.current = 0;
+                    applyTimeshearWeek(w);
+                  });
+                }}
+                className="w-full accent-cyan-400"
+              />
+              <div className="flex justify-between text-[9px] text-white/30 mt-1">
+                <span>1 year ago</span>
+                <span>6 months ago</span>
+                <span>now</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Phase 3.0 — Timeshear launch button (only when graph + library are loaded) */}
+        {!timeshearActive && !flythroughActive && !lassoActive && selectedNode === null && !loading && (
+          <button
+            onClick={enterTimeshear}
+            className="absolute bottom-4 right-4 z-20 bg-white/[0.04] hover:bg-white/[0.08] backdrop-blur-md border border-cyan-400/25 rounded-full px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-cyan-300/70 hover:text-cyan-200 transition-colors"
+            title="Scrub the past year of your library"
+          >
+            ◴ Timeshear
+          </button>
+        )}
+
+        {/* Phase 3.0 — Year Wrapped Flythrough lower-thirds + exit hint */}
+        {flythroughActive && (
+          <>
+            {flythroughLowerThird && (
+              <motion.div
+                key={flythroughLowerThird.index}
+                initial={{ opacity: 0, y: 24 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -24 }}
+                transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+                className="absolute left-1/2 bottom-16 -translate-x-1/2 z-30 pointer-events-none"
+              >
+                <div className="bg-black/55 backdrop-blur-md border border-white/[0.08] rounded-lg px-6 py-4 max-w-[560px] text-center shadow-2xl shadow-black/70">
+                  <div className="text-[10px] uppercase tracking-[0.24em] text-fuchsia-300/55 mb-1.5">
+                    The Voyage · Keyframe {flythroughLowerThird.index + 1}
+                  </div>
+                  <div className="text-[22px] font-light text-white/95 mb-1 leading-tight">
+                    {flythroughLowerThird.title}
+                  </div>
+                  <div className="text-[11px] text-white/55">
+                    {flythroughLowerThird.subtitle}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+              <div className="bg-white/[0.04] backdrop-blur-md border border-fuchsia-400/30 rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-fuchsia-300/80">
+                Cinematic · Esc to exit
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Phase 2.1 — Codex 2-page spread */}
+        {codexOpen && selectedNode && (() => {
+          const buffers = gameGraphStore.getScoreBuffers();
+          const communityName = sceneRef.current?.constellationLabels?.children?.find(
+            (c) => c.userData.communityId === gameGraphStore.getScores(selectedNode.id)?.community,
+          )?.userData.name as string | undefined;
+          const stellarClass = sceneRef.current?.stellarClassByGameId.get(selectedNode.id);
+          const spread = narratorBus.getCuratorSpread(selectedNode.id, communityName, stellarClass);
+          const total = buffers?.nodeIds.length ?? 0;
+          return (
+            <>
+              <div
+                className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm"
+                onClick={() => setCodexOpen(false)}
+              />
+              <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[820px] max-w-[92vw] h-[480px] max-h-[88vh] grid grid-cols-2 gap-0 rounded-lg overflow-hidden shadow-[0_30px_120px_-20px_rgba(0,0,0,0.95)]"
+                style={{ filter: 'sepia(0.35) contrast(1.05)' }}
+              >
+                {/* Left page — classification */}
+                <div className="bg-[#1a1410] border-r border-[#3d2f25] p-8 flex flex-col">
+                  <div className="text-[10px] uppercase tracking-[0.22em] text-amber-200/40 mb-3">
+                    Codex Entry · {codexUnlockedCount} / {total.toLocaleString()} charted
+                  </div>
+                  <div className="text-[24px] font-serif text-amber-100/85 mb-1 leading-tight">
+                    {selectedNode.title}
+                  </div>
+                  {stellarClass && (
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-amber-200/60 mb-4">
+                      {stellarClass}
+                    </div>
+                  )}
+                  <div className="text-[13px] italic font-serif text-amber-50/65 leading-relaxed flex-1">
+                    {spread.left}
+                  </div>
+                  <div className="text-[9px] uppercase tracking-[0.18em] text-amber-200/30 mt-4">
+                    — Curator’s Field Journal —
+                  </div>
+                </div>
+                {/* Right page — narrative observation */}
+                <div className="bg-[#15100d] p-8 flex flex-col">
+                  {selectedNode.coverUrl && (
+                    <div className="w-full h-32 rounded overflow-hidden mb-3 border border-[#3d2f25]" style={{ filter: 'sepia(0.6) contrast(1.05) brightness(0.85)' }}>
+                      <FallbackImg node={selectedNode} className="w-full h-full object-cover" />
+                    </div>
+                  )}
+                  <div className="text-[13px] font-serif text-amber-50/75 leading-relaxed flex-1">
+                    {spread.right}
+                  </div>
+                  <div className="flex items-center justify-between mt-4">
+                    <div className="text-[10px] text-amber-200/35">
+                      {communityName ?? 'Unmapped Reach'}
+                    </div>
+                    <button
+                      onClick={() => setCodexOpen(false)}
+                      className="text-[10px] uppercase tracking-[0.18em] text-amber-200/50 hover:text-amber-100 transition-colors"
+                    >
+                      Close ✕
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </>
+          );
+        })()}
+
+        {/* Phase 2 — Probe mode SVG overlay */}
+        {scannerMode === 'probe' && (
+          <>
+            <svg
+              ref={probeSvgRef}
+              className="absolute left-1/2 top-1/2 pointer-events-none z-20"
+              style={{ width: 32, height: 32, transform: 'translate(-50%, -50%)' }}
+              viewBox="0 0 32 32"
+            >
+              <polygon points="16,4 28,28 4,28" fill="rgba(167, 139, 250, 0.18)" stroke="rgba(167, 139, 250, 0.85)" strokeWidth="1.5" />
+              <circle cx="16" cy="20" r="2" fill="rgba(167, 139, 250, 0.9)" />
+            </svg>
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+              <div className="bg-white/[0.04] backdrop-blur-md border border-fuchsia-400/30 rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-fuchsia-300/80">
+                Probe Mode · WASD to drift · P to exit
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Phase 2 — Stargazer mode indicator */}
+        {scannerMode === 'stargazer' && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+            <div className="bg-white/[0.04] backdrop-blur-md border border-cyan-400/30 rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-cyan-300/80">
+              Stargazer · {stargazerPath.length} stars · Enter to name · Esc to cancel
+            </div>
+          </div>
+        )}
+
+        {/* Phase 2 — Whisper drift (on broker hover) */}
+        {whisperState && (
+          <div
+            key={whisperState.key}
+            className="absolute z-30 pointer-events-none italic text-white/55 text-[12px] font-light"
+            style={{
+              left: whisperState.x,
+              top: whisperState.y,
+              animation: 'whisper-drift 2500ms ease-out forwards',
+            }}
+          >
+            {whisperState.phrase}
+          </div>
+        )}
+
+        {/* Phase 2 — Banner picker context menu */}
+        {bannerMenu && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setBannerMenu(null)} />
+            <div
+              className="absolute z-50 bg-black/85 backdrop-blur-xl border border-white/[0.08] rounded-lg p-2 shadow-2xl shadow-black/60"
+              style={{ left: bannerMenu.x, top: bannerMenu.y }}
+            >
+              <div className="text-[10px] uppercase tracking-[0.18em] text-white/40 px-2 py-1">Plant Banner</div>
+              <div className="flex gap-1.5 px-1.5 pb-1.5 pt-0.5">
+                {BANNER_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => {
+                      userMarksStore.setBanner(bannerMenu.gameId, c);
+                      setBannerMenu(null);
+                    }}
+                    className="w-7 h-7 rounded-full border border-white/15 hover:scale-110 transition-transform"
+                    style={{ background: `rgb(${BANNER_RGB[c][0] * 255}, ${BANNER_RGB[c][1] * 255}, ${BANNER_RGB[c][2] * 255})` }}
+                    title={c}
+                  />
+                ))}
+                <button
+                  onClick={() => {
+                    userMarksStore.removeBanner(bannerMenu.gameId);
+                    setBannerMenu(null);
+                  }}
+                  className="w-7 h-7 rounded-full border border-white/15 bg-black hover:scale-110 transition-transform flex items-center justify-center text-white/40"
+                  title="Remove banner"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Phase 2 — Stargazer name prompt */}
+        {stargazerNamePrompt && (
+          <>
+            <div className="fixed inset-0 z-40 bg-black/40" onClick={() => setStargazerNamePrompt(false)} />
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-black/90 backdrop-blur-2xl border border-cyan-400/30 rounded-xl p-5 w-80 shadow-2xl">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-cyan-300/70 mb-2">Name this constellation</div>
+              <input
+                autoFocus
+                value={stargazerNameInput}
+                onChange={(e) => setStargazerNameInput(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter' && stargazerNameInput.trim()) {
+                    const ok = await userMarksStore.addConstellation(stargazerNameInput, stargazerPath);
+                    if (!ok) console.warn('[Stargazer] constellation cap reached');
+                    setStargazerNamePrompt(false);
+                    setStargazerNameInput('');
+                    setStargazerPath([]);
+                    setScannerMode('observer');
+                  } else if (e.key === 'Escape') {
+                    setStargazerNamePrompt(false);
+                  }
+                }}
+                placeholder="The..."
+                className="w-full bg-white/[0.04] border border-white/[0.1] rounded-md px-3 py-2 text-sm text-white/90 placeholder-white/30 focus:outline-none focus:border-cyan-400/40"
+              />
+              <div className="text-[10px] text-white/30 mt-2">{stargazerPath.length} stars connected · Enter to save · Esc to discard</div>
+            </div>
+          </>
+        )}
 
         {/* Library side panel — collapsible glass overlay */}
         <AnimatePresence>
@@ -2994,61 +5185,81 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
                 </div>
               </div>
 
-              {/* Scrollable game card list */}
-              <div ref={libScrollRef} className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide px-2 py-2 space-y-1.5">
+              {/* Scrollable game card list — virtualized so only the visible
+                  rows render even when the library has 500+ games. */}
+              <div ref={libScrollRef} className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide px-2 py-2">
                 {filteredLibNodes.length === 0 && (
                   <div className="text-[10px] text-white/20 text-center py-8">
                     {libSearch ? 'No matches' : 'No library games found'}
                   </div>
                 )}
-                {filteredLibNodes.map(node => {
-                  const isActive = selectedNode?.id === node.id;
-                  return (
-                    <button
-                      key={node.id}
-                      data-active={isActive || undefined}
-                      onClick={() => { traversalStackRef.current = []; setTraversalDepth(0); selectNode(node, true); }}
-                      className={`w-full rounded-lg overflow-hidden text-left transition-all duration-200 cursor-pointer group/card border ${
-                        isActive
-                          ? 'border-fuchsia-500/30 bg-fuchsia-500/10 ring-1 ring-fuchsia-500/20'
-                          : 'border-transparent hover:border-white/[0.08] hover:bg-white/[0.04]'
-                      }`}
-                    >
-                      {/* Cover image */}
-                      <div className="relative w-full h-[72px] bg-black/40 overflow-hidden">
-                        <FallbackImg
-                          node={node}
-                          className="w-full h-full object-cover transition-transform duration-500 group-hover/card:scale-105"
-                          fallbackClassName="w-full h-full flex items-center justify-center text-white/20 text-sm font-bold"
-                          loading="lazy"
-                        />
-                        <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent pointer-events-none" />
-                        {node.hoursPlayed > 0 && (
-                          <span className="absolute bottom-1 right-1.5 text-[8px] text-white/50 font-mono bg-black/50 px-1 py-0.5 rounded backdrop-blur-sm">
-                            {node.hoursPlayed.toFixed(1)}h
-                          </span>
-                        )}
-                      </div>
-                      {/* Info */}
-                      <div className="px-2.5 py-2">
-                        <div className="flex items-center gap-1.5">
-                          <div className="text-[11px] font-medium text-white/85 truncate leading-tight flex-1 min-w-0">{node.title}</div>
-                          <StoreLogos nodeId={node.id} />
-                        </div>
-                        {node.developer && (
-                          <div className="text-[9px] text-white/30 truncate mt-0.5">{node.developer}</div>
-                        )}
-                        {node.genres.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mt-1.5">
-                            {node.genres.slice(0, 3).map(g => (
-                              <span key={g} className="text-[8px] px-1 py-[1px] rounded bg-white/[0.06] text-white/30">{g}</span>
-                            ))}
+                {filteredLibNodes.length > 0 && (
+                  <div
+                    style={{
+                      height: `${libRowVirtualizer.getTotalSize()}px`,
+                      position: 'relative',
+                    }}
+                  >
+                    {libRowVirtualizer.getVirtualItems().map(virtualRow => {
+                      const node = filteredLibNodes[virtualRow.index];
+                      const isActive = selectedNode?.id === node.id;
+                      return (
+                        <button
+                          key={node.id}
+                          data-active={isActive || undefined}
+                          onClick={() => { traversalStackRef.current = []; setTraversalDepth(0); selectNode(node, true); }}
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            height: `${virtualRow.size}px`,
+                            transform: `translateY(${virtualRow.start}px)`,
+                            paddingBottom: '6px', // preserves the previous space-y-1.5 visual gap
+                          }}
+                          className={`rounded-lg overflow-hidden text-left transition-all duration-200 cursor-pointer group/card border ${
+                            isActive
+                              ? 'border-fuchsia-500/30 bg-fuchsia-500/10 ring-1 ring-fuchsia-500/20'
+                              : 'border-transparent hover:border-white/[0.08] hover:bg-white/[0.04]'
+                          }`}
+                        >
+                          {/* Cover image */}
+                          <div className="relative w-full h-[72px] bg-black/40 overflow-hidden">
+                            <FallbackImg
+                              node={node}
+                              className="w-full h-full object-cover transition-transform duration-500 group-hover/card:scale-105"
+                              fallbackClassName="w-full h-full flex items-center justify-center text-white/20 text-sm font-bold"
+                              loading="lazy"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent pointer-events-none" />
+                            {node.hoursPlayed > 0 && (
+                              <span className="absolute bottom-1 right-1.5 text-[8px] text-white/50 font-mono bg-black/50 px-1 py-0.5 rounded backdrop-blur-sm">
+                                {node.hoursPlayed.toFixed(1)}h
+                              </span>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    </button>
-                  );
-                })}
+                          {/* Info */}
+                          <div className="px-2.5 py-2">
+                            <div className="flex items-center gap-1.5">
+                              <div className="text-[11px] font-medium text-white/85 truncate leading-tight flex-1 min-w-0">{node.title}</div>
+                              <StoreLogos nodeId={node.id} />
+                            </div>
+                            {node.developer && (
+                              <div className="text-[9px] text-white/30 truncate mt-0.5">{node.developer}</div>
+                            )}
+                            {node.genres.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-1.5">
+                                {node.genres.slice(0, 3).map(g => (
+                                  <span key={g} className="text-[8px] px-1 py-[1px] rounded bg-white/[0.06] text-white/30">{g}</span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </motion.div>
           )}

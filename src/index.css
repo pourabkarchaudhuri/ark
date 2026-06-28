@@ -216,3 +216,10 @@
   animation: bootFadeIn 0.05s ease-out both;
 }
 
+/* Phase 2 — Whisper Layer drift animation */
+@keyframes whisper-drift {
+  0%   { opacity: 0; transform: translateY(0); }
+  18%  { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-30px); }
+}
+

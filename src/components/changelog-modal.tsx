@@ -9,6 +9,25 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.39': {
+    title: "What's New in Ark 1.0.39",
+    changes: [
+      'Galaxy View — Graph-powered star map now uses graphology for community detection (Louvain), PageRank, Personalized PageRank, HITS authority/hub scores, and betweenness centrality',
+      'Stellar Classification — Stars are visually classified (Quasar, Pulsar, Hypergiant, Neutron Star, M-Dwarf) based on graph signals; each class has a distinct glyph and color',
+      'Fault Lines — Edges with high betweenness pulse as visible fault lines, revealing the bridges between game clusters in your library',
+      'Community Color Fills — Louvain communities are color-coded by golden-angle hue, making genre territories immediately visible',
+      'Frontier Aurora — High-prDelta nodes emit a soft cyan-to-magenta aurora, spotlighting games that punch above their PageRank weight',
+      'Monuments — Completed games are crowned with animated 3D monuments (obelisk, ring, crystal, spire, disc) that mark meaningful milestones in the map',
+      'Whisper Layer — Hovering on a high-betweenness broker node triggers a brief ambient phrase describing its role as a bridge between worlds',
+      'Codex — Press C on any selected game to open a two-page spread narrated by three AI voices (Cartographer, Curator, Ghost) with graph-derived context',
+      'Banners — Place colored banner markers on any star; organize and manage them from the banner menu',
+      'Constellations — Draw, name, and save custom star groupings; constellations persist across sessions',
+      'Timeshear — Scrub backward through 52 weeks to watch your library grow; games appear, complete, and gild as you travel through time',
+      'Lasso — Press L to draw a freehand selection; capture any cluster of stars and save it as a named constellation',
+      'Year Wrapped → Galaxy Flythrough — The Year Wrapped finale now has a "Watch your year in the Galaxy" button that launches a 60-second cinematic camera flight through your year\'s key games with animated title callouts',
+      'Galaxy performance — One shared DataTexture for all graph signals, sampled betweenness with fixed predecessor-list bug, and RAF-throttled appearance updates across 60K nodes',
+    ],
+  },
   '1.0.38': {
     title: "What's New in Ark 1.0.38",
     changes: [

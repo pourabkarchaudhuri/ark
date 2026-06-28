@@ -1723,7 +1723,16 @@ export function Dashboard() {
       />
 
       {/* Year Wrapped */}
-      <YearWrapped isOpen={showWrapped} onClose={() => setShowWrapped(false)} />
+      <YearWrapped
+        isOpen={showWrapped}
+        onClose={() => setShowWrapped(false)}
+        onLaunchFlythrough={() => {
+          // Phase 3.0 — finale handoff. Keyframes already stashed in localStorage by Year Wrapped.
+          // Galaxy view checks `ark.flythrough.pending` on mount and triggers the cinematic.
+          setShowWrapped(false);
+          switchToAnnGraph();
+        }}
+      />
       <WrappedSnackbar onLaunch={() => setShowWrapped(true)} />
 
     </div>

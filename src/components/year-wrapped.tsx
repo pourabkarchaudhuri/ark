@@ -20,6 +20,7 @@ import {
   Flame, Calendar, Zap, Target,
   Download, Copy, Check,
   Twitter, MessageCircle, Send,
+  Sparkles,
 } from 'lucide-react';
 import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
 import { journeyStore } from '@/services/journey-store';
@@ -1528,11 +1529,12 @@ function SlideFunFacts({ stats, active }: { stats: WrappedStats; active: boolean
   );
 }
 
-function SlideFinale({ stats, active, onDownload, onShare, isExporting }: {
+function SlideFinale({ stats, active, onDownload, onShare, onLaunchFlythrough, isExporting }: {
   stats: WrappedStats;
   active: boolean;
   onDownload: () => void;
   onShare: (platform: string) => void;
+  onLaunchFlythrough?: () => void;
   isExporting: boolean;
 }) {
   useEffect(() => {
@@ -1642,6 +1644,17 @@ function SlideFinale({ stats, active, onDownload, onShare, isExporting }: {
         transition={{ delay: 2.5 }}
         className="flex flex-col items-center gap-4 mt-4"
       >
+        {/* Phase 3.0 — Watch in the Galaxy: handoff to the Cinematic Flythrough */}
+        {onLaunchFlythrough && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onLaunchFlythrough(); }}
+            className="flex items-center gap-2 px-7 py-3 rounded-full bg-gradient-to-r from-cyan-500/30 via-fuchsia-500/30 to-purple-500/30 hover:from-cyan-500/45 hover:via-fuchsia-500/45 hover:to-purple-500/45 border border-cyan-400/40 text-white text-sm font-medium transition-all shadow-lg shadow-fuchsia-500/20"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>Watch your year in the Galaxy</span>
+          </button>
+        )}
+
         {/* Download button */}
         <button
           onClick={(e) => { e.stopPropagation(); onDownload(); }}
@@ -1698,11 +1711,39 @@ function SlideFinale({ stats, active, onDownload, onShare, isExporting }: {
 interface YearWrappedProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Optional. When provided, the finale slide shows a "Watch in the Galaxy" button.
+   *  Caller is responsible for navigating to Galaxy view after the callback fires.
+   *  Keyframes are stashed in localStorage at `ark.flythrough.pending`. */
+  onLaunchFlythrough?: () => void;
 }
 
 const TOTAL_SLIDES = 14;
 
-export const YearWrapped = memo(function YearWrapped({ isOpen, onClose }: YearWrappedProps) {
+/**
+ * Build a 6-8 keyframe list for the Galaxy Flythrough from computed WrappedStats.
+ * Selection picks distinct "story beats" so the camera tour spans the year's arc.
+ */
+export function buildFlythroughKeyframes(stats: WrappedStats): Array<{ gameId: string; title: string; subtitle: string }> {
+  const out: Array<{ gameId: string; title: string; subtitle: string }> = [];
+  const seen = new Set<string>();
+  const push = (gameId: string, title: string, subtitle: string) => {
+    if (seen.has(gameId)) return;
+    seen.add(gameId);
+    out.push({ gameId, title, subtitle });
+  };
+  if (stats.firstGameAdded && stats.top5Games.length > 0) {
+    const firstId = stats.top5Games.find((g) => g.title === stats.firstGameAdded?.title)?.gameId;
+    if (firstId) push(firstId, stats.firstGameAdded.title, `The first signal of your year — ${stats.firstGameAdded.date}`);
+  }
+  if (stats.topGame) push(stats.topGame.gameId, stats.topGame.title, `${Math.round(stats.topGame.hours)}h · the gravity well of your year`);
+  for (const g of stats.top5Games.slice(1, 4)) {
+    push(g.gameId, g.title, `${Math.round(g.hours)}h logged${g.rating ? ' · rated ' + g.rating + '/5' : ''}`);
+  }
+  for (const g of stats.completedGames.slice(0, 2)) push(g.gameId, g.title, 'A monument stands — conquered this year');
+  return out.slice(0, 8);
+}
+
+export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunchFlythrough }: YearWrappedProps) {
   const [currentSlide, setCurrentSlide] = useState(0);
   const [direction, setDirection] = useState(0);
   const currentYear = new Date().getFullYear();
@@ -1945,6 +1986,21 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose }: YearWr
                   onDownload={handleDownloadAll}
                   onShare={handleShare}
                   isExporting={isExporting}
+                  onLaunchFlythrough={onLaunchFlythrough ? () => {
+                    // Stash keyframes for Galaxy view's localStorage one-shot pickup
+                    try {
+                      const keyframes = buildFlythroughKeyframes(stats);
+                      if (keyframes.length >= 2) {
+                        localStorage.setItem('ark.flythrough.pending', JSON.stringify({
+                          keyframes,
+                          year: stats.year,
+                          generatedAt: Date.now(),
+                        }));
+                      }
+                    } catch { /* swallow */ }
+                    onLaunchFlythrough();
+                    onClose();
+                  } : undefined}
                 />
               ) : (
                 slides[currentSlide]

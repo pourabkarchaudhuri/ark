@@ -487,6 +487,10 @@ contextBridge.exposeInMainWorld('ollama', {
   // Cross-encoder rerank (POST /api/rerank) for Embedding Space neighbors
   rerank: (payload) =>
     ipcRenderer.invoke('ollama:rerank', payload),
+
+  // Rich diagnostic probe — tells you exactly why rerank is failing
+  rerankDiagnostic: () =>
+    ipcRenderer.invoke('ollama:rerankDiagnostic'),
 });
 
 // Expose ANN Index API to renderer (HNSW nearest-neighbor search)

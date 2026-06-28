@@ -4,7 +4,7 @@
 
 import type { TasteProfile, RecoShelf, ScoredGame } from '@/types/reco';
 
-const ORACLE_RERANK_POOL = 80;
+const ORACLE_RERANK_POOL = 200;
 
 export type OracleRerankStatus =
   | 'none'
@@ -63,14 +63,17 @@ function sortShelfWithBlend(
   if (games.length <= 1) return [...games];
   const origOrder = new Map(games.map((g, i) => [g.gameId, i]));
   const denomO = Math.max(1, games.length - 1);
-  const denomR = Math.max(1, maxRankOrdinal);
+  // Synthetic rank denominator covers reranked range AND fallback tail for unranked games.
+  const denomR = Math.max(1, maxRankOrdinal + games.length);
   return [...games].sort((a, b) => {
-    const ra = (rank.get(a.gameId) ?? 1_000_000) / denomR;
-    const rb = (rank.get(b.gameId) ?? 1_000_000) / denomR;
-    const oa = (origOrder.get(a.gameId) ?? 0) / denomO;
-    const ob = (origOrder.get(b.gameId) ?? 0) / denomO;
-    const ca = blend * ra + (1 - blend) * oa;
-    const cb = blend * rb + (1 - blend) * ob;
+    const oa = origOrder.get(a.gameId) ?? 0;
+    const ob = origOrder.get(b.gameId) ?? 0;
+    // Fallback for games not in rerank pool: slot AFTER reranked games, preserving worker order.
+    // This avoids the historical rank=1_000_000 cliff that flung unreranked games to the bottom.
+    const ra = (rank.get(a.gameId) ?? maxRankOrdinal + 1 + oa) / denomR;
+    const rb = (rank.get(b.gameId) ?? maxRankOrdinal + 1 + ob) / denomR;
+    const ca = blend * ra + (1 - blend) * (oa / denomO);
+    const cb = blend * rb + (1 - blend) * (ob / denomO);
     return ca - cb;
   });
 }
@@ -105,16 +108,26 @@ export async function applyOracleRerankShelves(
     return { shelves, status: 'skipped_no_client' };
   }
 
+  // Round-robin pool building: ensures every shelf is represented in the rerank pool
+  // even when earlier shelves are long. Prevents late shelves from being entirely cut.
   const seen = new Set<string>();
   const pool: ScoredGame[] = [];
-  for (const sh of shelves) {
-    for (const g of sh.games) {
-      if (seen.has(g.gameId)) continue;
-      seen.add(g.gameId);
-      pool.push(g);
+  const cursors = shelves.map(() => 0);
+  let progressed = true;
+  while (pool.length < ORACLE_RERANK_POOL && progressed) {
+    progressed = false;
+    for (let i = 0; i < shelves.length; i++) {
+      const games = shelves[i].games;
+      while (cursors[i] < games.length) {
+        const g = games[cursors[i]++];
+        if (seen.has(g.gameId)) continue;
+        seen.add(g.gameId);
+        pool.push(g);
+        progressed = true;
+        break;
+      }
       if (pool.length >= ORACLE_RERANK_POOL) break;
     }
-    if (pool.length >= ORACLE_RERANK_POOL) break;
   }
   if (pool.length === 0) return { shelves, status: 'skipped_empty_pool' };
 

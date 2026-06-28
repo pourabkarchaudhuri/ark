@@ -319,6 +319,14 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [rerankDiag, setRerankDiag] = useState<{
+    state: 'idle' | 'testing' | 'ok' | 'fail';
+    ollamaUp?: boolean;
+    modelInstalled?: boolean;
+    rerankWorking?: boolean;
+    latencyMs?: number;
+    error?: string;
+  }>({ state: 'idle' });
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
   const initialLoadRef = useRef(true);
 
@@ -555,9 +563,57 @@ const AIModelsTab = memo(function AIModelsTab() {
           <Input type="text" value={ollamaRerankModel} onChange={(e) => setOllamaRerankModel(e.target.value)} placeholder={DEFAULT_OLLAMA_RERANK_MODEL}
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
           <p className="text-[11px] text-white/25 mt-1">
-            Neighbor ordering via <code className="text-white/35">/api/rerank</code>. Run{' '}
+            Neighbor + Oracle shelf ordering via <code className="text-white/35">/api/rerank</code>. Run{' '}
             <code className="text-white/35">ollama pull {DEFAULT_OLLAMA_RERANK_MODEL}</code>
           </p>
+          <div className="mt-2 flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={rerankDiag.state === 'testing' || !window.ollama?.rerankDiagnostic}
+              onClick={async () => {
+                if (!window.ollama?.rerankDiagnostic) {
+                  setRerankDiag({ state: 'fail', error: 'Diagnostic IPC not available — restart the app.' });
+                  return;
+                }
+                setRerankDiag({ state: 'testing' });
+                try {
+                  const r = await window.ollama.rerankDiagnostic();
+                  setRerankDiag({
+                    state: r.rerankWorking ? 'ok' : 'fail',
+                    ollamaUp: r.ollamaUp,
+                    modelInstalled: r.modelInstalled,
+                    rerankWorking: r.rerankWorking,
+                    latencyMs: r.latencyMs,
+                    error: r.error,
+                  });
+                } catch (e) {
+                  setRerankDiag({ state: 'fail', error: e instanceof Error ? e.message : 'Probe threw an exception' });
+                }
+              }}
+              className="h-7 text-[11px]"
+            >
+              {rerankDiag.state === 'testing' ? (
+                <><Loader2 className="h-3 w-3 mr-1.5 animate-spin" />Testing…</>
+              ) : (
+                <>Test reranker</>
+              )}
+            </Button>
+            {rerankDiag.state === 'ok' && (
+              <span className="text-[11px] text-emerald-400/80 flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3" />
+                Reranker working{typeof rerankDiag.latencyMs === 'number' ? ` (${rerankDiag.latencyMs}ms)` : ''}
+              </span>
+            )}
+            {rerankDiag.state === 'fail' && (
+              <span className="text-[11px] text-amber-400/80 flex items-center gap-1">
+                <AlertCircle className="h-3 w-3" />
+                {!rerankDiag.ollamaUp ? 'Ollama not running' :
+                 rerankDiag.modelInstalled === false ? `Model not pulled — ${rerankDiag.error}` :
+                 rerankDiag.error || 'Probe failed'}
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex items-center justify-between gap-3">
           <div>

@@ -1,6 +1,6 @@
 {
   "name": "ark",
-  "version": "1.0.38",
+  "version": "1.0.39",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -74,6 +74,10 @@
     "emoji-mart": "^5.6.0",
     "file-saver": "^2.0.5",
     "framer-motion": "^10.18.0",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "graphology-metrics": "^2.4.0",
+    "graphology-types": "^0.24.8",
     "gravatar": "^1.8.2",
     "html-to-image": "^1.11.13",
     "jszip": "^3.10.1",
