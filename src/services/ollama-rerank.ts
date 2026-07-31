@@ -72,9 +72,11 @@ export async function applyOllamaNeighborRerank(
   });
   try {
     const res = await window.ollama.rerank({ query, documents, topN: finalK });
-    if (!res?.results?.length) {
-      const out = { neighbors: neighbors.slice(0, finalK), status: 'empty_results' as const };
-      neighborRerankCache.set(cacheKey, { neighbors: out.neighbors, status: 'empty_results', expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
+    if (!res || 'error' in res || !('results' in res) || !res.results?.length) {
+      const status: NeighborRerankStatus =
+        res && 'error' in res && res.error.code !== 'empty_results' ? 'error' : 'empty_results';
+      const out = { neighbors: neighbors.slice(0, finalK), status };
+      neighborRerankCache.set(cacheKey, { neighbors: out.neighbors, status, expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
       return out;
     }
 
@@ -104,8 +106,10 @@ export async function applyOllamaNeighborRerank(
         }
       }
     }
-    neighborRerankCache.set(cacheKey, { neighbors: out, status: 'applied', expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
-    return { neighbors: out, status: 'applied' };
+    // embed_fallback is a successful reorder — badge-hidden via 'fallback' status.
+    const status: NeighborRerankStatus = res.via === 'embed_fallback' ? 'fallback' : 'applied';
+    neighborRerankCache.set(cacheKey, { neighbors: out, status, expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
+    return { neighbors: out, status };
   } catch {
     const out = { neighbors: neighbors.slice(0, finalK), status: 'error' as const };
     neighborRerankCache.set(cacheKey, { neighbors: out.neighbors, status: 'error', expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });

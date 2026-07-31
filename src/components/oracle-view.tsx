@@ -10,6 +10,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
+import { createPortal } from 'react-dom';
 import { useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -56,13 +57,10 @@ import type { OracleRerankStatus } from '@/services/oracle-rerank';
 import { shelfBanditStore } from '@/services/shelf-bandit-store';
 
 function oracleRerankBadge(status: OracleRerankStatus): { label: string; title: string } | null {
-  if (status === 'none' || status === 'applied') return null;
-  if (status === 'skipped_disabled') return { label: 'Rerank off', title: 'Oracle rerank is off in Settings; shelves use the worker order' };
-  if (status === 'skipped_no_client') return { label: 'Rerank unavailable', title: 'Ollama rerank is not available; shelves use the worker order' };
-  if (status === 'skipped_blend_zero') return { label: 'Rerank blend 0', title: 'Oracle rerank blend is 0; shelves keep the worker order' };
-  if (status === 'skipped_empty_pool') return { label: 'Rerank skipped', title: 'Nothing to rerank; shelves unchanged' };
+  // Soft skips (disabled / blend 0 / no client) and successful apply (incl. embed_fallback) stay quiet.
+  // Badge only for hard failures — both cross-encoder and arctic-embed fallback failed.
+  if (status === 'error') return { label: 'Rerank failed', title: 'Rerank failed (cross-encoder and embed fallback); shelves use the worker order' };
   if (status === 'empty_results') return { label: 'No rerank scores', title: 'Rerank returned no scores; shelves use the worker order' };
-  if (status === 'error') return { label: 'Rerank failed', title: 'Rerank failed; shelves use the worker order' };
   return null;
 }
 import { recoHistoryStore } from '@/services/reco-history-store';
@@ -70,6 +68,7 @@ import { normalizeLayerScores, generateExplanation } from '@/services/reco-expla
 import { embeddingService } from '@/services/embedding-service';
 import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
+import { bm25Index } from '@/services/bm25-index';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
 import { getPrefetchedGames, setNavigatingGame } from '@/services/prefetch-store';
@@ -79,6 +78,7 @@ import type { Game } from '@/types/game';
 import type { RecoShelf, ScoredGame, TasteProfile, ShelfType } from '@/types/reco';
 import { getCanonicalGenres } from '@/data/canonical-genres';
 import { TooltipCard } from '@/components/ui/tooltip-card';
+import { useDraggableScroll } from '@/hooks/useDraggableScroll';
 
 // ─── Background catalog embedding pipeline (persists across navigation) ──────
 
@@ -94,7 +94,12 @@ function startCatalogEmbeddingPipeline() {
     } catch { /* non-fatal */ }
 
     const available = await embeddingService.isAvailable();
-    if (!available) { _pipelineStarted = false; return; }
+    if (!available) {
+      // Still warm BM25 from catalogs even without embeddings.
+      bm25Index.scheduleIdleRebuild();
+      _pipelineStarted = false;
+      return;
+    }
 
     const entryCount = await catalogStore.getEntryCount();
     if (entryCount === 0) { _pipelineStarted = false; return; }
@@ -117,6 +122,7 @@ function startCatalogEmbeddingPipeline() {
       );
     }
 
+    bm25Index.scheduleIdleRebuild();
     _pipelineStarted = false;
   })();
 }
@@ -794,6 +800,129 @@ const ExplainPopover = memo(function ExplainPopover({ game }: { game: ScoredGame
   );
 });
 
+// v1.0.46 — "Why recommended?" popover shown on right-click of an Oracle card.
+// Portal-rendered, cursor-anchored, viewport-clamped, closes on outside
+// mousedown / Escape / scroll / another context-menu event.
+const RecoWhyPopover = memo(function RecoWhyPopover({
+  game,
+  anchor,
+  onClose,
+}: {
+  game: ScoredGame;
+  anchor: { x: number; y: number };
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number }>({ left: anchor.x, top: anchor.y });
+
+  // Clamp within viewport after mount + measure
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const margin = 12;
+    const maxLeft = window.innerWidth - rect.width - margin;
+    const maxTop = window.innerHeight - rect.height - margin;
+    setPos({
+      left: Math.max(margin, Math.min(anchor.x, maxLeft)),
+      top: Math.max(margin, Math.min(anchor.y, maxTop)),
+    });
+  }, [anchor.x, anchor.y]);
+
+  // Close on outside interaction / Escape / scroll / another context menu
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    const onScroll = () => onClose();
+    const onContext = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener('mousedown', onDown, true);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onScroll, true);
+    document.addEventListener('contextmenu', onContext, true);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onScroll, true);
+      document.removeEventListener('contextmenu', onContext, true);
+    };
+  }, [onClose]);
+
+  const similarTo = game.reasons.similarTo.slice(0, 3);
+  const sharedGenres = game.reasons.sharedGenres.slice(0, 4);
+  const bestCluster = game.reasons.bestClusterLabel;
+  const layers = Object.entries(game.layerScores ?? {})
+    .filter(([, v]) => typeof v === 'number' && v > 0)
+    .sort(([, a], [, b]) => (b as number) - (a as number))
+    .slice(0, 5);
+
+  return createPortal(
+    <div
+      ref={ref}
+      role="dialog"
+      aria-label={`Why ${game.title} was recommended`}
+      onContextMenu={(e) => e.preventDefault()}
+      className="fixed z-[10000] w-[320px] rounded-lg border border-white/10 bg-black/95 backdrop-blur-xl shadow-2xl shadow-black/60 p-4 text-white/85 select-none"
+      style={{ left: pos.left, top: pos.top }}
+    >
+      <div className="text-[13px] font-semibold leading-tight mb-1 line-clamp-2">{game.title}</div>
+      <div className="text-[10px] uppercase tracking-widest text-fuchsia-400/70 mb-3">Why recommended?</div>
+
+      {bestCluster && (
+        <div className="text-[11px] text-white/60 mb-2">
+          Matches your <span className="text-white/85 font-medium">{bestCluster}</span> cluster
+        </div>
+      )}
+
+      {similarTo.length > 0 && (
+        <div className="mb-2">
+          <div className="text-[10px] uppercase tracking-wide text-white/40 mb-1">Similar to</div>
+          <div className="flex flex-wrap gap-1">
+            {similarTo.map((t, i) => (
+              <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-white/[0.06] border border-white/10">{t}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {sharedGenres.length > 0 && (
+        <div className="mb-2">
+          <div className="text-[10px] uppercase tracking-wide text-white/40 mb-1">Shared genres</div>
+          <div className="flex flex-wrap gap-1">
+            {sharedGenres.map((g, i) => (
+              <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-fuchsia-500/[0.12] border border-fuchsia-500/25 text-fuchsia-200/90">{g}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {layers.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          <div className="text-[10px] uppercase tracking-wide text-white/40">Top signals</div>
+          {layers.map(([name, value]) => {
+            const pct = Math.max(0, Math.min(100, Math.round((value as number) * 100)));
+            return (
+              <div key={name} className="flex items-center gap-2">
+                <span className="text-[10px] w-20 text-white/55 truncate">{name}</span>
+                <div className="flex-1 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+                  <div className="h-full bg-fuchsia-500/70" style={{ width: `${pct}%` }} />
+                </div>
+                <span className="text-[10px] tabular-nums text-white/60 w-8 text-right">{pct}%</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>,
+    document.body,
+  );
+});
+
 const OracleCard = memo(function OracleCard({
   game,
   index,
@@ -807,8 +936,21 @@ const OracleCard = memo(function OracleCard({
 }) {
   const [hovered, setHovered] = useState(false);
   const [showExplain, setShowExplain] = useState(false);
+  const [whyAnchor, setWhyAnchor] = useState<{ x: number; y: number } | null>(null);
   const gameObj = useMemo(() => scoredGameToGame(game), [game]);
   const oracleFooter = useMemo(() => <OracleFooter game={game} />, [game]);
+
+  // v1.0.46 — right-click reveals the "Why recommended?" popover at the cursor.
+  // Ignore right-clicks that land on interactive children (buttons, links) so
+  // their native contextmenu still works. Ignore Ctrl+click too (browser
+  // convention for opening a new tab / native menu).
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('button, a, input, [data-no-drag]')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setWhyAnchor({ x: e.clientX, y: e.clientY });
+  }, []);
 
   const handleClickCapture = useCallback(() => {
     if (shelfType) {
@@ -844,6 +986,7 @@ const OracleCard = memo(function OracleCard({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); setShowExplain(false); }}
       onClickCapture={handleClickCapture}
+      onContextMenu={handleContextMenu}
     >
       <GameCard
         game={gameObj}
@@ -853,6 +996,13 @@ const OracleCard = memo(function OracleCard({
         hideLibraryBadge
         footer={oracleFooter}
       />
+      {whyAnchor && (
+        <RecoWhyPopover
+          game={game}
+          anchor={whyAnchor}
+          onClose={() => setWhyAnchor(null)}
+        />
+      )}
 
       {/* Protruding lower-third tabs — top-left over the card art */}
       <div className="absolute top-3 left-0 z-20 flex flex-col gap-1.5 pointer-events-none">
@@ -935,6 +1085,9 @@ function ShelfCarousel({
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(true);
   const Icon = SHELF_ICONS[shelf.type] || Sparkles;
+
+  // v1.0.46: click-and-drag horizontal panning on shelf carousels.
+  useDraggableScroll(scrollRef);
 
   const checkScroll = useCallback(() => {
     const el = scrollRef.current;

@@ -39,9 +39,14 @@ import type {
   TasteCluster,
   EngagementPattern,
   FranchiseCluster,
-  FranchiseEntry,
 } from '@/types/reco';
 import { toCanonicalGenre, toCanonicalGenres, CANONICAL_GENRES } from '@/data/canonical-genres';
+import {
+  computeFranchiseBoost,
+  detectFranchises,
+  isFutureReleaseDate,
+} from '@/services/franchise';
+import { matchesDeepInGenre, matchesMoodShelf } from '@/services/reco-shelf-rules';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -715,216 +720,7 @@ function computeTimeOfDayBoost(candidate: CandidateGame, ctx: TimeOfDayContext):
   return count > 0 ? clamp01(affinitySum / count) : 0;
 }
 
-// ─── Layer 11: Franchise Detection & Scoring ────────────────────────────────────
-
-/** Common franchise suffixes/numbering patterns to strip. */
-const FRANCHISE_STRIP_PATTERNS = [
-  // Numbered sequels: "Game 2", "Game II", "Game III", "Game IV"
-  /\s+([\divxlc]+|\d+)$/i,
-  // Colon-prefixed edition/remaster suffixes: "Game: Remastered"
-  /\s*:\s*(remastered|goty|game of the year|deluxe|ultimate|definitive|complete|enhanced|anniversary|remake|hd|collection|gold|premium|special|digital|standard)(\s+edition)?$/i,
-  // Standalone edition/remaster suffixes (no colon): "Game Remastered", "Game Definitive Edition"
-  /\s+(remastered|remake|definitive|enhanced|anniversary|hd|complete|ultimate|deluxe|goty|gold|premium|special|digital|standard)(\s+edition)?$/i,
-  // "Game of the Year" as trailing phrase (with or without "Edition")
-  /\s+game\s+of\s+the\s+year(\s+edition)?$/i,
-  /\s+edition$/i,
-  // Parenthetical year/platform markers
-  /\s*\([^)]*\)$/,
-  // Subtitled entries: keep "Game:" → "Game"
-  /\s*:\s+[^:]+$/,
-  // " - " subtitle separator
-  /\s+-\s+.*$/,
-];
-
-/** Extract the base franchise name from a game title. */
-function extractFranchiseBase(title: string): string {
-  let base = title.trim();
-  const original = base;
-  // Apply patterns iteratively (some titles have multiple suffixes)
-  for (let round = 0; round < 3; round++) {
-    let changed = false;
-    for (const pattern of FRANCHISE_STRIP_PATTERNS) {
-      const stripped = base.replace(pattern, '').trim();
-      if (stripped.length >= 3 && stripped !== base) {
-        base = stripped;
-        changed = true;
-      }
-    }
-    if (!changed) break;
-  }
-  // Fallback: strip trailing word for 4+-word titles where no pattern matched
-  // (catches "Assassin's Creed Valhalla" → "Assassin's Creed")
-  // Requires 4+ words to avoid false positives like "Grand Theft Auto" → "Grand Theft"
-  if (base === original) {
-    const words = base.split(/\s+/);
-    if (words.length >= 4) {
-      const candidate = words.slice(0, -1).join(' ');
-      const newLast = candidate.split(/\s+/).pop()?.toLowerCase() ?? '';
-      const stopWords = new Set(['of', 'the', 'and', 'in', 'on', 'at', 'for', 'to', 'a', 'an']);
-      if (candidate.length >= 3 && !stopWords.has(newLast)) base = candidate;
-    }
-  }
-  return norm(base);
-}
-
-/** Detect all franchises from user + candidate game titles. */
-function detectFranchises(
-  userGames: UserGameSnapshot[],
-  candidates: CandidateGame[],
-  onProgress?: (fraction: number) => void,
-): FranchiseCluster[] {
-  // Build base name → entries map
-  const baseMap = new Map<string, {
-    entries: Map<string, { gameId: string; title: string; releaseDate: string; isUserOwned: boolean }>;
-    developers: Map<string, number>;
-    userRatings: number[];
-    userHours: number;
-  }>();
-
-  const addToMap = (gameId: string, title: string, releaseDate: string, isUser: boolean, developer: string, rating: number, hours: number) => {
-    const baseName = extractFranchiseBase(title);
-    if (!baseName || baseName.length < 3) return;
-
-    if (!baseMap.has(baseName)) {
-      baseMap.set(baseName, {
-        entries: new Map(),
-        developers: new Map(),
-        userRatings: [],
-        userHours: 0,
-      });
-    }
-
-    const cluster = baseMap.get(baseName)!;
-
-    if (!cluster.entries.has(gameId)) {
-      cluster.entries.set(gameId, { gameId, title, releaseDate, isUserOwned: isUser });
-    } else if (isUser) {
-      cluster.entries.get(gameId)!.isUserOwned = true;
-    }
-
-    if (developer) {
-      cluster.developers.set(norm(developer), (cluster.developers.get(norm(developer)) || 0) + 1);
-    }
-
-    if (isUser) {
-      if (rating > 0) cluster.userRatings.push(rating);
-      cluster.userHours += hours;
-    }
-  };
-
-  for (const ug of userGames) {
-    addToMap(ug.gameId, ug.title, ug.releaseDate, true, ug.developer, ug.rating, ug.hoursPlayed);
-  }
-
-  const franchiseProgressStep = Math.max(1, Math.floor(candidates.length / 5));
-  for (let fi = 0; fi < candidates.length; fi++) {
-    const c = candidates[fi];
-    addToMap(c.gameId, c.title, c.releaseDate, false, c.developer, 0, 0);
-    if (onProgress && fi % franchiseProgressStep === 0) {
-      onProgress(fi / candidates.length);
-    }
-  }
-
-  // Build franchise clusters: must have ≥2 entries total AND ≥1 user entry
-  const franchises: FranchiseCluster[] = [];
-
-  for (const [baseName, data] of baseMap) {
-    if (data.entries.size < 2) continue;
-
-    const hasUserEntry = [...data.entries.values()].some(e => e.isUserOwned);
-    if (!hasUserEntry) continue;
-
-    // Sort entries by release date for sequence indexing
-    const entries: FranchiseEntry[] = [...data.entries.values()]
-      .sort((a, b) => {
-        const dateA = new Date(a.releaseDate).getTime();
-        const dateB = new Date(b.releaseDate).getTime();
-        if (isNaN(dateA) && isNaN(dateB)) return 0;
-        if (isNaN(dateA)) return 1;
-        if (isNaN(dateB)) return -1;
-        return dateA - dateB;
-      })
-      .map((e, i) => ({ ...e, sequenceIndex: i }));
-
-    // Primary developer
-    let topDev = '';
-    let topDevCount = 0;
-    for (const [dev, count] of data.developers) {
-      if (count > topDevCount) { topDev = dev; topDevCount = count; }
-    }
-
-    const userPlayedIds = entries.filter(e => e.isUserOwned).map(e => e.gameId);
-    const avgRating = data.userRatings.length > 0
-      ? data.userRatings.reduce((s, r) => s + r, 0) / data.userRatings.length
-      : 0;
-
-    // Pretty display name: use the first entry's title base
-    const firstEntry = entries[0];
-    const displayParts = firstEntry.title.split(/[:\-–]/);
-    const displayName = displayParts[0].trim();
-
-    franchises.push({
-      baseName,
-      displayName,
-      entries,
-      userPlayedIds,
-      userAvgRating: avgRating,
-      userTotalHours: data.userHours,
-      developer: topDev,
-    });
-  }
-
-  return franchises.sort((a, b) => b.userTotalHours - a.userTotalHours);
-}
-
-/** Compute franchise boost for a single candidate. */
-function computeFranchiseBoost(
-  candidate: CandidateGame,
-  franchises: FranchiseCluster[],
-  userGameIds: Set<string>,
-): { boost: number; franchiseName?: string; isFranchiseEntry: boolean } {
-  if (userGameIds.has(candidate.gameId)) {
-    return { boost: 0, isFranchiseEntry: false };
-  }
-
-  const candidateBase = extractFranchiseBase(candidate.title);
-
-  for (const franchise of franchises) {
-    // Check if this candidate belongs to a franchise the user has played
-    const belongsToFranchise = franchise.baseName === candidateBase ||
-      franchise.entries.some(e => e.gameId === candidate.gameId);
-
-    if (!belongsToFranchise) continue;
-
-    // The user has played at least one entry in this franchise
-    const userPlayed = franchise.userPlayedIds.length;
-    const totalEntries = franchise.entries.length;
-
-    // Higher boost if user rated the franchise entries highly.
-    // When no ratings exist, infer satisfaction from hours played
-    // (unrated games shouldn't be penalized — playing 10+ hours signals interest).
-    const ratingMult = franchise.userAvgRating >= 4 ? 1.5
-      : franchise.userAvgRating >= 3 ? 1.0
-      : franchise.userAvgRating > 0 ? 0.5
-      : franchise.userTotalHours >= 10 ? 1.2
-      : 1.0;
-
-    // Higher boost for completing more of the series
-    const completionFactor = Math.min(userPlayed / totalEntries, 0.8);
-
-    // Strong base boost for franchise membership (0.4 – 0.9)
-    const boost = clamp01((0.4 + completionFactor * 0.5) * ratingMult);
-
-    return {
-      boost,
-      franchiseName: franchise.displayName,
-      isFranchiseEntry: true,
-    };
-  }
-
-  return { boost: 0, isFranchiseEntry: false };
-}
-
+// ─── Layer 11: Franchise Detection & Scoring → @/services/franchise ──────────────
 // ─── Layer 12: Studio Loyalty Boost ─────────────────────────────────────────────
 
 function computeStudioLoyaltyBoost(
@@ -1693,6 +1489,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
         isFranchiseEntry: franchise.isFranchiseEntry,
         isOnSale,
         semanticRetrieved: c.semanticRetrieved === true,
+        lexicalRetrieved: c.lexicalRetrieved === true,
         bestClusterLabel,
         explanation: '',
       },
@@ -1823,11 +1620,10 @@ function buildShelvesFromScored(
     }
   }
 
-  // "Deep in [Genre]"
+  // "Deep in [Genre]" — primary canonical genre must equal topGenre
   if (profile.topGenre) {
-    const topGenreNorm = norm(profile.topGenre);
     const genreGames = reranked
-      .filter(s => !usedGameIds.has(s.gameId) && s.genres.some(g => norm(toCanonicalGenre(g) ?? g) === topGenreNorm))
+      .filter(s => !usedGameIds.has(s.gameId) && matchesDeepInGenre(s.genres, profile.topGenre))
       .slice(0, 12);
 
     if (genreGames.length >= 2) {
@@ -1842,12 +1638,12 @@ function buildShelvesFromScored(
     }
   }
 
-  // "For your [mood]"
+  // "For your [mood]" — require the cluster label genre on the candidate
   for (const cluster of clusters) {
     if (!cluster.label || cluster.gameCount < 2) continue;
-    const clusterGenresNorm = new Set(cluster.profile.genres.slice(0, 3).map(g => norm(g.name)));
+    const labelGenre = cluster.profile.topGenre || cluster.label;
     const clusterGames = reranked
-      .filter(s => !usedGameIds.has(s.gameId) && s.genres.some(g => clusterGenresNorm.has(norm(toCanonicalGenre(g) ?? g))))
+      .filter(s => !usedGameIds.has(s.gameId) && matchesMoodShelf(s.genres, labelGenre))
       .slice(0, 10);
 
     if (clusterGames.length >= 3) {
@@ -1955,13 +1751,12 @@ function buildShelvesFromScored(
     addToUsed(newReleases);
   }
 
-  // Upcoming Sequels — franchise entries not yet released
+  // Upcoming Sequels — franchise entries with a real future releaseDate only
   const upcomingSequels = allScored
     .filter(s => {
       if (usedGameIds.has(s.gameId)) return false;
       if (!s.reasons.isFranchiseEntry) return false;
-      const rd = new Date(s.releaseDate).getTime();
-      return (!isNaN(rd) && rd > Date.now()) || s.releaseDate === '';
+      return isFutureReleaseDate(s.releaseDate, nowMs);
     })
     .sort((a, b) => b.score - a.score)
     .slice(0, 8);

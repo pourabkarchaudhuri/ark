@@ -26,6 +26,7 @@ import type { ResolvedEvent } from '@/data/gaming-events';
 import { resolveEvents, refreshStatuses, clearResolvedCache } from '@/services/event-resolver-service';
 import { transmissionsHistoryStore } from '@/services/transmissions-history-store';
 import { TooltipCard } from '@/components/ui/tooltip-card';
+import { useDraggableScroll } from '@/hooks/useDraggableScroll';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -769,6 +770,9 @@ const BroadcastsStrip = memo(function BroadcastsStrip({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
+
+  // v1.0.46: click-and-drag horizontal panning on the broadcasts strip.
+  useDraggableScroll(scrollRef);
 
   const checkScroll = useCallback(() => {
     const el = scrollRef.current;

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildTasteQueryText } from '@/services/oracle-rerank';
+import { buildTasteQueryText, buildLexicalTasteQuery } from '@/services/oracle-rerank';
 import type { TasteProfile } from '@/types/reco';
 
 function emptyProfile(): TasteProfile {
@@ -40,5 +40,19 @@ describe('buildTasteQueryText', () => {
     expect(q).toContain('Fantasy');
     expect(q).toContain('FromSoftware');
     expect(q).toContain('Single-player');
+  });
+});
+
+describe('buildLexicalTasteQuery', () => {
+  it('is keyword-focused and includes loved titles', () => {
+    const p = emptyProfile();
+    p.topGenre = 'RPG';
+    p.genres = [{ name: 'RPG', weight: 2, gameCount: 0, totalHours: 0, avgRating: 4 }];
+    p.loyalDevelopers = ['FromSoftware'];
+    const q = buildLexicalTasteQuery(p, { lovedTitles: ['Elden Ring'] });
+    expect(q).toContain('RPG');
+    expect(q).toContain('FromSoftware');
+    expect(q).toContain('Elden Ring');
+    expect(q.toLowerCase()).not.toContain('recommend games');
   });
 });

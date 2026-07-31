@@ -15,8 +15,11 @@
 import { setEmbeddingCache } from './reco-store';
 import { annIndex } from './ann-index';
 import { toCanonicalGenres } from '@/data/canonical-genres';
+import { extractFranchiseBase } from '@/services/franchise';
 import type { CatalogEntry } from '@/types/catalog';
 import type { EpicCatalogEntry } from '@/services/epic-catalog-store';
+
+export { extractFranchiseBase };
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -36,6 +39,7 @@ declare global {
         ollamaDetected: boolean;
         ollamaVersion: string | null;
         embeddingModelReady: boolean;
+        rerankModelReady?: boolean;
         error: string | null;
       }>;
       generateEmbedding: (text: string) => Promise<number[] | null>;
@@ -43,12 +47,18 @@ declare global {
       getModelInfo: () => Promise<OllamaModelInfo | null>;
       /** Subscribe to setup progress (status, pct) during ollama:setup. Returns unsubscribe. */
       onSetupProgress?: (callback: (data: { status: string; pct: number }) => void) => () => void;
-      /** POST /api/rerank — returns ranked indices or null if unavailable. */
+      /**
+       * POST /api/rerank — structured success `{ results, via }` or `{ error }`.
+       * `via: 'embed_fallback'` is still a successful reorder (arctic-embed cosine).
+       */
       rerank: (payload: {
         query: string;
         documents: string[];
         topN?: number;
-      }) => Promise<{ results: Array<{ index: number; relevance_score: number }> } | null>;
+      }) => Promise<
+        | { results: Array<{ index: number; relevance_score: number }>; via?: 'cross_encoder' | 'embed_fallback' }
+        | { error: { code: string; httpStatus?: number; message: string } }
+      >;
       /** Diagnostic probe — surfaces exactly why rerank is failing (Ollama down, model missing, etc.). */
       rerankDiagnostic?: () => Promise<{
         ollamaUp: boolean;
@@ -266,46 +276,6 @@ function hashText(text: string): string {
 }
 
 // ─── Franchise base extraction (mirrors reco.worker.ts logic) ───────────────
-
-const FRANCHISE_STRIP_PATTERNS = [
-  /\s+([\divxlc]+|\d+)$/i,
-  /\s*:\s*(remastered|goty|game of the year|deluxe|ultimate|definitive|complete|enhanced|anniversary|remake|hd|collection|gold|premium|special|digital|standard)(\s+edition)?$/i,
-  /\s+(remastered|remake|definitive|enhanced|anniversary|hd|complete|ultimate|deluxe|goty|gold|premium|special|digital|standard)(\s+edition)?$/i,
-  /\s+game\s+of\s+the\s+year(\s+edition)?$/i,
-  /\s+edition$/i,
-  /\s*\([^)]*\)$/,
-  /\s*:\s+[^:]+$/,
-  /\s+-\s+.*$/,
-];
-
-export function extractFranchiseBase(title: string): string {
-  let base = title.trim();
-  const original = base;
-  for (let round = 0; round < 3; round++) {
-    let changed = false;
-    for (const pattern of FRANCHISE_STRIP_PATTERNS) {
-      const stripped = base.replace(pattern, '').trim();
-      if (stripped.length >= 3 && stripped !== base) {
-        base = stripped;
-        changed = true;
-      }
-    }
-    if (!changed) break;
-  }
-  // Fallback: strip trailing word for 4+-word titles where no pattern matched
-  // (catches "Assassin's Creed Valhalla" → "Assassin's Creed")
-  // Requires 4+ words to avoid false positives like "Grand Theft Auto" → "Grand Theft"
-  if (base === original) {
-    const words = base.split(/\s+/);
-    if (words.length >= 4) {
-      const candidate = words.slice(0, -1).join(' ');
-      const newLast = candidate.split(/\s+/).pop()?.toLowerCase() ?? '';
-      const stopWords = new Set(['of', 'the', 'and', 'in', 'on', 'at', 'for', 'to', 'a', 'an']);
-      if (candidate.length >= 3 && !stopWords.has(newLast)) base = candidate;
-    }
-  }
-  return base.toLowerCase().trim();
-}
 
 // ─── Embedding text builders ────────────────────────────────────────────────
 

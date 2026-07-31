@@ -18,10 +18,66 @@ import {
   detectGpuMode,
   getEmbeddingModelInfo,
   getEmbeddingModelSize,
+  ensureRerankModelPull,
+  getRerankModelTag,
   EMBEDDING_MODEL_NAME,
 } from '../ollama-setup.js';
 import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
-import { normalizeOllamaRerankRows } from '../ollama-rerank-normalize.js';
+import { normalizeOllamaRerankRows, type RerankResultRow } from '../ollama-rerank-normalize.js';
+
+/** Structured IPC result for ollama:rerank. */
+export type OllamaRerankIpcResult =
+  | { results: RerankResultRow[]; via: 'cross_encoder' | 'embed_fallback' }
+  | { error: { code: string; httpStatus?: number; message: string } };
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length === 0 || a.length !== b.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i]! * b[i]!;
+    na += a[i]! * a[i]!;
+    nb += b[i]! * b[i]!;
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom > 0 ? dot / denom : 0;
+}
+
+/**
+ * Rank documents by cosine(query, doc) using the existing arctic-embed2 path.
+ * Used when /api/rerank is 404 or the cross-encoder model is missing.
+ */
+async function embedCosineRerank(
+  query: string,
+  documents: string[],
+  topN: number,
+): Promise<RerankResultRow[] | null> {
+  const qEmb = await generateEmbedding(query);
+  if (!qEmb?.length) return null;
+  const docEmbs = await generateEmbeddingsBatch(documents);
+  const scored: RerankResultRow[] = [];
+  for (let i = 0; i < documents.length; i++) {
+    const emb = docEmbs[i];
+    if (!emb?.length) continue;
+    scored.push({ index: i, relevance_score: cosineSimilarity(qEmb, emb) });
+  }
+  if (scored.length === 0) return null;
+  scored.sort((a, b) => b.relevance_score - a.relevance_score);
+  return scored.slice(0, topN);
+}
+
+function looksLikeModelMissing(httpStatus: number, bodyText: string): boolean {
+  const lower = bodyText.toLowerCase();
+  if (lower.includes('not found') && (lower.includes('model') || lower.includes('pull'))) {
+    return true;
+  }
+  // Ollama often returns 404 for a missing model name on /api/rerank.
+  if (httpStatus === 404 && (lower.includes('model') || lower.includes('pull it'))) {
+    return true;
+  }
+  return false;
+}
 
 // Items per Ollama array request — Ollama processes them sequentially internally,
 // so larger batches reduce HTTP roundtrips without bumping CPU.
@@ -107,6 +163,7 @@ export function register(): void {
         ollamaDetected: false,
         ollamaVersion: null,
         embeddingModelReady: false,
+        rerankModelReady: false,
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
@@ -404,16 +461,28 @@ export function register(): void {
   });
 
   /**
-   * POST /api/rerank — cross-encoder relevance for Embedding Space neighbor ordering.
-   * Returns { results: [{ index, relevance_score }] } or null on failure.
+   * POST /api/rerank — cross-encoder relevance for Embedding Space / Oracle ordering.
+   * Returns { results, via } on success, or { error: { code, httpStatus?, message } }.
+   * On model_missing: silent one-shot pull (deduped) + arctic-embed cosine fallback.
+   * On /api/rerank 404 / endpoint missing: arctic-embed cosine fallback (no new models).
    */
-  ipcMain.handle('ollama:rerank', async (_event: any, payload: unknown) => {
+  ipcMain.handle('ollama:rerank', async (_event: any, payload: unknown): Promise<OllamaRerankIpcResult> => {
+    const fail = (
+      code: string,
+      message: string,
+      httpStatus?: number,
+    ): OllamaRerankIpcResult => ({ error: { code, message, ...(httpStatus !== undefined ? { httpStatus } : {}) } });
+
     try {
-      if (!payload || typeof payload !== 'object') return null;
+      if (!payload || typeof payload !== 'object') {
+        return fail('invalid_payload', 'Rerank payload must be an object');
+      }
       const p = payload as { query?: unknown; documents?: unknown; topN?: unknown };
       const query = typeof p.query === 'string' ? p.query.trim() : '';
       const documents = Array.isArray(p.documents) ? p.documents : [];
-      if (!query || documents.length === 0) return null;
+      if (!query || documents.length === 0) {
+        return fail('invalid_payload', 'Rerank requires a non-empty query and documents');
+      }
 
       const slice = documents.slice(0, RERANK_MAX_DOCS).map((d) => {
         const s = typeof d === 'string' ? d : String(d ?? '');
@@ -428,8 +497,17 @@ export function register(): void {
           : slice.length;
 
       const ollama = settingsStore.getOllamaSettings();
-      const baseUrl = ollama.url.replace(/\/$/, '');
-      const model = ollama.rerankModel?.trim() || DEFAULT_OLLAMA_RERANK_MODEL;
+      const baseUrl = (ollama.url || 'http://localhost:11434').replace(/\/$/, '');
+      const model = getRerankModelTag();
+
+      const tryEmbedFallback = async (reason: string): Promise<OllamaRerankIpcResult> => {
+        logger.log(`[Ollama] rerank falling back to arctic-embed cosine (${reason})`);
+        const results = await embedCosineRerank(q, slice, topN);
+        if (!results?.length) {
+          return fail('embed_fallback_failed', `Cross-encoder unavailable (${reason}); embed cosine fallback also failed`);
+        }
+        return { results, via: 'embed_fallback' };
+      };
 
       const ac = new AbortController();
       const t = setTimeout(() => ac.abort(), RERANK_TIMEOUT_MS);
@@ -451,20 +529,40 @@ export function register(): void {
       }
 
       if (!res.ok) {
-        logger.warn(`[Ollama] rerank HTTP ${res.status} for model ${model}`);
-        return null;
+        let bodyText = '';
+        try {
+          bodyText = await res.text();
+        } catch {
+          bodyText = '';
+        }
+        logger.warn(`[Ollama] rerank HTTP ${res.status} for model ${model}: ${bodyText.slice(0, 200)}`);
+
+        const modelMissing = looksLikeModelMissing(res.status, bodyText);
+        if (modelMissing) {
+          // Silent one-shot pull (deduped). Do not await completion — serve via embed fallback now.
+          void ensureRerankModelPull(model);
+          return tryEmbedFallback('model_missing');
+        }
+        if (res.status === 404) {
+          return tryEmbedFallback('endpoint_missing');
+        }
+        return fail('http_error', `Rerank HTTP ${res.status}`, res.status);
       }
 
       const data = (await res.json()) as {
         results?: Array<{ index?: number; relevance_score?: number; score?: number }>;
       };
-      const raw = data.results;
-      const results = normalizeOllamaRerankRows(raw, slice.length);
-      if (!results) return null;
-      return { results };
+      const results = normalizeOllamaRerankRows(data.results, slice.length);
+      if (!results) {
+        return fail('empty_results', 'Rerank returned no usable rows');
+      }
+      return { results, via: 'cross_encoder' };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       logger.warn('[Ollama] rerank failed:', error);
-      return null;
+      // Abort / network — not a 404; do not silent-fallback (keeps failures honest).
+      const code = message.toLowerCase().includes('abort') ? 'timeout' : 'network_error';
+      return fail(code, message);
     }
   });
 

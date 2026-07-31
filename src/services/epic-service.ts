@@ -11,6 +11,67 @@ import { libraryStore } from './library-store';
 import { egdataOfferToEpicCatalogItem } from './egdata-adapter';
 import type { EgdataOfferLike } from './egdata-adapter';
 
+// ---------------------------------------------------------------------------
+// Dummy-page predicate (mirrors electron/epic-api.ts)
+//
+// Epic's catalog surfaces empty "placeholder" offers with nothing but a
+// namespace/offerId.  A page is considered dummy when BOTH the description
+// AND image gates are empty — release-date presence is NOT part of the test.
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when an Epic offer has no consumer-facing content
+ * (no description AND no image), i.e. it is a dummy placeholder page.
+ */
+export function isDummyEpicOffer(item: EpicCatalogItem | null | undefined): boolean {
+  if (!item) return true;
+  const rec = item as unknown as Record<string, unknown>;
+
+  const isNonEmpty = (v: unknown): boolean =>
+    typeof v === 'string' && v.trim().length > 0;
+
+  const hasDescription =
+    isNonEmpty(rec.description) ||
+    isNonEmpty(rec.shortDescription) ||
+    isNonEmpty(rec.longDescription) ||
+    isNonEmpty(rec.about) ||
+    isNonEmpty(rec.summary);
+
+  const keyImages = rec.keyImages;
+  const hasKeyImages =
+    Array.isArray(keyImages) &&
+    keyImages.some((img) => img && isNonEmpty((img as { url?: unknown }).url));
+
+  const hasHeaderImage = isNonEmpty(rec.headerImage);
+  const hasCoverUrl = isNonEmpty(rec.coverUrl);
+
+  const productContent = rec.productContent as { gallery?: unknown } | undefined;
+  const gallery = productContent?.gallery;
+  const hasGallery =
+    Array.isArray(gallery) &&
+    gallery.some((g) => g && isNonEmpty((g as { url?: unknown }).url));
+
+  const hasImage = hasKeyImages || hasHeaderImage || hasCoverUrl || hasGallery;
+
+  return !hasDescription && !hasImage;
+}
+
+/**
+ * Filter helper — drops dummy offers and logs the drop count when > 0.
+ * Applied at the transformEpicGame boundary as defence-in-depth: if a dummy
+ * slipped through the raw API layer, it will be dropped here before a Game
+ * is constructed.
+ */
+function filterDummyOffers<T extends EpicCatalogItem>(items: T[]): T[] {
+  const before = items.length;
+  const filtered = items.filter((item) => !isDummyEpicOffer(item));
+  const dropped = before - filtered.length;
+  if (dropped > 0) {
+    console.log(`[Epic] Filtered ${dropped} dummy pages from result`);
+  }
+  return filtered;
+}
+
 // API-verified genre tag IDs (groupName === "genre"). Fallback when groupName absent.
 const EPIC_GENRE_IDS: ReadonlySet<number> = new Set([
   1080, 1083, 1084, 1110, 1115, 1116, 1117, 1120, 1121, 1146,
@@ -323,7 +384,7 @@ class EpicService {
           if (!id) continue;
           const full = await window.egdata.getOffer(id) as EgdataOfferLike | null;
           const item = full ? egdataOfferToEpicCatalogItem(full) : null;
-          if (item) {
+          if (item && !isDummyEpicOffer(item)) {
             games.push({
               ...transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
               searchResultRank: ei + 1,
@@ -334,7 +395,8 @@ class EpicService {
       }
 
       console.log(`[Epic Service] searchGames: "${query}" (limit ${limit})`);
-      const items = await window.epic!.searchGames(query, limit);
+      const rawItems = await window.epic!.searchGames(query, limit);
+      const items = filterDummyOffers(rawItems);
       return items.map((item, i) => ({
         ...transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
         searchResultRank: i + 1,
@@ -354,6 +416,10 @@ class EpicService {
     try {
       const item = await window.epic!.getGameDetails(namespace, offerId);
       if (!item) return null;
+      if (isDummyEpicOffer(item)) {
+        console.log('[Epic] Filtered 1 dummy pages from result');
+        return null;
+      }
       const gameId = `epic-${item.namespace}:${item.id}`;
       return transformEpicGame(item, libraryStore.getEntry(gameId));
     } catch (error) {
@@ -368,7 +434,8 @@ class EpicService {
   async getNewReleases(): Promise<Game[]> {
     if (!isEpicAvailable()) return [];
     try {
-      const items = await window.epic!.getNewReleases();
+      const rawItems = await window.epic!.getNewReleases();
+      const items = filterDummyOffers(rawItems);
       return items.map(item => transformEpicGame(item));
     } catch (error) {
       console.error('[Epic Service] Error getting new releases:', error);
@@ -382,7 +449,8 @@ class EpicService {
   async getComingSoon(): Promise<Game[]> {
     if (!isEpicAvailable()) return [];
     try {
-      const items = await window.epic!.getComingSoon();
+      const rawItems = await window.epic!.getComingSoon();
+      const items = filterDummyOffers(rawItems);
       return items.map(item => transformEpicGame(item));
     } catch (error) {
       console.error('[Epic Service] Error getting coming soon:', error);
@@ -396,7 +464,8 @@ class EpicService {
   async getFreeGames(): Promise<Game[]> {
     if (!isEpicAvailable()) return [];
     try {
-      const items = await window.epic!.getFreeGames();
+      const rawItems = await window.epic!.getFreeGames();
+      const items = filterDummyOffers(rawItems);
       return items.map(item => transformEpicGame(item));
     } catch (error) {
       console.error('[Epic Service] Error getting free games:', error);
@@ -411,7 +480,8 @@ class EpicService {
   async getTopSellersFromCollection(): Promise<Game[]> {
     if (!isEpicAvailable() || typeof window.epic?.getTopSellersCollection !== 'function') return [];
     try {
-      const items = await window.epic.getTopSellersCollection();
+      const rawItems = await window.epic.getTopSellersCollection();
+      const items = filterDummyOffers(rawItems);
       return items.map(item =>
         transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
       );
@@ -436,16 +506,18 @@ class EpicService {
       if (epicBlocked && typeof window.egdata?.getTopSellers === 'function') {
         const result = await window.egdata.getTopSellers(99, 0);
         const elements = (result?.elements ?? []) as EgdataOfferLike[];
-        return elements
-          .map((o) => egdataOfferToEpicCatalogItem(o))
-          .filter((item): item is EpicCatalogItem => item != null)
-          .map((item) =>
-            transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
-          );
+        return filterDummyOffers(
+          elements
+            .map((o) => egdataOfferToEpicCatalogItem(o))
+            .filter((item): item is EpicCatalogItem => item != null),
+        ).map((item) =>
+          transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
+        );
       }
 
       console.log(`[Epic Service] browseCatalog (limit ${limit || 'ALL'})`);
-      const items = await window.epic!.browseCatalog(limit);
+      const rawItems = await window.epic!.browseCatalog(limit);
+      const items = filterDummyOffers(rawItems);
       return items.map(item =>
         transformEpicGame(item, libraryStore.getEntry(`epic-${item.namespace}:${item.id}`)),
       );

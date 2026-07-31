@@ -67,6 +67,9 @@ export interface FranchiseEntry {
   releaseDate: string;
   isUserOwned: boolean;
   sequenceIndex: number;  // 0-based position in franchise chronology
+  /** Studio fields used by umbrella-brand membership gating. */
+  developer?: string;
+  publisher?: string;
 }
 
 /** A detected franchise/series cluster. */
@@ -100,6 +103,8 @@ export interface MatchReasons {
   isOnSale: boolean;
   /** Whether this game was surfaced via ANN embedding retrieval. */
   semanticRetrieved: boolean;
+  /** Whether this game was surfaced via BM25 lexical retrieval. */
+  lexicalRetrieved?: boolean;
   /** Label of the taste cluster this game matched best (from cluster centroid scoring). */
   bestClusterLabel?: string;
   /** Natural-language explanation of why this game was recommended. */
@@ -290,6 +295,8 @@ export interface CandidateGame {
   embedding?: number[];
   /** True if surfaced via ANN embedding retrieval, not metadata filter. */
   semanticRetrieved?: boolean;
+  /** True if surfaced via BM25 lexical retrieval, not metadata filter. */
+  lexicalRetrieved?: boolean;
   /** ML model P(recommended) score from the Kaggle-trained LightGBM model. */
   mlScore?: number;
 }

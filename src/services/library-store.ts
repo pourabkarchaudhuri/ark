@@ -7,6 +7,37 @@ import {
   migrateGameId,
 } from '@/types/game';
 import { journeyStore } from './journey-store';
+import { normalizeTitle } from '@/services/dedup';
+
+// Statuses that cross-store propagation is allowed to write to a sibling.
+// (Playing / Playing Now / Completed — "in progress" or "done" on some store.)
+const PROPAGATABLE_STATUSES = new Set<GameStatus>(['Playing', 'Playing Now', 'Completed']);
+
+// Statuses considered "stronger" — never overwritten by a weaker sibling.
+// Completed is the terminal state; Playing Now is the in-session marker.
+const NEVER_OVERWRITE_STATUSES = new Set<GameStatus>(['Completed', 'Playing Now']);
+
+// Statuses safe for a Playing / Playing Now sibling to overwrite.
+// Completed is stronger; Playing Now is in-flight — leave both alone.
+const PLAYING_OVERWRITE_TARGETS = new Set<GameStatus>(['Want to Play', 'On Hold']);
+
+// Statuses safe for a Completed sibling to overwrite (anything not already
+// Completed — Completed → Completed would be a no-op).
+const COMPLETED_OVERWRITE_TARGETS = new Set<GameStatus>([
+  'Want to Play',
+  'Playing',
+  'Playing Now',
+  'On Hold',
+]);
+
+// Case-insensitive substrings that mean "release date not yet confirmed".
+// Backlog filtering treats any of these as unannounced.
+const UNANNOUNCED_MARKERS = ['tba', 'tbd', 'coming soon', 'to be announced', 'unknown'] as const;
+
+// Duplicated from dedup.ts on purpose: dedup.ts does not export SENTINEL_YEAR
+// and per this file's ownership rules we don't want to force a helper export.
+// Keep in sync with dedup.ts SENTINEL_YEAR.
+const SENTINEL_YEAR_LOCAL = 2090;
 
 function resolveJourneyTitleForRecord(
   updated: LibraryGameEntry,
@@ -53,6 +84,8 @@ class LibraryStore {
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
   private _sortedCache: LibraryGameEntry[] | null = null;
+  /** v1.0.45 — guard so `syncCrossStoreStatusesOnce` only ever sweeps once. */
+  private _crossStoreSweepDone = false;
 
   constructor() {
     this.initialize();
@@ -278,6 +311,10 @@ class LibraryStore {
     const isNowPlaying = updatedStatus === 'Playing' || updatedStatus === 'Playing Now';
     const isCompleted = updatedStatus === 'Completed';
     const isWantToPlay = updatedStatus === 'Want to Play';
+    // v1.0.45: propagate status to same-title siblings on other stores
+    // AFTER the primary mutation is committed and listeners have fired.
+    const shouldPropagate =
+      statusChanged && PROPAGATABLE_STATUSES.has(updatedStatus);
 
     const updated: LibraryGameEntry = {
       ...existing,
@@ -386,7 +423,175 @@ class LibraryStore {
       if (t) journeyStore.syncTitleIfPlaceholder(gameId, t);
     }
 
+    // v1.0.45: cross-store title sync. Defer so listeners already saw the
+    // primary mutation; the propagation itself will fire its own notifyListeners.
+    if (shouldPropagate) {
+      setTimeout(() => this.propagateStatusByTitle(updated, updated.status), 0);
+    }
+
     return updated;
+  }
+
+  /**
+   * v1.0.45 — Cross-store status sync.
+   * When a library entry's status becomes Playing / Playing Now / Completed,
+   * mirror it onto every other library entry whose normalized title matches.
+   *
+   *   • Completed  → propagates to any non-Completed sibling
+   *   • Playing / Playing Now → propagates to Want-to-Play / On-Hold siblings only
+   *
+   * Never overwrites Completed (terminal) or Playing Now (in-session) on the
+   * target. Stamps `crossStoreSyncedFrom` + `autoTransitionedAt` on updated
+   * siblings for diagnostic traceability.
+   *
+   * Called automatically from `updateEntry` (deferred via `setTimeout(0)` so
+   * listeners see a consistent state) and once at startup via
+   * `syncCrossStoreStatusesOnce()` to catch pre-existing v1.0.44 mismatches.
+   */
+  propagateStatusByTitle(sourceEntry: LibraryGameEntry, newStatus: GameStatus): number {
+    if (!PROPAGATABLE_STATUSES.has(newStatus)) return 0;
+
+    const sourceTitle =
+      sourceEntry.cachedMeta?.title?.trim() ||
+      (this.entries.get(sourceEntry.gameId)?.cachedMeta?.title?.trim() ?? '');
+    const sourceKey = normalizeTitle(sourceTitle);
+    if (!sourceKey) return 0;
+
+    const isSourceCompleted = newStatus === 'Completed';
+    const targets = isSourceCompleted
+      ? COMPLETED_OVERWRITE_TARGETS
+      : PLAYING_OVERWRITE_TARGETS;
+
+    const nowIso = new Date().toISOString();
+    let changed = 0;
+
+    // Iterate the raw Map (not getAllEntries) — this is a write path,
+    // no need to sort, and we're skipping the source entry anyway.
+    for (const sibling of this.entries.values()) {
+      if (sibling.gameId === sourceEntry.gameId) continue;
+      const siblingTitle = sibling.cachedMeta?.title?.trim();
+      if (!siblingTitle) continue;
+      if (normalizeTitle(siblingTitle) !== sourceKey) continue;
+      if (NEVER_OVERWRITE_STATUSES.has(sibling.status) && !isSourceCompleted) continue;
+      if (!targets.has(sibling.status)) continue;
+      if (sibling.status === newStatus) continue;
+
+      const mutated: LibraryGameEntry = {
+        ...sibling,
+        status: newStatus,
+        autoTransitionedAt: nowIso,
+        crossStoreSyncedFrom: sourceEntry.gameId,
+        updatedAt: new Date(),
+      };
+      this.entries.set(sibling.gameId, mutated);
+      // Record the transition so status history reflects the sync.
+      const title = sibling.cachedMeta?.title?.trim() || `Game ${sibling.gameId}`;
+      try {
+        statusHistoryStore.record(sibling.gameId, title, sibling.status, newStatus);
+      } catch {
+        // Status history is best-effort — never let its failure block the sync.
+      }
+      // Keep journey history in step with the new status.
+      try {
+        if (journeyStore.has(sibling.gameId)) {
+          journeyStore.syncProgress(sibling.gameId, { status: newStatus });
+        }
+      } catch {
+        // Non-critical
+      }
+      changed++;
+    }
+
+    if (changed > 0) {
+      this.invalidateSortedCache();
+      this.scheduleSave();
+      this.notifyListeners();
+    }
+    return changed;
+  }
+
+  /**
+   * v1.0.45 — one-shot startup sweep to reconcile pre-existing cross-store
+   * status mismatches for users upgrading from v1.0.44. Idempotent; safe to
+   * call more than once but internally guarded to only actually sweep once
+   * per process. For each normalized title with at least one Playing /
+   * Playing Now / Completed entry, propagates the strongest observed status
+   * onto matching siblings using the same rules as `propagateStatusByTitle`.
+   */
+  syncCrossStoreStatusesOnce(): void {
+    if (this._crossStoreSweepDone) return;
+    this._crossStoreSweepDone = true;
+
+    // Group entries by normalized title. Only keys with a propagatable status
+    // among their members can drive propagation.
+    const byKey = new Map<string, LibraryGameEntry[]>();
+    for (const entry of this.entries.values()) {
+      const t = entry.cachedMeta?.title?.trim();
+      if (!t) continue;
+      const key = normalizeTitle(t);
+      if (!key) continue;
+      const bucket = byKey.get(key);
+      if (bucket) bucket.push(entry);
+      else byKey.set(key, [entry]);
+    }
+
+    // Rank: Completed (2) > Playing Now (1.5) > Playing (1) > others (0).
+    const rank = (s: GameStatus): number =>
+      s === 'Completed' ? 2 : s === 'Playing Now' ? 1.5 : s === 'Playing' ? 1 : 0;
+
+    for (const bucket of byKey.values()) {
+      if (bucket.length < 2) continue;
+      let best: LibraryGameEntry | null = null;
+      for (const e of bucket) {
+        if (!PROPAGATABLE_STATUSES.has(e.status)) continue;
+        if (!best || rank(e.status) > rank(best.status)) best = e;
+      }
+      if (!best) continue;
+      this.propagateStatusByTitle(best, best.status);
+    }
+  }
+
+  /**
+   * v1.0.45 — Backlog filtering. A release date is "confirmed" only when
+   * it exists, isn't a TBA-style placeholder, and isn't a far-future sentinel
+   * (year >= 2090, matching dedup.ts SENTINEL_YEAR).
+   *
+   * The backlog is meant to answer "what can I actually play next?" —
+   * unreleased / unannounced games belong on a wishlist view, not here.
+   */
+  isReleaseDateConfirmed(entry: LibraryGameEntry): boolean {
+    const raw = entry.cachedMeta?.releaseDate;
+    if (raw === undefined || raw === null) return false;
+    const trimmed = String(raw).trim();
+    if (trimmed.length === 0) return false;
+
+    const lower = trimmed.toLowerCase();
+    for (const marker of UNANNOUNCED_MARKERS) {
+      if (lower === marker || lower.includes(marker)) return false;
+    }
+
+    // Try to parse — if it parses, sentinel-year cutoff applies. If it doesn't
+    // parse but survived the marker check above, we treat it as confirmed
+    // (some titles ship with e.g. "Q1 2027" that Date can't parse but is
+    // still a real announced window).
+    const ts = Date.parse(trimmed);
+    if (!Number.isNaN(ts)) {
+      const year = new Date(ts).getFullYear();
+      if (year >= SENTINEL_YEAR_LOCAL) return false;
+    }
+    return true;
+  }
+
+  /**
+   * v1.0.45 — Want-to-Play entries with a confirmed release date only.
+   * Excludes TBA / Coming Soon / sentinel-year (2099-01-01 style) entries
+   * per user complaint: "backlog cannot include games that are yet to be
+   * announced".
+   */
+  getBacklogEntries(): LibraryGameEntry[] {
+    return this.getAllEntries().filter(
+      (e) => e.status === 'Want to Play' && this.isReleaseDateConfirmed(e),
+    );
   }
 
   // Check if a game is in the library
@@ -401,6 +606,13 @@ class LibraryStore {
 
   // Get all library entries (cached sort — invalidated on mutation)
   getAllEntries(): LibraryGameEntry[] {
+    // v1.0.45: lazily run the one-shot cross-store sweep the first time
+    // any consumer reads the library. This covers pre-existing v1.0.44
+    // mismatches for upgraders without adding a wire-up call at every
+    // possible boot site. Guarded internally so it's a no-op after run.
+    if (!this._crossStoreSweepDone) {
+      this.syncCrossStoreStatusesOnce();
+    }
     if (this._sortedCache) return this._sortedCache;
     this._sortedCache = Array.from(this.entries.values()).sort(
       (a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime()

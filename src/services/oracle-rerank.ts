@@ -42,6 +42,46 @@ export function buildTasteQueryText(profile: TasteProfile): string {
   return parts.filter(Boolean).join(' ');
 }
 
+/**
+ * Keyword-focused taste query for BM25 / MiniSearch retrieval.
+ * Prefer concrete tokens (genres, themes, studios, loved titles) over prose.
+ */
+export function buildLexicalTasteQuery(
+  profile: TasteProfile,
+  opts?: { lovedTitles?: string[] },
+): string {
+  const genres = profile.genres
+    .filter((x) => x.weight > 0)
+    .slice(0, 10)
+    .map((x) => x.name);
+  if (profile.topGenre && !genres.includes(profile.topGenre)) {
+    genres.unshift(profile.topGenre);
+  }
+
+  const themes = profile.themes
+    .filter((x) => x.weight > 0)
+    .slice(0, 8)
+    .map((x) => x.name);
+  if (profile.topTheme && !themes.includes(profile.topTheme)) {
+    themes.unshift(profile.topTheme);
+  }
+
+  const studios = [
+    ...(profile.loyalDevelopers ?? []).slice(0, 6),
+    ...(profile.loyalPublishers ?? []).slice(0, 3),
+  ];
+
+  const loved = (opts?.lovedTitles ?? [])
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
+  return [...genres, ...themes, ...studios, ...loved]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+}
+
 export function scoredGameToRerankDoc(g: ScoredGame): string {
   return [
     g.title,
@@ -135,7 +175,16 @@ export async function applyOracleRerankShelves(
   const documents = pool.map(scoredGameToRerankDoc);
   try {
     const res = await window.ollama.rerank({ query, documents, topN: pool.length });
-    if (!res?.results?.length) return { shelves, status: 'empty_results' };
+    // Structured IPC: { results, via } success (incl. embed_fallback) or { error }.
+    if (!res || 'error' in res || !('results' in res) || !res.results?.length) {
+      if (res && 'error' in res) {
+        return {
+          shelves,
+          status: res.error.code === 'empty_results' ? 'empty_results' : 'error',
+        };
+      }
+      return { shelves, status: 'empty_results' };
+    }
 
     const rank = new Map<string, number>();
     res.results.forEach((r, ord) => {
@@ -149,6 +198,7 @@ export async function applyOracleRerankShelves(
       ...sh,
       games: sortShelfWithBlend(sh.games, rank, blend, maxRankOrdinal),
     }));
+    // embed_fallback is treated as success (no failure badge).
     return { shelves: out, status: 'applied' };
   } catch {
     return { shelves, status: 'error' };

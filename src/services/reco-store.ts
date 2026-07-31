@@ -31,8 +31,10 @@ import { recoHistoryStore } from './reco-history-store';
 import { catalogStore } from './catalog-store';
 import { epicCatalogStore } from './epic-catalog-store';
 import { annIndex } from './ann-index';
+import { bm25Index } from './bm25-index';
 import { embeddingService } from './embedding-service';
 import { gameGraphStore } from './game-graph-store';
+import { buildLexicalTasteQuery } from '@/services/oracle-rerank';
 import type { OracleRerankStatus } from '@/services/oracle-rerank';
 
 // ─── Embedding cache (populated externally by embedding-service) ────────────
@@ -225,12 +227,14 @@ class RecoStore {
     const cached = this.loadResultsFromCache();
     if (cached && cached.shelves && cached.shelves.length > 0) {
       console.log(`[RecoStore] Restored cached results (${cached.shelves.length} shelves, computed ${Math.round((Date.now() - (cached.lastComputed || 0)) / 1000)}s ago)`);
+      const tasteProfile = (cached.tasteProfile as RecoState['tasteProfile']) ?? null;
+      const shelves = cached.shelves as RecoShelf[];
       this.state = {
         ...this.state,
         status: 'done',
         progress: { stage: 'Complete (cached)', percent: 100 },
-        tasteProfile: (cached.tasteProfile as RecoState['tasteProfile']) ?? null,
-        shelves: cached.shelves as RecoShelf[],
+        tasteProfile,
+        shelves,
         computeTimeMs: (cached.computeTimeMs as number) ?? 0,
         lastComputed: (cached.lastComputed as number) ?? Date.now(),
         libraryCount: (cached.libraryCount as number) ?? 0,
@@ -238,6 +242,11 @@ class RecoStore {
         oracleRerankStatus: 'none',
       };
       this.notify();
+      // Cache restore used to skip rerank entirely. When Oracle rerank is still
+      // enabled, refine shelf order in the background (cross-encoder or embed fallback).
+      if (tasteProfile && shelves.length > 0) {
+        void this.rerankRestoredCachedShelves(tasteProfile, shelves);
+      }
       return;
     }
 
@@ -738,7 +747,17 @@ class RecoStore {
       console.warn('[RecoStore] ANN retrieval failed (non-fatal):', err);
     }
 
-    console.log(`[RecoStore] Candidate pool: ${candidates.length} (browse: ${browseCount}, catalog: ${catalogCount}, epicCatalog: ${epicCatalogCount}, ann: ${annCount})`);
+    // ── Source 4: BM25 lexical retrieval (taste keywords → ~500) ──
+    let bm25Count = 0;
+    try {
+      const bm25Candidates = await this.retrieveByBM25(userGames, userGameIds, seenIds);
+      candidates.push(...bm25Candidates);
+      bm25Count = bm25Candidates.length;
+    } catch (err) {
+      console.warn('[RecoStore] BM25 retrieval failed (non-fatal):', err);
+    }
+
+    console.log(`[RecoStore] Candidate pool: ${candidates.length} (browse: ${browseCount}, catalog: ${catalogCount}, epicCatalog: ${epicCatalogCount}, ann: ${annCount}, bm25: ${bm25Count})`);
     return candidates;
   }
 
@@ -1025,6 +1044,230 @@ class RecoStore {
     return results;
   }
 
+  /**
+   * Lexical BM25 retrieval via MiniSearch — covers title/tag exactness ANN misses.
+   * Builds a keyword taste query from library signals (no worker taste profile yet).
+   */
+  private async retrieveByBM25(
+    userGames: UserGameSnapshot[],
+    userGameIds: Set<string>,
+    seenIds: Set<string>,
+  ): Promise<CandidateGame[]> {
+    const ready = await bm25Index.ensureReady();
+    if (!ready) return [];
+
+    const lexicalQuery = this.buildLexicalQueryFromLibrary(userGames);
+    if (!lexicalQuery) return [];
+
+    const TOP_K = 500;
+    const hits = bm25Index.search(lexicalQuery, TOP_K);
+    if (hits.length === 0) return [];
+
+    const newSteamAppIds: number[] = [];
+    const newEpicIds: string[] = [];
+    const newIdSet = new Set<string>();
+    for (const { id } of hits) {
+      if (userGameIds.has(id) || seenIds.has(id)) continue;
+      if (id.startsWith('steam-')) {
+        const appid = parseInt(id.slice(6), 10);
+        if (!isNaN(appid)) {
+          newSteamAppIds.push(appid);
+          newIdSet.add(id);
+          seenIds.add(id);
+        }
+      } else if (id.startsWith('epic-')) {
+        newEpicIds.push(id);
+        newIdSet.add(id);
+        seenIds.add(id);
+      }
+    }
+
+    if (newSteamAppIds.length === 0 && newEpicIds.length === 0) return [];
+
+    const results: CandidateGame[] = [];
+
+    if (newSteamAppIds.length > 0) {
+      const entries = await catalogStore.getEntries(newSteamAppIds);
+      for (const entry of entries) {
+        const id = `steam-${entry.appid}`;
+        if (!newIdSet.has(id)) continue;
+        const embedding = embeddingCache.get(id);
+        const releaseStr = entry.releaseDate
+          ? new Date(entry.releaseDate * 1000).toISOString().slice(0, 10)
+          : '';
+        results.push({
+          gameId: id,
+          title: entry.name,
+          coverUrl: `https://cdn.akamai.steamstatic.com/steam/apps/${entry.appid}/library_600x900.jpg`,
+          headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${entry.appid}/header.jpg`,
+          developer: entry.developer,
+          publisher: entry.publisher,
+          genres: entry.genres || [],
+          themes: entry.themes || [],
+          gameModes: entry.modes || [],
+          perspectives: [],
+          platforms: [
+            ...(entry.windows ? ['Windows'] : []),
+            ...(entry.mac ? ['Mac'] : []),
+            ...(entry.linux ? ['Linux'] : []),
+          ],
+          metacriticScore: null,
+          playerCount: null,
+          releaseDate: releaseStr,
+          similarGameTitles: [],
+          reviewPositivity: entry.reviewPositivity,
+          reviewVolume: entry.reviewCount,
+          price: {
+            isFree: entry.isFree,
+            finalFormatted: entry.priceFormatted,
+            discountPercent: entry.discountPercent,
+          },
+          lexicalRetrieved: true,
+          ...(embedding ? { embedding } : {}),
+        });
+      }
+    }
+
+    if (newEpicIds.length > 0) {
+      const epicIdSet = new Set(newEpicIds.map((id) => id.slice(5)));
+      await epicCatalogStore.getAllEntries((batch) => {
+        for (const entry of batch) {
+          if (!epicIdSet.has(entry.epicId)) continue;
+          const id = `epic-${entry.epicId}`;
+          const embedding = embeddingCache.get(id);
+          const releaseStr = entry.releaseDate
+            ? new Date(entry.releaseDate).toISOString().slice(0, 10)
+            : '';
+          results.push({
+            gameId: id,
+            title: entry.name,
+            coverUrl: entry.coverUrl || undefined,
+            developer: entry.developer,
+            publisher: entry.publisher,
+            genres: entry.genres || [],
+            themes: entry.themes || [],
+            gameModes: entry.modes || [],
+            perspectives: [],
+            platforms: ['Windows'],
+            metacriticScore: null,
+            playerCount: null,
+            releaseDate: releaseStr,
+            similarGameTitles: [],
+            price: {
+              isFree: entry.isFree,
+              finalFormatted: entry.priceFormatted,
+              discountPercent: entry.discountPercent,
+            },
+            lexicalRetrieved: true,
+            ...(embedding ? { embedding } : {}),
+          });
+        }
+      });
+    }
+
+    console.log(
+      `[RecoStore] BM25 retrieval: query="${lexicalQuery.slice(0, 80)}…" → ${hits.length} hits → ${results.length} new candidates`,
+    );
+    return results;
+  }
+
+  /** Lightweight taste profile + loved titles for BM25 (pre-worker). */
+  private buildLexicalQueryFromLibrary(userGames: UserGameSnapshot[]): string {
+    const genreCounts = new Map<string, { weight: number; hours: number; ratingSum: number; n: number }>();
+    const themeCounts = new Map<string, { weight: number; hours: number; ratingSum: number; n: number }>();
+    const devCounts = new Map<string, number>();
+    const pubCounts = new Map<string, number>();
+    const lovedTitles: string[] = [];
+
+    for (const ug of userGames) {
+      const eng = this.computeEngagementWeight(ug);
+      for (const g of ug.genres) {
+        const cur = genreCounts.get(g) ?? { weight: 0, hours: 0, ratingSum: 0, n: 0 };
+        cur.weight += eng;
+        cur.hours += ug.hoursPlayed;
+        cur.ratingSum += ug.rating;
+        cur.n += 1;
+        genreCounts.set(g, cur);
+      }
+      for (const t of ug.themes) {
+        const cur = themeCounts.get(t) ?? { weight: 0, hours: 0, ratingSum: 0, n: 0 };
+        cur.weight += eng;
+        cur.hours += ug.hoursPlayed;
+        cur.ratingSum += ug.rating;
+        cur.n += 1;
+        themeCounts.set(t, cur);
+      }
+      if (ug.developer && (ug.rating >= 3.5 || ug.hoursPlayed >= 20)) {
+        devCounts.set(ug.developer, (devCounts.get(ug.developer) || 0) + 1);
+      }
+      if (ug.publisher && (ug.rating >= 3.5 || ug.hoursPlayed >= 20)) {
+        pubCounts.set(ug.publisher, (pubCounts.get(ug.publisher) || 0) + 1);
+      }
+      if (ug.rating >= 4 || ug.status === 'Completed' || ug.hoursPlayed >= 20) {
+        lovedTitles.push(ug.title);
+      }
+    }
+
+    const genres = [...genreCounts.entries()]
+      .sort((a, b) => b[1].weight - a[1].weight)
+      .slice(0, 10)
+      .map(([name, s]) => ({
+        name,
+        weight: s.weight,
+        gameCount: s.n,
+        totalHours: s.hours,
+        avgRating: s.n > 0 ? s.ratingSum / s.n : 0,
+      }));
+    const themes = [...themeCounts.entries()]
+      .sort((a, b) => b[1].weight - a[1].weight)
+      .slice(0, 8)
+      .map(([name, s]) => ({
+        name,
+        weight: s.weight,
+        gameCount: s.n,
+        totalHours: s.hours,
+        avgRating: s.n > 0 ? s.ratingSum / s.n : 0,
+      }));
+    const loyalDevelopers = [...devCounts.entries()]
+      .filter(([, n]) => n >= 2)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([d]) => d);
+    // Single-game studios still useful for BM25 if highly rated
+    if (loyalDevelopers.length < 4) {
+      for (const [d] of [...devCounts.entries()].sort((a, b) => b[1] - a[1])) {
+        if (loyalDevelopers.includes(d)) continue;
+        loyalDevelopers.push(d);
+        if (loyalDevelopers.length >= 6) break;
+      }
+    }
+    const loyalPublishers = [...pubCounts.entries()]
+      .filter(([, n]) => n >= 2)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([p]) => p);
+
+    const profile: TasteProfile = {
+      genres,
+      themes,
+      gameModes: [],
+      perspectives: [],
+      developers: [],
+      publishers: [],
+      eras: [],
+      totalGames: userGames.length,
+      totalHours: userGames.reduce((s, g) => s + g.hoursPlayed, 0),
+      avgRating: 0,
+      topGenre: genres[0]?.name ?? '',
+      topTheme: themes[0]?.name ?? '',
+      clusters: [],
+      loyalDevelopers,
+      loyalPublishers,
+    };
+
+    return buildLexicalTasteQuery(profile, { lovedTitles });
+  }
+
   private computeEngagementWeight(ug: UserGameSnapshot): number {
     let w = 1;
     w += Math.min(ug.hoursPlayed / 20, 3);
@@ -1108,6 +1351,7 @@ class RecoStore {
     // Fill quotas
     const selected = new Set<CandidateGame>();
     const QUOTA_SEMANTIC    = 500;
+    const QUOTA_LEXICAL     = 400;
     const QUOTA_GENRE       = 2000;
     const QUOTA_FRANCHISE   = 300;
     const QUOTA_STUDIO      = 200;
@@ -1122,6 +1366,17 @@ class RecoStore {
       if (selected.size >= QUOTA_SEMANTIC) break;
       if (s.candidate.semanticRetrieved && !selected.has(s.candidate)) {
         selected.add(s.candidate);
+      }
+    }
+
+    // 0b. BM25 lexical hits — title/tag exactness ANN can miss. Keep a dedicated
+    // quota so popular-flood / genre fill does not starve them.
+    let lexicalCount = 0;
+    for (const s of scored) {
+      if (lexicalCount >= QUOTA_LEXICAL) break;
+      if (s.candidate.lexicalRetrieved && !selected.has(s.candidate)) {
+        selected.add(s.candidate);
+        lexicalCount++;
       }
     }
 
@@ -1370,39 +1625,76 @@ class RecoStore {
     }, RecoStore.WORKER_IDLE_TIMEOUT_MS);
   }
 
+  /**
+   * Shared settings + applyOracleRerankShelves path.
+   * Used after worker completion and after localStorage cache restore.
+   */
+  private async runOracleRerankPass(
+    tasteProfile: TasteProfile,
+    shelves: RecoShelf[],
+    opts?: { showProgress?: boolean },
+  ): Promise<{ shelves: RecoShelf[]; status: OracleRerankStatus }> {
+    let settings: {
+      oracleRerankEnabled?: boolean;
+      oracleRerankBlend?: number;
+    } | null = null;
+    if (typeof window !== 'undefined' && window.settings?.getOllamaSettings) {
+      settings = await window.settings.getOllamaSettings();
+    }
+    const enabled = settings?.oracleRerankEnabled !== false;
+    const blend =
+      typeof settings?.oracleRerankBlend === 'number' && Number.isFinite(settings.oracleRerankBlend)
+        ? Math.min(1, Math.max(0, settings.oracleRerankBlend))
+        : 1;
+
+    if (!(typeof window !== 'undefined' && window.ollama?.rerank && enabled && blend > 0)) {
+      if (!enabled) return { shelves, status: 'skipped_disabled' };
+      if (blend <= 0) return { shelves, status: 'skipped_blend_zero' };
+      return { shelves, status: 'skipped_no_client' };
+    }
+
+    if (opts?.showProgress) {
+      this.state = {
+        ...this.state,
+        progress: { stage: 'Refining recommendations (Ollama)...', percent: 92 },
+      };
+      this.notify();
+    }
+    const { applyOracleRerankShelves } = await import('@/services/oracle-rerank');
+    return applyOracleRerankShelves(tasteProfile, shelves, { enabled: true, blend });
+  }
+
+  /** After cache restore: still rerank when oracleRerankEnabled (embed_fallback counts as success). */
+  private async rerankRestoredCachedShelves(tasteProfile: TasteProfile, shelves: RecoShelf[]) {
+    const genAtStart = this.computeGeneration;
+    try {
+      const out = await this.runOracleRerankPass(tasteProfile, shelves, { showProgress: false });
+      if (genAtStart !== this.computeGeneration) return;
+      if (this.state.status !== 'done') return;
+      this.state = {
+        ...this.state,
+        shelves: out.shelves,
+        oracleRerankStatus: out.status,
+      };
+      this.notify();
+      // Persist refined order so the next cold start benefits.
+      if (out.status === 'applied') this.saveResultsToCache();
+    } catch (e) {
+      console.warn('[RecoStore] Cached-shelf Oracle rerank skipped:', e);
+      if (genAtStart !== this.computeGeneration) return;
+      this.state = { ...this.state, oracleRerankStatus: 'error' };
+      this.notify();
+    }
+  }
+
   /** Apply Ollama /api/rerank to shelf game order when available (after worker completes). */
   private async finishWorkerResult(msg: RecoWorkerResult, runId: number) {
     let shelves = msg.shelves;
     let oracleRerankStatus: OracleRerankStatus = 'none';
     try {
-      let settings: {
-        oracleRerankEnabled?: boolean;
-        oracleRerankBlend?: number;
-      } | null = null;
-      if (typeof window !== 'undefined' && window.settings?.getOllamaSettings) {
-        settings = await window.settings.getOllamaSettings();
-      }
-      const enabled = settings?.oracleRerankEnabled !== false;
-      const blend =
-        typeof settings?.oracleRerankBlend === 'number' && Number.isFinite(settings.oracleRerankBlend)
-          ? Math.min(1, Math.max(0, settings.oracleRerankBlend))
-          : 1;
-
-      if (typeof window !== 'undefined' && window.ollama?.rerank && enabled && blend > 0) {
-        this.state = {
-          ...this.state,
-          progress: { stage: 'Refining recommendations (Ollama)...', percent: 92 },
-        };
-        this.notify();
-        const { applyOracleRerankShelves } = await import('@/services/oracle-rerank');
-        const out = await applyOracleRerankShelves(msg.tasteProfile, msg.shelves, { enabled: true, blend });
-        shelves = out.shelves;
-        oracleRerankStatus = out.status;
-      } else {
-        if (!enabled) oracleRerankStatus = 'skipped_disabled';
-        else if (blend <= 0) oracleRerankStatus = 'skipped_blend_zero';
-        else if (typeof window !== 'undefined' && !window.ollama?.rerank) oracleRerankStatus = 'skipped_no_client';
-      }
+      const out = await this.runOracleRerankPass(msg.tasteProfile, msg.shelves, { showProgress: true });
+      shelves = out.shelves;
+      oracleRerankStatus = out.status;
     } catch (e) {
       console.warn('[RecoStore] Oracle rerank skipped:', e);
       oracleRerankStatus = 'error';

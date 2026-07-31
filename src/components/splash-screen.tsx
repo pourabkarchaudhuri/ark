@@ -15,6 +15,7 @@ import { catalogStore } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { recoStore } from '@/services/reco-store';
 import { annIndex } from '@/services/ann-index';
+import { bm25Index } from '@/services/bm25-index';
 import { scheduleBackgroundPrecompute } from '@/services/galaxy-cache';
 import { ensureArkBackfill } from '@/hooks/useGameStore';
 import {
@@ -452,6 +453,11 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
         console.log(`[Splash] Epic catalog ready: ${p.itemsStored.toLocaleString()} games`);
       }
     }).catch((err) => { console.warn('[Splash] Epic catalog sync:', err); });
+
+    // BM25 lexical index — load/rebuild after catalogs settle (idle; non-blocking).
+    void Promise.all([steamSyncDone, epicSyncDone]).then(() => {
+      bm25Index.scheduleIdleRebuild();
+    });
 
     embeddingLoadPromise.then(() => {
       return embeddingService.isAvailable();

@@ -145,6 +145,12 @@ export interface LibraryGameEntry {
   /** ISO timestamp — set when the auto Want-to-Play → Playing transition fired (v1.0.41). */
   autoTransitionedAt?: string;
   /**
+   * gameId of the sibling library entry (with matching normalized title on
+   * another store) whose status was mirrored onto this entry by the
+   * cross-store status sync (v1.0.45). Diagnostic-only; safe to ignore.
+   */
+  crossStoreSyncedFrom?: string;
+  /**
    * True when `window.exeInfo.analyze(executablePath)` identified this entry's
    * executable as a launcher (v1.0.42). Suppresses auto Want-to-Play → Playing
    * transitions and lets consumer UI (Voyage / dashboard) surface a

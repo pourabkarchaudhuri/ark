@@ -64,6 +64,12 @@ const RAW_TO_CANONICAL: Record<string, CanonicalGenre> = {
   'rogue-lite': 'Action',
   exploration: 'Adventure',
   narration: 'Adventure',
+  // Character-action / ARPG tags — keep off FPS shelves
+  'hack and slash': 'Action',
+  'action rpg': 'RPG',
+  'spectacle fighter': 'Action',
+  'character action': 'Action',
+  'character action game': 'Action',
 };
 
 const _canonCache = new Map<string, CanonicalGenre | null>();

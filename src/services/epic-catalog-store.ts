@@ -16,6 +16,45 @@
 
 import type { EpicCatalogItem } from '@/types/epic';
 
+// ─── Dummy-page predicate ───────────────────────────────────────────────────────
+// Mirrors electron/epic-api.ts and epic-service.ts.  A page is "dummy" when
+// BOTH description AND image gates are empty — release-date presence is not
+// part of the test.  Sync-persist path skips these so the local cache doesn't
+// accumulate junk placeholder offers scraped from Epic's catalog.
+
+function isDummyEpicOffer(item: EpicCatalogItem | null | undefined): boolean {
+  if (!item) return true;
+  const rec = item as unknown as Record<string, unknown>;
+
+  const isNonEmpty = (v: unknown): boolean =>
+    typeof v === 'string' && v.trim().length > 0;
+
+  const hasDescription =
+    isNonEmpty(rec.description) ||
+    isNonEmpty(rec.shortDescription) ||
+    isNonEmpty(rec.longDescription) ||
+    isNonEmpty(rec.about) ||
+    isNonEmpty(rec.summary);
+
+  const keyImages = rec.keyImages;
+  const hasKeyImages =
+    Array.isArray(keyImages) &&
+    keyImages.some((img) => img && isNonEmpty((img as { url?: unknown }).url));
+
+  const hasHeaderImage = isNonEmpty(rec.headerImage);
+  const hasCoverUrl = isNonEmpty(rec.coverUrl);
+
+  const productContent = rec.productContent as { gallery?: unknown } | undefined;
+  const gallery = productContent?.gallery;
+  const hasGallery =
+    Array.isArray(gallery) &&
+    gallery.some((g) => g && isNonEmpty((g as { url?: unknown }).url));
+
+  const hasImage = hasKeyImages || hasHeaderImage || hasCoverUrl || hasGallery;
+
+  return !hasDescription && !hasImage;
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
 export interface EpicCatalogEntry {
@@ -294,12 +333,22 @@ class EpicCatalogStore {
 
       const seen = new Set<string>();
       const entries: EpicCatalogEntry[] = [];
+      let droppedDummies = 0;
       for (const item of items) {
+        // Defence-in-depth: skip dummy pages so the local cache doesn't
+        // accumulate empty placeholder offers that slipped past the API layer.
+        if (isDummyEpicOffer(item)) {
+          droppedDummies++;
+          continue;
+        }
         const entry = transformItem(item);
         if (!entry) continue;
         if (seen.has(entry.epicId)) continue;
         seen.add(entry.epicId);
         entries.push(entry);
+      }
+      if (droppedDummies > 0) {
+        console.log(`[Epic] Filtered ${droppedDummies} dummy pages from result`);
       }
 
       let stored = 0;

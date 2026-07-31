@@ -175,6 +175,68 @@ export interface EpicCatalogItem {
 }
 
 // ---------------------------------------------------------------------------
+// Dummy-page predicate
+//
+// Epic's catalog surfaces empty "placeholder" offers (namespace/offerId only,
+// no consumer-facing content).  A page is considered dummy when BOTH the
+// description AND image gates are empty.  Release-date presence is NOT part
+// of the test — a real unreleased game can legitimately lack a release date
+// but must have description or image data.
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when an Epic offer has no consumer-facing content
+ * (no description AND no image), i.e. it is a dummy placeholder page.
+ */
+export function isDummyEpicOffer(item: EpicCatalogItem | null | undefined): boolean {
+  if (!item) return true;
+  const rec = item as unknown as Record<string, unknown>;
+
+  const isNonEmpty = (v: unknown): boolean =>
+    typeof v === 'string' && v.trim().length > 0;
+
+  // Description gate — shortDescription/description/longDescription/about/summary
+  const hasDescription =
+    isNonEmpty(rec.description) ||
+    isNonEmpty(rec.shortDescription) ||
+    isNonEmpty(rec.longDescription) ||
+    isNonEmpty(rec.about) ||
+    isNonEmpty(rec.summary);
+
+  // Image gate — keyImages / headerImage / coverUrl / productContent.gallery
+  const keyImages = rec.keyImages;
+  const hasKeyImages =
+    Array.isArray(keyImages) &&
+    keyImages.some((img) => img && isNonEmpty((img as { url?: unknown }).url));
+
+  const hasHeaderImage = isNonEmpty(rec.headerImage);
+  const hasCoverUrl = isNonEmpty(rec.coverUrl);
+
+  const productContent = rec.productContent as { gallery?: unknown } | undefined;
+  const gallery = productContent?.gallery;
+  const hasGallery =
+    Array.isArray(gallery) &&
+    gallery.some((g) => g && isNonEmpty((g as { url?: unknown }).url));
+
+  const hasImage = hasKeyImages || hasHeaderImage || hasCoverUrl || hasGallery;
+
+  return !hasDescription && !hasImage;
+}
+
+/**
+ * Filter helper — drops dummy offers and logs the drop count when > 0.
+ */
+function filterDummyOffers<T extends EpicCatalogItem>(items: T[]): T[] {
+  const before = items.length;
+  const filtered = items.filter((item) => !isDummyEpicOffer(item));
+  const dropped = before - filtered.length;
+  if (dropped > 0) {
+    logger.log(`[Epic] Filtered ${dropped} dummy pages from result`);
+  }
+  return filtered;
+}
+
+// ---------------------------------------------------------------------------
 // GraphQL queries
 // ---------------------------------------------------------------------------
 
@@ -702,13 +764,15 @@ class EpicAPIClient {
     const json = await response.json();
 
     // The REST endpoint wraps everything in the same GraphQL-like envelope
-    const elements: EpicCatalogItem[] = json?.data?.Catalog?.searchStore?.elements || [];
+    const rawElements: EpicCatalogItem[] = json?.data?.Catalog?.searchStore?.elements || [];
     // Map seller info into developer/publisher for compatibility
-    for (const el of elements) {
+    for (const el of rawElements) {
       if (!el.developer && el.seller?.name) {
         el.developer = el.seller.name;
       }
     }
+
+    const elements = filterDummyOffers(rawElements);
 
     this.cache.set(cacheKey, elements, FREE_GAMES_CACHE_TTL);
     logger.log(`[EpicAPI] Promotional catalog loaded: ${elements.length} items`);
@@ -738,7 +802,8 @@ class EpicAPIClient {
         country: 'IN',
       });
 
-      const results = data.Catalog.searchStore.elements || [];
+      const rawResults = data.Catalog.searchStore.elements || [];
+      const results = filterDummyOffers(rawResults);
       this.cache.set(cacheKey, results, SEARCH_CACHE_TTL);
 
       if (cached) return cached;
@@ -792,6 +857,10 @@ class EpicAPIClient {
 
       const item = data.Catalog.catalogOffer;
       if (item) {
+        if (isDummyEpicOffer(item)) {
+          logger.log('[Epic] Filtered 1 dummy pages from result');
+          return null;
+        }
         this.cache.set(cacheKey, item, CACHE_TTL);
         return item;
       }
@@ -844,7 +913,8 @@ class EpicAPIClient {
         releaseDate: `[,${new Date().toISOString()}]`,
       });
 
-      const results = data.Catalog.searchStore.elements || [];
+      const rawResults = data.Catalog.searchStore.elements || [];
+      const results = filterDummyOffers(rawResults);
       this.cache.set(cacheKey, results, RELEASES_CACHE_TTL);
       return results;
     } catch (error) {
@@ -894,7 +964,8 @@ class EpicAPIClient {
         releaseDate: `[${new Date().toISOString()},]`,
       });
 
-      const results = data.Catalog.searchStore.elements || [];
+      const rawResults = data.Catalog.searchStore.elements || [];
+      const results = filterDummyOffers(rawResults);
       this.cache.set(cacheKey, results, RELEASES_CACHE_TTL);
       return results;
     } catch (error) {
@@ -941,9 +1012,11 @@ class EpicAPIClient {
       // Use getPromotionalCatalog (which already fetches from the REST endpoint)
       const elements = await this.getPromotionalCatalog();
 
-      // Filter to only currently free games (discount = 0 price, active promo)
+      // Filter to only currently free games (discount = 0 price, active promo).
+      // Also defence-in-depth dummy filter — getPromotionalCatalog already
+      // filters dummies, but rerunning here is cheap and safe.
       const now = new Date();
-      const freeGames = elements.filter(item => {
+      const freeGames = filterDummyOffers(elements.filter(item => {
         const promos = item.promotions?.promotionalOffers;
         if (!promos || promos.length === 0) return false;
         return promos.some(offer =>
@@ -953,7 +1026,7 @@ class EpicAPIClient {
             new Date(p.endDate) >= now
           )
         );
-      });
+      }));
 
       logger.log(`[EpicAPI] Free games: ${freeGames.length} currently free out of ${elements.length} promotional`);
       this.cache.set(cacheKey, freeGames, FREE_GAMES_CACHE_TTL);
@@ -1268,7 +1341,7 @@ class EpicAPIClient {
         const key = `${el.namespace}:${el.id}`;
         if (!uniqueMap.has(key)) uniqueMap.set(key, el);
       }
-      const uniqueItems = Array.from(uniqueMap.values());
+      const uniqueItems = filterDummyOffers(Array.from(uniqueMap.values()));
 
       if (uniqueItems.length > 0) {
         this.cache.set(cacheKey, uniqueItems, RELEASES_CACHE_TTL);
@@ -1310,15 +1383,17 @@ class EpicAPIClient {
         slug: 'top-sellers',
       });
 
-      const offers = data?.Storefront?.collectionLayout?.collectionOffers ?? [];
-      if (offers.length === 0) return [];
+      const rawOffers = data?.Storefront?.collectionLayout?.collectionOffers ?? [];
+      if (rawOffers.length === 0) return [];
 
       // Map seller → developer for compatibility with EpicCatalogItem
-      for (const el of offers) {
+      for (const el of rawOffers) {
         if (!el.developer && el.seller?.name) {
           el.developer = el.seller.name;
         }
       }
+
+      const offers = filterDummyOffers(rawOffers);
 
       this.cache.set(cacheKey, offers, RELEASES_CACHE_TTL);
       logger.log(`[EpicAPI] Top Sellers from collectionLayout: ${offers.length} games`);

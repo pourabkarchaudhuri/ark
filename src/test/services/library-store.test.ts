@@ -18,6 +18,7 @@ vi.mock('@/services/journey-store', () => ({
 vi.mock('@/services/session-store', () => ({
   sessionStore: {
     getTotalHours: vi.fn().mockReturnValue(0),
+    getFirstSessionStart: vi.fn().mockReturnValue(0),
     exportData: vi.fn().mockReturnValue([]),
     importData: vi.fn().mockReturnValue({ added: 0, skipped: 0 }),
     clear: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock('@/services/session-store', () => ({
 vi.mock('@/services/status-history-store', () => ({
   statusHistoryStore: {
     record: vi.fn(),
+    getFirstPlayingTransition: vi.fn().mockReturnValue(null),
     exportData: vi.fn().mockReturnValue([]),
     importData: vi.fn().mockReturnValue({ added: 0, skipped: 0 }),
     clear: vi.fn(),
@@ -704,6 +706,203 @@ describe('LibraryStore', () => {
       const updated = libraryStore.getEntry('epic-fn:fortnite-offer-123');
       expect(updated!.cachedMeta).toBeDefined();
       expect(updated!.cachedMeta!.title).toBe('Fortnite');
+    });
+  });
+
+  // v1.0.45 — cross-store status sync + backlog filtering
+  describe('cross-store status sync (v1.0.45)', () => {
+    const cyberpunkSteam: CachedGameMeta = { title: 'Cyberpunk 2077', releaseDate: '2020-12-10' };
+    const cyberpunkEpic: CachedGameMeta = { title: 'Cyberpunk 2077: Ultimate Edition', releaseDate: '2020-12-10' };
+
+    const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+
+    it('propagates Completed from Steam entry to same-title Epic entry', async () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-1091500',
+        status: 'Want to Play',
+        priority: 'High',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: cyberpunkSteam,
+      });
+      libraryStore.addToLibrary({
+        gameId: 'epic-cyberpunk-abc',
+        status: 'Want to Play',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: cyberpunkEpic,
+      });
+
+      libraryStore.updateEntry('steam-1091500', { status: 'Completed' });
+      await flush();
+
+      const epicSibling = libraryStore.getEntry('epic-cyberpunk-abc');
+      expect(epicSibling!.status).toBe('Completed');
+      expect(epicSibling!.crossStoreSyncedFrom).toBe('steam-1091500');
+      expect(epicSibling!.autoTransitionedAt).toBeDefined();
+    });
+
+    it('propagates Playing to Want-to-Play sibling only (leaves Completed alone)', async () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-1',
+        status: 'Playing',
+        priority: 'High',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Elden Ring', releaseDate: '2022-02-25' },
+      });
+      libraryStore.addToLibrary({
+        gameId: 'epic-1',
+        status: 'Completed',
+        priority: 'High',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Elden Ring', releaseDate: '2022-02-25' },
+      });
+
+      libraryStore.propagateStatusByTitle(
+        libraryStore.getEntry('steam-1')!,
+        'Playing'
+      );
+
+      // Completed sibling must NOT be downgraded to Playing
+      expect(libraryStore.getEntry('epic-1')!.status).toBe('Completed');
+    });
+
+    it('does not propagate Want-to-Play changes', async () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-2',
+        status: 'Playing',
+        priority: 'High',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Hades', releaseDate: '2020-09-17' },
+      });
+      libraryStore.addToLibrary({
+        gameId: 'epic-2',
+        status: 'On Hold',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Hades', releaseDate: '2020-09-17' },
+      });
+
+      libraryStore.updateEntry('steam-2', { status: 'Want to Play' });
+      await flush();
+
+      expect(libraryStore.getEntry('epic-2')!.status).toBe('On Hold');
+    });
+
+    it('handles normalized-title matching across edition suffixes', async () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-x',
+        status: 'Want to Play',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'The Witcher 3: Wild Hunt', releaseDate: '2015-05-19' },
+      });
+      libraryStore.addToLibrary({
+        gameId: 'epic-x',
+        status: 'Want to Play',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'The Witcher 3: Wild Hunt - Game of the Year Edition', releaseDate: '2016-08-30' },
+      });
+
+      libraryStore.updateEntry('steam-x', { status: 'Playing' });
+      await flush();
+
+      expect(libraryStore.getEntry('epic-x')!.status).toBe('Playing');
+    });
+  });
+
+  describe('backlog filtering (v1.0.45)', () => {
+    it('excludes entries without a release date', () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-a',
+        status: 'Want to Play',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Mystery Game' },
+      });
+
+      expect(libraryStore.getBacklogEntries()).toHaveLength(0);
+    });
+
+    it('excludes entries with TBA / Coming Soon placeholders', () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-b',
+        status: 'Want to Play',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'GTA 6', releaseDate: 'TBA' },
+      });
+      libraryStore.addToLibrary({
+        gameId: 'steam-c',
+        status: 'Want to Play',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Beyond', releaseDate: 'Coming Soon' },
+      });
+
+      expect(libraryStore.getBacklogEntries()).toHaveLength(0);
+    });
+
+    it('excludes entries with sentinel-year (>= 2090) release dates', () => {
+      libraryStore.addToLibrary({
+        gameId: 'epic-y',
+        status: 'Want to Play',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Placeholder', releaseDate: '2099-01-01' },
+      });
+
+      expect(libraryStore.getBacklogEntries()).toHaveLength(0);
+    });
+
+    it('includes entries with real confirmed release dates', () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-real',
+        status: 'Want to Play',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Real Game', releaseDate: '2024-05-15' },
+      });
+
+      const backlog = libraryStore.getBacklogEntries();
+      expect(backlog).toHaveLength(1);
+      expect(backlog[0].gameId).toBe('steam-real');
+    });
+
+    it('only surfaces Want-to-Play status (not Playing / Completed)', () => {
+      libraryStore.addToLibrary({
+        gameId: 'steam-p',
+        status: 'Playing',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Currently Playing', releaseDate: '2023-01-01' },
+      });
+      libraryStore.addToLibrary({
+        gameId: 'steam-w',
+        status: 'Want to Play',
+        priority: 'Medium',
+        publicReviews: '',
+        recommendationSource: '',
+        cachedMeta: { title: 'Backlog Game', releaseDate: '2023-06-01' },
+      });
+
+      const backlog = libraryStore.getBacklogEntries();
+      expect(backlog).toHaveLength(1);
+      expect(backlog[0].gameId).toBe('steam-w');
     });
   });
 });

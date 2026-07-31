@@ -4,6 +4,18 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.46] - 2026-07-31
+
+### Added
+- **Draggable carousels (mouse click-and-drag).** New shared hook `src/hooks/useDraggableScroll.ts` — pointer-based click-and-drag horizontal panning wired into Oracle shelf carousels and the Scheduled Broadcasts strip. 5 px activation threshold so plain clicks still fire card `onClick`. Skips drag when the pointer starts on `<button>` / `<a>` / `<input>` / `[data-no-drag]` descendants. Uses `setPointerCapture` for reliable pan even when the pointer briefly leaves the container. Installs a one-shot capture-phase click-swallow on release so a drag doesn't accidentally navigate.
+- **Right-click Oracle recommendation → "Why recommended?" popover.** New `RecoWhyPopover` (portal-rendered, cursor-anchored, viewport-clamped) attached to Oracle cards. Right-click reveals the game title, best-cluster label, similar-to titles (up to 3), shared genres (up to 4), and the top 5 non-zero layer signals with proportional bars. Skips when the right-click lands on a `<button>` / `<a>` / `<input>` / `[data-no-drag]` descendant. Closes on outside mousedown, Escape, scroll, or another context-menu event.
+- **Cross-store status sync on 100% title match.** New `libraryStore.propagateStatusByTitle(source, newStatus)` fires from `updateEntry` whenever the new status is Playing / Playing Now / Completed. Siblings across other stores (Steam/Epic) with the same `normalizeTitle` mirror the status. Rules: Completed can overwrite anything not-Completed; Playing can only overwrite Want-to-Play / On-Hold. Never overwrites Completed or Playing-Now. Stamps `crossStoreSyncedFrom` + `autoTransitionedAt`. Also runs a one-shot idempotent startup sweep `syncCrossStoreStatusesOnce()` so upgraders reconcile any pre-existing inconsistencies on first `getAllEntries()`.
+- **Backlog excludes unannounced games.** New `libraryStore.getBacklogEntries()` (and matching `useLibraryBacklog()` hook in `useGameStore.ts`) returns Want-to-Play entries with a confirmed release date. `isReleaseDateConfirmed(entry)` gates on: date present + non-whitespace, not containing `tba` / `tbd` / `coming soon` / `to be announced` / `unknown` (case-insensitive), and not sentinel-future (year < 2090).
+- **`LibraryGameEntry.crossStoreSyncedFrom?: string`** field — diagnostic trace of the sibling entry that drove a cross-store status propagation.
+
+### Fixed
+- **Epic API dummy pages excluded.** Epic's catalog scrapers were including offers with no description AND no image — pure stubs sitting in your Coming Soon / Browse lists. New `isDummyEpicOffer(item)` predicate + `filterDummyOffers()` helper is applied at every list-returning path in `electron/epic-api.ts` (`getPromotionalCatalog`, GQL `searchGames`, `getGameDetails`, `getNewReleases`, `getComingSoon`, `getFreeGames`, `browseCatalog`, `getTopSellersFromCollection`), plus a defence-in-depth pass in `src/services/epic-service.ts` at every `transformEpicGame` call site, plus a persist-time skip in `src/services/epic-catalog-store.ts`. Release-date presence is intentionally ignored — a page is dummy iff both description AND image are absent. Drops are logged as `[Epic] Filtered N dummy pages from result`.
+
 ## [1.0.45] - 2026-07-31
 
 ### Fixed

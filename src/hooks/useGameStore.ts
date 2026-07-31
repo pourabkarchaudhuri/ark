@@ -17,7 +17,7 @@ import {
   searchPrefetchedGames,
 } from '@/services/prefetch-store';
 import { scoreGame, buildSingleSearchIndex, compareBrowseSearchZeroScore } from '@/services/game-search-scoring';
-import { Game, GameFilters, GameCategory, UpdateLibraryEntry, CreateCustomGameEntry, GameStatus, CachedGameMeta } from '@/types/game';
+import { Game, GameFilters, GameCategory, UpdateLibraryEntry, CreateCustomGameEntry, GameStatus, CachedGameMeta, LibraryGameEntry } from '@/types/game';
 import { SteamAppListItem } from '@/types/steam';
 import { detailEnricher } from '@/services/detail-enricher';
 import {
@@ -1344,6 +1344,35 @@ export function useLibrary() {
     getAllGameIds,
     getAllEntries,
   };
+}
+
+/**
+ * Custom hook for the backlog (Want-to-Play entries with a confirmed release
+ * date). Excludes unannounced titles (TBA / Coming Soon / sentinel-future
+ * release dates) per user request in v1.0.45.
+ *
+ * Any consumer that previously filtered by `status === 'Want to Play'` for the
+ * "backlog" concept should switch to this hook (or `libraryStore.getBacklogEntries()`
+ * directly in non-React code) so unannounced games are consistently excluded.
+ * Existing consumers still using `status === 'Want to Play'`:
+ *   - src/workers/reco.worker.ts (Backlog Advisor) — owned by Worker A,
+ *     needs to be re-fed from `getBacklogEntries()` at pipeline input time.
+ *   - src/data/badges.ts uses it for badge rules (leave as-is; badges count
+ *     "games you want to play", not "backlog to play next").
+ */
+export function useLibraryBacklog(): LibraryGameEntry[] {
+  const [entries, setEntries] = useState<LibraryGameEntry[]>(() =>
+    libraryStore.getBacklogEntries()
+  );
+
+  useEffect(() => {
+    const unsub = libraryStore.subscribe(() => {
+      setEntries(libraryStore.getBacklogEntries());
+    });
+    return unsub;
+  }, []);
+
+  return entries;
 }
 
 /**

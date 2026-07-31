@@ -7,14 +7,16 @@
  *
  * Required models:
  *   - snowflake-arctic-embed2  (for semantic embeddings — 1024-dim, ~1.2 GB)
+ *   - dengcao/bge-reranker-v2-m3 (cross-encoder /api/rerank — silent background pull)
  *
  * Graceful degradation: if Ollama is not found, all functions return
  * cleanly with status 'unavailable'. The rest of the app continues normally
- * and the recommendation engine runs without embeddings.
+ * and the recommendation engine runs without embeddings. Missing rerank model
+ * falls back to arctic-embed cosine scoring via IPC.
  */
 
 import { logger } from './safe-logger.js';
-import { settingsStore } from './settings-store.js';
+import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from './settings-store.js';
 import http from 'http';
 
 // Base model name (no tag). Used for matching loaded/installed models in
@@ -62,7 +64,29 @@ export interface OllamaSetupStatus {
   ollamaDetected: boolean;
   ollamaVersion: string | null;
   embeddingModelReady: boolean;
+  /** True when the configured /api/rerank model is already installed. */
+  rerankModelReady: boolean;
   error: string | null;
+}
+
+/** Resolve configured rerank model tag (Settings → default dengcao/bge-reranker-v2-m3). */
+export function getRerankModelTag(): string {
+  const settings = settingsStore.getOllamaSettings();
+  return settings.rerankModel?.trim() || DEFAULT_OLLAMA_RERANK_MODEL;
+}
+
+/** Match installed tags for a rerank model (bare name or tagged variant). */
+export function isRerankModelInstalled(
+  _baseNames: string[],
+  fullTags: string[],
+  modelName: string,
+): boolean {
+  const target = modelName.toLowerCase();
+  const targetBase = target.split(':')[0];
+  return fullTags.some((t) => {
+    const n = t.toLowerCase();
+    return n === target || n.startsWith(`${target}:`) || n.split(':')[0] === targetBase;
+  });
 }
 
 /**
@@ -236,6 +260,40 @@ async function pullModel(
     req.write(body);
     req.end();
   });
+}
+
+// Silent rerank pull: one-shot per model tag per process + in-flight dedupe.
+let _rerankPullInFlight: Promise<boolean> | null = null;
+let _rerankPullTarget: string | null = null;
+const _rerankPullAttempted = new Set<string>();
+
+/**
+ * Fire-and-forget (or awaitable) silent pull of the configured rerank model.
+ * No splash progress callbacks. Concurrent callers for the same tag share one pull;
+ * a second miss later in the session does not start another download.
+ */
+export function ensureRerankModelPull(modelName?: string): Promise<boolean> {
+  const model = modelName?.trim() || getRerankModelTag();
+  if (_rerankPullInFlight && _rerankPullTarget === model) {
+    return _rerankPullInFlight;
+  }
+  if (_rerankPullAttempted.has(model)) {
+    return Promise.resolve(false);
+  }
+  _rerankPullAttempted.add(model);
+  _rerankPullTarget = model;
+  logger.log(`[Ollama Setup] Silently pulling rerank model: ${model}`);
+  // No onProgress — must not spam splash UI.
+  _rerankPullInFlight = pullModel(model)
+    .then((ok) => {
+      logger.log(`[Ollama Setup] Silent rerank pull ${ok ? 'succeeded' : 'failed'}: ${model}`);
+      return ok;
+    })
+    .finally(() => {
+      _rerankPullInFlight = null;
+      _rerankPullTarget = null;
+    });
+  return _rerankPullInFlight;
 }
 
 /**
@@ -429,6 +487,26 @@ export function resetGpuModeCache(): void {
  *
  * This function NEVER throws — it always returns a status object.
  */
+/**
+ * After embedding is ready: mark rerank readiness and silently pull the
+ * configured rerank model if missing. Never reports splash progress for the pull.
+ */
+function settleRerankModelStatus(
+  result: OllamaSetupStatus,
+  baseNames: string[],
+  fullTags: string[],
+): void {
+  const rerankTag = getRerankModelTag();
+  const hasRerank = isRerankModelInstalled(baseNames, fullTags, rerankTag);
+  result.rerankModelReady = hasRerank;
+  if (hasRerank) {
+    logger.log(`[Ollama Setup] Rerank model already installed: ${rerankTag}`);
+    return;
+  }
+  logger.log(`[Ollama Setup] Rerank model missing — starting silent background pull: ${rerankTag}`);
+  void ensureRerankModelPull(rerankTag);
+}
+
 export async function runOllamaSetup(
   onProgress?: (status: string, pct: number) => void,
 ): Promise<OllamaSetupStatus> {
@@ -436,6 +514,7 @@ export async function runOllamaSetup(
     ollamaDetected: false,
     ollamaVersion: null,
     embeddingModelReady: false,
+    rerankModelReady: false,
     error: null,
   };
 
@@ -476,6 +555,8 @@ export async function runOllamaSetup(
       // first real embedding batch hits a loaded-and-mode-known model.
       // Fire-and-forget — never blocks the splash.
       warmUpAndDetectGpu();
+      // Previously returned here and never considered the rerank model.
+      settleRerankModelStatus(result, baseNames, fullTags);
       onProgress?.('Embedding model ready', 100);
       return result;
     }
@@ -497,6 +578,9 @@ export async function runOllamaSetup(
       // round-trip on slow machines. Fire-and-forget so splash isn't blocked.
       onProgress?.('Warming up embedding model...', 95);
       warmUpAndDetectGpu();
+      // Re-list so we see any models installed while we pulled embeddings.
+      const afterPull = await listModels();
+      settleRerankModelStatus(result, afterPull.baseNames, afterPull.fullTags);
       onProgress?.('Embedding model ready', 100);
     } else {
       result.error = `Failed to pull ${tagToPull}`;
