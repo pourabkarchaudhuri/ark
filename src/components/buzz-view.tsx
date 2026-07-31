@@ -584,23 +584,50 @@ const EventCard = memo(function EventCard({
       onClick={handleCardClick}
       onKeyDown={(e) => e.key === 'Enter' && handleCardClick()}
       className={cn(
-        'group relative flex flex-col w-full h-full rounded-[20px] overflow-hidden',
+        'group relative flex flex-col w-full h-full rounded-[20px] overflow-hidden isolate',
         'transition-transform duration-300',
         !isImminent && 'border border-white/[0.07] hover:border-white/[0.14]',
-        'bg-black/15 backdrop-blur-md',
+        'bg-black/40 backdrop-blur-md',
         event.url && 'cursor-pointer',
         !isImminent && event.url && 'hover:scale-[1.02]',
         isPast && 'opacity-50',
       )}
     >
-      {/* ── Cover art (scraped) OR celestial body etching (fallback) ── */}
+      {/* ── Backdrop layer ─────────────────────────────────────────────────
+          The cover art (or celestial fallback) sits behind everything as a
+          dimmed atmospheric backdrop — never as a stark banner. Product
+          logos on solid colors (Steam, Nintendo, MAGFest, …) become
+          desaturated colour washes instead of blocky product tiles. */}
       {hasCoverArt ? (
-        <img
-          src={event.imageUrl}
-          alt=""
-          loading="lazy"
-          className="w-full h-32 object-cover rounded-t-[20px] flex-shrink-0"
-        />
+        <>
+          <img
+            src={event.imageUrl}
+            alt=""
+            aria-hidden
+            loading="lazy"
+            className="pointer-events-none absolute inset-0 w-full h-full object-cover select-none"
+            style={{
+              opacity: 0.55,
+              filter: 'saturate(0.85) contrast(1.05)',
+            }}
+          />
+          {/* Vignette + darken so text is always readable, regardless of image content */}
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background:
+                'linear-gradient(180deg, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0.65) 55%, rgba(0,0,0,0.92) 100%)',
+            }}
+          />
+          {/* Subtle top-right colour accent — brand cue without banner treatment */}
+          <div
+            className="pointer-events-none absolute inset-0 opacity-70"
+            style={{
+              background:
+                'radial-gradient(ellipse at 90% 0%, rgba(255,255,255,0.10) 0%, transparent 55%)',
+            }}
+          />
+        </>
       ) : (
         <img
           src={celestial.src}
@@ -617,10 +644,10 @@ const EventCard = memo(function EventCard({
       )}
 
       {/* ── Content ── */}
-      <div className="relative flex flex-col flex-1 px-5 py-5 gap-4">
+      <div className="relative flex flex-col flex-1 px-4 py-4 gap-2.5">
         {/* Title */}
         <h3 className={cn(
-          'text-[15px] font-semibold leading-[1.35] line-clamp-2 min-h-[41px]',
+          'text-[14px] font-semibold leading-[1.3] line-clamp-2',
           palette.text,
         )}>
           {event.name}
@@ -628,23 +655,23 @@ const EventCard = memo(function EventCard({
 
         {/* Date */}
         {event.startDate ? (
-          <span className="text-[20px] font-mono font-bold text-white leading-none">
+          <span className="text-[16px] font-mono font-bold text-white leading-none">
             {formatEventDate(event.startDate)}
             {event.endDate && ` — ${formatEventDate(event.endDate)}`}
           </span>
         ) : (
-          <span className="text-[20px] font-mono font-bold text-white/20 italic leading-none">
+          <span className="text-[16px] font-mono font-bold text-white/20 italic leading-none">
             Date TBA
           </span>
         )}
 
         {/* Location: city or Online */}
         {event.location && (
-          <div className="flex items-center gap-1.5 text-[12px] font-medium text-white/50">
+          <div className="flex items-center gap-1 text-[11px] font-medium text-white/60">
             {event.location === 'Online' ? (
-              <Globe className="w-3.5 h-3.5 shrink-0 text-white/40" aria-hidden />
+              <Globe className="w-3 h-3 shrink-0 text-white/45" aria-hidden />
             ) : (
-              <MapPin className="w-3.5 h-3.5 shrink-0 text-white/40" aria-hidden />
+              <MapPin className="w-3 h-3 shrink-0 text-white/45" aria-hidden />
             )}
             <span>{event.location}</span>
           </div>
@@ -652,12 +679,12 @@ const EventCard = memo(function EventCard({
 
         {/* Countdown ticker — the centrepiece */}
         {isUpcoming && event.startDate && (
-          <div className="flex items-baseline gap-2.5">
-            <span className={cn('text-[11px] font-mono font-bold select-none', palette.sub)}>
+          <div className="flex items-baseline gap-2 mt-0.5">
+            <span className={cn('text-[10px] font-mono font-bold select-none', palette.sub)}>
               //
             </span>
             <span className={cn(
-              'text-[17px] font-mono font-bold tracking-[0.12em] tabular-nums',
+              'text-[14px] font-mono font-bold tracking-[0.1em] tabular-nums',
               palette.accent,
             )}>
               {formatCountdown(event.startDate)}
@@ -665,11 +692,11 @@ const EventCard = memo(function EventCard({
           </div>
         )}
         {isLive && (
-          <div className="flex items-baseline gap-2.5">
-            <span className="text-[11px] font-mono font-bold text-red-500/50 select-none">
+          <div className="flex items-baseline gap-2 mt-0.5">
+            <span className="text-[10px] font-mono font-bold text-red-500/50 select-none">
               //
             </span>
-            <span className="text-[14px] font-mono font-bold tracking-[0.2em] text-red-400 uppercase animate-pulse">
+            <span className="text-[13px] font-mono font-bold tracking-[0.18em] text-red-400 uppercase animate-pulse">
               Broadcasting
             </span>
           </div>
@@ -680,8 +707,8 @@ const EventCard = memo(function EventCard({
       </div>
 
       {/* Edge-to-edge separator + footer */}
-      <div className="border-t border-white/[0.06]" />
-      <div className="relative flex items-center gap-2 px-5 pb-4 pt-3">
+      <div className="relative border-t border-white/[0.06]" />
+      <div className="relative flex items-center gap-2 px-4 pb-3 pt-2">
           {hasYt && (
             <TooltipCard content="Watch on YouTube">
               <button
@@ -715,10 +742,10 @@ const EventCard = memo(function EventCard({
     </div>
   );
 
-  if (!isImminent) return <div className="w-[280px] shrink-0">{card}</div>;
+  if (!isImminent) return <div className="w-[260px] shrink-0">{card}</div>;
 
   return (
-    <div className="w-[280px] shrink-0 rounded-[20px] border border-primary/40 broadcast-card-glow bg-primary/5">
+    <div className="w-[260px] shrink-0 rounded-[20px] border border-primary/40 broadcast-card-glow bg-primary/5">
       {card}
     </div>
   );
@@ -726,7 +753,7 @@ const EventCard = memo(function EventCard({
 
 // ─── Scheduled broadcasts strip (collapsible, sorted, with live data) ───────
 
-const SCROLL_STEP = 296; // card width (280) + gap (16)
+const SCROLL_STEP = 276; // card width (260) + gap (16)
 
 const BroadcastsStrip = memo(function BroadcastsStrip({
   events, eventsLoading, tick, eventFilter, onEventLatest, onClearFilter, onOpenUrl,

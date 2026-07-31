@@ -9,6 +9,14 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.43': {
+    title: "What's New in Ark 1.0.43",
+    changes: [
+      'Scheduled Broadcast cards redesigned — Cover images now render as a dimmed atmospheric backdrop across the whole card with a dark gradient wash + subtle top-right accent, instead of the harsh 128 px logo-banner strip from v1.0.42. Plain product logos (Steam, Nintendo, MAGFest, …) become tasteful color washes rather than blocky product tiles.',
+      'Broadcast cards ~35% shorter — Removed the dedicated image row, tightened padding and typography. Cards now hold their information densely without towering above the rest of the strip.',
+      'Card width tightened from 280 px → 260 px so more events fit in view before you need to scroll.',
+    ],
+  },
   '1.0.42': {
     title: "What's New in Ark 1.0.42",
     changes: [

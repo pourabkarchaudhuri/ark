@@ -4,6 +4,13 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.43] - 2026-07-31
+
+### Fixed
+- **Scheduled Broadcast cards look tasteful** — Cover images now render as a dimmed atmospheric backdrop across the whole card (55% opacity, saturate 0.85, plus a top-to-bottom black gradient wash from 0.45 → 0.92 and a subtle top-right radial highlight for a brand cue) instead of the harsh 128 px logo-banner strip from v1.0.42. Plain product logos (Steam, Nintendo, MAGFest, PAX West) become tasteful colour washes rather than sterile product tiles. Text remains fully readable regardless of image contents.
+- **Broadcast cards ~35% shorter** — Removed the dedicated image row, tightened outer padding (`px-5 py-5` → `px-4 py-4`), gap (`gap-4` → `gap-2.5`), and typography (title 15 px → 14 px, date 20 px → 16 px, countdown 17 px → 14 px). Footer padding also trimmed.
+- **Card width tightened** — 280 px → 260 px, scroll step updated to match (296 → 276) so more events fit in view before you need to scroll.
+
 ## [1.0.42] - 2026-07-31
 
 ### Fixed
