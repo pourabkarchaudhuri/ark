@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback, memo, type MouseEvent } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, memo, lazy, Suspense, type MouseEvent } from 'react';
 import { useRoute, useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
 import DOMPurify from 'dompurify';
@@ -40,6 +40,7 @@ import { Game } from '@/types/game';
 import { useLibrary, extractCachedMeta } from '@/hooks/useGameStore';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
+import { sessionStore } from '@/services/session-store';
 import { GameDialogInitialEntry } from '@/components/game-dialog';
 import { useToast } from '@/components/ui/toast';
 import { getRepackLinkForGame } from '@/services/fitgirl-service';
@@ -53,6 +54,9 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { MyProgressTab, MyProgressSkeleton } from '@/components/my-progress-tab';
 import { Gamepad2, BarChart3 } from 'lucide-react';
 import { Carousel, BlurImage, type CardType } from '@/components/ui/apple-cards-carousel';
+
+// Lazy-loaded telemetry tab — heavy panels split from the main game-details bundle.
+const TelemetryTab = lazy(() => import('@/components/telemetry-tab'));
 
 // ─── Minimal SteamAppDetails from cached Game (fallback when API returns null) ─
 function gameToMinimalSteamDetails(g: Game, steamAppId: number): SteamAppDetails {
@@ -756,6 +760,15 @@ export function GameDetailsPage() {
   }, [gameId]);
 
   const showProgressTabs = isCustomGame || (gameInLibrary && wasInLibraryOnLoad.current === true);
+
+  const hasSessions = useMemo(
+    () => Boolean(gameId) && sessionStore.getForGame(gameId!).length > 0,
+    [gameId]
+  );
+  const defaultTab =
+    typeof window !== 'undefined' && window.location.hash === '#telemetry' && hasSessions
+      ? 'telemetry'
+      : 'progress';
 
   // Dialog state for add to library / edit library entry
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -2039,7 +2052,7 @@ export function GameDetailsPage() {
       <div className="max-w-7xl mx-auto px-4 py-6" data-tour="game-details-main">
         {/* Tabbed view — only when game was already in library on page load */}
         {showProgressTabs && gameId ? (
-          <Tabs defaultValue="progress" className="w-full">
+          <Tabs defaultValue={defaultTab} className="w-full">
             <TabsList className="mb-6 bg-white/5">
               <TabsTrigger value="progress" className="flex items-center gap-2">
                 <BarChart3 className="w-4 h-4" />
@@ -2049,6 +2062,12 @@ export function GameDetailsPage() {
                 <Gamepad2 className="w-4 h-4" />
                 Game Details
               </TabsTrigger>
+              {hasSessions && (
+                <TabsTrigger value="telemetry" className="flex items-center gap-2">
+                  <Cpu className="w-4 h-4" />
+                  Insights & Telemetry
+                </TabsTrigger>
+              )}
             </TabsList>
 
             <TabsContent value="progress">
@@ -2101,6 +2120,20 @@ export function GameDetailsPage() {
                 navigate={navigate}
               />
             </TabsContent>
+
+            {hasSessions && gameId && (
+              <TabsContent value="telemetry">
+                <div className="p-6 rounded-lg bg-white/5 border border-white/10">
+                  <Suspense fallback={<div className="text-sm text-muted-foreground py-8 text-center">Loading telemetry…</div>}>
+                    <TelemetryTab
+                      gameId={gameId}
+                      gameTitle={details.name}
+                      gameCoverUrl={details.header_image}
+                    />
+                  </Suspense>
+                </div>
+              </TabsContent>
+            )}
           </Tabs>
         ) : (
           <GameDetailsContent

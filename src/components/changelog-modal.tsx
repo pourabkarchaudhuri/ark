@@ -9,6 +9,12 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.45': {
+    title: "What's New in Ark 1.0.45",
+    changes: [
+      'Insights & Telemetry tab now actually appears. The tab shipped in 1.0.44 was wired into the wrong build of game-details.tsx and never rendered. Fixed — the tab now shows up next to My Progress and Game Details for any game with at least one recorded session.',
+    ],
+  },
   '1.0.44': {
     title: "What's New in Ark 1.0.44",
     changes: [

@@ -4,6 +4,11 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.45] - 2026-07-31
+
+### Fixed
+- **Insights & Telemetry tab was never rendering.** The v1.0.44 commit shipped every supporting file (panels, derivations, session-tracker instrumentation, preload API, Gantt deep-link) but the six-edit integration into `src/pages/game-details.tsx` (lazy import, `sessionStore` import, `TelemetryTab` lazy const, `hasSessions`/`defaultTab` derivation, the third `TabsTrigger`, and the matching `TabsContent`) did not make it into that commit — a concurrent session editing the same file for the Oracle-hydration fix landed its changes last, silently dropping the tab wiring with no test coverage on tab *count* to catch it. Re-applied all six edits in isolation (verified via `git diff --stat` showing only `game-details.tsx` touched) and confirmed the tab now renders for any game with `sessionStore.getForGame(id).length > 0`.
+
 ## [1.0.44] - 2026-07-31
 
 ### Added
