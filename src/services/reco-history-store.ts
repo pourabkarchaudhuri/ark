@@ -9,11 +9,16 @@
  * Persists to localStorage with a simple versioned key.
  */
 
-import { extractFranchiseBase } from '@/services/franchise';
+import { canonicalFranchiseBase } from '@/services/franchise';
 import type { DismissMeta } from '@/services/hard-negative';
 
 const LS_DISMISSED_KEY = 'ark-reco-dismissed-v1';
 const LS_HISTORY_KEY = 'ark-reco-history-v1';
+
+/** Soft bound — drop oldest dismissals by `at`. */
+const MAX_DISMISSALS = 500;
+/** Soft bound — drop oldest conversion history by `clickedAt`. */
+const MAX_HISTORY = 200;
 
 /** Tracks the lifecycle of a single recommendation. */
 export interface RecoConversion {
@@ -97,7 +102,27 @@ class RecoHistoryStore {
     } catch { /* corrupted */ }
   }
 
+  private pruneSoftCaps() {
+    if (this.dismissals.size > MAX_DISMISSALS) {
+      const sorted = [...this.dismissals.values()].sort((a, b) => {
+        const atDiff = (a.at || 0) - (b.at || 0);
+        return atDiff !== 0 ? atDiff : a.gameId.localeCompare(b.gameId);
+      });
+      const drop = sorted.slice(0, sorted.length - MAX_DISMISSALS);
+      for (const d of drop) this.dismissals.delete(d.gameId);
+    }
+    if (this.history.size > MAX_HISTORY) {
+      const sorted = [...this.history.values()].sort((a, b) => {
+        const tDiff = (a.clickedAt || 0) - (b.clickedAt || 0);
+        return tDiff !== 0 ? tDiff : a.gameId.localeCompare(b.gameId);
+      });
+      const drop = sorted.slice(0, sorted.length - MAX_HISTORY);
+      for (const h of drop) this.history.delete(h.gameId);
+    }
+  }
+
   private save() {
+    this.pruneSoftCaps();
     try {
       localStorage.setItem(LS_DISMISSED_KEY, JSON.stringify([...this.dismissals.values()]));
       localStorage.setItem(LS_HISTORY_KEY, JSON.stringify([...this.history.values()]));
@@ -117,7 +142,7 @@ class RecoHistoryStore {
     const title = meta?.title;
     const franchiseBase =
       meta?.franchiseBase
-      || (title ? extractFranchiseBase(title) : undefined);
+      || (title ? canonicalFranchiseBase(title) : undefined);
     const prev = this.dismissals.get(gameId);
     this.dismissals.set(gameId, {
       gameId,

@@ -2,7 +2,7 @@
 
 Items identified during security and architecture reviews that are **not safe to fix** without risking regressions, or that require significant effort / design decisions before implementation.
 
-Last updated: 2026-02-23 (Review rounds 1–6)
+Last updated: 2026-08-01 (Oracle audit P0/P1 notes)
 
 ---
 
@@ -52,6 +52,8 @@ Cache and settings files are overwritten in place (now with atomic writes via `.
 
 ### 9. IndexedDB Cache Unbounded Size
 The renderer-side IndexedDB caches (prefetch store, image cache) have no eviction policy. On long-running installs with large libraries, this could consume significant disk space.
+
+**Oracle note (1.0.47):** Embeddings IDB remains unbounded this pass — no LRU eviction for the embedding store yet (deferred with this item).
 
 ### 10. Three.js Bundle Weight
 The splash screen uses `@react-three/fiber` + `@react-three/drei` which adds ~500 KB to the initial bundle. This is only used for the 3D splash screen animation.
@@ -133,6 +135,12 @@ The Appearance tab in settings saves the selected accent color to `localStorage(
 The AI Models tab saves Azure OpenAI and Anthropic configuration to localStorage, but the AI chat backend (`electron/ai-chat.ts`) only supports Ollama and Gemini providers. The settings are persisted but have no effect on AI behavior.
 
 **Why deferred:** Integrating Azure OpenAI requires `@langchain/openai` with Azure-specific config, and Anthropic requires `@langchain/anthropic`. Both need changes to the unified LLM proxy in `ai-chat.ts` to add provider selection logic.
+
+### 35. Graph scores best-effort
+Oracle / galaxy `graphScores` (pageRank, community affinity) are best-effort signals. Graph build can time out or skip; shelves still rank without them. No hard dependency.
+
+### 36. Thumbs-up unused for ranking
+Oracle thumbs-up is recorded for conversion stats / positive feedback rate but is not yet a first-class positive mining signal in the reco worker (thumbs-down already dismisses + hard-neg expands). LTR / positive-example training deferred.
 
 ---
 

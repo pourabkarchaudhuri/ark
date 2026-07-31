@@ -4,6 +4,16 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.47] - 2026-08-01
+
+### Fixed
+- **Oracle survivor similar titles from ANN.** Prefilter survivors now hydrate `similarGameTitles` from ANN neighbor display titles (distance-gated), not Steam `recommendations.total` fakes. Steam details still supply metacritic / studio / coming-soon only.
+- **Live hard-negative shelf mute.** Dismiss / thumbs-down expands franchise+developer mute against the current shelf catalog immediately; Oracle disk-cache signature includes dismiss fingerprint + coarse hours buckets, and cache is invalidated on dismiss so a 15‑minute restore cannot resurrect muted siblings (no full recompute on every dismiss).
+- **Franchise aliases.** `canonicalFranchiseBase` maps Halo Infinite → Halo, DOOM Eternal → DOOM, Resident Evil Village / biohazard → Resident Evil, Far Cry Primal / numbered → Far Cry (Halo Wars stays separate). Wired into hard-neg, MMR, detect/boost, and prefilter.
+- **Hard ANN distance ceiling.** Taste retrieval keeps only neighbors with cosine distance ≤ 0.45 — no soft top‑N fallback when the under-ceiling set is empty.
+- **Engagement alignment.** Worker library-seed weights use shared `computeEngagementWeight`; temporal decay is a multiplier only (Want-to-Play no longer re-inflated via `0.2*decay+0.05`).
+- **Soft growth bounds.** Dismissals capped at 500 and conversion history at 200 (oldest pruned); Ollama neighbor rerank cache prunes expired entries on read/write.
+
 ## [1.0.46] - 2026-08-01
 
 ### Added

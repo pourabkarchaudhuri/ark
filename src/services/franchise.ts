@@ -92,6 +92,31 @@ export function extractFranchiseBase(title: string): string {
   return norm(base);
 }
 
+/**
+ * Alias map applied after strip patterns so subtitle variants collapse to a
+ * canonical franchise key (Halo Infinite → halo, DOOM Eternal → doom, …).
+ * Leave Halo Wars as its own base (not under halo).
+ */
+const FRANCHISE_ALIASES: ReadonlyMap<string, string> = new Map([
+  ['halo infinite', 'halo'],
+  ['doom eternal', 'doom'],
+  ['doom 2016', 'doom'],
+  ['resident evil village', 'resident evil'],
+  ['resident evil 7', 'resident evil'],
+  ['biohazard', 'resident evil'],
+  ['far cry primal', 'far cry'],
+]);
+
+/**
+ * Canonical franchise base = alias(extractFranchiseBase(title)).
+ * Use for hard-neg mute, MMR, detect/boost — not for umbrella brand lists alone.
+ */
+export function canonicalFranchiseBase(title: string): string {
+  const base = extractFranchiseBase(title);
+  if (!base) return base;
+  return FRANCHISE_ALIASES.get(base) ?? base;
+}
+
 export function isUmbrellaBrand(baseName: string): boolean {
   const n = norm(baseName);
   if (!n) return false;
@@ -219,7 +244,7 @@ export function detectFranchises(
     rating: number,
     hours: number,
   ) => {
-    const baseName = extractFranchiseBase(title);
+    const baseName = canonicalFranchiseBase(title);
     if (!baseName || baseName.length < 3) return;
 
     if (!baseMap.has(baseName)) {
@@ -362,7 +387,7 @@ export function computeFranchiseBoost(
     return { boost: 0, isFranchiseEntry: false };
   }
 
-  const candidateBase = extractFranchiseBase(candidate.title);
+  const candidateBase = canonicalFranchiseBase(candidate.title);
 
   for (const franchise of franchises) {
     const inEntries = franchise.entries.some(e => e.gameId === candidate.gameId);

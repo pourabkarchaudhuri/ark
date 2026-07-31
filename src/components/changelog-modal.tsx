@@ -9,6 +9,17 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.47': {
+    title: "What's New in Ark 1.0.47",
+    changes: [
+      'Oracle similar titles are real ANN neighbors — survivors hydrate similar-game titles from embedding neighbors (distance-gated), not Steam recommendation counts. Steam details still fill metacritic / studio / coming-soon only.',
+      'Dismiss mutes the franchise live — thumbs-down / Not Interested hides same-franchise and same-developer shelf siblings immediately. Oracle cache fingerprint includes dismiss + playtime buckets so a short cache restore cannot bring muted siblings back.',
+      'Franchise aliases — Halo Infinite ↔ Halo, DOOM Eternal ↔ DOOM, Resident Evil Village / biohazard ↔ Resident Evil, Far Cry Primal / numbered ↔ Far Cry (Halo Wars stays its own line).',
+      'Hard ANN taste ceiling — only neighbors within cosine distance 0.45 enter the semantic pool; no soft fallback to far matches.',
+      'Engagement weights aligned — worker seed weights use the same shared engagement function as retrieve; decay multiplies, it does not re-floor Want-to-Play.',
+      'History soft caps — dismiss list ≤ 500 and conversion history ≤ 200 (oldest pruned); neighbor rerank cache drops expired entries.',
+    ],
+  },
   '1.0.46': {
     title: "What's New in Ark 1.0.46",
     changes: [

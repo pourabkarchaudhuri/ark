@@ -351,6 +351,56 @@ async function enrichNeighborRows(
 
 const DEFAULT_K = 8;
 
+/** Same cosine-distance ceiling as Oracle ANN taste retrieval / Taste Match. */
+export const SIMILAR_TITLES_DISTANCE_CEILING = 0.45;
+
+/**
+ * Lightweight ANN neighbor titles for Oracle survivor hydrate (F4).
+ * Returns display titles only — no Steam recommendations.total fakes.
+ * Uses the same distance ceiling as the details similar strip / Oracle ANN gate.
+ */
+export async function getSimilarTitlesForReco(
+  sourceGameId: string,
+  k: number = 6,
+): Promise<string[]> {
+  if (!annIndex.isReady) return [];
+
+  const vec = await getEmbeddingById(sourceGameId);
+  if (!vec) return [];
+
+  const overFetch = Math.max(k * 4 + 12, k + 24);
+  const raw = await annIndex.queryWithDistances(vec, overFetch);
+  const filtered = raw
+    .filter((r) => r.id !== sourceGameId && r.distance <= SIMILAR_TITLES_DISTANCE_CEILING)
+    .sort((a, b) => a.distance - b.distance);
+
+  if (filtered.length === 0) return [];
+
+  const linked = getLinkedStoreIds(sourceGameId);
+  const sourceMetaTitle = resolveNeighborMeta(sourceGameId).title;
+  const sourceNorm =
+    sourceMetaTitle.length >= 2 && !isAppPlaceholderTitle(sourceMetaTitle)
+      ? normalizeTitleForSimilarDedup(sourceMetaTitle)
+      : '';
+
+  const titles: string[] = [];
+  const seenTitleNorms = new Set<string>();
+
+  for (const r of filtered) {
+    if (linked.has(r.id)) continue;
+    const meta = resolveNeighborMeta(r.id);
+    if (isAppPlaceholderTitle(meta.title)) continue;
+    const tn = normalizeTitleForSimilarDedup(meta.title);
+    if (sourceNorm.length >= 2 && tn === sourceNorm) continue;
+    if (tn.length >= 3 && seenTitleNorms.has(tn)) continue;
+    if (tn.length >= 3) seenTitleNorms.add(tn);
+    titles.push(meta.title);
+    if (titles.length >= k) break;
+  }
+
+  return titles;
+}
+
 /**
  * Nearest neighbors in the persisted ANN index for the given game's embedding.
  * Enriches Steam/Epic rows via IPC so titles and art match the store.

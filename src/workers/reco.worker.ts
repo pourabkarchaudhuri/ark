@@ -48,7 +48,8 @@ import {
 } from '@/services/franchise';
 import { matchesDeepInGenre, matchesMoodShelf, isComingSoonForShelf } from '@/services/reco-shelf-rules';
 import {
-  clampActiveToIdleRatio,
+  applyTemporalDecayMultiplier,
+  computeEngagementWeight,
   heroEvidenceSortKey,
   isEvidenceGame,
 } from '@/services/engagement-weight';
@@ -104,14 +105,6 @@ function isReleasedPlayableForBacklog(releaseDate: string, nowMs: number): boole
 
 // ─── Layer 1: Taste Profile ────────────────────────────────────────────────────
 
-const STATUS_WEIGHTS: Record<string, number> = {
-  'Completed': 1.0,
-  'Playing Now': 0.9,
-  'Playing': 0.7,
-  'Want to Play': 0.5,
-  'On Hold': 0.3,
-};
-
 // ─── Layer 2: Engagement Curve Analysis ────────────────────────────────────────
 
 const CURVE_MULTIPLIERS: Record<EngagementPattern, number> = {
@@ -161,44 +154,28 @@ function classifyEngagementCurve(snap: UserGameSnapshot): EngagementPattern {
 // Engagement score cache — reset per pipeline run to avoid stale values
 const _engagementCache = new Map<string, number>();
 
+/**
+ * Worker library-seed / evidence weight: shared computeEngagementWeight × temporal
+ * decay × curve. Decay is a multiplier only — no WtP floor re-inflate.
+ * Retrieve weight = shared; score may apply decay on top.
+ */
 function computeEngagementScore(game: UserGameSnapshot, now: number): number {
   const cached = _engagementCache.get(game.gameId);
   if (cached !== undefined) return cached;
-
-  const maxHours = 500;
-  const normalizedHours = clamp01(Math.min(game.hoursPlayed, maxHours) / maxHours);
-  const normalizedRating = game.rating / 5;
-  const statusScore = STATUS_WEIGHTS[game.status] ?? 0.3;
-
-  const sessionDepth = game.sessionCount > 0
-    ? clamp01(game.avgSessionMinutes / 240)
-    : normalizedHours * 0.3;
 
   const HALF_LIFE_MS = 180 * 24 * 60 * 60 * 1000;
   const addedTime = new Date(game.addedAt).getTime();
   const lastActivity = game.lastSessionDate
     ? new Date(game.lastSessionDate).getTime()
     : addedTime;
-  const age = now - lastActivity;
+  const age = Math.max(0, now - (Number.isFinite(lastActivity) ? lastActivity : now));
   const temporalDecay = Math.pow(0.5, age / HALF_LIFE_MS);
 
   const curvePattern = game.engagementPattern || classifyEngagementCurve(game);
   const curveMult = CURVE_MULTIPLIERS[curvePattern];
 
-  let baseScore =
-    normalizedHours * 0.28 +
-    normalizedRating * 0.25 +
-    statusScore * 0.18 +
-    sessionDepth * 0.14 +
-    temporalDecay * 0.10 +
-    (curveMult - 1) * 0.05;
-
-  // Want-to-Play: mild intent only — no floor that inflates centroid-like weights
-  if (game.status === 'Want to Play' && game.hoursPlayed === 0) {
-    baseScore = Math.min(baseScore, 0.2) * temporalDecay + 0.05;
-  }
-
-  const result = clamp01(baseScore * curveMult * clampActiveToIdleRatio(game.activeToIdleRatio));
+  const shared = computeEngagementWeight(game);
+  const result = applyTemporalDecayMultiplier(shared, temporalDecay) * curveMult;
   _engagementCache.set(game.gameId, result);
   return result;
 }

@@ -4,7 +4,7 @@
  */
 
 import { toCanonicalGenre } from '@/data/canonical-genres';
-import { extractFranchiseBase } from '@/services/franchise';
+import { canonicalFranchiseBase } from '@/services/franchise';
 
 const norm = (s: string) => s.toLowerCase().trim();
 
@@ -27,7 +27,7 @@ export function mmrMaxSim(
       .filter((c): c is NonNullable<typeof c> => c !== null)
       .map(c => norm(c)),
   );
-  const candBase = extractFranchiseBase(candidate.title);
+  const candBase = canonicalFranchiseBase(candidate.title);
   const candDev = norm(candidate.developer);
   let maxSim = 0;
   for (const sel of selected) {
@@ -43,7 +43,7 @@ export function mmrMaxSim(
     }
     const union = setA.size + setB.size - intersection;
     const jaccard = union > 0 ? intersection / union : 0;
-    const franchiseSame = !!candBase && candBase === extractFranchiseBase(sel.title);
+    const franchiseSame = !!candBase && candBase === canonicalFranchiseBase(sel.title);
     const sameDeveloper = !!candDev && candDev === norm(sel.developer);
     const sim = Math.max(jaccard, franchiseSame ? 1.0 : 0, sameDeveloper ? 0.8 : 0);
     if (sim > maxSim) maxSim = sim;

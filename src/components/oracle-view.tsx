@@ -64,6 +64,7 @@ function oracleRerankBadge(status: OracleRerankStatus): { label: string; title: 
   return null;
 }
 import { recoHistoryStore } from '@/services/reco-history-store';
+import { expandHardNegativeIds } from '@/services/hard-negative';
 import { normalizeLayerScores, explanationLines } from '@/services/reco-explainer';
 import { embeddingService } from '@/services/embedding-service';
 import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store';
@@ -1669,16 +1670,29 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     recoStore.refresh();
   }, []);
 
+  const applyLiveHardNegFilter = useCallback((shelves: RecoShelf[]) => {
+    const catalog = shelves.flatMap(s => s.games).map(g => ({
+      gameId: g.gameId,
+      title: g.title,
+      developer: g.developer,
+    }));
+    const expanded = expandHardNegativeIds(recoHistoryStore.getDismissals(), catalog);
+    setDismissedIds(new Set(expanded));
+    // Drop disk cache so restore cannot resurrect muted franchise siblings.
+    // Do not full-recompute — next Refresh / library change rebuilds with expand.
+    recoStore.invalidateCacheOnly();
+  }, []);
+
   const handleDismiss = useCallback((gameId: string) => {
     const fromShelf = state.shelves.flatMap(s => s.games).find(g => g.gameId === gameId);
     recoHistoryStore.dismiss(gameId, {
       title: fromShelf?.title,
       developer: fromShelf?.developer,
     });
-    setDismissedIds(new Set(recoHistoryStore.getDismissedIds()));
-  }, [state.shelves]);
+    applyLiveHardNegFilter(state.shelves);
+  }, [state.shelves, applyLiveHardNegFilter]);
 
-  // Filter dismissed games from shelves and apply bandit reordering
+  // Filter dismissed + hard-neg expanded ids from shelves and apply bandit reordering
   const filterDismissed = (shelves: RecoShelf[]) =>
     shelves.map(s => ({
       ...s,

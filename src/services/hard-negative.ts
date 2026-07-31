@@ -3,7 +3,7 @@
  * Franchise mute 14d / developer mute 7d from dismiss metadata.
  */
 
-import { extractFranchiseBase } from '@/services/franchise';
+import { canonicalFranchiseBase } from '@/services/franchise';
 
 export interface DismissMeta {
   gameId: string;
@@ -42,8 +42,9 @@ export function expandHardNegativeIds(
     out.add(d.gameId);
     const age = nowMs - (typeof d.at === 'number' ? d.at : 0);
 
-    let base = (d.franchiseBase || '').toLowerCase().trim();
-    if (!base && d.title) base = extractFranchiseBase(d.title);
+    let base = '';
+    if (d.title) base = canonicalFranchiseBase(d.title);
+    else if (d.franchiseBase) base = canonicalFranchiseBase(d.franchiseBase);
 
     if (base && age <= FRANCHISE_MUTE_MS) franchiseBases.add(base);
 
@@ -60,7 +61,7 @@ export function expandHardNegativeIds(
     if (expanded >= HARD_NEG_EXPAND_CAP) break;
     if (!row.gameId || out.has(row.gameId)) continue;
 
-    const rowBase = extractFranchiseBase(row.title || '');
+    const rowBase = canonicalFranchiseBase(row.title || '');
     const rowDev = (row.developer || '').toLowerCase().trim();
 
     const franchiseHit = !!rowBase && franchiseBases.has(rowBase);

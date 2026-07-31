@@ -43,6 +43,14 @@ import {
   isLinkedExcluded,
 } from '@/services/linked-ids';
 import { expandHardNegativeIds } from '@/services/hard-negative';
+import { keepAnnNeighborsUnderCeiling } from '@/services/ann-retrieve';
+import { getSimilarTitlesForReco } from '@/services/similar-games';
+import { canonicalFranchiseBase } from '@/services/franchise';
+import {
+  djb2Fingerprint,
+  fingerprintDismissals,
+  hoursPlayedBucket,
+} from '@/services/oracle-signature';
 
 /** ANN cosine-distance ceiling for Oracle taste retrieval (Cos metric). */
 const ANN_DISTANCE_CEILING = 0.45;
@@ -66,18 +74,11 @@ export function getEmbeddingCache(): ReadonlyMap<string, number[]> {
   return embeddingCache;
 }
 
-/** Compact fingerprint for user notes (embedding input); avoids huge cache keys. */
-function djb2Fingerprint(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) + h) ^ s.charCodeAt(i);
-  }
-  return (h >>> 0).toString(36);
-}
-
 /**
- * Stable string over library + custom games — used for Oracle invalidation and
- * matching persisted reco cache to the current library (incl. notes that affect embeddings).
+ * Stable string over library + custom games + dismiss fingerprint — used for
+ * Oracle invalidation and matching persisted reco cache. Includes coarse hours
+ * buckets so engagement shifts invalidate restore; dismiss fp so muted franchise
+ * siblings cannot resurrect from a 15‑min cache.
  */
 export function buildOracleLibrarySignature(): string {
   const libLines = libraryStore
@@ -87,7 +88,8 @@ export function buildOracleLibrarySignature(): string {
     .map((id) => {
       const e = libraryStore.getEntry(id);
       const notes = e?.publicReviews ?? '';
-      return `L:${id}:${e?.status ?? ''}:${e?.priority ?? ''}:${djb2Fingerprint(notes)}`;
+      const hours = hoursPlayedBucket(e?.hoursPlayed);
+      return `L:${id}:${e?.status ?? ''}:${e?.priority ?? ''}:${hours}:${djb2Fingerprint(notes)}`;
     });
   const customLines = customGameStore
     .getAllGames()
@@ -95,9 +97,11 @@ export function buildOracleLibrarySignature(): string {
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((e) => {
       const notes = e.publicReviews ?? '';
-      return `C:${e.id}:${e.status}:${e.priority}:${djb2Fingerprint(notes)}`;
+      const hours = hoursPlayedBucket(e.hoursPlayed);
+      return `C:${e.id}:${e.status}:${e.priority}:${hours}:${djb2Fingerprint(notes)}`;
     });
-  return [...libLines, ...customLines].join('\n');
+  const dismissLine = `D:${fingerprintDismissals(recoHistoryStore.getDismissals())}`;
+  return [...libLines, ...customLines, dismissLine].join('\n');
 }
 
 // ─── State ─────────────────────────────────────────────────────────────────────
@@ -302,8 +306,8 @@ class RecoStore {
       candidates.push(...filtered);
       console.log(`[RecoStore] Pre-filter: ${poolSizeBefore.toLocaleString()} → ${candidates.length.toLocaleString()} candidates`);
 
-      // 2.2. Survivor metadata hydrate — similarGames / metacritic for graph layers (F4)
-      this.state = { ...this.state, progress: { stage: 'Hydrating survivor metadata...', percent: 7 } };
+      // 2.2. Survivor metadata hydrate — ANN neighbor titles + metacritic (F4)
+      this.state = { ...this.state, progress: { stage: 'Hydrating ANN neighbor titles + metacritic...', percent: 7 } };
       this.notify();
       await this.hydrateSurvivorMetadata(candidates);
 
@@ -860,27 +864,49 @@ class RecoStore {
   }
 
   /**
-   * F4: batch-hydrate missing similarGames / metacritic for survivors (cap ≤ 80).
-   * Prefers semantic/BM25-retrieved rows over popular-flood fills.
+   * F4: ANN neighbor titles into similarGameTitles; Steam details for
+   * metacritic/studio/comingSoon only (never recommendations.total as fake titles).
    */
   private async hydrateSurvivorMetadata(candidates: CandidateGame[]): Promise<void> {
-    if (typeof window === 'undefined' || !window.steam?.getMultipleAppDetails) return;
+    const pri = (c: CandidateGame) =>
+      (c.semanticRetrieved ? 2 : 0) + (c.lexicalRetrieved ? 2 : 0) + (c.coldStartSeeded ? 1 : 0);
 
-    const need = candidates
-      .filter(c =>
-        c.gameId.startsWith('steam-')
-        && (c.similarGameTitles.length === 0 || c.metacriticScore == null),
-      )
-      .sort((a, b) => {
-        const pri = (c: CandidateGame) =>
-          (c.semanticRetrieved ? 2 : 0) + (c.lexicalRetrieved ? 2 : 0) + (c.coldStartSeeded ? 1 : 0);
-        return pri(b) - pri(a);
-      })
+    // 1) ANN neighbor display titles (cap ≤ 80 survivors missing titles)
+    const needTitles = candidates
+      .filter(c => c.similarGameTitles.length === 0 && embeddingCache.has(c.gameId))
+      .sort((a, b) => pri(b) - pri(a))
       .slice(0, SURVIVOR_HYDRATE_CAP);
 
-    if (need.length === 0) return;
+    let annHydrated = 0;
+    for (const c of needTitles) {
+      try {
+        const titles = await getSimilarTitlesForReco(c.gameId, 6);
+        if (titles.length > 0) {
+          c.similarGameTitles = titles;
+          annHydrated++;
+        }
+      } catch {
+        /* non-fatal per id */
+      }
+    }
+    if (annHydrated > 0) {
+      console.log(`[RecoStore] Survivor ANN titles: ${annHydrated}/${needTitles.length}`);
+    }
 
-    const appIds = need
+    // 2) Steam details — metacritic / studio / comingSoon / recommendations count only
+    if (typeof window === 'undefined' || !window.steam?.getMultipleAppDetails) return;
+
+    const needSteam = candidates
+      .filter(c =>
+        c.gameId.startsWith('steam-')
+        && (c.metacriticScore == null || !c.developer || !c.publisher || c.comingSoon == null),
+      )
+      .sort((a, b) => pri(b) - pri(a))
+      .slice(0, SURVIVOR_HYDRATE_CAP);
+
+    if (needSteam.length === 0) return;
+
+    const appIds = needSteam
       .map(c => parseInt(c.gameId.slice(6), 10))
       .filter(n => !isNaN(n));
     if (appIds.length === 0) return;
@@ -888,23 +914,20 @@ class RecoStore {
     try {
       const detailsArr = await window.steam.getMultipleAppDetails(appIds);
       const byApp = new Map<number, any>();
-      for (const d of detailsArr || []) {
-        if (d && typeof d.steam_appid === 'number') byApp.set(d.steam_appid, d);
+      for (const { appId, details } of detailsArr || []) {
+        if (details) byApp.set(appId, details);
       }
       let hydrated = 0;
-      for (const c of need) {
+      for (const c of needSteam) {
         const appid = parseInt(c.gameId.slice(6), 10);
         const d = byApp.get(appid);
         if (!d) continue;
         if (c.metacriticScore == null && typeof d.metacritic?.score === 'number') {
           c.metacriticScore = d.metacritic.score;
         }
-        if (c.similarGameTitles.length === 0) {
-          // Steam details rarely include similar_games; keep recommendations as proxy titles when present
-          const recs = d.recommendations?.total;
-          if (typeof recs === 'number' && c.recommendations == null) {
-            c.recommendations = recs;
-          }
+        const recs = d.recommendations?.total;
+        if (typeof recs === 'number' && c.recommendations == null) {
+          c.recommendations = recs;
         }
         if (d.release_date?.coming_soon === true) c.comingSoon = true;
         if (!c.developer && d.developers?.[0]) c.developer = d.developers[0];
@@ -912,7 +935,7 @@ class RecoStore {
         hydrated++;
       }
       if (hydrated > 0) {
-        console.log(`[RecoStore] Survivor hydrate: ${hydrated}/${need.length} enriched`);
+        console.log(`[RecoStore] Survivor Steam meta: ${hydrated}/${needSteam.length} enriched`);
       }
     } catch (err) {
       console.warn('[RecoStore] Survivor hydrate failed (non-fatal):', err);
@@ -1093,9 +1116,8 @@ class RecoStore {
     if (!centroid) return [];
 
     const neighbors = await annIndex.queryWithDistances(centroid, ANN_QUERY_K);
-    const byDistance = [...neighbors].sort((a, b) => a.distance - b.distance);
-    const underCeiling = byDistance.filter(n => n.distance <= ANN_DISTANCE_CEILING);
-    const kept = (underCeiling.length > 0 ? underCeiling : byDistance).slice(0, ANN_MAX_KEEP);
+    // Hard ceiling only — no soft fallback to far neighbors when under-ceiling is empty
+    const kept = keepAnnNeighborsUnderCeiling(neighbors, ANN_DISTANCE_CEILING, ANN_MAX_KEEP);
     const distanceById = new Map(kept.map(n => [n.id, n.distance]));
 
     const newSteamAppIds: number[] = [];
@@ -1465,8 +1487,7 @@ class RecoStore {
       }
       if (ug.developer) devSet.add(ug.developer.toLowerCase());
       if (ug.publisher) pubSet.add(ug.publisher.toLowerCase());
-      // Simplified franchise base: first 2-3 significant words of the title
-      const base = this.extractSimpleFranchiseBase(ug.title);
+      const base = canonicalFranchiseBase(ug.title);
       if (base) franchiseBases.add(base);
     }
 
@@ -1492,7 +1513,7 @@ class RecoStore {
       }
       if (c.genres.length > 0) genreScore /= c.genres.length;
 
-      const isFranchise = franchiseBases.has(this.extractSimpleFranchiseBase(c.title));
+      const isFranchise = franchiseBases.has(canonicalFranchiseBase(c.title));
       const isStudio = (c.developer ? devSet.has(c.developer.toLowerCase()) : false) ||
                        (c.publisher ? pubSet.has(c.publisher.toLowerCase()) : false);
       const metacritic = c.metacriticScore ?? 0;
@@ -1608,26 +1629,6 @@ class RecoStore {
     }
 
     return [...selected];
-  }
-
-  /**
-   * Simplified franchise base extraction for pre-filtering.
-   * Strips trailing numbers, subtitles, and edition suffixes to get
-   * a rough franchise key. Doesn't need to be as precise as the worker's
-   * full detection — false positives are harmless (just increase the pool).
-   */
-  private extractSimpleFranchiseBase(title: string): string {
-    let base = title.trim();
-    // Strip parentheticals
-    base = base.replace(/\s*\([^)]*\)$/g, '').trim();
-    // Strip " - subtitle" and ": subtitle"
-    base = base.replace(/\s*[:\-–]\s+.*$/, '').trim();
-    // Strip trailing Roman/Arabic numerals
-    base = base.replace(/\s+[\dIVXLCivxlc]+$/, '').trim();
-    // Strip common edition suffixes
-    base = base.replace(/\s+(remastered|remake|definitive|enhanced|anniversary|hd|complete|ultimate|deluxe|goty|gold|premium|special|digital|standard)(\s+edition)?$/i, '').trim();
-    base = base.replace(/\s+edition$/i, '').trim();
-    return base.length >= 3 ? base.toLowerCase() : '';
   }
 
   /**
@@ -2070,6 +2071,14 @@ class RecoStore {
   }
 
   /**
+   * Drop persisted Oracle result cache without kicking a full recompute.
+   * Used after dismiss so a 15‑min restore cannot resurrect muted franchise siblings.
+   */
+  invalidateCacheOnly() {
+    this.clearResultsCache();
+  }
+
+  /**
    * Force a recompute, even if results already exist.
    * Kills any running worker, resets state to idle, and re-runs the full
    * pipeline (embedding reload + compute). Safe to call at any time.
@@ -2101,9 +2110,9 @@ export const recoStore = new RecoStore();
 
 // ── Invalidate Oracle reco when library/custom data used by reco changes ──
 // v1.0.41 audit: subscribe via libraryStore.subscribe (the non-hours channel),
-// NOT libraryStore.subscribeHours. buildOracleLibrarySignature() ignores hoursPlayed,
-// and 15s session ticks used to churn through this callback every time — now they
-// only fire hoursListeners so the signature rebuild + reco recompute stay quiet.
+// NOT libraryStore.subscribeHours — 15s session ticks must not full-recompute.
+// Signature now includes coarse hours buckets + dismiss fingerprint so a later
+// cache restore still fails when engagement or mutes changed.
 
 let oracleLibrarySnapBaseline: string | null = null;
 let oracleLibraryInvalidateTimer: ReturnType<typeof setTimeout> | null = null;

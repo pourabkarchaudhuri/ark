@@ -14,6 +14,12 @@ export const NEIGHBOR_HEURISTIC_POOL = 72;
 const NEIGHBOR_RERANK_CACHE_TTL_MS = 45_000;
 const neighborRerankCache = new Map<string, { neighbors: NeighborInfo[]; status: NeighborRerankStatus; expires: number }>();
 
+function pruneNeighborRerankCache(now: number = Date.now()) {
+  for (const [key, entry] of neighborRerankCache) {
+    if (entry.expires <= now) neighborRerankCache.delete(key);
+  }
+}
+
 function neighborCacheKey(anchorId: string, neighborIds: string[], finalK: number): string {
   const sig = neighborIds.join('\0');
   return `${anchorId}|${finalK}|${sig}`;
@@ -60,6 +66,7 @@ export async function applyOllamaNeighborRerank(
   const nbIds = trimmed.map((n) => n.id);
   const cacheKey = neighborCacheKey(anchor.id, nbIds, finalK);
   const now = Date.now();
+  pruneNeighborRerankCache(now);
   const hit = neighborRerankCache.get(cacheKey);
   if (hit && hit.expires > now) {
     return { neighbors: hit.neighbors, status: hit.status };
@@ -76,6 +83,7 @@ export async function applyOllamaNeighborRerank(
       const status: NeighborRerankStatus =
         res && 'error' in res && res.error.code !== 'empty_results' ? 'error' : 'empty_results';
       const out = { neighbors: neighbors.slice(0, finalK), status };
+      pruneNeighborRerankCache(now);
       neighborRerankCache.set(cacheKey, { neighbors: out.neighbors, status, expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
       return out;
     }
@@ -108,10 +116,12 @@ export async function applyOllamaNeighborRerank(
     }
     // embed_fallback is a successful reorder — badge-hidden via 'fallback' status.
     const status: NeighborRerankStatus = res.via === 'embed_fallback' ? 'fallback' : 'applied';
+    pruneNeighborRerankCache(now);
     neighborRerankCache.set(cacheKey, { neighbors: out, status, expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
     return { neighbors: out, status };
   } catch {
     const out = { neighbors: neighbors.slice(0, finalK), status: 'error' as const };
+    pruneNeighborRerankCache(now);
     neighborRerankCache.set(cacheKey, { neighbors: out.neighbors, status: 'error', expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
     return out;
   }

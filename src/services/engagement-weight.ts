@@ -32,6 +32,7 @@ export function countEvidenceLibrary(
 /**
  * Engagement weight for taste centroid, ANN retrieval, and genre prefilter.
  * Want-to-Play is capped (mild contribution) — never floored to 1.5.
+ * Retrieve weight = shared; worker score may apply temporal decay on top.
  */
 export function computeEngagementWeight(game: EngagementWeightInput): number {
   let w = 1;
@@ -45,6 +46,14 @@ export function computeEngagementWeight(game: EngagementWeightInput): number {
   }
 
   return w * clampActiveToIdleRatio(game.activeToIdleRatio);
+}
+
+/**
+ * Temporal decay as a multiplier only — never a WtP floor that re-inflates intent.
+ */
+export function applyTemporalDecayMultiplier(sharedWeight: number, decay: number): number {
+  const d = Number.isFinite(decay) ? Math.max(0, decay) : 1;
+  return sharedWeight * d;
 }
 
 /**
