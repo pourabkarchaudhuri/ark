@@ -144,6 +144,13 @@ export interface LibraryGameEntry {
   lastPlayedAt?: string; // ISO date — last time the game was played (from sessions or Steam)
   /** ISO timestamp — set when the auto Want-to-Play → Playing transition fired (v1.0.41). */
   autoTransitionedAt?: string;
+  /**
+   * True when `window.exeInfo.analyze(executablePath)` identified this entry's
+   * executable as a launcher (v1.0.42). Suppresses auto Want-to-Play → Playing
+   * transitions and lets consumer UI (Voyage / dashboard) surface a
+   * "this looks like a launcher" hint.
+   */
+  launcherDetected?: boolean;
   addedAt: Date;
   updatedAt: Date;
 }

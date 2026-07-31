@@ -9,6 +9,22 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.42': {
+    title: "What's New in Ark 1.0.42",
+    changes: [
+      'Update flow reliability — Differential (blockmap) downloads are now disabled; every update pulls the full installer. This eliminates the per-block SHA drift that could abort downloads on large releases.',
+      'Real update-error messages surfaced — When an update fails, the snackbar and Settings About tab now show the actual electron-updater error instead of a generic "Failed to download update". The real message from the update event is preserved even after the download promise settles.',
+      'Manual "Download from GitHub" fallback — If the auto-update ever fails, both the snackbar error state and the Settings About tab now include a one-click link that opens the GitHub releases page. Your data is preserved when you install manually.',
+      'Structured error diagnostics in the main-process log — Auto-updater errors now log name, message, and stack (previously only message). Easier to diagnose from user log dumps.',
+      'Download IPC returns structured result — `window.updater.downloadUpdate()` now returns `{ success, error?, errorName? }`. The renderer no longer clobbers a specific update-event error with a generic catch-all message.',
+      'Oracle shelf cards fixed — Reverted the v1.0.41 horizontal virtualization attempt on Oracle shelves. The virtualizer\'s absolute-positioned wrapper had no explicit height and its 264 px fixed size fought OracleCard\'s min-w-[200px]/max-w-[320px] clamp, causing cards to collapse or misalign. Restored the original flex-gap-4 layout.',
+      'Epic game details now match Steam hero — Epic games use their CMS gallery hero image as the wide backdrop (with a stylized fuchsia-tinted gradient fallback when no image is available), matching the look Steam pages already had. No more flat black hero on Epic.',
+      'Live Transmissions image extraction expanded — RSS parser now checks `<content:encoded>` (full WordPress post HTML), `<itunes:image>`, protocol-relative URLs (`//host/pic.jpg`), and a channel-level `<image><url>` fallback. Warns in the log per item that still ends up imageless.',
+      'Browse search no longer refreshes the grid on every keystroke — Typing updates only the dropdown; the browse grid rebuilds only on Enter, clicking a suggestion, or 400 ms of no typing. Dropdown itself now scrolls with a sticky "+N more results" footer and a `↵ to see all` hint.',
+      'Auto Playing → On Hold — Games in Playing that have not been played for 30+ days now automatically move to On Hold. Runs on startup and every 60 min. Opt-out via `preferences.autoOnHoldTransition` (default on).',
+      'Launcher-aware auto-transitions — When the exe path looks like a launcher (EA/Riot/Steam/Ubisoft/etc. or basename contains launcher/bootstrap/loader), the Want-to-Play → Playing auto-transition is skipped and the entry is stamped `launcherDetected: true`. Playtime tracked via a launcher is unreliable, so we no longer promote games based on it.',
+    ],
+  },
   '1.0.41': {
     title: "What's New in Ark 1.0.41",
     changes: [

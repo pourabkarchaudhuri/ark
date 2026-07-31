@@ -212,7 +212,7 @@ function SearchSuggestionsComponent({
   return (
     <div
       ref={containerRef}
-      className="absolute top-full left-0 right-0 mt-1 bg-card/95 backdrop-blur-xl border border-white/10 rounded-lg shadow-xl z-50 max-h-80 overflow-y-auto"
+      className="absolute top-full left-0 right-0 mt-1 bg-card/95 backdrop-blur-xl border border-white/10 rounded-lg shadow-xl z-50 max-h-[28rem] overflow-y-auto"
     >
       {(loading || searchPending) && (
         <div className="py-1">
@@ -243,10 +243,10 @@ function SearchSuggestionsComponent({
 
       {!loading && !searchPending && results.length > 0 && (
         <ul className="py-1">
-          {/* Results arrive pre-sorted by relevance from the search algorithm */}
-          {results
-            .slice(0, 8)
-            .map((game) => (
+          {/* Results arrive pre-sorted by relevance from the search algorithm.
+              Render all matches — the container caps at max-h-[28rem] (~8 rows)
+              and scrolls; the "+N more" footer stays sticky at the bottom. */}
+          {results.map((game) => (
             <li key={game.id}>
               <button
                 onClick={() => onSelect(game)}
@@ -284,8 +284,12 @@ function SearchSuggestionsComponent({
           ))}
           
           {results.length > 8 && (
-            <li className="px-4 py-2 text-xs text-white/40 text-center border-t border-white/10">
-              {results.length - 8} more results...
+            <li className="flex items-center justify-between px-4 py-2 text-xs text-white/40 border-t border-white/10 sticky bottom-0 bg-card/95 backdrop-blur-xl">
+              <span>+{results.length - 8} more results</span>
+              <span className="flex items-center gap-1">
+                <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-white/60 font-mono text-[10px] leading-none">{'↵'}</kbd>
+                <span>to see all</span>
+              </span>
             </li>
           )}
         </ul>

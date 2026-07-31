@@ -48,7 +48,6 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { DNA } from 'react-loader-spinner';
-import { useVirtualizer } from '@tanstack/react-virtual';
 import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import { EncryptedText } from '@/components/ui/encrypted-text';
@@ -159,11 +158,6 @@ const SHELF_ICONS: Record<ShelfType, React.ElementType> = {
 };
 
 const WAVE_SPRING = { type: 'spring' as const, stiffness: 500, damping: 26, mass: 0.8 };
-
-// Estimated per-card width (px) used by the shelf horizontal virtualizer.
-// OracleCard clamps between min-w-[200px] and max-w-[320px]; ~264px covers the
-// typical viewport range including the gap-4 (16px) between cards.
-const SHELF_CARD_WIDTH = 264;
 
 // ─── Skeleton Loading State ─────────────────────────────────────────────────────
 
@@ -892,18 +886,6 @@ function ShelfCarousel({
   const [canScrollRight, setCanScrollRight] = useState(true);
   const Icon = SHELF_ICONS[shelf.type] || Sparkles;
 
-  // Horizontal virtualizer — mounts only the cards inside (and slightly
-  // outside) the visible scroll window. Shelves can carry 40+ cards; on cold
-  // load with many shelves this trims hundreds of card mounts.
-  const virtualizer = useVirtualizer({
-    count: shelf.games.length,
-    horizontal: true,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => SHELF_CARD_WIDTH,
-    overscan: 3,
-  });
-  const virtualItems = virtualizer.getVirtualItems();
-
   const checkScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -970,42 +952,21 @@ function ShelfCarousel({
         </div>
       </div>
 
-      {/* Scrollable cards — horizontally virtualized so only ~viewport+overscan
-          cards are mounted at once (shelves can carry 40+ recos). */}
+      {/* Scrollable cards. v1.0.41 tried to virtualize this with useVirtualizer
+          (horizontal) but the absolute-positioned container had no explicit
+          height + OracleCard's min-w-[200px]/max-w-[320px] clamp fought the
+          264px estimateSize, so cards visually collapsed / misaligned. Reverted
+          to the original flex layout for v1.0.42 — a 40-card horizontal shelf
+          is cheap enough to fully mount, and the store-level perf gains from
+          v1.0.41's hours-only channel already carry the session-tick load. */}
       <div
         ref={scrollRef}
-        className="overflow-x-auto scrollbar-hide pb-2 px-1"
+        className="flex gap-4 overflow-x-auto scrollbar-hide pb-2 px-1"
         style={{ scrollSnapType: 'x mandatory' }}
       >
-        <div
-          style={{
-            width: virtualizer.getTotalSize(),
-            position: 'relative',
-          }}
-        >
-          {virtualItems.map((vi) => {
-            const game = shelf.games[vi.index];
-            return (
-              <div
-                key={game.gameId}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  transform: `translateX(${vi.start}px)`,
-                  paddingRight: 16, // matches previous gap-4 spacing between cards
-                }}
-              >
-                <OracleCard
-                  game={game}
-                  index={vi.index}
-                  shelfType={shelf.type}
-                  onDismiss={onDismiss}
-                />
-              </div>
-            );
-          })}
-        </div>
+        {shelf.games.map((game, i) => (
+          <OracleCard key={game.gameId} game={game} index={i} shelfType={shelf.type} onDismiss={onDismiss} />
+        ))}
       </div>
     </motion.div>
   );

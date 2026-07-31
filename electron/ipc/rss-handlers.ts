@@ -73,6 +73,12 @@ function parseRSSItems(xml: string, source: string, limit: number): Array<{
     source: string;
   }> = [];
 
+  // Channel-level <image><url>...</url></image> — parse ONCE as last-resort fallback per item.
+  // Strip <item>/<entry> blocks first so we don't pick up an item's <image> as the channel image.
+  const channelXml = xml.replace(/<item[\s>][\s\S]*?<\/item>/gi, '').replace(/<entry[\s>][\s\S]*?<\/entry>/gi, '');
+  const channelImageMatch = /<image[^>]*>[\s\S]*?<url[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/url>[\s\S]*?<\/image>/i.exec(channelXml);
+  const channelImageUrl = channelImageMatch?.[1]?.trim() || undefined;
+
   // Match RSS <item> or Atom <entry> blocks
   const itemRegex = /<item[\s>]([\s\S]*?)<\/item>|<entry[\s>]([\s\S]*?)<\/entry>/gi;
   let match: RegExpExecArray | null;
@@ -93,6 +99,10 @@ function parseRSSItems(xml: string, source: string, limit: number): Array<{
     url = linkHrefMatch?.[1] || linkTextMatch?.[1]?.trim() || guidMatch?.[1]?.trim() || '';
     if (!url) continue;
 
+    // <content:encoded> — WordPress full-post HTML. Extract FIRST so we can scan it for <img>.
+    const contentEncodedMatch = /<content:encoded[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/content:encoded>/i.exec(block);
+    const contentEncoded = contentEncodedMatch?.[1] ?? '';
+
     // Description / summary / content
     const descMatch =
       /<description[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/description>/i.exec(block) ||
@@ -100,15 +110,29 @@ function parseRSSItems(xml: string, source: string, limit: number): Array<{
       /<content[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/content>/i.exec(block);
     const rawDesc = descMatch?.[1] ?? '';
 
-    // Extract image from description HTML or media tags
+    // Extract image from description HTML or media tags.
+    // Order: dedicated media tags first, then <content:encoded> <img> (WordPress full-post HTML),
+    // then <description> <img>, then any <img> in the block (catches <figure><img> too).
     let imageUrl: string | undefined;
     const mediaMatch =
       /<media:content[^>]+url=["']([^"']+)["']/i.exec(block) ||
       /<media:thumbnail[^>]+url=["']([^"']+)["']/i.exec(block) ||
+      /<itunes:image[^>]+href=["']([^"']+)["']/i.exec(block) ||
       /<enclosure[^>]+url=["']([^"']+\.(?:jpg|jpeg|png|gif|webp)[^"']*)["']/i.exec(block) ||
+      /<img[^>]+src=["']([^"']+)["']/i.exec(contentEncoded) ||
       /<img[^>]+src=["']([^"']+)["']/i.exec(rawDesc) ||
       /<img[^>]+src=["']([^"']+)["']/i.exec(block);
     if (mediaMatch) imageUrl = mediaMatch[1].replace(/&amp;/g, '&');
+
+    // Channel-level <image><url> as last-resort fallback
+    if (!imageUrl && channelImageUrl) imageUrl = channelImageUrl.replace(/&amp;/g, '&');
+
+    // Handle protocol-relative URLs (//example.com/pic.jpg)
+    if (imageUrl && imageUrl.startsWith('//')) imageUrl = `https:${imageUrl}`;
+
+    if (!imageUrl) {
+      logger.warn(`[News] RSS ${source}: no imageUrl for item "${title.slice(0, 60)}"`);
+    }
 
     // Strip HTML from description for summary text
     const summary = decodeEntities(rawDesc.replace(/<[^>]+>/g, ''))

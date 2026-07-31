@@ -187,6 +187,19 @@ function epicToSteamDetails(
     ? `https://store.epicgames.com/en-US/p/${game.epicSlug}`
     : null;
 
+  // ── Hero background image ─────────────────────────────────────────────
+  // Epic CMS typically puts the landscape hero/banner art first in the
+  // gallery, so we prefer that over the small tile-shaped `headerImage`
+  // and portrait `coverUrl`. If a gallery entry's URL hints at a hero or
+  // background asset, favour it explicitly; otherwise fall back to the
+  // first gallery image, then to the tile / cover.
+  const galleryImages = productContent?.gallery?.filter(g => g.type === 'image') ?? [];
+  const heroCandidate =
+    galleryImages.find(g => /hero|background/i.test(g.url))?.url ||
+    galleryImages[0]?.url ||
+    '';
+  const heroBackground = heroCandidate || game.headerImage || game.coverUrl || '';
+
   return {
     type: 'game',
     name: game.title,
@@ -197,7 +210,7 @@ function epicToSteamDetails(
     about_the_game: fullDescription,
     short_description: shortDescription,
     supported_languages: '',
-    header_image: game.headerImage || game.coverUrl || '',
+    header_image: heroBackground,
     capsule_image: game.coverUrl || game.headerImage || '',
     capsule_imagev5: game.coverUrl || game.headerImage || '',
     website: epicStoreUrl,
@@ -253,7 +266,7 @@ function epicToSteamDetails(
         return game.releaseDate;
       })(),
     } : undefined,
-    background: game.headerImage || game.coverUrl || '',
+    background: heroBackground,
   };
 }
 
@@ -1887,22 +1900,30 @@ export function GameDetailsPage() {
     <div className="min-h-screen bg-black text-white">
       {/* Hero Section with Background */}
       <div className="relative h-[30vh] min-h-[240px] w-full overflow-hidden bg-black">
-        {/* Lazy-loaded hero background with fade-in */}
-        <img
-          src={details.background || details.header_image}
-          alt=""
-          loading="lazy"
-          onLoad={() => setHeroBgLoaded(true)}
-          className={cn(
-            "absolute inset-0 w-full h-full object-cover object-top transition-opacity duration-700 ease-out",
-            heroBgLoaded ? "opacity-100" : "opacity-0"
-          )}
-        />
-        {/* Skeleton shimmer while image loads */}
-        {!heroBgLoaded && (
+        {/* Stylized fallback backdrop — always painted first so a missing hero
+            image never leaves a jarring flat-black gap (Epic games without
+            gallery art still get a gradient wash that matches Steam's look). */}
+        <div className="absolute inset-0 bg-gradient-to-br from-fuchsia-500/10 via-purple-500/5 to-black" />
+        {/* Lazy-loaded hero background with fade-in. Falls back to header_image
+            if `background` is empty (e.g. legacy Epic entries with no CMS gallery). */}
+        {(details.background || details.header_image) && (
+          <img
+            src={details.background || details.header_image || ''}
+            alt=""
+            loading="lazy"
+            onLoad={() => setHeroBgLoaded(true)}
+            className={cn(
+              "absolute inset-0 w-full h-full object-cover object-top transition-opacity duration-700 ease-out",
+              heroBgLoaded ? "opacity-100" : "opacity-0"
+            )}
+          />
+        )}
+        {/* Skeleton shimmer while image loads (only when an image is expected) */}
+        {(details.background || details.header_image) && !heroBgLoaded && (
           <div className="absolute inset-0 bg-gradient-to-r from-white/5 via-white/10 to-white/5 animate-pulse" />
         )}
-        {/* Gradient Overlay */}
+        {/* Gradient Overlay — always rendered so the hero has a stylized black
+            wash even when no image is present. */}
         <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
         <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-transparent" />
 

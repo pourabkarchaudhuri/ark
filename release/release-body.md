@@ -1,70 +1,38 @@
-# Ark v1.0.41 — Health & Voyage Overhaul
+# Ark v1.0.42 — Update Flow, Oracle, Search, Auto-State Hotfix Bundle
 
-Big release. Voyage / OCD Mode has been rebuilt around a new hero band + focus row. Time-tracking accuracy is fixed at the root. Session-tick freezes are gone. Update flow is no longer silent when it fails. And the Captain's Log "Invalid Date" bug is dead.
+Emergency hotfix bundling multiple v1.0.41 regressions and follow-through work.
 
-## Voyage / OCD Mode overhaul
+## Fixed
 
-- **Hero band** — Sticky top section showing every game where you're actively playing right now (either `Playing Now` OR last-played within 24 h). Each card has the cover, elapsed session minutes, and a 14-day activity ribbon of hours-per-day bars.
-- **Focus row** — The top 3 games by rolling 30-day playtime, rendered as horizontal 12-week ridgelines. At-a-glance answer to "what am I actually playing?"
-- **Rebuilt archive Gantt** — Want-to-Play and On-Hold segments no longer clutter the timeline. Completions become gold ▲ chevron milestones at the completion date, not wide grey wall-clock bars. Bar opacity scales to per-segment session intensity so short-but-intense play stands out.
-- **Unified scroll** — Sidebar and Gantt timeline now share one vertical scroll container. No more panels drifting apart when you scroll. Sidebar auto-collapses to a thumbnail strip after 200 px of scroll.
-- **Playing Now pips** — Sessions inside a Playing segment are now rendered as fuchsia-accented Playing-Now pips with subtle ring shadow.
+- **Update flow — "Failed to update" bug.** Differential (blockmap) downloads disabled; every update pulls the full installer. Real electron-updater error is preserved and shown to the user (was being clobbered by a generic catch-all). "Download from GitHub" fallback button added to the snackbar and Settings About tab for manual recovery when auto-update fails.
+- **Oracle shelf cards no longer collapsed.** Reverted the v1.0.41 horizontal virtualization on shelf carousels — the absolute-positioned wrapper had no explicit height and its fixed 264 px `estimateSize` fought `OracleCard`'s min/max width clamp. Restored the original `flex gap-4` layout.
+- **Steam / Epic game-details hero parity.** Epic games now use their CMS gallery hero image as the wide backdrop (prefers a URL matching `/hero|background/i`, else first gallery image, else `headerImage`/`coverUrl`). A stylized fuchsia-tinted gradient renders behind the hero so Epic games without any art still match Steam's stylized look.
+- **Live Transmissions cover images.** RSS extractor gained `<content:encoded>` HTML scanning (WordPress full-post content), `<itunes:image>` for podcast RSS, channel-level `<image><url>` fallback, and protocol-relative URL normalization. Warns per source when a feed item still ends up imageless.
+- **Browse search doesn't refresh the grid on every keystroke.** Split into `typingQuery` (dropdown-only) and `committedQuery` (grid filter). Grid rebuilds on Enter (instant), clicking a suggestion, or 400 ms of typing idle. No more grid flicker while typing.
+- **Search suggestions dropdown scrolls with "+N more" footer.** Sticky bottom bar shows `+N more results` on the left and a `↵ to see all` kbd hint on the right when the dropdown has more than ~8 rows.
 
-## Time tracking — fixed at the root
+## Added
 
-- **Full exe-path matching** — Session tracker no longer relies on basename alone. Games sharing an executable name (common in indie Unity titles) can no longer double-count. First-time basename-only match logs a diagnostic warning.
-- **Session-fragment tolerance raised** — `MISSES_BEFORE_END` bumped from 2 to 4 polls (~60 s). Heavy GPU load, AV scans, and PowerShell contention no longer split one play block into many phantom sessions.
-- **"Playing since" now correct** — Five code paths that derived `firstPlayedAt` from your library-add date have been rewritten to use your earliest recorded session start (falling back to the first `Want-to-Play → Playing` status transition, then last-played, then added-at). Games that spent months in your backlog before you played them now show the correct first-play date.
-- **Exe metadata IPC** — New `window.exeInfo.analyze(exePath)` reads file mtime, size, and digital-signature signer + validity via PowerShell. Detects known launchers (EA, Riot, Steam, Valve, Rockstar, Ubisoft, Epic, Bethesda, Blizzard, Battle.net, GOG, Uplay, Origin) plus basename hints (`launcher`, `bootstrap`, `loader`) for a future "That looks like a launcher, not a game" warning during exe selection.
-
-## Auto-state (opt-in)
-
-- **Want-to-Play → Playing** — After a session ≥ 10 minutes, games automatically promote out of your backlog to Playing. Behind a preferences toggle (default off). Stamps `autoTransitionedAt` so a future undo UI can revert. Never overwrites Completed, On-Hold, or explicit Playing-Now.
-- **On-Hold suggestions** — New helper hook detects games sitting in Playing with no session for 14+ days for a future "Suggest pausing?" chip.
-
-## Update flow — no more silence
-
-- **"Check for Updates" button** in Settings → About. Manual check with spinner, latest-version display, and one-click Download when an update is available.
-- **Update snackbar error state** — If GitHub is unreachable at startup, you now see a dismissible "Couldn't reach GitHub — will try again in 2 min." toast with a Retry-now action. Previously silent.
-- **Pre-release version comparison** — Releases tagged `1.0.42-rc1` now compare correctly against `1.0.41`. No more silent "no update" when a pre-release ships.
-
-## Random-offline banner — fixed
-
-- **Adblocker whitelist** — The connectivity probe to `connectivitycheck.gstatic.com` is now allowed through before EasyList / EasyPrivacy filtering. The banner no longer flaps because the built-in adblocker cancelled its own probe.
-- **Probe hardened** — Timeout raised 5 s → 12 s. Two consecutive failures required before flipping offline.
-
-## Session-tick performance
-
-- **Hours-only subscription channel** — Library store now has a separate `subscribeHours` channel. The 15-second `updateHoursFromSessions` writes fire only that channel, not every listener. The master 6000+-entry games memo, Oracle signature check, and Medals view all stay quiet during play.
-- **`useLibraryHours(gameId)` hook** — Per-card live hours subscription without invalidating the master games memo.
-- **Session-store + status-history writes debounced** — 300 ms scheduler replaces synchronous `JSON.stringify` + `localStorage.setItem` on every session end and status change.
-- **Oracle shelf virtualization** — Horizontal `useVirtualizer` (264 px card width, 3 overscan). Only ~10 cards render per shelf instead of all 40+.
-- **ann-graph RAF leak fixed** — Supernova + shockwave animation ID sets no longer grow unbounded during long play sessions. IDs are removed each frame.
-- **Idempotent `beforeunload` listeners** — Library, journey, and custom-game store singletons no longer stack handlers under HMR / tests.
-
-## Transmissions
-
-- **Scheduled Broadcast cards get cover art** — Extracted from event pages via `og:image` → `twitter:image` → JSON-LD → `link rel=image_src` → hero `<img>` precedence chain. Falls back to the existing celestial etching when no image is available.
-
-## Captain's Log
-
-- **"Invalid Date" fixed** — Journey-view card date now uses `parseJourneyIso` guard. Journey store also sanitizes date fields on load, record, and import so the bug can't regress from legacy data.
-
-## Fixes
-
-- Journey / library / custom-game store `firstPlayedAt` fallback chains rewritten (5 sites, all using new `sessionStore.getFirstSessionStart` and `statusHistoryStore.getFirstPlayingTransition` helpers).
-- Journey store sanitizes `addedAt` / `firstPlayedAt` / `lastPlayedAt` / `removedAt` on all write paths.
+- **Auto Playing → On Hold sweep.** Any library entry in `Playing` whose `lastPlayedAt` is 30+ days old now automatically moves to `On Hold`. Runs on app startup + every 60 min. Opt out via `preferences.autoOnHoldTransition` (default on). Never overwrites `Completed`, `Playing Now`, `Want to Play`, or `On Hold`. Stamps `autoTransitionedAt` so future UI can offer one-click undo.
+- **Launcher-aware auto-state gate.** The v1.0.41 Want-to-Play → Playing auto-transition now invokes `window.exeInfo.analyze(exePath)` first. If the signer matches a known launcher publisher (EA, Riot, Steam, Valve, Rockstar, Ubisoft, Epic, Bethesda, Blizzard, Battle.net, GOG, Uplay, Origin) or the basename contains `launcher`/`bootstrap`/`loader`, promotion is skipped and `launcherDetected: true` is stamped. Playtime tracked via a launcher is unreliable — we no longer promote games based on it.
+- **`LibraryGameEntry.launcherDetected?: boolean`** field. UIs can now surface a "this looks like a launcher — tracking may be inaccurate" warning.
 
 ## Under the hood
 
-- New IPC: `exe-info:analyze` (main → renderer via `window.exeInfo.analyze`).
-- New settings: `preferences.autoStatusTransition` (opt-in Want-to-Play → Playing promotion).
-- New library-store type field: `LibraryGameEntry.autoTransitionedAt?`.
-- New event-scraper field: `ScrapedEvent.imageUrl`, threaded through `ResolvedEvent`.
-- Renderer connectivity probe now correctly labels itself in DevTools; adblocker no longer cancels it.
+- New hook `src/hooks/useAutoOnHold.ts` — periodic sweep, wired via `useSessionTracker`.
+- New setting `preferences.autoOnHoldTransition` in `electron/settings-store.ts` (default TRUE).
+- `epicToSteamDetails` gallery-hero extraction with `/hero|background/i` preference.
+- `electron/ipc/rss-handlers.ts` extended parser (content:encoded, itunes:image, channel image, protocol-relative URL normalization).
+- Dashboard search state split; `SearchSuggestions` container `max-h-[28rem]` with sticky "+N more" footer.
+- `autoUpdater.disableDifferentialDownload = true`.
+- Structured download IPC return: `{ success, error?, errorName? }`.
+- Structured error log: `name`, `message`, `stack` (previously only `message`).
+
+## For users stranded on v1.0.40 or v1.0.41
+
+If your auto-update failed, download the v1.0.42 installer directly from this release page and run it — your library, sessions, settings, and cached data are all preserved (the installer performs an in-place upgrade).
 
 ---
 
 **Tests:** 666/666 passing. Electron and renderer typecheck clean.
-
-**Data compatibility:** No IDB migration required. Cached embeddings, sessions, and library state all remain valid.
+**Data compatibility:** No IDB migration required.

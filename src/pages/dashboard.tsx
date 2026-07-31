@@ -188,13 +188,22 @@ export function Dashboard() {
   
   // Note: Cache clearing removed - useSteamGames handles data fetching on mount
   
-  // Search — short debounce so grid + dropdown stay aligned with useGameSearch (~300ms internal).
-  const [searchQuery, setSearchQuery] = useState('');
-  const debouncedSearch = useDebounce(searchQuery, 400);
-  const { results: searchResults, loading: searchLoading, isSearching } = useGameSearch(debouncedSearch);
-  // Show "searching" until debounce kicks in (avoids flashing full list then no-results)
-  const browseSearchPending = viewMode === 'browse' && searchQuery.trim() !== '' && debouncedSearch !== searchQuery;
-  const librarySearchPending = viewMode === 'library' && searchQuery.trim() !== '' && debouncedSearch !== searchQuery;
+  // Search — SPLIT: typing drives dropdown only, committed drives the grid filter.
+  // Grid commits on Enter, suggestion click, or 400ms of no typing.  This stops
+  // the whole Browse grid from re-deriving on every keystroke while the user
+  // still sees a live dropdown.
+  const [typingQuery, setTypingQuery] = useState('');
+  const [committedQuery, setCommittedQuery] = useState('');
+  const debouncedTyping = useDebounce(typingQuery, 400);
+  useEffect(() => { setCommittedQuery(debouncedTyping); }, [debouncedTyping]);
+  const clearSearch = useCallback(() => { setTypingQuery(''); setCommittedQuery(''); }, []);
+  // Dropdown reads live typing — useGameSearch has ~300ms internal debounce.
+  const { results: searchResults, loading: searchLoading } = useGameSearch(typingQuery);
+  // Grid reads the committed query — its own snapshot, only recomputes on commit.
+  const { results: gridSearchResults, loading: gridSearchLoading, isSearching } = useGameSearch(committedQuery);
+  // "Pending" reflects the uncommitted gap between typing and grid commit.
+  const browseSearchPending = viewMode === 'browse' && typingQuery.trim() !== '' && committedQuery !== typingQuery;
+  const librarySearchPending = viewMode === 'library' && typingQuery.trim() !== '' && committedQuery !== typingQuery;
   
   // Library management
   const { addToLibrary, removeFromLibrary, updateEntry, isInLibrary, librarySize, addCustomGame, removeCustomGame, customGames } = useLibrary();
@@ -256,7 +265,7 @@ export function Dashboard() {
     if (!betaFeatures) setIsAIChatOpen(false);
   }, [betaFeatures]);
   
-  const switchToSettings = useCallback(() => { setViewMode('settings'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
+  const switchToSettings = useCallback(() => { setViewMode('settings'); clearSearch(); resetFilters(); }, [resetFilters, clearSearch]);
   
   const openFilters = useCallback(() => {
     setIsAIChatOpen(false);
@@ -349,11 +358,11 @@ export function Dashboard() {
   const { sortedGames, dynamicGenres, dynamicPlatforms, dynamicYears } =
     useDeferredFilterSort({
       currentGames,
-      searchResults,
+      searchResults: gridSearchResults,
       isSearching,
       browseSearchPending,
       viewMode,
-      searchQuery: debouncedSearch,
+      searchQuery: committedQuery,
       filters,
       sortBy,
       sortDirection,
@@ -412,7 +421,7 @@ export function Dashboard() {
   // sortedGames is clearly stale library data (same length as library and all ids in library).
   const browseDisplayGames = useMemo(() => {
     if (viewMode !== 'browse') return sortedGames;
-    const userSearchingBrowse = searchQuery.trim().length > 0;
+    const userSearchingBrowse = committedQuery.trim().length > 0;
     // Empty browse: show nothing or let hook fill in next frame
     if (sortedGames.length === 0 && steamGames.length === 0) return sortedGames;
     // While searching, never substitute Top Sellers order for search relevance (avoids grid/dropdown mismatch).
@@ -447,7 +456,7 @@ export function Dashboard() {
       else cmp = releaseTs(a) - releaseTs(b);
       return sortDirection === 'desc' ? -cmp : cmp;
     });
-  }, [viewMode, sortedGames, mergedLibraryGames, steamGames, sortBy, sortDirection, searchQuery]);
+  }, [viewMode, sortedGames, mergedLibraryGames, steamGames, sortBy, sortDirection, committedQuery]);
 
   // Deferred scroll restore when grid content finishes loading.
   const rawGameCount = currentGames.length;
@@ -566,15 +575,15 @@ export function Dashboard() {
   // Stable view-mode handlers — avoids creating new closures on every render.
   // Reset filters + search when leaving a mode so stale filter state from one
   // view (e.g. Browse genre=RPG) doesn't silently carry over to another (Library).
-  const switchToBrowse = useCallback(() => { setSearchQuery(''); resetFilters(); startTransition(() => setViewMode('browse')); }, [resetFilters]);
-  const switchToLibrary = useCallback(() => { setSearchQuery(''); resetFilters(); startTransition(() => setViewMode('library')); }, [resetFilters]);
-  const switchToJourney = useCallback(() => { setViewMode('journey'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
-  const switchToBuzz = useCallback(() => { setViewMode('buzz'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
-  const switchToCalendar = useCallback(() => { setViewMode('calendar'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
-  const switchToOracle = useCallback(() => { setViewMode('oracle'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
-  const switchToAnnGraph = useCallback(() => { setViewMode('ann-graph'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
-  const switchToDataFlow = useCallback(() => { setViewMode('data-flow'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
-  const switchToDevLog = useCallback(() => { setViewMode('devlog'); setSearchQuery(''); resetFilters(); }, [resetFilters]);
+  const switchToBrowse = useCallback(() => { clearSearch(); resetFilters(); startTransition(() => setViewMode('browse')); }, [resetFilters, clearSearch]);
+  const switchToLibrary = useCallback(() => { clearSearch(); resetFilters(); startTransition(() => setViewMode('library')); }, [resetFilters, clearSearch]);
+  const switchToJourney = useCallback(() => { setViewMode('journey'); clearSearch(); resetFilters(); }, [resetFilters, clearSearch]);
+  const switchToBuzz = useCallback(() => { setViewMode('buzz'); clearSearch(); resetFilters(); }, [resetFilters, clearSearch]);
+  const switchToCalendar = useCallback(() => { setViewMode('calendar'); clearSearch(); resetFilters(); }, [resetFilters, clearSearch]);
+  const switchToOracle = useCallback(() => { setViewMode('oracle'); clearSearch(); resetFilters(); }, [resetFilters, clearSearch]);
+  const switchToAnnGraph = useCallback(() => { setViewMode('ann-graph'); clearSearch(); resetFilters(); }, [resetFilters, clearSearch]);
+  const switchToDataFlow = useCallback(() => { setViewMode('data-flow'); clearSearch(); resetFilters(); }, [resetFilters, clearSearch]);
+  const switchToDevLog = useCallback(() => { setViewMode('devlog'); clearSearch(); resetFilters(); }, [resetFilters, clearSearch]);
 
   /** Switch to the view that has the right DOM anchors, then start Joyride (used from Settings → Guide). */
   const runGuidedTour = useCallback(
@@ -909,14 +918,14 @@ export function Dashboard() {
   }, []);
 
   const hasActiveFilters = useMemo(() =>
-    !!(searchQuery || 
-    filters.status !== 'All' || 
+    !!(committedQuery ||
+    filters.status !== 'All' ||
     filters.priority !== 'All' ||
-    filters.genre !== 'All' || 
+    filters.genre !== 'All' ||
     filters.platform !== 'All' ||
     filters.category !== 'trending' ||
     filters.store.length > 0),
-  [searchQuery, filters.status, filters.priority, filters.genre, filters.platform, filters.category, filters.store.length]);
+  [committedQuery, filters.status, filters.priority, filters.genre, filters.platform, filters.category, filters.store.length]);
 
   const activeFilterCount = useMemo(() => {
     let count = 0;
@@ -1167,7 +1176,7 @@ export function Dashboard() {
                       onClick={(e) => {
                         e.stopPropagation();
                         resetFilters();
-                        setSearchQuery('');
+                        clearSearch();
                       }}
                       className="ml-0.5 rounded-full hover:bg-white/10 p-0.5 transition-colors"
                       aria-label="Clear all filters"
@@ -1188,25 +1197,32 @@ export function Dashboard() {
                 <Input
                   ref={searchInputRef}
                   placeholder={viewMode === 'library' ? "Search your library..." : "Search games..."}
-                  value={searchQuery}
+                  value={typingQuery}
                   onChange={(e) => {
-                    setSearchQuery(e.target.value);
+                    setTypingQuery(e.target.value);
                     if (viewMode === 'browse' && e.target.value.trim()) {
                       setShowSuggestions(true);
                     }
                   }}
                   onFocus={() => {
-                    if (viewMode === 'browse' && searchQuery.trim()) {
+                    if (viewMode === 'browse' && typingQuery.trim()) {
                       setShowSuggestions(true);
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      // Commit immediately — bypasses the 400ms idle debounce.
+                      setCommittedQuery(typingQuery);
+                      setShowSuggestions(false);
                     }
                   }}
                   className="w-44 lg:w-80 h-9 pl-10 pr-10 bg-white/5 border-white/10 text-white placeholder:text-white/40"
                   aria-label="Search games"
                 />
-                {searchQuery && (
+                {typingQuery && (
                   <button
                     onClick={() => {
-                      setSearchQuery('');
+                      clearSearch();
                       setShowSuggestions(false);
                     }}
                     className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-white/10 transition-colors z-10"
@@ -1226,18 +1242,18 @@ export function Dashboard() {
                   <SearchSuggestions
                     results={searchResults}
                     loading={searchLoading}
-                    searchPending={browseSearchPending}
-                    visible={showSuggestions && searchQuery.trim().length > 0}
+                    searchPending={false}
+                    visible={showSuggestions && typingQuery.trim().length > 0}
                     onSelect={(game) => {
                       setShowSuggestions(false);
-                      // Navigate to game details page using universal game ID
+                      // Suggestion click = user committed to a target; navigate away.
                       if (game.id) {
                         setNavigatingGame(game);
                         navigate(`/game/${encodeURIComponent(game.id)}`);
                       }
                     }}
                     onClose={() => setShowSuggestions(false)}
-                    searchQuery={searchQuery}
+                    searchQuery={typingQuery}
                   />
                 )}
               </div>
@@ -1498,11 +1514,11 @@ export function Dashboard() {
               (() => {
                 // In browse, never show "no results" while the user is typing or search is in flight
                 if (isSearching) {
-                  if (viewMode === 'browse' && (searchLoading || browseSearchPending)) return null;
+                  if (viewMode === 'browse' && (searchLoading || browseSearchPending || gridSearchLoading)) return null;
                   return (
-                    <EmptyState 
-                      type="no-results" 
-                      onAction={() => setSearchQuery('')} 
+                    <EmptyState
+                      type="no-results"
+                      onAction={clearSearch}
                     />
                   );
                 }

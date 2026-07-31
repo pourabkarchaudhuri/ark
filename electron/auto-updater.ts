@@ -93,6 +93,14 @@ export function initAutoUpdater(window: BrowserWindowType) {
   autoUpdater.autoDownload = false; // Don't auto-download, let user decide
   autoUpdater.autoInstallOnAppQuit = true;
 
+  // Disable differential (blockmap) downloads and force full-installer downloads.
+  // v1.0.41 → v1.0.42 hotfix: users on v1.0.40 reported "Failed to update" during
+  // upgrade to v1.0.41. Root cause was almost certainly a blockmap/SHA drift on
+  // large releases — differential download compares the previous installer's
+  // blocks against the new one, and any per-block hash mismatch aborts the whole
+  // download. Full-download is slightly slower but never fails from block drift.
+  autoUpdater.disableDifferentialDownload = true;
+
   // Set up event handlers
   autoUpdater.on('checking-for-update', () => {
     logger.log('[AutoUpdater] Checking for updates...');
@@ -208,10 +216,17 @@ export function initAutoUpdater(window: BrowserWindowType) {
   });
 
   autoUpdater.on('error', (error: Error) => {
-    logger.error('[AutoUpdater] Error:', error.message);
+    // Log everything we have — name, message, stack — so we can diagnose
+    // from user log dumps without needing to reproduce locally.
+    logger.error('[AutoUpdater] Error:', {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    });
     isDownloading = false;
     sendToRenderer('updater:error', {
-      message: error.message,
+      message: error.message || 'Unknown update error',
+      name: error.name,
     });
   });
 
@@ -400,10 +415,14 @@ function registerIpcHandlers() {
     return { updateAvailable: false, currentVersion, latestVersion: currentVersion };
   });
 
-  // Download the update (guarded against duplicate calls)
+  // Download the update (guarded against duplicate calls).
+  // Returns { success, error?, errorName? } — errors are structured, not thrown,
+  // so the renderer can preserve the electron-updater 'error' event's real
+  // message (which fires BEFORE the promise rejects) instead of being clobbered
+  // by a generic catch on the renderer side.
   ipcMain.handle('updater:download', async () => {
     if (!isInitialized) {
-      return { success: false };
+      return { success: false, error: 'Auto-updater not initialised (dev mode?)' };
     }
     if (isDownloading) {
       logger.log('[AutoUpdater] Download already in progress, ignoring duplicate request');
@@ -416,20 +435,29 @@ function registerIpcHandlers() {
     logger.log('[AutoUpdater] Download requested');
     isDownloading = true;
     const MAX_RETRIES = 2;
+    let lastError: Error | null = null;
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         await autoUpdater.downloadUpdate();
         return { success: true };
       } catch (error) {
-        logger.error(`[AutoUpdater] Download attempt ${attempt}/${MAX_RETRIES} failed:`, error);
-        if (attempt === MAX_RETRIES) {
-          isDownloading = false;
-          throw error;
-        }
+        lastError = error instanceof Error ? error : new Error(String(error));
+        logger.error(`[AutoUpdater] Download attempt ${attempt}/${MAX_RETRIES} failed:`, {
+          name: lastError.name,
+          message: lastError.message,
+          stack: lastError.stack,
+        });
+        if (attempt === MAX_RETRIES) break;
         // Wait before retry
         await new Promise(r => setTimeout(r, 3000));
       }
     }
+    isDownloading = false;
+    return {
+      success: false,
+      error: lastError?.message || 'Download failed for unknown reason',
+      errorName: lastError?.name,
+    };
   });
 
   // Install the update (quit and install)

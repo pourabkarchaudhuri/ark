@@ -23,7 +23,7 @@ declare global {
   interface Window {
     updater?: {
       checkForUpdates: () => Promise<{ updateAvailable: boolean; currentVersion: string; latestVersion: string }>;
-      downloadUpdate: () => Promise<{ success: boolean }>;
+      downloadUpdate: () => Promise<{ success: boolean; error?: string; errorName?: string }>;
       installUpdate: () => void;
       getVersion: () => Promise<string>;
       onChecking: (callback: () => void) => void;
@@ -184,11 +184,19 @@ export function UpdateSnackbar() {
       setUpdateInfo(info);
       setDismissed(false);
       setState('downloading');
-      // Automatically start the download
-      window.updater!.downloadUpdate().catch((err) => {
-        console.error('[UpdateSnackbar] Auto-download failed:', err);
+      // Automatically start the download. Preserve any specific electron-updater
+      // error that already arrived via the onError event — only overwrite the
+      // message when we don't yet have one.
+      window.updater!.downloadUpdate().then((result) => {
+        if (!result.success && result.error) {
+          console.error('[UpdateSnackbar] Auto-download returned error:', result.error);
+          setState('error');
+          setErrorMessage((prev) => prev ?? result.error!);
+        }
+      }).catch((err) => {
+        console.error('[UpdateSnackbar] Auto-download rejected:', err);
         setState('error');
-        setErrorMessage('Failed to download update');
+        setErrorMessage((prev) => prev ?? (err instanceof Error ? err.message : 'Failed to download update'));
       });
     });
 
@@ -203,15 +211,34 @@ export function UpdateSnackbar() {
     if (!hasUpdater) return;
     // Guard: don't trigger if already downloading or installed
     if (state === 'downloading' || state === 'ready') return;
+    setState('downloading');
     try {
-      setState('downloading');
-      await window.updater!.downloadUpdate();
+      const result = await window.updater!.downloadUpdate();
+      if (!result.success && result.error) {
+        console.error('[UpdateSnackbar] Download returned error:', result.error);
+        setState('error');
+        // Preserve any specific electron-updater error that already arrived via
+        // onError event (fires BEFORE this promise settles) instead of clobbering
+        // it with the generic "Failed to download update" message.
+        setErrorMessage((prev) => prev ?? result.error!);
+      }
     } catch (error) {
-      console.error('[UpdateSnackbar] Download failed:', error);
+      console.error('[UpdateSnackbar] Download rejected:', error);
       setState('error');
-      setErrorMessage('Failed to download update');
+      setErrorMessage((prev) => prev ?? (error instanceof Error ? error.message : 'Failed to download update'));
     }
   }, [hasUpdater, state]);
+
+  const handleOpenReleasePage = useCallback(() => {
+    const url = `https://github.com/pourabkarchaudhuri/ark/releases/latest`;
+    // Prefer the Electron shell IPC, fall back to window.open for dev/web.
+    const shell = (window as unknown as { electron?: { openExternal?: (url: string) => unknown } }).electron;
+    if (shell?.openExternal) {
+      void shell.openExternal(url);
+    } else if (typeof window !== 'undefined') {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  }, []);
 
   const handleInstall = useCallback(() => {
     if (!hasUpdater) return;
@@ -300,7 +327,12 @@ export function UpdateSnackbar() {
             <p className="text-white/70">Will try again in 2 min.</p>
           )}
           {state === 'error' && !isReachabilityError && (
-            <p className="text-red-400">{errorMessage || 'An error occurred while updating.'}</p>
+            <div className="space-y-1.5">
+              <p className="text-red-400">{errorMessage || 'An error occurred while updating.'}</p>
+              <p className="text-xs text-white/50">
+                If this keeps happening, download the installer manually from GitHub and run it — your data will be preserved.
+              </p>
+            </div>
           )}
         </div>
 
@@ -355,12 +387,20 @@ export function UpdateSnackbar() {
             </>
           )}
           {state === 'error' && !isReachabilityError && (
-            <button
-              onClick={handleDismiss}
-              className="px-3 py-1.5 text-sm font-medium rounded-md hover:bg-white/10 transition-colors text-muted-foreground"
-            >
-              Dismiss
-            </button>
+            <>
+              <button
+                onClick={handleDismiss}
+                className="px-3 py-1.5 text-sm font-medium rounded-md hover:bg-white/10 transition-colors text-muted-foreground"
+              >
+                Dismiss
+              </button>
+              <button
+                onClick={handleOpenReleasePage}
+                className="px-3 py-1.5 text-sm font-medium rounded-md bg-blue-500 hover:bg-blue-600 transition-colors text-white"
+              >
+                Download from GitHub
+              </button>
+            </>
           )}
         </div>
       </motion.div>

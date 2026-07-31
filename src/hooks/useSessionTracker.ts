@@ -3,6 +3,7 @@ import { GameSession } from '@/types/game';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { sessionStore } from '@/services/session-store';
+import { useAutoOnHold } from '@/hooks/useAutoOnHold';
 
 /** Minimum active minutes for a session to trigger the Want-to-Play → Playing transition. */
 const AUTO_TRANSITION_MIN_MINUTES = 10;
@@ -36,10 +37,39 @@ async function isAutoStatusTransitionEnabled(): Promise<boolean> {
 }
 
 /**
+ * Best-effort exe launcher check. Returns `true` when
+ * `window.exeInfo.analyze(exePath)` reports `isLikelyLauncher: true`; returns
+ * `false` when the exe looks like a real game OR the analyze call fails / the
+ * bridge is missing (v1.0.42). Fire-and-forget friendly — non-blocking on the
+ * caller's happy path.
+ */
+async function detectLauncher(exePath: string | undefined | null): Promise<boolean> {
+  if (!exePath || typeof window === 'undefined') return false;
+  const exeInfo = (window as unknown as {
+    exeInfo?: { analyze?: (p: string) => Promise<{ isLikelyLauncher?: boolean } | null> };
+  }).exeInfo;
+  if (!exeInfo || typeof exeInfo.analyze !== 'function') return false;
+  try {
+    const info = await exeInfo.analyze(exePath);
+    return info?.isLikelyLauncher === true;
+  } catch {
+    // Honest games should not be punished by a failed analyze — treat any
+    // failure as "not a launcher" so the transition still fires.
+    return false;
+  }
+}
+
+/**
  * If the ended session belongs to a library game currently marked "Want to Play"
  * and was long enough to count as real play, promote it to "Playing" and stamp
  * `autoTransitionedAt`. Gated by the opt-in `autoStatusTransition` setting.
  * Custom games are skipped — they live in a different store.
+ *
+ * v1.0.42 — Before promoting, consult `window.exeInfo.analyze` on the entry's
+ * executable. If it looks like a launcher (Steam / EA / Epic client / etc.),
+ * skip the transition and stamp `launcherDetected: true` so consumer UI can
+ * surface a "that exe is a launcher, tracking may be inaccurate" hint. The
+ * analyze call is non-blocking — a failure means we proceed as normal.
  */
 async function maybeAutoTransitionStatus(rawSession: GameSession): Promise<void> {
   try {
@@ -58,6 +88,21 @@ async function maybeAutoTransitionStatus(rawSession: GameSession): Promise<void>
 
     const entry = libraryStore.getEntry(gameId);
     if (!entry || entry.status !== 'Want to Play') return;
+
+    // v1.0.42 — exe metadata gate. If the tracked exe looks like a launcher,
+    // 10+ minutes of "runtime" doesn't mean the game was actually played, so
+    // skip the promotion and mark the entry for the UI to warn about.
+    const exePath = entry.executablePath ?? rawSession.executablePath;
+    const launcher = await detectLauncher(exePath);
+    if (launcher) {
+      console.warn(
+        '[useSessionTracker] Skipped auto-transition: exe looks like a launcher, tracking may be inaccurate.',
+      );
+      // Persist the detection so downstream UI (Voyage / dashboard) can nudge
+      // the user to pick the game's own .exe. Never overwrites status.
+      libraryStore.updateEntry(gameId, { launcherDetected: true });
+      return;
+    }
 
     libraryStore.updateEntry(gameId, {
       status: 'Playing',
@@ -80,6 +125,11 @@ async function maybeAutoTransitionStatus(rawSession: GameSession): Promise<void>
  * 4. Auto-updates hoursPlayed in library store (or custom game store for "custom-" IDs)
  */
 export function useSessionTracker() {
+  // v1.0.42 — Compose the Playing → On Hold sweep at the same app-root
+  // lifecycle. Kept as a hook call (not an effect inside this one) so its own
+  // interval is cleaned up independently and unit tests can mount it alone.
+  useAutoOnHold();
+
   const [liveGames, setLiveGames] = useState<Set<string>>(new Set());
   const cleanupRef = useRef<Array<() => void>>([]);
 

@@ -4,6 +4,27 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.42] - 2026-07-31
+
+### Fixed
+- **Update flow — "Failed to update" bug** — Differential (blockmap) downloads disabled; every update now pulls the full installer via `autoUpdater.disableDifferentialDownload = true`. This eliminates the per-block SHA drift that could abort downloads on releases with large diffs.
+- **Real update-error messages preserved** — Update-snackbar and Settings About tab no longer overwrite the electron-updater `onError` event's real message with the generic "Failed to download update" from `handleDownload`'s catch. `setErrorMessage((prev) => prev ?? …)` pattern preserves the earlier, more specific message.
+- **Structured download IPC result** — `updater:download` no longer throws on failure; returns `{ success, error?, errorName? }`. Renderer preserves specific errors from the download-progress error event.
+- **Main-process auto-updater logs full error details** — `name`, `message`, and `stack` now logged (previously only `message`).
+- **Steam/Epic game-details hero parity** — `epicToSteamDetails` now prefers `productContent.gallery` hero images (with a `/hero|background/i` URL match preferred over first-image) for both `header_image` and `background`. Render also gets a stylized fuchsia-tinted gradient fallback behind the hero image so Epic games without any art still match Steam's stylized look instead of a flat black gap.
+- **Live Transmissions cover images** — RSS extractor now checks `<content:encoded>` (WordPress full-post HTML) BEFORE description; adds `<itunes:image href="...">` (podcast RSS); adds channel-level `<image><url>` per-item fallback; normalizes protocol-relative URLs (`//host/pic.jpg`) to `https:`; logs a warning tagged with source when a feed item ends up imageless after all attempts.
+- **Browse search no longer rerenders the whole grid on every keystroke** — Split `searchQuery` into `typingQuery` (drives dropdown) and `committedQuery` (drives grid filter). Grid rebuilds only on Enter (instant), suggestion click, or 400 ms of typing idle. Prevents the visible flicker/jump of the grid while a user is typing.
+
+### Added
+- **"Download from GitHub" fallback button** in update-snackbar's error state and Settings About tab. One click opens `github.com/pourabkarchaudhuri/ark/releases/latest` for manual install when auto-update fails. Data is preserved when the installer is run manually.
+- **Auto Playing → On Hold sweep** — New `useAutoOnHold` hook runs on app startup + every 60 min. Any library entry in `Playing` whose `lastPlayedAt` (or `addedAt` as fallback) is 30+ days old is auto-transitioned to `On Hold` and stamped with `autoTransitionedAt`. Gated by new `preferences.autoOnHoldTransition` setting (default TRUE — the user asked for this explicitly). Never overwrites `Completed`, `Playing Now`, `Want to Play`, or `On Hold`. `useOnHoldSuggestions` kept intact as a 14-day read-only surface.
+- **Launcher-aware auto-state gate** — The v1.0.41 Want-to-Play → Playing transition now invokes `window.exeInfo.analyze(exePath)` before promoting. When the signer matches a known launcher publisher (EA / Riot / Steam / Valve / Rockstar / Ubisoft / Epic / Bethesda / Blizzard / Battle.net / GOG / Uplay / Origin) or the basename contains `launcher`/`bootstrap`/`loader`, auto-transition is skipped and `launcherDetected: true` is stamped on the library entry. Playtime tracked via a launcher process is unreliable.
+- **`LibraryGameEntry.launcherDetected?: boolean`** — new optional field so UIs can later surface a "this looks like a launcher" warning.
+- **Search suggestions dropdown +N indicator** — Sticky-bottom "+N more results" footer with a `↵ to see all` kbd hint when the dropdown has more than the ~8 visible rows. Container grew from `max-h-80` to `max-h-[28rem]` so it actually scrolls to the full result count.
+
+### Reverted
+- **Oracle shelf virtualization** — v1.0.41's horizontal `useVirtualizer` on shelf carousels wrapped cards in an absolute-positioned container with no explicit height, and its fixed 264 px `estimateSize` fought `OracleCard`'s `min-w-[200px]`/`max-w-[320px]` clamp — cards visually collapsed or misaligned. Restored the original `flex gap-4` layout. Perf impact is negligible (shelves usually <40 cards) and store-level session-tick fixes already carry the load.
+
 ## [1.0.41] - 2026-06-29
 
 ### Added

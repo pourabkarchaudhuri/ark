@@ -32,6 +32,14 @@ interface Settings {
      * `autoTransitionedAt` set to the moment the transition fired.
      */
     autoStatusTransition?: boolean;
+    /**
+     * Auto-transition a game from "Playing" → "On Hold" when it has had no session
+     * for 30 days (v1.0.42). Default TRUE — user asked for this explicitly. The
+     * renderer sweeps at app startup and every 60 minutes; when a stale entry is
+     * found, `libraryStore.updateEntry` is called with `autoTransitionedAt`
+     * stamped. `Completed` entries are never touched.
+     */
+    autoOnHoldTransition?: boolean;
   };
   ollama: {
     enabled: boolean;
@@ -75,7 +83,7 @@ class SettingsStore {
     const defaults = (): Settings => ({
       version: SETTINGS_VERSION,
       apiKeys: {},
-      preferences: { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: false, autoStatusTransition: false },
+      preferences: { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: false, autoStatusTransition: false, autoOnHoldTransition: true },
       ollama: {
         enabled: true,
         url: 'http://localhost:11434',
@@ -329,6 +337,22 @@ class SettingsStore {
     }
     this.saveSettings();
     logger.log(`[SettingsStore] Auto status transition set to ${enabled}`);
+  }
+
+  // Auto Playing → On Hold transition after 30 days of no play (default: true; v1.0.42).
+  getAutoOnHoldTransition(): boolean {
+    // Undefined counts as enabled — user explicitly asked for this default.
+    return this.settings.preferences?.autoOnHoldTransition !== false;
+  }
+
+  setAutoOnHoldTransition(enabled: boolean): void {
+    if (!this.settings.preferences) {
+      this.settings.preferences = { autoLaunch: true, autoOnHoldTransition: enabled };
+    } else {
+      this.settings.preferences.autoOnHoldTransition = enabled;
+    }
+    this.saveSettings();
+    logger.log(`[SettingsStore] Auto On Hold transition set to ${enabled}`);
   }
 }
 

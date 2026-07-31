@@ -1110,9 +1110,27 @@ const AboutTab = memo(function AboutTab() {
           </p>
         )}
         {updateState === 'error' && (
-          <p className="text-xs text-red-400/80 flex items-center gap-1.5">
-            <AlertCircle className="h-3.5 w-3.5" /> {updateError ?? 'Update check failed.'}
-          </p>
+          <div className="space-y-1">
+            <p className="text-xs text-red-400/80 flex items-center gap-1.5">
+              <AlertCircle className="h-3.5 w-3.5" /> {updateError ?? 'Update check failed.'}
+            </p>
+            <p className="text-xs text-white/40">
+              You can also{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  const url = 'https://github.com/pourabkarchaudhuri/ark/releases/latest';
+                  const shell = (window as unknown as { electron?: { openExternal?: (url: string) => unknown } }).electron;
+                  if (shell?.openExternal) void shell.openExternal(url);
+                  else window.open(url, '_blank', 'noopener,noreferrer');
+                }}
+                className="underline hover:text-white/70 transition-colors"
+              >
+                download the latest installer from GitHub
+              </button>
+              {' '}and run it — your data will be preserved.
+            </p>
+          </div>
         )}
         <div className="flex gap-4 text-xs text-white/25">
           <span>Electron + React + TypeScript</span>
