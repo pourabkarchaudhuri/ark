@@ -72,6 +72,7 @@ import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
+import { getPrefetchedGames, setNavigatingGame } from '@/services/prefetch-store';
 import { GameCard } from '@/components/game-card';
 import { Badge } from '@/components/ui/badge';
 import type { Game } from '@/types/game';
@@ -620,13 +621,60 @@ function getScoredGameImages(sg: ScoredGame): { coverUrl?: string; headerImage?:
   return { coverUrl, headerImage };
 }
 
-/** Convert a ScoredGame from the reco pipeline into a Game object for GameCard. */
+/**
+ * Convert a ScoredGame from the reco pipeline into a Game object for GameCard.
+ *
+ * v1.0.44 fix: Oracle cards previously navigated with a minimal stub that
+ * lacked `epicSlug` / `epicNamespace` / `epicOfferId` / `availableOn` /
+ * `secondaryId` / `longDescription`. Because `prefetch-store._navTransfer`
+ * short-circuits `findGameById`, the details page received the stub, saw no
+ * enrichment keys, and skipped both `epicService.getGameDetails()` and
+ * `getProductContent()` — the user saw a half-empty page.
+ *
+ * Fix: prefer the fully-hydrated Game already in the Browse prefetch cache
+ * (which carries all cross-store fields via dedup). If not found, still parse
+ * `epicNamespace` / `epicOfferId` from the id so the details-page Epic
+ * enrichment call can run and hydrate the missing fields live.
+ */
 function scoredGameToGame(sg: ScoredGame): Game {
   const steamAppId = sg.gameId.startsWith('steam-')
     ? parseInt(sg.gameId.slice(6), 10) || undefined
     : undefined;
 
+  // For Epic games the id shape is `epic-{namespace}:{offerId}`. Extract both
+  // so the details page can call `epicService.getGameDetails(ns, off)` even
+  // when the game isn't in the Browse prefetch cache.
+  let epicNamespace: string | undefined;
+  let epicOfferId: string | undefined;
+  if (sg.gameId.startsWith('epic-')) {
+    const rest = sg.gameId.slice(5);
+    const colonIdx = rest.indexOf(':');
+    if (colonIdx > 0) {
+      epicNamespace = rest.slice(0, colonIdx);
+      epicOfferId = rest.slice(colonIdx + 1);
+    }
+  }
+
   const { coverUrl, headerImage } = getScoredGameImages(sg);
+
+  // Prefer the hydrated Game from Browse prefetch cache — carries availableOn,
+  // secondaryId, epicSlug (when present), and cross-store metadata that
+  // ScoredGame alone doesn't. Merge Oracle's image + price on top so the
+  // Oracle-specific cover art (from getScoredGameImages) still wins.
+  const prefetched = getPrefetchedGames();
+  const hydrated = prefetched?.find(
+    (g) => g.id === sg.gameId || g.secondaryId === sg.gameId,
+  ) ?? null;
+
+  if (hydrated) {
+    return {
+      ...hydrated,
+      coverUrl: coverUrl || hydrated.coverUrl,
+      headerImage: headerImage || hydrated.headerImage,
+      price: sg.price ?? hydrated.price,
+      recommendationSource: 'Oracle',
+    } as Game;
+  }
 
   return {
     id: sg.gameId,
@@ -641,13 +689,15 @@ function scoredGameToGame(sg: ScoredGame): Game {
     headerImage,
     playerCount: sg.playerCount ?? undefined,
     steamAppId,
+    epicNamespace,
+    epicOfferId,
     store: sg.gameId.startsWith('epic-') ? 'epic' : undefined,
     price: sg.price,
     isInLibrary: false,
     status: 'Want to Play',
     priority: 'Medium',
     publicReviews: '',
-    recommendationSource: '',
+    recommendationSource: 'Oracle',
     createdAt: EPOCH_DATE,
     updatedAt: EPOCH_DATE,
   } as Game;
@@ -1007,7 +1057,14 @@ function HeroCard({ game, onNavigate }: { game: ScoredGame; onNavigate: (gameId:
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.8, ease: 'easeOut' }}
       className="relative w-full h-[280px] rounded-xl overflow-hidden cursor-pointer group mb-8"
-      onClick={() => onNavigate(game.gameId)}
+      onClick={() => {
+        // v1.0.44 fix — prime the nav-transfer with the hydrated Game so
+        // the details page hits the enrichment fast-path just like Browse
+        // clicks do. Without this the hero pick landed on details with the
+        // same half-empty stub the shelf cards used to.
+        setNavigatingGame(scoredGameToGame(game));
+        onNavigate(game.gameId);
+      }}
     >
       {/* Background image with Ken Burns */}
       {img.src && !img.failed && (

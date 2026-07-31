@@ -28,6 +28,7 @@
  *  - Accessibility (ARIA roles + labels)
  */
 import { useMemo, useRef, useState, useCallback, useEffect, memo } from 'react';
+import { useLocation } from 'wouter';
 import { useVirtualizer } from '@tanstack/react-virtual';
 
 import { motion } from 'framer-motion';
@@ -662,6 +663,7 @@ const VALID_RANGE_PRESETS: RangePreset[] = ['day', 'week', 'month', 'year'];
 
 export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: JourneyGanttViewProps) {
 
+  const [, navigate] = useLocation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const sidebarBodyRef = useRef<HTMLDivElement>(null);
@@ -1879,6 +1881,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                 style={{ height: ROW_HEIGHT, top: HEADER_HEIGHT + virtualItem.start, contain: 'layout style' }}
                 onClick={() => {
                   if (hasDragged.current) { hasDragged.current = false; return; }
+                  navigate(`/game/${encodeURIComponent(row.gameId)}#telemetry`);
                 }}
                 onMouseEnter={() => handleRowEnter(row.gameId)}
                 onMouseLeave={handleRowLeave}

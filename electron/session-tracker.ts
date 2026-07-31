@@ -41,6 +41,7 @@ interface ActiveSession {
   lastIdleCheck: boolean;    // Whether system was idle on the previous tick
   missedPolls: number;       // Consecutive polls where the process was not seen
   lastSeenMs: number;        // Timestamp (ms) of the last poll where the process was running
+  activeInputMs: number;     // Total ms where the user was actively providing input
 }
 
 export interface CompletedSession {
@@ -51,6 +52,7 @@ export interface CompletedSession {
   endTime: string;
   durationMinutes: number;
   idleMinutes: number;
+  activeInputMinutes?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +60,7 @@ export interface CompletedSession {
 // ---------------------------------------------------------------------------
 
 const POLL_INTERVAL_MS = 15_000;   // Check every 15 seconds
+const POLL_INTERVAL_S = POLL_INTERVAL_MS / 1000; // Seconds form for powerMonitor.getSystemIdleTime() comparisons
 const IDLE_THRESHOLD_S = 300;      // 5 minutes idle threshold
 /**
  * Number of consecutive polls a process must be missing before we end the
@@ -295,8 +298,24 @@ function pollTick() {
   // Skip expensive process snapshot when nothing is being tracked
   if (trackedGames.length === 0 && activeSessions.size === 0) return;
 
-  // Snapshot all running processes ONCE — O(1) lookups for each game below
+  // Snapshot all running processes ONCE — O(1) lookups for each game below.
+  // Measure OS-probe duration so we can surface hook latency in telemetry.
+  const _hookStart = performance.now();
   refreshProcessSnapshot();
+  const hookLatencyMs = Math.round((performance.now() - _hookStart) * 100) / 100;
+
+  // Sample process resource usage for telemetry samples emitted below.
+  const rssMb = Math.round((process.memoryUsage().rss / (1024 * 1024)) * 100) / 100;
+  let cpuPercent = 0;
+  try {
+    const metrics = app.getAppMetrics();
+    for (const m of metrics) {
+      cpuPercent += m?.cpu?.percentCPUUsage ?? 0;
+    }
+    cpuPercent = Math.round(cpuPercent * 100) / 100;
+  } catch {
+    cpuPercent = 0;
+  }
 
   // Get system idle time (seconds)
   let systemIdleS = 0;
@@ -322,6 +341,7 @@ function pollTick() {
         lastIdleCheck: false,
         missedPolls: 0,
         lastSeenMs: nowMs,
+        activeInputMs: 0,
       };
       activeSessions.set(game.gameId, session);
 
@@ -343,6 +363,12 @@ function pollTick() {
         existingSession.idleAccumulatedMs += POLL_INTERVAL_MS;
       }
       existingSession.lastIdleCheck = isSystemIdle;
+
+      // Telemetry: count this tick as active-input when the system was not idle
+      // for longer than one poll interval — i.e. the user provided input recently.
+      if (systemIdleS < POLL_INTERVAL_S) {
+        existingSession.activeInputMs += POLL_INTERVAL_MS;
+      }
 
       // Send live playtime update to the renderer
       const rawMs = nowMs - existingSession.startTime.getTime();
@@ -375,6 +401,7 @@ function pollTick() {
         endTime: new Date(endMs).toISOString(),
         durationMinutes: Math.round(activeDurationMs / 60_000 * 100) / 100,
         idleMinutes: Math.round(existingSession.idleAccumulatedMs / 60_000 * 100) / 100,
+        activeInputMinutes: Math.round(existingSession.activeInputMs / 60_000 * 100) / 100,
       };
 
       activeSessions.delete(game.gameId);
@@ -388,6 +415,20 @@ function pollTick() {
       );
     }
     // If !running && !existingSession → nothing to do
+  }
+
+  // Telemetry: emit one sample per active session per tick so per-game panels can chart it.
+  if (activeSessions.size > 0) {
+    const telemetryTimestamp = new Date(nowMs).toISOString();
+    for (const s of activeSessions.values()) {
+      sendToRenderer('session:telemetrySample', {
+        timestamp: telemetryTimestamp,
+        gameId: s.gameId,
+        cpuPercent,
+        rssMb,
+        hookLatencyMs,
+      });
+    }
   }
 
   // Snapshot in-progress sessions for crash recovery on the next launch.
@@ -456,6 +497,7 @@ export function stopSessionTracker() {
       endTime: endTime.toISOString(),
       durationMinutes: Math.round(activeDurationMs / 60_000 * 100) / 100,
       idleMinutes: Math.round(session.idleAccumulatedMs / 60_000 * 100) / 100,
+      activeInputMinutes: Math.round(session.activeInputMs / 60_000 * 100) / 100,
     };
 
     sendToRenderer('session:statusChange', { gameId, status: 'Playing' });
@@ -495,6 +537,7 @@ export function setTrackedGames(games: TrackedGame[]) {
         endTime: endTime.toISOString(),
         durationMinutes: Math.round(activeDurationMs / 60_000 * 100) / 100,
         idleMinutes: Math.round(session.idleAccumulatedMs / 60_000 * 100) / 100,
+        activeInputMinutes: Math.round(session.activeInputMs / 60_000 * 100) / 100,
       };
 
       activeSessions.delete(gameId);

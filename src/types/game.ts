@@ -219,6 +219,7 @@ export interface GameSession {
   endTime: string;         // ISO timestamp
   durationMinutes: number; // Active play time (raw - idle)
   idleMinutes: number;     // Total idle detected
+  activeInputMinutes?: number; // Time (min) user was actively giving input — telemetry v2
 }
 
 // Status change log entry — records every status transition for tracking/analytics.

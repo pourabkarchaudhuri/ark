@@ -1,14 +1,42 @@
-# Ark v1.0.43 — Broadcast Card Redesign
+# Ark v1.0.44 — Insights & Telemetry + Oracle Hydration
 
-Follow-up hotfix to v1.0.42. The Scheduled Broadcast cards in the Transmissions view were rendering cover art as a stark 128 px logo-banner strip at the top of each card. For events whose `og:image` is a simple product logo on solid colour (Steam Next Fest, MAGFest, Brasil Game Show / Nintendo, PAX West, …), that produced blocky product-tile cards that looked amateur. Photo-based hero images (Esports World Cup, Gamescom Opening Night Live) fared better but still made the cards uncomfortably tall.
+The biggest analytical feature yet, plus two long-standing bugs fixed.
 
-## Fixed
+## Insights & Telemetry tab (new)
 
-- **Cover images are now atmospheric backdrops, not banners.** Each card renders the image across the entire card at 55% opacity with `saturate(0.85)` + a `0.45 → 0.92` top-to-bottom black gradient overlay + a subtle top-right radial highlight for brand-cue. Product logos become tasteful colour washes; photo heroes look cinematic; text remains fully readable regardless of image contents.
-- **Broadcast cards ~35% shorter.** Removed the dedicated image row entirely. Tightened outer padding (`px-5 py-5` → `px-4 py-4`), inner gap (`gap-4` → `gap-2.5`), title size (15 px → 14 px), date size (20 px → 16 px), countdown size (17 px → 14 px), and footer padding. Cards now hold their information densely without towering above the rest of the strip.
-- **Card width tightened** 280 px → 260 px; scroll step updated 296 → 276. More events fit in view before scrolling is required.
+Every game with recorded session history now has a third tab on its details page: **Insights & Telemetry**. Also reachable by clicking a game row on the OCD/Voyage Gantt (`/game/{id}#telemetry`).
+
+Six analytical panels, top-to-bottom. Purely analytical — no wellness-coach language, no achievement/build/win-loss data.
+
+- **Session Analytics** — Histogram of session length (bucketed 0-15/15-30/30-60/60-120/120-240/240+ minutes), 7×24 weekday-hour heatmap, and a stacked strip of the last 30 sessions showing duration overlaid with active-input ratio. Tiles: mean, P95, longest gap in days, sessions last 7 days.
+- **Immersion Index** — Ratio of active-input time to total session length. Radial arc gauge for trailing-5 index, per-session ratio trend with rolling-5 mean overlay, active-vs-idle split for last 20 sessions. Tiles: all-time, trailing-5, highest-index session date, lowest.
+- **Engagement Pacing** — Weekly frequency vs average session length as a bubble scatter (bubble size = total minutes that week), reference lines at both medians labeled with numeric thresholds. 12-week cadence bar strip below.
+- **Fatigue Point Identification** — Weekly average session length over time with a linear regression trend line. Signed % change tile comparing last-4-week average to prior-4-week average. No color-coded verdict — just the slope.
+- **App Stability & Overhead** — ARK's own footprint while this game runs. Two sparklines for CPU % and RSS MB, plus a latency line with p50/p95 reference bars.
+- **Friction Detection** — Scatter of tracker latency vs idle-minute deltas around each sample, colored by session. Anomaly table lists rows where latency ≥ 3× median AND idle Δ ≥ 5 min. Pearson r tile.
+
+## New instrumentation (main process)
+
+- Every 15 s poll now wraps the process-snapshot probe with `performance.now()` to record hook latency, reads `process.memoryUsage().rss` for RSS MB, and sums `app.getAppMetrics()[*].cpu.percentCPUUsage` for CPU %.
+- When any session is active, main emits a per-tick `session:telemetrySample` event per active session — feeds a 4096-sample renderer-side ring buffer.
+- `ActiveSession.activeInputMs` accumulates each tick where `powerMonitor.getSystemIdleTime() < 15 s`. Persisted on the completed record as `activeInputMinutes` (added optionally to `GameSession` — no IDB migration needed).
+- New `window.telemetryAPI.onSample(cb)` renderer subscription exposed via `contextBridge`.
+
+## Bug fixes carried over
+
+### Oracle → game-details incomplete data
+
+**Symptom.** Clicking a game from an Oracle recommendation shelf opened a details page missing description, gallery, system requirements, and cross-store links. Clicking the same game from Browse worked fine.
+
+**Root cause.** `scoredGameToGame` built a minimal `Game` stub from the `ScoredGame` (which carries no `epicSlug`, `epicNamespace`, `epicOfferId`, `availableOn`, or `secondaryId`). Because `prefetch-store._navTransfer` short-circuits `findGameById`, the details page received the stub, saw no enrichment keys, and skipped both `epicService.getGameDetails()` and `getProductContent()` — nothing to enrich with.
+
+**Fix.** `scoredGameToGame` now prefers the fully-hydrated Game already in the Browse prefetch cache, merging Oracle's cover/price on top. If the game isn't cached, it parses `epicNamespace` / `epicOfferId` from the id shape `epic-{ns}:{offerId}` so the details-page Epic enrichment call can still run live. Also: `HeroCard.onClick` now calls `setNavigatingGame(scoredGameToGame(game))` before navigating — the featured hero card used to bypass nav-transfer priming.
+
+### Steam vs Epic hero gradient — Steam side removed
+
+Removed the Steam hero background image and the fuchsia/purple gradient fallback entirely. Both stores now share a clean flat-black hero with the same dark fade overlays. No store-specific colour, no parity gap.
 
 ---
 
-**Tests:** 666/666 passing. Electron and renderer typecheck clean.
-**Data compatibility:** No IDB migration required. No new dependencies.
+**Tests:** 690/690 passing. Renderer + electron typecheck clean.
+**Data compatibility:** No IDB migration required. No new dependencies. `activeInputMinutes` added optionally to `GameSession`; older sessions read as `undefined` (immersion falls back to `durationMinutes - idleMinutes`).

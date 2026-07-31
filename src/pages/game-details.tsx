@@ -705,7 +705,6 @@ export function GameDetailsPage() {
   const [isAutoplayPaused, setIsAutoplayPaused] = useState(false);
   const [headerImageError, setHeaderImageError] = useState(false);
   const [headerImageLoaded, setHeaderImageLoaded] = useState(false);
-  const [heroBgLoaded, setHeroBgLoaded] = useState(false);
   const [similarGames, setSimilarGames] = useState<SimilarGameCard[]>([]);
   const [similarGamesPhase, setSimilarGamesPhase] = useState<SimilarGamesSectionPhase>('hidden');
   const [annReady, setAnnReady] = useState(() => annIndex.isReady);
@@ -757,7 +756,7 @@ export function GameDetailsPage() {
   }, [gameId]);
 
   const showProgressTabs = isCustomGame || (gameInLibrary && wasInLibraryOnLoad.current === true);
-  
+
   // Dialog state for add to library / edit library entry
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [dialogGame, setDialogGame] = useState<Game | null>(null);
@@ -949,7 +948,6 @@ export function GameDetailsPage() {
       setIsAutoplayPaused(false);
       setHeaderImageError(false);
       setHeaderImageLoaded(false);
-      setHeroBgLoaded(false);
       setSimilarGames([]);
       setSimilarGamesPhase('hidden');
       setFitgirlRepack(null);
@@ -1739,8 +1737,9 @@ export function GameDetailsPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-black text-white">
-        {/* Hero Section Skeleton — shared by both views */}
-        <div className="relative h-[30vh] min-h-[240px] w-full bg-gradient-to-b from-white/5 to-black">
+        {/* Hero Section Skeleton — shared by both views. Matches the flat
+            backdrop of the loaded state (no store-specific colour). */}
+        <div className="relative h-[30vh] min-h-[240px] w-full bg-black">
           <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
           <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-transparent" />
 
@@ -1898,32 +1897,16 @@ export function GameDetailsPage() {
 
   return (
     <div className="min-h-screen bg-black text-white">
-      {/* Hero Section with Background */}
+      {/* Hero Section — v1.0.44: flat backdrop for BOTH stores.
+          The wide Steam page-bg image (page_bg_generated_v6b.jpg) previously
+          bled through the dark overlays as a colorful atmospheric wash on
+          Steam pages, while Epic pages showed nothing but darkness — asymmetric.
+          User asked repeatedly for Steam to match Epic (no colored gradient).
+          The hero is now a clean flat-black surface with two dark fade overlays
+          for depth. No store-specific image, no fuchsia wash, no parity gap. */}
       <div className="relative h-[30vh] min-h-[240px] w-full overflow-hidden bg-black">
-        {/* Stylized fallback backdrop — always painted first so a missing hero
-            image never leaves a jarring flat-black gap (Epic games without
-            gallery art still get a gradient wash that matches Steam's look). */}
-        <div className="absolute inset-0 bg-gradient-to-br from-fuchsia-500/10 via-purple-500/5 to-black" />
-        {/* Lazy-loaded hero background with fade-in. Falls back to header_image
-            if `background` is empty (e.g. legacy Epic entries with no CMS gallery). */}
-        {(details.background || details.header_image) && (
-          <img
-            src={details.background || details.header_image || ''}
-            alt=""
-            loading="lazy"
-            onLoad={() => setHeroBgLoaded(true)}
-            className={cn(
-              "absolute inset-0 w-full h-full object-cover object-top transition-opacity duration-700 ease-out",
-              heroBgLoaded ? "opacity-100" : "opacity-0"
-            )}
-          />
-        )}
-        {/* Skeleton shimmer while image loads (only when an image is expected) */}
-        {(details.background || details.header_image) && !heroBgLoaded && (
-          <div className="absolute inset-0 bg-gradient-to-r from-white/5 via-white/10 to-white/5 animate-pulse" />
-        )}
-        {/* Gradient Overlay — always rendered so the hero has a stylized black
-            wash even when no image is present. */}
+        {/* Subtle dark vignette overlays — same on both stores. Give the hero
+            depth without introducing any color that differs between stores. */}
         <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
         <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-transparent" />
 

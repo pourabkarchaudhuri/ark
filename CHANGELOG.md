@@ -4,6 +4,27 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.44] - 2026-07-31
+
+### Added
+- **Insights & Telemetry tab on game-details.** New third tab (gated on `sessionStore.getForGame(id).length > 0`) with six analytical panels stacked top-to-bottom:
+  - **Session Analytics** — histogram of session length (0-15/15-30/30-60/60-120/120-240/240+ minutes via `bucketSessionLengths`), 7×24 weekday×hour heatmap via `weekdayHourHeatmap`, last-30 SVG stacked strip (duration bar overlaid with per-session active-input ratio). Tiles: mean, P95, longest gap (days), sessions last 7 days.
+  - **Immersion Index** — ratio of active-input time to total session length. Radial arc gauge for trailing-5 index, `immersionRollingSeries` AreaChart with rolling-5 mean overlay, stacked BarChart for last 20 sessions. Tiles: all-time / trailing-5 / highest / lowest.
+  - **Engagement Pacing** — ScatterChart of `pacingWeeklyPoints` (X = sessions/week, Y = avg minutes, Z = total minutes) with ReferenceLines at both medians; 12-week cadence BarChart.
+  - **Fatigue Point Identification** — LineChart with three series (weekly avg solid, weekly max dashed, linear-regression trend dotted). Signed % change tile via `percentChange` comparing last-4-week avg to prior-4-week avg. No color-coded verdict.
+  - **App Stability & Overhead** — driven by `useTrackerOverhead(gameId)`. Two AreaCharts (ARK CPU %, RSS MB) + LineChart of hook probe latency with ReferenceLines at inline-computed p50 and p95.
+  - **Friction Detection** — `frictionAnomalies(samples, sessions)` ScatterChart (X = latency ms, Y = idle Δ minutes, colored by session) + compact anomaly table. `pearson` correlation tile.
+- **Session tracker telemetry sampling.** Every 15 s poll now wraps the process-snapshot probe with `performance.now()` to record `hookLatencyMs`, reads `process.memoryUsage().rss` for `rssMb`, and sums `app.getAppMetrics()[*].cpu.percentCPUUsage` for `cpuPercent`. When any session is active it emits per-session-per-tick `session:telemetrySample` events over IPC.
+- **Active-input tracking per session.** `ActiveSession.activeInputMs` accumulates each tick where `powerMonitor.getSystemIdleTime() < 15 s`. Persisted on the completed record as `CompletedSession.activeInputMinutes` (optional, added to `GameSession` in `src/types/game.ts`).
+- **`window.telemetryAPI.onSample(cb)` renderer subscription.** Exposed in `electron/preload.cjs` via `contextBridge`. Returns an unsubscribe function. Fed straight into `trackerOverheadStore` (a 4096-sample renderer-side ring buffer) which the OverheadPanel/FrictionPanel read via `useSyncExternalStore`.
+- **OCD Gantt row → Insights & Telemetry deep-link.** Clicking a row in `journey-gantt-view.tsx` now navigates via wouter to `/game/{gameId}#telemetry`; `game-details.tsx` reads `window.location.hash` at mount to select the telemetry tab directly.
+- **`src/services/telemetry-derivations.ts`** — pure math (no store imports): `weeklyAggregate`, `immersionForSession`, `immersionRollingSeries`, `linearRegression`, `percentChange`, `bucketSessionLengths`, `weekdayHourHeatmap`, `frictionAnomalies`, `pearson`, `pacingWeeklyPoints`. Unit-tested in `src/test/services/telemetry-derivations.test.ts`.
+
+### Fixed
+- **Oracle → game-details incomplete data.** Clicking an Oracle recommendation opened a details page missing description, gallery, requirements, and cross-store metadata (compared to opening the same game from Browse). Root cause: `scoredGameToGame` at [src/components/oracle-view.tsx:624](src/components/oracle-view.tsx:624) built a minimal Game stub lacking `epicSlug` / `epicNamespace` / `epicOfferId` / `availableOn` / `secondaryId`, and because `prefetch-store._navTransfer` short-circuits `findGameById`, the details page received the stub and skipped both `epicService.getGameDetails()` and `getProductContent()` — no data to enrich with. Fix: `scoredGameToGame` now looks up the fully-hydrated Game from the Browse prefetch cache first (via `getPrefetchedGames().find(g => g.id === sg.gameId || g.secondaryId === sg.gameId)`). If not found, it parses `epicNamespace` / `epicOfferId` from the id shape `epic-{ns}:{offerId}` so the details-page Epic enrichment call can still run live and hydrate the missing fields.
+- **Oracle hero card now primes nav-transfer.** Fixed a related bug at [src/components/oracle-view.tsx:1060](src/components/oracle-view.tsx:1060) where clicking the featured `HeroCard` navigated without calling `setNavigatingGame`, so the details page had to fall back to a `prefetchedGames.find` lookup and could silently return null. Hero click now stashes the hydrated Game via `setNavigatingGame(scoredGameToGame(game))` before navigating — same fast path as shelf cards.
+- **Steam game-details hero gradient removed.** The wide Steam `page_bg_generated_v6b.jpg` backdrop no longer bleeds through as a colorful atmospheric wash on Steam pages. Both Steam and Epic pages now render a flat-black hero with the same two dark fade overlays for depth. No store-specific colour, no parity gap. Also removed the fuchsia/purple fallback wash from v1.0.42 and the now-unused `heroBgLoaded` state.
+
 ## [1.0.43] - 2026-07-31
 
 ### Fixed

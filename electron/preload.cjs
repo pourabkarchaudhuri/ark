@@ -418,6 +418,16 @@ contextBridge.exposeInMainWorld('sessionTracker', {
   },
 });
 
+// Expose Telemetry sample API to renderer — per-tick main-process telemetry stream
+// (cpu%, RSS MB, hook-latency ms) tagged with the active session's gameId.
+contextBridge.exposeInMainWorld('telemetryAPI', {
+  onSample: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('session:telemetrySample', handler);
+    return () => ipcRenderer.removeListener('session:telemetrySample', handler);
+  },
+});
+
 // Expose Exe Info API to renderer (analyze game exe metadata + Authenticode signature)
 contextBridge.exposeInMainWorld('exeInfo', {
   analyze: (exePath) => ipcRenderer.invoke('exe-info:analyze', { exePath }),

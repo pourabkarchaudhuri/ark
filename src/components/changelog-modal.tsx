@@ -9,6 +9,18 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.44': {
+    title: "What's New in Ark 1.0.44",
+    changes: [
+      'Insights & Telemetry tab — New third tab on every game with recorded session history. Six analytical panels: Session Analytics (length distribution + weekday×hour heatmap + last-30 strip), Immersion Index (active-input ratio with radial gauge + trend), Engagement Pacing (weekly frequency vs length scatter with median reference lines), Fatigue Point (session length decay + linear regression + signed 4-week % change), App Stability & Overhead (ARK CPU/RAM/hook-latency sparklines), and Friction Detection (correlation of tracker latency spikes vs game idle time). Purely analytical, no wellness-coach language.',
+      'Voyage/OCD Gantt row → Insights & Telemetry — Clicking a game row on the OCD timeline now deep-links to that game\'s Insights & Telemetry tab via `/game/{id}#telemetry`.',
+      'Session tracker telemetry sampling — Every 15-second poll now records ARK\'s own CPU % (sum across processes via app.getAppMetrics()), RSS memory in MB, and hook probe latency (performance.now() around the tasklist/PowerShell snapshot). Emitted to the renderer over a new `session:telemetrySample` IPC channel.',
+      'Active-input tracking per session — Sessions now record `activeInputMinutes` (time when powerMonitor.getSystemIdleTime() < 15 s), so the new Immersion panel can show the fraction of a session where you were actually giving input.',
+      'Oracle → game-details now hydrates fully. Previously, clicking an Oracle recommendation opened a half-empty details page (no description, no gallery, no cross-store links). Root cause: Oracle built a minimal Game stub that lacked `epicSlug` / `epicNamespace` / `epicOfferId` / `availableOn` / `secondaryId`, and the details-page enrichment call had no keys to fetch with. Fix: Oracle now prefers the fully-hydrated Game from the Browse prefetch cache (with all cross-store metadata) and, as a fallback, parses `epicNamespace`/`epicOfferId` from the game id so the details page can still call `epicService.getGameDetails()` live.',
+      'Oracle hero card also primes nav-transfer. Fixed a subtler bug where clicking the featured hero recommendation navigated without setting `_navTransfer`, forcing the details page onto a slow catalog-cache fallback path.',
+      'Steam game-details hero gradient removed. The wide Steam `page_bg_generated_v6b.jpg` backdrop no longer bleeds through as a colorful atmospheric wash. Both Steam and Epic pages now use a clean flat-black hero with subtle dark fade overlays — no store-specific colour, no parity gap between the two stores.',
+    ],
+  },
   '1.0.43': {
     title: "What's New in Ark 1.0.43",
     changes: [
