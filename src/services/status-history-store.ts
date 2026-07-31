@@ -9,6 +9,9 @@ interface StoredStatusHistoryData {
   lastUpdated: string;
 }
 
+// Module-level guard so HMR doesn't stack duplicate beforeunload listeners.
+let _statusHistoryBeforeUnloadInstalled = false;
+
 /**
  * Status History Store — persists a chronological log of every status change
  * made to any game in the library.
@@ -42,9 +45,14 @@ class StatusHistoryStore {
   private entries: StatusChangeEntry[] = [];
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
+  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.initialize();
+    if (typeof window !== 'undefined' && !_statusHistoryBeforeUnloadInstalled) {
+      _statusHistoryBeforeUnloadInstalled = true;
+      window.addEventListener('beforeunload', () => this.flushSave());
+    }
   }
 
   private initialize() {
@@ -73,14 +81,35 @@ class StatusHistoryStore {
     }
 
     if (needsResave && this.entries.length > 0) {
-      this.save();
+      this.saveNow();
       console.log('[StatusHistoryStore] Migrated entries to v2 (string gameId)');
     }
 
     this.isInitialized = true;
   }
 
+  /**
+   * Debounced save — coalesces bursts of status writes (rapid status flips,
+   * imports, migrations) into a single localStorage write ~300ms later.
+   */
   private save() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.saveNow();
+    }, 300);
+  }
+
+  /** Flush any pending debounced save (used on beforeunload). */
+  private flushSave() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+      this.saveNow();
+    }
+  }
+
+  private saveNow() {
     try {
       const data: StoredStatusHistoryData = {
         version: STORAGE_VERSION,
@@ -159,6 +188,26 @@ class StatusHistoryStore {
     return this.entries.length;
   }
 
+  /**
+   * Find the earliest transition into `Playing` (or `Playing Now`) for a game.
+   * Returns the ISO timestamp as a ms-since-epoch number, or null if no such
+   * transition exists.
+   *
+   * Used as a fallback for `firstPlayedAt` when no session was recorded but
+   * the user did flip the status manually.
+   */
+  getFirstPlayingTransition(gameId: string): number | null {
+    let earliest: number | null = null;
+    for (const e of this.entries) {
+      if (e.gameId !== gameId) continue;
+      if (e.newStatus !== 'Playing' && e.newStatus !== 'Playing Now') continue;
+      const ts = new Date(e.timestamp).getTime();
+      if (!Number.isFinite(ts)) continue;
+      if (earliest === null || ts < earliest) earliest = ts;
+    }
+    return earliest;
+  }
+
   // ------ Import / Export ------
 
   exportData(): StatusChangeEntry[] {
@@ -199,7 +248,7 @@ class StatusHistoryStore {
       this.entries.sort(
         (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
       );
-      this.save();
+      this.saveNow(); // direct save for bulk import
       this.notifyListeners();
     }
 
@@ -209,6 +258,10 @@ class StatusHistoryStore {
   /** Clear all status history data (mainly for testing / reset). */
   clear() {
     this.entries = [];
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
     localStorage.removeItem(STORAGE_KEY);
     this.notifyListeners();
   }

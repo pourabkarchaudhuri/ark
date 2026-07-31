@@ -1540,7 +1540,10 @@ class RecoStore {
 export const recoStore = new RecoStore();
 
 // ── Invalidate Oracle reco when library/custom data used by reco changes ──
-// Hours-only updates do not change buildOracleLibrarySignature(), so session tracking won't thrash Oracle.
+// v1.0.41 audit: subscribe via libraryStore.subscribe (the non-hours channel),
+// NOT libraryStore.subscribeHours. buildOracleLibrarySignature() ignores hoursPlayed,
+// and 15s session ticks used to churn through this callback every time — now they
+// only fire hoursListeners so the signature rebuild + reco recompute stay quiet.
 
 let oracleLibrarySnapBaseline: string | null = null;
 let oracleLibraryInvalidateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1562,6 +1565,7 @@ function scheduleOracleInvalidateOnLibraryChange() {
 }
 
 if (typeof window !== 'undefined') {
+  // Non-hours channel only — see v1.0.41 audit note above.
   libraryStore.subscribe(scheduleOracleInvalidateOnLibraryChange);
   customGameStore.subscribe(scheduleOracleInvalidateOnLibraryChange);
 }

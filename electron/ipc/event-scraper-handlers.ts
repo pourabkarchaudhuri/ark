@@ -23,6 +23,7 @@ interface ScrapedEvent {
   endDate?: number;
   youtubeUrls: string[];
   twitchUrls: string[];
+  imageUrl?: string;
   scrapedAt: number;
 }
 
@@ -266,6 +267,91 @@ function extractLinks(html: string): { youtubeUrls: string[]; twitchUrls: string
   return { youtubeUrls: [...ytSet], twitchUrls: [...twitchSet] };
 }
 
+// ─── Image extraction ───────────────────────────────────────────────────────
+
+function resolveUrl(rel: string, baseUrl: string): string | null {
+  try {
+    return new URL(rel, baseUrl).href;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract cover-image URL. Precedence:
+ *   1. og:image
+ *   2. twitter:image / twitter:image:src
+ *   3. JSON-LD "image"
+ *   4. <link rel="image_src">
+ *   5. first <img> inside <main> or with "hero" class (fallback)
+ */
+function extractImage(html: string, baseUrl: string): string | null {
+  // 1. og:image
+  const og = html.match(/<meta[^>]+property=["']og:image(?::url)?["'][^>]*content=["']([^"']+)["']/i)
+    ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:image(?::url)?["']/i);
+  if (og && og[1]) {
+    const url = resolveUrl(og[1].trim(), baseUrl);
+    if (url) return url;
+  }
+
+  // 2. twitter:image / twitter:image:src
+  const tw = html.match(/<meta[^>]+name=["']twitter:image(?::src)?["'][^>]*content=["']([^"']+)["']/i)
+    ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*name=["']twitter:image(?::src)?["']/i);
+  if (tw && tw[1]) {
+    const url = resolveUrl(tw[1].trim(), baseUrl);
+    if (url) return url;
+  }
+
+  // 3. JSON-LD "image"
+  const ldRe = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let ld: RegExpExecArray | null;
+  while ((ld = ldRe.exec(html)) !== null) {
+    const body = ld[1];
+    // Match "image": "…" or "image": ["…", …] or "image": { "url": "…" }
+    const strM = body.match(/"image"\s*:\s*"([^"]+)"/);
+    if (strM && strM[1]) {
+      const url = resolveUrl(strM[1].replace(/\\\//g, '/').trim(), baseUrl);
+      if (url) return url;
+    }
+    const arrM = body.match(/"image"\s*:\s*\[\s*"([^"]+)"/);
+    if (arrM && arrM[1]) {
+      const url = resolveUrl(arrM[1].replace(/\\\//g, '/').trim(), baseUrl);
+      if (url) return url;
+    }
+    const objM = body.match(/"image"\s*:\s*\{[^}]*"url"\s*:\s*"([^"]+)"/);
+    if (objM && objM[1]) {
+      const url = resolveUrl(objM[1].replace(/\\\//g, '/').trim(), baseUrl);
+      if (url) return url;
+    }
+  }
+
+  // 4. <link rel="image_src" href="…">
+  const linkImg = html.match(/<link[^>]+rel=["']image_src["'][^>]*href=["']([^"']+)["']/i)
+    ?? html.match(/<link[^>]+href=["']([^"']+)["'][^>]*rel=["']image_src["']/i);
+  if (linkImg && linkImg[1]) {
+    const url = resolveUrl(linkImg[1].trim(), baseUrl);
+    if (url) return url;
+  }
+
+  // 5. Fallback: first <img> under <main> or with class containing "hero"
+  const mainMatch = html.match(/<main[\s\S]*?<\/main>/i);
+  if (mainMatch) {
+    const imgInMain = mainMatch[0].match(/<img[^>]+src=["']([^"']+)["']/i);
+    if (imgInMain && imgInMain[1]) {
+      const url = resolveUrl(imgInMain[1].trim(), baseUrl);
+      if (url) return url;
+    }
+  }
+  const heroImg = html.match(/<img[^>]+class=["'][^"']*hero[^"']*["'][^>]*src=["']([^"']+)["']/i)
+    ?? html.match(/<img[^>]+src=["']([^"']+)["'][^>]*class=["'][^"']*hero[^"']*["']/i);
+  if (heroImg && heroImg[1]) {
+    const url = resolveUrl(heroImg[1].trim(), baseUrl);
+    if (url) return url;
+  }
+
+  return null;
+}
+
 // ─── Fetch a single URL ─────────────────────────────────────────────────────
 
 async function fetchPage(url: string): Promise<{ html: string; text: string } | null> {
@@ -319,6 +405,7 @@ async function scrapeAll(events: Array<{ id: string; url?: string }>): Promise<R
 
     const dates = extractDates(page.html, page.text);
     const links = extractLinks(page.html);
+    const imageUrl = extractImage(page.html, ev.url) ?? undefined;
 
     results[ev.id] = {
       id: ev.id,
@@ -326,11 +413,12 @@ async function scrapeAll(events: Array<{ id: string; url?: string }>): Promise<R
       endDate: dates.end,
       youtubeUrls: links.youtubeUrls,
       twitchUrls: links.twitchUrls,
+      imageUrl,
       scrapedAt: now,
     };
 
     logger.log(
-      `[EventScraper] ${ev.id}: date=${dates.start ? 'yes' : 'no'}, yt=${links.youtubeUrls.length}, tw=${links.twitchUrls.length}`,
+      `[EventScraper] ${ev.id}: date=${dates.start ? 'yes' : 'no'}, yt=${links.youtubeUrls.length}, tw=${links.twitchUrls.length}, img=${imageUrl ? 'yes' : 'no'}`,
     );
   }
 

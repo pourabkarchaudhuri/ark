@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Download, X, RefreshCw, CheckCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -44,15 +44,51 @@ export function UpdateSnackbar() {
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Distinguishes the "couldn't reach GitHub on mount check" error from other errors,
+  // so we can show a Retry button and auto-dismiss the toast.
+  const [isReachabilityError, setIsReachabilityError] = useState(false);
+  const autoDismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Check if we're in Electron with updater available
   const hasUpdater = typeof window !== 'undefined' && window.updater;
 
-  // Log on mount for debugging
+  // Manual mount-time check — extracted so the Retry button can re-run it.
+  const runMountCheck = useCallback(() => {
+    if (!window.updater) return;
+    console.log('[UpdateSnackbar] Performing manual update check...');
+    window.updater.checkForUpdates().then(result => {
+      console.log('[UpdateSnackbar] Manual check result:', result);
+      if (result.updateAvailable) {
+        console.log('[UpdateSnackbar] Update IS available:', result.latestVersion);
+        // Manually trigger the available state if IPC events didn't fire
+        setUpdateInfo({ version: result.latestVersion });
+        setIsReachabilityError(false);
+        setErrorMessage(null);
+        setState('available');
+        setDismissed(false);
+      } else {
+        console.log('[UpdateSnackbar] No update available. Current:', result.currentVersion, 'Latest:', result.latestVersion);
+        // Clear a prior reachability-error toast if the retry now succeeds.
+        if (state === 'error') {
+          setIsReachabilityError(false);
+          setErrorMessage(null);
+          setState('idle');
+        }
+      }
+    }).catch(err => {
+      console.error('[UpdateSnackbar] Manual check failed:', err);
+      setIsReachabilityError(true);
+      setErrorMessage("Couldn't reach GitHub — will try again in 2 min.");
+      setState('error');
+      setDismissed(false);
+    });
+  }, [state]);
+
+  // Log on mount for debugging + kick off the first check.
   useEffect(() => {
     console.log('[UpdateSnackbar] Component mounted');
     console.log('[UpdateSnackbar] window.updater exists:', !!window.updater);
-    
+
     if (window.updater) {
       // Get current version for logging
       window.updater.getVersion().then(version => {
@@ -60,25 +96,42 @@ export function UpdateSnackbar() {
       }).catch(err => {
         console.error('[UpdateSnackbar] Failed to get version:', err);
       });
-      
-      // Perform a manual update check on mount and log the result
-      console.log('[UpdateSnackbar] Performing manual update check...');
-      window.updater.checkForUpdates().then(result => {
-        console.log('[UpdateSnackbar] Manual check result:', result);
-        if (result.updateAvailable) {
-          console.log('[UpdateSnackbar] Update IS available:', result.latestVersion);
-          // Manually trigger the available state if IPC events didn't fire
-          setUpdateInfo({ version: result.latestVersion });
-          setState('available');
-          setDismissed(false);
-        } else {
-          console.log('[UpdateSnackbar] No update available. Current:', result.currentVersion, 'Latest:', result.latestVersion);
-        }
-      }).catch(err => {
-        console.error('[UpdateSnackbar] Manual check failed:', err);
-      });
+
+      runMountCheck();
     }
+    // Intentionally empty deps — this must only fire on mount. runMountCheck
+    // is stable enough (state ref is only used to clear an error), and adding
+    // it here would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-dismiss the reachability-error toast after 12s if the user doesn't interact.
+  useEffect(() => {
+    if (state === 'error' && isReachabilityError && !dismissed) {
+      if (autoDismissTimerRef.current) clearTimeout(autoDismissTimerRef.current);
+      autoDismissTimerRef.current = setTimeout(() => {
+        setDismissed(true);
+      }, 12_000);
+      return () => {
+        if (autoDismissTimerRef.current) {
+          clearTimeout(autoDismissTimerRef.current);
+          autoDismissTimerRef.current = null;
+        }
+      };
+    }
+    return undefined;
+  }, [state, isReachabilityError, dismissed]);
+
+  const handleRetryReachability = useCallback(() => {
+    if (autoDismissTimerRef.current) {
+      clearTimeout(autoDismissTimerRef.current);
+      autoDismissTimerRef.current = null;
+    }
+    setIsReachabilityError(false);
+    setErrorMessage(null);
+    setState('checking');
+    runMountCheck();
+  }, [runMountCheck]);
 
   useEffect(() => {
     if (!hasUpdater) {
@@ -207,7 +260,7 @@ export function UpdateSnackbar() {
               {state === 'available' && 'Update Available'}
               {state === 'downloading' && 'Downloading Update'}
               {state === 'ready' && 'Ready to Install'}
-              {state === 'error' && 'Update Error'}
+              {state === 'error' && (isReachabilityError ? "Couldn't reach GitHub" : 'Update Error')}
             </span>
           </div>
           <button
@@ -243,7 +296,10 @@ export function UpdateSnackbar() {
           {state === 'ready' && updateInfo && (
             <p>Version {updateInfo.version} is ready. The app will restart to complete the update.</p>
           )}
-          {state === 'error' && (
+          {state === 'error' && isReachabilityError && (
+            <p className="text-white/70">Will try again in 2 min.</p>
+          )}
+          {state === 'error' && !isReachabilityError && (
             <p className="text-red-400">{errorMessage || 'An error occurred while updating.'}</p>
           )}
         </div>
@@ -282,7 +338,23 @@ export function UpdateSnackbar() {
               </button>
             </>
           )}
-          {state === 'error' && (
+          {state === 'error' && isReachabilityError && (
+            <>
+              <button
+                onClick={handleDismiss}
+                className="px-3 py-1.5 text-sm font-medium rounded-md hover:bg-white/10 transition-colors text-muted-foreground"
+              >
+                Dismiss
+              </button>
+              <button
+                onClick={handleRetryReachability}
+                className="px-3 py-1.5 text-sm font-medium rounded-md bg-blue-500 hover:bg-blue-600 transition-colors text-white"
+              >
+                Retry now
+              </button>
+            </>
+          )}
+          {state === 'error' && !isReachabilityError && (
             <button
               onClick={handleDismiss}
               className="px-3 py-1.5 text-sm font-medium rounded-md hover:bg-white/10 transition-colors text-muted-foreground"

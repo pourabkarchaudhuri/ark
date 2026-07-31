@@ -4,6 +4,71 @@ import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { sessionStore } from '@/services/session-store';
 
+/** Minimum active minutes for a session to trigger the Want-to-Play → Playing transition. */
+const AUTO_TRANSITION_MIN_MINUTES = 10;
+/** LocalStorage fallback so the renderer can gate the feature before the main-process
+ *  IPC bridge lands. Keeps the setting persistable without touching preload.cjs here. */
+const AUTO_TRANSITION_LS_KEY = 'ark:autoStatusTransition';
+
+/**
+ * Read the opt-in "auto status transition" flag. Prefers the main-process settings
+ * bridge (when a future preload wiring exposes `getAutoStatusTransition`); falls
+ * back to localStorage, then to `false`. Never throws.
+ */
+async function isAutoStatusTransitionEnabled(): Promise<boolean> {
+  try {
+    // Future-safe: if/when preload exposes `window.settings.getAutoStatusTransition`,
+    // it wins over the localStorage mirror.
+    const bridge = (window as unknown as { settings?: { getAutoStatusTransition?: () => Promise<boolean> | boolean } }).settings;
+    if (bridge && typeof bridge.getAutoStatusTransition === 'function') {
+      const value = await bridge.getAutoStatusTransition();
+      return value === true;
+    }
+  } catch {
+    /* fall through to localStorage */
+  }
+  try {
+    return typeof window !== 'undefined'
+      && window.localStorage?.getItem(AUTO_TRANSITION_LS_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * If the ended session belongs to a library game currently marked "Want to Play"
+ * and was long enough to count as real play, promote it to "Playing" and stamp
+ * `autoTransitionedAt`. Gated by the opt-in `autoStatusTransition` setting.
+ * Custom games are skipped — they live in a different store.
+ */
+async function maybeAutoTransitionStatus(rawSession: GameSession): Promise<void> {
+  try {
+    const gameId = typeof rawSession.gameId === 'number'
+      ? `steam-${rawSession.gameId}`
+      : String(rawSession.gameId);
+
+    // Custom games do not live in libraryStore — nothing to transition.
+    if (gameId.startsWith('custom-')) return;
+
+    if (!Number.isFinite(rawSession.durationMinutes)) return;
+    if (rawSession.durationMinutes < AUTO_TRANSITION_MIN_MINUTES) return;
+
+    const enabled = await isAutoStatusTransitionEnabled();
+    if (!enabled) return;
+
+    const entry = libraryStore.getEntry(gameId);
+    if (!entry || entry.status !== 'Want to Play') return;
+
+    libraryStore.updateEntry(gameId, {
+      status: 'Playing',
+      autoTransitionedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    // Never let a status-transition failure disturb session recording.
+    console.warn('[useSessionTracker] auto-transition skipped:', err);
+  }
+}
+
 /**
  * useSessionTracker — connects the renderer to the Electron session tracker.
  *
@@ -119,6 +184,9 @@ export function useSessionTracker() {
     // Listen for completed sessions
     const unsubEnded = window.sessionTracker.onSessionEnded((data) => {
       recordCompletedSession(data.session);
+      // v1.0.41 — opt-in auto Want-to-Play → Playing transition.
+      // Kept fire-and-forget so it can never stall session persistence.
+      void maybeAutoTransitionStatus(data.session);
     });
 
     cleanupRef.current = [unsubLibrary, unsubCustom, unsubStatus, unsubLive, unsubEnded];

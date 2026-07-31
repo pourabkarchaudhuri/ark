@@ -422,6 +422,28 @@ function buildGanttRows(
   });
 }
 
+/**
+ * Sum of GameSession.durationMinutes that overlap [startMs, endMs).
+ * Sessions extending beyond the window contribute proportional to the overlap.
+ * Used to compute per-segment "session intensity" for bar opacity.
+ */
+function sumSessionMinutesInRange(sessions: GameSession[] | undefined, startMs: number, endMs: number): number {
+  if (!sessions?.length || !(endMs > startMs)) return 0;
+  let total = 0;
+  for (const s of sessions) {
+    const sStart = new Date(s.startTime).getTime();
+    const sEnd = new Date(s.endTime).getTime();
+    if (!Number.isFinite(sStart) || !Number.isFinite(sEnd) || sEnd <= sStart) continue;
+    const ovStart = Math.max(sStart, startMs);
+    const ovEnd = Math.min(sEnd, endMs);
+    if (ovStart >= ovEnd) continue;
+    const overlapMs = ovEnd - ovStart;
+    const fullMs = sEnd - sStart;
+    total += (s.durationMinutes ?? 0) * (overlapMs / fullMs);
+  }
+  return total;
+}
+
 /** Split a single "Playing" segment into Playing Now (session) and Playing (gap) sub-segments. */
 function splitPlayingSegmentBySessions(
   segStart: string,
@@ -595,13 +617,28 @@ interface JourneyGanttViewProps {
 const ROW_HEIGHT = 72;
 const HEADER_HEIGHT = 56;
 const SIDEBAR_WIDTH = 200;
+const SIDEBAR_COLLAPSED_WIDTH = 44;
+const SIDEBAR_COLLAPSE_SCROLL_THRESHOLD = 200;
 const MIN_BAR_WIDTH = 8;
 const THIN_BAR_THRESHOLD = 32;
-const BAR_V_PADDING = 16;
+/** Uniform bar height (v1.0.41 — visual weight comes from opacity, not height). */
+const BAR_HEIGHT_DEFAULT = 14;
+/** Playing Now sessions render slightly taller for emphasis. */
+const BAR_HEIGHT_PLAYING_NOW = 18;
 const GAME_INFO_MIN_WIDTH = 130;
 const GAME_PILL_MIN_WIDTH = 70;
 const DURATION_BADGE_MIN_WIDTH = 56;
 const GAP_THRESHOLD_DAYS = 14;
+/** Hero band ~ Playing Now cards; sticky above the Gantt canvas. */
+const HERO_BAND_HEIGHT = 180;
+/** Focus band ~ 30-day top-3 games ridgeline. */
+const FOCUS_ROW_HEIGHT = 200;
+/** How many days ago counts as "active" in the hero band. */
+const HERO_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Focus row lookback for top games ranking. */
+const FOCUS_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
+/** Hero band 14-day activity ribbon window. */
+const HERO_RIBBON_DAYS = 14;
 
 const ALL_STATUSES: GameStatus[] = ['Playing Now', 'Playing', 'Completed'];
 
@@ -628,6 +665,10 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
   const scrollRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const sidebarBodyRef = useRef<HTMLDivElement>(null);
+  // Outer scroller shared by sidebar + timeline (unified vertical scroll)
+  const outerScrollRef = useRef<HTMLDivElement>(null);
+  // Sidebar collapse-on-scroll state (200px threshold)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   // ── Feature state (hydrated from localStorage) ────────────────────────
   const [hiddenStatuses, setHiddenStatuses] = useState<Set<GameStatus>>(() => {
@@ -762,7 +803,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     return counts;
   }, [allRows]);
 
-  // ── Session map (for heatmap dots) ─────────────────────────────────────
+  // ── Session map (for heatmap dots + intensity opacity) ────────────────
   const sessionsByGame = useMemo(() => {
     const map = new Map<string, GameSession[]>();
     if (!sessions) return map;
@@ -772,6 +813,78 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     }
     return map;
   }, [sessions]);
+
+  // ── Hero band: games currently active or played in the last 24h ─────
+  // Each: game row + last-14-day per-day hour buckets for the sparkline ribbon.
+  const heroGames = useMemo(() => {
+    const now = Date.now();
+    const cutoff = now - HERO_ACTIVE_WINDOW_MS;
+    const ribbonStart = now - HERO_RIBBON_DAYS * DAY_MS;
+    // Bucketize each game's recent sessions into per-day hour totals.
+    const bucketize = (gameId: string): number[] => {
+      const daily = new Array(HERO_RIBBON_DAYS).fill(0);
+      const list = sessionsByGame.get(gameId);
+      if (!list) return daily;
+      for (const s of list) {
+        const t = new Date(s.startTime).getTime();
+        if (!Number.isFinite(t) || t < ribbonStart) continue;
+        const dayIdx = Math.min(HERO_RIBBON_DAYS - 1, Math.floor((t - ribbonStart) / DAY_MS));
+        daily[dayIdx] += (s.durationMinutes ?? 0) / 60;
+      }
+      return daily;
+    };
+    const items = allRows.filter(r => {
+      if (r.currentStatus === 'Playing Now') return true;
+      const libEntry = libraryStore.getEntry(r.gameId);
+      const lastPlayedIso = libEntry?.lastPlayedAt;
+      if (!lastPlayedIso) return false;
+      const t = new Date(lastPlayedIso).getTime();
+      return Number.isFinite(t) && t >= cutoff;
+    }).map(r => {
+      // Elapsed minutes: current or most recent session's durationMinutes
+      const list = sessionsByGame.get(r.gameId) ?? [];
+      let latest = 0;
+      let elapsedMinutes = 0;
+      for (const s of list) {
+        const t = new Date(s.startTime).getTime();
+        if (Number.isFinite(t) && t > latest) {
+          latest = t;
+          elapsedMinutes = s.durationMinutes ?? 0;
+        }
+      }
+      return { row: r, ribbon: bucketize(r.gameId), elapsedMinutes };
+    });
+    return items;
+  }, [allRows, sessionsByGame]);
+
+  // ── Focus row: top-3 games by last-30d session minutes (12-week ridgeline) ─
+  const focusGames = useMemo(() => {
+    const now = Date.now();
+    const cutoff30d = now - FOCUS_LOOKBACK_MS;
+    const totals: Array<{ row: GanttGameRow; totalMinutes: number; weekly: number[] }> = [];
+    // 12 weekly buckets ending "now"
+    const weeks = 12;
+    const weekMs = 7 * DAY_MS;
+    const weeklyStart = now - weeks * weekMs;
+    for (const r of allRows) {
+      const list = sessionsByGame.get(r.gameId);
+      if (!list?.length) continue;
+      let total = 0;
+      const weekly = new Array(weeks).fill(0);
+      for (const s of list) {
+        const t = new Date(s.startTime).getTime();
+        if (!Number.isFinite(t)) continue;
+        if (t >= cutoff30d) total += s.durationMinutes ?? 0;
+        if (t >= weeklyStart) {
+          const wi = Math.min(weeks - 1, Math.floor((t - weeklyStart) / weekMs));
+          weekly[wi] += (s.durationMinutes ?? 0) / 60;
+        }
+      }
+      if (total > 0) totals.push({ row: r, totalMinutes: total, weekly });
+    }
+    totals.sort((a, b) => b.totalMinutes - a.totalMinutes);
+    return totals.slice(0, 3);
+  }, [allRows, sessionsByGame]);
 
   // ── Compute time range: data-driven (earliest segment/added to latest/now) so user can scroll back ─
   const { timelineStart, timelineEnd, totalDays, months, dayMarkers, hourMarkers, spanDays } = useMemo(() => {
@@ -902,25 +1015,7 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
   const nowX = useMemo(() => dateToX(new Date().toISOString()), [dateToX]);
 
-  // Info segment index
-  const getInfoSegmentIndex = useCallback(
-    (row: GanttGameRow): number => {
-      if (row.segments.length === 0) return -1;
-      const firstSeg = row.segments[0];
-      const firstWidth = Math.max(MIN_BAR_WIDTH, dateToX(firstSeg.endDate) - dateToX(firstSeg.startDate));
-      if (firstWidth >= GAME_PILL_MIN_WIDTH) return 0;
-
-      let widestIdx = 0;
-      let widestWidth = 0;
-      for (let i = 0; i < row.segments.length; i++) {
-        const seg = row.segments[i];
-        const w = Math.max(MIN_BAR_WIDTH, dateToX(seg.endDate) - dateToX(seg.startDate));
-        if (w > widestWidth) { widestWidth = w; widestIdx = i; }
-      }
-      return widestIdx;
-    },
-    [dateToX]
-  );
+  // (Info-segment index is now computed inline over visibleSegments in the row render.)
 
   // ── Hover / tooltip via refs + direct DOM (avoids re-renders) ─────────
   // Row keys: "tl:{gameId}" = timeline row, "sb:{gameId}" = sidebar row
@@ -1022,20 +1117,9 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
 
   const handleSegmentLeave = useCallback(() => updateTooltipEl(null), [updateTooltipEl]);
 
-  // ── Sync sidebar vertical scroll with timeline ─────────────────────────
-  // Since both sidebar and timeline use the same virtualizer items (positioned
-  // absolutely), we sync by adjusting the sidebar's scrollTop to match the
-  // timeline's scrollTop offset (minus the sticky header).
-  useEffect(() => {
-    const timeline = scrollRef.current;
-    const sidebar = sidebarBodyRef.current;
-    if (!timeline || !sidebar) return;
-    const syncScroll = () => {
-      sidebar.scrollTop = timeline.scrollTop - HEADER_HEIGHT;
-    };
-    timeline.addEventListener('scroll', syncScroll, { passive: true });
-    return () => timeline.removeEventListener('scroll', syncScroll);
-  }, []);
+  // Sidebar and timeline share a single vertical scroller (the outer wrapper),
+  // so no scroll-sync effect is needed. Vertical scrolling of the outer wrapper
+  // moves both columns together.
 
   // ── Drag-to-scroll (ref-driven, zero re-renders) ─────────────────────
   const handleDragStart = useCallback((e: React.MouseEvent) => {
@@ -1123,6 +1207,25 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
     return () => ro.disconnect();
   }, []);
 
+  // ── Sidebar collapse-on-scroll: past 200px, sidebar shrinks to icon-only strip ─
+  useEffect(() => {
+    const el = outerScrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const collapsed = el.scrollTop > SIDEBAR_COLLAPSE_SCROLL_THRESHOLD;
+        setSidebarCollapsed(prev => (prev === collapsed ? prev : collapsed));
+      });
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+
   // ── Keyboard navigation ───────────────────────────────────────────────
   useEffect(() => {
     const el = wrapperRef.current;
@@ -1152,11 +1255,15 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
   }, [focusedRowIdx, rows]);
 
   // ── Row virtualizer (only renders visible rows in the timeline) ──────
+  // Scroll element is the OUTER wrapper (unified sidebar + timeline vertical scroll).
+  // scrollMargin accounts for the fixed HEADER_HEIGHT that sits above the first
+  // virtual row inside the timeline canvas (and the sidebar column).
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
-    getScrollElement: () => scrollRef.current,
+    getScrollElement: () => outerScrollRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 8,
+    scrollMargin: HEADER_HEIGHT,
     scrollPaddingStart: HEADER_HEIGHT,
   });
 
@@ -1329,28 +1436,143 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
         </div>
       </div>
 
-      {/* ── Gantt container (sidebar + scrollable timeline) ──────────── */}
-      <div className="flex" style={{ height: chartHeight }}>
+      {/* ── Hero band: Playing Now cards (sticky) ───────────────────── */}
+      <section
+        aria-label="Playing Now"
+        className="sticky top-0 z-40 px-4 md:px-10 py-3 bg-black/70 backdrop-blur-md border-b border-white/[0.05]"
+        style={{ minHeight: HERO_BAND_HEIGHT }}
+      >
+        <div className="flex items-baseline justify-between mb-2">
+          <h3 className="text-[10px] font-bold text-white/50 uppercase tracking-wider">Playing Now</h3>
+          <span className="text-[10px] text-white/25 tabular-nums">{heroGames.length} active</span>
+        </div>
+        {heroGames.length === 0 ? (
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-[11px] text-white/45">
+            <span className="w-2 h-2 rounded-full bg-white/20" />
+            Idle — no active games this week
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+            {heroGames.slice(0, 4).map(({ row, ribbon, elapsedMinutes }) => {
+              const ribbonMax = Math.max(0.1, ...ribbon);
+              return (
+                <div
+                  key={row.gameId}
+                  className="flex gap-2.5 p-2 rounded-lg bg-white/[0.03] border border-white/10 hover:border-fuchsia-500/30 transition-colors min-w-0"
+                >
+                  <div className="flex-shrink-0 w-10 h-14 rounded overflow-hidden bg-white/5">
+                    <FallbackImg
+                      gameId={row.gameId}
+                      title={row.title}
+                      coverUrl={row.coverUrl}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1 flex flex-col justify-between">
+                    <div>
+                      <div className="text-[11px] font-semibold text-white/85 truncate leading-tight">{row.title}</div>
+                      <div className="text-[9px] text-emerald-400/80 mt-0.5">{formatMinutes(elapsedMinutes)}</div>
+                    </div>
+                    {/* 14-day activity ribbon */}
+                    <div className="flex items-end gap-[2px] h-5" aria-hidden>
+                      {ribbon.map((h, i) => (
+                        <div
+                          key={i}
+                          className="flex-1 rounded-sm bg-emerald-400/60 min-w-[3px]"
+                          style={{ height: `${Math.max(6, (h / ribbonMax) * 100)}%` }}
+                          title={`Day ${i + 1}: ${h.toFixed(1)}h`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
-        {/* ── Sticky sidebar: game labels ─────────────────────────── */}
+      {/* ── Focus row: top-3 30-day games (12-week ridgeline) ───────── */}
+      <section
+        aria-label="Focus"
+        className="px-4 md:px-10 py-3 border-b border-white/[0.05]"
+        style={{ minHeight: FOCUS_ROW_HEIGHT }}
+      >
+        <div className="flex items-baseline justify-between mb-2">
+          <h3 className="text-[10px] font-bold text-white/50 uppercase tracking-wider">Focus — Last 30 days</h3>
+          <span className="text-[10px] text-white/25 tabular-nums">Top {focusGames.length}</span>
+        </div>
+        {focusGames.length === 0 ? (
+          <div className="text-[11px] text-white/40">No session data in the last 30 days.</div>
+        ) : (
+          <div className="space-y-2">
+            {focusGames.map(({ row, totalMinutes, weekly }, idx) => {
+              const weeklyMax = Math.max(0.1, ...weekly);
+              const W = 320;
+              const H = 42;
+              const stepX = W / Math.max(1, weekly.length - 1);
+              const points = weekly.map((h, i) => `${i * stepX},${H - (h / weeklyMax) * (H - 4)}`);
+              const linePath = `M ${points.join(' L ')}`;
+              const areaPath = `${linePath} L ${W},${H} L 0,${H} Z`;
+              // Priority accent via idx (top-1 fuchsia, then teal, then amber)
+              const accent = idx === 0 ? '#e879f9' : idx === 1 ? '#2dd4bf' : '#fbbf24';
+              return (
+                <div key={row.gameId} className="flex items-center gap-3">
+                  <div className="flex-shrink-0 w-6 h-8 rounded overflow-hidden bg-white/5">
+                    <FallbackImg
+                      gameId={row.gameId}
+                      title={row.title}
+                      coverUrl={row.coverUrl}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div className="min-w-0 w-40 md:w-56">
+                    <div className="text-[11px] font-semibold text-white/85 truncate">{row.title}</div>
+                    <div className="text-[9px] text-white/45">{formatMinutes(totalMinutes)} · 30d</div>
+                  </div>
+                  <svg
+                    viewBox={`0 0 ${W} ${H}`}
+                    preserveAspectRatio="none"
+                    className="flex-1 h-8"
+                    aria-hidden
+                  >
+                    <path d={areaPath} fill={accent} fillOpacity={0.15} />
+                    <path d={linePath} fill="none" stroke={accent} strokeWidth={1.5} strokeLinejoin="round" />
+                  </svg>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* ── Gantt container: sidebar + scrollable timeline share one vertical scroller ── */}
+      <div
+        ref={outerScrollRef}
+        className="flex items-start overflow-y-auto"
+        style={{ height: chartHeight }}
+      >
+
+        {/* ── Sidebar: game labels; collapses to icon strip once outer scrollTop > 200px ── */}
         <div
-          className="flex-shrink-0 overflow-hidden border-r border-white/[0.06] bg-black/40 backdrop-blur-sm z-20"
-          style={{ width: SIDEBAR_WIDTH }}
+          className="flex-shrink-0 border-r border-white/[0.06] bg-black/40 backdrop-blur-sm z-20"
+          style={{
+            width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH,
+            transition: 'width 220ms ease-out',
+          }}
         >
-          {/* Sidebar header (aligns with timeline date header) */}
+          {/* Sidebar header aligns vertically with the date header on the right. */}
           <div
-            className="flex items-end px-3 pb-2 border-b border-white/[0.06] bg-black/60"
+            className="flex items-end px-3 pb-2 border-b border-white/[0.06] bg-black/60 backdrop-blur-md"
             style={{ height: HEADER_HEIGHT }}
           >
-            <span className="text-[10px] text-white/30 font-medium uppercase tracking-wider">Games</span>
+            <span className="text-[10px] text-white/30 font-medium uppercase tracking-wider">
+              {sidebarCollapsed ? '' : 'Games'}
+            </span>
           </div>
 
-          {/* Sidebar rows — synced scroll with timeline */}
-          <div
-            className="overflow-y-auto scrollbar-hide"
-            ref={sidebarBodyRef}
-            style={{ height: chartHeight - HEADER_HEIGHT, scrollbarWidth: 'none' }}
-          >
+          {/* Sidebar rows — share outer scroller (no independent overflow / fixed height) */}
+          <div ref={sidebarBodyRef}>
             <div style={{ height: rowVirtualizer.getTotalSize() + 24, position: 'relative' }}>
               {rowVirtualizer.getVirtualItems().map((virtualItem) => {
                 const rowIndex = virtualItem.index;
@@ -1360,19 +1582,20 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                   <div
                     key={row.gameId}
                     className={cn(
-                      'absolute left-0 right-0 flex items-center gap-2.5 px-3 border-b border-white/[0.03] transition-[opacity] duration-200',
+                      'absolute left-0 right-0 flex items-center gap-2.5 px-3 border-b border-white/[0.03] transition-[opacity] duration-200 overflow-hidden',
                       isFocused && 'bg-fuchsia-500/5',
                     )}
                     style={{ height: ROW_HEIGHT, top: virtualItem.start }}
                     onMouseEnter={() => handleRowEnter(row.gameId)}
                     onMouseLeave={handleRowLeave}
+                    title={sidebarCollapsed ? row.title : undefined}
                     ref={(el) => {
                       const key = `sb:${row.gameId}`;
                       if (el) rowEls.current.set(key, el);
                       else rowEls.current.delete(key);
                     }}
                   >
-                    {/* Thumbnail */}
+                    {/* Thumbnail (always visible; sole content when collapsed) */}
                     <div className="flex-shrink-0 w-8 h-11 rounded-md overflow-hidden bg-white/5">
                       <FallbackImg
                         gameId={row.gameId}
@@ -1382,32 +1605,34 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                       />
                     </div>
 
-                    {/* Title + hours */}
-                    <div className="min-w-0 flex-1">
-                      <div className="text-[11px] font-semibold text-white/80 truncate leading-tight">
-                        {row.title}
-                      </div>
-                      <div className="text-[9px] text-white/30 mt-0.5">
-                        {formatHours(row.hoursPlayed)} played
-                      </div>
-                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                        <span
-                          className={cn(
-                            'inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-medium flex-shrink-0',
-                            segmentStyles[row.currentStatus]?.badgeBg ?? 'bg-white/10',
-                            segmentStyles[row.currentStatus]?.badgeText ?? 'text-white/60',
-                          )}
-                        >
-                          {row.currentStatus}
-                        </span>
-                        {(libraryStore.isInLibrary(row.gameId) || customGameStore.getGame(row.gameId)) && (
-                          <span className="inline-flex items-center gap-0.5 text-[8px] text-emerald-400/90" title="In library">
-                            <Library className="w-3 h-3 flex-shrink-0" />
-                            In library
+                    {/* Title + hours (hidden when sidebar collapsed) */}
+                    {!sidebarCollapsed && (
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[11px] font-semibold text-white/80 truncate leading-tight">
+                          {row.title}
+                        </div>
+                        <div className="text-[9px] text-white/30 mt-0.5">
+                          {formatHours(row.hoursPlayed)} played
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                          <span
+                            className={cn(
+                              'inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-medium flex-shrink-0',
+                              segmentStyles[row.currentStatus]?.badgeBg ?? 'bg-white/10',
+                              segmentStyles[row.currentStatus]?.badgeText ?? 'text-white/60',
+                            )}
+                          >
+                            {row.currentStatus}
                           </span>
-                        )}
+                          {(libraryStore.isInLibrary(row.gameId) || customGameStore.getGame(row.gameId)) && (
+                            <span className="inline-flex items-center gap-0.5 text-[8px] text-emerald-400/90" title="In library">
+                              <Library className="w-3 h-3 flex-shrink-0" />
+                              In library
+                            </span>
+                          )}
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
                 );
               })}
@@ -1415,11 +1640,11 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
           </div>
         </div>
 
-        {/* ── Scrollable timeline area ────────────────────────────── */}
+        {/* ── Timeline area — only horizontal scroll (vertical goes to outer wrapper) ── */}
         <div
           ref={scrollRef}
-          className="relative flex-1 overflow-x-auto overflow-y-auto select-none cursor-grab"
-          style={{ willChange: 'scroll-position' }}
+          className="relative flex-1 overflow-x-auto select-none cursor-grab"
+          style={{ willChange: 'scroll-position', overflowY: 'hidden' }}
           onMouseDown={handleDragStart}
         >
           <div className="relative" style={{ width: timelineWidth, minWidth: '100%', height: HEADER_HEIGHT + rowVirtualizer.getTotalSize() + 24 }}>
@@ -1602,9 +1827,40 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
           {rowVirtualizer.getVirtualItems().map((virtualItem) => {
             const rowIndex = virtualItem.index;
             const row = rows[rowIndex];
-            const infoSegIdx = getInfoSegmentIndex(row);
             const isFocused = focusedRowIdx === rowIndex;
             const gameSessions = sessionsByGame.get(row.gameId);
+
+            // v1.0.41 audit: only Playing / Playing Now segments render as bars.
+            // Want-to-Play + On Hold segments are hidden entirely; Completed segments
+            // render as gold chevron markers at their completion timestamp.
+            const visibleSegments = row.segments.filter(
+              (s) => s.status === 'Playing' || s.status === 'Playing Now',
+            );
+            const completionSegments = row.segments.filter((s) => s.status === 'Completed');
+
+            // Info-segment index computed over visibleSegments (indices differ from row.segments).
+            let visibleInfoIdx = -1;
+            if (visibleSegments.length > 0) {
+              const firstW = Math.max(
+                MIN_BAR_WIDTH,
+                dateToX(visibleSegments[0].endDate) - dateToX(visibleSegments[0].startDate),
+              );
+              if (firstW >= GAME_PILL_MIN_WIDTH) {
+                visibleInfoIdx = 0;
+              } else {
+                let widestIdx = 0;
+                let widestW = 0;
+                for (let i = 0; i < visibleSegments.length; i++) {
+                  const s = visibleSegments[i];
+                  const w = Math.max(MIN_BAR_WIDTH, dateToX(s.endDate) - dateToX(s.startDate));
+                  if (w > widestW) {
+                    widestW = w;
+                    widestIdx = i;
+                  }
+                }
+                visibleInfoIdx = widestIdx;
+              }
+            }
 
             return (
               <div
@@ -1628,10 +1884,10 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                 onMouseLeave={handleRowLeave}
               >
 
-                {/* ── Gap indicators between segments ────────────────── */}
-                {row.segments.map((seg, i) => {
+                {/* ── Gap indicators between visible (Playing / Playing Now) segments ── */}
+                {visibleSegments.map((seg, i) => {
                   if (i === 0) return null;
-                  const prevEnd = row.segments[i - 1].endDate;
+                  const prevEnd = visibleSegments[i - 1].endDate;
                   const curStart = seg.startDate;
                   const gapMs = new Date(curStart).getTime() - new Date(prevEnd).getTime();
                   if (gapMs < GAP_THRESHOLD_DAYS * DAY_MS) return null;
@@ -1655,29 +1911,50 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                   );
                 })}
 
-                {/* ── Segment bars (one per status period; separators between different statuses) ── */}
-                {row.segments.map((seg, i) => {
+                {/* ── Segment bars: only Playing / Playing Now (uniform height, opacity = session intensity) ── */}
+                {visibleSegments.map((seg, i) => {
                   const left = dateToX(seg.startDate);
                   const right = dateToX(seg.endDate);
                   const width = Math.max(MIN_BAR_WIDTH, right - left);
                   const style = getSegmentStyle(seg.status);
-                  const isInfoSegment = i === infoSegIdx;
+                  const isInfoSegment = i === visibleInfoIdx;
                   const isTealBar = seg.status === 'Playing Now';
                   const isOngoing = new Date(seg.endDate).getTime() >= Date.now() - DAY_MS;
-                  const prevStatus = i > 0 ? row.segments[i - 1].status : null;
+                  const prevStatus = i > 0 ? visibleSegments[i - 1].status : null;
                   const showSegmentSeparator = i > 0 && prevStatus !== seg.status;
                   const isThin = isTealBar && width < THIN_BAR_THRESHOLD;
 
+                  // ── Session-intensity opacity ─────────────────────────────
+                  // Playing Now sub-segments are session-derived, so opacity = 1.
+                  // Playing (gap) sub-segments dim proportionally to actual sessionMinutes / wallClockMinutes.
+                  const segStartMs = new Date(seg.startDate).getTime();
+                  const segEndMs = new Date(seg.endDate).getTime();
+                  const durationMinutes = Math.max(0, (segEndMs - segStartMs) / 60_000);
+                  const sessionMinutes = isTealBar
+                    ? (seg.sessionMinutes ?? durationMinutes)
+                    : sumSessionMinutesInRange(gameSessions, segStartMs, segEndMs);
+                  const intensityRatio = durationMinutes > 0 ? sessionMinutes / durationMinutes : 0;
+                  const barOpacity = isTealBar
+                    ? 1
+                    : sessionMinutes === 0
+                      ? 0.2
+                      : Math.max(0.15, Math.min(1.0, intensityRatio));
+
+                  // Uniform bar height; Playing Now slightly taller for emphasis
+                  const barHeight = isTealBar ? BAR_HEIGHT_PLAYING_NOW : BAR_HEIGHT_DEFAULT;
+                  const barTop = (ROW_HEIGHT - barHeight) / 2;
+
                   const barKey = `${row.gameId}:${i}`;
                   const entranceDone = ganttBarEntranceDoneRef.current.has(barKey);
+                  // Animate to intensity-driven opacity (framer would otherwise clobber the style prop).
                   const barMotionProps = entranceDone
                     ? {
                         initial: false as const,
-                        animate: { scaleX: 1, opacity: 1 } as const,
+                        animate: { scaleX: 1, opacity: barOpacity },
                       }
                     : {
                         initial: { scaleX: 0, opacity: 0 } as const,
-                        animate: { scaleX: 1, opacity: 1 } as const,
+                        animate: { scaleX: 1, opacity: barOpacity },
                         transition: {
                           duration: 0.4,
                           delay: rowIndex * 0.03 + i * 0.02,
@@ -1696,17 +1973,19 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                       aria-label={`${row.title}: ${seg.status} from ${formatShortDate(seg.startDate)} to ${isOngoing ? 'Present' : formatShortDate(seg.endDate)}, ${formatSegmentDuration(seg)}`}
                       className={cn(
                         'absolute rounded-full transition-[filter,box-shadow] duration-200',
-                        'hover:brightness-110 hover:shadow-lg hover:scale-y-[1.04]',
+                        'hover:brightness-110 hover:shadow-lg',
                         style.bar,
                         style.glow,
                         style.border,
+                        isTealBar && 'ring-1 ring-fuchsia-400/40 shadow-fuchsia-500/20',
                         isThin && 'overflow-visible',
                       )}
                       style={{
                         left,
                         width,
-                        top: BAR_V_PADDING / 2,
-                        height: ROW_HEIGHT - BAR_V_PADDING,
+                        top: barTop,
+                        height: barHeight,
+                        opacity: barOpacity,
                         transformOrigin: 'left center',
                       }}
                     >
@@ -1853,6 +2132,31 @@ export function JourneyGanttView({ journeyEntries, statusHistory, sessions }: Jo
                         </div>
                       )}
                     </motion.div>
+                  );
+                })}
+
+                {/* ── Completion chevrons: gold ▲ marker per Completed segment ── */}
+                {!hiddenStatuses.has('Completed') && completionSegments.map((seg, i) => {
+                  const x = dateToX(seg.startDate);
+                  return (
+                    <div
+                      key={`chev-${i}`}
+                      className="absolute z-20 flex flex-col items-center pointer-events-auto cursor-pointer group/chev"
+                      style={{ left: x - 7, top: ROW_HEIGHT / 2 - 8 }}
+                      onMouseMove={(e) => {
+                        e.stopPropagation();
+                        handleSegmentHover(e, seg, row);
+                      }}
+                      onMouseLeave={handleSegmentLeave}
+                      aria-label={`Completed on ${formatShortDate(seg.startDate)}`}
+                    >
+                      <span
+                        className="text-amber-400 text-[14px] leading-none drop-shadow-[0_0_4px_rgba(251,191,36,0.55)] select-none"
+                        aria-hidden
+                      >
+                        ▲
+                      </span>
+                    </div>
                   );
                 })}
 

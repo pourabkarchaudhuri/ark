@@ -30,6 +30,9 @@ interface StoredData {
   lastUpdated: string;
 }
 
+// Module-level guard so HMR doesn't stack duplicate beforeunload listeners.
+let _libraryBeforeUnloadInstalled = false;
+
 /**
  * Library Store - Manages user's personal game library
  * Stores only user-specific data (status, priority, notes) for games added from Steam/Epic
@@ -37,13 +40,24 @@ interface StoredData {
 class LibraryStore {
   private entries: Map<string, LibraryGameEntry> = new Map(); // keyed by universal gameId string
   private listeners: Set<() => void> = new Set();
+  /**
+   * Hours-only subscription channel. Fired by every mutation that touches
+   * `hoursPlayed` (including session-tracker updates via updateHoursFromSessions).
+   * Regular status/collection mutations ALSO fire this channel — hours listeners
+   * are a superset of regular listeners. This split lets 15s session ticks
+   * update per-card hours without invalidating expensive top-level memos
+   * (games grid, Oracle reco signature) that only need to react to
+   * status/collection changes.
+   */
+  private hoursListeners: Set<() => void> = new Set();
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
   private _sortedCache: LibraryGameEntry[] | null = null;
 
   constructor() {
     this.initialize();
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && !_libraryBeforeUnloadInstalled) {
+      _libraryBeforeUnloadInstalled = true;
       window.addEventListener('beforeunload', () => this.flushSave());
     }
   }
@@ -173,14 +187,34 @@ class LibraryStore {
     }
   }
 
-  // Subscribe to changes
+  // Subscribe to status / collection changes (adds, removes, status/priority/meta edits).
+  // Does NOT fire on session-driven hours-only ticks. Use this for expensive top-level
+  // memos and Oracle-signature rebuilds so 15s session ticks don't invalidate them.
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * Subscribe to hours changes — fires on session-tracker ticks AND on regular
+   * status/collection mutations (superset of `subscribe`). Use this for
+   * per-card live-hours displays that need to update on every session tick.
+   */
+  subscribeHours(listener: () => void): () => void {
+    this.hoursListeners.add(listener);
+    return () => this.hoursListeners.delete(listener);
+  }
+
   private notifyListeners() {
     this.listeners.forEach((listener) => listener());
+    // Regular mutations are a superset — anyone watching hours also cares
+    // about status/collection changes (which can change hoursPlayed too).
+    this.hoursListeners.forEach((listener) => listener());
+  }
+
+  /** Fire ONLY the hours channel — used by updateHoursFromSessions. */
+  private notifyHoursListeners() {
+    this.hoursListeners.forEach((listener) => listener());
   }
 
   // Add a game to the library
@@ -288,6 +322,20 @@ class LibraryStore {
       });
     } else if (statusChanged && isCompleted && !hasJourney) {
       const meta = updated.cachedMeta ?? existing.cachedMeta;
+      // Prefer the earliest evidence of play we can find so the journey row
+      // has an accurate `firstPlayedAt`, in this order:
+      //   1. first recorded play session (executable actually ran)
+      //   2. first transition into Playing / Playing Now (manual status flip)
+      //   3. lastPlayedAt (best-effort from a data source like Steam)
+      //   4. addedAt (definitely earlier than nowIso)
+      const firstSession = sessionStore.getFirstSessionStart(gameId);
+      const firstPlayingTs = statusHistoryStore.getFirstPlayingTransition(gameId);
+      const firstPlayedAt =
+        firstSession > 0
+          ? new Date(firstSession).toISOString()
+          : firstPlayingTs !== null
+            ? new Date(firstPlayingTs).toISOString()
+            : (updated.lastPlayedAt ?? addedAtIso ?? nowIso);
       journeyStore.record({
         gameId,
         title: resolveJourneyTitleForRecord(updated, existing),
@@ -298,7 +346,7 @@ class LibraryStore {
         status: updated.status,
         hoursPlayed: updated.hoursPlayed,
         rating: updated.rating,
-        firstPlayedAt: updated.lastPlayedAt ?? addedAtIso ?? nowIso,
+        firstPlayedAt,
         lastPlayedAt: updated.lastPlayedAt ?? nowIso,
         addedAt: addedAtIso,
       });
@@ -444,7 +492,10 @@ class LibraryStore {
     existing.updatedAt = new Date();
     this.invalidateSortedCache();
     this.scheduleSave();
-    this.notifyListeners();
+    // Fire the hours-only channel — 15s session ticks must NOT invalidate
+    // the games grid memo, Oracle library-signature, or other top-level
+    // consumers that only care about status/collection changes.
+    this.notifyHoursListeners();
 
     journeyStore.syncProgress(gameId, { hoursPlayed: effectiveHours, lastPlayedAt });
   }

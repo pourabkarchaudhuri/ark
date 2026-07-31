@@ -4,6 +4,40 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.41] - 2026-06-29
+
+### Added
+- **Voyage OCD hero band + focus row** — Sticky Playing Now section (cover, elapsed minutes, 14-day activity ribbon) plus a focus strip of the top 3 games by rolling 30-day playtime, each rendered as a 12-week SVG ridgeline.
+- **Completion chevron milestones** — Completed segments now render as gold chevrons anchored at the completion timestamp instead of wide grey wall-clock bars. Legend toggle still hides them.
+- **Sidebar auto-collapse** — Voyage sidebar collapses to a 44px thumbnail strip after 200px of vertical scroll and expands on scroll back.
+- **Auto Want-to-Play → Playing (opt-in)** — Sessions ≥10 min automatically promote a game from Want-to-Play to Playing when `preferences.autoStatusTransition` is enabled. `autoTransitionedAt` timestamped for potential undo. Never overwrites Completed / On-Hold / Playing-Now.
+- **`useOnHoldSuggestions` hook** — Returns games in Playing with no session for 14+ days for future "Suggest pausing?" UI.
+- **`window.exeInfo.analyze(exePath)` IPC** — Reads mtime, file size, digital-signature signer + validity via PowerShell `Get-AuthenticodeSignature`, and computes `isLikelyLauncher` from known launcher publishers (EA, Riot, Steam, Valve, Rockstar, Ubisoft, Epic, Bethesda, Blizzard, Battle.net, GOG, Uplay, Origin) + basename keywords.
+- **`sessionStore.getFirstSessionStart(gameId)` and `statusHistoryStore.getFirstPlayingTransition(gameId)` helpers** — Reliable "first played" signals used across all 5 previously-buggy fallback chains.
+- **`libraryStore.subscribeHours(cb)` channel** — Separate subscription channel for hours-only mutations; `updateHoursFromSessions` no longer wakes status/collection subscribers.
+- **`useLibraryHours(gameId)` hook** — Per-card live hours subscription without invalidating the master games memo.
+- **"Check for Updates" button** — About tab in Settings now has a manual check button with `RefreshCw` spinner, latest-version display, and one-click Download.
+- **Update snackbar error state** — Reachability failures now show a dismissible "Couldn't reach GitHub — will try again in 2 min." toast with Retry-now action instead of silent `console.error`.
+- **Transmissions cover art** — Scheduled Broadcast cards extract images from event pages via `og:image` → `twitter:image` → JSON-LD → `link rel=image_src` → hero `<img>` precedence chain and render them at the top of the card.
+
+### Fixed
+- **Voyage / OCD scroll desync** — Unified sidebar + Gantt into one vertical scroll container. Deleted the one-way scroll-sync `useEffect`. Wheel events anywhere in the chart now drive both columns together.
+- **Voyage / OCD bar crowding** — Timeline now filters out Want-to-Play and On-Hold segments entirely. Playing and Playing-Now bars scale opacity to per-segment session intensity, so real playtime dominates visual weight instead of wall-clock duration.
+- **Captain's Log "Invalid Date"** — Journey-view card date rendering now uses the existing `parseJourneyIso` guard. Journey store additionally sanitizes `addedAt` / `firstPlayedAt` / `lastPlayedAt` / `removedAt` on load, record, and import so garbage strings can't be re-persisted.
+- **Session tracker missing launcher-only games** — Full-path matching added on top of basename matching. Games sharing a basename (common in Unity indie titles) no longer double-count. First-time basename-only match logs a one-shot warning.
+- **`MISSES_BEFORE_END` bumped 2 → 4** — Sessions no longer fragment when AV scans, heavy GPU load, or PowerShell contention delays two consecutive tasklist polls.
+- **`firstPlayedAt` derived from library-add date** — 5 code paths (library-store Completed transition, journey-store post-import backfill, useGameStore useLibraryGames + ensureArkBackfill, custom-game-store add/update/backfill) now use `sessionStore.getFirstSessionStart` → `statusHistoryStore.getFirstPlayingTransition` → `lastPlayedAt` → `addedAt` fallback chain.
+- **Random-offline banner** — Adblocker no longer intercepts `connectivitycheck.gstatic.com` (whitelist bypass added before FiltersEngine matching). Probe timeout raised 5 s → 12 s. Requires 2 consecutive failures before flipping offline.
+- **Update version comparison** — Pre-release tags (e.g. `1.0.42-rc1`) now compare correctly against release tags. Silent "no update" on suffixed releases is fixed.
+
+### Performance
+- **Master games memo no longer rebuilds on session ticks** — `useGameStore`'s 6000+-entry merged games array is now driven by the non-hours library channel. 15-second `updateHoursFromSessions` writes no longer invalidate the memo or cascade through every subscriber.
+- **Oracle library-signature rebuild filtered** — Signature check subscribes to the non-hours channel; session ticks no longer trigger it.
+- **Session-store + status-history-store writes debounced** — 300 ms scheduler (matching library-store) replaces synchronous `JSON.stringify` + `localStorage.setItem` on every session end and status change.
+- **Oracle shelf virtualization** — `useVirtualizer` (horizontal, 264 px card width, 3 overscan) applied to shelf carousels. Only ~10 cards render per shelf instead of 40+.
+- **`ann-graph-view` RAF ID leak** — Supernova + shockwave animation ID sets no longer grow unbounded during long play sessions. IDs are removed each frame as ticks fire.
+- **Idempotent `beforeunload` listeners** — Library, journey, custom-game store singletons no longer stack handlers under HMR / tests.
+
 ## [1.0.40] - 2026-06-28
 
 ### Performance

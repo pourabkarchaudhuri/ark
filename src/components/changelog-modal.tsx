@@ -9,6 +9,32 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.41': {
+    title: "What's New in Ark 1.0.41",
+    changes: [
+      'Voyage / OCD Mode overhaul — Hero band with Playing Now cards and 14-day activity ribbons; Focus row with 12-week ridgelines for your top 3 games; the timeline archive now hides Want-to-Play and On-Hold clutter, shows Completions as gold chevron milestones, and scales bar opacity to session intensity so real playtime finally stands out.',
+      'Voyage unified scroll — The sidebar and Gantt timeline now share one vertical scroll container. No more panels drifting apart when you scroll. Sidebar auto-collapses to a thumbnail strip after scrolling past 200px.',
+      'Captain\'s Log dates fixed — Cards no longer render "Invalid Date" for entries with corrupt legacy timestamps.',
+      'Auto Want-to-Play → Playing — Behind an opt-in Preferences toggle, sessions longer than 10 minutes automatically move a game out of your Want-to-Play backlog into Playing. Only fires from Want-to-Play; never overwrites Completed, On-Hold, or an explicit Playing-Now state.',
+      'On-Hold suggestions — New helper hook detects games sitting in Playing with no session for 14+ days so the UI can gently suggest pausing them.',
+      'Session tracker no longer misses launchers — Full exe-path matching added on top of basename matching. Games sharing the same executable name (common in indie Unity titles) no longer double-count. A one-shot warning fires when only the basename matches.',
+      'Session hiccup tolerance — Bumped MISSES_BEFORE_END from 2 to 4 polls (~60 s) so heavy GPU load, AV scans, and PowerShell contention no longer split one play block into many.',
+      'Exe metadata analysis — New IPC (window.exeInfo.analyze) reads exe mtime, size, digital signature, and detects known launchers (EA, Riot, Steam, Valve, Rockstar, Ubisoft, Epic, Bethesda, Blizzard, Battle.net, GOG, Uplay, Origin) so future UI can warn "That looks like a launcher, not a game" before tracking silently fails.',
+      'Playing-since dates now correct — First-play timestamps now derive from your earliest recorded session (or first Want-to-Play → Playing status transition), not from when the game was added to the library. Fixes 5 code paths that used the library-add date.',
+      'Update popup no longer silently fails — When GitHub is unreachable at startup, the snackbar now shows a "Couldn\'t reach GitHub — will try again in 2 min." toast with Retry now / Dismiss actions instead of failing silently.',
+      'Check for Updates button — About tab in Settings now has a manual "Check for Updates" button that surfaces the latest version and offers a one-click download.',
+      'Update version comparison accepts pre-release tags — Releases tagged 1.0.42-rc1 vs 1.0.41 are now compared correctly. No more silent "no update" when a pre-release ships.',
+      'Random-offline banner fixed — The connectivity probe is now whitelisted through the adblocker, uses a 12 s timeout, and requires 2 consecutive failures before flipping. Corporate networks and adblocked probes no longer flap.',
+      'Transmissions cover art — Scheduled Broadcast cards now show real cover images extracted from event pages (og:image → twitter:image → JSON-LD → link rel image_src → first hero img fallback chain).',
+      'Session-tick perf — Library store now has a separate hours-only subscription channel. 15-second session-tracker ticks no longer wake every subscriber in the app; the master games memo, Oracle signature rebuild, and Medals view all skip the wake-up.',
+      'Oracle shelf virtualization — Shelf carousels now use @tanstack/react-virtual (horizontal). Only the visible ~10 cards render per shelf instead of all 40+.',
+      'ann-graph RAF leak fixed — Supernova and shockwave animation IDs are now removed from the tracking set as each frame fires, not just on unmount. Set no longer grows unbounded during long play sessions.',
+      'Session + status-history writes debounced — Persistence to localStorage is now 300 ms-debounced (matching library-store), eliminating the every-15-second JSON.stringify freeze during play.',
+      'Journey store sanitizes dates on load, record, and import — "undefined" strings and unparseable timestamps no longer get re-persisted; the invalid-date bug can\'t regress.',
+      'beforeunload listeners are now idempotent — Library, journey, and custom-game stores no longer stack beforeunload handlers under HMR / tests.',
+      'useLibraryHours hook — New per-card hook that subscribes to hours-only changes so individual game cards can show live playtime without invalidating the whole games list.',
+    ],
+  },
   '1.0.40': {
     title: "What's New in Ark 1.0.40",
     changes: [

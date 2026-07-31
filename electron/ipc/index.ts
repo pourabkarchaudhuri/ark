@@ -23,6 +23,7 @@ import { register as registerDevlogHandlers } from './devlog-handlers.js';
 import { register as registerEventScraperHandlers } from './event-scraper-handlers.js';
 import { register as registerEgdataHandlers } from './egdata-handlers.js';
 import { register as registerCatalogHandlers } from './catalog-handlers.js';
+import { register as registerExeInfoHandlers } from './exe-info-handlers.js';
 
 export function registerAllHandlers(getMainWindow: () => BrowserWindowType | null): void {
   registerWindowHandlers(getMainWindow);
@@ -37,6 +38,7 @@ export function registerAllHandlers(getMainWindow: () => BrowserWindowType | nul
   registerSettingsHandlers();
   registerDialogHandlers(getMainWindow);
   registerSessionHandlers();
+  registerExeInfoHandlers();
   registerWebviewHandlers(getMainWindow);
   registerOllamaHandlers();
   registerAnnHandlers();

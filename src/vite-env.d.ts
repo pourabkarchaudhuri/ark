@@ -169,6 +169,7 @@ interface ScrapedEventData {
   endDate?: number;
   youtubeUrls: string[];
   twitchUrls: string[];
+  imageUrl?: string;
   scrapedAt: number;
 }
 

@@ -418,6 +418,11 @@ contextBridge.exposeInMainWorld('sessionTracker', {
   },
 });
 
+// Expose Exe Info API to renderer (analyze game exe metadata + Authenticode signature)
+contextBridge.exposeInMainWorld('exeInfo', {
+  analyze: (exePath) => ipcRenderer.invoke('exe-info:analyze', { exePath }),
+});
+
 // Expose News API to renderer (RSS feeds from gaming news sites)
 contextBridge.exposeInMainWorld('newsApi', {
   getRSSFeeds: () =>

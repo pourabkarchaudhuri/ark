@@ -59,7 +59,11 @@ export function useOnlineStatus() {
     // navigator.onLine only detects physical disconnection (Wi-Fi off, cable unplugged).
     // This probe catches "connected but no internet" by pinging a lightweight endpoint.
     const PROBE_INTERVAL_MS = 30_000; // 30 seconds
-    const PROBE_TIMEOUT_MS = 5_000;   // 5 second timeout
+    const PROBE_TIMEOUT_MS = 12_000;  // 12 second timeout — tolerate slow networks
+    const FAIL_THRESHOLD = 2;         // require N consecutive failures before flipping offline
+
+    // Local (per-effect) counter — resets to 0 on any success.
+    let failCount = 0;
 
     const probeNetwork = async () => {
       // Only probe when the browser thinks we're online
@@ -74,13 +78,15 @@ export function useOnlineStatus() {
           signal: controller.signal,
         });
         clearTimeout(timer);
-        // If we were marked offline but the probe succeeded, flip back to online
+        // Success — reset the fail counter and flip back online if needed
+        failCount = 0;
         if (!wasOnlineRef.current) {
           handleOnline();
         }
       } catch {
-        // Probe failed — mark as offline even though navigator.onLine is true
-        if (wasOnlineRef.current) {
+        // Probe failed — only flip offline after N consecutive failures
+        failCount += 1;
+        if (failCount >= FAIL_THRESHOLD && wasOnlineRef.current) {
           handleOffline();
         }
       }

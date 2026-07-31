@@ -575,6 +575,7 @@ const EventCard = memo(function EventCard({
   }, [event.url, onOpenUrl]);
 
   const celestial = useMemo(() => pickCelestial(event.name), [event.name]);
+  const hasCoverArt = !!event.imageUrl;
 
   const card = (
     <div
@@ -592,19 +593,28 @@ const EventCard = memo(function EventCard({
         isPast && 'opacity-50',
       )}
     >
-      {/* ── Celestial body etching ── */}
-      <img
-        src={celestial.src}
-        alt=""
-        aria-hidden
-        className="pointer-events-none absolute inset-0 w-full h-full object-cover"
-        style={{
-          opacity: 0.08,
-          transform: `translate(${celestial.x}px, ${celestial.y}px) rotate(${celestial.rotate}deg) scale(${celestial.scale})`,
-          filter: 'brightness(0.7) contrast(1.3)',
-          mixBlendMode: 'lighten',
-        }}
-      />
+      {/* ── Cover art (scraped) OR celestial body etching (fallback) ── */}
+      {hasCoverArt ? (
+        <img
+          src={event.imageUrl}
+          alt=""
+          loading="lazy"
+          className="w-full h-32 object-cover rounded-t-[20px] flex-shrink-0"
+        />
+      ) : (
+        <img
+          src={celestial.src}
+          alt=""
+          aria-hidden
+          className="pointer-events-none absolute inset-0 w-full h-full object-cover"
+          style={{
+            opacity: 0.08,
+            transform: `translate(${celestial.x}px, ${celestial.y}px) rotate(${celestial.rotate}deg) scale(${celestial.scale})`,
+            filter: 'brightness(0.7) contrast(1.3)',
+            mixBlendMode: 'lighten',
+          }}
+        />
+      )}
 
       {/* ── Content ── */}
       <div className="relative flex flex-col flex-1 px-5 py-5 gap-4">

@@ -25,6 +25,13 @@ interface Settings {
     preferredChatProvider?: PreferredChatProvider; // Single source of truth for chat model
     /** When false (default), AI Chat UI and cloud LLM providers are hidden; only Ollama is used. */
     betaFeatures?: boolean;
+    /**
+     * Auto-transition a game from "Want to Play" → "Playing" after a session ≥10 min
+     * (v1.0.41). Opt-in — default false so the app never mutates status without the
+     * user's explicit consent. When on, `libraryStore.updateEntry` is called with
+     * `autoTransitionedAt` set to the moment the transition fired.
+     */
+    autoStatusTransition?: boolean;
   };
   ollama: {
     enabled: boolean;
@@ -68,7 +75,7 @@ class SettingsStore {
     const defaults = (): Settings => ({
       version: SETTINGS_VERSION,
       apiKeys: {},
-      preferences: { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: false },
+      preferences: { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: false, autoStatusTransition: false },
       ollama: {
         enabled: true,
         url: 'http://localhost:11434',
@@ -307,6 +314,21 @@ class SettingsStore {
     }
 
     logger.log(`[SettingsStore] Auto-launch set to ${enabled}`);
+  }
+
+  // Auto Want-to-Play → Playing transition (opt-in; default false).
+  getAutoStatusTransition(): boolean {
+    return this.settings.preferences?.autoStatusTransition === true;
+  }
+
+  setAutoStatusTransition(enabled: boolean): void {
+    if (!this.settings.preferences) {
+      this.settings.preferences = { autoLaunch: true, autoStatusTransition: enabled };
+    } else {
+      this.settings.preferences.autoStatusTransition = enabled;
+    }
+    this.saveSettings();
+    logger.log(`[SettingsStore] Auto status transition set to ${enabled}`);
   }
 }
 

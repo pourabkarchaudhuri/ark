@@ -62,26 +62,47 @@ const IDLE_THRESHOLD_S = 300;      // 5 minutes idle threshold
 /**
  * Number of consecutive polls a process must be missing before we end the
  * session. `tasklist` can momentarily miss a process (CPU spike, AV scan, fast
- * relaunch), and basename matching can flicker. Requiring 2 misses (~30s)
- * before ending prevents a single hiccup from fragmenting one play session into
- * many tiny ones — a major cause of "duration looks too short / resets".
+ * relaunch), and basename matching can flicker. Requiring 4 misses (~60s)
+ * tolerates the common transient blips reported by users under load —
+ * antivirus full-file scans that pause tasklist for 30–45s, heavy GPU load
+ * that starves our snapshot, and the brief PowerShell/wmic contention when
+ * our own full-path snapshot runs in parallel — without letting the
+ * "Playing Now" indicator lag more than a minute past a real quit.
  */
-const MISSES_BEFORE_END = 2;
+const MISSES_BEFORE_END = 4;
 
 // ---------------------------------------------------------------------------
 // Process detection — single OS call per poll tick, not per game
 // ---------------------------------------------------------------------------
 
-/** Cache of lowercased process names from the most recent snapshot. */
-let _runningProcesses: Set<string> = new Set();
+/** Cache of lowercased process basenames from the most recent snapshot. */
+let _runningBasenames: Set<string> = new Set();
+/** Cache of lowercased full executable paths from the most recent snapshot. */
+let _runningPaths: Set<string> = new Set();
 
 /**
- * Snapshot all running processes into `_runningProcesses`.
- * Called once per poll tick — avoids spawning N `tasklist` commands for N games.
+ * Basenames we have already warned about falling back to basename-only
+ * matching for. Prevents the log from filling up with the same "possible
+ * collision" line every 15s while a game is running.
+ */
+const _basenameCollisionWarned: Set<string> = new Set();
+
+/**
+ * Snapshot all running processes into `_runningBasenames` and `_runningPaths`.
+ * Called once per poll tick — avoids spawning N per-game commands.
+ *
+ * On Windows we do two calls:
+ *   - `tasklist /FO CSV /NH` → basenames (fast, always works, no path info)
+ *   - `powershell Get-Process | Select-Object Path` → full paths (slower, may
+ *     miss elevated processes when we're not admin)
+ * Both are populated so we can primarily match on full path and fall back to
+ * basename when the path snapshot doesn't include a process (e.g. game
+ * launched with elevation).
  */
 function refreshProcessSnapshot(): void {
   try {
     if (process.platform === 'win32') {
+      // ---- Basenames (fast, primary source of truth for "is anything named X running") ----
       // /FO CSV /NH → one line per process: "imagename","PID","sessionname","session#","memUsage"
       const output = execSync('tasklist /FO CSV /NH', {
         encoding: 'utf-8',
@@ -94,25 +115,80 @@ function refreshProcessSnapshot(): void {
         const match = line.match(/^"([^"]+)"/);
         if (match) names.add(match[1].toLowerCase());
       }
-      _runningProcesses = names;
+      _runningBasenames = names;
+
+      // ---- Full paths (slower, best-effort — some processes hide their Path from non-admin) ----
+      const paths = new Set<string>();
+      try {
+        const psOut = execSync(
+          'powershell.exe -NoProfile -NonInteractive -Command "Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -ExpandProperty Path"',
+          { encoding: 'utf-8', timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }
+        );
+        for (const line of psOut.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed) paths.add(trimmed.toLowerCase());
+        }
+      } catch {
+        // PowerShell path snapshot failed — we fall through to basename matching.
+        // Don't clobber the previous _runningPaths, in case this was a transient failure.
+        return;
+      }
+      _runningPaths = paths;
     } else {
-      // macOS / Linux — `ps -eo comm=` prints just the command name, one per line
-      const output = execSync('ps -eo comm=', { encoding: 'utf-8', timeout: 5000 });
+      // macOS / Linux — `ps -eo comm=,command=` prints basename + full command per line
+      const output = execSync('ps -eo comm=,command=', { encoding: 'utf-8', timeout: 5000 });
       const names = new Set<string>();
+      const paths = new Set<string>();
       for (const line of output.split('\n')) {
         const trimmed = line.trim();
-        if (trimmed) names.add(trimmed.toLowerCase());
+        if (!trimmed) continue;
+        const spaceIdx = trimmed.indexOf(' ');
+        const comm = spaceIdx > 0 ? trimmed.slice(0, spaceIdx) : trimmed;
+        const command = spaceIdx > 0 ? trimmed.slice(spaceIdx + 1) : trimmed;
+        names.add(comm.toLowerCase());
+        // First token of `command` is the executable (usually an absolute path)
+        const firstArg = command.split(/\s+/)[0];
+        if (firstArg && firstArg.startsWith('/')) paths.add(firstArg.toLowerCase());
       }
-      _runningProcesses = names;
+      _runningBasenames = names;
+      _runningPaths = paths;
     }
   } catch {
-    // If the snapshot fails, keep the previous set — better stale than empty
+    // If the snapshot fails, keep the previous sets — better stale than empty
   }
 }
 
-/** Check the cached snapshot for a specific executable. */
+/**
+ * Check the cached snapshot for a specific executable.
+ *
+ * Prefers a full-path match (avoids treating two unrelated `game.exe` binaries
+ * as the same tracked game). Falls back to basename match — and logs a
+ * one-time warning — when the path snapshot doesn't include this process
+ * (elevated processes, non-Windows, or a failed PowerShell call).
+ */
 function isProcessRunning(exePath: string): boolean {
-  return _runningProcesses.has(path.basename(exePath).toLowerCase());
+  const normalizedPath = exePath.toLowerCase();
+
+  // Primary: exact full-path match
+  if (_runningPaths.has(normalizedPath)) return true;
+
+  // Fallback: basename match. Only trust it if we can't identify by path.
+  const basename = path.basename(exePath).toLowerCase();
+  if (_runningBasenames.has(basename)) {
+    // Warn once per basename per app run — if _runningPaths is populated but
+    // this exact path isn't in it, we're guessing based on a common filename.
+    if (_runningPaths.size > 0 && !_basenameCollisionWarned.has(basename)) {
+      _basenameCollisionWarned.add(basename);
+      logger.warn(
+        `[SessionTracker] Basename-only match for "${basename}" — the full path ` +
+        `"${exePath}" was not in the process-path snapshot. This may be an elevated ` +
+        `process (safe) or an unrelated collision (a different program of the same ` +
+        `filename). If sessions look wrong, check whether both are running.`
+      );
+    }
+    return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

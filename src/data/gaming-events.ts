@@ -19,6 +19,7 @@ export interface ResolvedEvent extends GamingEvent {
   endDate?: number;
   youtubeUrls: string[];
   twitchUrls: string[];
+  imageUrl?: string;
   status: 'upcoming' | 'live' | 'past' | 'unknown';
   scrapedAt?: number;
 }

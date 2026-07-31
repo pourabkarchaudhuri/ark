@@ -1,46 +1,70 @@
-# Ark v1.0.40 — Embedding Speed & Polite Background
+# Ark v1.0.41 — Health & Voyage Overhaul
 
-This release focuses entirely on making Ollama-backed embeddings faster, kinder to your GPU when you're gaming, and a no-brainer to install for first-time users.
+Big release. Voyage / OCD Mode has been rebuilt around a new hero band + focus row. Time-tracking accuracy is fixed at the root. Session-tick freezes are gone. Update flow is no longer silent when it fails. And the Captain's Log "Invalid Date" bug is dead.
 
-## Performance
+## Voyage / OCD Mode overhaul
 
-- **Single-request array batching** — The IPC handler now sends sub-batches of 256 texts as one array to Ollama's `/api/embed`, replacing the previous 20-way parallel single-text Promise.all that pegged CPU at 100%. Ollama processes the array sequentially internally — no parallel CPU spike, dramatically faster wall-clock.
-- **Full GPU offload** — On GPUs, all layers are forced via `num_gpu: 999` (catches Optimus/hybrid laptops where Ollama auto-leaves layers on CPU). Internal Ollama batch raised to `num_batch: 2048`, the throughput sweet spot for arctic-embed2 on consumer GPUs.
-- **Two concurrent in-flight requests on GPU** — Worker pool of 2 overlaps HTTP/JSON-shuffle wall-clock of one sub-batch with GPU compute of another. CPU stays cheap (no inference on host). Degrades gracefully to serial when `OLLAMA_NUM_PARALLEL=1` (default).
-- **Length-sorted sub-batches** — Items grouped by text length before batching, improving queue utilisation when concurrent in-flight is active.
-- **Model kept hot** — `keep_alive: -1` pins the embedding model in memory; no more ~80 s reload between bursts.
+- **Hero band** — Sticky top section showing every game where you're actively playing right now (either `Playing Now` OR last-played within 24 h). Each card has the cover, elapsed session minutes, and a 14-day activity ribbon of hours-per-day bars.
+- **Focus row** — The top 3 games by rolling 30-day playtime, rendered as horizontal 12-week ridgelines. At-a-glance answer to "what am I actually playing?"
+- **Rebuilt archive Gantt** — Want-to-Play and On-Hold segments no longer clutter the timeline. Completions become gold ▲ chevron milestones at the completion date, not wide grey wall-clock bars. Bar opacity scales to per-segment session intensity so short-but-intense play stands out.
+- **Unified scroll** — Sidebar and Gantt timeline now share one vertical scroll container. No more panels drifting apart when you scroll. Sidebar auto-collapses to a thumbnail strip after 200 px of scroll.
+- **Playing Now pips** — Sessions inside a Playing segment are now rendered as fuchsia-accented Playing-Now pips with subtle ring shadow.
 
-## Polite background mode
+## Time tracking — fixed at the root
 
-When you alt-tab, minimise, or hide Ark for ≥2 s, the embedding pipeline automatically switches to a polite profile:
-- Sub-batch drops 256 → 100
-- `num_batch` drops 2048 → 256 (~8× less GPU compute per pass)
-- Single in-flight request (no GPU queue pressure)
-- 100 ms cooldown between bursts (foreground app gets uncontended GPU windows)
+- **Full exe-path matching** — Session tracker no longer relies on basename alone. Games sharing an executable name (common in indie Unity titles) can no longer double-count. First-time basename-only match logs a diagnostic warning.
+- **Session-fragment tolerance raised** — `MISSES_BEFORE_END` bumped from 2 to 4 polls (~60 s). Heavy GPU load, AV scans, and PowerShell contention no longer split one play block into many phantom sessions.
+- **"Playing since" now correct** — Five code paths that derived `firstPlayedAt` from your library-add date have been rewritten to use your earliest recorded session start (falling back to the first `Want-to-Play → Playing` status transition, then last-played, then added-at). Games that spent months in your backlog before you played them now show the correct first-play date.
+- **Exe metadata IPC** — New `window.exeInfo.analyze(exePath)` reads file mtime, size, and digital-signature signer + validity via PowerShell. Detects known launchers (EA, Riot, Steam, Valve, Rockstar, Ubisoft, Epic, Bethesda, Blizzard, Battle.net, GOG, Uplay, Origin) plus basename hints (`launcher`, `bootstrap`, `loader`) for a future "That looks like a launcher, not a game" warning during exe selection.
 
-Focus instantly restores full throughput. Heavy games now run uninterrupted in the foreground while embedding catches up in the background.
+## Auto-state (opt-in)
 
-## VRAM auto-fallback
+- **Want-to-Play → Playing** — After a session ≥ 10 minutes, games automatically promote out of your backlog to Playing. Behind a preferences toggle (default off). Stamps `autoTransitionedAt` so a future undo UI can revert. Never overwrites Completed, On-Hold, or explicit Playing-Now.
+- **On-Hold suggestions** — New helper hook detects games sitting in Playing with no session for 14+ days for a future "Suggest pausing?" chip.
 
-On tight-VRAM GPUs, if a sub-batch returns all-null (Ollama OOM signature), the worker silently steps the internal batch ladder down: `2048 → 1024 → 512 → Ollama default`. The stepped-down value sticks for the rest of the session. No more silent zero-embed runs.
+## Update flow — no more silence
 
-## Auto-install embedding model in splash
+- **"Check for Updates" button** in Settings → About. Manual check with spinner, latest-version display, and one-click Download when an update is available.
+- **Update snackbar error state** — If GitHub is unreachable at startup, you now see a dismissible "Couldn't reach GitHub — will try again in 2 min." toast with a Retry-now action. Previously silent.
+- **Pre-release version comparison** — Releases tagged `1.0.42-rc1` now compare correctly against `1.0.41`. No more silent "no update" when a pre-release ships.
 
-First-launch updaters get the 1.2 GB arctic-embed2 model pulled automatically during the splash screen. The "Enter Ark" button is gated while the pull is actively in progress so the reco engine isn't half-ready when the user enters. Already-installed users see no extra wait. Hard 10-minute ceiling ensures users are never stranded behind a stuck pull.
+## Random-offline banner — fixed
 
-## New diagnostics
+- **Adblocker whitelist** — The connectivity probe to `connectivitycheck.gstatic.com` is now allowed through before EasyList / EasyPrivacy filtering. The banner no longer flaps because the built-in adblocker cancelled its own probe.
+- **Probe hardened** — Timeout raised 5 s → 12 s. Two consecutive failures required before flipping offline.
 
-- **Embed performance probe** — `window.ollama.embedDiagnostic()` from DevTools returns: GPU mode, VRAM bytes, embeds/sec, ms/embed, current profile (sub-batch, num_batch, in-flight, polite flag), Ollama version. Hard numbers for measuring real throughput.
-- **GPU mode detection eager** — Runs after model warm-up during splash; foreground batches no longer pay first-time GPU-detection round-trip.
+## Session-tick performance
 
-## Power-user knobs
+- **Hours-only subscription channel** — Library store now has a separate `subscribeHours` channel. The 15-second `updateHoursFromSessions` writes fire only that channel, not every listener. The master 6000+-entry games memo, Oracle signature check, and Medals view all stay quiet during play.
+- **`useLibraryHours(gameId)` hook** — Per-card live hours subscription without invalidating the master games memo.
+- **Session-store + status-history writes debounced** — 300 ms scheduler replaces synchronous `JSON.stringify` + `localStorage.setItem` on every session end and status change.
+- **Oracle shelf virtualization** — Horizontal `useVirtualizer` (264 px card width, 3 overscan). Only ~10 cards render per shelf instead of all 40+.
+- **ann-graph RAF leak fixed** — Supernova + shockwave animation ID sets no longer grow unbounded during long play sessions. IDs are removed each frame.
+- **Idempotent `beforeunload` listeners** — Library, journey, and custom-game store singletons no longer stack handlers under HMR / tests.
 
-- **Configurable model quantization** — `ARK_EMBEDDING_MODEL_TAG` env var overrides the embedding model tag for users who manually quantize arctic-embed2 (e.g. `snowflake-arctic-embed2:568m-q8_0`). Validation enforces the `snowflake-arctic-embed2:*` prefix to preserve embedding-space compatibility.
+## Transmissions
 
-## Test fixes
+- **Scheduled Broadcast cards get cover art** — Extracted from event pages via `og:image` → `twitter:image` → JSON-LD → `link rel=image_src` → hero `<img>` precedence chain. Falls back to the existing celestial etching when no image is available.
 
-- `getTopSellers` Epic catalog tests now stub global fetch so the renderer egdata fallback returns empty deterministically. Tests no longer flake based on live api.egdata.app response counts.
+## Captain's Log
+
+- **"Invalid Date" fixed** — Journey-view card date now uses `parseJourneyIso` guard. Journey store also sanitizes date fields on load, record, and import so the bug can't regress from legacy data.
+
+## Fixes
+
+- Journey / library / custom-game store `firstPlayedAt` fallback chains rewritten (5 sites, all using new `sessionStore.getFirstSessionStart` and `statusHistoryStore.getFirstPlayingTransition` helpers).
+- Journey store sanitizes `addedAt` / `firstPlayedAt` / `lastPlayedAt` / `removedAt` on all write paths.
+
+## Under the hood
+
+- New IPC: `exe-info:analyze` (main → renderer via `window.exeInfo.analyze`).
+- New settings: `preferences.autoStatusTransition` (opt-in Want-to-Play → Playing promotion).
+- New library-store type field: `LibraryGameEntry.autoTransitionedAt?`.
+- New event-scraper field: `ScrapedEvent.imageUrl`, threaded through `ResolvedEvent`.
+- Renderer connectivity probe now correctly labels itself in DevTools; adblocker no longer cancels it.
 
 ---
 
-**Default behaviour unchanged for existing users.** Cached embeddings remain valid (no IDB migration, no model version bump). The performance gains take effect immediately on next embedding pass.
+**Tests:** 666/666 passing. Electron and renderer typecheck clean.
+
+**Data compatibility:** No IDB migration required. Cached embeddings, sessions, and library state all remain valid.

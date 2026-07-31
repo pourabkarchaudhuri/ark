@@ -72,6 +72,7 @@ export async function resolveEvents(): Promise<ResolvedEvent[]> {
         endDate: data?.endDate,
         youtubeUrls: data?.youtubeUrls ?? [],
         twitchUrls: data?.twitchUrls ?? [],
+        imageUrl: data?.imageUrl,
         status: computeStatus(data?.startDate, data?.endDate),
         scrapedAt: data?.scrapedAt,
       };

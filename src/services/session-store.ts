@@ -9,6 +9,9 @@ interface StoredSessionData {
   lastUpdated: string;
 }
 
+// Module-level guard so HMR doesn't stack duplicate beforeunload listeners.
+let _sessionBeforeUnloadInstalled = false;
+
 /**
  * Session Store — persists a chronological log of play sessions.
  *
@@ -21,9 +24,14 @@ class SessionStore {
   private entries: GameSession[] = [];
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
+  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.initialize();
+    if (typeof window !== 'undefined' && !_sessionBeforeUnloadInstalled) {
+      _sessionBeforeUnloadInstalled = true;
+      window.addEventListener('beforeunload', () => this.flushSave());
+    }
   }
 
   private initialize() {
@@ -49,14 +57,35 @@ class SessionStore {
     }
 
     if (needsResave && this.entries.length > 0) {
-      this.save();
+      this.saveNow();
       console.log('[SessionStore] Migrated entries to v2 (string gameId)');
     }
 
     this.isInitialized = true;
   }
 
+  /**
+   * Debounced save — coalesces bursts of session writes (e.g. rapid session
+   * records during import) into a single localStorage write ~300ms later.
+   */
   private save() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.saveNow();
+    }, 300);
+  }
+
+  /** Flush any pending debounced save (used on beforeunload). */
+  private flushSave() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+      this.saveNow();
+    }
+  }
+
+  private saveNow() {
     try {
       const data: StoredSessionData = {
         version: STORAGE_VERSION,
@@ -123,6 +152,26 @@ class SessionStore {
     return this.entries.filter((e) => e.gameId === gameId).length;
   }
 
+  /**
+   * Get the earliest session start time (ms since epoch) for a game.
+   * Returns 0 if no sessions have been recorded for the game.
+   *
+   * Used by library-store / journey-store / custom-game-store to prime the
+   * journey row's `firstPlayedAt` — the first time we actually detected the
+   * game running is more accurate than fall-back timestamps like
+   * `lastPlayedAt` or `addedAt`.
+   */
+  getFirstSessionStart(gameId: string): number {
+    let earliest = 0;
+    for (const s of this.entries) {
+      if (s.gameId !== gameId) continue;
+      const ts = new Date(s.startTime).getTime();
+      if (!Number.isFinite(ts)) continue;
+      if (earliest === 0 || ts < earliest) earliest = ts;
+    }
+    return earliest;
+  }
+
   // ------ Import / Export ------
 
   exportData(): GameSession[] {
@@ -159,7 +208,7 @@ class SessionStore {
       this.entries.sort(
         (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime(),
       );
-      this.save();
+      this.saveNow(); // direct save for bulk import
       this.notifyListeners();
     }
 
@@ -278,6 +327,10 @@ class SessionStore {
   /** Clear all session data (mainly for testing / reset). */
   clear() {
     this.entries = [];
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
     localStorage.removeItem(STORAGE_KEY);
     this.notifyListeners();
   }

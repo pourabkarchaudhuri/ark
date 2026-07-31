@@ -13,6 +13,7 @@ import {
   Library, Compass, Globe, Newspaper, Calendar, Gamepad2,
   Zap, Search, Star, Trophy, Map, MessageCircle, Shield,
   Layers, Wand2, TrendingUp, Heart, Package, HelpCircle, Play, CheckCircle2, RotateCcw, Rocket,
+  RefreshCw,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -1002,8 +1003,51 @@ const KEY_PACKAGES: { name: string; desc: string; url: string }[] = [
   { name: 'Vitest + Playwright', desc: 'Unit & E2E testing', url: 'https://vitest.dev/' },
 ];
 
+type UpdateCheckState = 'idle' | 'checking' | 'latest' | 'available' | 'error';
+
 const AboutTab = memo(function AboutTab() {
   const [showTerms, setShowTerms] = useState(false);
+  const [updateState, setUpdateState] = useState<UpdateCheckState>('idle');
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const handleCheckForUpdates = useCallback(async () => {
+    if (!window.updater) {
+      setUpdateState('error');
+      setUpdateError('Updater unavailable in this build.');
+      return;
+    }
+    setUpdateState('checking');
+    setUpdateError(null);
+    try {
+      const result = await window.updater.checkForUpdates();
+      if (result.updateAvailable) {
+        setLatestVersion(result.latestVersion);
+        setUpdateState('available');
+      } else {
+        setLatestVersion(result.latestVersion);
+        setUpdateState('latest');
+      }
+    } catch (err) {
+      console.error('[Settings] Update check failed:', err);
+      setUpdateError("Couldn't reach GitHub.");
+      setUpdateState('error');
+    }
+  }, []);
+
+  const handleDownloadUpdate = useCallback(async () => {
+    if (!window.updater) return;
+    try {
+      await window.updater.downloadUpdate();
+      // Post-download install progress is handled by <UpdateSnackbar/>.
+    } catch (err) {
+      console.error('[Settings] Update download failed:', err);
+      setUpdateError('Download failed.');
+      setUpdateState('error');
+    }
+  }, []);
+
+  const hasUpdater = typeof window !== 'undefined' && !!window.updater;
 
   return (
     <div className="space-y-6">
@@ -1029,13 +1073,47 @@ const AboutTab = memo(function AboutTab() {
       {/* Version */}
       <SectionHeading icon={Info}>Version</SectionHeading>
       <SectionCard>
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-sm font-medium text-white/90">Ark</p>
             <p className="text-xs text-white/35 mt-0.5">Game Tracker & Recommendations</p>
           </div>
-          <span className="font-mono text-sm text-fuchsia-400/70 bg-fuchsia-500/10 px-3 py-1 rounded-lg border border-fuchsia-500/20">v{APP_VERSION}</span>
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-sm text-fuchsia-400/70 bg-fuchsia-500/10 px-3 py-1 rounded-lg border border-fuchsia-500/20">v{APP_VERSION}</span>
+            {hasUpdater && updateState !== 'available' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleCheckForUpdates}
+                disabled={updateState === 'checking'}
+                className="h-8 gap-1.5 text-xs"
+              >
+                <RefreshCw className={cn('h-3.5 w-3.5', updateState === 'checking' && 'animate-spin')} />
+                {updateState === 'checking' ? 'Checking…' : 'Check for Updates'}
+              </Button>
+            )}
+            {hasUpdater && updateState === 'available' && latestVersion && (
+              <Button
+                size="sm"
+                onClick={handleDownloadUpdate}
+                className="h-8 gap-1.5 text-xs bg-blue-500 hover:bg-blue-600 text-white"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download v{latestVersion}
+              </Button>
+            )}
+          </div>
         </div>
+        {updateState === 'latest' && (
+          <p className="text-xs text-emerald-400/80 flex items-center gap-1.5">
+            <CheckCircle2 className="h-3.5 w-3.5" /> You're on the latest version.
+          </p>
+        )}
+        {updateState === 'error' && (
+          <p className="text-xs text-red-400/80 flex items-center gap-1.5">
+            <AlertCircle className="h-3.5 w-3.5" /> {updateError ?? 'Update check failed.'}
+          </p>
+        )}
         <div className="flex gap-4 text-xs text-white/25">
           <span>Electron + React + TypeScript</span>
           <span>•</span>

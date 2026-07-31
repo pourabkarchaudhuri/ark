@@ -2640,7 +2640,9 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       sprite.renderOrder = 90;
       scene.add(sprite);
       const start = performance.now();
+      let rafId = 0;
       const tick = () => {
+        eventRafIds.delete(rafId);
         if (destroyed) {
           scene.remove(sprite);
           mat.dispose();
@@ -2656,10 +2658,11 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         }
         sprite.scale.setScalar(10 + t * 110);
         mat.opacity = Math.max(0, 1 - t);
-        const id = requestAnimationFrame(tick);
-        eventRafIds.add(id);
+        rafId = requestAnimationFrame(tick);
+        eventRafIds.add(rafId);
       };
-      eventRafIds.add(requestAnimationFrame(tick));
+      rafId = requestAnimationFrame(tick);
+      eventRafIds.add(rafId);
     }
 
     function spawnShockwave(node: GraphNode): void {
@@ -2678,7 +2681,9 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       ring.lookAt(camera.position);
       scene.add(ring);
       const start = performance.now();
+      let rafId = 0;
       const tick = () => {
+        eventRafIds.delete(rafId);
         if (destroyed) {
           scene.remove(ring);
           ringGeo.dispose();
@@ -2696,10 +2701,11 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         ring.scale.setScalar(scale);
         ring.lookAt(camera.position);
         ringMat.opacity = Math.max(0, 0.9 * (1 - t));
-        const id = requestAnimationFrame(tick);
-        eventRafIds.add(id);
+        rafId = requestAnimationFrame(tick);
+        eventRafIds.add(rafId);
       };
-      eventRafIds.add(requestAnimationFrame(tick));
+      rafId = requestAnimationFrame(tick);
+      eventRafIds.add(rafId);
     }
 
     // Live diff — fires on every libraryStore mutation; only spawns NEW completions.

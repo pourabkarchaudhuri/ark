@@ -6,6 +6,8 @@ import { dedupSortInWorker } from '@/workers/use-dedup-worker';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
 import { customGameStore } from '@/services/custom-game-store';
+import { sessionStore } from '@/services/session-store';
+import { statusHistoryStore } from '@/services/status-history-store';
 import {
   getPrefetchedGames,
   setPrefetchedGames,
@@ -814,8 +816,16 @@ export function useSteamGames(category: GameCategory = 'trending') {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 
-  // Subscribe to library changes — bump enrichment epoch so the `games` useMemo
-  // re-merges library status for the visible slice only (not all 6000).
+  // Subscribe to library STATUS/COLLECTION changes only — bump enrichment
+  // epoch so the `games` useMemo re-merges library status for the visible
+  // slice only (not all 6000).
+  //
+  // v1.0.41 audit: uses `libraryStore.subscribe` (the non-hours channel), NOT
+  // `subscribeHours`. Hours ticks fire every ~15s while a game is running; if
+  // this callback bumped the epoch on every tick the entire master memo would
+  // rebuild each time, dragging the browse grid + all downstream views with
+  // it. Per-card live hours consumers should use `useLibraryHours(gameId)`
+  // instead.
   useEffect(() => {
     return libraryStore.subscribe(() => {
       setEnrichmentEpoch(e => e + 1);
@@ -1337,6 +1347,38 @@ export function useLibrary() {
 }
 
 /**
+ * Subscribe to the live hoursPlayed for a single library entry.
+ *
+ * v1.0.41: session ticks now fire only the library-store hours channel, so
+ * top-level memos (games grid, Oracle signature) are no longer invalidated
+ * every 15 seconds. Per-card components that need live hours can call this
+ * hook to opt into hours-only updates without pulling in the full library
+ * memo.
+ *
+ * Returns 0 when the game is not in the library. Reads a fresh value from
+ * the store on every hours-channel notification.
+ */
+export function useLibraryHours(gameId: string): number {
+  const [hours, setHours] = useState<number>(() => {
+    const entry = libraryStore.getEntry(gameId);
+    return entry?.hoursPlayed ?? 0;
+  });
+
+  useEffect(() => {
+    // Re-read once on gameId change in case the initial state is stale.
+    const initial = libraryStore.getEntry(gameId);
+    setHours(initial?.hoursPlayed ?? 0);
+    const unsub = libraryStore.subscribeHours(() => {
+      const e = libraryStore.getEntry(gameId);
+      setHours(e?.hoursPlayed ?? 0);
+    });
+    return unsub;
+  }, [gameId]);
+
+  return hours;
+}
+
+/**
  * Build a Game object from a library entry's locally cached metadata.
  * No API calls — everything comes from localStorage.
  * Exported for tests (fallback title when cachedMeta missing).
@@ -1500,9 +1542,19 @@ export function useLibraryGames() {
         : game.createdAt
           ? new Date(game.createdAt).toISOString()
           : undefined;
-      const sortDate = game.status === 'Completed'
+      const fallback = game.status === 'Completed'
         ? (libEntry?.lastPlayedAt ?? addedAtIso ?? new Date().toISOString())
-        : addedAtIso;
+        : (addedAtIso ?? new Date().toISOString());
+      // v1.0.41: prefer real play evidence over addedAt/lastPlayedAt for
+      // firstPlayedAt so imported libraries show accurate journey timelines.
+      const firstSession = sessionStore.getFirstSessionStart(game.id);
+      const firstPlayingTs = statusHistoryStore.getFirstPlayingTransition(game.id);
+      const firstPlayedAt =
+        firstSession > 0
+          ? new Date(firstSession).toISOString()
+          : firstPlayingTs !== null
+            ? new Date(firstPlayingTs).toISOString()
+            : fallback;
       journeyStore.record({
         gameId: game.id,
         title: game.title,
@@ -1513,8 +1565,8 @@ export function useLibraryGames() {
         status: game.status,
         hoursPlayed: libEntry?.hoursPlayed ?? 0,
         rating: libEntry?.rating ?? 0,
-        firstPlayedAt: sortDate,
-        lastPlayedAt: libEntry?.lastPlayedAt ?? (game.status === 'Completed' ? sortDate : undefined),
+        firstPlayedAt,
+        lastPlayedAt: libEntry?.lastPlayedAt ?? (game.status === 'Completed' ? fallback : undefined),
         addedAt: addedAtIso,
       });
     }
@@ -1620,6 +1672,16 @@ export function ensureArkBackfill() {
   const addedAtIso = (d: Date | string) => (d instanceof Date ? d.toISOString() : String(d));
   const batch: Array<Parameters<typeof journeyStore.record>[0]> = [];
 
+  // v1.0.41: shared helper — real evidence (session or first Playing
+  // transition) beats fall-back timestamps like lastPlayedAt/addedAt.
+  const bestFirstPlayed = (gameId: string, fallback: string): string => {
+    const firstSession = sessionStore.getFirstSessionStart(gameId);
+    if (firstSession > 0) return new Date(firstSession).toISOString();
+    const firstPlayingTs = statusHistoryStore.getFirstPlayingTransition(gameId);
+    if (firstPlayingTs !== null) return new Date(firstPlayingTs).toISOString();
+    return fallback;
+  };
+
   // Library (Steam/Epic)
   for (const lib of libraryStore.getAllEntries()) {
     if (!ARK_STATUSES.includes(lib.status)) continue;
@@ -1627,7 +1689,7 @@ export function ensureArkBackfill() {
     const needsActivity = !existing || (!existing.firstPlayedAt && !existing.lastPlayedAt);
     if (!needsActivity) continue;
 
-    const sortDate = lib.lastPlayedAt ?? addedAtIso(lib.addedAt);
+    const fallback = lib.lastPlayedAt ?? addedAtIso(lib.addedAt);
     const meta = lib.cachedMeta;
     batch.push({
       gameId: lib.gameId,
@@ -1639,8 +1701,8 @@ export function ensureArkBackfill() {
       status: lib.status,
       hoursPlayed: lib.hoursPlayed ?? existing?.hoursPlayed ?? 0,
       rating: lib.rating ?? existing?.rating ?? 0,
-      firstPlayedAt: sortDate,
-      lastPlayedAt: lib.lastPlayedAt ?? (lib.status === 'Completed' ? sortDate : undefined),
+      firstPlayedAt: bestFirstPlayed(lib.gameId, fallback),
+      lastPlayedAt: lib.lastPlayedAt ?? (lib.status === 'Completed' ? fallback : undefined),
       addedAt: existing?.addedAt ?? addedAtIso(lib.addedAt),
     });
   }
@@ -1653,7 +1715,7 @@ export function ensureArkBackfill() {
     if (!needsActivity) continue;
 
     const addedAtStr = addedAtIso(entry.addedAt);
-    const sortDate = entry.lastPlayedAt ?? addedAtStr;
+    const fallback = entry.lastPlayedAt ?? addedAtStr;
     batch.push({
       gameId: entry.id,
       title: entry.title,
@@ -1664,8 +1726,8 @@ export function ensureArkBackfill() {
       status: entry.status,
       hoursPlayed: entry.hoursPlayed ?? 0,
       rating: entry.rating ?? 0,
-      firstPlayedAt: sortDate,
-      lastPlayedAt: entry.lastPlayedAt ?? (entry.status === 'Completed' ? sortDate : undefined),
+      firstPlayedAt: bestFirstPlayed(entry.id, fallback),
+      lastPlayedAt: entry.lastPlayedAt ?? (entry.status === 'Completed' ? fallback : undefined),
       addedAt: existing?.addedAt ?? addedAtStr,
     });
   }

@@ -142,6 +142,8 @@ export interface LibraryGameEntry {
   secondaryGameId?: string; // ID on another store (for dedup-linked games)
   cachedMeta?: CachedGameMeta; // Snapshot of game metadata at add-time (fallback when API unavailable)
   lastPlayedAt?: string; // ISO date — last time the game was played (from sessions or Steam)
+  /** ISO timestamp — set when the auto Want-to-Play → Playing transition fired (v1.0.41). */
+  autoTransitionedAt?: string;
   addedAt: Date;
   updatedAt: Date;
 }

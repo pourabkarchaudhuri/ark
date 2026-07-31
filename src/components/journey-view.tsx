@@ -165,8 +165,10 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
     () => resolveJourneyDisplayTitle(entry.gameId, entry.title),
     [entry.gameId, entry.title],
   );
-  const addedDate = entry.addedAt
-    ? new Date(entry.addedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+  // Guard against corrupt/legacy addedAt values — bad ISO strings used to render "Invalid Date".
+  const parsedAdded = parseJourneyIso(entry.addedAt);
+  const addedDate = parsedAdded
+    ? parsedAdded.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
     : '';
   const isRemoved = !!entry.removedAt;
   const inLibrary = libraryStore.isInLibrary(entry.gameId);

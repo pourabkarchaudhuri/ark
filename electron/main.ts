@@ -742,11 +742,18 @@ app.whenReady().then(async () => {
     }
 
     // Block matching network requests via session.webRequest
+    // Allow-list: connectivity probes must never be blocked, even if a filter list matches.
+    const ALLOWED_PROBE_HOSTS = ['connectivitycheck.gstatic.com', 'www.gstatic.com'];
     session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
         try {
       const { url, resourceType, referrer } = details;
       if (resourceType === 'mainFrame') {
         callback({ cancel: false });
+        return;
+      }
+      const host = new URL(url).host.toLowerCase();
+      if (ALLOWED_PROBE_HOSTS.includes(host)) {
+        callback({});
         return;
       }
       const request = Request.fromRawDetails({ url, type: resourceType || 'other', sourceUrl: referrer || '' });

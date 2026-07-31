@@ -1,7 +1,37 @@
 import { JourneyEntry, GameStatus, migrateGameId } from '@/types/game';
+import { sessionStore } from './session-store';
+import { statusHistoryStore } from './status-history-store';
 
 const STORAGE_KEY = 'ark-journey-history';
 const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
+
+// Module-level guard so HMR doesn't stack duplicate beforeunload listeners.
+let _journeyBeforeUnloadInstalled = false;
+
+/**
+ * Coerce a raw value into a valid ISO date string, or return `undefined` if
+ * the value is missing / non-parseable. Old exports and hand-edited entries
+ * can carry `"undefined"`, empty strings, or unparseable stubs — those must
+ * not be persisted back into the journey.
+ */
+function toValidIso(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'undefined' || trimmed.toLowerCase() === 'null') {
+      return undefined;
+    }
+    const d = new Date(trimmed);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : undefined;
+  }
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value.toISOString() : undefined;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return new Date(value).toISOString();
+  }
+  return undefined;
+}
 
 /** True when the journey row title should be replaced once library metadata loads. */
 export function isPlaceholderJourneyTitle(title: string | undefined): boolean {
@@ -33,7 +63,8 @@ class JourneyStore {
 
   constructor() {
     this.initialize();
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && !_journeyBeforeUnloadInstalled) {
+      _journeyBeforeUnloadInstalled = true;
       window.addEventListener('beforeunload', () => this.flushSave());
     }
   }
@@ -70,7 +101,16 @@ class JourneyStore {
           for (const entry of parsed.entries) {
             const id = migrateGameId(entry as any);
             if (id) {
-              this.entries.set(id, { ...entry, gameId: id });
+              // Sanitize dates on load so pre-existing garbage never gets
+              // re-persisted, and downstream views never see "Invalid Date".
+              this.entries.set(id, {
+                ...entry,
+                gameId: id,
+                addedAt: toValidIso(entry.addedAt) ?? new Date().toISOString(),
+                firstPlayedAt: toValidIso(entry.firstPlayedAt),
+                lastPlayedAt: toValidIso(entry.lastPlayedAt),
+                removedAt: toValidIso(entry.removedAt),
+              });
             }
           }
           if (parsed.version < STORAGE_VERSION) {
@@ -127,11 +167,18 @@ class JourneyStore {
    */
   record(entry: Omit<JourneyEntry, 'addedAt' | 'removedAt'> & { addedAt?: string }) {
     const existing = this.entries.get(entry.gameId);
-    const addedAt = existing?.addedAt ?? entry.addedAt ?? new Date().toISOString();
+    // Sanitize date fields so garbage strings ("undefined", "") never get
+    // re-persisted — mirrors the guard we already apply on load.
+    const addedAt =
+      toValidIso(existing?.addedAt) ?? toValidIso(entry.addedAt) ?? new Date().toISOString();
+    const firstPlayedAt = toValidIso(entry.firstPlayedAt) ?? toValidIso(existing?.firstPlayedAt);
+    const lastPlayedAt = toValidIso(entry.lastPlayedAt) ?? toValidIso(existing?.lastPlayedAt);
 
     this.entries.set(entry.gameId, {
       ...existing,  // preserve existing fields (firstPlayedAt, lastPlayedAt, etc.)
       ...entry,     // caller-provided fields override
+      firstPlayedAt,
+      lastPlayedAt,
       addedAt,
       removedAt: undefined, // clear removedAt — the game is (back) in library
     });
@@ -150,10 +197,15 @@ class JourneyStore {
     let changed = false;
     for (const entry of entries) {
       const existing = this.entries.get(entry.gameId);
-      const addedAt = existing?.addedAt ?? entry.addedAt ?? new Date().toISOString();
+      const addedAt =
+        toValidIso(existing?.addedAt) ?? toValidIso(entry.addedAt) ?? new Date().toISOString();
+      const firstPlayedAt = toValidIso(entry.firstPlayedAt) ?? toValidIso(existing?.firstPlayedAt);
+      const lastPlayedAt = toValidIso(entry.lastPlayedAt) ?? toValidIso(existing?.lastPlayedAt);
       this.entries.set(entry.gameId, {
         ...existing,
         ...entry,
+        firstPlayedAt,
+        lastPlayedAt,
         addedAt,
         removedAt: undefined,
       });
@@ -189,8 +241,15 @@ class JourneyStore {
     if (fields.status !== undefined) existing.status = fields.status;
     if (fields.hoursPlayed !== undefined) existing.hoursPlayed = fields.hoursPlayed;
     if (fields.rating !== undefined) existing.rating = fields.rating;
-    if (fields.firstPlayedAt !== undefined) existing.firstPlayedAt = fields.firstPlayedAt;
-    if (fields.lastPlayedAt !== undefined) existing.lastPlayedAt = fields.lastPlayedAt;
+    if (fields.firstPlayedAt !== undefined) {
+      // Reject garbage strings ("undefined", "") that would poison downstream views.
+      const iso = toValidIso(fields.firstPlayedAt);
+      if (iso) existing.firstPlayedAt = iso;
+    }
+    if (fields.lastPlayedAt !== undefined) {
+      const iso = toValidIso(fields.lastPlayedAt);
+      if (iso) existing.lastPlayedAt = iso;
+    }
 
     this.invalidateSortedCache();
     this.scheduleSave();
@@ -294,7 +353,16 @@ class JourneyStore {
     for (const incoming of entries) {
       const migratedId = migrateGameId(incoming as any);
       if (!migratedId) { skipped++; continue; }
-      const migratedIncoming = { ...incoming, gameId: migratedId };
+      // Sanitize date fields on the incoming record so imports never carry
+      // "undefined" / empty strings back into storage.
+      const migratedIncoming: JourneyEntry = {
+        ...incoming,
+        gameId: migratedId,
+        addedAt: toValidIso(incoming.addedAt) ?? new Date().toISOString(),
+        firstPlayedAt: toValidIso(incoming.firstPlayedAt),
+        lastPlayedAt: toValidIso(incoming.lastPlayedAt),
+        removedAt: toValidIso(incoming.removedAt),
+      };
 
       const existing = this.entries.get(migratedId);
 
@@ -340,11 +408,20 @@ class JourneyStore {
 
     // Backfill firstPlayedAt for entries that were played but lack timing data,
     // so they appear in Ark and Log views (which filter on firstPlayedAt/lastPlayedAt).
+    // Prefer real evidence over `addedAt`: first recorded session, then first
+    // transition into Playing, then finally fall back to `addedAt`.
     const noTimingStatuses: GameStatus[] = ['Want to Play'];
     let backfilled = 0;
     for (const entry of this.entries.values()) {
       if (!entry.firstPlayedAt && !entry.lastPlayedAt && !noTimingStatuses.includes(entry.status)) {
-        entry.firstPlayedAt = entry.addedAt;
+        const firstSession = sessionStore.getFirstSessionStart(entry.gameId);
+        const firstPlayingTs = statusHistoryStore.getFirstPlayingTransition(entry.gameId);
+        entry.firstPlayedAt =
+          firstSession > 0
+            ? new Date(firstSession).toISOString()
+            : firstPlayingTs !== null
+              ? new Date(firstPlayingTs).toISOString()
+              : entry.addedAt;
         backfilled++;
       }
     }
