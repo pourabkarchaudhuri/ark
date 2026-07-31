@@ -12,11 +12,14 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
   '1.0.46': {
     title: "What's New in Ark 1.0.46",
     changes: [
+      'Oracle accuracy overhaul — BM25 lexical hybrid retrieve, franchise/umbrella shelf gates, ANN distance gating, engagement-weighted taste (idle-quality + Want-to-Play caps), hard-negative franchise/developer mute after dismiss, smarter MMR diversity, evidence-vs-intent hero ranking, cold-start Top Sellers seed, and honest Taste Match explanations.',
+      'Oracle reranker reliability — silent background pull of the cross-encoder model, structured IPC results, arctic-embed cosine fallback when /api/rerank is unavailable, and cache-restore still applies shelf rerank when enabled.',
       'Draggable carousels — Oracle shelves and the Scheduled Broadcasts strip now support mouse click-and-drag. Grab and pan horizontally with a 5 px activation threshold so plain clicks still open the card. Buttons and links inside cards are respected.',
       'Right-click a recommendation to see "Why recommended?" — Cursor-anchored popover on Oracle cards shows the game title, best-matching taste cluster, similar-to titles, shared genres, and the top 5 layer scores as proportional bars. Close with outside click, Escape, scroll, or another right-click.',
       'Cross-store status sync on 100% title match — If a game is Playing, Playing Now, or Completed on one store (Steam or Epic), the same title on the other store now auto-mirrors the status. Never overwrites Completed or Playing Now on the other side; a one-shot startup sweep reconciles any pre-existing inconsistencies.',
       'Backlog excludes unannounced games — Want-to-Play entries with no confirmed release date, "TBA" / "TBD" / "Coming Soon" / "To Be Announced" markers, or sentinel-future dates (year ≥ 2090) no longer show up in the backlog list. Add a real release date to re-include them.',
       'Epic API dummy pages excluded — Epic\'s catalog was returning offers with no description AND no image (empty stubs). These are now filtered out at every list-returning API path and at the persist-time boundary. Release-date presence is intentionally ignored — a page is dummy iff both description AND image are absent.',
+      'Insights & Telemetry tab (from 1.0.45) — the tab now actually renders next to My Progress for games with recorded sessions.',
     ],
   },
   '1.0.45': {

@@ -29,7 +29,8 @@ try {
 const DIMS = 1024;
 const CONNECTIVITY = 48;
 const EF_CONSTRUCTION = 256;
-const EF_SEARCH = 400;
+/** Higher ef_search for distance-gated top‑K (Oracle keeps ≤500 neighbors). */
+const EF_SEARCH = 800;
 
 function getIndexPath(): string {
   return path.join(app.getPath('userData'), 'ann-hnsw.usearch');

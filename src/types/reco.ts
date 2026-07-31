@@ -105,10 +105,14 @@ export interface MatchReasons {
   semanticRetrieved: boolean;
   /** Whether this game was surfaced via BM25 lexical retrieval. */
   lexicalRetrieved?: boolean;
+  /** ANN cosine distance when surfaced via embedding retrieval (lower = closer). */
+  annDistance?: number;
   /** Label of the taste cluster this game matched best (from cluster centroid scoring). */
   bestClusterLabel?: string;
   /** Natural-language explanation of why this game was recommended. */
   explanation: string;
+  /** True when catalog/browse marked the title as unreleased. */
+  comingSoon?: boolean;
 }
 
 /** A scored recommendation candidate. */
@@ -259,6 +263,10 @@ export interface UserGameSnapshot {
   sessionDurations: number[];    // minutes per session
   /** Embedding vector (optional — only present when Ollama/Gemini embeddings are cached). */
   embedding?: number[];
+  /** Library priority (High / Medium / Low) for wishlist intent boost (F8). */
+  priority?: 'High' | 'Medium' | 'Low';
+  /** User notes / publicReviews — light lexical theme bonus (F8). */
+  userNotes?: string;
 }
 
 /** Candidate game to score (from cache / API browse results). */
@@ -297,8 +305,12 @@ export interface CandidateGame {
   semanticRetrieved?: boolean;
   /** True if surfaced via BM25 lexical retrieval, not metadata filter. */
   lexicalRetrieved?: boolean;
+  /** ANN cosine distance when semanticRetrieved (lower = closer taste match). */
+  annDistance?: number;
   /** ML model P(recommended) score from the Kaggle-trained LightGBM model. */
   mlScore?: number;
+  /** Seeded via cold-start Top Sellers ∩ genre playbook (F9). */
+  coldStartSeeded?: boolean;
 }
 
 /** Payload posted to the worker. */
@@ -312,6 +324,8 @@ export interface RecoWorkerInput {
   embeddingCoverage: number;
   /** Dismissed game IDs — filtered from results. */
   dismissedGameIds: string[];
+  /** Thumbs-down ids — mined into the negative taste profile (also dismissed). */
+  thumbsDownIds?: string[];
   /** Precomputed taste centroid (768-dim). Undefined if no library embeddings. */
   tasteCentroid?: number[];
   /**

@@ -2,7 +2,7 @@
  * Recommendation Explainer — Layer Score Normalization & Human-Readable Breakdown
  *
  * Takes a ScoredGame's `layerScores` and produces:
- *   1. A normalized percentage breakdown per scoring layer.
+ *   1. A weighted percentage breakdown per scoring layer.
  *   2. A human-readable explanation array for display in the UI.
  */
 
@@ -25,18 +25,62 @@ const LAYER_LABELS: Record<string, string> = {
   studioLoyaltyBoost: 'Studio Loyalty',
   sequencingBoost: 'Sequencing Bonus',
   mlSignal: 'ML Model Signal',
+  graphPageRankSignal: 'Graph PageRank',
+  graphCommunityAffinity: 'Community Affinity',
 };
+
+/**
+ * Approximate worker layer weights for honest contribution breakdown.
+ * Dynamic ML/graph budgets are folded into typical mid values.
+ */
+const LAYER_WEIGHTS: Record<string, number> = {
+  contentSimilarity: 0.22,
+  semanticSimilarity: 0.18,
+  clusterSemanticSim: 0.06,
+  graphSignal: 0.08,
+  qualitySignal: 0.10,
+  popularitySignal: 0.04,
+  recencyBoost: 0.04,
+  diversityBonus: 0.04,
+  timeOfDayBoost: 0.03,
+  engagementCurveBonus: 0.03,
+  franchiseBoost: 0.08,
+  studioLoyaltyBoost: 0.05,
+  sequencingBoost: 0.04,
+  mlSignal: 0.06,
+  graphPageRankSignal: 0.024,
+  graphCommunityAffinity: 0.036,
+  negativeSignal: 0.06,
+  trajectoryMultiplier: 0,
+};
+
+/** Prefer worker `reasons.explanation`; fall back to layer-derived lines. */
+export function explanationLines(game: ScoredGame): string[] {
+  const fromReasons = game.reasons?.explanation?.trim();
+  if (fromReasons) {
+    // Worker emits a single prose sentence; also accept "; "-joined parts
+    if (fromReasons.includes('; ')) return fromReasons.split('; ').map(s => s.trim()).filter(Boolean);
+    return [fromReasons];
+  }
+  if (game.explanation?.length) return game.explanation;
+  return generateExplanation(game);
+}
 
 export function normalizeLayerScores(game: ScoredGame): LayerBreakdown[] {
   const entries = Object.entries(game.layerScores)
     .filter(([, v]) => v !== undefined && v !== 0)
-    .map(([key, rawScore]) => ({
-      name: LAYER_LABELS[key] || key,
-      rawScore: rawScore as number,
-      key,
-    }));
+    .map(([key, rawScore]) => {
+      const weight = LAYER_WEIGHTS[key] ?? 0.05;
+      const weighted = Math.abs(rawScore as number) * weight;
+      return {
+        name: LAYER_LABELS[key] || key,
+        rawScore: rawScore as number,
+        key,
+        weighted,
+      };
+    });
 
-  const positiveSum = entries.reduce((s, e) => s + Math.max(0, e.rawScore), 0);
+  const positiveSum = entries.reduce((s, e) => s + (e.rawScore >= 0 ? e.weighted : 0), 0);
   if (positiveSum === 0) {
     return entries.map(e => ({
       name: e.name,
@@ -47,11 +91,12 @@ export function normalizeLayerScores(game: ScoredGame): LayerBreakdown[] {
   }
 
   return entries
+    .filter(e => e.rawScore > 0)
     .map(e => ({
       name: e.name,
       rawScore: e.rawScore,
-      normalizedScore: Math.max(0, e.rawScore) / positiveSum,
-      percentage: Math.round((Math.max(0, e.rawScore) / positiveSum) * 100),
+      normalizedScore: e.weighted / positiveSum,
+      percentage: Math.round((e.weighted / positiveSum) * 100),
     }))
     .filter(e => e.percentage > 0)
     .sort((a, b) => b.percentage - a.percentage);

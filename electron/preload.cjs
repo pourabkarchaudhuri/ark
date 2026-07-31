@@ -531,6 +531,7 @@ contextBridge.exposeInMainWorld('ml', {
   scoreGames: (userProfile, gameIds) => ipcRenderer.invoke('ml:scoreGames', userProfile, gameIds),
   buildUserProfile: (games) => ipcRenderer.invoke('ml:buildUserProfile', games),
   getGameRecRates: (gameIds) => ipcRenderer.invoke('ml:getGameRecRates', gameIds),
+  hasRealSteamProfile: (games) => ipcRenderer.invoke('ml:hasRealSteamProfile', games),
 });
 
 // Google Analytics (Measurement Protocol via main process)

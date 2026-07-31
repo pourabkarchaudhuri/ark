@@ -141,6 +141,9 @@ interface MLModelAPI {
     games: Array<{ gameId: string; hoursPlayed: number; rating: number; status: string }>,
   ) => Promise<MLUserProfile | null>;
   getGameRecRates: (gameIds: string[]) => Promise<Record<string, number>>;
+  hasRealSteamProfile?: (
+    games: Array<{ gameId: string; hoursPlayed: number; rating: number; status: string }>,
+  ) => Promise<boolean>;
 }
 
 interface DevJournalDay {

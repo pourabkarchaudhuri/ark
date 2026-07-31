@@ -315,15 +315,43 @@ function buildFeatureVector(
  * binary predictions across ensemble folds for a probability estimate.
  * With 8 folds this gives 9 distinct score levels (0/8 … 8/8).
  */
+/**
+ * True when the library has enough Steam-backed evidence to drive the ML user profile.
+ * Avoids scoring from empty/default profiles (Epic-only or brand-new libraries).
+ */
+export function hasRealSteamProfile(
+  games: Array<{ gameId: string; hoursPlayed: number; rating: number; status: string }>,
+): boolean {
+  const steam = games.filter(g => g.gameId.startsWith('steam-'));
+  if (steam.length < 3) return false;
+  return steam.some(
+    g =>
+      g.hoursPlayed > 0 ||
+      g.rating > 0 ||
+      g.status === 'Completed' ||
+      g.status === 'Playing' ||
+      g.status === 'Playing Now',
+  );
+}
+
 export async function scoreGames(
   userProfile: UserProfile,
   gameIds: string[],
 ): Promise<MLScoreResult[]> {
   if (!loaded || sessions.length === 0 || !featureSpec || !ort) {
-    return gameIds.map(id => ({ gameId: id, score: 0.5 }));
+    // Do not invent 0.5 placeholders — caller treats missing scores as unscored
+    return [];
   }
 
-  const n = gameIds.length;
+  // Only score Steam titles that have a real Kaggle game profile
+  const scorable: string[] = [];
+  for (const id of gameIds) {
+    if (!id.startsWith('steam-')) continue;
+    const steamAppId = id.slice(6);
+    if (gameProfiles.has(steamAppId)) scorable.push(id);
+  }
+
+  const n = scorable.length;
   if (n === 0) return [];
 
   const defaults = featureSpec.defaults;
@@ -331,7 +359,7 @@ export async function scoreGames(
   // Build flat feature buffer for all games
   const flatBuffer = new Float32Array(n * N_FEATURES);
   for (let i = 0; i < n; i++) {
-    const steamAppId = gameIds[i].replace('steam-', '');
+    const steamAppId = scorable[i].slice(6);
     const gp = gameProfiles.get(steamAppId);
     const vec = buildFeatureVector(userProfile, gp, defaults);
     flatBuffer.set(vec, i * N_FEATURES);
@@ -380,7 +408,7 @@ export async function scoreGames(
     }
   }
 
-  return gameIds.map((id, i) => ({
+  return scorable.map((id, i) => ({
     gameId: id,
     score: probSums[i] / nSessions,
   }));
@@ -417,10 +445,16 @@ export function buildUserProfile(
   const avgLogH = logHours.reduce((s, h) => s + h, 0) / n;
   const varH = logHours.reduce((s, h) => s + (h - avgLogH) ** 2, 0) / n;
 
-  // Approximate rec_rate: games with rating >= 3 or status 'completed'/'playing' are "recommended"
-  const recommended = games.filter(g =>
-    g.rating >= 3 || g.status === 'completed' || g.status === 'playing',
-  ).length;
+  // Approximate rec_rate: rating >= 3 or Completed / Playing* (GameStatus casing)
+  const recommended = games.filter(g => {
+    const status = (g.status || '').toLowerCase();
+    return (
+      g.rating >= 3 ||
+      status === 'completed' ||
+      status === 'playing' ||
+      status === 'playing now'
+    );
+  }).length;
   const smoothM = featureSpec?.smooth_m ?? 10;
   const globalRate = featureSpec?.global_rec_rate ?? 0.85;
   const recRate = (recommended + smoothM * globalRate) / (games.length + smoothM);

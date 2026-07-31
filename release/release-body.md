@@ -1,26 +1,39 @@
-# Ark v1.0.46 — Drag, Popovers, Cross-store Sync, Epic Cleanup
+# Ark v1.0.46 — Oracle Accuracy + Drag, Popovers, Cross-store Sync
 
-Five queued features shipped in one release.
+Combines the unshipped 1.0.45 telemetry tab fix, 1.0.46 UX/sync work, and the full Oracle BM25 accuracy replan (Phases A–F).
 
-## Added
+## Oracle accuracy
 
-- **Draggable carousels (mouse click-and-drag).** New shared hook `src/hooks/useDraggableScroll.ts` — pointer-based click-and-drag horizontal panning wired into Oracle shelf carousels and the Scheduled Broadcasts strip. 5 px activation threshold so plain clicks still open the card. Skips buttons / links / `[data-no-drag]` descendants. Uses `setPointerCapture` for pans that survive brief mouse exits, and swallows the release click so a drag never accidentally navigates.
-- **Right-click Oracle recommendation → "Why recommended?" popover.** New `RecoWhyPopover` (portal-rendered, cursor-anchored, viewport-clamped) attached to Oracle cards. Reveals the game title, best-cluster label, similar-to titles (up to 3), shared genres (up to 4), and the top 5 non-zero layer signals with proportional bars. Closes on outside mousedown, Escape, scroll, or another context menu.
-- **Cross-store status sync on 100% title match.** `libraryStore.propagateStatusByTitle` fires from `updateEntry` whenever a status change is Playing / Playing Now / Completed. Siblings across other stores (Steam/Epic) with the same normalized title mirror the status. Rules: Completed can overwrite anything not-Completed; Playing can only overwrite Want-to-Play / On-Hold. Never overwrites Completed or Playing Now. Also runs a one-shot startup sweep to reconcile any pre-existing inconsistencies.
-- **Backlog excludes unannounced games.** `libraryStore.getBacklogEntries()` + `useLibraryBacklog()` filter Want-to-Play entries where the release date is missing, "TBA" / "TBD" / "Coming Soon" / "To Be Announced" / "Unknown", or a sentinel-future year (≥ 2090). Games with a real confirmed date stay.
+- **BM25 hybrid retrieve** — MiniSearch lexical taste query unions into the Oracle candidate pool (`QUOTA_LEXICAL ≈ 400`).
+- **Shelf correctness** — Franchise umbrella gates; deep-in uses primary genre; coming-soon requires a real future date or `comingSoon` flag; shelf subtitles state the admission contract.
+- **ANN distance gate** — Taste retrieval keeps neighbors under a cosine-distance ceiling (top‑500).
+- **Engagement weight** — Shared centroid/ANN weight caps Want-to-Play and applies idle-quality (`activeToIdleRatio`).
+- **Hard-negative mute** — Dismiss / thumbs-down stores franchise + developer; expands suppress set (franchise 14d, developer 7d, cap 200).
+- **Smarter MMR** — Diversity similarity = max(genre Jaccard, same franchise → 1.0, same developer → 0.8).
+- **Evidence vs intent** — Hero / Next Obsession ranks by evidence-aligned score; wishlist keeps High-priority intent boost; Stretch prefers far-from-evidence variety.
+- **Cold-start** — Thin evidence libraries (<5) seed Top Sellers ∩ top genres.
+- **Reranker** — Silent model pull, structured IPC, arctic-embed cosine fallback, cache-restore rerank.
+
+## Added (UX / library)
+
+- **Draggable carousels** — Oracle shelves + Scheduled Broadcasts strip (5 px threshold, respects buttons/links).
+- **Right-click "Why recommended?"** — Cursor-anchored popover with cluster, similar-to, genres, top layer bars.
+- **Cross-store status sync** — Playing / Playing Now / Completed mirrors on 100% title match across Steam/Epic.
+- **Backlog excludes unannounced games** — Missing / TBA / sentinel-future dates filtered from Want-to-Play backlog.
 
 ## Fixed
 
-- **Epic API dummy pages excluded.** Empty offers (no description AND no image) are now filtered out at every list-returning API path in `electron/epic-api.ts`, at every `transformEpicGame` call in `src/services/epic-service.ts`, and at persist time in `src/services/epic-catalog-store.ts`. Release-date presence is intentionally ignored — a page is dummy iff both description AND image are absent.
+- **Insights & Telemetry tab** (1.0.45) — Tab wiring restored on game-details for games with sessions.
+- **Epic API dummy pages** — Offers with no description AND no image filtered at API, transform, and persist boundaries.
+- **ML scoring** — No 0.5 placeholders; Completed/Playing casing; requires a real Steam-backed profile.
 
 ## Under the hood
 
-- New `LibraryGameEntry.crossStoreSyncedFrom?: string` field — diagnostic trace of the sibling that drove a status propagation.
-- New `libraryStore` public API: `propagateStatusByTitle`, `syncCrossStoreStatusesOnce`, `isReleaseDateConfirmed`, `getBacklogEntries`.
-- New `useLibraryBacklog()` hook.
-- 9 new unit tests covering cross-store propagation (Completed spread, Playing spread with Completed-sibling protection, Want-to-Play no-op, edition-suffix normalization) and backlog filtering.
+- New services: `bm25-index`, `franchise`, `reco-shelf-rules`, `engagement-weight`, `linked-ids`, `hard-negative`, `mmr-diversity`.
+- Offline eval harness: `src/test/oracle/oracle-eval.test.ts`.
+- Dismiss persistence migrates bare ids → `{ gameId, at, franchiseBase?, developer? }`.
 
 ---
 
-**Tests:** 699/699 passing. Electron and renderer typecheck clean. Vite build clean.
-**Data compatibility:** No IDB migration. Additive field only (`crossStoreSyncedFrom`). Existing users auto-reconcile any cross-store inconsistencies on first `getAllEntries()` after upgrade.
+**Tests:** 734/734 passing.
+**Data compatibility:** Dismiss localStorage migrates in-place from string[] to metadata objects. Additive library field `crossStoreSyncedFrom`.

@@ -17,6 +17,7 @@ import {
   getGameRecRates,
   getStatus,
   isLoaded,
+  hasRealSteamProfile,
   type UserProfile,
 } from '../ml-model.js';
 
@@ -50,12 +51,27 @@ export function register(): void {
         if (!userProfile || !Array.isArray(gameIds)) return [];
         if (!isLoaded()) {
           const ok = await loadModel();
-          if (!ok) return gameIds.map((id: string) => ({ gameId: id, score: 0.5 }));
+          if (!ok) return [];
         }
         return await scoreGames(userProfile, gameIds);
       } catch (err) {
         logger.error('[ML IPC] scoreGames error:', err);
-        return (Array.isArray(gameIds) ? gameIds : []).map((id: string) => ({ gameId: id, score: 0.5 }));
+        return [];
+      }
+    },
+  );
+
+  ipcMain.handle(
+    'ml:hasRealSteamProfile',
+    async (
+      _event: any,
+      games: Array<{ gameId: string; hoursPlayed: number; rating: number; status: string }>,
+    ) => {
+      try {
+        if (!Array.isArray(games)) return false;
+        return hasRealSteamProfile(games);
+      } catch {
+        return false;
       }
     },
   );

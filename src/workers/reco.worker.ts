@@ -46,7 +46,43 @@ import {
   detectFranchises,
   isFutureReleaseDate,
 } from '@/services/franchise';
-import { matchesDeepInGenre, matchesMoodShelf } from '@/services/reco-shelf-rules';
+import { matchesDeepInGenre, matchesMoodShelf, isComingSoonForShelf } from '@/services/reco-shelf-rules';
+import {
+  clampActiveToIdleRatio,
+  heroEvidenceSortKey,
+  isEvidenceGame,
+} from '@/services/engagement-weight';
+import { mmrMaxSim } from '@/services/mmr-diversity';
+
+/** ANN cosine-distance ceiling for Taste Match pill (mirrors reco-store). */
+const ANN_TASTE_MATCH_CEILING = 0.45;
+
+/** Tokenize notes / titles for light lexical overlap (F8). */
+function noteTokens(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(t => t.length >= 3),
+  );
+}
+
+/** Notes overlap bonus capped at 0.05 of score (F8). */
+function computeNotesThemeBonus(
+  candidate: CandidateGame,
+  lovedNotesTokens: Set<string>,
+): number {
+  if (lovedNotesTokens.size === 0) return 0;
+  const hay = noteTokens([candidate.title, ...candidate.themes, ...candidate.genres].join(' '));
+  if (hay.size === 0) return 0;
+  let hit = 0;
+  for (const t of hay) {
+    if (lovedNotesTokens.has(t)) hit++;
+  }
+  if (hit === 0) return 0;
+  return Math.min(0.05, (hit / Math.max(lovedNotesTokens.size, 1)) * 0.05);
+}
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -157,11 +193,12 @@ function computeEngagementScore(game: UserGameSnapshot, now: number): number {
     temporalDecay * 0.10 +
     (curveMult - 1) * 0.05;
 
+  // Want-to-Play: mild intent only — no floor that inflates centroid-like weights
   if (game.status === 'Want to Play' && game.hoursPlayed === 0) {
-    baseScore = Math.max(baseScore, 0.25 * temporalDecay + 0.10);
+    baseScore = Math.min(baseScore, 0.2) * temporalDecay + 0.05;
   }
 
-  const result = clamp01(baseScore * curveMult);
+  const result = clamp01(baseScore * curveMult * clampActiveToIdleRatio(game.activeToIdleRatio));
   _engagementCache.set(game.gameId, result);
   return result;
 }
@@ -266,6 +303,7 @@ function buildTasteProfile(games: UserGameSnapshot[], now: number): TasteProfile
 function buildNegativeProfile(
   games: UserGameSnapshot[],
   _now: number,
+  thumbsDownCandidates: CandidateGame[] = [],
 ): { vec: FeatureVector; strength: number } {
   const negativeGames = games.filter(g => {
     if (g.removedAt) return true;
@@ -273,22 +311,32 @@ function buildNegativeProfile(
     return false;
   });
 
-  if (negativeGames.length === 0) return { vec: new Map(), strength: 0 };
-
   const vec: FeatureVector = new Map();
-  for (const g of negativeGames) {
-    for (const genre of g.genres) {
+  const addFeatures = (genres: string[], themes: string[], developer: string, weight = 1) => {
+    for (const genre of genres) {
       const can = toCanonicalGenre(genre);
-      if (can) vec.set(`g:${norm(can)}`, (vec.get(`g:${norm(can)}`) || 0) + 1);
+      if (can) vec.set(`g:${norm(can)}`, (vec.get(`g:${norm(can)}`) || 0) + weight);
     }
-    for (const theme of g.themes) vec.set(`t:${norm(theme)}`, (vec.get(`t:${norm(theme)}`) || 0) + 1);
-    if (g.developer) vec.set(`d:${norm(g.developer)}`, (vec.get(`d:${norm(g.developer)}`) || 0) + 1);
+    for (const theme of themes) vec.set(`t:${norm(theme)}`, (vec.get(`t:${norm(theme)}`) || 0) + weight);
+    if (developer) vec.set(`d:${norm(developer)}`, (vec.get(`d:${norm(developer)}`) || 0) + weight);
+  };
+
+  for (const g of negativeGames) {
+    addFeatures(g.genres, g.themes, g.developer);
   }
+  // Thumbs-down cards — strong negative signal from Oracle feedback
+  for (const c of thumbsDownCandidates) {
+    addFeatures(c.genres, c.themes, c.developer, 1.5);
+  }
+
+  const negCount = negativeGames.length + thumbsDownCandidates.length;
+  if (negCount === 0) return { vec: new Map(), strength: 0 };
 
   const maxVal = Math.max(1, ...vec.values());
   for (const [k, v] of vec) vec.set(k, v / maxVal);
 
-  return { vec, strength: Math.min(negativeGames.length / games.length, 0.5) };
+  const denom = Math.max(games.length, 1);
+  return { vec, strength: Math.min(negCount / denom, 0.5) };
 }
 
 // ─── Layer 4: Status Trajectory Scoring ─────────────────────────────────────────
@@ -842,13 +890,6 @@ function computeSequencingBoost(candidate: CandidateGame, ctx: SequencingContext
 function mmrRerank(scored: ScoredGame[], lambda: number, limit: number, onProgress?: (fraction: number) => void): ScoredGame[] {
   if (scored.length <= 1) return scored.slice(0, limit);
 
-  // Pre-compute normalized canonical genre sets — avoids creating them in the O(n²) loop
-  const genreSets = new Map<string, Set<string>>();
-  for (const s of scored) {
-    const canonNorm = new Set(s.genres.map(g => toCanonicalGenre(g)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c)));
-    genreSets.set(s.gameId, canonNorm);
-  }
-
   const selected: ScoredGame[] = [];
   const remaining = [...scored];
 
@@ -862,20 +903,7 @@ function mmrRerank(scored: ScoredGame[], lambda: number, limit: number, onProgre
 
     for (let i = 0; i < remaining.length; i++) {
       const candidate = remaining[i];
-      const setA = genreSets.get(candidate.gameId)!;
-      let maxSim = 0;
-
-      for (const sel of selected) {
-        const setB = genreSets.get(sel.gameId)!;
-        let intersection = 0;
-        for (const g of setA) {
-          if (setB.has(g)) intersection++;
-        }
-        const union = setA.size + setB.size - intersection;
-        const jaccard = union > 0 ? intersection / union : 0;
-        if (jaccard > maxSim) maxSim = jaccard;
-      }
-
+      const maxSim = mmrMaxSim(candidate, selected);
       const mmrScore = lambda * candidate.score - negLambda * maxSim;
       if (mmrScore > bestMMR) {
         bestMMR = mmrScore;
@@ -1030,9 +1058,16 @@ function generateExplanation(
     parts.push(`part of the ${scored.reasons.franchiseOf} series you love`);
   }
 
-  // Semantic discovery callout (ANN-sourced games)
-  if (scored.reasons.semanticRetrieved && scored.layerScores.semanticSimilarity > 0.15) {
+  // Semantic discovery — Taste Match from ANN distance, not mere membership
+  const annDist = scored.reasons.annDistance;
+  if (
+    typeof annDist === 'number'
+    && annDist <= ANN_TASTE_MATCH_CEILING
+    && scored.layerScores.semanticSimilarity > 0.15
+  ) {
     parts.push('discovered through your taste profile');
+  } else if (scored.reasons.semanticRetrieved && scored.layerScores.semanticSimilarity > 0.15) {
+    parts.push('close to games you love in embedding space');
   }
 
   // Cluster centroid match — game resonates with a specific taste niche
@@ -1091,7 +1126,9 @@ function generateExplanation(
 
 async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: TasteProfile; shelves: RecoShelf[] }> {
   const { userGames, candidates, now, currentHour, embeddingCoverage, dismissedGameIds } = input;
+  const thumbsDownIds = input.thumbsDownIds ?? [];
   const dismissedSet = new Set(dismissedGameIds);
+  for (const id of thumbsDownIds) dismissedSet.add(id);
 
   // Normalize array fields — old DB entries may have undefined for optional arrays
   for (const c of candidates) {
@@ -1110,7 +1147,11 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   // Reset per-run caches
   _engagementCache.clear();
 
-  // Filter out dismissed candidates
+  // Mine thumbs-down features before filtering them out of the candidate pool
+  const thumbsDownSet = new Set(thumbsDownIds);
+  const thumbsDownCandidates = candidates.filter(c => thumbsDownSet.has(c.gameId));
+
+  // Filter out dismissed / thumbs-down candidates
   const filteredCandidates = candidates.filter(c => !dismissedSet.has(c.gameId));
 
   // ── 1. Build taste profile ──
@@ -1131,7 +1172,15 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   // ── 3. Build negative taste profile ──
   progress('Mining negative signals...', 12);
-  const negativeProfile = buildNegativeProfile(userGames, now);
+  const negativeProfile = buildNegativeProfile(userGames, now, thumbsDownCandidates);
+
+  // F8: notes tokens from loved / evidence games
+  const lovedNotesTokens = new Set<string>();
+  for (const ug of userGames) {
+    if (!ug.userNotes) continue;
+    if (!isEvidenceGame(ug) && ug.rating < 4) continue;
+    for (const t of noteTokens(ug.userNotes)) lovedNotesTokens.add(t);
+  }
 
   // ── 4. Pre-compute taste vectors (dense Float32Array) ──
   progress('Building taste vectors...', 16);
@@ -1404,8 +1453,8 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     const isStretchPick = cCanonGenres.length > 0 && sharedGenres.length === 0;
     const isOnSale = !!c.price?.discountPercent && c.price.discountPercent > 0;
 
-    // ML model signal: P(recommended) from Kaggle-trained LightGBM (0..1)
-    const mlSignal = c.mlScore ?? 0.5;
+    // ML model signal: only when a real score was attached (no ?? 0.5 under W_ML)
+    const mlSignal = c.mlScore != null ? c.mlScore : 0;
 
     // Layer 14: Graph metrics (PageRank quality propagation + Louvain community affinity)
     let graphPageRankSignal = 0;
@@ -1418,6 +1467,9 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
         graphCommunityAffinity = clamp01(inCommunity / userCommunityTotal);
       }
     }
+
+    // F8: light lexical notes overlap with loved games (cap ≤ 0.05)
+    const notesBonus = computeNotesThemeBonus(c, lovedNotesTokens);
 
     // Final composite score
     const score = clamp01(
@@ -1436,7 +1488,8 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
       sequencingBoost * W_SEQUENCING +
       mlSignal * W_ML +
       graphPageRankSignal * W_GRAPH_PAGERANK +
-      graphCommunityAffinity * W_GRAPH_COMMUNITY -
+      graphCommunityAffinity * W_GRAPH_COMMUNITY +
+      notesBonus -
       negativeSignal * W_NEGATIVE
     );
     if (!Number.isFinite(score)) continue;
@@ -1490,8 +1543,10 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
         isOnSale,
         semanticRetrieved: c.semanticRetrieved === true,
         lexicalRetrieved: c.lexicalRetrieved === true,
+        annDistance: c.annDistance,
         bestClusterLabel,
         explanation: '',
+        comingSoon: c.comingSoon === true,
       },
       ...(c.price ? { price: c.price } : {}),
     });
@@ -1506,7 +1561,12 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   // ── 14. Diversity re-ranking (MMR) ──
   progress('Applying diversity filter...', 60);
-  scored.sort((a, b) => b.score - a.score);
+  // F2: hero/next-obsession prefers evidence-aligned scores
+  scored.sort((a, b) => {
+    const alignA = 0.5 * a.layerScores.contentSimilarity + 0.5 * a.layerScores.semanticSimilarity;
+    const alignB = 0.5 * b.layerScores.contentSimilarity + 0.5 * b.layerScores.semanticSimilarity;
+    return heroEvidenceSortKey(b.score, alignB) - heroEvidenceSortKey(a.score, alignA);
+  });
   const MMR_POOL_SIZE = 500;
   const mmrPool = scored.slice(0, MMR_POOL_SIZE);
   const reranked = mmrRerank(mmrPool, 0.7, 80, (f) => {
@@ -1518,7 +1578,9 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   // ── 16. Generate explanations ──
   progress('Generating insights...', 76);
   for (const s of reranked) {
-    s.reasons.explanation = generateExplanation(s, userGames, tasteProfile);
+    const prose = generateExplanation(s, userGames, tasteProfile);
+    s.reasons.explanation = prose;
+    s.explanation = [prose];
   }
 
   // ── 17. Shelf assembly ──
@@ -1570,7 +1632,7 @@ function buildShelvesFromScored(
       shelves.push({
         type: 'complete-the-series',
         title: `Complete the ${franchise.displayName} Series`,
-        subtitle: `You've played ${franchise.userPlayedIds.length} of ${franchise.entries.length} entries`,
+        subtitle: 'Same series as games you own — not just a shared brand',
         games: missingEntries.slice(0, 10),
       });
       addToUsed(missingEntries.slice(0, 10));
@@ -1631,7 +1693,7 @@ function buildShelvesFromScored(
       shelves.push({
         type: 'deep-in-genre',
         title: `Deep in ${displayGenre}`,
-        subtitle: 'More from your favourite genre',
+        subtitle: `Primary genre is ${displayGenre}`,
         games: genreGames,
       });
       addToUsed(genreGames);
@@ -1716,16 +1778,21 @@ function buildShelvesFromScored(
     addToUsed(criticsChoice);
   }
 
-  // Stretch Picks
+  // Stretch Picks — prefer low content AND low semantic to evidence taste (F2)
   const stretchPicks = reranked
     .filter(s => !usedGameIds.has(s.gameId) && s.reasons.isStretchPick && s.score > 0.12)
+    .sort((a, b) => {
+      const farA = a.layerScores.contentSimilarity + a.layerScores.semanticSimilarity;
+      const farB = b.layerScores.contentSimilarity + b.layerScores.semanticSimilarity;
+      return farA - farB || b.score - a.score;
+    })
     .slice(0, 12);
 
   if (stretchPicks.length >= 2) {
     shelves.push({
       type: 'stretch-picks',
       title: 'Stretch Picks',
-      subtitle: 'Outside your comfort zone, but you might love them',
+      subtitle: 'Far from your evidence taste — intentional variety',
       games: stretchPicks,
     });
     addToUsed(stretchPicks);
@@ -1765,18 +1832,17 @@ function buildShelvesFromScored(
     shelves.push({
       type: 'upcoming-sequels',
       title: 'Upcoming Sequels',
-      subtitle: 'New entries in franchises you love',
+      subtitle: 'Dated sequels in series you own',
       games: upcomingSequels,
     });
     addToUsed(upcomingSequels);
   }
 
-  // Coming Soon For You (general)
+  // Coming Soon For You — empty date ≠ upcoming; honor comingSoon flag
   const comingSoon = allScored
     .filter(s => {
       if (usedGameIds.has(s.gameId)) return false;
-      const rd = new Date(s.releaseDate).getTime();
-      return (!isNaN(rd) && rd > Date.now()) || s.releaseDate === '';
+      return isComingSoonForShelf(s.releaseDate, s.reasons.comingSoon, nowMs);
     })
     .filter(s => s.score > 0.15)
     .sort((a, b) => b.score - a.score)
@@ -1907,12 +1973,14 @@ function buildShelvesFromScored(
       const ratingBoost = g.rating > 0 ? g.rating / 5 : 0;
 
       const semanticSim = computeSemanticSimilarity(tasteCentroid, g.embedding);
+      // F8: High-priority WtP gets intent boost on wishlist ordering only
+      const priorityBoost = g.priority === 'High' ? 0.12 : 0;
 
       const score = clamp01(tasteCentroid && semanticSim > 0
         ? genreOverlap * 0.20 + themeOverlap * 0.10 + devMatch * 0.15 + pubMatch * 0.05
-          + ratingBoost * 0.10 + semanticSim * 0.30 + 0.10
+          + ratingBoost * 0.10 + semanticSim * 0.30 + 0.10 + priorityBoost
         : genreOverlap * 0.30 + themeOverlap * 0.15 + devMatch * 0.20 + pubMatch * 0.10
-          + ratingBoost * 0.15 + 0.10);
+          + ratingBoost * 0.15 + 0.10 + priorityBoost);
 
       const reasons: string[] = [];
       if (semanticSim > 0.3) reasons.push('Strong semantic match to your taste');

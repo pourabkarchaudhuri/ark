@@ -376,6 +376,8 @@ class CatalogStore {
     minReviews?: number;
     minPositivity?: number;
     maxResults?: number;
+    /** Cap for reviewCount-only admits (no genre/dev/pub match). Default 200. */
+    maxPopularQuota?: number;
   }): Promise<CatalogEntry[]> {
     const {
       topGenres,
@@ -385,6 +387,7 @@ class CatalogStore {
     minReviews = 10,
     minPositivity = 0.5,
     maxResults = 25_000,
+    maxPopularQuota = 200,
     } = opts;
 
     const genreSet = new Set(topGenres.map(g => g.toLowerCase()));
@@ -396,13 +399,17 @@ class CatalogStore {
       const tx = db.transaction(ENTRIES_STORE, 'readonly');
       const store = tx.objectStore(ENTRIES_STORE);
       const req = store.openCursor();
-      const results: CatalogEntry[] = [];
+      const matched: CatalogEntry[] = [];
+      const popularOnly: CatalogEntry[] = [];
 
       req.onsuccess = () => {
         const cursor = req.result;
-        if (!cursor || results.length >= maxResults) {
-          results.sort((a, b) => b.reviewCount - a.reviewCount);
-          resolve(results.slice(0, maxResults));
+        if (!cursor) {
+          popularOnly.sort((a, b) => b.reviewCount - a.reviewCount);
+          const popularCap = popularOnly.slice(0, maxPopularQuota);
+          const combined = [...matched, ...popularCap];
+          combined.sort((a, b) => b.reviewCount - a.reviewCount);
+          resolve(combined.slice(0, maxResults));
           return;
         }
 
@@ -422,10 +429,12 @@ class CatalogStore {
         const hasGenreMatch = entry.genres.some(g => genreSet.has(g.toLowerCase()));
         const hasDevMatch = entry.developer && devSet.has(entry.developer.toLowerCase());
         const hasPubMatch = entry.publisher && pubSet.size > 0 && pubSet.has(entry.publisher.toLowerCase());
-        const isPopular = entry.reviewCount >= 1000;
 
-        if (hasGenreMatch || hasDevMatch || hasPubMatch || isPopular) {
-          results.push(entry);
+        if (hasGenreMatch || hasDevMatch || hasPubMatch) {
+          matched.push(entry);
+        } else if (entry.reviewCount >= 1000) {
+          // Small capped popular quota — no longer OR-floods the whole pool
+          popularOnly.push(entry);
         }
 
         cursor.continue();

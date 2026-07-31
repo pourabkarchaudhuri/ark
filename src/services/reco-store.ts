@@ -36,6 +36,21 @@ import { embeddingService } from './embedding-service';
 import { gameGraphStore } from './game-graph-store';
 import { buildLexicalTasteQuery } from '@/services/oracle-rerank';
 import type { OracleRerankStatus } from '@/services/oracle-rerank';
+import { computeEngagementWeight, countEvidenceLibrary } from '@/services/engagement-weight';
+import {
+  buildLinkedExclusionIds,
+  expandDismissedWithLinked,
+  isLinkedExcluded,
+} from '@/services/linked-ids';
+import { expandHardNegativeIds } from '@/services/hard-negative';
+
+/** ANN cosine-distance ceiling for Oracle taste retrieval (Cos metric). */
+const ANN_DISTANCE_CEILING = 0.45;
+const ANN_MAX_KEEP = 500;
+const ANN_QUERY_K = 2_000;
+const GRAPH_BUILD_TIMEOUT_MS = 8_000;
+const QUOTA_COLD = 300;
+const SURVIVOR_HYDRATE_CAP = 80;
 
 // ─── Embedding cache (populated externally by embedding-service) ────────────
 
@@ -287,6 +302,11 @@ class RecoStore {
       candidates.push(...filtered);
       console.log(`[RecoStore] Pre-filter: ${poolSizeBefore.toLocaleString()} → ${candidates.length.toLocaleString()} candidates`);
 
+      // 2.2. Survivor metadata hydrate — similarGames / metacritic for graph layers (F4)
+      this.state = { ...this.state, progress: { stage: 'Hydrating survivor metadata...', percent: 7 } };
+      this.notify();
+      await this.hydrateSurvivorMetadata(candidates);
+
       // 2.5. Generate missing semantic embeddings if a generator was provided
       if (embeddingGenerator) {
         this.state = {
@@ -363,7 +383,7 @@ class RecoStore {
       // 3.5. Precompute taste centroid for the worker
       const userEmbs = userGames
         .filter(ug => ug.embedding && ug.embedding.length > 0)
-        .map(ug => ({ embedding: ug.embedding!, weight: this.computeEngagementWeight(ug) }));
+        .map(ug => ({ embedding: ug.embedding!, weight: computeEngagementWeight(ug) }));
       const tasteCentroid = embeddingService.computeTasteCentroid(userEmbs);
 
       // Embedding coverage: only meaningful when we CAN produce semantic scores
@@ -405,49 +425,30 @@ class RecoStore {
         for (const c of candidates) delete c.embedding;
       }
 
-      // 4. Get dismissed game IDs
-      const dismissedGameIds = recoHistoryStore.getDismissedIds();
+      // 4. Dismissed + thumbs-down ids → hard-neg franchise/dev expand → linked twins (F3)
+      const linkedEntries = libraryStore.getAllEntries().map(e => ({
+        gameId: e.gameId,
+        secondaryGameId: e.secondaryGameId,
+      }));
+      const thumbsDownIds = recoHistoryStore.getThumbsDownIds();
+      const hardNegCatalog = candidates.map(c => ({
+        gameId: c.gameId,
+        title: c.title,
+        developer: c.developer,
+      }));
+      const hardNegExpanded = expandHardNegativeIds(
+        recoHistoryStore.getDismissals(),
+        hardNegCatalog,
+        Date.now(),
+      );
+      const dismissedGameIds = expandDismissedWithLinked(
+        [...new Set([...hardNegExpanded, ...thumbsDownIds])],
+        linkedEntries,
+      );
 
-      // 4.5. Graph metrics — pulled from gameGraphStore if it has finished building.
-      // When unavailable (first run, still building, or graph disabled), these are undefined and
-      // the worker's graph budget collapses to 0 — other layers absorb the weight naturally.
-      let graphScoresMap: Record<string, {
-        pageRank: number;
-        personalizedPageRank: number;
-        authority: number;
-        hub: number;
-        community: number;
-        degree: number;
-      }> | undefined;
-      let userCommunityCounts: Record<number, number> | undefined;
-      let userCommunityTotal: number | undefined;
-      if (gameGraphStore.isReady) {
-        graphScoresMap = gameGraphStore.getAllScores() ?? undefined;
-        if (graphScoresMap) {
-          userCommunityCounts = {};
-          let total = 0;
-          for (const ug of userGames) {
-            const gs = graphScoresMap[ug.gameId];
-            if (!gs || gs.community < 0) continue;
-            userCommunityCounts[gs.community] = (userCommunityCounts[gs.community] ?? 0) + 1;
-            total++;
-          }
-          userCommunityTotal = total;
-        }
-      } else if (annIndex.isReady && gameGraphStore.state.phase === 'idle') {
-        // Kick off background build with PPR seed = engagement-weighted user library.
-        // First compute won't have graph signals, future runs will. PPR seed makes the
-        // graph encode "what's structurally close to this player" — foundation for Frontier Aurora.
-        const sig = `ann-${annIndex.vectorCount}`;
-        const seedWeights = new Map<string, number>();
-        for (const ug of userGames) {
-          const w = this.computeEngagementWeight(ug);
-          if (w > 0) seedWeights.set(ug.gameId, w);
-        }
-        gameGraphStore
-          .build(sig, { librarySeed: seedWeights.size > 0 ? { weights: seedWeights } : null })
-          .catch((err) => console.warn('[RecoStore] graph build failed:', err));
-      }
+      // 4.5. Graph metrics — await build (≤8s) so PPR/PageRank can feed this run when possible
+      const { graphScoresMap, userCommunityCounts, userCommunityTotal } =
+        await this.resolveGraphScores(userGames);
 
       // 5. Dispatch to worker
       const input: RecoWorkerInput = {
@@ -457,6 +458,7 @@ class RecoStore {
         currentHour: new Date().getHours(),
         embeddingCoverage,
         dismissedGameIds,
+        thumbsDownIds,
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
         precomputedSemanticScores,
         graphScores: graphScoresMap,
@@ -560,6 +562,8 @@ class RecoStore {
         engagementPattern,
         sessionTimestamps,
         sessionDurations,
+        priority: libEntry?.priority,
+        userNotes: libEntry?.publicReviews || undefined,
         ...(embedding ? { embedding } : {}),
       });
     }
@@ -601,6 +605,8 @@ class RecoStore {
         engagementPattern: 'unknown',
         sessionTimestamps: [],
         sessionDurations: [],
+        priority: libEntry.priority,
+        userNotes: libEntry.publicReviews || undefined,
         ...(embedding ? { embedding } : {}),
       });
     }
@@ -652,10 +658,11 @@ class RecoStore {
    * operations from the prefetch store.
    */
   private async buildCandidatePool(userGames: UserGameSnapshot[]): Promise<CandidateGame[]> {
-    // Exclude both journey-derived snapshots AND all library entries (covers
-    // "Want to Play" and other statuses that may not yet have journey records).
-    const userGameIds = new Set(userGames.map(g => g.gameId));
-    for (const id of libraryStore.getAllGameIds()) userGameIds.add(id);
+    // Exclude library primaries + secondaryGameId twins across all sources
+    const userGameIds = buildLinkedExclusionIds(
+      libraryStore.getAllEntries(),
+      userGames.map(g => g.gameId),
+    );
 
     const candidates: CandidateGame[] = [];
     const seenIds = new Set<string>();
@@ -670,9 +677,9 @@ class RecoStore {
 
     for (const g of rawGames) {
       const id = String(g.id ?? '');
-      if (!id || userGameIds.has(id) || seenIds.has(id)) continue;
       const secId = g.secondaryId ? String(g.secondaryId) : '';
-      if (secId && (userGameIds.has(secId) || seenIds.has(secId))) continue;
+      if (isLinkedExcluded(id, secId || undefined, userGameIds)) continue;
+      if (isLinkedExcluded(id, secId || undefined, seenIds)) continue;
       seenIds.add(id);
       if (secId) seenIds.add(secId);
 
@@ -757,8 +764,159 @@ class RecoStore {
       console.warn('[RecoStore] BM25 retrieval failed (non-fatal):', err);
     }
 
-    console.log(`[RecoStore] Candidate pool: ${candidates.length} (browse: ${browseCount}, catalog: ${catalogCount}, epicCatalog: ${epicCatalogCount}, ann: ${annCount}, bm25: ${bm25Count})`);
+    // ── Source 5: Cold-start — Top Sellers ∩ top genres when evidence < 5 (F9) ──
+    let coldCount = 0;
+    try {
+      const cold = this.seedColdStartCandidates(userGames, rawGames, userGameIds, seenIds);
+      candidates.push(...cold);
+      coldCount = cold.length;
+    } catch (err) {
+      console.warn('[RecoStore] Cold-start seed failed (non-fatal):', err);
+    }
+
+    console.log(`[RecoStore] Candidate pool: ${candidates.length} (browse: ${browseCount}, catalog: ${catalogCount}, epicCatalog: ${epicCatalogCount}, ann: ${annCount}, bm25: ${bm25Count}, cold: ${coldCount})`);
     return candidates;
+  }
+
+  /**
+   * F9: when evidence library is thin, seed Top Sellers ∩ user's top genres.
+   * Pure sync over already-loaded browse cache rows (category trending / high reviews).
+   */
+  private seedColdStartCandidates(
+    userGames: UserGameSnapshot[],
+    rawGames: Record<string, any>[],
+    userGameIds: Set<string>,
+    seenIds: Set<string>,
+  ): CandidateGame[] {
+    if (countEvidenceLibrary(userGames) >= 5) return [];
+
+    const genreWeights = new Map<string, number>();
+    for (const ug of userGames) {
+      const w = computeEngagementWeight(ug);
+      for (const g of ug.genres) {
+        const key = g.toLowerCase();
+        genreWeights.set(key, (genreWeights.get(key) ?? 0) + w);
+      }
+    }
+    const topGenres = [...genreWeights.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([g]) => g);
+    // Empty genre set → admit any top-seller (brand-new library)
+    const genreSet = new Set(topGenres);
+
+    const scored = rawGames
+      .map(g => {
+        const id = String(g.id ?? '');
+        const genres: string[] = Array.isArray(g.genre) ? g.genre : [];
+        const reviews = typeof g.totalReviews === 'number' ? g.totalReviews
+          : typeof g.reviewVolume === 'number' ? g.reviewVolume
+          : typeof g.recommendations === 'number' ? g.recommendations
+          : 0;
+        const category = String(g.category ?? g.browseCategory ?? '').toLowerCase();
+        const isTopSeller = category.includes('trend') || category.includes('top') || reviews >= 5000;
+        const genreHit = genreSet.size === 0
+          || genres.some(x => genreSet.has(String(x).toLowerCase()));
+        return { g, id, reviews, isTopSeller, genreHit };
+      })
+      .filter(r => r.id && r.isTopSeller && r.genreHit)
+      .sort((a, b) => b.reviews - a.reviews);
+
+    const results: CandidateGame[] = [];
+    for (const { g, id } of scored) {
+      if (results.length >= QUOTA_COLD) break;
+      const secId = g.secondaryId ? String(g.secondaryId) : '';
+      if (isLinkedExcluded(id, secId || undefined, userGameIds)) continue;
+      if (isLinkedExcluded(id, secId || undefined, seenIds)) continue;
+      seenIds.add(id);
+      if (secId) seenIds.add(secId);
+      const embedding = embeddingCache.get(id);
+      results.push({
+        gameId: id,
+        title: g.title || '',
+        coverUrl: g.coverUrl,
+        headerImage: g.headerImage,
+        developer: g.developer || '',
+        publisher: g.publisher || '',
+        genres: Array.isArray(g.genre) ? g.genre : [],
+        themes: Array.isArray(g.themes) ? g.themes : [],
+        gameModes: Array.isArray(g.gameModes) ? g.gameModes : [],
+        perspectives: Array.isArray(g.playerPerspectives) ? g.playerPerspectives : [],
+        platforms: Array.isArray(g.platform) ? g.platform : [],
+        metacriticScore: typeof g.metacriticScore === 'number' ? g.metacriticScore : null,
+        playerCount: typeof g.playerCount === 'number' ? g.playerCount : null,
+        releaseDate: g.releaseDate || '',
+        similarGameTitles: Array.isArray(g.similarGames)
+          ? g.similarGames.map((sg: any) => sg.name || '').filter(Boolean)
+          : [],
+        coldStartSeeded: true,
+        ...(embedding ? { embedding } : {}),
+      });
+    }
+    if (results.length > 0) {
+      console.log(`[RecoStore] Cold-start seeded ${results.length} Top Sellers ∩ genre`);
+    }
+    return results;
+  }
+
+  /**
+   * F4: batch-hydrate missing similarGames / metacritic for survivors (cap ≤ 80).
+   * Prefers semantic/BM25-retrieved rows over popular-flood fills.
+   */
+  private async hydrateSurvivorMetadata(candidates: CandidateGame[]): Promise<void> {
+    if (typeof window === 'undefined' || !window.steam?.getMultipleAppDetails) return;
+
+    const need = candidates
+      .filter(c =>
+        c.gameId.startsWith('steam-')
+        && (c.similarGameTitles.length === 0 || c.metacriticScore == null),
+      )
+      .sort((a, b) => {
+        const pri = (c: CandidateGame) =>
+          (c.semanticRetrieved ? 2 : 0) + (c.lexicalRetrieved ? 2 : 0) + (c.coldStartSeeded ? 1 : 0);
+        return pri(b) - pri(a);
+      })
+      .slice(0, SURVIVOR_HYDRATE_CAP);
+
+    if (need.length === 0) return;
+
+    const appIds = need
+      .map(c => parseInt(c.gameId.slice(6), 10))
+      .filter(n => !isNaN(n));
+    if (appIds.length === 0) return;
+
+    try {
+      const detailsArr = await window.steam.getMultipleAppDetails(appIds);
+      const byApp = new Map<number, any>();
+      for (const d of detailsArr || []) {
+        if (d && typeof d.steam_appid === 'number') byApp.set(d.steam_appid, d);
+      }
+      let hydrated = 0;
+      for (const c of need) {
+        const appid = parseInt(c.gameId.slice(6), 10);
+        const d = byApp.get(appid);
+        if (!d) continue;
+        if (c.metacriticScore == null && typeof d.metacritic?.score === 'number') {
+          c.metacriticScore = d.metacritic.score;
+        }
+        if (c.similarGameTitles.length === 0) {
+          // Steam details rarely include similar_games; keep recommendations as proxy titles when present
+          const recs = d.recommendations?.total;
+          if (typeof recs === 'number' && c.recommendations == null) {
+            c.recommendations = recs;
+          }
+        }
+        if (d.release_date?.coming_soon === true) c.comingSoon = true;
+        if (!c.developer && d.developers?.[0]) c.developer = d.developers[0];
+        if (!c.publisher && d.publishers?.[0]) c.publisher = d.publishers[0];
+        hydrated++;
+      }
+      if (hydrated > 0) {
+        console.log(`[RecoStore] Survivor hydrate: ${hydrated}/${need.length} enriched`);
+      }
+    } catch (err) {
+      console.warn('[RecoStore] Survivor hydrate failed (non-fatal):', err);
+    }
   }
 
   /**
@@ -801,12 +959,13 @@ class RecoStore {
       minReviews: 10,
       minPositivity: 0.5,
       maxResults: 25_000,
+      maxPopularQuota: 200,
     });
 
     const results: CandidateGame[] = [];
     for (const entry of catalogEntries) {
       const id = `steam-${entry.appid}`;
-      if (seenIds.has(id)) continue;
+      if (isLinkedExcluded(id, undefined, seenIds)) continue;
       seenIds.add(id);
 
       const embedding = embeddingCache.get(id);
@@ -873,7 +1032,7 @@ class RecoStore {
     await epicCatalogStore.getAllEntries((batch) => {
       for (const entry of batch) {
         const id = `epic-${entry.epicId}`;
-        if (userGameIds.has(id) || seenIds.has(id)) continue;
+        if (isLinkedExcluded(id, undefined, userGameIds) || isLinkedExcluded(id, undefined, seenIds)) continue;
 
         const hasGenreMatch = entry.genres.some(g => genreSet.has(g.toLowerCase()));
         const hasDevMatch = entry.developer && devSet.has(entry.developer.toLowerCase());
@@ -927,20 +1086,23 @@ class RecoStore {
       .filter(ug => ug.embedding && ug.embedding.length > 0)
       .map(ug => ({
         embedding: ug.embedding!,
-        weight: this.computeEngagementWeight(ug),
+        weight: computeEngagementWeight(ug),
       }));
 
     const centroid = embeddingService.computeTasteCentroid(userEmbs);
     if (!centroid) return [];
 
-    const TOP_K = 5_000;
-    const nearestIds = await annIndex.query(centroid, TOP_K);
+    const neighbors = await annIndex.queryWithDistances(centroid, ANN_QUERY_K);
+    const byDistance = [...neighbors].sort((a, b) => a.distance - b.distance);
+    const underCeiling = byDistance.filter(n => n.distance <= ANN_DISTANCE_CEILING);
+    const kept = (underCeiling.length > 0 ? underCeiling : byDistance).slice(0, ANN_MAX_KEEP);
+    const distanceById = new Map(kept.map(n => [n.id, n.distance]));
 
     const newSteamAppIds: number[] = [];
     const newEpicIds: string[] = [];
     const newIdSet = new Set<string>();
-    for (const id of nearestIds) {
-      if (userGameIds.has(id) || seenIds.has(id)) continue;
+    for (const { id } of kept) {
+      if (isLinkedExcluded(id, undefined, userGameIds) || isLinkedExcluded(id, undefined, seenIds)) continue;
       if (id.startsWith('steam-')) {
         const appid = parseInt(id.slice(6), 10);
         if (!isNaN(appid)) {
@@ -997,6 +1159,7 @@ class RecoStore {
             discountPercent: entry.discountPercent,
           },
           semanticRetrieved: true,
+          annDistance: distanceById.get(id),
           ...(embedding ? { embedding } : {}),
         });
       }
@@ -1034,13 +1197,14 @@ class RecoStore {
               discountPercent: entry.discountPercent,
             },
             semanticRetrieved: true,
+            annDistance: distanceById.get(id),
             ...(embedding ? { embedding } : {}),
           });
         }
       });
     }
 
-    console.log(`[RecoStore] ANN retrieval: ${nearestIds.length} queried → ${newSteamAppIds.length} Steam + ${newEpicIds.length} Epic new → ${results.length} loaded`);
+    console.log(`[RecoStore] ANN retrieval: ${neighbors.length} queried → ${kept.length} kept (ceiling ${ANN_DISTANCE_CEILING} / top ${ANN_MAX_KEEP}) → ${results.length} loaded`);
     return results;
   }
 
@@ -1067,7 +1231,7 @@ class RecoStore {
     const newEpicIds: string[] = [];
     const newIdSet = new Set<string>();
     for (const { id } of hits) {
-      if (userGameIds.has(id) || seenIds.has(id)) continue;
+      if (isLinkedExcluded(id, undefined, userGameIds) || isLinkedExcluded(id, undefined, seenIds)) continue;
       if (id.startsWith('steam-')) {
         const appid = parseInt(id.slice(6), 10);
         if (!isNaN(appid)) {
@@ -1180,7 +1344,7 @@ class RecoStore {
     const lovedTitles: string[] = [];
 
     for (const ug of userGames) {
-      const eng = this.computeEngagementWeight(ug);
+      const eng = computeEngagementWeight(ug);
       for (const g of ug.genres) {
         const cur = genreCounts.get(g) ?? { weight: 0, hours: 0, ratingSum: 0, n: 0 };
         cur.weight += eng;
@@ -1268,15 +1432,6 @@ class RecoStore {
     return buildLexicalTasteQuery(profile, { lovedTitles });
   }
 
-  private computeEngagementWeight(ug: UserGameSnapshot): number {
-    let w = 1;
-    w += Math.min(ug.hoursPlayed / 20, 3);
-    w += (ug.rating / 5) * 2;
-    if (ug.status === 'Completed') w += 1;
-    if (ug.status === 'Want to Play') w = Math.max(w, 1.5);
-    return w;
-  }
-
   /**
    * Pre-filter candidates using shelf-aware quotas so the expensive worker
    * pipeline only processes ~3K games instead of 25K+.
@@ -1303,7 +1458,7 @@ class RecoStore {
     const franchiseBases = new Set<string>();
 
     for (const ug of userGames) {
-      const weight = this.computeEngagementWeight(ug);
+      const weight = computeEngagementWeight(ug);
       for (const g of ug.genres) {
         const key = g.toLowerCase();
         genreWeights.set(key, (genreWeights.get(key) ?? 0) + weight);
@@ -1352,6 +1507,7 @@ class RecoStore {
     const selected = new Set<CandidateGame>();
     const QUOTA_SEMANTIC    = 500;
     const QUOTA_LEXICAL     = 400;
+    const QUOTA_COLD_KEEP   = QUOTA_COLD;
     const QUOTA_GENRE       = 2000;
     const QUOTA_FRANCHISE   = 300;
     const QUOTA_STUDIO      = 200;
@@ -1377,6 +1533,16 @@ class RecoStore {
       if (s.candidate.lexicalRetrieved && !selected.has(s.candidate)) {
         selected.add(s.candidate);
         lexicalCount++;
+      }
+    }
+
+    // 0c. Cold-start Top Sellers ∩ genre seeds (F9)
+    let coldCount = 0;
+    for (const s of scored) {
+      if (coldCount >= QUOTA_COLD_KEEP) break;
+      if (s.candidate.coldStartSeeded && !selected.has(s.candidate)) {
+        selected.add(s.candidate);
+        coldCount++;
       }
     }
 
@@ -1476,6 +1642,26 @@ class RecoStore {
     if (!window.ml) return;
 
     try {
+      const profileGames = userGames.map(ug => ({
+        gameId: ug.gameId,
+        hoursPlayed: ug.hoursPlayed,
+        rating: ug.rating,
+        status: ug.status,
+      }));
+
+      // Only score with a real Steam-backed profile — no default/empty ML noise
+      const hasSteam = window.ml.hasRealSteamProfile
+        ? await window.ml.hasRealSteamProfile(profileGames)
+        : profileGames.filter(g => g.gameId.startsWith('steam-')).length >= 3
+          && profileGames.some(g =>
+            g.gameId.startsWith('steam-')
+            && (g.hoursPlayed > 0 || g.rating > 0 || g.status === 'Completed'
+              || g.status === 'Playing' || g.status === 'Playing Now'));
+      if (!hasSteam) {
+        console.log('[RecoStore] ML scoring skipped — no real Steam profile');
+        return;
+      }
+
       const mlStatus = await window.ml.status();
       if (!mlStatus.loaded) {
         const loaded = await window.ml.load();
@@ -1485,23 +1671,14 @@ class RecoStore {
         }
       }
 
-      // Build user profile from library data
-      const profileGames = userGames.map(ug => ({
-        gameId: ug.gameId,
-        hoursPlayed: ug.hoursPlayed,
-        rating: ug.rating,
-        status: ug.status,
-      }));
       const userProfile = await window.ml.buildUserProfile(profileGames);
       if (!userProfile) return;
 
-      // Build O(1) lookup map for candidate indices
       const idToIdx = new Map<string, number>();
       for (let i = 0; i < candidates.length; i++) {
         idToIdx.set(candidates[i].gameId, i);
       }
 
-      // Score all candidates in batches (avoid oversized IPC messages)
       const BATCH_SIZE = 2000;
       const gameIds = candidates.map(c => c.gameId);
 
@@ -1510,6 +1687,8 @@ class RecoStore {
         const scores = await window.ml.scoreGames(userProfile, batchIds);
 
         for (const result of scores) {
+          // scoreGames only returns real Kaggle-profile titles (no 0.5 placeholders)
+          if (result.score == null || !Number.isFinite(result.score)) continue;
           const idx = idToIdx.get(result.gameId);
           if (idx !== undefined) {
             candidates[idx].mlScore = result.score;
@@ -1522,6 +1701,95 @@ class RecoStore {
     } catch (err) {
       console.warn('[RecoStore] ML scoring failed (non-fatal):', err);
     }
+  }
+
+  /**
+   * Await graphology build (≤8s) so PageRank/PPR can feed this compute when ready.
+   * On timeout/error, skip cleanly — worker graph budget collapses to 0.
+   */
+  private async resolveGraphScores(userGames: UserGameSnapshot[]): Promise<{
+    graphScoresMap: Record<string, {
+      pageRank: number;
+      personalizedPageRank: number;
+      authority: number;
+      hub: number;
+      community: number;
+      degree: number;
+    }> | undefined;
+    userCommunityCounts: Record<number, number> | undefined;
+    userCommunityTotal: number | undefined;
+  }> {
+    const pack = () => {
+      const graphScoresMap = gameGraphStore.getAllScores() ?? undefined;
+      if (!graphScoresMap) {
+        return { graphScoresMap: undefined, userCommunityCounts: undefined, userCommunityTotal: undefined };
+      }
+      const userCommunityCounts: Record<number, number> = {};
+      let total = 0;
+      for (const ug of userGames) {
+        const gs = graphScoresMap[ug.gameId];
+        if (!gs || gs.community < 0) continue;
+        userCommunityCounts[gs.community] = (userCommunityCounts[gs.community] ?? 0) + 1;
+        total++;
+      }
+      return {
+        graphScoresMap,
+        userCommunityCounts,
+        userCommunityTotal: total,
+      };
+    };
+
+    if (gameGraphStore.isReady) return pack();
+    if (!annIndex.isReady) {
+      return { graphScoresMap: undefined, userCommunityCounts: undefined, userCommunityTotal: undefined };
+    }
+
+    const sig = `ann-${annIndex.vectorCount}`;
+    const seedWeights = new Map<string, number>();
+    for (const ug of userGames) {
+      const w = computeEngagementWeight(ug);
+      if (w > 0) seedWeights.set(ug.gameId, w);
+    }
+    const seed = seedWeights.size > 0 ? { weights: seedWeights } : null;
+
+    const waitReady = (): Promise<boolean> =>
+      new Promise((resolve) => {
+        if (gameGraphStore.isReady) return resolve(true);
+        const timer = setTimeout(() => {
+          unsub();
+          resolve(false);
+        }, GRAPH_BUILD_TIMEOUT_MS);
+        const unsub = gameGraphStore.subscribe(() => {
+          if (gameGraphStore.isReady || gameGraphStore.state.phase === 'error') {
+            clearTimeout(timer);
+            unsub();
+            resolve(gameGraphStore.isReady);
+          }
+        });
+      });
+
+    try {
+      const phase = gameGraphStore.state.phase;
+      if (phase === 'building') {
+        await waitReady();
+      } else {
+        const buildP = gameGraphStore.build(sig, { librarySeed: seed });
+        await Promise.race([
+          buildP.then(() => true),
+          new Promise<boolean>((r) => setTimeout(() => r(false), GRAPH_BUILD_TIMEOUT_MS)),
+        ]);
+        // Re-read phase after race — build may still be in flight after timeout
+        if (!gameGraphStore.isReady) {
+          await waitReady();
+        }
+      }
+    } catch (err) {
+      console.warn('[RecoStore] graph build failed (skipping graphScores):', err);
+    }
+
+    if (gameGraphStore.isReady) return pack();
+    console.log('[RecoStore] graphScores unavailable this run — skipping cleanly');
+    return { graphScoresMap: undefined, userCommunityCounts: undefined, userCommunityTotal: undefined };
   }
 
   /**

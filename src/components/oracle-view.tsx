@@ -64,7 +64,7 @@ function oracleRerankBadge(status: OracleRerankStatus): { label: string; title: 
   return null;
 }
 import { recoHistoryStore } from '@/services/reco-history-store';
-import { normalizeLayerScores, generateExplanation } from '@/services/reco-explainer';
+import { normalizeLayerScores, explanationLines } from '@/services/reco-explainer';
 import { embeddingService } from '@/services/embedding-service';
 import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
@@ -556,7 +556,9 @@ function ReasonPills({ game }: { game: ScoredGame }) {
   if (game.price?.isFree) {
     pills.push('Free');
   }
-  if (game.reasons.semanticRetrieved) {
+  // Taste Match from ANN distance (not mere ANN-only membership)
+  const annDist = game.reasons.annDistance;
+  if (typeof annDist === 'number' && annDist <= 0.45) {
     pills.push('Taste Match');
   }
   if (game.reasons.isHiddenGem) {
@@ -724,9 +726,15 @@ const OracleFooter = memo(function OracleFooter({ game }: { game: ScoredGame }) 
 
 // ─── Explanation Popover ──────────────────────────────────────────────────────
 
-const ExplainPopover = memo(function ExplainPopover({ game }: { game: ScoredGame }) {
+const ExplainPopover = memo(function ExplainPopover({
+  game,
+  onDismissed,
+}: {
+  game: ScoredGame;
+  onDismissed?: (gameId: string) => void;
+}) {
   const breakdown = useMemo(() => normalizeLayerScores(game), [game]);
-  const reasons = useMemo(() => game.explanation?.length ? game.explanation : generateExplanation(game), [game]);
+  const reasons = useMemo(() => explanationLines(game), [game]);
   const [thumbs, setThumbs] = useState<1 | -1 | undefined>(() => recoHistoryStore.getThumbs(game.gameId));
 
   // Reset thumbs when the game changes (lazy init only fires on first mount)
@@ -740,9 +748,29 @@ const ExplainPopover = memo(function ExplainPopover({ game }: { game: ScoredGame
   }, [game.gameId, game.title]);
 
   const onThumbDown = useCallback(() => {
-    recoHistoryStore.recordThumbs(game.gameId, -1, game.title);
+    // recordThumbs(-1) also dismisses with franchise/dev meta; expand secondary twin
+    recoHistoryStore.recordThumbs(game.gameId, -1, game.title, '', {
+      developer: game.developer,
+    });
+    const lib = libraryStore.getEntry(game.gameId);
+    if (lib?.secondaryGameId) {
+      recoHistoryStore.dismiss(lib.secondaryGameId, {
+        title: game.title,
+        developer: game.developer,
+      });
+    }
+    const prefetched = getPrefetchedGames()?.find(
+      g => g.id === game.gameId || g.secondaryId === game.gameId,
+    );
+    if (prefetched?.secondaryId) {
+      recoHistoryStore.dismiss(prefetched.secondaryId, {
+        title: game.title,
+        developer: game.developer,
+      });
+    }
     setThumbs(-1);
-  }, [game.gameId, game.title]);
+    onDismissed?.(game.gameId);
+  }, [game.gameId, game.title, game.developer, onDismissed]);
 
   return (
     <div className="absolute top-0 right-0 z-30 w-60 bg-black/95 border border-white/10 rounded-lg shadow-2xl p-3 space-y-2 backdrop-blur-xl">
@@ -964,6 +992,37 @@ const OracleCard = memo(function OracleCard({
     onDismiss?.(game.gameId);
   }, [game.gameId, onDismiss]);
 
+  const handleAddToLibrary = useCallback((gameId: string) => {
+    if (libraryStore.isInLibrary(gameId)) return;
+    const g = gameObj;
+    libraryStore.addToLibrary({
+      gameId,
+      status: 'Want to Play',
+      priority: 'Medium',
+      publicReviews: '',
+      recommendationSource: 'Oracle',
+      cachedMeta: {
+        title: g.title,
+        coverUrl: g.coverUrl,
+        headerImage: g.headerImage,
+        developer: g.developer,
+        publisher: g.publisher,
+        genre: g.genre,
+        platform: g.platform,
+        releaseDate: g.releaseDate,
+        metacriticScore: g.metacriticScore,
+        steamAppId: g.steamAppId,
+        epicNamespace: g.epicNamespace,
+        epicOfferId: g.epicOfferId,
+        store: g.store,
+        themes: game.themes,
+        gameModes: game.gameModes,
+      },
+    });
+    if (shelfType) recoHistoryStore.recordClick(gameId, game.title, shelfType);
+    recoHistoryStore.recordLibraryAdd(gameId, game.title, shelfType || 'oracle');
+  }, [gameObj, game.themes, game.gameModes, game.title, shelfType]);
+
   const toggleExplain = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     setShowExplain(v => !v);
@@ -992,6 +1051,7 @@ const OracleCard = memo(function OracleCard({
         game={gameObj}
         onEdit={NOOP}
         onDelete={NOOP}
+        onAddToLibrary={handleAddToLibrary}
         isInLibrary={false}
         hideLibraryBadge
         footer={oracleFooter}
@@ -1064,7 +1124,7 @@ const OracleCard = memo(function OracleCard({
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.15 }}
           >
-            <ExplainPopover game={game} />
+            <ExplainPopover game={game} onDismissed={onDismiss} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -1610,9 +1670,13 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
   }, []);
 
   const handleDismiss = useCallback((gameId: string) => {
-    recoHistoryStore.dismiss(gameId);
+    const fromShelf = state.shelves.flatMap(s => s.games).find(g => g.gameId === gameId);
+    recoHistoryStore.dismiss(gameId, {
+      title: fromShelf?.title,
+      developer: fromShelf?.developer,
+    });
     setDismissedIds(new Set(recoHistoryStore.getDismissedIds()));
-  }, []);
+  }, [state.shelves]);
 
   // Filter dismissed games from shelves and apply bandit reordering
   const filterDismissed = (shelves: RecoShelf[]) =>

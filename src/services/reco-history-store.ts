@@ -3,12 +3,14 @@
  *
  * Tracks:
  *   1. Dismissed game IDs ("Not Interested") — filtered from future recommendations.
+ *      Persists dismiss metadata (franchise/developer/at) for hard-negative expand (F3).
  *   2. Recommendation conversions: click → library add → play → rate.
- *      This data feeds back into the scoring pipeline to weight future recs.
  *
  * Persists to localStorage with a simple versioned key.
- * The dismissed list is passed to the worker so it can exclude those games.
  */
+
+import { extractFranchiseBase } from '@/services/franchise';
+import type { DismissMeta } from '@/services/hard-negative';
 
 const LS_DISMISSED_KEY = 'ark-reco-dismissed-v1';
 const LS_HISTORY_KEY = 'ark-reco-history-v1';
@@ -32,13 +34,16 @@ export interface RecoConversion {
   thumbs?: 1 | -1;
 }
 
+export type { DismissMeta };
+
 class RecoHistoryStore {
-  private dismissed: Set<string>;
+  /** Rich dismiss records (migrated from bare id arrays). */
+  private dismissals: Map<string, DismissMeta>;
   private history: Map<string, RecoConversion>;
   private listeners: Set<() => void> = new Set();
 
   constructor() {
-    this.dismissed = new Set();
+    this.dismissals = new Map();
     this.history = new Map();
     this.load();
   }
@@ -60,8 +65,24 @@ class RecoHistoryStore {
     try {
       const rawDismissed = localStorage.getItem(LS_DISMISSED_KEY);
       if (rawDismissed) {
-        const arr: string[] = JSON.parse(rawDismissed);
-        for (const id of arr) this.dismissed.add(id);
+        const parsed = JSON.parse(rawDismissed) as unknown;
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (typeof item === 'string') {
+              // Legacy bare-id format
+              this.dismissals.set(item, { gameId: item, at: 0 });
+            } else if (item && typeof item === 'object' && typeof (item as DismissMeta).gameId === 'string') {
+              const m = item as DismissMeta;
+              this.dismissals.set(m.gameId, {
+                gameId: m.gameId,
+                at: typeof m.at === 'number' ? m.at : 0,
+                franchiseBase: m.franchiseBase,
+                developer: m.developer,
+                title: m.title,
+              });
+            }
+          }
+        }
       }
     } catch { /* corrupted */ }
 
@@ -78,40 +99,62 @@ class RecoHistoryStore {
 
   private save() {
     try {
-      localStorage.setItem(LS_DISMISSED_KEY, JSON.stringify([...this.dismissed]));
+      localStorage.setItem(LS_DISMISSED_KEY, JSON.stringify([...this.dismissals.values()]));
       localStorage.setItem(LS_HISTORY_KEY, JSON.stringify([...this.history.values()]));
     } catch { /* storage full */ }
   }
 
   // ── Dismissed Games ──
 
-  /** Dismiss a game — it won't be recommended again. */
-  dismiss(gameId: string) {
-    this.dismissed.add(gameId);
+  /**
+   * Dismiss a game — it won't be recommended again.
+   * Optional meta enables franchise/developer hard-negative expand (F3).
+   */
+  dismiss(
+    gameId: string,
+    meta?: { title?: string; developer?: string; franchiseBase?: string },
+  ) {
+    const title = meta?.title;
+    const franchiseBase =
+      meta?.franchiseBase
+      || (title ? extractFranchiseBase(title) : undefined);
+    const prev = this.dismissals.get(gameId);
+    this.dismissals.set(gameId, {
+      gameId,
+      at: prev?.at && prev.at > 0 ? prev.at : Date.now(),
+      franchiseBase: franchiseBase || prev?.franchiseBase,
+      developer: meta?.developer || prev?.developer,
+      title: title || prev?.title,
+    });
     this.save();
     this.notify();
   }
 
   /** Un-dismiss a game. */
   undismiss(gameId: string) {
-    this.dismissed.delete(gameId);
+    this.dismissals.delete(gameId);
     this.save();
     this.notify();
   }
 
   /** Check if a game is dismissed. */
   isDismissed(gameId: string): boolean {
-    return this.dismissed.has(gameId);
+    return this.dismissals.has(gameId);
   }
 
-  /** Get all dismissed game IDs. */
+  /** Get all dismissed game IDs (API preserved). */
   getDismissedIds(): string[] {
-    return [...this.dismissed];
+    return [...this.dismissals.keys()];
+  }
+
+  /** Rich dismiss metadata for hard-negative expand. */
+  getDismissals(): DismissMeta[] {
+    return [...this.dismissals.values()];
   }
 
   /** Get count of dismissed games. */
   getDismissedCount(): number {
-    return this.dismissed.size;
+    return this.dismissals.size;
   }
 
   // ── Conversion Tracking ──
@@ -126,21 +169,33 @@ class RecoHistoryStore {
         clickedAt: Date.now(),
         converted: false,
       });
+      this.save();
+      this.notify();
     }
-    this.save();
   }
 
   /** Record that a user added a recommended game to their library. */
-  recordLibraryAdd(gameId: string) {
-    const entry = this.history.get(gameId);
-    if (entry && !entry.addedAt) {
+  recordLibraryAdd(gameId: string, title = '', shelfType = 'oracle') {
+    let entry = this.history.get(gameId);
+    if (!entry) {
+      entry = {
+        gameId,
+        title,
+        shelfType,
+        clickedAt: Date.now(),
+        converted: false,
+      };
+      this.history.set(gameId, entry);
+    }
+    if (!entry.addedAt) {
       entry.addedAt = Date.now();
       entry.converted = true;
       this.save();
+      this.notify();
     }
   }
 
-  /** Record that a user started playing a recommended game. */
+  /** Record that a user played a recommended game. */
   recordPlay(gameId: string) {
     const entry = this.history.get(gameId);
     if (entry && !entry.playedAt) {
@@ -161,7 +216,13 @@ class RecoHistoryStore {
   }
 
   /** Record thumbs-up or thumbs-down feedback on a recommendation. */
-  recordThumbs(gameId: string, value: 1 | -1, title = '', shelfType = '') {
+  recordThumbs(
+    gameId: string,
+    value: 1 | -1,
+    title = '',
+    shelfType = '',
+    meta?: { developer?: string },
+  ) {
     let entry = this.history.get(gameId);
     if (!entry) {
       entry = {
@@ -175,6 +236,14 @@ class RecoHistoryStore {
     }
     entry.thumbs = value;
     if (value === 1) entry.converted = true;
+    // Thumbs-down closes the loop: dismiss so it won't resurface (with franchise meta)
+    if (value === -1) {
+      this.dismiss(gameId, {
+        title: title || entry.title,
+        developer: meta?.developer,
+      });
+      return; // dismiss already save+notify
+    }
     this.save();
     this.notify();
   }
@@ -182,6 +251,13 @@ class RecoHistoryStore {
   /** Get thumbs feedback for a game. */
   getThumbs(gameId: string): 1 | -1 | undefined {
     return this.history.get(gameId)?.thumbs;
+  }
+
+  /** All game ids the user thumbs-downed (for negative profile mining). */
+  getThumbsDownIds(): string[] {
+    return [...this.history.values()]
+      .filter(e => e.thumbs === -1)
+      .map(e => e.gameId);
   }
 
   /** Get positive feedback ratio (for signal quality measurement). */
@@ -246,14 +322,14 @@ class RecoHistoryStore {
 
   /** Clear all dismissed games. */
   clearDismissed() {
-    this.dismissed.clear();
+    this.dismissals.clear();
     this.save();
     this.notify();
   }
 
   /** Reset everything. */
   reset() {
-    this.dismissed.clear();
+    this.dismissals.clear();
     this.history.clear();
     localStorage.removeItem(LS_DISMISSED_KEY);
     localStorage.removeItem(LS_HISTORY_KEY);
