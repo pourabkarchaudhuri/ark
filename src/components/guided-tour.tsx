@@ -563,7 +563,7 @@ const librarySteps: Step[] = [
   {
     target: '[data-tour="journey-button"]',
     content:
-      '**Voyage** keeps a historical timeline even if you remove a game from the library — open it to see Captain’s Log, OCD timeline, and medals.',
+      '**Voyage** keeps a historical timeline even if you remove a game from the library — open it to see Captain’s Log, Scenes, Audit, and medals.',
     placement: 'bottom',
     title: 'Voyage Timeline',
   },
@@ -580,7 +580,7 @@ const journeySteps: Step[] = [
   {
     target: '[data-tour="app-logo"]',
     content:
-      'Voyage is your persistent gaming history — Ark, Captain’s Log, OCD timeline, and Medals — even after you remove a game from the library.',
+      'Voyage is your persistent gaming history — Ark, Captain’s Log, Scenes, Audit, and Medals — even after you remove a game from the library.',
     placement: 'bottom',
     disableBeacon: true,
     title: 'Voyage Timeline',
@@ -594,7 +594,7 @@ const journeySteps: Step[] = [
   {
     target: '[data-tour="journey-view-styles"]',
     content:
-      '**Your Ark** showcases active play; **Log** is the yearly timeline; **OCD** is the Gantt-style chart. Open **Medals** for Taste DNA, badge vault, and streak analytics.',
+      '**Your Ark** showcases active play; **Log** is the yearly timeline; **Scenes** replays your play episodes; **Audit** checks how complete and accurate your records are. Open **Medals** for Taste DNA, badge vault, and streak analytics.',
     placement: 'bottom',
     title: "Captain's Log & timeline",
   },

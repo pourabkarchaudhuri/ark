@@ -66,6 +66,47 @@ export function explanationLines(game: ScoredGame): string[] {
   return generateExplanation(game);
 }
 
+/**
+ * One sentence naming the single strongest reason this game surfaced.
+ *
+ * The drawer leads with this before the evidence chips and the score
+ * breakdown, so it has to be a verdict rather than a list: it picks the
+ * highest-signal reason available and says only that. Ordered by how
+ * convincing the reason is to a reader, not by raw layer weight — "similar to
+ * a game you love" lands harder than "scored well on popularity".
+ */
+export function explanationHeadline(game: ScoredGame): string {
+  const r = game.reasons;
+  const ls = game.layerScores;
+  const pct = Math.min(100, Math.max(0, Math.round(game.score * 100)));
+
+  if (r.similarTo.length > 0) {
+    return `A ${pct}% match, mostly because it plays like ${r.similarTo.slice(0, 2).join(' and ')}.`;
+  }
+  if (ls.franchiseBoost > 0) {
+    return `A ${pct}% match — it continues a franchise you already follow.`;
+  }
+  if (ls.studioLoyaltyBoost > 0 && game.developer) {
+    return `A ${pct}% match — ${game.developer} is a studio you keep coming back to.`;
+  }
+  if (r.bestClusterLabel) {
+    return `A ${pct}% match with your ${r.bestClusterLabel} cluster.`;
+  }
+  if (r.sharedGenres.length > 0) {
+    return `A ${pct}% match on the ${r.sharedGenres.slice(0, 2).join(' and ')} you play most.`;
+  }
+  if (r.isHiddenGem) {
+    return `A ${pct}% match — critically strong but almost nobody is talking about it.`;
+  }
+  if (ls.semanticSimilarity > 0.1) {
+    return `A ${pct}% match on how closely it reads like the games in your library.`;
+  }
+  if (r.isStretchPick) {
+    return `A ${pct}% match, offered as a stretch pick outside your usual range.`;
+  }
+  return `A ${pct}% match against your overall profile.`;
+}
+
 export function normalizeLayerScores(game: ScoredGame): LayerBreakdown[] {
   const entries = Object.entries(game.layerScores)
     .filter(([, v]) => v !== undefined && v !== 0)

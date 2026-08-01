@@ -48,6 +48,12 @@ interface Settings {
     useGeminiInstead: boolean; // Deprecated: use preferences.preferredChatProvider instead
     /** Ollama library name for POST /api/rerank (Embedding Space neighbor ordering). */
     rerankModel?: string;
+    /**
+     * Causal-LM reranker used when /api/rerank is unavailable, scored through
+     * /api/generate logprobs. Separate from `rerankModel` because the two tiers
+     * need different architectures — a BERT cross-encoder cannot be prompted.
+     */
+    rerankQwenModel?: string;
     /** Refine Embedding Space neighbor lists with /api/rerank (default true). */
     neighborRerankEnabled?: boolean;
     /** Refine Oracle shelves with /api/rerank (default true). */
@@ -59,6 +65,9 @@ interface Settings {
 
 /** Default rerank model — keep string in sync with `src/services/ollama-rerank.ts` `DEFAULT_OLLAMA_RERANK_MODEL`. */
 export const DEFAULT_OLLAMA_RERANK_MODEL = 'dengcao/bge-reranker-v2-m3';
+
+/** Default Qwen3 tier model — Apache 2.0, ~600 MB, works through /api/generate. */
+export const DEFAULT_OLLAMA_RERANK_QWEN_MODEL = 'qwen3-reranker:0.6b';
 
 const SETTINGS_VERSION = 1;
 
@@ -90,6 +99,7 @@ class SettingsStore {
         model: 'gemma3:12b',
         useGeminiInstead: false,
         rerankModel: DEFAULT_OLLAMA_RERANK_MODEL,
+        rerankQwenModel: DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
         neighborRerankEnabled: true,
         oracleRerankEnabled: true,
         oracleRerankBlend: 1,
@@ -195,6 +205,7 @@ class SettingsStore {
     model: string;
     useGeminiInstead: boolean;
     rerankModel: string;
+    rerankQwenModel: string;
     neighborRerankEnabled: boolean;
     oracleRerankEnabled: boolean;
     oracleRerankBlend: number;
@@ -205,6 +216,7 @@ class SettingsStore {
       model: 'gemma3:12b',
       useGeminiInstead: false,
       rerankModel: DEFAULT_OLLAMA_RERANK_MODEL,
+      rerankQwenModel: DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
       neighborRerankEnabled: true,
       oracleRerankEnabled: true,
       oracleRerankBlend: 1,
@@ -219,6 +231,7 @@ class SettingsStore {
       ...defaults,
       ...o,
       rerankModel: o?.rerankModel?.trim() || defaults.rerankModel,
+      rerankQwenModel: o?.rerankQwenModel?.trim() || defaults.rerankQwenModel,
       neighborRerankEnabled: o?.neighborRerankEnabled !== false,
       oracleRerankEnabled: o?.oracleRerankEnabled !== false,
       oracleRerankBlend: blend,
@@ -231,6 +244,7 @@ class SettingsStore {
     model?: string;
     useGeminiInstead?: boolean;
     rerankModel?: string;
+    rerankQwenModel?: string;
     neighborRerankEnabled?: boolean;
     oracleRerankEnabled?: boolean;
     oracleRerankBlend?: number;
@@ -239,6 +253,10 @@ class SettingsStore {
     if (next.rerankModel !== undefined) {
       const t = String(next.rerankModel).trim();
       next.rerankModel = t.length > 200 ? t.slice(0, 200) : t;
+    }
+    if (next.rerankQwenModel !== undefined) {
+      const t = String(next.rerankQwenModel).trim();
+      next.rerankQwenModel = t.length > 200 ? t.slice(0, 200) : t;
     }
     if (next.oracleRerankBlend !== undefined) {
       const b = Number(next.oracleRerankBlend);

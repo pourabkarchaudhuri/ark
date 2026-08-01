@@ -4,32 +4,38 @@
  * Uses the journey store which persists entries even after library removal.
  * Scrolls from latest (top) to oldest (bottom).
  *
- * Four view styles:
+ * Five view styles:
  *  - "Ark": 3D card showcase
  *  - "Log" (Captain's Log): vertical timeline grouped by year and month
- *  - "OCD": horizontally scrollable Gantt chart with status-colored bars
+ *  - "Scenes": detected play episodes as a stream, with silences rendered as content
+ *  - "Audit": record-quality rings and a resolution queue
  *  - "Medals": gamified progression with Taste DNA and badge vault (analytics in Overview)
+ *
+ * Scenes and Audit are competing replacements for the old OCD Gantt and are
+ * deliberately independent of each other — they share only the pure helpers in
+ * lib/voyage-derive.ts, so retiring the loser is a single commit.
  */
 import { useMemo, useState, useEffect, memo, useCallback } from 'react';
 import { useLocation } from 'wouter';
 import { motion } from 'framer-motion';
-import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, BarChart3, ScrollText, X, Box, Award } from 'lucide-react';
+import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, Clapperboard, ClipboardCheck, ScrollText, X, Box, Award } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Timeline, TimelineEntry } from '@/components/ui/timeline';
-import { JourneyEntry, GameStatus, StatusChangeEntry, GameSession } from '@/types/game';
+import { JourneyEntry, GameStatus, StatusChangeEntry, GameSession, LibraryGameEntry } from '@/types/game';
 import { steamService } from '@/services/steam-service';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
 import { statusHistoryStore } from '@/services/status-history-store';
 import { sessionStore } from '@/services/session-store';
-import { JourneyGanttView } from '@/components/journey-gantt-view';
+import { JourneyScenesView } from '@/components/journey-scenes-view';
+import { JourneyAuditView } from '@/components/journey-audit-view';
 import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
 import { resolveJourneyDisplayTitle } from '@/lib/journey-display-title';
 import { ShowcaseView } from '@/components/showcase-view';
 import { MedalsView } from '@/components/medals-view';
 
-type JourneyViewStyle = 'log' | 'ocd' | 'ark' | 'medals';
+type JourneyViewStyle = 'log' | 'chronicle' | 'audit' | 'ark' | 'medals';
 
 /** Parses journey date strings; invalid values yield null so we never use NaN for year/month grouping. */
 function parseJourneyIso(iso: string | undefined): Date | null {
@@ -284,6 +290,25 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
   );
 });
 
+/**
+ * The five Voyage pills. Scenes and Audit are labelled neutrally on purpose:
+ * neither carries the old "OCD" name, so the A/B isn't biased toward the one
+ * that inherited it.
+ */
+const VIEW_PILLS: Array<{
+  id: JourneyViewStyle;
+  label: string;
+  title?: string;
+  icon: typeof Box;
+  tour?: string;
+}> = [
+  { id: 'ark', label: 'Your Ark', icon: Box },
+  { id: 'log', label: 'Log', title: "Captain's Log", icon: ScrollText },
+  { id: 'chronicle', label: 'Scenes', title: 'Your play episodes', icon: Clapperboard },
+  { id: 'audit', label: 'Audit', title: 'Record quality', icon: ClipboardCheck },
+  { id: 'medals', label: 'Medals', icon: Award, tour: 'journey-medals-tab' },
+];
+
 export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
   const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('ark');
 
@@ -344,32 +369,42 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entryIdsKey]);
 
-  // OCD (Gantt) merges journey entries with status history + sessions. Those stores
-  // update without changing `entries`, so we keep snapshots in state while OCD is
-  // active; subscribing only in OCD avoids re-rendering Ark/Log on every session tick.
-  const [ocdStoreSnap, setOcdStoreSnap] = useState<{
+  // Scenes and Audit merge journey entries with status history + sessions (and,
+  // for Audit, the live library). Those stores update without changing `entries`,
+  // so we keep snapshots in state while one of those tabs is active; subscribing
+  // only there avoids re-rendering Ark/Log/Medals on every session tick.
+  const needsStoreSnapshot = viewStyle === 'chronicle' || viewStyle === 'audit';
+  const needsLibrarySnapshot = viewStyle === 'audit';
+
+  const [voyageStoreSnap, setVoyageStoreSnap] = useState<{
     statusHistory: StatusChangeEntry[];
     sessions: GameSession[];
+    libraryEntries: LibraryGameEntry[];
   } | null>(null);
 
   useEffect(() => {
-    if (viewStyle !== 'ocd') {
-      setOcdStoreSnap(null);
+    if (!needsStoreSnapshot) {
+      setVoyageStoreSnap(null);
       return;
     }
+    // Each array identity changes only when its store notifies, which is what
+    // the consuming views memoize their derivations against.
     const read = () => ({
       statusHistory: statusHistoryStore.getAll(),
       sessions: sessionStore.getAll(),
+      libraryEntries: needsLibrarySnapshot ? libraryStore.getAllEntries() : [],
     });
-    setOcdStoreSnap(read());
-    const onStore = () => setOcdStoreSnap(read());
-    const unsubHistory = statusHistoryStore.subscribe(onStore);
-    const unsubSessions = sessionStore.subscribe(onStore);
+    setVoyageStoreSnap(read());
+    const onStore = () => setVoyageStoreSnap(read());
+    const unsubs = [
+      statusHistoryStore.subscribe(onStore),
+      sessionStore.subscribe(onStore),
+    ];
+    if (needsLibrarySnapshot) unsubs.push(libraryStore.subscribe(onStore));
     return () => {
-      unsubHistory();
-      unsubSessions();
+      for (const unsub of unsubs) unsub();
     };
-  }, [viewStyle]);
+  }, [needsStoreSnapshot, needsLibrarySnapshot]);
 
   // Ark and Log: entries with firstPlayedAt or lastPlayedAt; sort: Playing first, then by latest activity (lastPlayedAt ?? firstPlayedAt) desc
   const arkAndLogEntries = useMemo(() => {
@@ -534,19 +569,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // Total stats
   const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
 
-  // Prepare Gantt data (only when OCD view is active)
-  const ganttData = useMemo(() => {
-    if (viewStyle !== 'ocd') return null;
-    const statusHistory = ocdStoreSnap?.statusHistory ?? statusHistoryStore.getAll();
-    const sessions = ocdStoreSnap?.sessions ?? sessionStore.getAll();
-    return {
-      journeyEntries: entries,
-      statusHistory,
-      sessions,
-    };
-  }, [viewStyle, entries, ocdStoreSnap]);
-
-  // Loading state — skeleton matches Voyage header + content (Your Ark / Log / OCD / Medals)
+  // Loading state — skeleton matches Voyage header + content (Ark / Log / Scenes / Audit / Medals)
   if (loading) {
     return (
       <div className="relative w-full overflow-clip" data-tour="journey-main">
@@ -557,10 +580,10 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
               <div className="h-8 md:h-9 w-48 md:w-64 bg-white/10 rounded animate-pulse mb-2" />
               <div className="h-4 w-40 bg-white/5 rounded animate-pulse" />
             </div>
-            <div className="flex items-center gap-3">
-              <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10 gap-0.5" data-tour="journey-view-styles">
-                {[1, 2, 3, 4].map((i) => (
-                  <div key={i} className="h-9 w-16 md:w-20 bg-white/10 rounded-md animate-pulse" data-tour={i === 4 ? 'journey-medals-tab' : undefined} />
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10 gap-0.5 max-w-full overflow-x-auto scrollbar-hide" data-tour="journey-view-styles">
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <div key={i} className="h-9 w-16 md:w-20 shrink-0 bg-white/10 rounded-md animate-pulse" data-tour={i === 5 ? 'journey-medals-tab' : undefined} />
                 ))}
               </div>
             </div>
@@ -615,67 +638,49 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h2 className="text-lg md:text-3xl mb-2 text-white font-bold font-['Orbitron']">
-              {viewStyle === 'log' ? "Captain's Log" : 'Your Gaming Voyage'}
+              {viewStyle === 'log'
+                ? "Captain's Log"
+                : viewStyle === 'chronicle'
+                  ? 'Scenes'
+                  : viewStyle === 'audit'
+                    ? 'Audit'
+                    : 'Your Gaming Voyage'}
             </h2>
             <p className="text-white/60 text-sm md:text-base max-w-lg">
-              {formatHours(totalHours)} played
+              {viewStyle === 'audit'
+                ? 'How complete and accurate your records are'
+                : `${formatHours(totalHours)} played`}
             </p>
           </div>
 
-          {/* View style toggle + data source toggle */}
-          <div className="flex items-center gap-3">
-            <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10" data-tour="journey-view-styles">
-              <button
-                onClick={() => setViewStyle('ark')}
-                className={cn(
-                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                  viewStyle === 'ark'
-                    ? 'bg-fuchsia-500 text-white'
-                    : 'text-white/60 hover:text-white'
-                )}
-              >
-                <Box className="w-3 h-3" />
-                Your Ark
-              </button>
-              <button
-                onClick={() => setViewStyle('log')}
-                title="Captain's Log"
-                className={cn(
-                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                  viewStyle === 'log'
-                    ? 'bg-fuchsia-500 text-white'
-                    : 'text-white/60 hover:text-white'
-                )}
-              >
-                <ScrollText className="w-3 h-3" />
-                Log
-              </button>
-              <button
-                onClick={() => setViewStyle('ocd')}
-                className={cn(
-                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                  viewStyle === 'ocd'
-                    ? 'bg-fuchsia-500 text-white'
-                    : 'text-white/60 hover:text-white'
-                )}
-              >
-                <BarChart3 className="w-3 h-3" />
-                OCD
-              </button>
-              <button
-                type="button"
-                data-tour="journey-medals-tab"
-                onClick={() => setViewStyle('medals')}
-                className={cn(
-                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                  viewStyle === 'medals'
-                    ? 'bg-fuchsia-500 text-white'
-                    : 'text-white/60 hover:text-white'
-                )}
-              >
-                <Award className="w-3 h-3" />
-                Medals
-              </button>
+          {/* View style toggle — five pills, so the strip scrolls sideways once
+              the window is too narrow to lay them out (roughly below 900px). */}
+          <div className="flex items-center gap-3 min-w-0">
+            <div
+              className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10 max-w-full overflow-x-auto scrollbar-hide"
+              data-tour="journey-view-styles"
+            >
+              {VIEW_PILLS.map((pill) => {
+                const PillIcon = pill.icon;
+                return (
+                  <button
+                    key={pill.id}
+                    type="button"
+                    data-tour={pill.tour}
+                    title={pill.title}
+                    onClick={() => setViewStyle(pill.id)}
+                    className={cn(
+                      'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 shrink-0 whitespace-nowrap',
+                      viewStyle === pill.id
+                        ? 'bg-fuchsia-500 text-white'
+                        : 'text-white/60 hover:text-white'
+                    )}
+                  >
+                    <PillIcon className="w-3 h-3" />
+                    {pill.label}
+                  </button>
+                );
+              })}
             </div>
 
           </div>
@@ -687,15 +692,20 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         <ShowcaseView entries={arkAndLogEntries} />
       ) : viewStyle === 'medals' ? (
         <MedalsView entries={entries} />
-      ) : viewStyle === 'ocd' && ganttData ? (
-        <div className="px-0 md:px-4 lg:px-6">
-          <JourneyGanttView
-            journeyEntries={ganttData.journeyEntries}
-            statusHistory={ganttData.statusHistory}
-            sessions={ganttData.sessions}
-          />
-        </div>
-      ) : (
+      ) : viewStyle === 'chronicle' && voyageStoreSnap ? (
+        <JourneyScenesView
+          journeyEntries={entries}
+          statusHistory={voyageStoreSnap.statusHistory}
+          sessions={voyageStoreSnap.sessions}
+        />
+      ) : viewStyle === 'audit' && voyageStoreSnap ? (
+        <JourneyAuditView
+          journeyEntries={entries}
+          libraryEntries={voyageStoreSnap.libraryEntries}
+          statusHistory={voyageStoreSnap.statusHistory}
+          sessions={voyageStoreSnap.sessions}
+        />
+      ) : viewStyle === 'chronicle' || viewStyle === 'audit' ? null : (
         <Timeline data={timelineData} />
       )}
     </div>

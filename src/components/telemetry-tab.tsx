@@ -62,15 +62,31 @@ export default function TelemetryTab({
 }): JSX.Element {
   const [sessions, setSessions] = React.useState<GameSessionLike[]>([]);
 
+  // The tab is always mounted now, so a session recorded while it is on screen
+  // has to reach it. A load keyed on gameId alone left the panel sitting on its
+  // empty state while a session was recording behind it.
   React.useEffect(() => {
     let alive = true;
-    const load = async () => {
-      const raw = await Promise.resolve(sessionStore.getForGame(gameId));
-      if (alive) setSessions(raw as GameSessionLike[]);
+    // Only swap state when this game's rows actually changed. sessionStore
+    // notifies on every live tick for every game, and each of the six panels
+    // below re-derives from `sessions` on identity change.
+    let lastKey = '';
+
+    const load = () => {
+      const raw = sessionStore.getForGame(gameId) as GameSessionLike[];
+      const key = raw
+        .map((s) => `${s.id}:${s.endTime ?? ''}:${s.durationMinutes ?? 0}`)
+        .join('|');
+      if (!alive || key === lastKey) return;
+      lastKey = key;
+      setSessions(raw);
     };
+
     load();
+    const unsubscribe = sessionStore.subscribe(load);
     return () => {
       alive = false;
+      unsubscribe();
     };
   }, [gameId]);
 

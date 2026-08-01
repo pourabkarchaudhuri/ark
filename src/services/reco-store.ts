@@ -34,8 +34,8 @@ import { annIndex } from './ann-index';
 import { bm25Index } from './bm25-index';
 import { embeddingService } from './embedding-service';
 import { gameGraphStore } from './game-graph-store';
-import { buildLexicalTasteQuery } from '@/services/oracle-rerank';
-import type { OracleRerankStatus } from '@/services/oracle-rerank';
+import { buildLexicalTasteQuery, rerankStatus } from '@/services/oracle-rerank';
+import type { RerankStatus } from '@/services/oracle-rerank';
 import { computeEngagementWeight, countEvidenceLibrary } from '@/services/engagement-weight';
 import {
   buildLinkedExclusionIds,
@@ -104,6 +104,57 @@ export function buildOracleLibrarySignature(): string {
   return [...libLines, ...customLines, dismissLine].join('\n');
 }
 
+// ─── Cached-result pipeline signature ──────────────────────────────────────────
+//
+// A cache restore replays only the Oracle rerank pass. BM25 retrieval, ANN
+// retrieval, ML scoring and the graph signals are NOT re-run, so a restored
+// session can differ from a fresh compute in ways the library signature cannot
+// see. Recording which of those stages actually contributed lets the restore
+// notice when the machine has since gained a signal the cached shelves never
+// saw.
+//
+// The test is deliberately one-directional. Losing a stage (ANN not loaded yet
+// this session) does not invalidate — the cached result was computed with MORE
+// signal than a fresh run could produce right now, so keeping it is strictly
+// better. Only a stage that is available now and was missing then forces a
+// recompute. Without that asymmetry every cold start would invalidate, since
+// ANN, BM25 and the graph all come up lazily after boot.
+
+export interface OraclePipelineStages {
+  bm25: boolean;
+  ann: boolean;
+  graph: boolean;
+  ml: boolean;
+}
+
+/** Set by `applyMLScores` once the ML model has actually scored a pool. */
+let _mlScoringAvailable = false;
+
+export function currentOraclePipelineStages(): OraclePipelineStages {
+  return {
+    bm25: bm25Index.isReady,
+    ann: annIndex.isReady,
+    graph: gameGraphStore.isReady,
+    ml: _mlScoringAvailable,
+  };
+}
+
+/** True when the pipeline can now contribute a signal the cached result lacks. */
+function pipelineGainedStages(cached: OraclePipelineStages, now: OraclePipelineStages): boolean {
+  return (Object.keys(now) as Array<keyof OraclePipelineStages>).some((k) => now[k] && !cached[k]);
+}
+
+function isPipelineStages(value: unknown): value is OraclePipelineStages {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.bm25 === 'boolean' &&
+    typeof v.ann === 'boolean' &&
+    typeof v.graph === 'boolean' &&
+    typeof v.ml === 'boolean'
+  );
+}
+
 // ─── State ─────────────────────────────────────────────────────────────────────
 
 interface RecoState {
@@ -118,8 +169,8 @@ interface RecoState {
   libraryCount: number;
   /** How many candidate games were available to score. */
   candidateCount: number;
-  /** Last Oracle /api/rerank outcome (for UI transparency). */
-  oracleRerankStatus: OracleRerankStatus;
+  /** Last Oracle rerank outcome plus the tier that produced it (UI transparency). */
+  oracleRerankStatus: RerankStatus;
   /** Bumps when library-derived Oracle results are invalidated (UI resets pipeline). */
   invalidationGeneration: number;
 }
@@ -134,7 +185,7 @@ const INITIAL_STATE: RecoState = {
   error: null,
   libraryCount: 0,
   candidateCount: 0,
-  oracleRerankStatus: 'none',
+  oracleRerankStatus: rerankStatus('none'),
   invalidationGeneration: 0,
 };
 
@@ -180,6 +231,7 @@ class RecoStore {
         libraryCount: this.state.libraryCount,
         candidateCount: this.state.candidateCount,
         librarySignature: buildOracleLibrarySignature(),
+        pipelineStages: currentOraclePipelineStages(),
       };
       localStorage.setItem(RecoStore.RESULT_CACHE_KEY, JSON.stringify(cache));
     } catch {
@@ -201,6 +253,15 @@ class RecoStore {
         typeof cache.librarySignature !== 'string' ||
         cache.librarySignature !== buildOracleLibrarySignature()
       ) {
+        return null;
+      }
+      // Restore only replays the rerank pass, so a cache written before a
+      // retrieval or scoring stage came online would silently serve shelves
+      // that a fresh compute would not produce. Pre-signature caches are
+      // dropped because there is no way to tell what produced them.
+      if (!isPipelineStages(cache.pipelineStages)) return null;
+      if (pipelineGainedStages(cache.pipelineStages, currentOraclePipelineStages())) {
+        console.log('[RecoStore] Dropping cached results — pipeline gained a stage since they were computed');
         return null;
       }
       return cache;
@@ -258,7 +319,7 @@ class RecoStore {
         lastComputed: (cached.lastComputed as number) ?? Date.now(),
         libraryCount: (cached.libraryCount as number) ?? 0,
         candidateCount: (cached.candidateCount as number) ?? 0,
-        oracleRerankStatus: 'none',
+        oracleRerankStatus: rerankStatus('none'),
       };
       this.notify();
       // Cache restore used to skip rerank entirely. When Oracle rerank is still
@@ -274,7 +335,7 @@ class RecoStore {
       status: 'computing',
       progress: { stage: 'Gathering data...', percent: 5 },
       error: null,
-      oracleRerankStatus: 'none',
+      oracleRerankStatus: rerankStatus('none'),
     };
     this.notify();
 
@@ -1698,6 +1759,7 @@ class RecoStore {
       }
 
       const scored = candidates.filter(c => c.mlScore != null).length;
+      if (scored > 0) _mlScoringAvailable = true;
       console.log(`[RecoStore] ML scoring: ${scored}/${candidates.length} candidates scored`);
     } catch (err) {
       console.warn('[RecoStore] ML scoring failed (non-fatal):', err);
@@ -1902,7 +1964,7 @@ class RecoStore {
     tasteProfile: TasteProfile,
     shelves: RecoShelf[],
     opts?: { showProgress?: boolean },
-  ): Promise<{ shelves: RecoShelf[]; status: OracleRerankStatus }> {
+  ): Promise<{ shelves: RecoShelf[]; status: RerankStatus }> {
     let settings: {
       oracleRerankEnabled?: boolean;
       oracleRerankBlend?: number;
@@ -1917,9 +1979,9 @@ class RecoStore {
         : 1;
 
     if (!(typeof window !== 'undefined' && window.ollama?.rerank && enabled && blend > 0)) {
-      if (!enabled) return { shelves, status: 'skipped_disabled' };
-      if (blend <= 0) return { shelves, status: 'skipped_blend_zero' };
-      return { shelves, status: 'skipped_no_client' };
+      if (!enabled) return { shelves, status: rerankStatus('skipped_disabled') };
+      if (blend <= 0) return { shelves, status: rerankStatus('skipped_blend_zero') };
+      return { shelves, status: rerankStatus('skipped_no_client') };
     }
 
     if (opts?.showProgress) {
@@ -1933,7 +1995,12 @@ class RecoStore {
     return applyOracleRerankShelves(tasteProfile, shelves, { enabled: true, blend });
   }
 
-  /** After cache restore: still rerank when oracleRerankEnabled (embed_fallback counts as success). */
+  /**
+   * After cache restore: replay only the Oracle rerank pass. The heavier
+   * retrieval and scoring stages are not re-run, which is safe because
+   * `loadResultsFromCache` already refused the cache if any of them became
+   * available since it was written.
+   */
   private async rerankRestoredCachedShelves(tasteProfile: TasteProfile, shelves: RecoShelf[]) {
     const genAtStart = this.computeGeneration;
     try {
@@ -1947,11 +2014,11 @@ class RecoStore {
       };
       this.notify();
       // Persist refined order so the next cold start benefits.
-      if (out.status === 'applied') this.saveResultsToCache();
+      if (out.status.outcome === 'applied') this.saveResultsToCache();
     } catch (e) {
       console.warn('[RecoStore] Cached-shelf Oracle rerank skipped:', e);
       if (genAtStart !== this.computeGeneration) return;
-      this.state = { ...this.state, oracleRerankStatus: 'error' };
+      this.state = { ...this.state, oracleRerankStatus: rerankStatus('error') };
       this.notify();
     }
   }
@@ -1959,14 +2026,14 @@ class RecoStore {
   /** Apply Ollama /api/rerank to shelf game order when available (after worker completes). */
   private async finishWorkerResult(msg: RecoWorkerResult, runId: number) {
     let shelves = msg.shelves;
-    let oracleRerankStatus: OracleRerankStatus = 'none';
+    let oracleRerankStatus: RerankStatus = rerankStatus('none');
     try {
       const out = await this.runOracleRerankPass(msg.tasteProfile, msg.shelves, { showProgress: true });
       shelves = out.shelves;
       oracleRerankStatus = out.status;
     } catch (e) {
       console.warn('[RecoStore] Oracle rerank skipped:', e);
-      oracleRerankStatus = 'error';
+      oracleRerankStatus = rerankStatus('error');
     }
 
     if (runId !== this.computeGeneration) return;

@@ -6,7 +6,13 @@ const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
-import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
+import {
+  settingsStore,
+  DEFAULT_OLLAMA_RERANK_MODEL,
+  DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
+} from '../settings-store.js';
+import { resetRerankTierCache } from '../rerank-engine.js';
+import { resetRerankPullAttempts } from '../ollama-setup.js';
 
 export function register(): void {
   ipcMain.handle('settings:getApiKey', async () => {
@@ -61,6 +67,7 @@ export function register(): void {
         model: 'gemma3:12b',
         useGeminiInstead: false,
         rerankModel: DEFAULT_OLLAMA_RERANK_MODEL,
+        rerankQwenModel: DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
         neighborRerankEnabled: true,
         oracleRerankEnabled: true,
         oracleRerankBlend: 1,
@@ -74,6 +81,7 @@ export function register(): void {
     model?: string;
     useGeminiInstead?: boolean;
     rerankModel?: string;
+    rerankQwenModel?: string;
     neighborRerankEnabled?: boolean;
     oracleRerankEnabled?: boolean;
     oracleRerankBlend?: number;
@@ -93,6 +101,10 @@ export function register(): void {
         }
       }
       settingsStore.setOllamaSettings(settings);
+      // Session-cached reranker tier and pull cooldown were both resolved
+      // against the old URL / model tags, so they no longer describe reality.
+      resetRerankTierCache();
+      resetRerankPullAttempts();
     } catch (error) {
       logger.error('[Settings] Error setting Ollama settings:', error);
       throw error;

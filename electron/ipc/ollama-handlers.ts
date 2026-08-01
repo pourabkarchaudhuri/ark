@@ -19,15 +19,28 @@ import {
   getEmbeddingModelInfo,
   getEmbeddingModelSize,
   ensureRerankModelPull,
-  getRerankModelTag,
+  getRerankQwenModelTag,
   EMBEDDING_MODEL_NAME,
 } from '../ollama-setup.js';
 import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
 import { normalizeOllamaRerankRows, type RerankResultRow } from '../ollama-rerank-normalize.js';
+import {
+  detectRerankTier,
+  resetRerankTierCache,
+  rerankTierLabel,
+  scoreWithQwen3,
+  type RerankTier,
+  type RerankTierProbe,
+} from '../rerank-engine.js';
 
-/** Structured IPC result for ollama:rerank. */
+/**
+ * Structured IPC result for ollama:rerank.
+ *
+ * `via` is the tier that actually produced the ordering, so the renderer can be
+ * honest about a weaker path instead of showing everything as "reranked".
+ */
 export type OllamaRerankIpcResult =
-  | { results: RerankResultRow[]; via: 'cross_encoder' | 'embed_fallback' }
+  | { results: RerankResultRow[]; via: RerankTier }
   | { error: { code: string; httpStatus?: number; message: string } };
 
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -65,6 +78,69 @@ async function embedCosineRerank(
   if (scored.length === 0) return null;
   scored.sort((a, b) => b.relevance_score - a.relevance_score);
   return scored.slice(0, topN);
+}
+
+type NativeRerankOutcome = {
+  results: RerankResultRow[] | null;
+  /** 'ok' | 'empty_results' | 'model_missing' | 'endpoint_missing' | 'http_error' | 'network_error' */
+  code: string;
+  message: string;
+  httpStatus?: number;
+};
+
+/** POST /api/rerank against a cross-encoder. Only reached when the native tier won detection. */
+async function rerankViaNativeEndpoint(
+  query: string,
+  documents: string[],
+  topN: number,
+  model: string,
+): Promise<NativeRerankOutcome> {
+  const ollama = settingsStore.getOllamaSettings();
+  const baseUrl = (ollama.url || 'http://localhost:11434').replace(/\/$/, '');
+
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), RERANK_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/api/rerank`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, query, documents, top_n: topN }),
+      signal: ac.signal,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { results: null, code: 'network_error', message };
+  } finally {
+    clearTimeout(t);
+  }
+
+  if (!res.ok) {
+    let bodyText = '';
+    try {
+      bodyText = await res.text();
+    } catch {
+      bodyText = '';
+    }
+    logger.warn(`[Ollama] rerank HTTP ${res.status} for model ${model}: ${bodyText.slice(0, 200)}`);
+    if (looksLikeModelMissing(res.status, bodyText)) {
+      void ensureRerankModelPull(model);
+      return { results: null, code: 'model_missing', message: `Model ${model} is not installed`, httpStatus: res.status };
+    }
+    if (res.status === 404) {
+      return { results: null, code: 'endpoint_missing', message: '/api/rerank is not available', httpStatus: res.status };
+    }
+    return { results: null, code: 'http_error', message: `Rerank HTTP ${res.status}`, httpStatus: res.status };
+  }
+
+  const data = (await res.json()) as {
+    results?: Array<{ index?: number; relevance_score?: number; score?: number }>;
+  };
+  const results = normalizeOllamaRerankRows(data.results, documents.length);
+  if (!results) {
+    return { results: null, code: 'empty_results', message: 'Rerank returned no usable rows', httpStatus: res.status };
+  }
+  return { results, code: 'ok', message: 'ok', httpStatus: res.status };
 }
 
 function looksLikeModelMissing(httpStatus: number, bodyText: string): boolean {
@@ -149,14 +225,26 @@ export function register(): void {
   ipcMain.handle('ollama:setup', async (event) => {
     const sender = event.sender;
     try {
-      return await runOllamaSetup((status, pct) => {
-        logger.log(`[Ollama Setup] ${status} (${pct}%)`);
-        try {
-          sender.send('ollama:setup-progress', { status, pct });
-        } catch {
-          // Window may have closed
-        }
-      });
+      return await runOllamaSetup(
+        (status, pct) => {
+          logger.log(`[Ollama Setup] ${status} (${pct}%)`);
+          try {
+            sender.send('ollama:setup-progress', { status, pct });
+          } catch {
+            // Window may have closed
+          }
+        },
+        // Separate channel: the rerank pull outlives runOllamaSetup, and its
+        // progress must not be mistaken for the embedding bar's.
+        (progress) => {
+          logger.log(`[Ollama Rerank Setup] ${progress.status} (${progress.pct}%)`);
+          try {
+            sender.send('ollama:rerank-progress', progress);
+          } catch {
+            // Window may have closed
+          }
+        },
+      );
     } catch (error) {
       logger.error('[Ollama] Setup error:', error);
       return {
@@ -164,6 +252,8 @@ export function register(): void {
         ollamaVersion: null,
         embeddingModelReady: false,
         rerankModelReady: false,
+        rerankTier: null,
+        rerankTierLabel: null,
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
@@ -461,10 +551,16 @@ export function register(): void {
   });
 
   /**
-   * POST /api/rerank — cross-encoder relevance for Embedding Space / Oracle ordering.
-   * Returns { results, via } on success, or { error: { code, httpStatus?, message } }.
-   * On model_missing: silent one-shot pull (deduped) + arctic-embed cosine fallback.
-   * On /api/rerank 404 / endpoint missing: arctic-embed cosine fallback (no new models).
+   * Tiered rerank for Embedding Space / Oracle ordering.
+   *
+   * The tier is chosen once per session by `detectRerankTier()` and the result
+   * reports which one actually ran:
+   *   native        → POST /api/rerank cross-encoder
+   *   qwen_graded   → Qwen3-Reranker, softmax over the yes/no logprobs
+   *   qwen_binary   → same model on an Ollama build without logprobs support
+   *   embed_fallback→ arctic-embed2 cosine
+   *
+   * Returns { results, via } on success or { error: { code, httpStatus?, message } }.
    */
   ipcMain.handle('ollama:rerank', async (_event: any, payload: unknown): Promise<OllamaRerankIpcResult> => {
     const fail = (
@@ -496,67 +592,56 @@ export function register(): void {
           ? Math.min(Math.max(1, Math.floor(topNRaw)), slice.length)
           : slice.length;
 
-      const ollama = settingsStore.getOllamaSettings();
-      const baseUrl = (ollama.url || 'http://localhost:11434').replace(/\/$/, '');
-      const model = getRerankModelTag();
-
       const tryEmbedFallback = async (reason: string): Promise<OllamaRerankIpcResult> => {
         logger.log(`[Ollama] rerank falling back to arctic-embed cosine (${reason})`);
         const results = await embedCosineRerank(q, slice, topN);
         if (!results?.length) {
-          return fail('embed_fallback_failed', `Cross-encoder unavailable (${reason}); embed cosine fallback also failed`);
+          return fail('embed_fallback_failed', `Reranker unavailable (${reason}); embed cosine fallback also failed`);
         }
         return { results, via: 'embed_fallback' };
       };
 
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), RERANK_TIMEOUT_MS);
-      let res: Response;
-      try {
-        res = await fetch(`${baseUrl}/api/rerank`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model,
-            query: q,
-            documents: slice,
-            top_n: topN,
-          }),
-          signal: ac.signal,
+      let detection = await detectRerankTier();
+
+      // ── Tier 1: native cross-encoder ──
+      if (detection.tier === 'native') {
+        const native = await rerankViaNativeEndpoint(q, slice, topN, detection.model);
+        if (native.results) return { results: native.results, via: 'native' };
+        if (native.code === 'empty_results') {
+          return fail('empty_results', 'Rerank returned no usable rows');
+        }
+        if (native.code === 'http_error') {
+          return fail('http_error', native.message, native.httpStatus);
+        }
+        // The endpoint or model stopped answering mid-session (Ollama restarted,
+        // model deleted). Re-probe so later calls pick the next-best tier.
+        logger.warn(`[Ollama] native rerank stopped working (${native.code}) — re-probing tiers`);
+        resetRerankTierCache();
+        detection = await detectRerankTier({ force: true });
+      }
+
+      // ── Tier 2: Qwen3 through /api/generate ──
+      if (detection.tier === 'qwen_graded' || detection.tier === 'qwen_binary') {
+        const scored = await scoreWithQwen3(q, slice, {
+          model: detection.model,
+          graded: detection.tier === 'qwen_graded',
+          // Same politeness contract as embeddings: when the window has been
+          // blurred we assume a game has the GPU and pause between documents.
+          isBackground: () => embedState.background,
         });
-      } finally {
-        clearTimeout(t);
+        if (scored) {
+          return { results: scored.rows.slice(0, topN), via: scored.tier };
+        }
+        return tryEmbedFallback('qwen_abandoned');
       }
 
-      if (!res.ok) {
-        let bodyText = '';
-        try {
-          bodyText = await res.text();
-        } catch {
-          bodyText = '';
-        }
-        logger.warn(`[Ollama] rerank HTTP ${res.status} for model ${model}: ${bodyText.slice(0, 200)}`);
-
-        const modelMissing = looksLikeModelMissing(res.status, bodyText);
-        if (modelMissing) {
-          // Silent one-shot pull (deduped). Do not await completion — serve via embed fallback now.
-          void ensureRerankModelPull(model);
-          return tryEmbedFallback('model_missing');
-        }
-        if (res.status === 404) {
-          return tryEmbedFallback('endpoint_missing');
-        }
-        return fail('http_error', `Rerank HTTP ${res.status}`, res.status);
+      // ── Tier 3: cosine ──
+      if (detection.ollamaUp) {
+        // Nothing better is installed — start the Qwen3 download so the next
+        // session gets graded scores. Deduped, retry-capable, non-blocking.
+        void ensureRerankModelPull(getRerankQwenModelTag());
       }
-
-      const data = (await res.json()) as {
-        results?: Array<{ index?: number; relevance_score?: number; score?: number }>;
-      };
-      const results = normalizeOllamaRerankRows(data.results, slice.length);
-      if (!results) {
-        return fail('empty_results', 'Rerank returned no usable rows');
-      }
-      return { results, via: 'cross_encoder' };
+      return tryEmbedFallback(detection.reason);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.warn('[Ollama] rerank failed:', error);
@@ -567,8 +652,11 @@ export function register(): void {
   });
 
   /**
-   * Diagnostic probe — surfaces WHY rerank is failing instead of returning a silent null.
-   * Returns: { ollamaUp, modelName, modelInstalled, rerankWorking, latencyMs?, error? }
+   * Diagnostic probe — surfaces WHICH tier is serving reranks and why the
+   * stronger ones were rejected, instead of only testing /api/rerank.
+   *
+   * `ollamaUp` / `modelName` / `modelInstalled` / `rerankWorking` / `latencyMs`
+   * are kept for the Settings screen's existing "Test reranker" button.
    */
   ipcMain.handle('ollama:rerankDiagnostic', async () => {
     const ollama = settingsStore.getOllamaSettings();
@@ -577,91 +665,56 @@ export function register(): void {
 
     const status: {
       ollamaUp: boolean;
+      ollamaVersion: string | null;
       modelName: string;
       modelInstalled: boolean;
       rerankWorking: boolean;
+      tier: RerankTier | null;
+      tierLabel: string | null;
+      tierModel: string;
+      tierReason: string;
+      tiers: RerankTierProbe[];
       latencyMs?: number;
       error?: string;
     } = {
       ollamaUp: false,
+      ollamaVersion: null,
       modelName,
       modelInstalled: false,
       rerankWorking: false,
+      tier: null,
+      tierLabel: null,
+      tierModel: '',
+      tierReason: '',
+      tiers: [],
     };
 
-    // Step 1: Ollama running?
     try {
-      const health = await isOllamaRunning();
-      status.ollamaUp = !!(health && health.running);
-      if (!status.ollamaUp) {
+      const t0 = Date.now();
+      // Force a fresh probe — the point of the button is to test the current
+      // machine state, not to report a cached decision.
+      const detection = await detectRerankTier({ force: true });
+      status.latencyMs = Date.now() - t0;
+      status.ollamaUp = detection.ollamaUp;
+      status.ollamaVersion = detection.ollamaVersion;
+      status.tier = detection.tier;
+      status.tierLabel = rerankTierLabel(detection.tier);
+      status.tierModel = detection.model;
+      status.tierReason = detection.reason;
+      status.tiers = detection.probes;
+
+      if (!detection.ollamaUp) {
         status.error = 'Ollama is not reachable at ' + baseUrl;
         return status;
       }
-    } catch (e) {
-      status.error = 'Ollama health check failed: ' + (e instanceof Error ? e.message : 'unknown');
-      return status;
-    }
 
-    // Step 2: Rerank model installed?
-    try {
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), 5000);
-      let tagsRes: Response;
-      try {
-        tagsRes = await fetch(`${baseUrl}/api/tags`, { signal: ac.signal });
-      } finally {
-        clearTimeout(t);
+      const nativeProbe = detection.probes.find((probe) => probe.tier === 'native');
+      status.modelInstalled = nativeProbe?.available ?? false;
+      // Any tier above cosine is a working reranker as far as the UI cares.
+      status.rerankWorking = detection.tier !== 'embed_fallback';
+      if (!status.rerankWorking) {
+        status.error = `${rerankTierLabel(detection.tier)} — ${detection.reason}`;
       }
-      if (tagsRes.ok) {
-        const tags = (await tagsRes.json()) as { models?: Array<{ name?: string }> };
-        const installed = (tags.models || []).some((m) => {
-          const n = (m.name || '').toLowerCase();
-          const target = modelName.toLowerCase();
-          return n === target || n.startsWith(target + ':') || n.split(':')[0] === target.split(':')[0];
-        });
-        status.modelInstalled = installed;
-        if (!installed) {
-          status.error = `Model "${modelName}" not pulled. Run: ollama pull ${modelName}`;
-          return status;
-        }
-      }
-    } catch (e) {
-      logger.warn('[Ollama] tags lookup failed in diagnostic:', e);
-    }
-
-    // Step 3: End-to-end rerank probe
-    try {
-      const t0 = Date.now();
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), 30_000);
-      let res: Response;
-      try {
-        res = await fetch(`${baseUrl}/api/rerank`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: modelName,
-            query: 'cozy roguelike with great pixel art',
-            documents: ['Hades — fast action roguelike with greek mythology', 'Stardew Valley — cozy farming sim', 'Doom Eternal — fast shooter'],
-            top_n: 3,
-          }),
-          signal: ac.signal,
-        });
-      } finally {
-        clearTimeout(t);
-      }
-      if (!res.ok) {
-        status.error = `Rerank HTTP ${res.status}`;
-        return status;
-      }
-      const data = (await res.json()) as { results?: Array<{ index?: number; relevance_score?: number; score?: number }> };
-      const normalized = normalizeOllamaRerankRows(data.results, 3);
-      if (!normalized || normalized.length === 0) {
-        status.error = 'Rerank returned empty results';
-        return status;
-      }
-      status.rerankWorking = true;
-      status.latencyMs = Date.now() - t0;
       return status;
     } catch (e) {
       status.error = 'Rerank probe failed: ' + (e instanceof Error ? e.message : 'unknown');

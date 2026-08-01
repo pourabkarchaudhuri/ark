@@ -9,6 +9,17 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.48': {
+    title: "What's New in Ark 1.0.48",
+    changes: [
+      'Insights & Telemetry always available — the tab no longer hides behind a session gate; it shows an empty state at zero sessions and live-updates when a session is recorded mid-view via sessionStore subscription.',
+      'Game-details hero backgrounds — Steam and Epic pages share the same header-image chain with onError fallthrough, so both stores get consistent 460×215-class art instead of a flat backdrop or a wide page wash.',
+      'Tiered Oracle reranker — probes native /api/rerank, then Qwen3 graded logprobs (or binary on older Ollama), then arctic-embed cosine; auto-downloads Qwen3 with its own splash/navbar progress row and honest tier badges.',
+      'Broadcast cards streamlined — fixed height, single shell, blurred-fill letterbox backdrop for any aspect ratio, and TransmissionCard-style load/error handling.',
+      'Oracle explanation drawer — one right-side drawer (shared Taste DNA chrome) replaces the clipped popovers; scroll-into-view, focus management, and a one-line headline verdict.',
+      'Voyage Scenes & Audit — two competing replacements for OCD Mode: episode-clustered Scenes with gap content and log-scaled magnitude, plus record-grading Audit with health rings, rule queue, snooze/dismiss persistence, and inline fixes.',
+    ],
+  },
   '1.0.47': {
     title: "What's New in Ark 1.0.47",
     changes: [

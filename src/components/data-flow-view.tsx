@@ -230,6 +230,7 @@ const NODES: FlowNode[] = [
   nd('epic-catalog-sync', 'Epic Catalog Sync',  'process', 'workflow', X.ing, 3, 'Subspace archive'),
   nd('catalog-embed',     'Embedding Pipeline', 'process', 'zap',      X.ing, 4, 'Vectorisation core'),
   nd('ollama-setup',      'Ollama Model Setup', 'process', 'cpu',      X.ing, 5, 'Model bootstrap'),
+  nd('rerank-setup',      'Reranker Setup',     'process', 'cpu',      X.ing, 6, 'Relevance forge'),
 
   // ── AI / ML (col 2 — vertically centred, horizontal with key sources) ──
   nd('reco-engine',  'Recommendation Engine', 'ai', 'brain', X.ai, 2, 'Oracle v3 core'),
@@ -282,6 +283,7 @@ const EDGES: Edge[] = [
   eg('e27', 'epic-api',      'epic-catalog-sync'),
   eg('e5',  'kaggle-data',   'ml-model'),
   eg('e6',  'ollama-server', 'ollama-setup'),
+  eg('e30', 'ollama-server', 'rerank-setup'),
 
   // Ingestion → Storage
   eg('e7',  'steam-browse',       'idb-browse'),
@@ -305,6 +307,7 @@ const EDGES: Edge[] = [
 
   // Storage → Screens
   eg('e21', 'idb-browse',    'screen-library'),
+  eg('e31', 'rerank-setup',  'reco-engine'),
   eg('e22', 'reco-engine',   'screen-oracle'),
   eg('e23', 'idb-galaxy',    'screen-galaxy'),
   eg('e24', 'idb-browse',    'screen-medals'),
@@ -329,6 +332,7 @@ function buildUpdates(snap: SystemStatusSnapshot): Record<string, Partial<FlowNo
     'ann-index':          toPartial(snap.annIndexStatus),
     'galaxy-build':       toPartial(snap.galaxyBuild),
     'ollama-setup':       toPartial(snap.ollamaSetup),
+    'rerank-setup':       toPartial(snap.rerankSetup),
   };
 
   if (snap.embeddingModel) {

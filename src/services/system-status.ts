@@ -12,6 +12,7 @@ import { recoStore } from './reco-store';
 import { embeddingService } from './embedding-service';
 import { annIndex } from './ann-index';
 import { getBuildStage, getBuildNodeCount, getBuildStepIndex, getBuildStepDetail, GALAXY_STEP_LABELS, subscribeGalaxy } from './galaxy-cache';
+import { RERANK_TIER_LABELS, type RerankTier } from './oracle-rerank';
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,7 @@ export interface SystemStatusSnapshot {
   annIndexStatus: SyncStatus;
   galaxyBuild: SyncStatus;
   ollamaSetup: SyncStatus;
+  rerankSetup: SyncStatus;
   embeddingModel: EmbeddingModelStatus | null;
   mlModel: MLModelStatus | null;
   storage: StorageMetric[];
@@ -179,6 +181,97 @@ export function reportOllamaDone(available: boolean) {
   }
   systemStatus._notify();
   systemStatus.refreshStorage();
+}
+
+// ─── Reranker setup / download tracking ─────────────────────────────────────────
+//
+// Fed by the dedicated `ollama:rerank-progress` IPC channel, which is separate
+// from `ollama:setup-progress` because the ~600 MB Qwen3 pull outlives
+// `ollama:setup`. Mirrors `RerankSetupProgress` in electron/ollama-setup.ts.
+
+export interface RerankProgressEvent {
+  status: string;
+  pct: number;
+  /** Only the terminal event sets this. */
+  done?: boolean;
+  tier?: string | null;
+  tierLabel?: string | null;
+  error?: string | null;
+  /** False when Ollama never answered — then there is nothing to call an error. */
+  ollamaUp?: boolean;
+}
+
+let _rerankSetupStatus: SyncStatus = { label: 'Reranker Setup', stage: 'idle', detail: '', percent: 0, elapsed: 0, itemsDone: 0, itemsTotal: 0 };
+let _rerankSetupStartTime = 0;
+let _rerankProgressSubscribed = false;
+
+/**
+ * Subscribe to `ollama:rerank-progress` for the app lifetime. Splash calls this
+ * immediately; `systemStatus.init()` calls it again as a no-op. The channel
+ * outlives `ollama:setup`, so the navbar must keep listening after splash exit.
+ */
+export function initRerankProgressListener(): void {
+  if (_rerankProgressSubscribed) return;
+  if (typeof window === 'undefined' || !window.ollama?.onRerankProgress) return;
+  _rerankProgressSubscribed = true;
+  window.ollama.onRerankProgress((ev) => reportRerankProgress(ev));
+}
+
+function asRerankTier(value: unknown): RerankTier | null {
+  return value === 'native' || value === 'qwen_graded' || value === 'qwen_binary' || value === 'embed_fallback'
+    ? value
+    : null;
+}
+
+/**
+ * The tier name always wins over the label the main process sent. A binary
+ * Qwen3 tier must never be able to read as graded because of a stale or
+ * mismatched label string.
+ */
+function rerankDetail(ev: RerankProgressEvent, tier: RerankTier | null): string {
+  if (tier) return RERANK_TIER_LABELS[tier];
+  return ev.tierLabel || ev.status || '';
+}
+
+export function reportRerankProgress(ev: RerankProgressEvent) {
+  if (_rerankSetupStartTime === 0) _rerankSetupStartTime = performance.now();
+  if (ev.done) {
+    reportRerankDone(ev);
+    return;
+  }
+  const pct = Number.isFinite(ev.pct) ? Math.max(0, Math.min(99, Math.round(ev.pct))) : 0;
+  _rerankSetupStatus = {
+    ..._rerankSetupStatus,
+    stage: 'running',
+    detail: ev.status,
+    percent: pct,
+    elapsed: performance.now() - _rerankSetupStartTime,
+  };
+  systemStatus._notify();
+}
+
+/**
+ * Terminal event. `error` is reserved for the case where Ollama answered and
+ * every tier above cosine still failed — an unreachable Ollama is a normal
+ * degraded install, not a fault worth lighting the aggregate LED red.
+ */
+export function reportRerankDone(ev: RerankProgressEvent) {
+  if (_rerankSetupStartTime === 0) _rerankSetupStartTime = performance.now();
+  const tier = asRerankTier(ev.tier);
+  const ollamaUp = ev.ollamaUp !== false;
+  const failed = ollamaUp && !!ev.error;
+  const detail = failed
+    ? `${rerankDetail(ev, tier)} — ${ev.error}`
+    : rerankDetail(ev, tier);
+
+  _rerankSetupStatus = {
+    ..._rerankSetupStatus,
+    stage: failed ? 'error' : 'done',
+    detail,
+    percent: 100,
+    elapsed: performance.now() - _rerankSetupStartTime,
+  };
+  systemStatus._notify();
 }
 
 // ─── Prefetch progress tracking ─────────────────────────────────────────────────
@@ -331,6 +424,8 @@ class SystemStatus {
   init() {
     if (this._initialized) return;
     this._initialized = true;
+
+    initRerankProgressListener();
 
     catalogStore.subscribe(() => this._notify());
     epicCatalogStore.subscribe(() => this._notify());
@@ -604,6 +699,7 @@ class SystemStatus {
       annIndexStatus,
       galaxyBuild,
       ollamaSetup: { ..._ollamaSetupStatus },
+      rerankSetup: { ..._rerankSetupStatus },
       embeddingModel: this._embeddingModelCache ? { ...this._embeddingModelCache } : null,
       mlModel: this._mlModelCache ? { ...this._mlModelCache } : null,
       storage: [...this._storageCache],

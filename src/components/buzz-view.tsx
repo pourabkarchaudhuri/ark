@@ -576,21 +576,32 @@ const EventCard = memo(function EventCard({
   }, [event.url, onOpenUrl]);
 
   const celestial = useMemo(() => pickCelestial(event.name), [event.name]);
-  const hasCoverArt = !!event.imageUrl;
 
-  const card = (
+  // Cover art is only trusted once it decodes; a 404 previously left a broken
+  // image sitting under the vignette. Same machine TransmissionCard uses.
+  const [imgState, setImgState] = useState<'loading' | 'loaded' | 'failed'>('loading');
+  useEffect(() => { setImgState('loading'); }, [event.id, event.imageUrl]);
+  const handleImgLoad = useCallback(() => setImgState('loaded'), []);
+  const handleImgError = useCallback(() => setImgState('failed'), []);
+  const hasCoverArt = !!event.imageUrl && imgState !== 'failed';
+
+  return (
     <div
       role={event.url ? 'button' : undefined}
       tabIndex={event.url ? 0 : undefined}
       onClick={handleCardClick}
       onKeyDown={(e) => e.key === 'Enter' && handleCardClick()}
       className={cn(
-        'group relative flex flex-col w-full h-full rounded-[20px] overflow-hidden isolate',
-        'transition-transform duration-300',
-        !isImminent && 'border border-white/[0.07] hover:border-white/[0.14]',
-        'bg-black/40 backdrop-blur-md',
-        event.url && 'cursor-pointer',
-        !isImminent && event.url && 'hover:scale-[1.02]',
+        // One shell for both states. The strip is a stretch flex row, so an
+        // unset height let the tallest card size every sibling; imminent cards
+        // additionally sat inside a second bordered wrapper, so the two states
+        // had different box models. The glow is now a shadow on this one root.
+        'group relative flex flex-col w-[260px] h-[220px] shrink-0 rounded-[20px] overflow-hidden isolate border',
+        'bg-black/40 backdrop-blur-md transition-transform duration-300',
+        isImminent
+          ? 'border-primary/40 broadcast-card-glow'
+          : 'border-white/[0.07] hover:border-white/[0.14]',
+        event.url && 'cursor-pointer hover:scale-[1.02]',
         isPast && 'opacity-50',
       )}
     >
@@ -598,7 +609,13 @@ const EventCard = memo(function EventCard({
           The cover art (or celestial fallback) sits behind everything as a
           dimmed atmospheric backdrop — never as a stark banner. Product
           logos on solid colors (Steam, Nintendo, MAGFest, …) become
-          desaturated colour washes instead of blocky product tiles. */}
+          desaturated colour washes instead of blocky product tiles.
+
+          Art arrives at wildly different aspect ratios — wide event banners,
+          square publisher logos, tall posters — so object-cover in a 260x220
+          box cropped the subject out of most of them. The image is letterboxed
+          instead, with a blurred, over-scaled copy of itself painting the bars
+          so every ratio fills the card. */}
       {hasCoverArt ? (
         <>
           <img
@@ -606,11 +623,26 @@ const EventCard = memo(function EventCard({
             alt=""
             aria-hidden
             loading="lazy"
-            className="pointer-events-none absolute inset-0 w-full h-full object-cover select-none"
-            style={{
-              opacity: 0.55,
-              filter: 'saturate(0.85) contrast(1.05)',
-            }}
+            className={cn(
+              'pointer-events-none absolute inset-0 w-full h-full object-cover select-none',
+              // scale-150 keeps the blur's soft edge outside the clip box.
+              'scale-150 blur-xl saturate-150 transition-opacity duration-500',
+              imgState === 'loaded' ? 'opacity-[0.3]' : 'opacity-0',
+            )}
+          />
+          <img
+            src={event.imageUrl}
+            alt=""
+            aria-hidden
+            loading="lazy"
+            onLoad={handleImgLoad}
+            onError={handleImgError}
+            className={cn(
+              'pointer-events-none absolute inset-0 w-full h-full object-contain select-none',
+              'transition-opacity duration-500',
+              imgState === 'loaded' ? 'opacity-[0.62]' : 'opacity-0',
+            )}
+            style={{ filter: 'saturate(0.85) contrast(1.05)' }}
           />
           {/* Vignette + darken so text is always readable, regardless of image content */}
           <div
@@ -668,13 +700,14 @@ const EventCard = memo(function EventCard({
 
         {/* Location: city or Online */}
         {event.location && (
-          <div className="flex items-center gap-1 text-[11px] font-medium text-white/60">
+          <div className="flex items-center gap-1 min-w-0 text-[11px] font-medium text-white/60">
             {event.location === 'Online' ? (
               <Globe className="w-3 h-3 shrink-0 text-white/45" aria-hidden />
             ) : (
               <MapPin className="w-3 h-3 shrink-0 text-white/45" aria-hidden />
             )}
-            <span>{event.location}</span>
+            {/* Truncated: a wrapping location would overflow the fixed height. */}
+            <span className="truncate">{event.location}</span>
           </div>
         )}
 
@@ -702,9 +735,6 @@ const EventCard = memo(function EventCard({
             </span>
           </div>
         )}
-
-        {/* Spacer */}
-        <div className="flex-1" />
       </div>
 
       {/* Edge-to-edge separator + footer */}
@@ -740,14 +770,6 @@ const EventCard = memo(function EventCard({
             </button>
           </TooltipCard>
       </div>
-    </div>
-  );
-
-  if (!isImminent) return <div className="w-[260px] shrink-0">{card}</div>;
-
-  return (
-    <div className="w-[260px] shrink-0 rounded-[20px] border border-primary/40 broadcast-card-glow bg-primary/5">
-      {card}
     </div>
   );
 });

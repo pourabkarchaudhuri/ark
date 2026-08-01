@@ -26,7 +26,10 @@ import {
   reportPrefetchError,
   reportOllamaProgress,
   reportOllamaDone,
+  initRerankProgressListener,
 } from '@/services/system-status';
+import { rerankTierLabel, toRerankTier } from '@/services/oracle-rerank';
+import type { RerankSetupProgressEvent } from '@/services/embedding-service';
 import { SplashStatusPanel } from '@/components/system-status-panel';
 import { useDevMode } from '@/hooks/useDevMode';
 
@@ -284,8 +287,10 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
   const [dataReady, setDataReady] = useState(() => isPrefetchReady()); // data loaded
   const bootProgressRef = useRef(0);                     // 0–1 drives scene lights — ref to avoid re-renders
   const [ollamaLine, setOllamaLine] = useState<string | null>(null);  // live Ollama/arctic download line
+  const [rerankLine, setRerankLine] = useState<string | null>(null);  // live Qwen3 reranker download line
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const unsubOllamaRef = useRef<(() => void) | null>(null);
+  const unsubRerankRef = useRef<(() => void) | null>(null);
 
   // Embedding-model gate: only block "Enter Ark" while the model is ACTIVELY
   // being pulled (multi-GB download on first launch). When already installed
@@ -303,6 +308,9 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
   // ---- Kick off data prefetch and track readiness ----
   useEffect(() => {
     let cancelled = false;
+
+    // Rerank progress outlives splash — wire the status panel before deferred init.
+    initRerankProgressListener();
 
     // Defer heavy init work so the boot animation can paint without contention.
     // IDB reads, IPC calls, and catalog syncs starve setTimeout callbacks
@@ -436,6 +444,28 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
       });
     }
 
+    // Reranker setup — terminal line only; status panel uses initRerankProgressListener.
+    if (typeof window !== 'undefined' && window.ollama?.onRerankProgress) {
+      const rerankTerminalLabel = (ev: RerankSetupProgressEvent): string => {
+        const tier = toRerankTier(ev.tier);
+        return tier ? rerankTierLabel(tier) : (ev.tierLabel || ev.status);
+      };
+      unsubRerankRef.current = window.ollama.onRerankProgress((ev) => {
+        if (cancelled) return;
+        if (ev.done) {
+          const label = rerankTerminalLabel(ev);
+          setRerankLine(
+            ev.ollamaUp !== false && ev.error
+              ? `> Reranker: ${label} (${ev.error})`
+              : `[  OK  ] Reranker: ${label}`,
+          );
+          return;
+        }
+        const suffix = ev.pct > 0 && ev.pct < 100 ? ` ${Math.round(ev.pct)}%` : '';
+        setRerankLine(`> ${ev.status}${suffix}`);
+      });
+    }
+
     // Steam catalog sync — runs independently of Ollama availability.
     // Embedding gen below awaits this so they don't fight for IDB.
     // Non-blocking, skips if data is fresh (< 24h).
@@ -539,6 +569,8 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
       if (cacheTimeoutId !== null) clearTimeout(cacheTimeoutId);
       unsubOllamaRef.current?.();
       unsubOllamaRef.current = null;
+      unsubRerankRef.current?.();
+      unsubRerankRef.current = null;
     };
   }, []);
 
@@ -730,6 +762,15 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
                 {ollamaLine != null && (
                   <div className="boot-line-fade" style={{ animationDuration: '0.15s' }}>
                     {renderTextLine(ollamaLine)}
+                  </div>
+                )}
+
+                {/* Reranker tier detection / Qwen3 download — separate row, its
+                    own channel, so the embedding bar hitting 100% is never
+                    mistaken for this one. */}
+                {rerankLine != null && (
+                  <div className="boot-line-fade" style={{ animationDuration: '0.15s' }}>
+                    {renderTextLine(rerankLine)}
                   </div>
                 )}
 

@@ -58,6 +58,18 @@ vi.mock('@/components/showcase-view', () => ({
   ),
 }));
 
+// Mock the two competing Voyage views — this suite covers the tab shell only
+vi.mock('@/components/journey-scenes-view', () => ({
+  JourneyScenesView: ({ sessions }: { sessions: unknown[] }) => (
+    <div data-testid="scenes-view">Scenes ({(sessions as unknown[]).length} sessions)</div>
+  ),
+}));
+vi.mock('@/components/journey-audit-view', () => ({
+  JourneyAuditView: ({ libraryEntries }: { libraryEntries: unknown[] }) => (
+    <div data-testid="audit-view">Audit ({(libraryEntries as unknown[]).length} records)</div>
+  ),
+}));
+
 // Mock useBadgeProgress (used by MedalsView)
 vi.mock('@/hooks/useBadgeProgress', () => ({
   useBadgeProgress: () => ({
@@ -331,9 +343,9 @@ describe('JourneyView', () => {
     expect(screen.queryByText('Removed')).not.toBeInTheDocument();
   });
 
-  // ── Log / OCD / Medals tab toggle tests ──
+  // ── Log / Scenes / Audit / Medals tab toggle tests ──
 
-  it('renders Log, OCD, and Medals tab buttons', () => {
+  it('renders Log, Scenes, Audit, and Medals tab buttons', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
@@ -341,8 +353,15 @@ describe('JourneyView', () => {
     render(<JourneyView entries={entries} loading={false} />);
 
     expect(screen.getByText('Log')).toBeInTheDocument();
-    expect(screen.getByText('OCD')).toBeInTheDocument();
+    expect(screen.getByText('Scenes')).toBeInTheDocument();
+    expect(screen.getByText('Audit')).toBeInTheDocument();
     expect(screen.getByText('Medals')).toBeInTheDocument();
+  });
+
+  it('does not offer the retired OCD tab', () => {
+    render(<JourneyView entries={[createMockEntry()]} loading={false} />);
+
+    expect(screen.queryByText('OCD')).not.toBeInTheDocument();
   });
 
   it('defaults to Ark view, switches to Log view with timeline', () => {
@@ -359,52 +378,47 @@ describe('JourneyView', () => {
     expect(screen.getAllByText('2025').length).toBeGreaterThan(0);
   });
 
-  it('switches to OCD view when OCD tab is clicked', () => {
+  it('switches to Scenes when the Scenes tab is clicked', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    // Click OCD tab
-    fireEvent.click(screen.getByText('OCD'));
+    const scenesButton = screen.getByRole('button', { name: /Scenes/i });
+    expect(scenesButton).not.toHaveClass('bg-fuchsia-500');
 
-    // OCD view shows the game title (may appear in both timeline and Gantt)
-    const titles = screen.getAllByText('Counter-Strike 2');
-    expect(titles.length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(scenesButton);
+
+    expect(screen.getByTestId('scenes-view')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Scenes/i })).toHaveClass('bg-fuchsia-500');
   });
 
-  it('shows OCD view when OCD tab is clicked', () => {
+  it('switches to Audit when the Audit tab is clicked', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
     ];
 
     render(<JourneyView entries={entries} loading={false} />);
 
-    // In Ark view, OCD is not selected
-    const ocdButton = screen.getByRole('button', { name: /OCD/i });
-    expect(ocdButton).not.toHaveClass('bg-fuchsia-500');
+    fireEvent.click(screen.getByRole('button', { name: /Audit/i }));
 
-    // Switch to OCD
-    fireEvent.click(ocdButton);
-
-    // OCD view is active (button has selected styling)
-    expect(screen.getByRole('button', { name: /OCD/i })).toHaveClass('bg-fuchsia-500');
+    expect(screen.getByTestId('audit-view')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Audit/i })).toHaveClass('bg-fuchsia-500');
   });
 
-  it('shows entry data in OCD view', () => {
-    const entries = [
-      createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),
-    ];
+  it('only reads the library snapshot for Audit', async () => {
+    const { libraryStore } = await import('@/services/library-store');
+    const getAllEntries = libraryStore.getAllEntries as ReturnType<typeof vi.fn>;
 
-    render(<JourneyView entries={entries} loading={false} />);
+    render(<JourneyView entries={[createMockEntry()]} loading={false} />);
 
-    // Switch to OCD
-    fireEvent.click(screen.getByText('OCD'));
+    fireEvent.click(screen.getByRole('button', { name: /Scenes/i }));
+    getAllEntries.mockClear();
+    expect(getAllEntries).not.toHaveBeenCalled();
 
-    // OCD view shows the game title from the entry (Gantt or timeline)
-    const titles = screen.getAllByText('Counter-Strike 2');
-    expect(titles.length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(screen.getByRole('button', { name: /Audit/i }));
+    expect(getAllEntries).toHaveBeenCalled();
   });
 
   it('switches to Medals view when Medals tab is clicked', () => {

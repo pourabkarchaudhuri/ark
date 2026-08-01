@@ -26,7 +26,7 @@ import { SiEpicgames, SiSteam } from 'react-icons/si';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { GameDialog } from '@/components/game-dialog';
-import { cn } from '@/lib/utils';
+import { cn, buildGameImageChain } from '@/lib/utils';
 import { annIndex } from '@/services/ann-index';
 import {
   getSimilarGamesForDetails,
@@ -645,6 +645,31 @@ function ErrorFallback({ error, navigate }: { error: string | null; navigate: (t
   );
 }
 
+/**
+ * Hero backdrop: one image layer under the two dark fade overlays, identical
+ * for Steam and Epic. Shared by the loading skeleton and the loaded page so
+ * the artwork is continuous across the transition. A dead URL degrades to the
+ * flat black of v1.0.44 rather than a broken image.
+ */
+function HeroBackdrop({ src, onError }: { src: string | null; onError: () => void }) {
+  return (
+    <>
+      {src && (
+        <img
+          key={src}
+          src={src}
+          alt=""
+          aria-hidden
+          onError={onError}
+          className="absolute inset-0 h-full w-full object-cover object-center opacity-40 select-none pointer-events-none"
+        />
+      )}
+      <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
+      <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-transparent" />
+    </>
+  );
+}
+
 export function GameDetailsPage() {
   const [, params] = useRoute('/game/:id') as [boolean, Record<string, string> | null];
   const [, navigate] = useLocation();
@@ -761,10 +786,18 @@ export function GameDetailsPage() {
 
   const showProgressTabs = isCustomGame || (gameInLibrary && wasInLibraryOnLoad.current === true);
 
-  const hasSessions = useMemo(
-    () => Boolean(gameId) && sessionStore.getForGame(gameId!).length > 0,
-    [gameId]
+  // Subscribed rather than memoised on gameId: a session recorded while this
+  // page is open (launch → play → exit) has to be visible without a remount.
+  const [hasSessions, setHasSessions] = useState(
+    () => Boolean(gameId) && sessionStore.getForGame(gameId!).length > 0
   );
+  useEffect(() => {
+    const read = () => setHasSessions(Boolean(gameId) && sessionStore.getForGame(gameId!).length > 0);
+    read();
+    return sessionStore.subscribe(read);
+  }, [gameId]);
+
+  // Still gates the deep link so #telemetry can't land on an empty tab.
   const defaultTab =
     typeof window !== 'undefined' && window.location.hash === '#telemetry' && hasSessions
       ? 'telemetry'
@@ -1747,14 +1780,37 @@ export function GameDetailsPage() {
     return Math.round((total_positive / total_reviews) * 100);
   }, [reviews]);
 
+  // ── Hero backdrop source ──────────────────────────────────────────────
+  // `header_image` leads for BOTH stores. Steam's `background` asset is a
+  // 1438-wide page wash with no Epic equivalent, and that asymmetry is the
+  // whole reason v1.0.44 dropped hero images; a 460x215-class header exists
+  // on both sides. Falls back to prefetched metadata while details load so
+  // the image doesn't pop in when the fetch resolves.
+  const heroImageChain = useMemo(() => {
+    if (!gameId) return [];
+    const cached = details ? null : findGameById(gameId);
+    const title = details?.name ?? cached?.title ?? '';
+    const header = details?.header_image || cached?.headerImage || undefined;
+    const wide = details?.background || cached?.coverUrl || undefined;
+    // library_600x900 is 2:3 portrait; in a full-bleed 30vh hero it crops to
+    // a zoomed sliver, so it stays out even though the shared chain offers it.
+    return buildGameImageChain(gameId, title, header, wide)
+      .filter(url => !url.includes('library_600x900'));
+  }, [gameId, details]);
+  const [heroImageFailed, setHeroImageFailed] = useState<ReadonlySet<string>>(() => new Set());
+  const heroImageUrl = heroImageChain.find(url => !heroImageFailed.has(url)) ?? null;
+  const handleHeroImageError = useCallback(() => {
+    if (!heroImageUrl) return;
+    setHeroImageFailed(prev => new Set(prev).add(heroImageUrl));
+  }, [heroImageUrl]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-black text-white">
-        {/* Hero Section Skeleton — shared by both views. Matches the flat
-            backdrop of the loaded state (no store-specific colour). */}
-        <div className="relative h-[30vh] min-h-[240px] w-full bg-black">
-          <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
-          <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-transparent" />
+        {/* Hero Section Skeleton — shared by both views, same backdrop
+            treatment as the loaded state so nothing shifts on resolve. */}
+        <div className="relative h-[30vh] min-h-[240px] w-full overflow-hidden bg-black">
+          <HeroBackdrop src={heroImageUrl} onError={handleHeroImageError} />
 
           {/* Top Navigation Bar */}
           <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-3 app-drag-region">
@@ -1910,18 +1966,14 @@ export function GameDetailsPage() {
 
   return (
     <div className="min-h-screen bg-black text-white">
-      {/* Hero Section — v1.0.44: flat backdrop for BOTH stores.
-          The wide Steam page-bg image (page_bg_generated_v6b.jpg) previously
-          bled through the dark overlays as a colorful atmospheric wash on
-          Steam pages, while Epic pages showed nothing but darkness — asymmetric.
-          User asked repeatedly for Steam to match Epic (no colored gradient).
-          The hero is now a clean flat-black surface with two dark fade overlays
-          for depth. No store-specific image, no fuchsia wash, no parity gap. */}
+      {/* Hero Section — v1.0.48: artwork is back, but store-agnostic.
+          v1.0.44 went flat black because Steam's wide page-bg image
+          (page_bg_generated_v6b.jpg) washed the hero in colour while Epic
+          pages had no equivalent asset and stayed dark — the complaint was the
+          parity gap, not the image. Both stores now resolve through the same
+          header-first chain, so neither gets a treatment the other can't. */}
       <div className="relative h-[30vh] min-h-[240px] w-full overflow-hidden bg-black">
-        {/* Subtle dark vignette overlays — same on both stores. Give the hero
-            depth without introducing any color that differs between stores. */}
-        <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-transparent" />
+        <HeroBackdrop src={heroImageUrl} onError={handleHeroImageError} />
 
         {/* Top Navigation Bar */}
         <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-3 app-drag-region">
@@ -2062,12 +2114,10 @@ export function GameDetailsPage() {
                 <Gamepad2 className="w-4 h-4" />
                 Game Details
               </TabsTrigger>
-              {hasSessions && (
-                <TabsTrigger value="telemetry" className="flex items-center gap-2">
-                  <Cpu className="w-4 h-4" />
-                  Insights & Telemetry
-                </TabsTrigger>
-              )}
+              <TabsTrigger value="telemetry" className="flex items-center gap-2">
+                <Cpu className="w-4 h-4" />
+                Insights & Telemetry
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="progress">
@@ -2121,7 +2171,7 @@ export function GameDetailsPage() {
               />
             </TabsContent>
 
-            {hasSessions && gameId && (
+            {gameId && (
               <TabsContent value="telemetry">
                 <div className="p-6 rounded-lg bg-white/5 border border-white/10">
                   <Suspense fallback={<div className="text-sm text-muted-foreground py-8 text-center">Loading telemetry…</div>}>

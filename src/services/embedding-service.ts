@@ -18,8 +18,25 @@ import { toCanonicalGenres } from '@/data/canonical-genres';
 import { extractFranchiseBase } from '@/services/franchise';
 import type { CatalogEntry } from '@/types/catalog';
 import type { EpicCatalogEntry } from '@/services/epic-catalog-store';
+import { toRerankTier, rerankTierLabel, type RerankTier } from '@/services/oracle-rerank';
 
 export { extractFranchiseBase };
+
+/**
+ * Payload of the `ollama:rerank-progress` channel.
+ * Mirrors `RerankSetupProgress` in electron/ollama-setup.ts.
+ */
+export interface RerankSetupProgressEvent {
+  status: string;
+  pct: number;
+  /** Only the terminal event sets this. */
+  done?: boolean;
+  tier?: string | null;
+  tierLabel?: string | null;
+  error?: string | null;
+  /** False when Ollama never answered, so a missing reranker is not a fault. */
+  ollamaUp?: boolean;
+}
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -39,7 +56,11 @@ declare global {
         ollamaDetected: boolean;
         ollamaVersion: string | null;
         embeddingModelReady: boolean;
+        /** True when a reranker tier stronger than cosine is available. */
         rerankModelReady?: boolean;
+        /** Tier resolved during setup — see `RerankTier` in src/services/oracle-rerank.ts. */
+        rerankTier?: string | null;
+        rerankTierLabel?: string | null;
         error: string | null;
       }>;
       generateEmbedding: (text: string) => Promise<number[] | null>;
@@ -48,23 +69,43 @@ declare global {
       /** Subscribe to setup progress (status, pct) during ollama:setup. Returns unsubscribe. */
       onSetupProgress?: (callback: (data: { status: string; pct: number }) => void) => () => void;
       /**
-       * POST /api/rerank — structured success `{ results, via }` or `{ error }`.
-       * `via: 'embed_fallback'` is still a successful reorder (arctic-embed cosine).
+       * Subscribe to reranker setup progress. Independent of `onSetupProgress`
+       * because the ~600 MB Qwen3 pull continues after `ollama:setup` resolves.
+       */
+      onRerankProgress?: (callback: (data: RerankSetupProgressEvent) => void) => () => void;
+      /**
+       * Tiered rerank — structured success `{ results, via }` or `{ error }`.
+       * `via` names the tier that produced the ordering, including the weaker
+       * `qwen_binary` and `embed_fallback` paths.
        */
       rerank: (payload: {
         query: string;
         documents: string[];
         topN?: number;
       }) => Promise<
-        | { results: Array<{ index: number; relevance_score: number }>; via?: 'cross_encoder' | 'embed_fallback' }
+        | { results: Array<{ index: number; relevance_score: number }>; via?: RerankTier }
         | { error: { code: string; httpStatus?: number; message: string } }
       >;
-      /** Diagnostic probe — surfaces exactly why rerank is failing (Ollama down, model missing, etc.). */
+      /** Diagnostic probe — reports the winning tier plus why each stronger tier was rejected. */
       rerankDiagnostic?: () => Promise<{
         ollamaUp: boolean;
+        ollamaVersion?: string | null;
         modelName: string;
         modelInstalled: boolean;
         rerankWorking: boolean;
+        tier?: RerankTier | null;
+        tierLabel?: string | null;
+        tierModel?: string;
+        tierReason?: string;
+        tiers?: Array<{
+          tier: RerankTier;
+          label: string;
+          model: string;
+          available: boolean;
+          detail: string;
+          httpStatus?: number;
+          latencyMs?: number;
+        }>;
         latencyMs?: number;
         error?: string;
       }>;
@@ -495,6 +536,9 @@ function writePausedToStorage(paused: boolean): void {
 class EmbeddingService {
   private ollamaAvailable: boolean | null = null;
   private embeddingModelReady = false;
+  /** From `ollama:setup` — true when a tier stronger than cosine resolved. */
+  private _rerankModelReady = false;
+  private _rerankTier: RerankTier | null = null;
   private _embeddingsLoaded = false;
   private _loadedCount = 0;
 
@@ -646,6 +690,10 @@ class EmbeddingService {
       // automatically pulls it if missing. This is the runtime auto-download.
       const setup = await window.ollama.setup();
       this.embeddingModelReady = setup.embeddingModelReady;
+      // Reranker status used to be dropped on the floor here, so nothing in the
+      // renderer could tell a working cross-encoder from silent cosine.
+      this._rerankModelReady = setup.rerankModelReady === true;
+      this._rerankTier = toRerankTier(setup.rerankTier);
 
       if (!setup.embeddingModelReady) {
         console.log('[EmbeddingService] Embedding model not ready:', setup.error);
@@ -899,6 +947,15 @@ class EmbeddingService {
 
   /** True if Ollama was confirmed unavailable. */
   get isOllamaUnavailable(): boolean { return this.ollamaAvailable === false; }
+
+  /** True when setup resolved a reranker tier stronger than arctic-embed cosine. */
+  get isRerankReady(): boolean { return this._rerankModelReady; }
+
+  /** Tier resolved by the last `ollama:setup`, or null before setup ran. */
+  get rerankTier(): RerankTier | null { return this._rerankTier; }
+
+  /** Display name for the resolved tier — derived from the tier, never a label string. */
+  get rerankTierLabel(): string { return rerankTierLabel(this._rerankTier); }
 
   /** Cancel an in-flight catalog embedding run. */
   cancelCatalogEmbeddings() {
@@ -1365,6 +1422,8 @@ class EmbeddingService {
   resetAvailability() {
     this.ollamaAvailable = null;
     this.embeddingModelReady = false;
+    this._rerankModelReady = false;
+    this._rerankTier = null;
     this._embeddingsLoaded = false;
     this._loadedCount = 0;
   }

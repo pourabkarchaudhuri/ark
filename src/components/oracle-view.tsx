@@ -10,7 +10,6 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
-import { createPortal } from 'react-dom';
 import { useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -53,19 +52,49 @@ import { cn, formatHours, buildGameImageChain } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import { EncryptedText } from '@/components/ui/encrypted-text';
 import { recoStore } from '@/services/reco-store';
-import type { OracleRerankStatus } from '@/services/oracle-rerank';
+import { rerankTierLabel, type RerankStatus } from '@/services/oracle-rerank';
 import { shelfBanditStore } from '@/services/shelf-bandit-store';
 
-function oracleRerankBadge(status: OracleRerankStatus): { label: string; title: string } | null {
-  // Soft skips (disabled / blend 0 / no client) and successful apply (incl. embed_fallback) stay quiet.
-  // Badge only for hard failures — both cross-encoder and arctic-embed fallback failed.
-  if (status === 'error') return { label: 'Rerank failed', title: 'Rerank failed (cross-encoder and embed fallback); shelves use the worker order' };
-  if (status === 'empty_results') return { label: 'No rerank scores', title: 'Rerank returned no scores; shelves use the worker order' };
+/**
+ * Reranker badge. Hard failures still show, but a pass that succeeded on a
+ * weaker tier is now named instead of hidden: 'applied' used to swallow
+ * `embed_fallback`, so cosine ordering was presented as a cross-encoder result.
+ */
+function oracleRerankBadge(status: RerankStatus): { label: string; title: string; tone: 'warn' | 'info' } | null {
+  const { outcome, tier } = status;
+  if (outcome === 'applied') {
+    if (tier === 'qwen_binary') {
+      return {
+        label: 'Binary rerank',
+        title: 'This Ollama build predates logprobs support, so the reranker could only answer yes/no per game — the ordering is coarser than a graded pass',
+        tone: 'info',
+      };
+    }
+    if (tier === 'embed_fallback') {
+      return {
+        label: 'Cosine rerank',
+        title: 'No cross-encoder was available, so shelves were ordered by arctic-embed cosine similarity rather than a reranker',
+        tone: 'info',
+      };
+    }
+    return null;
+  }
+  if (outcome === 'error') {
+    return {
+      label: 'Rerank failed',
+      title: `Rerank failed (${rerankTierLabel(tier)}); shelves use the worker order`,
+      tone: 'warn',
+    };
+  }
+  if (outcome === 'empty_results') {
+    return { label: 'No rerank scores', title: 'Rerank returned no scores; shelves use the worker order', tone: 'warn' };
+  }
+  // Soft skips (disabled / blend 0 / no client / empty pool) stay quiet.
   return null;
 }
 import { recoHistoryStore } from '@/services/reco-history-store';
 import { expandHardNegativeIds } from '@/services/hard-negative';
-import { normalizeLayerScores, explanationLines } from '@/services/reco-explainer';
+import { normalizeLayerScores, explanationLines, explanationHeadline } from '@/services/reco-explainer';
 import { embeddingService } from '@/services/embedding-service';
 import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
@@ -725,18 +754,111 @@ const OracleFooter = memo(function OracleFooter({ game }: { game: ScoredGame }) 
   );
 });
 
-// ─── Explanation Popover ──────────────────────────────────────────────────────
+// ─── Explanation drawer body ──────────────────────────────────────────────────
+//
+// Replaces the two competing popovers this file used to carry. `ExplainPopover`
+// was absolutely positioned inside the card's own wrapper, so the shelf's
+// `overflow-x-auto` clipped it no matter what z-index it claimed, and
+// `RecoWhyPopover` was a second, better implementation reachable only by
+// right-click. Both are now one body rendered in the shared right-hand drawer
+// slot alongside Taste DNA.
 
-const ExplainPopover = memo(function ExplainPopover({
+/**
+ * One piece of evidence. Clicking expands a line explaining what that evidence
+ * contributed, so the chips are informative rather than decorative.
+ */
+function EvidenceChip({
+  label,
+  detail,
+  tone,
+  selected,
+  onSelect,
+}: {
+  label: string;
+  detail: string;
+  tone: 'neutral' | 'genre' | 'theme';
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      title={detail}
+      className={cn(
+        'text-[10px] px-2 py-0.5 rounded-full border transition-colors cursor-pointer',
+        tone === 'genre' && 'border-fuchsia-500/25 bg-fuchsia-500/[0.12] text-fuchsia-200/90',
+        tone === 'theme' && 'border-cyan-500/25 bg-cyan-500/[0.10] text-cyan-200/90',
+        tone === 'neutral' && 'border-white/10 bg-white/[0.06] text-white/70',
+        selected && 'ring-1 ring-white/40',
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+const WhyPanelBody = memo(function WhyPanelBody({
   game,
   onDismissed,
+  onClose,
 }: {
   game: ScoredGame;
   onDismissed?: (gameId: string) => void;
+  onClose: () => void;
 }) {
   const breakdown = useMemo(() => normalizeLayerScores(game), [game]);
   const reasons = useMemo(() => explanationLines(game), [game]);
+  const headline = useMemo(() => explanationHeadline(game), [game]);
+  const { coverUrl, headerImage } = useMemo(() => getScoredGameImages(game), [game]);
+  const img = useFallbackImage(game.gameId, game.title, coverUrl, headerImage);
   const [thumbs, setThumbs] = useState<1 | -1 | undefined>(() => recoHistoryStore.getThumbs(game.gameId));
+  const [openBreakdown, setOpenBreakdown] = useState(false);
+  const [selectedEvidence, setSelectedEvidence] = useState<string | null>(null);
+
+  const matchPct = Math.min(100, Math.round(game.score * 100));
+
+  const evidence = useMemo(() => {
+    const items: Array<{ key: string; label: string; detail: string; tone: 'neutral' | 'genre' | 'theme' }> = [];
+    for (const t of game.reasons.similarTo.slice(0, 3)) {
+      items.push({
+        key: `sim-${t}`,
+        label: t,
+        detail: `${game.title} scored close to ${t} in the embedding space built from your library.`,
+        tone: 'neutral',
+      });
+    }
+    for (const g of game.reasons.sharedGenres.slice(0, 4)) {
+      items.push({
+        key: `genre-${g}`,
+        label: g,
+        detail: `${g} is one of the genres you play most, and this game carries it.`,
+        tone: 'genre',
+      });
+    }
+    for (const t of game.reasons.sharedThemes.slice(0, 3)) {
+      items.push({
+        key: `theme-${t}`,
+        label: t,
+        detail: `You return to the ${t} theme often enough for it to weigh on the score.`,
+        tone: 'theme',
+      });
+    }
+    if (game.reasons.bestClusterLabel) {
+      items.push({
+        key: 'cluster',
+        label: game.reasons.bestClusterLabel,
+        detail: `This is the taste cluster the game sits closest to.`,
+        tone: 'neutral',
+      });
+    }
+    return items;
+  }, [game]);
+
+  const selectedDetail = selectedEvidence
+    ? evidence.find((e) => e.key === selectedEvidence)?.detail ?? null
+    : null;
 
   // Reset thumbs when the game changes (lazy init only fires on first mount)
   useEffect(() => {
@@ -771,184 +893,151 @@ const ExplainPopover = memo(function ExplainPopover({
     }
     setThumbs(-1);
     onDismissed?.(game.gameId);
-  }, [game.gameId, game.title, game.developer, onDismissed]);
+    onClose();
+  }, [game.gameId, game.title, game.developer, onDismissed, onClose]);
+
+  const handleDismiss = useCallback(() => {
+    onDismissed?.(game.gameId);
+    onClose();
+  }, [game.gameId, onDismissed, onClose]);
 
   return (
-    <div className="absolute top-0 right-0 z-30 w-60 bg-black/95 border border-white/10 rounded-lg shadow-2xl p-3 space-y-2 backdrop-blur-xl">
-      <p className="text-[10px] font-mono uppercase tracking-wider text-white/40">Why this recommendation</p>
-      <ul className="space-y-1">
-        {reasons.map((r, i) => (
-          <li key={i} className="text-[10px] text-white/70 leading-snug flex items-start gap-1.5">
-            <Check className="w-3 h-3 text-emerald-400 flex-shrink-0 mt-[1px]" />
-            <span>{r}</span>
-          </li>
-        ))}
-      </ul>
-      {breakdown.length > 0 && (
-        <>
-          <p className="text-[10px] font-mono uppercase tracking-wider text-white/30 pt-1">Score layers</p>
-          <div className="space-y-1">
-            {breakdown.slice(0, 6).map(layer => (
-              <div key={layer.name} className="flex items-center gap-2">
-                <div className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-fuchsia-500/60"
-                    style={{ width: `${layer.percentage}%` }}
-                  />
-                </div>
-                <span className="text-[9px] font-mono text-white/40 w-14 text-right tabular-nums">{layer.percentage}%</span>
-                <span className="text-[9px] font-mono text-white/50 truncate w-20">{layer.name}</span>
-              </div>
+    <div className="pb-6">
+      {/* Identity strip — cover, title, match ring */}
+      <div className="flex items-start gap-3 px-4 pt-4">
+        <div className="relative w-[54px] h-[80px] shrink-0 rounded-md overflow-hidden bg-white/[0.04] border border-white/[0.08]">
+          {img.src && !img.failed && (
+            <img
+              src={img.src}
+              alt=""
+              onLoad={img.onLoad}
+              onError={img.onError}
+              className={cn(
+                'w-full h-full object-cover transition-opacity duration-300',
+                img.loaded ? 'opacity-100' : 'opacity-0',
+              )}
+            />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <h4 className="text-[13px] font-semibold text-white/90 leading-tight line-clamp-2">{game.title}</h4>
+          {game.developer && (
+            <p className="text-[10px] text-white/35 truncate mt-0.5">{game.developer}</p>
+          )}
+          <div className="flex items-center gap-2 mt-2">
+            <div className="flex-1 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+              <div className="h-full rounded-full bg-fuchsia-500/70" style={{ width: `${matchPct}%` }} />
+            </div>
+            <span className="text-[11px] font-bold text-fuchsia-400 tabular-nums">{matchPct}%</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Verdict */}
+      <p className="px-4 mt-3 text-[11px] leading-relaxed text-white/70">{headline}</p>
+
+      {/* Evidence */}
+      {evidence.length > 0 && (
+        <div className="px-4 mt-4">
+          <h5 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-2">Evidence</h5>
+          <div className="flex flex-wrap gap-1.5">
+            {evidence.map((e) => (
+              <EvidenceChip
+                key={e.key}
+                label={e.label}
+                detail={e.detail}
+                tone={e.tone}
+                selected={selectedEvidence === e.key}
+                onSelect={() => setSelectedEvidence((cur) => (cur === e.key ? null : e.key))}
+              />
             ))}
           </div>
-        </>
+          {selectedDetail && (
+            <p className="mt-2 text-[10px] leading-relaxed text-white/45">{selectedDetail}</p>
+          )}
+        </div>
       )}
-      {/* Thumbs feedback */}
-      <div className="flex items-center gap-2 pt-1 border-t border-white/[0.06]">
+
+      {/* Full reason list */}
+      {reasons.length > 0 && (
+        <ul className="px-4 mt-4 space-y-1.5">
+          {reasons.map((r, i) => (
+            <li key={i} className="text-[10px] text-white/60 leading-snug flex items-start gap-1.5">
+              <Check className="w-3 h-3 text-emerald-400/70 flex-shrink-0 mt-[1px]" />
+              <span>{r}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Score breakdown — collapsed by default */}
+      {breakdown.length > 0 && (
+        <div className="mx-4 mt-4 pt-3 border-t border-white/[0.06]">
+          <button
+            type="button"
+            onClick={() => setOpenBreakdown((v) => !v)}
+            aria-expanded={openBreakdown}
+            className="flex items-center gap-1.5 w-full text-[10px] uppercase tracking-widest text-white/25 font-semibold hover:text-white/50 transition-colors cursor-pointer"
+          >
+            <ChevronRight className={cn('w-3 h-3 transition-transform', openBreakdown && 'rotate-90')} />
+            Score breakdown
+          </button>
+          {openBreakdown && (
+            <div className="space-y-1 mt-2">
+              {breakdown.slice(0, 8).map((layer) => (
+                <div key={layer.name} className="flex items-center gap-2">
+                  <span className="text-[9px] font-mono text-white/50 truncate w-[92px]">{layer.name}</span>
+                  <div className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                    <div className="h-full rounded-full bg-fuchsia-500/60" style={{ width: `${layer.percentage}%` }} />
+                  </div>
+                  <span className="text-[9px] font-mono text-white/40 w-8 text-right tabular-nums">{layer.percentage}%</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Feedback */}
+      <div className="mx-4 mt-4 pt-3 border-t border-white/[0.06] flex items-center gap-2">
         <span className="text-[9px] font-mono text-white/30 flex-1">Good recommendation?</span>
         <button
+          type="button"
           onClick={onThumbUp}
+          aria-label="Good recommendation"
           className={cn(
-            "p-1 rounded transition-colors",
-            thumbs === 1 ? "bg-emerald-500/20 text-emerald-400" : "text-white/30 hover:text-emerald-400",
+            'p-1 rounded transition-colors cursor-pointer',
+            thumbs === 1 ? 'bg-emerald-500/20 text-emerald-400' : 'text-white/30 hover:text-emerald-400',
           )}
         >
-          <ThumbsUp className="w-3 h-3" />
+          <ThumbsUp className="w-3.5 h-3.5" />
         </button>
         <button
+          type="button"
           onClick={onThumbDown}
+          aria-label="Bad recommendation"
           className={cn(
-            "p-1 rounded transition-colors",
-            thumbs === -1 ? "bg-red-500/20 text-red-400" : "text-white/30 hover:text-red-400",
+            'p-1 rounded transition-colors cursor-pointer',
+            thumbs === -1 ? 'bg-red-500/20 text-red-400' : 'text-white/30 hover:text-red-400',
           )}
         >
-          <ThumbsDown className="w-3 h-3" />
+          <ThumbsDown className="w-3.5 h-3.5" />
         </button>
       </div>
+
+      {onDismissed && (
+        <div className="mx-4 mt-3">
+          <button
+            type="button"
+            onClick={handleDismiss}
+            className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-[10px] rounded-md border border-white/[0.08] text-white/40 hover:text-red-400 hover:border-red-400/30 transition-colors cursor-pointer"
+          >
+            <X className="w-3 h-3" />
+            Don&apos;t recommend this again
+          </button>
+        </div>
+      )}
     </div>
-  );
-});
-
-// v1.0.46 — "Why recommended?" popover shown on right-click of an Oracle card.
-// Portal-rendered, cursor-anchored, viewport-clamped, closes on outside
-// mousedown / Escape / scroll / another context-menu event.
-const RecoWhyPopover = memo(function RecoWhyPopover({
-  game,
-  anchor,
-  onClose,
-}: {
-  game: ScoredGame;
-  anchor: { x: number; y: number };
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number }>({ left: anchor.x, top: anchor.y });
-
-  // Clamp within viewport after mount + measure
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const margin = 12;
-    const maxLeft = window.innerWidth - rect.width - margin;
-    const maxTop = window.innerHeight - rect.height - margin;
-    setPos({
-      left: Math.max(margin, Math.min(anchor.x, maxLeft)),
-      top: Math.max(margin, Math.min(anchor.y, maxTop)),
-    });
-  }, [anchor.x, anchor.y]);
-
-  // Close on outside interaction / Escape / scroll / another context menu
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    const onScroll = () => onClose();
-    const onContext = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener('mousedown', onDown, true);
-    document.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', onScroll, true);
-    document.addEventListener('contextmenu', onContext, true);
-    return () => {
-      document.removeEventListener('mousedown', onDown, true);
-      document.removeEventListener('keydown', onKey);
-      window.removeEventListener('scroll', onScroll, true);
-      document.removeEventListener('contextmenu', onContext, true);
-    };
-  }, [onClose]);
-
-  const similarTo = game.reasons.similarTo.slice(0, 3);
-  const sharedGenres = game.reasons.sharedGenres.slice(0, 4);
-  const bestCluster = game.reasons.bestClusterLabel;
-  const layers = Object.entries(game.layerScores ?? {})
-    .filter(([, v]) => typeof v === 'number' && v > 0)
-    .sort(([, a], [, b]) => (b as number) - (a as number))
-    .slice(0, 5);
-
-  return createPortal(
-    <div
-      ref={ref}
-      role="dialog"
-      aria-label={`Why ${game.title} was recommended`}
-      onContextMenu={(e) => e.preventDefault()}
-      className="fixed z-[10000] w-[320px] rounded-lg border border-white/10 bg-black/95 backdrop-blur-xl shadow-2xl shadow-black/60 p-4 text-white/85 select-none"
-      style={{ left: pos.left, top: pos.top }}
-    >
-      <div className="text-[13px] font-semibold leading-tight mb-1 line-clamp-2">{game.title}</div>
-      <div className="text-[10px] uppercase tracking-widest text-fuchsia-400/70 mb-3">Why recommended?</div>
-
-      {bestCluster && (
-        <div className="text-[11px] text-white/60 mb-2">
-          Matches your <span className="text-white/85 font-medium">{bestCluster}</span> cluster
-        </div>
-      )}
-
-      {similarTo.length > 0 && (
-        <div className="mb-2">
-          <div className="text-[10px] uppercase tracking-wide text-white/40 mb-1">Similar to</div>
-          <div className="flex flex-wrap gap-1">
-            {similarTo.map((t, i) => (
-              <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-white/[0.06] border border-white/10">{t}</span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {sharedGenres.length > 0 && (
-        <div className="mb-2">
-          <div className="text-[10px] uppercase tracking-wide text-white/40 mb-1">Shared genres</div>
-          <div className="flex flex-wrap gap-1">
-            {sharedGenres.map((g, i) => (
-              <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-fuchsia-500/[0.12] border border-fuchsia-500/25 text-fuchsia-200/90">{g}</span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {layers.length > 0 && (
-        <div className="mt-3 space-y-1.5">
-          <div className="text-[10px] uppercase tracking-wide text-white/40">Top signals</div>
-          {layers.map(([name, value]) => {
-            const pct = Math.max(0, Math.min(100, Math.round((value as number) * 100)));
-            return (
-              <div key={name} className="flex items-center gap-2">
-                <span className="text-[10px] w-20 text-white/55 truncate">{name}</span>
-                <div className="flex-1 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
-                  <div className="h-full bg-fuchsia-500/70" style={{ width: `${pct}%` }} />
-                </div>
-                <span className="text-[10px] tabular-nums text-white/60 w-8 text-right">{pct}%</span>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>,
-    document.body,
   );
 });
 
@@ -957,29 +1046,36 @@ const OracleCard = memo(function OracleCard({
   index,
   shelfType,
   onDismiss,
+  onExplain,
+  explaining,
 }: {
   game: ScoredGame;
   index: number;
   shelfType?: string;
   onDismiss?: (gameId: string) => void;
+  /** Stable identity from OracleView — this component is memoized. */
+  onExplain?: (gameId: string) => void;
+  /** Passed as a boolean so only the two affected cards re-render on change. */
+  explaining?: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
-  const [showExplain, setShowExplain] = useState(false);
-  const [whyAnchor, setWhyAnchor] = useState<{ x: number; y: number } | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const explainBtnRef = useRef<HTMLButtonElement>(null);
+  const wasExplaining = useRef(false);
   const gameObj = useMemo(() => scoredGameToGame(game), [game]);
   const oracleFooter = useMemo(() => <OracleFooter game={game} />, [game]);
 
-  // v1.0.46 — right-click reveals the "Why recommended?" popover at the cursor.
-  // Ignore right-clicks that land on interactive children (buttons, links) so
-  // their native contextmenu still works. Ignore Ctrl+click too (browser
-  // convention for opening a new tab / native menu).
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    const target = e.target as HTMLElement | null;
-    if (target?.closest('button, a, input, [data-no-drag]')) return;
-    e.preventDefault();
-    e.stopPropagation();
-    setWhyAnchor({ x: e.clientX, y: e.clientY });
-  }, []);
+  // The drawer occupies the right edge, so a card sitting under it would be
+  // explained invisibly. Pull it into view on open, and hand focus back to the
+  // trigger when the drawer closes.
+  useEffect(() => {
+    if (explaining && !wasExplaining.current) {
+      rootRef.current?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+    } else if (!explaining && wasExplaining.current) {
+      explainBtnRef.current?.focus();
+    }
+    wasExplaining.current = !!explaining;
+  }, [explaining]);
 
   const handleClickCapture = useCallback(() => {
     if (shelfType) {
@@ -1026,8 +1122,8 @@ const OracleCard = memo(function OracleCard({
 
   const toggleExplain = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    setShowExplain(v => !v);
-  }, []);
+    onExplain?.(game.gameId);
+  }, [onExplain, game.gameId]);
 
   const matchPct = Math.min(100, Math.round(game.score * 100));
   const hasDiscount = game.reasons.isOnSale && game.price?.discountPercent;
@@ -1035,6 +1131,7 @@ const OracleCard = memo(function OracleCard({
 
   return (
     <motion.div
+      ref={rootRef}
       initial={{ opacity: 0, y: 20, scale: 0.95 }}
       animate={{
         opacity: 1, y: 0, scale: 1,
@@ -1044,9 +1141,8 @@ const OracleCard = memo(function OracleCard({
       className="relative flex-shrink-0 w-[calc((100vw-8rem)/5)]
                  min-w-[200px] max-w-[320px]"
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); setShowExplain(false); }}
+      onMouseLeave={() => setHovered(false)}
       onClickCapture={handleClickCapture}
-      onContextMenu={handleContextMenu}
     >
       <GameCard
         game={gameObj}
@@ -1057,13 +1153,6 @@ const OracleCard = memo(function OracleCard({
         hideLibraryBadge
         footer={oracleFooter}
       />
-      {whyAnchor && (
-        <RecoWhyPopover
-          game={game}
-          anchor={whyAnchor}
-          onClose={() => setWhyAnchor(null)}
-        />
-      )}
 
       {/* Protruding lower-third tabs — top-left over the card art */}
       <div className="absolute top-3 left-0 z-20 flex flex-col gap-1.5 pointer-events-none">
@@ -1088,15 +1177,19 @@ const OracleCard = memo(function OracleCard({
       {/* Top-right action buttons */}
       <div className={cn(
         "absolute top-2 right-2 z-20 flex gap-1 transition-opacity duration-200",
-        hovered ? "opacity-100" : "opacity-0",
+        hovered || explaining ? "opacity-100" : "opacity-0",
       )}>
-        {/* Explain button */}
+        {/* Explain button — opens the shared right-hand drawer */}
         <TooltipCard content="See why the Oracle picked this game for you — match score breakdown, genre overlap, and reasoning.">
           <button
+            ref={explainBtnRef}
             onClick={toggleExplain}
+            aria-expanded={!!explaining}
+            aria-controls={ORACLE_RIGHT_PANEL_ID}
+            aria-label={`Why ${game.title} was recommended`}
             className={cn(
               "p-1 rounded-full bg-black/60 transition-all duration-200",
-              showExplain ? "text-fuchsia-400 bg-fuchsia-500/20" : "text-white/40 hover:text-fuchsia-400 hover:bg-black/80",
+              explaining ? "text-fuchsia-400 bg-fuchsia-500/20" : "text-white/40 hover:text-fuchsia-400 hover:bg-black/80",
             )}
           >
             <Info className="w-3 h-3" />
@@ -1116,19 +1209,6 @@ const OracleCard = memo(function OracleCard({
         )}
       </div>
 
-      {/* Explanation popover */}
-      <AnimatePresence>
-        {showExplain && (
-          <motion.div
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.15 }}
-          >
-            <ExplainPopover game={game} onDismissed={onDismiss} />
-          </motion.div>
-        )}
-      </AnimatePresence>
     </motion.div>
   );
 });
@@ -1138,9 +1218,13 @@ const OracleCard = memo(function OracleCard({
 function ShelfCarousel({
   shelf,
   onDismiss,
+  onExplain,
+  explainingId,
 }: {
   shelf: RecoShelf;
   onDismiss?: (gameId: string) => void;
+  onExplain?: (gameId: string) => void;
+  explainingId?: string | null;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -1229,7 +1313,15 @@ function ShelfCarousel({
         style={{ scrollSnapType: 'x mandatory' }}
       >
         {shelf.games.map((game, i) => (
-          <OracleCard key={game.gameId} game={game} index={i} shelfType={shelf.type} onDismiss={onDismiss} />
+          <OracleCard
+            key={game.gameId}
+            game={game}
+            index={i}
+            shelfType={shelf.type}
+            onDismiss={onDismiss}
+            onExplain={onExplain}
+            explaining={explainingId === game.gameId}
+          />
         ))}
       </div>
     </motion.div>
@@ -1550,6 +1642,15 @@ function ColdStart({
 
 // ─── Main Component ────────────────────────────────────────────────────────────
 
+/**
+ * The right edge holds exactly one drawer. Taste DNA and a per-game
+ * explanation are mutually exclusive by construction rather than by two
+ * booleans that could both be true.
+ */
+type RightPanel = { kind: 'dna' } | { kind: 'why'; gameId: string } | null;
+
+const ORACLE_RIGHT_PANEL_ID = 'oracle-right-panel';
+
 export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void }) {
   const state = useRecoStore();
   const [, navigate] = useLocation();
@@ -1575,7 +1676,8 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     return null;
   });
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set(recoHistoryStore.getDismissedIds()));
-  const [dnaOpen, setDnaOpen] = useState(false);
+  const [rightPanel, setRightPanel] = useState<RightPanel>(null);
+  const rightPanelRef = useRef<HTMLDivElement>(null);
   const [catalogSync, setCatalogSync] = useState<CatalogSyncProgress>(catalogStore.syncProgress);
   const [catalogEmbeddingProgress, setCatalogEmbeddingProgress] = useState<{ completed: number; total: number } | null>(
     () => embeddingService.isCatalogRunning ? { ...embeddingService.catalogProgress } : null,
@@ -1692,6 +1794,34 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     applyLiveHardNegFilter(state.shelves);
   }, [state.shelves, applyLiveHardNegFilter]);
 
+  // Stable across renders — OracleCard is memoized and would otherwise
+  // re-render every card on every parent render.
+  const handleExplain = useCallback((gameId: string) => {
+    setRightPanel(cur => (cur?.kind === 'why' && cur.gameId === gameId ? null : { kind: 'why', gameId }));
+  }, []);
+
+  const closeRightPanel = useCallback(() => setRightPanel(null), []);
+
+  const toggleDna = useCallback(() => {
+    setRightPanel(cur => (cur?.kind === 'dna' ? null : { kind: 'dna' }));
+  }, []);
+
+  // Move focus into the drawer when it opens so keyboard users land inside it.
+  // The card's own effect handles handing focus back to its button on close.
+  useEffect(() => {
+    if (!rightPanel) return;
+    rightPanelRef.current?.focus();
+  }, [rightPanel]);
+
+  useEffect(() => {
+    if (!rightPanel) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setRightPanel(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [rightPanel]);
+
   // Filter dismissed + hard-neg expanded ids from shelves and apply bandit reordering
   const filterDismissed = (shelves: RecoShelf[]) =>
     shelves.map(s => ({
@@ -1705,6 +1835,13 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     filteredShelves.filter(s => s.type !== 'hero'),
   );
   const oracleRerankBadgeInfo = oracleRerankBadge(state.oracleRerankStatus);
+
+  const explainingId = rightPanel?.kind === 'why' ? rightPanel.gameId : null;
+
+  const whyGame = useMemo(() => {
+    if (!explainingId) return null;
+    return state.shelves.flatMap(s => s.games).find(g => g.gameId === explainingId) ?? null;
+  }, [explainingId, state.shelves]);
 
   return (
     <div className="relative h-[calc(100vh-10rem)] overflow-hidden" data-tour="oracle-view-root">
@@ -1857,10 +1994,17 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                 )}
                 {oracleRerankBadgeInfo && (
                   <span
-                    className="flex items-center gap-1 text-[9px] text-amber-400/70 bg-amber-400/[0.08] border border-amber-400/15 rounded px-1.5 py-0.5"
+                    className={cn(
+                      'flex items-center gap-1 text-[9px] rounded px-1.5 py-0.5 border',
+                      oracleRerankBadgeInfo.tone === 'warn'
+                        ? 'text-amber-400/70 bg-amber-400/[0.08] border-amber-400/15'
+                        : 'text-cyan-400/70 bg-cyan-400/[0.06] border-cyan-400/15',
+                    )}
                     title={oracleRerankBadgeInfo.title}
                   >
-                    <AlertTriangle className="w-3 h-3 shrink-0" />
+                    {oracleRerankBadgeInfo.tone === 'warn'
+                      ? <AlertTriangle className="w-3 h-3 shrink-0" />
+                      : <Info className="w-3 h-3 shrink-0" />}
                     {oracleRerankBadgeInfo.label}
                   </span>
                 )}
@@ -1889,6 +2033,8 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                     key={`${shelf.type}-${shelf.seedGameTitle || ''}-${idx}`}
                     shelf={shelf}
                     onDismiss={handleDismiss}
+                    onExplain={handleExplain}
+                    explainingId={explainingId}
                   />
                 ))
               ) : (
@@ -1916,49 +2062,96 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
       </AnimatePresence>
       </div>
 
-      {/* Taste DNA collapsible right panel */}
-      {state.status === 'done' && state.tasteProfile && state.tasteProfile.genres.length >= 3 && (
+      {/* Right-hand drawer — Taste DNA or a per-game explanation, never both */}
+      {state.status === 'done' && (
         <>
           {/* Toggle tab — vertical bookmark on right edge */}
-          <button
-            onClick={() => setDnaOpen(v => !v)}
-            className={cn(
-              'absolute z-40 right-0 top-1/3 transition-all duration-300 cursor-pointer',
-              dnaOpen
-                ? 'translate-x-full opacity-0 pointer-events-none'
-                : 'flex flex-col items-center gap-1.5 px-1.5 py-3 rounded-l-lg bg-fuchsia-500/15 border border-r-0 border-fuchsia-500/25 text-fuchsia-400 hover:bg-fuchsia-500/25 backdrop-blur-sm',
-            )}
-          >
-            <Zap className="w-3.5 h-3.5" />
-            <span className="text-[9px] font-bold tracking-wider" style={{ writingMode: 'vertical-rl' }}>
-              TASTE DNA
-            </span>
-          </button>
+          {state.tasteProfile && state.tasteProfile.genres.length >= 3 && (
+            <button
+              onClick={toggleDna}
+              aria-expanded={rightPanel?.kind === 'dna'}
+              aria-controls={ORACLE_RIGHT_PANEL_ID}
+              className={cn(
+                'absolute z-40 right-0 top-1/3 transition-all duration-300 cursor-pointer',
+                rightPanel
+                  ? 'translate-x-full opacity-0 pointer-events-none'
+                  : 'flex flex-col items-center gap-1.5 px-1.5 py-3 rounded-l-lg bg-fuchsia-500/15 border border-r-0 border-fuchsia-500/25 text-fuchsia-400 hover:bg-fuchsia-500/25 backdrop-blur-sm',
+              )}
+            >
+              <Zap className="w-3.5 h-3.5" />
+              <span className="text-[9px] font-bold tracking-wider" style={{ writingMode: 'vertical-rl' }}>
+                TASTE DNA
+              </span>
+            </button>
+          )}
 
           {/* Slide-out panel */}
           <AnimatePresence>
-            {dnaOpen && (
+            {rightPanel && (
               <motion.div
+                ref={rightPanelRef}
+                id={ORACLE_RIGHT_PANEL_ID}
+                role="dialog"
+                aria-label={rightPanel.kind === 'dna' ? 'Taste DNA' : 'Why this recommendation'}
+                tabIndex={-1}
                 initial={{ x: '100%' }}
                 animate={{ x: 0 }}
                 exit={{ x: '100%' }}
                 transition={{ type: 'spring', stiffness: 400, damping: 30 }}
-                className="absolute right-0 top-0 bottom-0 w-[310px] z-30 overflow-y-auto scrollbar-hide bg-black/90 backdrop-blur-xl border-l border-white/[0.08] shadow-2xl shadow-black/60"
+                className="absolute right-0 top-0 bottom-0 w-[310px] z-30 overflow-y-auto scrollbar-hide bg-black/90 backdrop-blur-xl border-l border-white/[0.08] shadow-2xl shadow-black/60 focus:outline-none"
               >
                 {/* Sticky header with close */}
                 <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-3 bg-black/80 backdrop-blur-md border-b border-white/[0.06]">
                   <div className="flex items-center gap-2">
-                    <Zap className="w-3.5 h-3.5 text-fuchsia-400" />
-                    <span className="text-xs font-semibold text-white/70">Taste DNA</span>
+                    {rightPanel.kind === 'dna'
+                      ? <Zap className="w-3.5 h-3.5 text-fuchsia-400" />
+                      : <Info className="w-3.5 h-3.5 text-fuchsia-400" />}
+                    <span className="text-xs font-semibold text-white/70">
+                      {rightPanel.kind === 'dna' ? 'Taste DNA' : 'Why this recommendation'}
+                    </span>
                   </div>
                   <button
-                    onClick={() => setDnaOpen(false)}
+                    onClick={closeRightPanel}
+                    aria-label="Close panel"
                     className="p-1 rounded-md text-white/30 hover:text-white/60 hover:bg-white/5 transition-colors cursor-pointer"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
 
+                {/* Body crossfades so clicking `i` on another card swaps content
+                    without the whole drawer sliding out and back in. */}
+                <AnimatePresence mode="wait">
+                  {rightPanel.kind === 'why' ? (
+                    <motion.div
+                      key={`why-${rightPanel.gameId}`}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.15 }}
+                    >
+                      {whyGame ? (
+                        <WhyPanelBody
+                          game={whyGame}
+                          onDismissed={handleDismiss}
+                          onClose={closeRightPanel}
+                        />
+                      ) : (
+                        <p className="px-4 py-6 text-[11px] text-white/40">
+                          That recommendation is no longer on a shelf.
+                        </p>
+                      )}
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key="dna"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.15 }}
+                    >
+                      {state.tasteProfile && (
+                        <>
                 <TasteDNA profile={state.tasteProfile} />
 
                 {/* Quick stats */}
@@ -2022,6 +2215,11 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                     </div>
                   </div>
                 )}
+                        </>
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </motion.div>
             )}
           </AnimatePresence>

@@ -786,7 +786,7 @@ const ALL_TOURS: { id: TourId; label: string; description: string; icon: React.E
   { id: 'welcome',   label: 'Welcome',         description: 'Quick orientation — command strip, Browse vs Library, search, filters, and settings.',         icon: Rocket,    color: 'text-fuchsia-400' },
   { id: 'browse',    label: 'Browse',           description: 'Deep dive into the catalog: categories, search, filters, Embedding Space, and the game grid.', icon: Search,    color: 'text-sky-400' },
   { id: 'library',   label: 'Library',          description: 'Your shelf: custom games, status chips, search, filters, and the Voyage link.',                icon: Library,   color: 'text-emerald-400' },
-  { id: 'journey',   label: 'Voyage',           description: 'Timeline, Captain\'s Log, OCD Gantt, and Medals.',                                             icon: Compass,   color: 'text-violet-400' },
+  { id: 'journey',   label: 'Voyage',           description: 'Timeline, Captain\'s Log, Scenes, Audit, and Medals.',                                             icon: Compass,   color: 'text-violet-400' },
   { id: 'oracle',    label: 'Oracle',           description: 'AI recommendation engine and taste profiling.',                                                icon: Brain,     color: 'text-fuchsia-400' },
   { id: 'ann-graph', label: 'Embedding Space',  description: '3D galaxy map with ANN search and neighbor paths.',                                            icon: Map,       color: 'text-amber-400' },
   { id: 'buzz',      label: 'Transmissions',    description: 'Gaming news stream, Decode Bay reader, and events.',                                           icon: Newspaper, color: 'text-rose-400' },

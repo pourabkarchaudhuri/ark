@@ -499,6 +499,14 @@ contextBridge.exposeInMainWorld('ollama', {
     return () => ipcRenderer.removeListener('ollama:setup-progress', handler);
   },
 
+  // Subscribe to reranker setup / download progress. Separate channel from
+  // ollama:setup-progress because the rerank pull outlives ollama:setup.
+  onRerankProgress: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('ollama:rerank-progress', handler);
+    return () => ipcRenderer.removeListener('ollama:rerank-progress', handler);
+  },
+
   // Cross-encoder rerank (POST /api/rerank) for Embedding Space neighbors
   rerank: (payload) =>
     ipcRenderer.invoke('ollama:rerank', payload),

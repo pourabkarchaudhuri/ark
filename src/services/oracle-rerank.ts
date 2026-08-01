@@ -6,7 +6,14 @@ import type { TasteProfile, RecoShelf, ScoredGame } from '@/types/reco';
 
 const ORACLE_RERANK_POOL = 200;
 
-export type OracleRerankStatus =
+/**
+ * Which reranker tier produced an ordering.
+ * Mirrors `RerankTier` in electron/rerank-engine.ts — keep the two in sync.
+ */
+export type RerankTier = 'native' | 'qwen_graded' | 'qwen_binary' | 'embed_fallback';
+
+/** What happened to a rerank attempt, independent of which tier ran. */
+export type RerankOutcome =
   | 'none'
   | 'applied'
   | 'skipped_disabled'
@@ -15,6 +22,53 @@ export type OracleRerankStatus =
   | 'skipped_empty_pool'
   | 'empty_results'
   | 'error';
+
+/**
+ * One status type shared by the Oracle shelf pass and the Embedding Space
+ * neighbor pass.
+ *
+ * The tier is what makes a degraded path visible. Previously the two passes
+ * disagreed about the same event: oracle-rerank mapped `embed_fallback` to
+ * 'applied' (hiding it) while ollama-rerank mapped it to 'fallback', so cosine
+ * ordering looked like a cross-encoder result in Oracle and like something else
+ * in Embedding Space.
+ */
+export interface RerankStatus {
+  outcome: RerankOutcome;
+  /** Null when no tier ran — every skip, and hard errors. */
+  tier: RerankTier | null;
+}
+
+export const RERANK_TIER_LABELS: Record<RerankTier, string> = {
+  native: 'Native cross-encoder',
+  qwen_graded: 'Qwen3 graded',
+  qwen_binary: 'Qwen3 binary',
+  embed_fallback: 'Cosine fallback',
+};
+
+export function rerankTierLabel(tier: RerankTier | null): string {
+  return tier ? RERANK_TIER_LABELS[tier] : 'None';
+}
+
+export function rerankStatus(outcome: RerankOutcome, tier: RerankTier | null = null): RerankStatus {
+  return { outcome, tier };
+}
+
+/**
+ * True for tiers that ordered the list but with less signal than the ideal
+ * path — a hard yes/no instead of graded scores, or embedding cosine instead
+ * of a cross-encoder. The UI labels these rather than hiding them.
+ */
+export function isDegradedRerankTier(tier: RerankTier | null): boolean {
+  return tier === 'qwen_binary' || tier === 'embed_fallback';
+}
+
+/** Narrow the IPC `via` field, which is untyped across the preload boundary. */
+export function toRerankTier(via: unknown): RerankTier | null {
+  return via === 'native' || via === 'qwen_graded' || via === 'qwen_binary' || via === 'embed_fallback'
+    ? via
+    : null;
+}
 
 export function buildTasteQueryText(profile: TasteProfile): string {
   const gTop = profile.genres
@@ -132,20 +186,20 @@ export async function applyOracleRerankShelves(
   profile: TasteProfile,
   shelves: RecoShelf[],
   opts?: OracleRerankOptions,
-): Promise<{ shelves: RecoShelf[]; status: OracleRerankStatus }> {
-  if (!shelves.length) return { shelves, status: 'none' };
+): Promise<{ shelves: RecoShelf[]; status: RerankStatus }> {
+  if (!shelves.length) return { shelves, status: rerankStatus('none') };
 
   const enabled = opts?.enabled !== false;
-  if (!enabled) return { shelves, status: 'skipped_disabled' };
+  if (!enabled) return { shelves, status: rerankStatus('skipped_disabled') };
 
   const blend =
     typeof opts?.blend === 'number' && Number.isFinite(opts.blend)
       ? Math.min(1, Math.max(0, opts.blend))
       : 1;
-  if (blend <= 0) return { shelves, status: 'skipped_blend_zero' };
+  if (blend <= 0) return { shelves, status: rerankStatus('skipped_blend_zero') };
 
   if (typeof window === 'undefined' || !window.ollama?.rerank) {
-    return { shelves, status: 'skipped_no_client' };
+    return { shelves, status: rerankStatus('skipped_no_client') };
   }
 
   // Round-robin pool building: ensures every shelf is represented in the rerank pool
@@ -169,7 +223,7 @@ export async function applyOracleRerankShelves(
       if (pool.length >= ORACLE_RERANK_POOL) break;
     }
   }
-  if (pool.length === 0) return { shelves, status: 'skipped_empty_pool' };
+  if (pool.length === 0) return { shelves, status: rerankStatus('skipped_empty_pool') };
 
   const query = buildTasteQueryText(profile);
   const documents = pool.map(scoredGameToRerankDoc);
@@ -180,10 +234,10 @@ export async function applyOracleRerankShelves(
       if (res && 'error' in res) {
         return {
           shelves,
-          status: res.error.code === 'empty_results' ? 'empty_results' : 'error',
+          status: rerankStatus(res.error.code === 'empty_results' ? 'empty_results' : 'error'),
         };
       }
-      return { shelves, status: 'empty_results' };
+      return { shelves, status: rerankStatus('empty_results') };
     }
 
     const rank = new Map<string, number>();
@@ -198,9 +252,11 @@ export async function applyOracleRerankShelves(
       ...sh,
       games: sortShelfWithBlend(sh.games, rank, blend, maxRankOrdinal),
     }));
-    // embed_fallback is treated as success (no failure badge).
-    return { shelves: out, status: 'applied' };
+    // The ordering was applied either way — the tier is what says how good it
+    // is. embed_fallback used to be flattened into a bare 'applied' here, which
+    // made cosine ordering indistinguishable from a cross-encoder pass.
+    return { shelves: out, status: rerankStatus('applied', toRerankTier(res.via)) };
   } catch {
-    return { shelves, status: 'error' };
+    return { shelves, status: rerankStatus('error') };
   }
 }

@@ -16,8 +16,15 @@
  */
 
 import { logger } from './safe-logger.js';
-import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from './settings-store.js';
+import {
+  settingsStore,
+  DEFAULT_OLLAMA_RERANK_MODEL,
+  DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
+} from './settings-store.js';
 import http from 'http';
+// Type-only — the runtime import of rerank-engine.ts is dynamic (see
+// settleRerankModelStatus) because that module imports this one.
+import type { RerankTier } from './rerank-engine.js';
 
 // Base model name (no tag). Used for matching loaded/installed models in
 // /api/tags and /api/ps listings — we accept any quantization variant of
@@ -64,15 +71,44 @@ export interface OllamaSetupStatus {
   ollamaDetected: boolean;
   ollamaVersion: string | null;
   embeddingModelReady: boolean;
-  /** True when the configured /api/rerank model is already installed. */
+  /** True when a reranker tier stronger than arctic-embed cosine is available. */
   rerankModelReady: boolean;
+  /** Tier resolved during setup — 'embed_fallback' when nothing better exists. */
+  rerankTier: string | null;
+  /** Display name for `rerankTier` ("Qwen3 graded", "Cosine fallback", ...). */
+  rerankTierLabel: string | null;
   error: string | null;
 }
+
+/** Progress event for the dedicated `ollama:rerank-progress` channel. */
+export interface RerankSetupProgress {
+  status: string;
+  pct: number;
+  /** Present on the terminal event. */
+  done?: boolean;
+  tier?: string | null;
+  tierLabel?: string | null;
+  error?: string | null;
+  /**
+   * Whether Ollama answered during tier detection. The renderer needs this to
+   * distinguish "no reranker because Ollama is off" (not an error — nothing was
+   * expected to work) from "Ollama is up and every tier above cosine failed".
+   */
+  ollamaUp?: boolean;
+}
+
+export type RerankProgressCallback = (progress: RerankSetupProgress) => void;
 
 /** Resolve configured rerank model tag (Settings → default dengcao/bge-reranker-v2-m3). */
 export function getRerankModelTag(): string {
   const settings = settingsStore.getOllamaSettings();
   return settings.rerankModel?.trim() || DEFAULT_OLLAMA_RERANK_MODEL;
+}
+
+/** Resolve the Qwen3 tier tag (Settings → default qwen3-reranker:0.6b, Apache 2.0). */
+export function getRerankQwenModelTag(): string {
+  const settings = settingsStore.getOllamaSettings();
+  return settings.rerankQwenModel?.trim() || DEFAULT_OLLAMA_RERANK_QWEN_MODEL;
 }
 
 /** Match installed tags for a rerank model (bare name or tagged variant). */
@@ -262,38 +298,69 @@ async function pullModel(
   });
 }
 
-// Silent rerank pull: one-shot per model tag per process + in-flight dedupe.
+// Rerank pull: in-flight dedupe plus a retry cooldown. A one-shot Set used to
+// block retries for the whole session, so a transient network failure during
+// boot meant no reranker until the app restarted.
 let _rerankPullInFlight: Promise<boolean> | null = null;
 let _rerankPullTarget: string | null = null;
-const _rerankPullAttempted = new Set<string>();
+/** Model tag → timestamp of the last failed pull. */
+const _rerankPullFailedAt = new Map<string, number>();
+const RERANK_PULL_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
+
+/** Clear the pull-failure cooldown so the next call retries immediately. */
+export function resetRerankPullAttempts(): void {
+  _rerankPullFailedAt.clear();
+}
 
 /**
- * Fire-and-forget (or awaitable) silent pull of the configured rerank model.
- * No splash progress callbacks. Concurrent callers for the same tag share one pull;
- * a second miss later in the session does not start another download.
+ * Pull the reranker model, optionally reporting streaming download progress.
+ *
+ * Concurrent callers for the same tag share one pull. A tag that failed is
+ * retried after `RERANK_PULL_RETRY_COOLDOWN_MS`, or immediately after
+ * `resetRerankPullAttempts()` (called when Ollama settings change).
+ *
+ * Defaults to the Qwen3 tier tag, since that is the model auto-download exists
+ * for — the native cross-encoder is only useful on builds that serve /api/rerank.
  */
-export function ensureRerankModelPull(modelName?: string): Promise<boolean> {
-  const model = modelName?.trim() || getRerankModelTag();
+export function ensureRerankModelPull(
+  modelName?: string,
+  onProgress?: (status: string, pct: number) => void,
+): Promise<boolean> {
+  const model = modelName?.trim() || getRerankQwenModelTag();
   if (_rerankPullInFlight && _rerankPullTarget === model) {
     return _rerankPullInFlight;
   }
-  if (_rerankPullAttempted.has(model)) {
-    return Promise.resolve(false);
+
+  const failedAt = _rerankPullFailedAt.get(model);
+  if (failedAt !== undefined) {
+    const sinceMs = Date.now() - failedAt;
+    if (sinceMs < RERANK_PULL_RETRY_COOLDOWN_MS) {
+      const waitS = Math.ceil((RERANK_PULL_RETRY_COOLDOWN_MS - sinceMs) / 1000);
+      logger.log(`[Ollama Setup] Rerank pull for ${model} failed recently — retry in ${waitS}s`);
+      return Promise.resolve(false);
+    }
   }
-  _rerankPullAttempted.add(model);
+
   _rerankPullTarget = model;
-  logger.log(`[Ollama Setup] Silently pulling rerank model: ${model}`);
-  // No onProgress — must not spam splash UI.
-  _rerankPullInFlight = pullModel(model)
+  logger.log(`[Ollama Setup] Pulling rerank model: ${model}`);
+  const pull = pullModel(model, onProgress)
     .then((ok) => {
-      logger.log(`[Ollama Setup] Silent rerank pull ${ok ? 'succeeded' : 'failed'}: ${model}`);
+      if (ok) _rerankPullFailedAt.delete(model);
+      else _rerankPullFailedAt.set(model, Date.now());
+      logger.log(`[Ollama Setup] Rerank pull ${ok ? 'succeeded' : 'failed'}: ${model}`);
       return ok;
+    })
+    .catch((err) => {
+      _rerankPullFailedAt.set(model, Date.now());
+      logger.error(`[Ollama Setup] Rerank pull threw for ${model}:`, err);
+      return false;
     })
     .finally(() => {
       _rerankPullInFlight = null;
       _rerankPullTarget = null;
     });
-  return _rerankPullInFlight;
+  _rerankPullInFlight = pull;
+  return pull;
 }
 
 /**
@@ -488,33 +555,113 @@ export function resetGpuModeCache(): void {
  * This function NEVER throws — it always returns a status object.
  */
 /**
- * After embedding is ready: mark rerank readiness and silently pull the
- * configured rerank model if missing. Never reports splash progress for the pull.
+ * Resolve which reranker tier this machine can serve, and start the Qwen3
+ * download when the answer is "cosine only".
+ *
+ * Tier detection is awaited — it is a handful of short probes, and the caller
+ * needs an accurate `rerankModelReady` in its return value. The download is
+ * NOT awaited: it is ~600 MB, and the splash must not block on it. Progress
+ * streams on the dedicated rerank channel instead of the shared setup channel,
+ * so the embedding bar hitting 100% is never mistaken for the reranker's.
  */
-function settleRerankModelStatus(
+async function settleRerankModelStatus(
   result: OllamaSetupStatus,
-  baseNames: string[],
-  fullTags: string[],
-): void {
-  const rerankTag = getRerankModelTag();
-  const hasRerank = isRerankModelInstalled(baseNames, fullTags, rerankTag);
-  result.rerankModelReady = hasRerank;
-  if (hasRerank) {
-    logger.log(`[Ollama Setup] Rerank model already installed: ${rerankTag}`);
+  onRerankProgress?: RerankProgressCallback,
+): Promise<void> {
+  // Dynamic import: rerank-engine.ts imports this module for the health probe
+  // and the model-tag matcher, so a static import here would be a cycle.
+  const { detectRerankTier, rerankTierLabel, resetRerankTierCache } = await import('./rerank-engine.js');
+
+  const emit = (progress: RerankSetupProgress) => {
+    try {
+      onRerankProgress?.(progress);
+    } catch {
+      // Window may have closed
+    }
+  };
+
+  let ollamaUp = false;
+
+  const settle = (tier: RerankTier, ready: boolean, status: string, error?: string) => {
+    result.rerankModelReady = ready;
+    result.rerankTier = tier;
+    result.rerankTierLabel = rerankTierLabel(tier);
+    emit({
+      status,
+      pct: 100,
+      done: true,
+      tier,
+      tierLabel: result.rerankTierLabel,
+      error: error ?? null,
+      ollamaUp,
+    });
+  };
+
+  emit({ status: 'Probing reranker tiers...', pct: 5 });
+  const detection = await detectRerankTier();
+  ollamaUp = detection.ollamaUp;
+
+  if (detection.tier !== 'embed_fallback') {
+    settle(detection.tier, true, rerankTierLabel(detection.tier));
+    logger.log(`[Ollama Setup] Reranker ready: ${detection.reason}`);
     return;
   }
-  logger.log(`[Ollama Setup] Rerank model missing — starting silent background pull: ${rerankTag}`);
-  void ensureRerankModelPull(rerankTag);
+
+  if (!detection.ollamaUp) {
+    settle('embed_fallback', false, 'Ollama not detected', detection.reason);
+    return;
+  }
+
+  // Ollama is up but neither /api/rerank nor the Qwen3 model is available.
+  // Report cosine now, then download in the background and re-detect.
+  const qwenTag = getRerankQwenModelTag();
+  result.rerankModelReady = false;
+  result.rerankTier = 'embed_fallback';
+  result.rerankTierLabel = rerankTierLabel('embed_fallback');
+  logger.log(`[Ollama Setup] Reranker on cosine — starting background pull: ${qwenTag}`);
+
+  void (async () => {
+    emit({ status: `Downloading ${qwenTag}`, pct: 0, ollamaUp: true });
+    const pulled = await ensureRerankModelPull(qwenTag, (status, pct) => {
+      emit({ status: `${qwenTag}: ${status}`, pct, ollamaUp: true });
+    });
+    if (!pulled) {
+      emit({
+        status: `Cosine fallback — could not download ${qwenTag}`,
+        pct: 100,
+        done: true,
+        tier: 'embed_fallback',
+        tierLabel: rerankTierLabel('embed_fallback'),
+        error: `Failed to pull ${qwenTag}`,
+        ollamaUp: true,
+      });
+      return;
+    }
+    resetRerankTierCache();
+    const after = await detectRerankTier({ force: true });
+    emit({
+      status: rerankTierLabel(after.tier),
+      pct: 100,
+      done: true,
+      tier: after.tier,
+      tierLabel: rerankTierLabel(after.tier),
+      error: after.tier === 'embed_fallback' ? after.reason : null,
+      ollamaUp: after.ollamaUp,
+    });
+  })();
 }
 
 export async function runOllamaSetup(
   onProgress?: (status: string, pct: number) => void,
+  onRerankProgress?: RerankProgressCallback,
 ): Promise<OllamaSetupStatus> {
   const result: OllamaSetupStatus = {
     ollamaDetected: false,
     ollamaVersion: null,
     embeddingModelReady: false,
     rerankModelReady: false,
+    rerankTier: null,
+    rerankTierLabel: null,
     error: null,
   };
 
@@ -526,6 +673,7 @@ export async function runOllamaSetup(
     if (!health.running) {
       logger.log('[Ollama Setup] Ollama not detected — recommendation engine will run without embeddings');
       result.error = 'Ollama not detected';
+      await settleRerankModelStatus(result, onRerankProgress);
       return result;
     }
 
@@ -556,7 +704,7 @@ export async function runOllamaSetup(
       // Fire-and-forget — never blocks the splash.
       warmUpAndDetectGpu();
       // Previously returned here and never considered the rerank model.
-      settleRerankModelStatus(result, baseNames, fullTags);
+      await settleRerankModelStatus(result, onRerankProgress);
       onProgress?.('Embedding model ready', 100);
       return result;
     }
@@ -578,17 +726,23 @@ export async function runOllamaSetup(
       // round-trip on slow machines. Fire-and-forget so splash isn't blocked.
       onProgress?.('Warming up embedding model...', 95);
       warmUpAndDetectGpu();
-      // Re-list so we see any models installed while we pulled embeddings.
-      const afterPull = await listModels();
-      settleRerankModelStatus(result, afterPull.baseNames, afterPull.fullTags);
+      await settleRerankModelStatus(result, onRerankProgress);
       onProgress?.('Embedding model ready', 100);
     } else {
       result.error = `Failed to pull ${tagToPull}`;
       onProgress?.('Model pull failed — continuing without embeddings', 100);
+      // A failed embedding pull used to silently cancel the reranker too —
+      // the two are independent, so settle the reranker either way.
+      await settleRerankModelStatus(result, onRerankProgress);
     }
   } catch (err) {
     logger.error('[Ollama Setup] Unexpected error:', err);
     result.error = err instanceof Error ? err.message : String(err);
+    try {
+      await settleRerankModelStatus(result, onRerankProgress);
+    } catch (rerankErr) {
+      logger.warn('[Ollama Setup] Rerank settle failed after setup error:', rerankErr);
+    }
   }
 
   return result;

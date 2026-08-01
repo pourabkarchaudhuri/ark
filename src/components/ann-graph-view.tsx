@@ -55,13 +55,25 @@ import {
   NEIGHBOR_HEURISTIC_POOL,
   type NeighborRerankStatus,
 } from '@/services/ollama-rerank';
+import { rerankTierLabel } from '@/services/oracle-rerank';
 
 function neighborRerankBadge(status: NeighborRerankStatus): { label: string; title: string } | null {
-  if (status === 'applied' || status === 'fallback') return null;
-  if (status === 'skipped_settings') return { label: 'Rerank off', title: 'Neighbor rerank is off in Settings' };
-  if (status === 'skipped_no_client') return { label: 'Rerank unavailable', title: 'Ollama rerank not available — connect in Settings' };
-  if (status === 'empty_results') return { label: 'No rerank scores', title: 'Rerank returned no scores; using heuristic order' };
-  if (status === 'error') return { label: 'Rerank failed', title: 'Rerank failed; using heuristic order' };
+  const { outcome, tier } = status;
+  if (outcome === 'applied') {
+    // A weaker tier still produced the ordering — say which one rather than
+    // letting cosine pass for a cross-encoder.
+    if (tier === 'qwen_binary') {
+      return { label: 'Binary rerank', title: 'Ollama predates logprobs support, so the reranker could only answer yes/no — ordering is coarse' };
+    }
+    if (tier === 'embed_fallback') {
+      return { label: 'Cosine rerank', title: 'No cross-encoder available — neighbors were ordered by arctic-embed cosine similarity' };
+    }
+    return null;
+  }
+  if (outcome === 'skipped_disabled') return { label: 'Rerank off', title: 'Neighbor rerank is off in Settings' };
+  if (outcome === 'skipped_no_client') return { label: 'Rerank unavailable', title: 'Ollama rerank not available — connect in Settings' };
+  if (outcome === 'empty_results') return { label: 'No rerank scores', title: 'Rerank returned no scores; using heuristic order' };
+  if (outcome === 'error') return { label: 'Rerank failed', title: `Rerank failed (${rerankTierLabel(tier)}); using heuristic order` };
   return null;
 }
 
