@@ -13,6 +13,8 @@ import {
 } from '../settings-store.js';
 import { resetRerankTierCache } from '../rerank-engine.js';
 import { resetRerankPullAttempts } from '../ollama-setup.js';
+import { showOverlay, hideOverlay } from '../overlay-window.js';
+import { getActiveSessions } from '../session-tracker.js';
 
 export function register(): void {
   ipcMain.handle('settings:getApiKey', async () => {
@@ -170,6 +172,33 @@ export function register(): void {
       return { success: true };
     } catch (error) {
       logger.error('[Settings] Error setting beta features:', error);
+      return { success: false, error: 'Failed to save' };
+    }
+  });
+
+  ipcMain.handle('settings:getOverlayEnabled', async () => {
+    try {
+      return settingsStore.getOverlayEnabled();
+    } catch (error) {
+      logger.error('[Settings] Error getting overlay enabled:', error);
+      return false;
+    }
+  });
+
+  ipcMain.handle('settings:setOverlayEnabled', async (_event: any, enabled: boolean) => {
+    try {
+      if (typeof enabled !== 'boolean') return { success: false, error: 'Invalid value' };
+      settingsStore.setOverlayEnabled(enabled);
+      // Apply live: turning it on shows the HUD immediately if a game is being
+      // played right now; turning it off hides it regardless of session state.
+      if (enabled) {
+        if (getActiveSessions().length > 0) showOverlay();
+      } else {
+        hideOverlay();
+      }
+      return { success: true };
+    } catch (error) {
+      logger.error('[Settings] Error setting overlay enabled:', error);
       return { success: false, error: 'Failed to save' };
     }
   });

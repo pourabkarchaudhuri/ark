@@ -18,6 +18,15 @@ export default defineConfig({
   base: './',
   build: {
     outDir: 'dist',
+    rollupOptions: {
+      // Two HTML entries: the main app window and the transparent in-game
+      // overlay HUD window. Both are emitted so Electron can loadFile the
+      // packaged dist/overlay.html (dev loads /overlay.html from the Vite server).
+      input: {
+        index: path.resolve(__dirname, 'index.html'),
+        overlay: path.resolve(__dirname, 'overlay.html'),
+      },
+    },
   },
   server: {
     port: 5173,

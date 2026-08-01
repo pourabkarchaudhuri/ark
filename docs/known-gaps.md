@@ -136,13 +136,12 @@ The AI Models tab saves Azure OpenAI and Anthropic configuration to localStorage
 
 **Why deferred:** Integrating Azure OpenAI requires `@langchain/openai` with Azure-specific config, and Anthropic requires `@langchain/anthropic`. Both need changes to the unified LLM proxy in `ai-chat.ts` to add provider selection logic.
 
-### 35. Graph scores best-effort
-Oracle / galaxy `graphScores` (pageRank, community affinity) are best-effort signals. Graph build can time out or skip; shelves still rank without them. No hard dependency.
-
-### 36. Thumbs-up unused for ranking
-Oracle thumbs-up is recorded for conversion stats / positive feedback rate but is not yet a first-class positive mining signal in the reco worker (thumbs-down already dismisses + hard-neg expands). LTR / positive-example training deferred.
-
 ---
+
+## Resolved (Blast-radius / graph feedback loop — Aug 2026)
+
+- **#35 Graph scores reliability** — `resolveGraphScores` now prefers restore, uses a single wait deadline (8s) while building, and fire-and-forgets cold ANN builds so Oracle compute is not double-blocked. Optional background PPR seed repair when a restored graph lacks a seeded PPR buffer. Graph signals remain optional (no hard dependency); Why panel surfaces blast-radius neighbor chips when the graph is ready.
+- **#36 Thumbs-up → ranking** — `getThumbsUpIds` feeds `RecoWorkerInput.thumbsUpIds`; worker mines a positive profile (`W_POSITIVE = 0.05`) mirroring thumbs-down. Oracle library signature includes a thumbs-up fingerprint; thumbs-up in the Why panel invalidates cache and refreshes. LTR / positive-example training still deferred. PPR still not wired into worker score weights.
 
 ## Resolved (Round 7 — Feb 23 2026)
 

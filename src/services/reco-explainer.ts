@@ -4,9 +4,23 @@
  * Takes a ScoredGame's `layerScores` and produces:
  *   1. A weighted percentage breakdown per scoring layer.
  *   2. A human-readable explanation array for display in the UI.
+ *   3. Optional blast-radius evidence chips from the ANN neighbor graph.
  */
 
 import type { ScoredGame, LayerBreakdown } from '@/types/reco';
+import { gameGraphStore } from '@/services/game-graph-store';
+import { findGameById } from '@/services/prefetch-store';
+import { libraryStore } from '@/services/library-store';
+
+/** Evidence chip for Oracle Why panel (blast-radius / graph). */
+export interface BlastRadiusChip {
+  key: string;
+  label: string;
+  detail: string;
+  tone: 'neutral' | 'genre' | 'theme';
+}
+
+const COMMUNITY_AFFINITY_FLOOR = 0.05;
 
 const LAYER_LABELS: Record<string, string> = {
   contentSimilarity: 'Genre & Theme Match',
@@ -19,6 +33,7 @@ const LAYER_LABELS: Record<string, string> = {
   diversityBonus: 'Diversity Bonus',
   trajectoryMultiplier: 'Trajectory Fit',
   negativeSignal: 'Negative Signal',
+  positiveAffinity: 'Positive Affinity',
   timeOfDayBoost: 'Time-of-Day Fit',
   engagementCurveBonus: 'Engagement Curve',
   franchiseBoost: 'Franchise Boost',
@@ -51,6 +66,7 @@ const LAYER_WEIGHTS: Record<string, number> = {
   graphPageRankSignal: 0.024,
   graphCommunityAffinity: 0.036,
   negativeSignal: 0.06,
+  positiveAffinity: 0.05,
   trajectoryMultiplier: 0,
 };
 
@@ -141,6 +157,75 @@ export function normalizeLayerScores(game: ScoredGame): LayerBreakdown[] {
     }))
     .filter(e => e.percentage > 0)
     .sort((a, b) => b.percentage - a.percentage);
+}
+
+/**
+ * Client-only blast-radius chips from gameGraphStore neighbors.
+ * Returns [] silently when the graph is not ready.
+ */
+export function buildBlastRadiusEvidence(
+  gameId: string,
+  layerScores: Pick<ScoredGame['layerScores'], 'graphCommunityAffinity'> = {},
+): BlastRadiusChip[] {
+  if (!gameGraphStore.isReady) return [];
+
+  const neighbors = gameGraphStore.getNeighbors(gameId, 5);
+  if (neighbors.length === 0 && !(layerScores.graphCommunityAffinity && layerScores.graphCommunityAffinity > COMMUNITY_AFFINITY_FLOOR)) {
+    return [];
+  }
+
+  const resolveTitle = (id: string): string | null => {
+    const pref = findGameById(id);
+    if (pref?.title) return pref.title;
+    const lib = libraryStore.getEntry(id);
+    return lib?.cachedMeta?.title?.trim() || null;
+  };
+
+  const titled: Array<{ id: string; title: string; inLibrary: boolean }> = [];
+  let libraryOverlap = 0;
+  for (const n of neighbors) {
+    const inLibrary = libraryStore.isInLibrary(n.id);
+    if (inLibrary) libraryOverlap++;
+    const title = resolveTitle(n.id);
+    if (title) titled.push({ id: n.id, title, inLibrary });
+  }
+
+  const chips: BlastRadiusChip[] = [];
+
+  // Up to 2 "Near X" chips from titled neighbors
+  for (const n of titled.slice(0, 2)) {
+    chips.push({
+      key: `blast-near-${n.id}`,
+      label: `Near ${n.title}`,
+      detail: `${n.title} is a close neighbor in the taste graph (ANN similarity edges).`,
+      tone: 'neutral',
+    });
+  }
+
+  if (libraryOverlap > 0) {
+    chips.push({
+      key: 'blast-lib-overlap',
+      label: `Same cluster as ${libraryOverlap} library game${libraryOverlap === 1 ? '' : 's'}`,
+      detail:
+        libraryOverlap === 1
+          ? 'One game in your library sits next to this pick in the neighbor graph.'
+          : `${libraryOverlap} games in your library sit next to this pick in the neighbor graph.`,
+      tone: 'neutral',
+    });
+  } else {
+    const affinity = layerScores.graphCommunityAffinity ?? 0;
+    const scores = gameGraphStore.getScores(gameId);
+    if (affinity > COMMUNITY_AFFINITY_FLOOR && scores && scores.community >= 0) {
+      chips.push({
+        key: `blast-community-${scores.community}`,
+        label: 'Shares your Louvain cluster',
+        detail: `Community affinity ${Math.round(affinity * 100)}% — part of Louvain community ${scores.community} with games you already play.`,
+        tone: 'neutral',
+      });
+    }
+  }
+
+  return chips.slice(0, 3);
 }
 
 export function generateExplanation(game: ScoredGame): string[] {

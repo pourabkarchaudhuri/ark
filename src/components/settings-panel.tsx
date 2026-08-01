@@ -52,6 +52,8 @@ declare global {
       setPreferredChatProvider: (provider: 'ollama' | 'gemini' | 'azure-openai' | 'anthropic') => Promise<{ success: boolean; error?: string }>;
       getBetaFeatures: () => Promise<boolean>;
       setBetaFeatures: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+      getOverlayEnabled?: () => Promise<boolean>;
+      setOverlayEnabled?: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
     };
   }
 }

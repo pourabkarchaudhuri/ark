@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   hoursPlayedBucket,
   fingerprintDismissals,
+  fingerprintThumbsUp,
 } from '@/services/oracle-signature';
 
 describe('oracle library signature fragments', () => {
@@ -24,5 +25,9 @@ describe('oracle library signature fragments', () => {
     ]);
     expect(b).not.toBe(a);
     expect(c).not.toBe(a);
+  });
+
+  it('thumbs-up fingerprint changes when ups change', () => {
+    expect(fingerprintThumbsUp(['a'])).not.toBe(fingerprintThumbsUp(['a', 'b']));
   });
 });

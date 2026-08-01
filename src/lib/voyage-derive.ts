@@ -763,3 +763,449 @@ export function formatDay(ms: number): string {
     year: 'numeric',
   });
 }
+
+// ─── Scenes: play-rhythm analytics (library-wide, pure) ──────────────────────
+//
+// These feed the Scenes play-rhythm dashboard. Every one is O(sessions) plus a
+// bounded window (weeks / months), never O(calendar-time), so a decade of
+// history costs the same as a month.
+
+export const WEEK_MS = 7 * DAY_MS;
+
+/** Local midnight for a timestamp — the identity of a calendar day. */
+function dayStartMs(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** Local start-of-week (Monday 00:00) for a timestamp. */
+export function startOfWeekMs(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  const day = d.getDay(); // 0 Sun … 6 Sat
+  const diff = day === 0 ? -6 : 1 - day; // shift back to Monday
+  d.setDate(d.getDate() + diff);
+  return d.getTime();
+}
+
+export interface CadenceWeek {
+  weekStartMs: number;
+  /** "M/D" of the week's Monday. */
+  label: string;
+  sessions: number;
+  minutes: number;
+}
+
+/**
+ * Sessions and minutes per week over the last `weeks` contiguous weeks ending
+ * at `nowMs`. Weeks with no play are returned as zero rows so the trend never
+ * lies about a quiet stretch. Bounded by `weeks`.
+ */
+export function computePlayCadence(
+  sessions: GameSession[],
+  nowMs: number = Date.now(),
+  weeks: number = 12,
+): CadenceWeek[] {
+  const n = Math.max(1, Math.floor(weeks));
+
+  const byWeek = new Map<number, { sessions: number; minutes: number }>();
+  for (const s of sessions) {
+    const startMs = parseIsoMs(s.startTime);
+    if (startMs === null) continue;
+    const wk = startOfWeekMs(startMs);
+    const minutes = Math.max(0, s.durationMinutes ?? 0);
+    const agg = byWeek.get(wk);
+    if (agg) {
+      agg.sessions += 1;
+      agg.minutes += minutes;
+    } else {
+      byWeek.set(wk, { sessions: 1, minutes });
+    }
+  }
+
+  const base = new Date(startOfWeekMs(nowMs));
+  const out: CadenceWeek[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(base);
+    d.setDate(d.getDate() - i * 7); // preserves local 00:00 across DST
+    const wk = d.getTime();
+    const agg = byWeek.get(wk);
+    out.push({
+      weekStartMs: wk,
+      label: `${d.getMonth() + 1}/${d.getDate()}`,
+      sessions: agg?.sessions ?? 0,
+      minutes: agg?.minutes ?? 0,
+    });
+  }
+  return out;
+}
+
+export interface StreakInfo {
+  /** Consecutive days with play ending today or yesterday. */
+  current: number;
+  /** Longest run of consecutive played days ever recorded. */
+  longest: number;
+  /** Distinct calendar days with at least one session. */
+  activeDays: number;
+}
+
+/**
+ * Current and longest play streaks over distinct local calendar days. A streak
+ * is content in Scenes, never a target — Audit deliberately never scores this.
+ */
+export function computeStreaks(
+  sessions: GameSession[],
+  nowMs: number = Date.now(),
+): StreakInfo {
+  const daySet = new Set<number>();
+  for (const s of sessions) {
+    const ms = parseIsoMs(s.startTime);
+    if (ms === null) continue;
+    daySet.add(dayStartMs(ms));
+  }
+  const activeDays = daySet.size;
+  if (activeDays === 0) return { current: 0, longest: 0, activeDays: 0 };
+
+  // Current: step back from today (or yesterday, so an evening-less morning
+  // does not reset a live streak) while days keep landing.
+  let current = 0;
+  const cursor = new Date(nowMs);
+  cursor.setHours(0, 0, 0, 0);
+  if (!daySet.has(cursor.getTime())) cursor.setDate(cursor.getDate() - 1);
+  while (daySet.has(cursor.getTime())) {
+    current += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+
+  // Longest: single pass over the sorted day starts.
+  const sorted = [...daySet].sort((a, b) => a - b);
+  let longest = 1;
+  let run = 1;
+  for (let i = 1; i < sorted.length; i++) {
+    const diff = Math.round((sorted[i] - sorted[i - 1]) / DAY_MS);
+    if (diff === 1) {
+      run += 1;
+      if (run > longest) longest = run;
+    } else if (diff > 1) {
+      run = 1;
+    }
+  }
+
+  return { current, longest: Math.max(longest, current), activeDays };
+}
+
+export interface LengthBucket {
+  label: string;
+  min: number;
+  /** Exclusive upper bound; Infinity for the open final bucket. */
+  max: number;
+  count: number;
+}
+
+const SESSION_LENGTH_BUCKETS: Array<{ label: string; min: number; max: number }> = [
+  { label: '<15m', min: 0, max: 15 },
+  { label: '15–30m', min: 15, max: 30 },
+  { label: '30–60m', min: 30, max: 60 },
+  { label: '1–2h', min: 60, max: 120 },
+  { label: '2–4h', min: 120, max: 240 },
+  { label: '4h+', min: 240, max: Infinity },
+];
+
+/** Histogram of session durations into fixed play-length buckets. */
+export function computeSessionLengthHistogram(sessions: GameSession[]): LengthBucket[] {
+  const out: LengthBucket[] = SESSION_LENGTH_BUCKETS.map((b) => ({ ...b, count: 0 }));
+  for (const s of sessions) {
+    const d = s.durationMinutes;
+    if (!Number.isFinite(d) || d < 0) continue;
+    for (const b of out) {
+      if (d >= b.min && d < b.max) {
+        b.count += 1;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+export const DAYPART_LABELS = ['Night', 'Morning', 'Afternoon', 'Evening'] as const;
+export const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+
+export interface RhythmHeatmap {
+  /** grid[weekday 0..6 (Sun..Sat)][daypart 0..3]. */
+  grid: number[][];
+  byWeekday: number[]; // length 7
+  byDaypart: number[]; // length 4
+  max: number;
+  total: number;
+  /** Busiest weekday / hour, or null when there is no play at all. */
+  peakWeekday: number | null;
+  peakHour: number | null;
+}
+
+/**
+ * When play happens, folded onto a weekday × part-of-day grid. A coarse
+ * four-part day reads far better in a dashboard than a raw 24-column heatmap.
+ */
+export function computeRhythmHeatmap(sessions: GameSession[]): RhythmHeatmap {
+  const grid: number[][] = Array.from({ length: 7 }, () => [0, 0, 0, 0]);
+  const byWeekday = new Array(7).fill(0) as number[];
+  const byDaypart = [0, 0, 0, 0];
+  const byHour = new Array(24).fill(0) as number[];
+  let total = 0;
+
+  for (const s of sessions) {
+    const ms = parseIsoMs(s.startTime);
+    if (ms === null) continue;
+    const d = new Date(ms);
+    const wd = d.getDay();
+    const hr = d.getHours();
+    const dp = hr < 6 ? 0 : hr < 12 ? 1 : hr < 18 ? 2 : 3;
+    grid[wd][dp] += 1;
+    byWeekday[wd] += 1;
+    byDaypart[dp] += 1;
+    byHour[hr] += 1;
+    total += 1;
+  }
+
+  let max = 0;
+  for (const row of grid) for (const c of row) if (c > max) max = c;
+
+  let peakWeekday: number | null = null;
+  let peakHour: number | null = null;
+  if (total > 0) {
+    let bestW = 0;
+    for (let i = 1; i < 7; i++) if (byWeekday[i] > byWeekday[bestW]) bestW = i;
+    peakWeekday = bestW;
+    let bestH = 0;
+    for (let i = 1; i < 24; i++) if (byHour[i] > byHour[bestH]) bestH = i;
+    peakHour = bestH;
+  }
+
+  return { grid, byWeekday, byDaypart, max, total, peakWeekday, peakHour };
+}
+
+// ─── Audit: data-quality analytics (library-wide, pure) ──────────────────────
+//
+// Everything here grades *records* — how much of each one is filled in — and
+// never playing behaviour. There is a correct target of 100% for a filled-in
+// field; there is no correct amount of play, so none is computed.
+
+export interface QualityMetric {
+  filled: number;
+  total: number;
+  /** filled / total, or 0 when nothing is checkable. */
+  pct: number;
+}
+
+export interface AuditQuality {
+  /** Records in the library — the denominator for the coverage metrics. */
+  records: number;
+  /** Cover or header artwork stored. */
+  artwork: QualityMetric;
+  /** Genre plus at least one of developer / publisher / release date. */
+  metadata: QualityMetric;
+  /** A star rating stored (across all records). */
+  rating: QualityMetric;
+  /** Rated among the records marked Completed — the verdict is filled in. */
+  completionVerdict: QualityMetric;
+  /** An executable on file, so sessions can be captured at all. */
+  trackable: QualityMetric;
+  /** At least one session on record. Informational; never a target. */
+  sessionData: QualityMetric;
+  /** Ring 1 — average of artwork and metadata coverage. */
+  coverageScore: number;
+  /** Ring 2 — completion verdicts (falls back to overall rating density). */
+  completionScore: number;
+  /** Ring 3 — session-tracking readiness (executable on file). */
+  sessionScore: number;
+}
+
+function metric(filled: number, total: number): QualityMetric {
+  return { filled, total, pct: total > 0 ? filled / total : 0 };
+}
+
+/**
+ * The three scored data-quality gauges plus the pieces behind them. Reads the
+ * raw library / journey rows for artwork and metadata (which the rollups drop)
+ * and the rollups for rating, executable and session counts.
+ */
+export function computeAuditQuality(input: {
+  rollups: GameRollup[];
+  libraryEntries: LibraryGameEntry[];
+  journeyEntries: JourneyEntry[];
+}): AuditQuality {
+  const { rollups, libraryEntries, journeyEntries } = input;
+  const libById = new Map(libraryEntries.map((e) => [e.gameId, e]));
+  const jrnById = new Map(journeyEntries.map((e) => [e.gameId, e]));
+
+  const inLib = rollups.filter((r) => r.inLibrary);
+  const total = inLib.length;
+
+  let artwork = 0;
+  let metadata = 0;
+  let rating = 0;
+  let trackable = 0;
+  let sessionData = 0;
+  let completed = 0;
+  let completedRated = 0;
+
+  for (const r of inLib) {
+    const le = libById.get(r.gameId);
+    const je = jrnById.get(r.gameId);
+
+    const cover = le?.cachedMeta?.coverUrl || le?.cachedMeta?.headerImage || je?.coverUrl;
+    if (cover) artwork += 1;
+
+    const hasGenre = (le?.cachedMeta?.genre?.length ?? 0) > 0 || (je?.genre?.length ?? 0) > 0;
+    const hasContext = !!(
+      le?.cachedMeta?.developer ||
+      le?.cachedMeta?.publisher ||
+      le?.cachedMeta?.releaseDate ||
+      je?.releaseDate
+    );
+    if (hasGenre && hasContext) metadata += 1;
+
+    if (r.rating > 0) rating += 1;
+    if (r.executablePath) trackable += 1;
+    if (r.sessionCount > 0) sessionData += 1;
+    if (r.status === 'Completed') {
+      completed += 1;
+      if (r.rating > 0) completedRated += 1;
+    }
+  }
+
+  const artworkM = metric(artwork, total);
+  const metadataM = metric(metadata, total);
+  const ratingM = metric(rating, total);
+  const completionM = metric(completedRated, completed);
+  const trackableM = metric(trackable, total);
+  const sessionM = metric(sessionData, total);
+
+  return {
+    records: total,
+    artwork: artworkM,
+    metadata: metadataM,
+    rating: ratingM,
+    completionVerdict: completionM,
+    trackable: trackableM,
+    sessionData: sessionM,
+    coverageScore: (artworkM.pct + metadataM.pct) / 2,
+    completionScore: completed > 0 ? completionM.pct : ratingM.pct,
+    sessionScore: trackableM.pct,
+  };
+}
+
+export interface StatusCount {
+  status: GameStatus | 'Unset';
+  count: number;
+}
+
+const STATUS_ORDER: GameStatus[] = [
+  'Want to Play',
+  'Playing',
+  'Playing Now',
+  'On Hold',
+  'Completed',
+];
+
+/** How the library's records are distributed across statuses. */
+export function computeStatusDistribution(rollups: GameRollup[]): StatusCount[] {
+  const counts = new Map<string, number>();
+  for (const r of rollups) {
+    if (!r.inLibrary) continue;
+    const key = r.status ?? 'Unset';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const out: StatusCount[] = [];
+  for (const s of STATUS_ORDER) {
+    const c = counts.get(s) ?? 0;
+    if (c > 0) out.push({ status: s, count: c });
+  }
+  const unset = counts.get('Unset') ?? 0;
+  if (unset > 0) out.push({ status: 'Unset', count: unset });
+  return out;
+}
+
+const DECIDED_STATUSES = new Set<GameStatus>([
+  'Playing',
+  'Playing Now',
+  'On Hold',
+  'Completed',
+]);
+
+export interface DebtMonth {
+  key: string;
+  /** Short month label, e.g. "Mar". */
+  label: string;
+  /** Records added inside the month. */
+  added: number;
+  /** Records that first reached a decided status inside the month. */
+  decided: number;
+  /** Cumulative added minus cumulative decided — undecided records to review. */
+  open: number;
+}
+
+/**
+ * Open records-to-review over the last `months` months: a record is "open"
+ * from when it was added until its status first moves off the default to a
+ * decided one. This trends record curation, not play — an unplayed record is
+ * never counted as debt once its status reflects that intent.
+ */
+export function computeOpenItemsTrend(
+  rollups: GameRollup[],
+  statusHistory: StatusChangeEntry[],
+  nowMs: number = Date.now(),
+  months: number = 12,
+): DebtMonth[] {
+  const n = Math.max(1, Math.floor(months));
+
+  const decidedAt = new Map<string, number>();
+  for (const e of statusHistory) {
+    if (!DECIDED_STATUSES.has(e.newStatus)) continue;
+    const ms = parseIsoMs(e.timestamp);
+    if (ms === null) continue;
+    const prev = decidedAt.get(e.gameId);
+    if (prev === undefined || ms < prev) decidedAt.set(e.gameId, ms);
+  }
+
+  const base = new Date(nowMs);
+  base.setDate(1);
+  base.setHours(0, 0, 0, 0);
+
+  const monthStart: number[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(base);
+    d.setMonth(d.getMonth() - i);
+    monthStart.push(d.getTime());
+  }
+  const afterLast = (() => {
+    const d = new Date(base);
+    d.setMonth(d.getMonth() + 1);
+    return d.getTime();
+  })();
+
+  const addedMs = rollups
+    .filter((r) => r.inLibrary && r.addedAtMs !== null)
+    .map((r) => r.addedAtMs as number);
+  const decidedMs = [...decidedAt.values()];
+
+  const out: DebtMonth[] = [];
+  for (let i = 0; i < monthStart.length; i++) {
+    const start = monthStart[i];
+    const end = i + 1 < monthStart.length ? monthStart[i + 1] : afterLast;
+    const added = addedMs.filter((ms) => ms >= start && ms < end).length;
+    const decided = decidedMs.filter((ms) => ms >= start && ms < end).length;
+    const cumAdded = addedMs.filter((ms) => ms < end).length;
+    const cumDecided = decidedMs.filter((ms) => ms < end).length;
+    const d = new Date(start);
+    out.push({
+      key: `${d.getFullYear()}-${d.getMonth() + 1}`,
+      label: d.toLocaleDateString('en-US', { month: 'short' }),
+      added,
+      decided,
+      open: Math.max(0, cumAdded - cumDecided),
+    });
+  }
+  return out;
+}

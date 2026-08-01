@@ -307,6 +307,14 @@ contextBridge.exposeInMainWorld('settings', {
 
   setBetaFeatures: (enabled) =>
     ipcRenderer.invoke('settings:setBetaFeatures', enabled),
+
+  // Get in-game overlay HUD enabled setting
+  getOverlayEnabled: () =>
+    ipcRenderer.invoke('settings:getOverlayEnabled'),
+
+  // Set in-game overlay HUD enabled setting (applies live)
+  setOverlayEnabled: (enabled) =>
+    ipcRenderer.invoke('settings:setOverlayEnabled', enabled),
 });
 
 // Expose auto-updater API to renderer

@@ -13,7 +13,7 @@ import {
   Library, Compass, Globe, Newspaper, Calendar, Gamepad2,
   Zap, Search, Star, Trophy, Map, MessageCircle, Shield,
   Layers, Wand2, TrendingUp, Heart, Package, HelpCircle, Play, CheckCircle2, RotateCcw, Rocket,
-  RefreshCw,
+  RefreshCw, MonitorPlay,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -64,6 +64,8 @@ declare global {
       setPreferredChatProvider: (provider: PreferredChatProvider) => Promise<{ success: boolean; error?: string }>;
       getBetaFeatures: () => Promise<boolean>;
       setBetaFeatures: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+      getOverlayEnabled?: () => Promise<boolean>;
+      setOverlayEnabled?: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
     };
   }
 }
@@ -128,6 +130,7 @@ function Toggle({ value, onChange, disabled }: { value: boolean; onChange: () =>
 
 const GeneralTab = memo(function GeneralTab() {
   const [autoLaunch, setAutoLaunchState] = useState(true);
+  const [overlayEnabled, setOverlayEnabledState] = useState(false);
   const [betaFeatures, setBetaFeatures] = useBetaFeatures();
   const [devMode, setDevMode] = useDevMode();
   const [allowAdultContent, setAllowAdultContent] = useAllowAdultContent();
@@ -138,6 +141,9 @@ const GeneralTab = memo(function GeneralTab() {
 
   useEffect(() => {
     window.settings?.getAutoLaunch().then(setAutoLaunchState).catch(() => {});
+    // In-game overlay HUD toggle — the getter is optional until the main-process
+    // IPC wiring lands, so guard the call and default to off.
+    window.settings?.getOverlayEnabled?.().then(setOverlayEnabledState).catch(() => {});
   }, []);
 
   const handleAutoLaunchToggle = useCallback(async () => {
@@ -147,6 +153,18 @@ const GeneralTab = memo(function GeneralTab() {
     try { await window.settings.setAutoLaunch(newValue); }
     catch { setAutoLaunchState(!newValue); }
   }, [autoLaunch]);
+
+  const handleOverlayToggle = useCallback(async () => {
+    if (!window.settings?.setOverlayEnabled) return;
+    const newValue = !overlayEnabled;
+    setOverlayEnabledState(newValue);
+    try {
+      const result = await window.settings.setOverlayEnabled(newValue);
+      if (!result?.success) setOverlayEnabledState(!newValue);
+    } catch {
+      setOverlayEnabledState(!newValue);
+    }
+  }, [overlayEnabled]);
 
   const handleExportLibrary = useCallback(async () => {
     setExportStatus('loading');
@@ -216,6 +234,18 @@ const GeneralTab = memo(function GeneralTab() {
               <p className="text-xs text-white/35 mt-0.5">Automatically start Ark when you log in (minimized to system tray)</p>
             </div>
             <Toggle value={autoLaunch} onChange={handleAutoLaunchToggle} />
+          </div>
+          <div className="border-t border-white/[0.04] pt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <MonitorPlay className="h-3.5 w-3.5 text-white/40" />
+                  <p className="text-sm font-medium text-white/90">In-game overlay</p>
+                </div>
+                <p className="text-xs text-white/35 mt-0.5">Show a small corner HUD (badge, game name, live timer) on top of games while they're running. Best with borderless / windowed fullscreen.</p>
+              </div>
+              <Toggle value={overlayEnabled} onChange={handleOverlayToggle} />
+            </div>
           </div>
           <div className="border-t border-white/[0.04] pt-4">
             <div className="flex items-center justify-between">

@@ -285,6 +285,13 @@ class RecoHistoryStore {
       .map(e => e.gameId);
   }
 
+  /** All game ids the user thumbs-upped (for positive profile mining). */
+  getThumbsUpIds(): string[] {
+    return [...this.history.values()]
+      .filter(e => e.thumbs === 1)
+      .map(e => e.gameId);
+  }
+
   /** Get positive feedback ratio (for signal quality measurement). */
   getPositiveFeedbackRate(): number {
     const withThumbs = [...this.history.values()].filter(e => e.thumbs !== undefined);

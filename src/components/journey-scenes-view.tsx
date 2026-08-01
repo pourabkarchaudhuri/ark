@@ -23,11 +23,16 @@
  * commit.
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { motion } from 'framer-motion';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import {
+  Activity,
+  CalendarDays,
   ChevronDown,
   Clapperboard,
+  Clock3,
   Coffee,
   Filter,
   Flame,
@@ -36,13 +41,21 @@ import {
   RotateCcw,
   Sparkles,
   Timer,
+  TrendingUp,
   Wind,
+  Zap,
 } from 'lucide-react';
 import type { GameSession, JourneyEntry, StatusChangeEntry } from '@/types/game';
 import {
+  DAYPART_LABELS,
   SCENE_TYPE_LABEL,
+  WEEKDAY_LABELS,
   clusterSessionsIntoScenes,
+  computePlayCadence,
+  computeRhythmHeatmap,
   computeSceneGaps,
+  computeSessionLengthHistogram,
+  computeStreaks,
   deriveMilestones,
   detectBulkImportGameIds,
   detectStatusChurnGameIds,
@@ -58,6 +71,14 @@ import {
   type SceneGap,
   type SceneType,
 } from '@/lib/voyage-derive';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
+import PacingPanel from '@/components/telemetry/PacingPanel';
+import SessionAnalyticsPanel from '@/components/telemetry/SessionAnalyticsPanel';
 import { resolveJourneyDisplayTitle } from '@/lib/journey-display-title';
 import { cn } from '@/lib/utils';
 
@@ -395,6 +416,305 @@ const MilestoneRow = memo(function MilestoneRow({
   );
 });
 
+// ─── Play-rhythm dashboard ───────────────────────────────────────────────────
+
+const CADENCE_CONFIG: ChartConfig = {
+  sessions: { label: 'Sessions', color: 'hsl(292, 84%, 61%)' },
+};
+const LENGTH_CONFIG: ChartConfig = {
+  count: { label: 'Sessions', color: 'hsl(187, 96%, 42%)' },
+};
+
+const DASH_HEAT = 'rgb(217, 70, 239)'; // fuchsia-500
+
+function StatTile({
+  icon: Icon,
+  label,
+  value,
+  hint,
+}: {
+  icon: typeof Flame;
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2.5">
+      <div className="flex items-center gap-1.5 text-white/40">
+        <Icon className="h-3 w-3" />
+        <span className="font-mono text-[9px] uppercase tracking-wider">{label}</span>
+      </div>
+      <p className="mt-1 font-mono text-xl font-black text-white">{value}</p>
+      {hint && <p className="text-[10px] leading-tight text-white/30">{hint}</p>}
+    </div>
+  );
+}
+
+/** A weekday × part-of-day grid. Empty cells stay visible so a quiet slot reads. */
+function RhythmGrid({ heat }: { heat: ReturnType<typeof computeRhythmHeatmap> }) {
+  return (
+    <div className="grid grid-cols-[auto_repeat(4,1fr)] gap-1 text-white/40">
+      <div aria-hidden />
+      {DAYPART_LABELS.map((d) => (
+        <div key={d} className="text-center font-mono text-[9px] uppercase tracking-wider">
+          {d.slice(0, 3)}
+        </div>
+      ))}
+      {WEEKDAY_LABELS.map((wd, wi) => (
+        <div key={wd} className="contents">
+          <div className="flex items-center justify-end pr-1 font-mono text-[9px] uppercase tracking-wider">
+            {wd}
+          </div>
+          {heat.grid[wi].map((count, di) => {
+            const opacity = heat.max > 0 ? 0.06 + (count / heat.max) * 0.94 : 0.04;
+            return (
+              <div
+                key={di}
+                className="flex h-6 items-center justify-center rounded-[3px] border border-white/[0.04]"
+                style={{ backgroundColor: DASH_HEAT, opacity: count > 0 ? opacity : 0.04 }}
+                title={`${wd} ${DAYPART_LABELS[di]} — ${count} session${count === 1 ? '' : 's'}`}
+              >
+                {count > 0 && (
+                  <span className="font-mono text-[9px] font-bold text-white/90">{count}</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Panel({
+  title,
+  icon: Icon,
+  children,
+  className,
+}: {
+  title: string;
+  icon: typeof Flame;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        'rounded-2xl border border-white/[0.07] bg-white/[0.015] p-4',
+        className,
+      )}
+    >
+      <div className="mb-3 flex items-center gap-1.5 text-white/45">
+        <Icon className="h-3.5 w-3.5" />
+        <span className="font-mono text-[10px] uppercase tracking-wider">{title}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+const PlayRhythmDashboard = memo(function PlayRhythmDashboard({
+  sessions,
+  scenes,
+  medianMinutes,
+}: {
+  sessions: GameSession[];
+  scenes: PlayScene[];
+  medianMinutes: number;
+}) {
+  const cadence = useMemo(() => computePlayCadence(sessions, Date.now(), 12), [sessions]);
+  const streaks = useMemo(() => computeStreaks(sessions), [sessions]);
+  const lengthHist = useMemo(() => computeSessionLengthHistogram(sessions), [sessions]);
+  const rhythm = useMemo(() => computeRhythmHeatmap(sessions), [sessions]);
+
+  const totalHours = useMemo(() => {
+    let mins = 0;
+    for (const s of sessions) mins += Math.max(0, s.durationMinutes ?? 0);
+    return mins / 60;
+  }, [sessions]);
+
+  const topScenes = useMemo(
+    () => [...scenes].sort((a, b) => b.minutes - a.minutes).slice(0, 6),
+    [scenes],
+  );
+
+  const peakSlot = useMemo(() => {
+    if (rhythm.peakWeekday === null || rhythm.peakHour === null) return '—';
+    return `${WEEKDAY_LABELS[rhythm.peakWeekday]} ${DAYPART_LABELS[
+      rhythm.peakHour < 6 ? 0 : rhythm.peakHour < 12 ? 1 : rhythm.peakHour < 18 ? 2 : 3
+    ].toLowerCase()}`;
+  }, [rhythm.peakWeekday, rhythm.peakHour]);
+
+  const hasCadence = cadence.some((w) => w.sessions > 0);
+
+  return (
+    <div className="mb-8 space-y-4">
+      {/* Headline stat tiles */}
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
+        <StatTile
+          icon={Flame}
+          label="Current streak"
+          value={`${streaks.current}d`}
+          hint={streaks.current > 0 ? 'in a row' : 'no active streak'}
+        />
+        <StatTile
+          icon={TrendingUp}
+          label="Longest streak"
+          value={`${streaks.longest}d`}
+          hint="your record"
+        />
+        <StatTile
+          icon={CalendarDays}
+          label="Active days"
+          value={streaks.activeDays.toLocaleString()}
+          hint="days with play"
+        />
+        <StatTile
+          icon={Timer}
+          label="Tracked time"
+          value={totalHours >= 100 ? `${Math.round(totalHours)}h` : `${totalHours.toFixed(1)}h`}
+          hint={`${sessions.length.toLocaleString()} sessions`}
+        />
+        <StatTile
+          icon={Coffee}
+          label="Median episode"
+          value={formatPlayMinutes(medianMinutes)}
+          hint="typical run"
+        />
+        <StatTile icon={Clock3} label="Peak slot" value={peakSlot} hint="busiest time" />
+      </div>
+
+      {/* Cadence + length distribution */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Panel title="Weekly cadence — last 12 weeks" icon={Activity}>
+          {hasCadence ? (
+            <ChartContainer config={CADENCE_CONFIG} className="aspect-[3/1] w-full">
+              <AreaChart data={cadence} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="fillCadence" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="var(--color-sessions)" stopOpacity={0.6} />
+                    <stop offset="95%" stopColor="var(--color-sessions)" stopOpacity={0.04} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.04)" />
+                <XAxis
+                  dataKey="label"
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={4}
+                  tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+                />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  width={22}
+                  allowDecimals={false}
+                  tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+                />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
+                <Area
+                  dataKey="sessions"
+                  type="natural"
+                  fill="url(#fillCadence)"
+                  stroke="var(--color-sessions)"
+                  strokeWidth={1.5}
+                />
+              </AreaChart>
+            </ChartContainer>
+          ) : (
+            <p className="py-8 text-center text-xs text-white/35">
+              No sessions in the last 12 weeks.
+            </p>
+          )}
+        </Panel>
+
+        <Panel title="Session-length distribution" icon={Zap}>
+          {sessions.length > 0 ? (
+            <ChartContainer config={LENGTH_CONFIG} className="aspect-[3/1] w-full">
+              <BarChart data={lengthHist} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.04)" />
+                <XAxis
+                  dataKey="label"
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={4}
+                  tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+                />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  width={22}
+                  allowDecimals={false}
+                  tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+                />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false} />} />
+                <Bar dataKey="count" fill="var(--color-count)" radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ChartContainer>
+          ) : (
+            <p className="py-8 text-center text-xs text-white/35">No sessions recorded yet.</p>
+          )}
+        </Panel>
+      </div>
+
+      {/* Rhythm heatmap + notable episodes */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Panel title="When you play" icon={CalendarDays}>
+          {rhythm.total > 0 ? (
+            <RhythmGrid heat={rhythm} />
+          ) : (
+            <p className="py-8 text-center text-xs text-white/35">
+              Not enough sessions to map a rhythm.
+            </p>
+          )}
+        </Panel>
+
+        <Panel title="Notable episodes" icon={Flame}>
+          {topScenes.length > 0 ? (
+            <div className="space-y-2">
+              {topScenes.map((scene) => {
+                const meta = SCENE_META[scene.type];
+                const intensity = magnitudeVsMedian(scene.minutes, medianMinutes);
+                return (
+                  <div
+                    key={scene.id}
+                    className="flex items-center gap-2 rounded-lg border border-white/[0.05] bg-white/[0.015] px-3 py-2"
+                  >
+                    <span className="min-w-0 flex-1 truncate text-xs font-medium text-white/80">
+                      {scene.title}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] text-white/45">
+                      <span className={meta.accent}>{formatPlayMinutes(scene.minutes)}</span>
+                      <span aria-hidden>·</span>
+                      <span>{scene.sessionCount}×</span>
+                      {medianMinutes > 0 && (
+                        <>
+                          <span aria-hidden>·</span>
+                          <span className="text-fuchsia-300/80">{intensity.toFixed(1)}× med</span>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="py-8 text-center text-xs text-white/35">No episodes yet.</p>
+          )}
+        </Panel>
+      </div>
+
+      {/* Aggregated telemetry — library-wide play cadence & session analytics.
+          Both panels take a flat session list; the gameId is unused by their
+          math, so a placeholder is safe. */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <PacingPanel gameId="__library__" sessions={sessions} />
+        <SessionAnalyticsPanel gameId="__library__" sessions={sessions} />
+      </div>
+    </div>
+  );
+});
+
 // ─── Not-enough-data gate ────────────────────────────────────────────────────
 
 function NotEnoughData({ scenes, sessionCount }: { scenes: PlayScene[]; sessionCount: number }) {
@@ -635,6 +955,14 @@ export const JourneyScenesView = memo(function JourneyScenesView({
 
   return (
     <div className="mx-auto max-w-7xl px-4 pb-16 md:px-8 lg:px-10">
+      {/* Play-rhythm dashboard — the aggregate telemetry the stream cannot show:
+          cadence, streaks, session shape and when play actually happens. */}
+      <PlayRhythmDashboard
+        sessions={sessions}
+        scenes={curated.scenes}
+        medianMinutes={medianMinutes}
+      />
+
       {/* One control strip: a density stepper and the curation filters. */}
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <div className="flex items-center rounded-lg border border-white/10 bg-white/5 p-0.5">

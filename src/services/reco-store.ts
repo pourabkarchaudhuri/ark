@@ -49,14 +49,15 @@ import { canonicalFranchiseBase } from '@/services/franchise';
 import {
   djb2Fingerprint,
   fingerprintDismissals,
+  fingerprintThumbsUp,
   hoursPlayedBucket,
 } from '@/services/oracle-signature';
+import { resolveGraphScores } from '@/services/resolve-graph-scores';
 
 /** ANN cosine-distance ceiling for Oracle taste retrieval (Cos metric). */
 const ANN_DISTANCE_CEILING = 0.45;
 const ANN_MAX_KEEP = 500;
 const ANN_QUERY_K = 2_000;
-const GRAPH_BUILD_TIMEOUT_MS = 8_000;
 const QUOTA_COLD = 300;
 const SURVIVOR_HYDRATE_CAP = 80;
 
@@ -101,7 +102,8 @@ export function buildOracleLibrarySignature(): string {
       return `C:${e.id}:${e.status}:${e.priority}:${hours}:${djb2Fingerprint(notes)}`;
     });
   const dismissLine = `D:${fingerprintDismissals(recoHistoryStore.getDismissals())}`;
-  return [...libLines, ...customLines, dismissLine].join('\n');
+  const thumbsUpLine = `U:${fingerprintThumbsUp(recoHistoryStore.getThumbsUpIds())}`;
+  return [...libLines, ...customLines, dismissLine, thumbsUpLine].join('\n');
 }
 
 // ─── Cached-result pipeline signature ──────────────────────────────────────────
@@ -496,6 +498,7 @@ class RecoStore {
         secondaryGameId: e.secondaryGameId,
       }));
       const thumbsDownIds = recoHistoryStore.getThumbsDownIds();
+      const thumbsUpIds = recoHistoryStore.getThumbsUpIds();
       const hardNegCatalog = candidates.map(c => ({
         gameId: c.gameId,
         title: c.title,
@@ -511,9 +514,9 @@ class RecoStore {
         linkedEntries,
       );
 
-      // 4.5. Graph metrics — await build (≤8s) so PPR/PageRank can feed this run when possible
+      // 4.5. Graph metrics — prefer restore / single wait; cold build is non-blocking
       const { graphScoresMap, userCommunityCounts, userCommunityTotal } =
-        await this.resolveGraphScores(userGames);
+        await resolveGraphScores(userGames);
 
       // 5. Dispatch to worker
       const input: RecoWorkerInput = {
@@ -524,6 +527,7 @@ class RecoStore {
         embeddingCoverage,
         dismissedGameIds,
         thumbsDownIds,
+        thumbsUpIds,
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
         precomputedSemanticScores,
         graphScores: graphScoresMap,
@@ -1764,95 +1768,6 @@ class RecoStore {
     } catch (err) {
       console.warn('[RecoStore] ML scoring failed (non-fatal):', err);
     }
-  }
-
-  /**
-   * Await graphology build (≤8s) so PageRank/PPR can feed this compute when ready.
-   * On timeout/error, skip cleanly — worker graph budget collapses to 0.
-   */
-  private async resolveGraphScores(userGames: UserGameSnapshot[]): Promise<{
-    graphScoresMap: Record<string, {
-      pageRank: number;
-      personalizedPageRank: number;
-      authority: number;
-      hub: number;
-      community: number;
-      degree: number;
-    }> | undefined;
-    userCommunityCounts: Record<number, number> | undefined;
-    userCommunityTotal: number | undefined;
-  }> {
-    const pack = () => {
-      const graphScoresMap = gameGraphStore.getAllScores() ?? undefined;
-      if (!graphScoresMap) {
-        return { graphScoresMap: undefined, userCommunityCounts: undefined, userCommunityTotal: undefined };
-      }
-      const userCommunityCounts: Record<number, number> = {};
-      let total = 0;
-      for (const ug of userGames) {
-        const gs = graphScoresMap[ug.gameId];
-        if (!gs || gs.community < 0) continue;
-        userCommunityCounts[gs.community] = (userCommunityCounts[gs.community] ?? 0) + 1;
-        total++;
-      }
-      return {
-        graphScoresMap,
-        userCommunityCounts,
-        userCommunityTotal: total,
-      };
-    };
-
-    if (gameGraphStore.isReady) return pack();
-    if (!annIndex.isReady) {
-      return { graphScoresMap: undefined, userCommunityCounts: undefined, userCommunityTotal: undefined };
-    }
-
-    const sig = `ann-${annIndex.vectorCount}`;
-    const seedWeights = new Map<string, number>();
-    for (const ug of userGames) {
-      const w = computeEngagementWeight(ug);
-      if (w > 0) seedWeights.set(ug.gameId, w);
-    }
-    const seed = seedWeights.size > 0 ? { weights: seedWeights } : null;
-
-    const waitReady = (): Promise<boolean> =>
-      new Promise((resolve) => {
-        if (gameGraphStore.isReady) return resolve(true);
-        const timer = setTimeout(() => {
-          unsub();
-          resolve(false);
-        }, GRAPH_BUILD_TIMEOUT_MS);
-        const unsub = gameGraphStore.subscribe(() => {
-          if (gameGraphStore.isReady || gameGraphStore.state.phase === 'error') {
-            clearTimeout(timer);
-            unsub();
-            resolve(gameGraphStore.isReady);
-          }
-        });
-      });
-
-    try {
-      const phase = gameGraphStore.state.phase;
-      if (phase === 'building') {
-        await waitReady();
-      } else {
-        const buildP = gameGraphStore.build(sig, { librarySeed: seed });
-        await Promise.race([
-          buildP.then(() => true),
-          new Promise<boolean>((r) => setTimeout(() => r(false), GRAPH_BUILD_TIMEOUT_MS)),
-        ]);
-        // Re-read phase after race — build may still be in flight after timeout
-        if (!gameGraphStore.isReady) {
-          await waitReady();
-        }
-      }
-    } catch (err) {
-      console.warn('[RecoStore] graph build failed (skipping graphScores):', err);
-    }
-
-    if (gameGraphStore.isReady) return pack();
-    console.log('[RecoStore] graphScores unavailable this run — skipping cleanly');
-    return { graphScoresMap: undefined, userCommunityCounts: undefined, userCommunityTotal: undefined };
   }
 
   /**

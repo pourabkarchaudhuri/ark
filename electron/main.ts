@@ -73,7 +73,16 @@ import { chatStore, processMessage } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
 import { trackAppLaunch } from './analytics.js';
 import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
-import { startSessionTracker, stopSessionTracker } from './session-tracker.js';
+import { startSessionTracker, stopSessionTracker, registerOverlayWindow } from './session-tracker.js';
+import {
+  createOverlayWindow,
+  showOverlay,
+  hideOverlay,
+  isOverlayVisible,
+  registerOverlayHotkey,
+  unregisterOverlayHotkey,
+  destroyOverlay,
+} from './overlay-window.js';
 import { logger } from './safe-logger.js';
 import { setEmbeddingBackgroundMode } from './ipc/ollama-handlers.js';
 let mainWindow: BrowserWindowType | null = null;
@@ -159,22 +168,32 @@ app.commandLine.appendSwitch('renderer-process-limit', '1');
 // "No handler registered" errors — even in dev mode.
 registerUpdaterIpcHandlers();
 
-function createWindow() {
-  // Resolve paths: when packaged, use app path so loadFile/preload work from installed location
-  let preloadPath: string;
-  let indexPath: string;
+/**
+ * Resolve the preload script path. Shared by the main window and the overlay
+ * window so both load the SAME `preload.cjs` (which exposes the `sessionTracker`
+ * bridge the overlay HUD relies on).
+ */
+function getPreloadPath(): string {
   if (app.isPackaged) {
-    const appPath = app.getAppPath();
-    indexPath = path.join(appPath, 'dist', 'index.html');
     // Preload is unpacked (asarUnpack) so load from app.asar.unpacked to avoid Windows asar issues
     const resourcesPath = process.resourcesPath;
-    preloadPath = path.join(resourcesPath, 'app.asar.unpacked', 'dist-electron', 'electron', 'preload.cjs');
+    const unpacked = path.join(resourcesPath, 'app.asar.unpacked', 'dist-electron', 'electron', 'preload.cjs');
     // Fallback if unpacked path doesn't exist (e.g. older build)
-    if (!fs.existsSync(preloadPath)) {
-      preloadPath = path.join(appPath, 'dist-electron', 'electron', 'preload.cjs');
+    if (!fs.existsSync(unpacked)) {
+      return path.join(app.getAppPath(), 'dist-electron', 'electron', 'preload.cjs');
     }
+    return unpacked;
+  }
+  return path.join(__dirname, 'preload.cjs');
+}
+
+function createWindow() {
+  // Resolve paths: when packaged, use app path so loadFile/preload work from installed location
+  const preloadPath = getPreloadPath();
+  let indexPath: string;
+  if (app.isPackaged) {
+    indexPath = path.join(app.getAppPath(), 'dist', 'index.html');
   } else {
-    preloadPath = path.join(__dirname, 'preload.cjs');
     indexPath = path.join(__dirname, '../../dist/index.html');
   }
 
@@ -316,6 +335,11 @@ function createWindow() {
     if (mainWindow) {
       startSessionTracker(mainWindow);
     }
+
+    // ---- In-game overlay HUD ----
+    // Create the transparent click-through overlay (reuses the SAME preload),
+    // forward session events to it, and drive show/hide from session activity.
+    setupOverlay();
   });
 
   // Intercept close to hide to tray instead of quitting
@@ -371,6 +395,39 @@ function createWindow() {
     if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
     if (mainWindow?.isFocused()) setEmbeddingBackgroundMode(false);
   });
+}
+
+/**
+ * Create and wire the in-game overlay HUD. Non-fatal on failure — the overlay is
+ * an optional, opt-in feature and must never block app startup.
+ */
+function setupOverlay() {
+  try {
+    const overlayWin = createOverlayWindow(getPreloadPath());
+
+    // The tracker forwards session:* events to this window and calls us back on
+    // the 0↔1 active-session transition. We gate the actual show on the opt-in
+    // setting; hide is unconditional so the HUD disappears when play ends.
+    registerOverlayWindow(overlayWin, (shouldShow) => {
+      if (shouldShow) {
+        if (settingsStore.getOverlayEnabled()) showOverlay();
+      } else {
+        hideOverlay();
+      }
+    });
+
+    // Global hotkey toggles visibility. Showing still respects the opt-in
+    // setting, so "overlay off" fully disables the HUD.
+    registerOverlayHotkey(() => {
+      if (isOverlayVisible()) {
+        hideOverlay();
+      } else if (settingsStore.getOverlayEnabled()) {
+        showOverlay();
+      }
+    });
+  } catch (err) {
+    logger.warn('[Overlay] Failed to set up in-game overlay (non-fatal):', err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +922,9 @@ app.whenReady().then(async () => {
 // Also flush caches synchronously so no data is lost on shutdown
 app.on('before-quit', () => {
   isQuitting = true;
+  // Tear down the overlay HUD and release its global hotkey.
+  try { unregisterOverlayHotkey(); } catch (e) { logger.error('[Shutdown] Overlay hotkey unregister failed:', e); }
+  try { destroyOverlay(); } catch (e) { logger.error('[Shutdown] Overlay destroy failed:', e); }
   try { steamAPI.flushCache(); } catch (e) { logger.error('[Shutdown] Steam cache flush failed:', e); }
   try { epicAPI.flushCache(); } catch (e) { logger.error('[Shutdown] Epic cache flush failed:', e); }
   try { chatStore.flushSync(); } catch (e) { logger.error('[Shutdown] Chat store flush failed:', e); }

@@ -54,6 +54,7 @@ import {
   isEvidenceGame,
 } from '@/services/engagement-weight';
 import { mmrMaxSim } from '@/services/mmr-diversity';
+import { buildPositiveProfile } from '@/services/reco-feedback-profiles';
 
 /** ANN cosine-distance ceiling for Taste Match pill (mirrors reco-store). */
 const ANN_TASTE_MATCH_CEILING = 0.45;
@@ -1104,6 +1105,7 @@ function generateExplanation(
 async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: TasteProfile; shelves: RecoShelf[] }> {
   const { userGames, candidates, now, currentHour, embeddingCoverage, dismissedGameIds } = input;
   const thumbsDownIds = input.thumbsDownIds ?? [];
+  const thumbsUpIds = input.thumbsUpIds ?? [];
   const dismissedSet = new Set(dismissedGameIds);
   for (const id of thumbsDownIds) dismissedSet.add(id);
 
@@ -1124,11 +1126,13 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   // Reset per-run caches
   _engagementCache.clear();
 
-  // Mine thumbs-down features before filtering them out of the candidate pool
+  // Mine thumbs-down / thumbs-up features before filtering thumbs-down from the pool
   const thumbsDownSet = new Set(thumbsDownIds);
+  const thumbsUpSet = new Set(thumbsUpIds);
   const thumbsDownCandidates = candidates.filter(c => thumbsDownSet.has(c.gameId));
+  const thumbsUpCandidates = candidates.filter(c => thumbsUpSet.has(c.gameId));
 
-  // Filter out dismissed / thumbs-down candidates
+  // Filter out dismissed / thumbs-down candidates (thumbs-up stay in the pool)
   const filteredCandidates = candidates.filter(c => !dismissedSet.has(c.gameId));
 
   // ── 1. Build taste profile ──
@@ -1147,9 +1151,10 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     }
   }
 
-  // ── 3. Build negative taste profile ──
+  // ── 3. Build negative / positive taste profiles ──
   progress('Mining negative signals...', 12);
   const negativeProfile = buildNegativeProfile(userGames, now, thumbsDownCandidates);
+  const positiveProfile = buildPositiveProfile(userGames, thumbsUpCandidates);
 
   // F8: notes tokens from loved / evidence games
   const lovedNotesTokens = new Set<string>();
@@ -1197,6 +1202,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   const { vec: profileVecDense, mag: profileMag } = featureSpace.profileToDense(tasteProfile);
   const { vec: negVecDense, mag: negMag } = featureSpace.mapToDense(negativeProfile.vec);
+  const { vec: posVecDense, mag: posMag } = featureSpace.mapToDense(positiveProfile.vec);
 
   // ── 5. Build co-occurrence graph ──
   progress('Building similarity graph...', 18);
@@ -1302,6 +1308,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const W_TIME         = 0.03;
   const W_CURVE        = 0.03;
   const W_NEGATIVE     = 0.06;
+  const W_POSITIVE     = 0.05;
   const W_FRANCHISE    = 0.08;
   const W_STUDIO       = 0.05;
   const W_SEQUENCING   = 0.04;
@@ -1402,6 +1409,11 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
       ? fastCosineProfileVsCandidate(negVecDense, negMag, candidateIndices, candidateMag) * negativeProfile.strength
       : 0;
 
+    // Positive affinity — dense cosine between thumbs-up profile and candidate
+    const positiveAffinity = positiveProfile.strength > 0
+      ? fastCosineProfileVsCandidate(posVecDense, posMag, candidateIndices, candidateMag) * positiveProfile.strength
+      : 0;
+
     // Engagement curve bonus (uses pre-computed canonical genre norm sets)
     let engagementCurveBonus = 0;
     const cGenresNorm = new Set(c.genres.map(g => toCanonicalGenre(g)).filter((x): x is NonNullable<typeof x> => x !== null).map(x => norm(x)));
@@ -1466,7 +1478,8 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
       mlSignal * W_ML +
       graphPageRankSignal * W_GRAPH_PAGERANK +
       graphCommunityAffinity * W_GRAPH_COMMUNITY +
-      notesBonus -
+      notesBonus +
+      positiveAffinity * W_POSITIVE -
       negativeSignal * W_NEGATIVE
     );
     if (!Number.isFinite(score)) continue;
@@ -1497,6 +1510,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
         diversityBonus,
         trajectoryMultiplier: 1,
         negativeSignal,
+        positiveAffinity,
         timeOfDayBoost,
         engagementCurveBonus,
         franchiseBoost,

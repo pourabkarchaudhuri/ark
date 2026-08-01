@@ -94,7 +94,12 @@ function oracleRerankBadge(status: RerankStatus): { label: string; title: string
 }
 import { recoHistoryStore } from '@/services/reco-history-store';
 import { expandHardNegativeIds } from '@/services/hard-negative';
-import { normalizeLayerScores, explanationLines, explanationHeadline } from '@/services/reco-explainer';
+import {
+  normalizeLayerScores,
+  explanationLines,
+  explanationHeadline,
+  buildBlastRadiusEvidence,
+} from '@/services/reco-explainer';
 import { embeddingService } from '@/services/embedding-service';
 import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
@@ -814,13 +819,17 @@ const WhyPanelBody = memo(function WhyPanelBody({
   const { coverUrl, headerImage } = useMemo(() => getScoredGameImages(game), [game]);
   const img = useFallbackImage(game.gameId, game.title, coverUrl, headerImage);
   const [thumbs, setThumbs] = useState<1 | -1 | undefined>(() => recoHistoryStore.getThumbs(game.gameId));
-  const [openBreakdown, setOpenBreakdown] = useState(false);
+  const [openBreakdown, setOpenBreakdown] = useState(true);
   const [selectedEvidence, setSelectedEvidence] = useState<string | null>(null);
 
   const matchPct = Math.min(100, Math.round(game.score * 100));
 
   const evidence = useMemo(() => {
     const items: Array<{ key: string; label: string; detail: string; tone: 'neutral' | 'genre' | 'theme' }> = [];
+    // Blast-radius chips first when graph is ready (hide silently otherwise).
+    for (const chip of buildBlastRadiusEvidence(game.gameId, game.layerScores)) {
+      items.push(chip);
+    }
     for (const t of game.reasons.similarTo.slice(0, 3)) {
       items.push({
         key: `sim-${t}`,
@@ -868,6 +877,9 @@ const WhyPanelBody = memo(function WhyPanelBody({
   const onThumbUp = useCallback(() => {
     recoHistoryStore.recordThumbs(game.gameId, 1, game.title);
     setThumbs(1);
+    // Invalidate + refresh so positive profile re-ranks shelves; keep drawer open.
+    recoStore.invalidateCacheOnly();
+    recoStore.refresh();
   }, [game.gameId, game.title]);
 
   const onThumbDown = useCallback(() => {
@@ -970,7 +982,7 @@ const WhyPanelBody = memo(function WhyPanelBody({
         </ul>
       )}
 
-      {/* Score breakdown — collapsed by default */}
+      {/* Score breakdown — expanded by default */}
       {breakdown.length > 0 && (
         <div className="mx-4 mt-4 pt-3 border-t border-white/[0.06]">
           <button
@@ -1070,7 +1082,7 @@ const OracleCard = memo(function OracleCard({
   // trigger when the drawer closes.
   useEffect(() => {
     if (explaining && !wasExplaining.current) {
-      rootRef.current?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+      rootRef.current?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'auto' });
     } else if (!explaining && wasExplaining.current) {
       explainBtnRef.current?.focus();
     }
@@ -1576,6 +1588,81 @@ function TasteDNA({ profile }: { profile: TasteProfile }) {
   );
 }
 
+// ─── Taste DNA drawer body ─────────────────────────────────────────────────────
+//
+// Extracted from the inline drawer markup and memoized so toggling the panel or
+// explaining a card doesn't re-render the radar chart, clusters, and studio
+// chips. Keyed only on the taste profile, which is stable between panel toggles.
+const DnaPanelBody = memo(function DnaPanelBody({ profile }: { profile: TasteProfile }) {
+  return (
+    <>
+      <TasteDNA profile={profile} />
+
+      {/* Quick stats */}
+      <div className="flex flex-col gap-2 px-4 pb-2">
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-white/30">Games Analyzed</span>
+          <span className="text-fuchsia-400/70 font-medium">{profile.totalGames}</span>
+        </div>
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-white/30">Total Hours</span>
+          <span className="text-fuchsia-400/70 font-medium">{formatHours(profile.totalHours)}</span>
+        </div>
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-white/30">Avg Rating</span>
+          <span className="text-fuchsia-400/70 font-medium">
+            {profile.avgRating > 0 ? profile.avgRating.toFixed(1) : '—'} / 5
+          </span>
+        </div>
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-white/30">Top Genre</span>
+          <span className="text-fuchsia-400/70 font-medium capitalize">{profile.topGenre || '—'}</span>
+        </div>
+      </div>
+
+      {/* Taste Clusters */}
+      {profile.clusters.length > 0 && (
+        <div className="mx-4 mt-3 pt-4 border-t border-white/[0.06]">
+          <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">Taste Clusters</h4>
+          <div className="space-y-2">
+            {profile.clusters.map(cluster => (
+              <div key={cluster.id} className="flex items-center justify-between text-[10px]">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-fuchsia-400/60" />
+                  <span className="text-white/50 capitalize">{cluster.label}</span>
+                </div>
+                <span className="text-white/25">{cluster.gameCount} games</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Loyal Studios */}
+      {((profile.loyalDevelopers?.length ?? 0) > 0 || (profile.loyalPublishers?.length ?? 0) > 0) && (
+        <div className="mx-4 mt-4 pt-4 pb-6 border-t border-white/[0.06]">
+          <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">Loyal Studios</h4>
+          <div className="flex flex-wrap gap-1.5">
+            {profile.loyalDevelopers?.slice(0, 6).map(dev => (
+              <span key={`dev-${dev}`} className="text-[9px] px-2 py-0.5 rounded-full border border-purple-500/30 text-purple-400/70 capitalize">
+                {dev}
+              </span>
+            ))}
+            {profile.loyalPublishers
+              ?.filter(p => !profile.loyalDevelopers?.includes(p))
+              .slice(0, 4)
+              .map(pub => (
+              <span key={`pub-${pub}`} className="text-[9px] px-2 py-0.5 rounded-full border border-blue-500/30 text-blue-400/70 capitalize">
+                {pub}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+});
+
 // ─── Empty / Cold Start State ──────────────────────────────────────────────────
 
 function ColdStart({
@@ -1677,6 +1764,9 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
   });
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set(recoHistoryStore.getDismissedIds()));
   const [rightPanel, setRightPanel] = useState<RightPanel>(null);
+  // Static blur is re-enabled only once the drawer's slide-in settles, so the
+  // enter transform never animates a full-height backdrop-blur (the jank source).
+  const [panelSettled, setPanelSettled] = useState(false);
   const rightPanelRef = useRef<HTMLDivElement>(null);
   const [catalogSync, setCatalogSync] = useState<CatalogSyncProgress>(catalogStore.syncProgress);
   const [catalogEmbeddingProgress, setCatalogEmbeddingProgress] = useState<{ completed: number; total: number } | null>(
@@ -1806,11 +1896,11 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     setRightPanel(cur => (cur?.kind === 'dna' ? null : { kind: 'dna' }));
   }, []);
 
-  // Move focus into the drawer when it opens so keyboard users land inside it.
-  // The card's own effect handles handing focus back to its button on close.
+  // Focus now moves into the drawer from the panel's `onAnimationComplete`
+  // (once the slide-in settles) so it doesn't fight the transform. Here we only
+  // reset the settled flag on close so the next open animates blur-free again.
   useEffect(() => {
-    if (!rightPanel) return;
-    rightPanelRef.current?.focus();
+    if (!rightPanel) setPanelSettled(false);
   }, [rightPanel]);
 
   useEffect(() => {
@@ -2098,7 +2188,20 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                 animate={{ x: 0 }}
                 exit={{ x: '100%' }}
                 transition={{ type: 'spring', stiffness: 400, damping: 30 }}
-                className="absolute right-0 top-0 bottom-0 w-[310px] z-30 overflow-y-auto scrollbar-hide bg-black/90 backdrop-blur-xl border-l border-white/[0.08] shadow-2xl shadow-black/60 focus:outline-none"
+                style={{ willChange: 'transform' }}
+                onAnimationComplete={(definition) => {
+                  // Only react to the slide-in finishing (x:0), not the exit.
+                  if ((definition as { x?: number | string })?.x !== 0) return;
+                  // Defer focus until the transform settles so it doesn't fight
+                  // the slide; preventScroll keeps the page/drawer scroll put.
+                  rightPanelRef.current?.focus({ preventScroll: true });
+                  // Re-enable a static blur only now that nothing is animating.
+                  setPanelSettled(true);
+                }}
+                className={cn(
+                  'absolute right-0 top-0 bottom-0 w-[310px] z-30 overflow-y-auto scrollbar-hide bg-[#0b0b0f]/95 border-l border-white/[0.08] shadow-2xl shadow-black/60 focus:outline-none',
+                  panelSettled && 'backdrop-blur-xl',
+                )}
               >
                 {/* Sticky header with close */}
                 <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-3 bg-black/80 backdrop-blur-md border-b border-white/[0.06]">
@@ -2120,8 +2223,13 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                 </div>
 
                 {/* Body crossfades so clicking `i` on another card swaps content
-                    without the whole drawer sliding out and back in. */}
-                <AnimatePresence mode="wait">
+                    without the whole drawer sliding out and back in. `popLayout`
+                    (not `wait`) keeps the exiting body out of flow while the new
+                    body mounts in place, so the `overflow-y-auto` container never
+                    collapses to zero between the two — the old cause of the
+                    scroll/height jump. The min-height floors the body region. */}
+                <div className="relative min-h-[320px]">
+                <AnimatePresence mode="popLayout" initial={false}>
                   {rightPanel.kind === 'why' ? (
                     <motion.div
                       key={`why-${rightPanel.gameId}`}
@@ -2150,76 +2258,11 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                       exit={{ opacity: 0 }}
                       transition={{ duration: 0.15 }}
                     >
-                      {state.tasteProfile && (
-                        <>
-                <TasteDNA profile={state.tasteProfile} />
-
-                {/* Quick stats */}
-                <div className="flex flex-col gap-2 px-4 pb-2">
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="text-white/30">Games Analyzed</span>
-                    <span className="text-fuchsia-400/70 font-medium">{state.tasteProfile.totalGames}</span>
-                  </div>
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="text-white/30">Total Hours</span>
-                    <span className="text-fuchsia-400/70 font-medium">{formatHours(state.tasteProfile.totalHours)}</span>
-                  </div>
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="text-white/30">Avg Rating</span>
-                    <span className="text-fuchsia-400/70 font-medium">
-                      {state.tasteProfile.avgRating > 0 ? state.tasteProfile.avgRating.toFixed(1) : '—'} / 5
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="text-white/30">Top Genre</span>
-                    <span className="text-fuchsia-400/70 font-medium capitalize">{state.tasteProfile.topGenre || '—'}</span>
-                  </div>
-                </div>
-
-                {/* Taste Clusters */}
-                {state.tasteProfile.clusters.length > 0 && (
-                  <div className="mx-4 mt-3 pt-4 border-t border-white/[0.06]">
-                    <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">Taste Clusters</h4>
-                    <div className="space-y-2">
-                      {state.tasteProfile.clusters.map(cluster => (
-                        <div key={cluster.id} className="flex items-center justify-between text-[10px]">
-                          <div className="flex items-center gap-2">
-                            <div className="w-2 h-2 rounded-full bg-fuchsia-400/60" />
-                            <span className="text-white/50 capitalize">{cluster.label}</span>
-                          </div>
-                          <span className="text-white/25">{cluster.gameCount} games</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Loyal Studios */}
-                {((state.tasteProfile.loyalDevelopers?.length ?? 0) > 0 || (state.tasteProfile.loyalPublishers?.length ?? 0) > 0) && (
-                  <div className="mx-4 mt-4 pt-4 pb-6 border-t border-white/[0.06]">
-                    <h4 className="text-[10px] uppercase tracking-widest text-white/25 font-semibold mb-3">Loyal Studios</h4>
-                    <div className="flex flex-wrap gap-1.5">
-                      {state.tasteProfile.loyalDevelopers?.slice(0, 6).map(dev => (
-                        <span key={`dev-${dev}`} className="text-[9px] px-2 py-0.5 rounded-full border border-purple-500/30 text-purple-400/70 capitalize">
-                          {dev}
-                        </span>
-                      ))}
-                      {state.tasteProfile?.loyalPublishers
-                        ?.filter(p => !state.tasteProfile?.loyalDevelopers?.includes(p))
-                        .slice(0, 4)
-                        .map(pub => (
-                        <span key={`pub-${pub}`} className="text-[9px] px-2 py-0.5 rounded-full border border-blue-500/30 text-blue-400/70 capitalize">
-                          {pub}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                        </>
-                      )}
+                      {state.tasteProfile && <DnaPanelBody profile={state.tasteProfile} />}
                     </motion.div>
                   )}
                 </AnimatePresence>
+                </div>
               </motion.div>
             )}
           </AnimatePresence>

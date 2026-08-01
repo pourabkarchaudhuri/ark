@@ -144,6 +144,8 @@ export interface ScoredGame {
     diversityBonus: number;
     trajectoryMultiplier: number;
     negativeSignal: number;
+    /** Affinity to thumbs-up mined positive profile (optional). */
+    positiveAffinity?: number;
     timeOfDayBoost: number;
     engagementCurveBonus: number;
     franchiseBoost: number;
@@ -326,6 +328,8 @@ export interface RecoWorkerInput {
   dismissedGameIds: string[];
   /** Thumbs-down ids — mined into the negative taste profile (also dismissed). */
   thumbsDownIds?: string[];
+  /** Thumbs-up ids — mined into the positive taste profile (stay in candidate pool). */
+  thumbsUpIds?: string[];
   /** Precomputed taste centroid (768-dim). Undefined if no library embeddings. */
   tasteCentroid?: number[];
   /**

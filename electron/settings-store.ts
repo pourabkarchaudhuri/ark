@@ -40,6 +40,13 @@ interface Settings {
      * stamped. `Completed` entries are never touched.
      */
     autoOnHoldTransition?: boolean;
+    /**
+     * Show the opt-in in-game overlay HUD (transparent corner badge + live
+     * session timer) while a tracked game is running. Default false — the
+     * overlay is entirely disabled unless the user turns it on. A global hotkey
+     * (Ctrl+Shift+O) toggles visibility while enabled.
+     */
+    overlayEnabled?: boolean;
   };
   ollama: {
     enabled: boolean;
@@ -66,8 +73,33 @@ interface Settings {
 /** Default rerank model — keep string in sync with `src/services/ollama-rerank.ts` `DEFAULT_OLLAMA_RERANK_MODEL`. */
 export const DEFAULT_OLLAMA_RERANK_MODEL = 'dengcao/bge-reranker-v2-m3';
 
-/** Default Qwen3 tier model — Apache 2.0, ~600 MB, works through /api/generate. */
-export const DEFAULT_OLLAMA_RERANK_QWEN_MODEL = 'qwen3-reranker:0.6b';
+/** Default Qwen3 tier model — Apache 2.0, ~639 MB, works through /api/generate.
+ *  Namespaced+quantized tag that actually exists in the Ollama registry. */
+export const DEFAULT_OLLAMA_RERANK_QWEN_MODEL = 'dengcao/Qwen3-Reranker-0.6B:Q8_0';
+
+/**
+ * Legacy default shipped through 1.0.48. This tag never existed in the Ollama
+ * registry, so pulls 404'd and the reranker silently fell back to cosine.
+ * `loadSettings()` migrates any settings.json still pinned to this value onto
+ * `DEFAULT_OLLAMA_RERANK_QWEN_MODEL`. Kept exported so the migration and its
+ * tests share one source of truth.
+ */
+export const LEGACY_OLLAMA_RERANK_QWEN_MODEL = 'qwen3-reranker:0.6b';
+
+/**
+ * Rewrite the legacy Qwen3 reranker tag onto the current default, in place.
+ * Returns true when a rewrite happened (caller should persist). Only the exact
+ * legacy value is touched — a custom user tag is left alone. Extracted as a pure
+ * function so the migration decision is unit-testable without the disk/electron
+ * side effects of the SettingsStore singleton.
+ */
+export function migrateOllamaRerankQwenModel(ollama: { rerankQwenModel?: string }): boolean {
+  if (ollama.rerankQwenModel === LEGACY_OLLAMA_RERANK_QWEN_MODEL) {
+    ollama.rerankQwenModel = DEFAULT_OLLAMA_RERANK_QWEN_MODEL;
+    return true;
+  }
+  return false;
+}
 
 const SETTINGS_VERSION = 1;
 
@@ -92,7 +124,7 @@ class SettingsStore {
     const defaults = (): Settings => ({
       version: SETTINGS_VERSION,
       apiKeys: {},
-      preferences: { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: false, autoStatusTransition: false, autoOnHoldTransition: true },
+      preferences: { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: false, autoStatusTransition: false, autoOnHoldTransition: true, overlayEnabled: false },
       ollama: {
         enabled: true,
         url: 'http://localhost:11434',
@@ -120,6 +152,17 @@ class SettingsStore {
           if (!merged.preferences.preferredChatProvider) {
             merged.preferences.preferredChatProvider =
               parsed.ollama?.useGeminiInstead && parsed.apiKeys?.googleAI ? 'gemini' : 'ollama';
+          }
+          // Targeted migration (no SETTINGS_VERSION bump — that would reset ALL
+          // user settings). Existing 1.0.48 installs have the bad Qwen3 reranker
+          // tag persisted; rewrite ONLY that exact value so the pull can succeed.
+          // Any custom user-chosen tag is left untouched.
+          if (migrateOllamaRerankQwenModel(merged.ollama)) {
+            // saveSettings() serializes this.settings, which the constructor has
+            // not assigned yet during initial load — point it at merged first.
+            this.settings = merged;
+            this.saveSettings();
+            logger.log('[SettingsStore] Migrated legacy Qwen3 reranker tag to new default');
           }
           return merged;
         }
@@ -371,6 +414,21 @@ class SettingsStore {
     }
     this.saveSettings();
     logger.log(`[SettingsStore] Auto On Hold transition set to ${enabled}`);
+  }
+
+  // In-game overlay HUD (opt-in; default false).
+  getOverlayEnabled(): boolean {
+    return this.settings.preferences?.overlayEnabled === true;
+  }
+
+  setOverlayEnabled(enabled: boolean): void {
+    if (!this.settings.preferences) {
+      this.settings.preferences = { autoLaunch: true, overlayEnabled: enabled };
+    } else {
+      this.settings.preferences.overlayEnabled = enabled;
+    }
+    this.saveSettings();
+    logger.log(`[SettingsStore] Overlay enabled set to ${enabled}`);
   }
 }
 

@@ -1,0 +1,129 @@
+/*
+ * Overlay HUD styles — this stylesheet is loaded ONLY by the transparent,
+ * click-through overlay BrowserWindow (overlay.html → main.tsx). It must never
+ * paint an opaque background or the whole game screen would be dimmed.
+ */
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#overlay-root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+  /* No scrollbars — the window is exactly HUD-sized and never scrolls. */
+  overflow: hidden;
+  /* The window itself is click-through (setIgnoreMouseEvents in main). Belt
+     and suspenders: don't try to capture pointer events in the DOM either. */
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+}
+
+/* Positioning shell — fills the window, pins the card to the top-right corner
+   with a little breathing room from the edges. The overlay BrowserWindow content
+   area is 260x84 DIP (see electron/overlay-window.ts), so the padding here is
+   kept tight and the card sizing below is tuned to fit inside those bounds
+   without clipping. */
+.ark-overlay-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 4px;
+  box-sizing: border-box;
+}
+
+/* The corner card. Dark, glassy, subtle fuchsia edge to match the app theme.
+   Sizing is constrained to the 260x84 window: with 4px shell padding the card
+   gets at most 252x76, and the padding/gap/line-heights below sum to ~73px
+   tall, leaving a small safety margin so the timer never clips. */
+.ark-overlay-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+  max-width: 252px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(10, 10, 15, 0.82);
+  border: 1px solid rgba(217, 70, 239, 0.28); /* fuchsia-500 @ ~28% */
+  box-shadow:
+    0 8px 28px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+
+  /* Fade + subtle slide. Controlled by the `.is-visible` class. */
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 260ms ease, transform 260ms ease;
+}
+
+.ark-overlay-card.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* "ARK — tracking" badge row. */
+.ark-overlay-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'Orbitron', 'JetBrains Mono', sans-serif;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(240, 171, 252, 0.9); /* fuchsia-300 */
+}
+
+.ark-overlay-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #d946ef; /* fuchsia-500 */
+  box-shadow: 0 0 6px rgba(217, 70, 239, 0.8);
+  animation: ark-overlay-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes ark-overlay-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+
+/* Game name. */
+.ark-overlay-name {
+  font-family: 'Orbitron', 'JetBrains Mono', sans-serif;
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.94);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Live HH:MM:SS timer. */
+.ark-overlay-timer {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 500;
+  font-size: 18px;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.72);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ark-overlay-card { transition: opacity 120ms linear; transform: none; }
+  .ark-overlay-card.is-visible { transform: none; }
+  .ark-overlay-badge-dot { animation: none; }
+}

@@ -33,3 +33,9 @@ export function fingerprintDismissals(dismissals: ReadonlyArray<DismissMeta>): s
     .join(';');
   return `${ids}#${djb2Fingerprint(meta)}`;
 }
+
+/** Sorted thumbs-up ids — included in Oracle signature so restore cannot ignore new ups. */
+export function fingerprintThumbsUp(ids: ReadonlyArray<string>): string {
+  const sorted = [...ids].filter(Boolean).sort((a, b) => a.localeCompare(b));
+  return djb2Fingerprint(sorted.join(','));
+}

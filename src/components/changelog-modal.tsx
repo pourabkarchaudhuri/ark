@@ -9,6 +9,17 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.49': {
+    title: "What's New in Ark 1.0.49",
+    changes: [
+      'Qwen3 reranker pull fixed — default tag is now dengcao/Qwen3-Reranker-0.6B:Q8_0; legacy qwen3-reranker:0.6b installs auto-migrate on load. Failed pulls surface the real Ollama error. When graded scores are unavailable, Ark tiers down to arctic-embed cosine honestly — status UI reports the resolved tier, not a broken Qwen3 claim.',
+      'Oracle Why drawer polish — score breakdown opens expanded by default; scroll-into-view is instant to avoid shelf jank; Taste DNA panel memoized; blast-radius evidence chips when graph metrics are ready; thumbs-up refreshes shelves without closing the drawer.',
+      'Voyage Scenes analytics — session-length histogram, weekday×hour rhythm heatmap, play cadence, streak counters, plus Session Analytics and Pacing panels shared with Insights & Telemetry.',
+      'Voyage Audit analytics — data-quality dashboard with record-quality trend, status distribution, open-items chart, and aggregate gauges above the existing health rings and rule queue.',
+      'In-game overlay HUD (opt-in) — transparent click-through corner badge with live session timer while a game runs; disabled by default, toggle in Settings, Ctrl+Shift+O hotkey. Non-injecting Electron window, zero anti-cheat risk.',
+      'Oracle feedback & graph scoring — thumbs-up mined into positive taste profiles; graph resolver prefers cache restore and non-blocking cold builds; new tests for migration, blast-radius, thumbs-up re-rank, and graph scores.',
+    ],
+  },
   '1.0.48': {
     title: "What's New in Ark 1.0.48",
     changes: [

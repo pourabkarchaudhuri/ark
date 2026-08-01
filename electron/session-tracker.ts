@@ -203,6 +203,22 @@ let mainWindowRef: BrowserWindowType | null = null;
 let trackedGames: TrackedGame[] = [];
 const activeSessions: Map<string, ActiveSession> = new Map(); // gameId -> session
 
+// ---------------------------------------------------------------------------
+// In-game overlay HUD wiring
+//
+// The overlay is a second BrowserWindow (see electron/overlay-window.ts). It
+// consumes the exact same `session:*` event stream as the main window, so we
+// simply forward every payload to its webContents as well. Separately, we tell
+// main.ts when to show/hide the overlay by firing a visibility callback on the
+// 0↔1 active-session transition (main.ts gates the actual show on the
+// `overlayEnabled` setting). Keeping content event-driven and show/hide
+// callback-driven makes the two concerns race-free.
+// ---------------------------------------------------------------------------
+
+let overlayWindowRef: BrowserWindowType | null = null;
+let overlayVisibilityCallback: ((shouldShow: boolean) => void) | null = null;
+let lastOverlayShouldShow = false;
+
 // Sessions recovered from a previous run that crashed/was force-killed before it
 // could finalize them. Buffered here until the renderer drains them on mount.
 let recoveredSessions: CompletedSession[] = [];
@@ -433,6 +449,9 @@ function pollTick() {
 
   // Snapshot in-progress sessions for crash recovery on the next launch.
   persistActiveSessions();
+
+  // Show/hide the overlay HUD based on whether anything is being played now.
+  updateOverlayVisibility();
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +465,48 @@ function sendToRenderer(channel: string, data: unknown) {
     }
   } catch (err) {
     logger.error(`[SessionTracker] Failed to send ${channel}:`, err);
+  }
+  // Also forward the same payload to the overlay HUD window, if registered.
+  // Guard against a destroyed window (overlay is torn down on app quit).
+  try {
+    if (overlayWindowRef && !overlayWindowRef.isDestroyed()) {
+      overlayWindowRef.webContents.send(channel, data);
+    }
+  } catch (err) {
+    logger.error(`[SessionTracker] Failed to forward ${channel} to overlay:`, err);
+  }
+}
+
+/**
+ * Fire the overlay visibility callback when the active-session count crosses the
+ * 0↔1 boundary. Only fires on an actual change, so main.ts's handler runs once
+ * per transition rather than every poll tick.
+ */
+function updateOverlayVisibility(): void {
+  if (!overlayVisibilityCallback) return;
+  const shouldShow = activeSessions.size > 0;
+  if (shouldShow === lastOverlayShouldShow) return;
+  lastOverlayShouldShow = shouldShow;
+  try {
+    overlayVisibilityCallback(shouldShow);
+  } catch (err) {
+    logger.error('[SessionTracker] Overlay visibility callback failed:', err);
+  }
+}
+
+/**
+ * Register the overlay window so `session:*` events are forwarded to it, and
+ * (optionally) a callback that fires when the overlay should be shown/hidden
+ * based on whether any session is active. main.ts owns the show/hide decision
+ * (it gates on the `overlayEnabled` setting).
+ */
+export function registerOverlayWindow(
+  win: BrowserWindowType | null,
+  onVisibilityChange?: (shouldShow: boolean) => void,
+): void {
+  overlayWindowRef = win;
+  if (onVisibilityChange !== undefined) {
+    overlayVisibilityCallback = onVisibilityChange;
   }
 }
 
@@ -508,6 +569,7 @@ export function stopSessionTracker() {
   // We finalized everything cleanly — drop the crash-recovery snapshot so we
   // don't double-count these sessions on the next launch.
   persistActiveSessions();
+  updateOverlayVisibility();
   mainWindowRef = null;
   logger.log('[SessionTracker] Stopped');
 }
@@ -548,6 +610,8 @@ export function setTrackedGames(games: TrackedGame[]) {
   }
 
   trackedGames = games;
+  // Untracking a game may have finalized its active session above.
+  updateOverlayVisibility();
   logger.log(`[SessionTracker] Now tracking ${games.length} game(s)`);
 }
 

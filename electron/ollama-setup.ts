@@ -99,13 +99,39 @@ export interface RerankSetupProgress {
 
 export type RerankProgressCallback = (progress: RerankSetupProgress) => void;
 
+/**
+ * Build the terminal progress event for a FAILED background Qwen3 pull.
+ *
+ * `lastPullStatus` is the last real text delivered through the pull progress
+ * callback — `pullModel` forwards `Error: <ollama message>`, `HTTP error <code>`,
+ * `Network error: <msg>` or `Download timed out`. Surfacing it (instead of a
+ * generic "could not download") tells the user WHY the reranker fell back to
+ * cosine. Tier stays `embed_fallback`.
+ */
+export function buildRerankPullFailureEvent(
+  qwenTag: string,
+  lastPullStatus: string | null,
+  tierLabel: string | null,
+): RerankSetupProgress {
+  const detail = lastPullStatus && lastPullStatus.trim() ? ` — ${lastPullStatus.trim()}` : '';
+  return {
+    status: `Cosine fallback — could not download ${qwenTag}${detail}`,
+    pct: 100,
+    done: true,
+    tier: 'embed_fallback',
+    tierLabel,
+    error: `Failed to pull ${qwenTag}${detail}`,
+    ollamaUp: true,
+  };
+}
+
 /** Resolve configured rerank model tag (Settings → default dengcao/bge-reranker-v2-m3). */
 export function getRerankModelTag(): string {
   const settings = settingsStore.getOllamaSettings();
   return settings.rerankModel?.trim() || DEFAULT_OLLAMA_RERANK_MODEL;
 }
 
-/** Resolve the Qwen3 tier tag (Settings → default qwen3-reranker:0.6b, Apache 2.0). */
+/** Resolve the Qwen3 tier tag (Settings → default dengcao/Qwen3-Reranker-0.6B:Q8_0, Apache 2.0). */
 export function getRerankQwenModelTag(): string {
   const settings = settingsStore.getOllamaSettings();
   return settings.rerankQwenModel?.trim() || DEFAULT_OLLAMA_RERANK_QWEN_MODEL;
@@ -622,19 +648,15 @@ async function settleRerankModelStatus(
 
   void (async () => {
     emit({ status: `Downloading ${qwenTag}`, pct: 0, ollamaUp: true });
+    // Remember the last real status/error the pull reported so a failure can
+    // surface the concrete reason instead of a generic "could not download".
+    let lastPullStatus: string | null = null;
     const pulled = await ensureRerankModelPull(qwenTag, (status, pct) => {
+      lastPullStatus = status;
       emit({ status: `${qwenTag}: ${status}`, pct, ollamaUp: true });
     });
     if (!pulled) {
-      emit({
-        status: `Cosine fallback — could not download ${qwenTag}`,
-        pct: 100,
-        done: true,
-        tier: 'embed_fallback',
-        tierLabel: rerankTierLabel('embed_fallback'),
-        error: `Failed to pull ${qwenTag}`,
-        ollamaUp: true,
-      });
+      emit(buildRerankPullFailureEvent(qwenTag, lastPullStatus, rerankTierLabel('embed_fallback')));
       return;
     }
     resetRerankTierCache();

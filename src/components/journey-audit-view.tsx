@@ -22,15 +22,20 @@
  * retiring the loser of the A/B is one commit.
  */
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { motion } from 'framer-motion';
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, XAxis, YAxis } from 'recharts';
 import {
   BellOff,
   CheckCircle2,
   ClipboardCheck,
   EyeOff,
   FolderSearch,
+  Gauge,
   History,
+  Image as ImageIcon,
   Layers,
+  LineChart as LineChartIcon,
   Link2,
   ListChecks,
   Play,
@@ -48,10 +53,20 @@ import type {
 import {
   DAY_MS,
   buildGameRollups,
+  computeAuditQuality,
+  computeOpenItemsTrend,
+  computeStatusDistribution,
   formatMonthYear,
   formatSpan,
+  type AuditQuality,
   type GameRollup,
 } from '@/lib/voyage-derive';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
 import { canonicalFranchiseBase, isUmbrellaBrand, passesUmbrellaMembership } from '@/services/franchise';
 import { bm25Index } from '@/services/bm25-index';
 import { catalogStore } from '@/services/catalog-store';
@@ -629,6 +644,294 @@ function AuditRings({ scores }: { scores: AreaScore[] }) {
   );
 }
 
+// ─── Data-quality dashboard ──────────────────────────────────────────────────
+//
+// The aggregate view of record health. Like the rings, everything here scores
+// how filled-in and current the *records* are — never how much anyone plays.
+
+const QUALITY_CONFIG: ChartConfig = {
+  count: { label: 'Records', color: '#00d4ff' },
+  open: { label: 'To review', color: '#d946ef' },
+  added: { label: 'Added', color: '#34d399' },
+};
+
+interface GaugeSpec {
+  key: string;
+  label: string;
+  blurb: string;
+  score: number;
+  color: string;
+  icon: typeof Gauge;
+  detail: string;
+}
+
+function QualityGauge({ spec }: { spec: GaugeSpec }) {
+  const size = 92;
+  const stroke = 8;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const pct = Math.max(0, Math.min(1, spec.score));
+  const Icon = spec.icon;
+
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-3">
+      <div className="relative shrink-0" style={{ width: size, height: size }}>
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={spec.label}>
+          <g transform={`rotate(-90 ${size / 2} ${size / 2})`}>
+            <circle
+              cx={size / 2}
+              cy={size / 2}
+              r={r}
+              fill="none"
+              stroke="rgba(255,255,255,0.07)"
+              strokeWidth={stroke}
+            />
+            <motion.circle
+              cx={size / 2}
+              cy={size / 2}
+              r={r}
+              fill="none"
+              stroke={spec.color}
+              strokeWidth={stroke}
+              strokeLinecap="round"
+              strokeDasharray={`${c * Math.max(0.001, pct)} ${c}`}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.95 }}
+              transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+            />
+          </g>
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <span className="font-mono text-lg font-black text-white">
+            {Math.round(pct * 100)}%
+          </span>
+        </div>
+      </div>
+      <div className="min-w-0">
+        <div className="flex items-center gap-1.5">
+          <Icon className="h-3.5 w-3.5" style={{ color: spec.color }} />
+          <span className="font-mono text-[10px] uppercase tracking-wider text-white/55">
+            {spec.label}
+          </span>
+        </div>
+        <p className="mt-1 text-[11px] leading-tight text-white/45">{spec.detail}</p>
+        <p className="text-[10px] leading-tight text-white/25">{spec.blurb}</p>
+      </div>
+    </div>
+  );
+}
+
+function DashPanel({
+  title,
+  icon: Icon,
+  children,
+}: {
+  title: string;
+  icon: typeof Gauge;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/[0.06] bg-white/[0.015] p-4">
+      <div className="mb-3 flex items-center gap-1.5 text-white/45">
+        <Icon className="h-3.5 w-3.5" />
+        <span className="font-mono text-[10px] uppercase tracking-wider">{title}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+interface RuleBar {
+  id: RuleId;
+  label: string;
+  count: number;
+  color: string;
+}
+
+const DataQualityDashboard = memo(function DataQualityDashboard({
+  quality,
+  statusDist,
+  debtTrend,
+  issuesByRule,
+}: {
+  quality: AuditQuality;
+  statusDist: Array<{ status: GameStatus | 'Unset'; count: number }>;
+  debtTrend: Array<{ key: string; label: string; added: number; decided: number; open: number }>;
+  issuesByRule: RuleBar[];
+}) {
+  const gauges: GaugeSpec[] = [
+    {
+      key: 'coverage',
+      label: 'Coverage',
+      blurb: 'Artwork & metadata filled',
+      score: quality.coverageScore,
+      color: '#00d4ff',
+      icon: ImageIcon,
+      detail: `${quality.artwork.filled}/${quality.artwork.total} art · ${quality.metadata.filled}/${quality.metadata.total} meta`,
+    },
+    {
+      key: 'completion',
+      label: 'Completion verdicts',
+      blurb: 'Ratings on finished games',
+      score: quality.completionScore,
+      color: '#34d399',
+      icon: Star,
+      detail:
+        quality.completionVerdict.total > 0
+          ? `${quality.completionVerdict.filled}/${quality.completionVerdict.total} completed rated`
+          : `${quality.rating.filled}/${quality.rating.total} rated`,
+    },
+    {
+      key: 'trackable',
+      label: 'Session-ready',
+      blurb: 'Executable on file to track',
+      score: quality.sessionScore,
+      color: '#d946ef',
+      icon: Gauge,
+      detail: `${quality.trackable.filled}/${quality.trackable.total} have an exe`,
+    },
+  ];
+
+  const totalIssues = issuesByRule.reduce((s, r) => s + r.count, 0);
+  const hasTrend = debtTrend.some((m) => m.added > 0 || m.decided > 0 || m.open > 0);
+
+  return (
+    <div className="mb-6 space-y-4">
+      <div className="grid gap-3 md:grid-cols-3">
+        {gauges.map((g) => (
+          <QualityGauge key={g.key} spec={g} />
+        ))}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <DashPanel title="Open items by rule" icon={ListChecks}>
+          {totalIssues > 0 ? (
+            <ChartContainer config={QUALITY_CONFIG} className="aspect-[3/1] w-full">
+              <BarChart
+                data={issuesByRule}
+                layout="vertical"
+                margin={{ top: 4, right: 12, left: 4, bottom: 4 }}
+              >
+                <CartesianGrid horizontal={false} stroke="rgba(255,255,255,0.04)" />
+                <XAxis
+                  type="number"
+                  tickLine={false}
+                  axisLine={false}
+                  allowDecimals={false}
+                  tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+                />
+                <YAxis
+                  type="category"
+                  dataKey="label"
+                  width={128}
+                  tickLine={false}
+                  axisLine={false}
+                  tick={{ fontSize: 9, fill: 'rgba(255,255,255,0.5)', fontFamily: 'JetBrains Mono, monospace' }}
+                />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false} />} />
+                <Bar dataKey="count" radius={[0, 3, 3, 0]}>
+                  {issuesByRule.map((r) => (
+                    <Cell key={r.id} fill={r.color} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ChartContainer>
+          ) : (
+            <p className="py-8 text-center text-xs text-white/35">
+              No open items — every checked record is filled in.
+            </p>
+          )}
+        </DashPanel>
+
+        <DashPanel title="Status distribution" icon={Layers}>
+          {statusDist.length > 0 ? (
+            <ChartContainer config={QUALITY_CONFIG} className="aspect-[3/1] w-full">
+              <BarChart data={statusDist} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.04)" />
+                <XAxis
+                  dataKey="status"
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={4}
+                  tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+                />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  width={22}
+                  allowDecimals={false}
+                  tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+                />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false} />} />
+                <Bar dataKey="count" fill="#00d4ff" radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ChartContainer>
+          ) : (
+            <p className="py-8 text-center text-xs text-white/35">No records to distribute.</p>
+          )}
+        </DashPanel>
+      </div>
+
+      <DashPanel title="Records to review over time" icon={LineChartIcon}>
+        {hasTrend ? (
+          <ChartContainer config={QUALITY_CONFIG} className="aspect-[4/1] w-full">
+            <AreaChart data={debtTrend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <defs>
+                <linearGradient id="fillOpen" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--color-open)" stopOpacity={0.5} />
+                  <stop offset="95%" stopColor="var(--color-open)" stopOpacity={0.03} />
+                </linearGradient>
+                <linearGradient id="fillAddedAudit" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--color-added)" stopOpacity={0.4} />
+                  <stop offset="95%" stopColor="var(--color-added)" stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.04)" />
+              <XAxis
+                dataKey="label"
+                tickLine={false}
+                axisLine={false}
+                tickMargin={4}
+                tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+              />
+              <YAxis
+                tickLine={false}
+                axisLine={false}
+                width={22}
+                allowDecimals={false}
+                tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace' }}
+              />
+              <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
+              <Area
+                dataKey="added"
+                type="natural"
+                fill="url(#fillAddedAudit)"
+                stroke="var(--color-added)"
+                strokeWidth={1.25}
+              />
+              <Area
+                dataKey="open"
+                type="natural"
+                fill="url(#fillOpen)"
+                stroke="var(--color-open)"
+                strokeWidth={1.5}
+              />
+            </AreaChart>
+          </ChartContainer>
+        ) : (
+          <p className="py-8 text-center text-xs text-white/35">
+            Not enough history to chart record curation yet.
+          </p>
+        )}
+        <p className="mt-2 text-[10px] leading-relaxed text-white/30">
+          A record counts as “to review” from when it was added until its status first moves off the
+          default. This tracks record curation — never how much you play.
+        </p>
+      </DashPanel>
+    </div>
+  );
+});
+
 // ─── Inline resolution controls ──────────────────────────────────────────────
 
 const STATUS_CHOICES: GameStatus[] = [
@@ -963,6 +1266,32 @@ export const JourneyAuditView = memo(function JourneyAuditView({
     });
   }, [open, bandByArea]);
 
+  // ── Data-quality dashboard inputs — all pure, all record-scoped ──
+  const quality = useMemo(
+    () => computeAuditQuality({ rollups, libraryEntries, journeyEntries }),
+    [rollups, libraryEntries, journeyEntries],
+  );
+  const statusDist = useMemo(() => computeStatusDistribution(rollups), [rollups]);
+  const debtTrend = useMemo(
+    () => computeOpenItemsTrend(rollups, statusHistory, nowMs, 12),
+    [rollups, statusHistory, nowMs],
+  );
+  const issuesByRule = useMemo(() => {
+    const counts = new Map<RuleId, number>();
+    for (const f of open) counts.set(f.ruleId, (counts.get(f.ruleId) ?? 0) + 1);
+    return [...counts.entries()]
+      .map(([id, count]) => {
+        const rule = RULES_BY_ID.get(id);
+        return {
+          id,
+          label: rule?.label ?? id,
+          count,
+          color: rule ? AREA_META[rule.area].color : '#d946ef',
+        };
+      })
+      .sort((a, b) => b.count - a.count);
+  }, [open]);
+
   const pushTrail = useCallback(
     (action: TrailAction, finding: Finding, detail: string) => {
       update((prev) => ({
@@ -1096,6 +1425,17 @@ export const JourneyAuditView = memo(function JourneyAuditView({
           </p>
         </div>
       </div>
+
+      {/* Data-quality dashboard — scored coverage gauges plus the aggregate
+          charts. Same hard line as the rings: it grades records, not playing. */}
+      {libraryCount > 0 && (
+        <DataQualityDashboard
+          quality={quality}
+          statusDist={statusDist}
+          debtTrend={debtTrend}
+          issuesByRule={issuesByRule}
+        />
+      )}
 
       {/* Section switcher */}
       <div className="mb-4 flex items-center gap-2">
