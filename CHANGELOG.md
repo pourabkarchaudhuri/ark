@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.50] - 2026-08-01
+
 ### Added
 - **Chunked embeddings (Phase A).** Library and catalog rewrites can persist facet chunks (`lib:` / `cat:` prefixed ids) with int8 pooled game vectors. Upgrade is lazy dual-format — existing installs are not wiped and do not force a full re-embed. Progress stays in game units. Kill switch: Settings → Ollama → “Facet chunk embeddings” (default on). Galaxy cache freshness now keys on pooled count + `embeddingContentEpoch`.
 
@@ -14,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Notes (user risk)
 - First rewrite of a previously float-pooled game may change that game’s ANN neighbors (weighted pool vs concat embed). Unchanged content still skips Ollama entirely.
+
 
 ## [1.0.47] - 2026-08-01
 

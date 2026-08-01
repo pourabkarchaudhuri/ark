@@ -9,6 +9,14 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.50': {
+    title: "What's New in Ark 1.0.50",
+    changes: [
+      'Chunked embeddings (Phase A) — library and catalog rewrites can persist facet chunks (lib:/cat: ids) with int8 pooled game vectors. Existing installs upgrade lazily (dual-format); no forced full re-embed. Kill switch in Settings → Ollama → Facet chunk embeddings.',
+      'Embeddings IDB v4 adds chunk-embeddings store. Readers decode int8 or legacy float at the boundary for ANN / reco / galaxy / graph. Failed writes surface errors and do not advance catalog watermarks.',
+      'Galaxy cache freshness keys on pooled count + embeddingContentEpoch. Progress reporting stays in game units.',
+    ],
+  },
   '1.0.49': {
     title: "What's New in Ark 1.0.49",
     changes: [
