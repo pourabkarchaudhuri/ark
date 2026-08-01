@@ -45,6 +45,7 @@ beforeEach(() => {
     neighborRerankEnabled: true,
     oracleRerankEnabled: true,
     oracleRerankBlend: 1,
+    embeddingChunkingEnabled: true,
   });
 });
 

@@ -67,6 +67,12 @@ interface Settings {
     oracleRerankEnabled?: boolean;
     /** 0 = keep worker order within shelves, 1 = full rerank ordering (default 1). */
     oracleRerankBlend?: number;
+    /**
+     * When true (default), library/catalog embedding rewrites use facet chunks + int8
+     * pooled storage. When false, fall back to whole-text float pooled writes.
+     * Reads always decode both formats.
+     */
+    embeddingChunkingEnabled?: boolean;
   };
 }
 
@@ -135,6 +141,7 @@ class SettingsStore {
         neighborRerankEnabled: true,
         oracleRerankEnabled: true,
         oracleRerankBlend: 1,
+        embeddingChunkingEnabled: true,
       },
     });
     try {
@@ -252,6 +259,7 @@ class SettingsStore {
     neighborRerankEnabled: boolean;
     oracleRerankEnabled: boolean;
     oracleRerankBlend: number;
+    embeddingChunkingEnabled: boolean;
   } {
     const defaults = {
       enabled: true,
@@ -263,6 +271,7 @@ class SettingsStore {
       neighborRerankEnabled: true,
       oracleRerankEnabled: true,
       oracleRerankBlend: 1,
+      embeddingChunkingEnabled: true,
     };
     const o = this.settings.ollama;
     let blend =
@@ -278,6 +287,7 @@ class SettingsStore {
       neighborRerankEnabled: o?.neighborRerankEnabled !== false,
       oracleRerankEnabled: o?.oracleRerankEnabled !== false,
       oracleRerankBlend: blend,
+      embeddingChunkingEnabled: o?.embeddingChunkingEnabled !== false,
     };
   }
 
@@ -291,6 +301,7 @@ class SettingsStore {
     neighborRerankEnabled?: boolean;
     oracleRerankEnabled?: boolean;
     oracleRerankBlend?: number;
+    embeddingChunkingEnabled?: boolean;
   }): void {
     const next = { ...settings };
     if (next.rerankModel !== undefined) {

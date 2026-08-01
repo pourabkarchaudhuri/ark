@@ -9,7 +9,13 @@
  * a recompute.
  */
 
-import { loadProjectedEmbeddingsForGraph, getEmbeddingCount, embeddingService, EMBEDDING_TEXT_VERSION } from '@/services/embedding-service';
+import {
+  loadProjectedEmbeddingsForGraph,
+  getPooledEmbeddingCount,
+  getEmbeddingContentEpoch,
+  embeddingService,
+  EMBEDDING_TEXT_VERSION,
+} from '@/services/embedding-service';
 import { journeyStore } from '@/services/journey-store';
 import { libraryStore } from '@/services/library-store';
 import { catalogStore } from '@/services/catalog-store';
@@ -828,8 +834,11 @@ export async function buildGalaxyData(
 interface CachedGalaxy {
   nodes: GraphNode[];
   allGenres: string[];
+  /** Pooled embedding count only (never chunk-embeddings). */
   embeddingCount: number;
   embeddingTextVersion?: number;
+  /** Bumped on any successful pooled rewrite — invalidates galaxy after content changes. */
+  embeddingContentEpoch?: number;
   timestamp: number;
   projectionMethod?: string;
 }
@@ -900,7 +909,13 @@ export async function loadCachedGalaxyIfFresh(): Promise<{ nodes: GraphNode[]; a
     return null;
   }
 
-  const currentCount = await getEmbeddingCount();
+  const currentEpoch = await getEmbeddingContentEpoch();
+  if ((cached.embeddingContentEpoch ?? 0) !== currentEpoch) {
+    console.log(`[Galaxy Cache] Stale — content epoch ${cached.embeddingContentEpoch ?? 0} vs current ${currentEpoch}`);
+    return null;
+  }
+
+  const currentCount = await getPooledEmbeddingCount();
   const ageMs = Date.now() - cached.timestamp;
   const RECENT_THRESHOLD_MS = 5 * 60_000;
   if (currentCount !== cached.embeddingCount) {
@@ -931,12 +946,14 @@ export async function buildAndCacheGalaxy(
 ): Promise<{ nodes: GraphNode[]; allGenres: string[]; projectionMethod: string }> {
   const result = await buildGalaxyData(onStep);
   if (result.nodes.length > 0) {
-    const embCount = await getEmbeddingCount();
+    const embCount = await getPooledEmbeddingCount();
+    const epoch = await getEmbeddingContentEpoch();
     await saveCachedGalaxy({
       nodes: result.nodes,
       allGenres: result.allGenres,
       embeddingCount: embCount,
       embeddingTextVersion: EMBEDDING_TEXT_VERSION,
+      embeddingContentEpoch: epoch,
       timestamp: Date.now(),
       projectionMethod: result.projectionMethod,
     });
@@ -1018,7 +1035,7 @@ async function _runBackgroundPrecompute(): Promise<void> {
   //   2. Ollama availability check completed (available or not)
   //   3. Timeout reached
   while (Date.now() - waitStart < MAX_WAIT_MS) {
-    const count = await getEmbeddingCount();
+    const count = await getPooledEmbeddingCount();
     if (count > 0) {
       console.log(`[Galaxy Cache] Background: ${count} embeddings cached, proceeding`);
       break;
@@ -1055,7 +1072,7 @@ async function _runBackgroundPrecompute(): Promise<void> {
   }
 
   // Check if we have any embeddings at all
-  const finalCount = await getEmbeddingCount();
+  const finalCount = await getPooledEmbeddingCount();
   if (finalCount === 0) {
     console.log('[Galaxy Cache] Background: 0 embeddings available, deferring galaxy build');
     _bgScheduled = false;

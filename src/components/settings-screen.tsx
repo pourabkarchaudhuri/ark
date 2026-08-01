@@ -47,6 +47,7 @@ declare global {
         neighborRerankEnabled: boolean;
         oracleRerankEnabled: boolean;
         oracleRerankBlend: number;
+        embeddingChunkingEnabled: boolean;
       }>;
       setOllamaSettings: (settings: {
         enabled?: boolean;
@@ -57,6 +58,7 @@ declare global {
         neighborRerankEnabled?: boolean;
         oracleRerankEnabled?: boolean;
         oracleRerankBlend?: number;
+        embeddingChunkingEnabled?: boolean;
       }) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
       setAutoLaunch: (enabled: boolean) => Promise<void>;
@@ -349,6 +351,7 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [neighborRerankEnabled, setNeighborRerankEnabled] = useState(true);
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
+  const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [rerankDiag, setRerankDiag] = useState<{
     state: 'idle' | 'testing' | 'ok' | 'fail';
@@ -412,6 +415,7 @@ const AIModelsTab = memo(function AIModelsTab() {
         setOllamaRerankModel(s.rerankModel ?? DEFAULT_OLLAMA_RERANK_MODEL);
         setNeighborRerankEnabled(s.neighborRerankEnabled !== false);
         setOracleRerankEnabled(s.oracleRerankEnabled !== false);
+        setEmbeddingChunkingEnabled(s.embeddingChunkingEnabled !== false);
         setOracleRerankBlend(
           typeof s.oracleRerankBlend === 'number' && Number.isFinite(s.oracleRerankBlend)
             ? Math.min(1, Math.max(0, s.oracleRerankBlend))
@@ -450,13 +454,14 @@ const AIModelsTab = memo(function AIModelsTab() {
           neighborRerankEnabled,
           oracleRerankEnabled,
           oracleRerankBlend,
+          embeddingChunkingEnabled,
         });
         setOllamaSaveStatus('saved');
         setTimeout(() => setOllamaSaveStatus('idle'), 2000);
       }
       catch { /* ignore */ }
     }, 800);
-  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend]);
+  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled]);
 
   useEffect(() => {
     if (initialLoadRef.current || !window.settings || !apiKey.trim()) { setSaveStatus('idle'); return; }
@@ -659,6 +664,18 @@ const AIModelsTab = memo(function AIModelsTab() {
             <p className="text-[11px] text-white/30 mt-0.5">Reorder shelves after the scoring worker.</p>
           </div>
           <Toggle value={oracleRerankEnabled} onChange={() => setOracleRerankEnabled(!oracleRerankEnabled)} />
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-white/70">Facet chunk embeddings</p>
+            <p className="text-[11px] text-white/30 mt-0.5">
+              Re-embed only changed facets (int8). Off = whole-text float writes.
+            </p>
+          </div>
+          <Toggle
+            value={embeddingChunkingEnabled}
+            onChange={() => setEmbeddingChunkingEnabled(!embeddingChunkingEnabled)}
+          />
         </div>
         {oracleRerankEnabled && (
           <div>

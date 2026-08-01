@@ -4,6 +4,17 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+- **Chunked embeddings (Phase A).** Library and catalog rewrites can persist facet chunks (`lib:` / `cat:` prefixed ids) with int8 pooled game vectors. Upgrade is lazy dual-format — existing installs are not wiped and do not force a full re-embed. Progress stays in game units. Kill switch: Settings → Ollama → “Facet chunk embeddings” (default on). Galaxy cache freshness now keys on pooled count + `embeddingContentEpoch`.
+
+### Changed
+- **Embeddings IDB v4** adds `chunk-embeddings` (additive). Readers decode int8 or legacy float at the boundary before ANN / reco / galaxy / graph. Failed writes surface errors and do not advance catalog watermarks.
+
+### Notes (user risk)
+- First rewrite of a previously float-pooled game may change that game’s ANN neighbors (weighted pool vs concat embed). Unchanged content still skips Ollama entirely.
+
 ## [1.0.47] - 2026-08-01
 
 ### Fixed

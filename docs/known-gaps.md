@@ -2,7 +2,7 @@
 
 Items identified during security and architecture reviews that are **not safe to fix** without risking regressions, or that require significant effort / design decisions before implementation.
 
-Last updated: 2026-08-01 (Oracle audit P0/P1 notes)
+Last updated: 2026-08-01 (chunked embeddings Phase A)
 
 ---
 
@@ -123,6 +123,17 @@ Epic Games Store does not expose review scores or review counts via its API. Epi
 Games available on both Steam and Epic get separate embeddings (`steam-<appid>` and `epic-<namespace>:<offerId>`). This uses extra embedding storage and ANN index space but doesn't cause incorrect behavior — both entries appear as separate nodes in the galaxy and the recommendation engine handles them as distinct candidates.
 
 **Why accepted:** The overhead of double-embedding ~2–5K cross-listed games is <5% of the total index. Implementing cross-store dedup requires maintaining a title-matching table with fuzzy matching for name variations. The current behavior is correct, just slightly wasteful.
+
+### 37. Chunked Embeddings Phase A — Accepted Tradeoffs / Deferred
+Phase A ships lazy dual-format facet chunks (`chunk-embeddings` + int8 pooled rows) without bumping `EMBEDDING_TEXT_VERSION` / `EMBEDDING_MODEL_VERSION` and without forcing a catalog rebuild.
+
+**Upgrade behavior (user risk):** Existing float pooled rows keep serving until that game’s whole-text hash misses. The first rewrite for a game replaces concat-embed geometry with a weighted chunk pool for that id only — ANN neighbors for that game may shift. Unchanged games make zero Ollama calls. Kill switch: Settings → Ollama → “Facet chunk embeddings” (`ollama.embeddingChunkingEnabled`, default on).
+
+**Deferred (Phase B / later):**
+- Multi-vector ANN / max-sim over chunk ids
+- MRL-256 dimensionality
+- Live Ollama weight sweep / synthetic-distance neighbor-quality harness for pool weights
+- Idle or forced full-catalog re-chunk on upgrade (explicitly out of scope)
 
 ---
 

@@ -19,8 +19,27 @@ import { extractFranchiseBase } from '@/services/franchise';
 import type { CatalogEntry } from '@/types/catalog';
 import type { EpicCatalogEntry } from '@/services/epic-catalog-store';
 import { toRerankTier, rerankTierLabel, type RerankTier } from '@/services/oracle-rerank';
+import { quantizeEmbedding, dequantizeEmbedding, EMBEDDING_DIM } from '@/services/embedding-quant';
+import {
+  CURRENT_POOL_VERSION,
+  HASH_VERSION_PREFIX as CHUNK_HASH_VERSION_PREFIX,
+  buildGameChunks,
+  diffChunksAgainstCache,
+  hashWholeEmbeddingText,
+  poolChunkVectors,
+  shouldSkipPooled,
+  type ChunkSpec,
+  type EmbeddingTier,
+} from '@/services/embedding-chunks';
 
 export { extractFranchiseBase };
+export {
+  CURRENT_POOL_VERSION,
+  EMBEDDING_CHUNK_VERSION,
+  hashWholeEmbeddingText,
+  buildGameChunks,
+} from '@/services/embedding-chunks';
+export { EMBEDDING_DIM, quantizeEmbedding, dequantizeEmbedding } from '@/services/embedding-quant';
 
 /**
  * Payload of the `ollama:rerank-progress` channel.
@@ -135,20 +154,43 @@ declare global {
   }
 }
 
-interface CachedEmbedding {
+/** Dual-format pooled row — legacy float or int8+scale. Exactly one vector form. */
+export interface CachedEmbedding {
   gameId: string;
-  embedding: number[];
+  /** Legacy float vector (pre-chunking writes). */
+  embedding?: number[];
+  /** Int8 quantized vector (Phase A writes). */
+  q?: Int8Array;
+  scale?: number;
   textHash: string;
+  timestamp: number;
+  format?: 'f32' | 'i8';
+  /** Writers set 1; legacy omit = compatible with skip. */
+  poolVersion?: number;
+}
+
+export interface CachedChunk {
+  chunkId: string;
+  tier: EmbeddingTier;
+  gameId: string;
+  kind: string;
+  seq: number;
+  q: Int8Array;
+  scale: number;
+  textHash: string;
+  weight: number;
   timestamp: number;
 }
 
 // ─── IDB Helpers ───────────────────────────────────────────────────────────────
 
 const DB_NAME = 'ark-embeddings';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const LIBRARY_STORE = 'embeddings';
 const CATALOG_STORE = 'catalog-embeddings';
+const CHUNK_STORE = 'chunk-embeddings';
 const META_STORE = 'embedding-meta'; // small key/value store for watermarks
+const META_EPOCH_KEY = 'embeddingContentEpoch';
 const LIBRARY_TTL = 30 * 24 * 60 * 60 * 1000;  // 30 days
 const CATALOG_TTL = 90 * 24 * 60 * 60 * 1000;  // 90 days
 
@@ -168,6 +210,7 @@ function getDB(): Promise<IDBDatabase> {
     req.onerror = () => { embDbPromise = null; reject(req.error); };
     req.onupgradeneeded = (e) => {
       const db = (e.target as IDBOpenDBRequest).result;
+      // Additive only — never wipe existing stores/rows.
       if (!db.objectStoreNames.contains(LIBRARY_STORE)) {
         db.createObjectStore(LIBRARY_STORE, { keyPath: 'gameId' });
       }
@@ -176,6 +219,11 @@ function getDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(META_STORE)) {
         db.createObjectStore(META_STORE, { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains(CHUNK_STORE)) {
+        const chunkStore = db.createObjectStore(CHUNK_STORE, { keyPath: 'chunkId' });
+        chunkStore.createIndex('byGame', 'gameId', { unique: false });
+        chunkStore.createIndex('byTierGame', ['tier', 'gameId'], { unique: false });
       }
     };
     req.onsuccess = () => {
@@ -186,6 +234,32 @@ function getDB(): Promise<IDBDatabase> {
     };
   });
   return embDbPromise;
+}
+
+/** Shared IDB accessor for graph/status consumers that must open at current version. */
+export function getEmbeddingDB(): Promise<IDBDatabase> {
+  return getDB();
+}
+
+/**
+ * Decode boundary: IDB row → f32 1024 (or null).
+ * Legacy float arrays and int8+scale both accepted; TypedArrays rejected by Array.isArray.
+ */
+export function readPooledVector(entry: CachedEmbedding | null | undefined): Float32Array | null {
+  if (!entry) return null;
+  if (entry.q instanceof Int8Array && entry.q.length === EMBEDDING_DIM && typeof entry.scale === 'number') {
+    return dequantizeEmbedding(entry.q, entry.scale);
+  }
+  if (Array.isArray(entry.embedding) && entry.embedding.length === EMBEDDING_DIM) {
+    return Float32Array.from(entry.embedding);
+  }
+  return null;
+}
+
+function pooledVectorAsNumberArray(entry: CachedEmbedding | null | undefined): number[] | null {
+  const f32 = readPooledVector(entry);
+  if (!f32) return null;
+  return Array.from(f32);
 }
 
 async function getCachedEmbeddings(
@@ -217,15 +291,117 @@ async function saveCachedEmbeddings(
 ): Promise<void> {
   if (entries.length === 0) return;
   const db = await getDB();
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
     for (const entry of entries) {
       store.put(entry);
     }
     tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error('saveCachedEmbeddings failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('saveCachedEmbeddings aborted'));
   });
+}
+
+async function getChunksForTierGame(
+  tier: EmbeddingTier,
+  gameId: string,
+): Promise<Map<string, CachedChunk>> {
+  const db = await getDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(CHUNK_STORE, 'readonly');
+    const store = tx.objectStore(CHUNK_STORE);
+    if (!store.indexNames.contains('byTierGame')) {
+      resolve(new Map());
+      return;
+    }
+    const idx = store.index('byTierGame');
+    const req = idx.getAll([tier, gameId]);
+    req.onsuccess = () => {
+      const map = new Map<string, CachedChunk>();
+      for (const row of (req.result as CachedChunk[])) {
+        map.set(row.chunkId, row);
+      }
+      resolve(map);
+    };
+    req.onerror = () => resolve(new Map());
+  });
+}
+
+/**
+ * Atomically rewrite chunks + pooled int8 row for one game.
+ * Rejects on tx error — callers must not ANN-upsert or advance watermarks on failure.
+ */
+async function writeGameChunksAndPool(opts: {
+  tier: EmbeddingTier;
+  gameId: string;
+  pooledStore: string;
+  wholeHash: string;
+  chunks: Array<ChunkSpec & { vector: Float32Array | number[] }>;
+  staleIds: string[];
+}): Promise<Float32Array> {
+  const { tier, gameId, pooledStore, wholeHash, chunks, staleIds } = opts;
+  const pooledF32 = poolChunkVectors(
+    chunks.map(c => ({ vector: c.vector, weight: c.weight })),
+  );
+  const { q, scale } = quantizeEmbedding(pooledF32);
+  const now = Date.now();
+  const pooledRow: CachedEmbedding = {
+    gameId,
+    q,
+    scale,
+    textHash: wholeHash,
+    timestamp: now,
+    format: 'i8',
+    poolVersion: CURRENT_POOL_VERSION,
+  };
+
+  const db = await getDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction([CHUNK_STORE, pooledStore], 'readwrite');
+    const chunkStore = tx.objectStore(CHUNK_STORE);
+    const poolStore = tx.objectStore(pooledStore);
+
+    for (const id of staleIds) {
+      chunkStore.delete(id);
+    }
+    for (const chunk of chunks) {
+      const cq = quantizeEmbedding(chunk.vector);
+      const row: CachedChunk = {
+        chunkId: chunk.chunkId,
+        tier,
+        gameId,
+        kind: chunk.kind,
+        seq: chunk.seq,
+        q: cq.q,
+        scale: cq.scale,
+        textHash: chunk.textHash,
+        weight: chunk.weight,
+        timestamp: now,
+      };
+      chunkStore.put(row);
+    }
+    // Clear legacy float field by writing int8-only row.
+    poolStore.put(pooledRow);
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error('writeGameChunksAndPool failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('writeGameChunksAndPool aborted'));
+  });
+
+  return pooledF32;
+}
+
+async function bumpEmbeddingContentEpoch(): Promise<number> {
+  const current = await getEmbeddingContentEpoch();
+  const next = current + 1;
+  await setEmbeddingMeta({ key: META_EPOCH_KEY, value: next });
+  return next;
+}
+
+export async function getEmbeddingContentEpoch(): Promise<number> {
+  const row = await getEmbeddingMeta<{ key: string; value: number }>(META_EPOCH_KEY);
+  return typeof row?.value === 'number' && Number.isFinite(row.value) ? row.value : 0;
 }
 
 // ─── Embedding meta (watermark / per-store small key-value) ─────────────────
@@ -252,11 +428,12 @@ async function getEmbeddingMeta<T extends { key: string }>(key: string): Promise
 
 async function setEmbeddingMeta<T extends { key: string }>(value: T): Promise<void> {
   const db = await getDB();
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const tx = db.transaction(META_STORE, 'readwrite');
     tx.objectStore(META_STORE).put(value);
     tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error('setEmbeddingMeta failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('setEmbeddingMeta aborted'));
   });
 }
 
@@ -295,25 +472,29 @@ async function refreshCachedTimestamps(
 /**
  * Bump when the prompt-construction layout changes (gen text shape, field set, ordering).
  * Pure cache invalidation — does not depend on the embedding model.
+ * Phase A lock: do NOT bump for chunking rollout (lazy dual-format).
  */
 export const EMBEDDING_TEXT_VERSION = 10;
 
 /**
  * Bump when the embedding model itself changes (Ollama model swap, dimensionality
  * change). Invalidates all cached vectors even if prompt text is unchanged.
+ * Phase A lock: do NOT bump for chunking rollout.
  */
 export const EMBEDDING_MODEL_VERSION = 1;
 
-/** Combined version stamp folded into every hash. */
+/** Combined version stamp folded into every hash. Must stay `t10m1`. */
 const HASH_VERSION_PREFIX = `t${EMBEDDING_TEXT_VERSION}m${EMBEDDING_MODEL_VERSION}`;
 
+// Dev-time guard: chunk module prefix must match (skip hashes share one alphabet).
+if (HASH_VERSION_PREFIX !== CHUNK_HASH_VERSION_PREFIX) {
+  console.error(
+    `[EmbeddingService] HASH_VERSION_PREFIX mismatch: service=${HASH_VERSION_PREFIX} chunks=${CHUNK_HASH_VERSION_PREFIX}`,
+  );
+}
+
 function hashText(text: string): string {
-  const versioned = `${HASH_VERSION_PREFIX}:${text}`;
-  let hash = 5381;
-  for (let i = 0; i < versioned.length; i++) {
-    hash = ((hash << 5) + hash + versioned.charCodeAt(i)) & 0xFFFFFFFF;
-  }
-  return hash.toString(36);
+  return hashWholeEmbeddingText(text);
 }
 
 // ─── Franchise base extraction (mirrors reco.worker.ts logic) ───────────────
@@ -339,8 +520,10 @@ function gameplayGenres(genres: string[]): string[] {
  * No prefix — snowflake-arctic-embed2 embeds documents without instruction prefix.
  * Publisher intentionally excluded (noise — same publisher ≠ similar gameplay).
  * "Indie" filtered from genres (business model, not gameplay).
+ *
+ * Exported so tests share the production whole-text builder (skip-hash compat).
  */
-function buildEmbeddingText(game: {
+export function buildEmbeddingText(game: {
   title: string;
   genres?: string[];
   themes?: string[];
@@ -384,7 +567,7 @@ function buildEmbeddingText(game: {
  *
  * Same layout as Tier 1 but metadata-only (no userNotes).
  */
-function buildCatalogEmbeddingText(entry: CatalogEntry): string {
+export function buildCatalogEmbeddingText(entry: CatalogEntry): string {
   const parts = [entry.name];
   const gpGenres = gameplayGenres(entry.genres);
   if (gpGenres.length) {
@@ -410,7 +593,7 @@ function buildCatalogEmbeddingText(entry: CatalogEntry): string {
  * Epic has richer descriptions than Steam catalog browse data — we include
  * both short description and longDescription for higher-quality embeddings.
  */
-function buildEpicCatalogEmbeddingText(entry: EpicCatalogEntry): string {
+export function buildEpicCatalogEmbeddingText(entry: EpicCatalogEntry): string {
   const parts = [entry.name];
   const gpGenres = gameplayGenres(entry.genres);
   if (gpGenres.length) {
@@ -432,24 +615,25 @@ function buildEpicCatalogEmbeddingText(entry: EpicCatalogEntry): string {
 }
 
 /**
- * Load only gameId → textHash from the catalog embedding store (no vectors).
- * Used for dedup checking during background generation without loading ~500MB.
+ * Load gameId → pooled skip metadata from the catalog store (no vectors in memory).
+ * Only rows with a decodable pooled payload are indexed — corrupt/hash-only rows
+ * must not short-circuit re-embed.
  */
-async function getCatalogHashIndex(): Promise<Map<string, string>> {
+async function getCatalogHashIndex(): Promise<Map<string, { textHash: string; poolVersion?: number }>> {
   const db = await getDB();
   return new Promise((resolve) => {
     const tx = db.transaction(CATALOG_STORE, 'readonly');
     const store = tx.objectStore(CATALOG_STORE);
     const req = store.openCursor();
-    const map = new Map<string, string>();
+    const map = new Map<string, { textHash: string; poolVersion?: number }>();
     const now = Date.now();
 
     req.onsuccess = () => {
       const cursor = req.result;
       if (!cursor) { resolve(map); return; }
       const entry = cursor.value as CachedEmbedding;
-      if (now - entry.timestamp < CATALOG_TTL) {
-        map.set(entry.gameId, entry.textHash);
+      if (now - entry.timestamp < CATALOG_TTL && readPooledVector(entry)) {
+        map.set(entry.gameId, { textHash: entry.textHash, poolVersion: entry.poolVersion });
       }
       cursor.continue();
     };
@@ -502,7 +686,8 @@ async function getCatalogEmbeddingsForIds(
       req.onsuccess = () => {
         const entry = req.result as CachedEmbedding | undefined;
         if (entry && (now - entry.timestamp < CATALOG_TTL)) {
-          result.set(gameId, entry.embedding);
+          const vec = pooledVectorAsNumberArray(entry);
+          if (vec) result.set(gameId, vec);
         }
         remaining--;
         if (remaining === 0) resolve(result);
@@ -517,6 +702,77 @@ async function getCatalogEmbeddingsForIds(
 
 /** Live reference to the merged embedding cache (updated incrementally by catalog gen). */
 let embeddingCacheRef = new Map<string, number[]>();
+
+async function isEmbeddingChunkingEnabled(): Promise<boolean> {
+  try {
+    const settingsApi = (window as unknown as {
+      settings?: { getOllamaSettings?: () => Promise<{ embeddingChunkingEnabled?: boolean }> };
+    }).settings;
+    const s = await settingsApi?.getOllamaSettings?.();
+    // Default true when unset.
+    return s?.embeddingChunkingEnabled !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Diff chunks for one game, embed only misses, atomic write, return pooled f32.
+ * Throws on persist failure (caller must not advance watermark / ANN on throw).
+ */
+async function embedAndPersistChunkedGame(opts: {
+  tier: EmbeddingTier;
+  gameId: string;
+  pooledStore: string;
+  wholeHash: string;
+  chunkInput: Parameters<typeof buildGameChunks>[2];
+}): Promise<Float32Array | null> {
+  const desired = buildGameChunks(opts.tier, opts.gameId, opts.chunkInput);
+  if (desired.length === 0) return null;
+
+  const existing = await getChunksForTierGame(opts.tier, opts.gameId);
+  const existingMeta = new Map(
+    [...existing.entries()].map(([id, row]) => [id, { chunkId: id, textHash: row.textHash }]),
+  );
+  const { toEmbed, staleIds } = diffChunksAgainstCache(desired, existingMeta);
+
+  const vectorsById = new Map<string, Float32Array>();
+  for (const [id, row] of existing) {
+    if (row.q instanceof Int8Array && typeof row.scale === 'number') {
+      vectorsById.set(id, dequantizeEmbedding(row.q, row.scale));
+    }
+  }
+
+  if (toEmbed.length > 0) {
+    const items = toEmbed.map(c => ({ id: c.chunkId, text: c.text }));
+    const results = await window.ollama!.generateEmbeddings(items);
+    for (const chunk of toEmbed) {
+      const vec = results[chunk.chunkId];
+      if (!vec || vec.length !== EMBEDDING_DIM) {
+        throw new Error(`Missing embedding for chunk ${chunk.chunkId}`);
+      }
+      vectorsById.set(chunk.chunkId, Float32Array.from(vec));
+    }
+  }
+
+  const chunksWithVectors: Array<ChunkSpec & { vector: Float32Array }> = [];
+  for (const chunk of desired) {
+    const vector = vectorsById.get(chunk.chunkId);
+    if (!vector) {
+      throw new Error(`No vector for required chunk ${chunk.chunkId}`);
+    }
+    chunksWithVectors.push({ ...chunk, vector });
+  }
+
+  return writeGameChunksAndPool({
+    tier: opts.tier,
+    gameId: opts.gameId,
+    pooledStore: opts.pooledStore,
+    wholeHash: opts.wholeHash,
+    chunks: chunksWithVectors,
+    staleIds,
+  });
+}
 
 // ─── Embedding Service ─────────────────────────────────────────────────────────
 
@@ -727,7 +983,8 @@ class EmbeddingService {
 
       const embeddingMap = new Map<string, number[]>();
       for (const [gameId, entry] of libCached) {
-        embeddingMap.set(gameId, entry.embedding);
+        const vec = pooledVectorAsNumberArray(entry);
+        if (vec) embeddingMap.set(gameId, vec);
       }
 
       embeddingCacheRef = embeddingMap;
@@ -829,20 +1086,23 @@ class EmbeddingService {
     const librarySignal = this._libraryAbort.signal;
 
     try {
+      const chunkingEnabled = await isEmbeddingChunkingEnabled();
       const cached = await getCachedEmbeddings();
 
-      const needsEmbedding: Array<{ id: string; text: string; hash: string }> = [];
+      type Need = {
+        game: (typeof games)[number];
+        text: string;
+        hash: string;
+      };
+      const needsEmbedding: Need[] = [];
 
       for (const game of games) {
         const text = buildEmbeddingText(game);
         const hash = hashText(text);
         const existing = cached.get(game.id);
-
-        if (existing && existing.textHash === hash) {
-          continue;
-        }
-
-        needsEmbedding.push({ id: game.id, text, hash });
+        // Skip only when pooled payload exists AND whole-hash + poolVersion OK.
+        if (shouldSkipPooled(existing, hash) && readPooledVector(existing)) continue;
+        needsEmbedding.push({ game, text, hash });
       }
 
       if (needsEmbedding.length === 0) {
@@ -851,12 +1111,16 @@ class EmbeddingService {
         return 0;
       }
 
-      console.log(`[EmbeddingService] Generating ${needsEmbedding.length} new embeddings...`);
+      console.log(
+        `[EmbeddingService] Generating ${needsEmbedding.length} library embeddings ` +
+        `(chunking=${chunkingEnabled ? 'on' : 'off'})...`,
+      );
+      // Progress stays in game units (never raw chunk calls).
       this._libraryProgress = { completed: 0, total: needsEmbedding.length };
       this._notify();
 
       const BATCH_SIZE = 100;
-      const allNewEntries: CachedEmbedding[] = [];
+      let generated = 0;
       let completed = 0;
 
       for (let i = 0; i < needsEmbedding.length; i += BATCH_SIZE) {
@@ -864,25 +1128,77 @@ class EmbeddingService {
         if (librarySignal.aborted) break;
 
         const batch = needsEmbedding.slice(i, i + BATCH_SIZE);
-        const items = batch.map(b => ({ id: b.id, text: b.text }));
 
-        const results = await window.ollama!.generateEmbeddings(items);
-
-        const batchEntries: CachedEmbedding[] = [];
-        for (const item of batch) {
-          if (results[item.id]) {
+        if (!chunkingEnabled) {
+          const items = batch.map(b => ({ id: b.game.id, text: b.text }));
+          const results = await window.ollama!.generateEmbeddings(items);
+          const batchEntries: CachedEmbedding[] = [];
+          for (const item of batch) {
+            const vec = results[item.game.id];
+            if (!vec) continue;
             batchEntries.push({
-              gameId: item.id,
-              embedding: results[item.id],
+              gameId: item.game.id,
+              embedding: vec,
               textHash: item.hash,
               timestamp: Date.now(),
+              format: 'f32',
             });
           }
-        }
-
-        if (batchEntries.length > 0) {
-          await saveCachedEmbeddings(batchEntries);
-          allNewEntries.push(...batchEntries);
+          if (batchEntries.length > 0) {
+            await saveCachedEmbeddings(batchEntries);
+            for (const entry of batchEntries) {
+              if (entry.embedding) {
+                embeddingCacheRef.set(entry.gameId, entry.embedding);
+                generated++;
+              }
+            }
+            setEmbeddingCache(embeddingCacheRef);
+            try {
+              await annIndex.addVectors(
+                batchEntries
+                  .filter(e => e.embedding)
+                  .map(e => ({ id: e.gameId, vector: e.embedding! })),
+              );
+            } catch { /* ANN not ready yet */ }
+            await bumpEmbeddingContentEpoch();
+          }
+        } else {
+          for (const item of batch) {
+            await this._awaitIfPaused();
+            if (librarySignal.aborted) break;
+            try {
+              const pooled = await embedAndPersistChunkedGame({
+                tier: 'lib',
+                gameId: item.game.id,
+                pooledStore: LIBRARY_STORE,
+                wholeHash: item.hash,
+                chunkInput: {
+                  title: item.game.title,
+                  genres: item.game.genres,
+                  themes: item.game.themes,
+                  modes: item.game.modes,
+                  playerPerspectives: item.game.playerPerspectives,
+                  developer: item.game.developer,
+                  summary: item.game.summary,
+                  description: item.game.description,
+                  userNotes: item.game.userNotes,
+                  similarGames: item.game.similarGames,
+                },
+              });
+              if (pooled) {
+                const arr = Array.from(pooled);
+                embeddingCacheRef.set(item.game.id, arr);
+                generated++;
+                try {
+                  await annIndex.addVectors([{ id: item.game.id, vector: arr }]);
+                } catch { /* ANN not ready yet */ }
+                await bumpEmbeddingContentEpoch();
+              }
+            } catch (err) {
+              console.warn(`[EmbeddingService] Library chunk write failed for ${item.game.id}:`, err);
+            }
+          }
+          setEmbeddingCache(embeddingCacheRef);
         }
 
         completed += batch.length;
@@ -895,24 +1211,12 @@ class EmbeddingService {
         }
       }
 
-      for (const entry of allNewEntries) {
-        embeddingCacheRef.set(entry.gameId, entry.embedding);
-      }
-      setEmbeddingCache(embeddingCacheRef);
-
-      if (allNewEntries.length > 0) {
-        try {
-          const annBatch = allNewEntries.map(e => ({ id: e.gameId, vector: e.embedding }));
-          await annIndex.addVectors(annBatch);
-        } catch { /* ANN not ready yet — catalog gen will backfill later */ }
-      }
-
-      const status = (allNewEntries.length > 0 || this._loadedCount > 0) ? 'ready' as const : 'unavailable' as const;
+      const status = (generated > 0 || this._loadedCount > 0) ? 'ready' as const : 'unavailable' as const;
       this._setLibraryStatus(status);
       this._libraryProgress = { completed: 0, total: 0 };
 
-      console.log(`[EmbeddingService] Generated ${allNewEntries.length} new embeddings, total cached: ${embeddingCacheRef.size}`);
-      return allNewEntries.length;
+      console.log(`[EmbeddingService] Generated ${generated} new embeddings, total cached: ${embeddingCacheRef.size}`);
+      return generated;
     } catch (err) {
       console.warn('[EmbeddingService] Error generating embeddings:', err);
       this._setLibraryStatus('unavailable');
@@ -1023,10 +1327,11 @@ class EmbeddingService {
         return 0;
       }
 
+      const chunkingEnabled = await isEmbeddingChunkingEnabled();
       const cachedHashes = await getCatalogHashIndex();
       const cachedTimestamps = await getCatalogTimestampIndex();
 
-      const needsEmbedding: Array<{ id: string; text: string; hash: string }> = [];
+      const needsEmbedding: Array<{ id: string; text: string; hash: string; entry: CatalogEntry }> = [];
       const refreshTimestampIds: string[] = [];
       let scannedTotal = 0;
       const refreshCutoff = Date.now() - TTL_REFRESH_THRESHOLD_MS;
@@ -1036,14 +1341,14 @@ class EmbeddingService {
           const id = `steam-${entry.appid}`;
           const text = buildCatalogEmbeddingText(entry);
           const hash = hashText(text);
-          const existingHash = cachedHashes.get(id);
-          if (existingHash === hash) {
+          const existing = cachedHashes.get(id);
+          if (shouldSkipPooled(existing, hash)) {
             // Same content — just touch the timestamp if it's getting stale.
             const ts = cachedTimestamps.get(id) ?? 0;
             if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
             continue;
           }
-          needsEmbedding.push({ id, text, hash });
+          needsEmbedding.push({ id, text, hash, entry });
         }
         scannedTotal += batch.length;
       });
@@ -1077,7 +1382,10 @@ class EmbeddingService {
         return 0;
       }
 
-      console.log(`[EmbeddingService] Generating ${needsEmbedding.length} catalog embeddings (background)...`);
+      console.log(
+        `[EmbeddingService] Generating ${needsEmbedding.length} catalog embeddings ` +
+        `(chunking=${chunkingEnabled ? 'on' : 'off'})...`,
+      );
       this._catalogProgress = { completed: 0, total: needsEmbedding.length };
       this._notify();
 
@@ -1085,40 +1393,78 @@ class EmbeddingService {
       const IDLE_DELAY_MS = 200;
       let totalGenerated = 0;
       let completed = 0;
+      let writeFailures = 0;
 
       for (let i = 0; i < needsEmbedding.length; i += EMBED_BATCH) {
         await this._awaitIfPaused();
         if (signal.aborted) break;
 
         const batch = needsEmbedding.slice(i, i + EMBED_BATCH);
-        const items = batch.map(b => ({ id: b.id, text: b.text }));
 
-        const results = await window.ollama!.generateEmbeddings(items);
-
-        const batchEntries: CachedEmbedding[] = [];
-        for (const item of batch) {
-          if (results[item.id]) {
-            batchEntries.push({
-              gameId: item.id,
-              embedding: results[item.id],
-              textHash: item.hash,
-              timestamp: Date.now(),
-            });
+        if (!chunkingEnabled) {
+          const items = batch.map(b => ({ id: b.id, text: b.text }));
+          const results = await window.ollama!.generateEmbeddings(items);
+          const batchEntries: CachedEmbedding[] = [];
+          for (const item of batch) {
+            if (results[item.id]) {
+              batchEntries.push({
+                gameId: item.id,
+                embedding: results[item.id],
+                textHash: item.hash,
+                timestamp: Date.now(),
+                format: 'f32',
+              });
+            }
           }
-        }
-
-        if (batchEntries.length > 0) {
-          await saveCachedEmbeddings(batchEntries, CATALOG_STORE);
-          totalGenerated += batchEntries.length;
-
-          // Feed new vectors to the ANN index incrementally
-          try {
-            const annBatch = batchEntries.map(e => ({
-              id: e.gameId,
-              vector: e.embedding,
-            }));
-            await annIndex.addVectors(annBatch);
-          } catch { /* ANN not ready yet — non-fatal */ }
+          if (batchEntries.length > 0) {
+            try {
+              await saveCachedEmbeddings(batchEntries, CATALOG_STORE);
+              totalGenerated += batchEntries.length;
+              try {
+                await annIndex.addVectors(
+                  batchEntries
+                    .filter(e => e.embedding)
+                    .map(e => ({ id: e.gameId, vector: e.embedding! })),
+                );
+              } catch { /* ANN not ready yet — non-fatal */ }
+              await bumpEmbeddingContentEpoch();
+            } catch (err) {
+              writeFailures += batchEntries.length;
+              console.warn('[EmbeddingService] Catalog float persist failed:', err);
+            }
+          }
+        } else {
+          for (const item of batch) {
+            await this._awaitIfPaused();
+            if (signal.aborted) break;
+            try {
+              const pooled = await embedAndPersistChunkedGame({
+                tier: 'cat',
+                gameId: item.id,
+                pooledStore: CATALOG_STORE,
+                wholeHash: item.hash,
+                chunkInput: {
+                  title: item.entry.name,
+                  genres: item.entry.genres,
+                  themes: item.entry.themes,
+                  modes: item.entry.modes,
+                  developer: item.entry.developer,
+                  shortDescription: item.entry.shortDescription,
+                  source: 'steam',
+                },
+              });
+              if (pooled) {
+                totalGenerated++;
+                try {
+                  await annIndex.addVectors([{ id: item.id, vector: Array.from(pooled) }]);
+                } catch { /* ANN not ready yet — non-fatal */ }
+                await bumpEmbeddingContentEpoch();
+              }
+            } catch (err) {
+              writeFailures++;
+              console.warn(`[EmbeddingService] Catalog chunk write failed for ${item.id}:`, err);
+            }
+          }
         }
 
         completed += batch.length;
@@ -1142,9 +1488,8 @@ class EmbeddingService {
       }
       annIndex.finishBuild();
 
-      // Only write the watermark when the pass ran to completion (not aborted).
-      // A partial pass would otherwise look like full coverage on next launch.
-      if (!signal.aborted && lastSyncTimestamp > 0) {
+      // Watermark only when pass completed with no unpersisted failures.
+      if (!signal.aborted && writeFailures === 0 && lastSyncTimestamp > 0) {
         await setEmbeddingMeta<EmbeddingPassWatermark>({
           key: storeKey,
           syncTimestamp: lastSyncTimestamp,
@@ -1217,10 +1562,11 @@ class EmbeddingService {
         return 0;
       }
 
+      const chunkingEnabled = await isEmbeddingChunkingEnabled();
       const cachedHashes = await getCatalogHashIndex();
       const cachedTimestamps = await getCatalogTimestampIndex();
 
-      const needsEmbedding: Array<{ id: string; text: string; hash: string }> = [];
+      const needsEmbedding: Array<{ id: string; text: string; hash: string; entry: EpicCatalogEntry }> = [];
       const refreshTimestampIds: string[] = [];
       let scannedTotal = 0;
       const refreshCutoff = Date.now() - TTL_REFRESH_THRESHOLD_MS;
@@ -1230,13 +1576,13 @@ class EmbeddingService {
           const id = `epic-${entry.epicId}`;
           const text = buildEpicCatalogEmbeddingText(entry);
           const hash = hashText(text);
-          const existingHash = cachedHashes.get(id);
-          if (existingHash === hash) {
+          const existing = cachedHashes.get(id);
+          if (shouldSkipPooled(existing, hash)) {
             const ts = cachedTimestamps.get(id) ?? 0;
             if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
             continue;
           }
-          needsEmbedding.push({ id, text, hash });
+          needsEmbedding.push({ id, text, hash, entry });
         }
         scannedTotal += batch.length;
       });
@@ -1263,7 +1609,10 @@ class EmbeddingService {
         return 0;
       }
 
-      console.log(`[EmbeddingService] Generating ${needsEmbedding.length} Epic catalog embeddings (background)...`);
+      console.log(
+        `[EmbeddingService] Generating ${needsEmbedding.length} Epic catalog embeddings ` +
+        `(chunking=${chunkingEnabled ? 'on' : 'off'})...`,
+      );
       this._catalogProgress = { completed: 0, total: needsEmbedding.length };
       this._notify();
 
@@ -1271,35 +1620,79 @@ class EmbeddingService {
       const IDLE_DELAY_MS = 200;
       let totalGenerated = 0;
       let completed = 0;
+      let writeFailures = 0;
 
       for (let i = 0; i < needsEmbedding.length; i += EMBED_BATCH) {
         await this._awaitIfPaused();
         if (signal.aborted) break;
 
         const batch = needsEmbedding.slice(i, i + EMBED_BATCH);
-        const items = batch.map(b => ({ id: b.id, text: b.text }));
-        const results = await window.ollama!.generateEmbeddings(items);
 
-        const batchEntries: CachedEmbedding[] = [];
-        for (const item of batch) {
-          if (results[item.id]) {
-            batchEntries.push({
-              gameId: item.id,
-              embedding: results[item.id],
-              textHash: item.hash,
-              timestamp: Date.now(),
-            });
+        if (!chunkingEnabled) {
+          const items = batch.map(b => ({ id: b.id, text: b.text }));
+          const results = await window.ollama!.generateEmbeddings(items);
+          const batchEntries: CachedEmbedding[] = [];
+          for (const item of batch) {
+            if (results[item.id]) {
+              batchEntries.push({
+                gameId: item.id,
+                embedding: results[item.id],
+                textHash: item.hash,
+                timestamp: Date.now(),
+                format: 'f32',
+              });
+            }
           }
-        }
-
-        if (batchEntries.length > 0) {
-          await saveCachedEmbeddings(batchEntries, CATALOG_STORE);
-          totalGenerated += batchEntries.length;
-
-          try {
-            const annBatch = batchEntries.map(e => ({ id: e.gameId, vector: e.embedding }));
-            await annIndex.addVectors(annBatch);
-          } catch { /* ANN not ready yet — non-fatal */ }
+          if (batchEntries.length > 0) {
+            try {
+              await saveCachedEmbeddings(batchEntries, CATALOG_STORE);
+              totalGenerated += batchEntries.length;
+              try {
+                await annIndex.addVectors(
+                  batchEntries
+                    .filter(e => e.embedding)
+                    .map(e => ({ id: e.gameId, vector: e.embedding! })),
+                );
+              } catch { /* ANN not ready yet — non-fatal */ }
+              await bumpEmbeddingContentEpoch();
+            } catch (err) {
+              writeFailures += batchEntries.length;
+              console.warn('[EmbeddingService] Epic float persist failed:', err);
+            }
+          }
+        } else {
+          for (const item of batch) {
+            await this._awaitIfPaused();
+            if (signal.aborted) break;
+            try {
+              const pooled = await embedAndPersistChunkedGame({
+                tier: 'cat',
+                gameId: item.id,
+                pooledStore: CATALOG_STORE,
+                wholeHash: item.hash,
+                chunkInput: {
+                  title: item.entry.name,
+                  genres: item.entry.genres,
+                  themes: item.entry.themes,
+                  modes: item.entry.modes,
+                  developer: item.entry.developer,
+                  description: item.entry.description,
+                  longDescription: item.entry.longDescription,
+                  source: 'epic',
+                },
+              });
+              if (pooled) {
+                totalGenerated++;
+                try {
+                  await annIndex.addVectors([{ id: item.id, vector: Array.from(pooled) }]);
+                } catch { /* ANN not ready yet — non-fatal */ }
+                await bumpEmbeddingContentEpoch();
+              }
+            } catch (err) {
+              writeFailures++;
+              console.warn(`[EmbeddingService] Epic chunk write failed for ${item.id}:`, err);
+            }
+          }
         }
 
         completed += batch.length;
@@ -1321,7 +1714,7 @@ class EmbeddingService {
         console.log(`[EmbeddingService] ANN index saved (Epic): ${annIndex.vectorCount} vectors`);
       }
 
-      if (!signal.aborted && lastSyncTimestamp > 0) {
+      if (!signal.aborted && writeFailures === 0 && lastSyncTimestamp > 0) {
         await setEmbeddingMeta<EmbeddingPassWatermark>({
           key: storeKey,
           syncTimestamp: lastSyncTimestamp,
@@ -1388,13 +1781,14 @@ class EmbeddingService {
             return;
           }
           const entry = cursor.value as CachedEmbedding;
+          const vec = readPooledVector(entry);
           if (
-            entry.embedding?.length === 1024 &&
+            vec &&
             !seen.has(entry.gameId) &&
             now - entry.timestamp < ttl
           ) {
             seen.add(entry.gameId);
-            batch.push({ id: entry.gameId, vector: entry.embedding });
+            batch.push({ id: entry.gameId, vector: Array.from(vec) });
           }
           if (batch.length >= BATCH) {
             // Yield after each flush so other work (UI, IPC, sync) gets cycles.
@@ -1433,13 +1827,13 @@ class EmbeddingService {
 export const embeddingService = new EmbeddingService();
 
 /**
- * Get the total number of cached embeddings across both stores
- * without loading the actual vectors (fast IDB count).
+ * Pooled embedding count only (library + catalog). Never includes chunk-embeddings.
  */
-export async function getEmbeddingCount(): Promise<number> {
+export async function getPooledEmbeddingCount(): Promise<number> {
   const db = await getDB();
   const countStore = (name: string): Promise<number> =>
     new Promise((resolve) => {
+      if (!db.objectStoreNames.contains(name)) { resolve(0); return; }
       const tx = db.transaction(name, 'readonly');
       const req = tx.objectStore(name).count();
       req.onsuccess = () => resolve(req.result);
@@ -1453,8 +1847,15 @@ export async function getEmbeddingCount(): Promise<number> {
 }
 
 /**
+ * Alias of getPooledEmbeddingCount — must not include chunk store rows.
+ */
+export async function getEmbeddingCount(): Promise<number> {
+  return getPooledEmbeddingCount();
+}
+
+/**
  * Retrieve a single embedding vector by gameId (checks library store first,
- * then catalog). Returns null if not found.
+ * then catalog). Returns null if not found. Always dequantized f32 number[].
  */
 export async function getEmbeddingById(gameId: string): Promise<number[] | null> {
   const db = await getDB();
@@ -1465,8 +1866,8 @@ export async function getEmbeddingById(gameId: string): Promise<number[] | null>
       const req = tx.objectStore(name).get(gameId);
       req.onsuccess = () => {
         const entry = req.result as CachedEmbedding | undefined;
-        if (entry?.embedding && now - entry.timestamp < ttl) {
-          resolve(entry.embedding);
+        if (entry && now - entry.timestamp < ttl) {
+          resolve(pooledVectorAsNumberArray(entry));
         } else {
           resolve(null);
         }
@@ -1506,7 +1907,7 @@ export async function loadAllEmbeddingsForGraph(
         if (!cursor) { resolve(); return; }
         const entry = cursor.value as CachedEmbedding;
         if (
-          entry.embedding?.length === dim &&
+          readPooledVector(entry) &&
           !seen.has(entry.gameId) &&
           now - entry.timestamp < ttl
         ) {
@@ -1542,9 +1943,10 @@ export async function loadAllEmbeddingsForGraph(
         const cursor = req.result;
         if (!cursor) { resolve(); return; }
         const entry = cursor.value as CachedEmbedding;
-        if (entry.embedding?.length === dim && now - entry.timestamp < ttl) {
+        const vec = readPooledVector(entry);
+        if (vec && now - entry.timestamp < ttl) {
           const idx = idToIdx.get(entry.gameId);
-          if (idx !== undefined) data.set(entry.embedding, idx * dim);
+          if (idx !== undefined) data.set(vec, idx * dim);
         }
         cursor.continue();
       };
@@ -1603,7 +2005,7 @@ export async function loadProjectedEmbeddingsForGraph(
         if (!cursor) { resolve(); return; }
         const entry = cursor.value as CachedEmbedding;
         if (
-          entry.embedding?.length === srcDim &&
+          readPooledVector(entry) &&
           !seen.has(entry.gameId) &&
           now - entry.timestamp < ttl
         ) {
@@ -1642,10 +2044,10 @@ export async function loadProjectedEmbeddingsForGraph(
         const cursor = req.result;
         if (!cursor) { resolve(); return; }
         const entry = cursor.value as CachedEmbedding;
-        if (entry.embedding?.length === srcDim && now - entry.timestamp < ttl) {
+        const emb = readPooledVector(entry);
+        if (emb && now - entry.timestamp < ttl) {
           const idx = idToIdx.get(entry.gameId);
           if (idx !== undefined) {
-            const emb = entry.embedding;
             let norm = 0;
             for (let j = 0; j < srcDim; j++) norm += emb[j] * emb[j];
             norm = Math.sqrt(norm);

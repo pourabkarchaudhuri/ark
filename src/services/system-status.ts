@@ -80,7 +80,12 @@ const IDB_DATABASES: Array<{ label: string; subtitle?: string; dbName: string; v
   { label: 'Browse Cache', dbName: 'ark-browse-cache', version: 1, stores: ['data'] },
   { label: 'Game Cache', dbName: 'ark-game-cache', version: 2, stores: ['games', 'genres', 'platforms', 'searchResults', 'metadata'] },
   { label: 'Catalog Cache', dbName: 'ark-catalog-cache', version: 1, stores: ['appList', 'meta'] },
-  { label: 'Embeddings', dbName: 'ark-embeddings', version: 2, stores: ['embeddings', 'catalog-embeddings'] },
+  {
+    label: 'Embeddings',
+    dbName: 'ark-embeddings',
+    version: 4,
+    stores: ['embeddings', 'catalog-embeddings', 'embedding-meta', 'chunk-embeddings'],
+  },
   { label: 'Galaxy Cache', dbName: 'galaxy-cache', version: 1, stores: ['data'] },
 ];
 
@@ -114,9 +119,11 @@ async function measureIdbStore(dbName: string, version: number, stores: string[]
             countReq.onsuccess = () => {
               const cnt = countReq.result ?? 0;
               totalCount += cnt;
-              // Rough size estimate: 200 bytes per entry for metadata stores,
-              // 4KB for embedding entries, 2KB for game entries
-              const avgSize = storeName.includes('embedding') ? 4096
+              // Rough size estimate: pooled int8 ~1536B, chunk rows ~1400B,
+              // legacy float pooled was ~4KB; metadata/game stores smaller.
+              const avgSize = storeName === 'chunk-embeddings' ? 1400
+                : storeName === 'embeddings' || storeName === 'catalog-embeddings' ? 1536
+                : storeName.includes('embedding') ? 1536
                 : storeName === 'entries' ? 512
                 : storeName === 'data' || storeName === 'games' ? 2048
                 : 256;

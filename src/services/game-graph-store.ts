@@ -14,6 +14,7 @@
  */
 
 import { annIndex } from './ann-index';
+import { getEmbeddingDB, readPooledVector, type CachedEmbedding as PooledEmbedding } from './embedding-service';
 
 export interface GraphScores {
   pageRank: number;
@@ -103,37 +104,38 @@ async function idbPut<T>(key: string, value: T): Promise<void> {
   });
 }
 
-interface CachedEmbedding { gameId: string; embedding: number[] }
+interface GraphEmbeddingRow { gameId: string; embedding: number[] }
 
-/** Read every cached embedding from both library and catalog stores. */
-async function readAllEmbeddings(): Promise<CachedEmbedding[]> {
-  const dbReq = await new Promise<IDBDatabase | null>((resolve) => {
-    const r = indexedDB.open('ark-embeddings', 2);
-    r.onsuccess = () => resolve(r.result);
-    r.onerror = () => resolve(null);
-    r.onblocked = () => resolve(null);
-  });
-  if (!dbReq) return [];
-  const all: CachedEmbedding[] = [];
+/** Read every cached embedding from both library and catalog stores (decode boundary). */
+async function readAllEmbeddings(): Promise<GraphEmbeddingRow[]> {
+  let db: IDBDatabase;
+  try {
+    db = await getEmbeddingDB();
+  } catch {
+    return [];
+  }
+  const all: GraphEmbeddingRow[] = [];
   const seen = new Set<string>();
   for (const storeName of ['embeddings', 'catalog-embeddings']) {
-    if (!dbReq.objectStoreNames.contains(storeName)) continue;
+    if (!db.objectStoreNames.contains(storeName)) continue;
     await new Promise<void>((resolve) => {
-      const tx = dbReq.transaction(storeName, 'readonly');
+      const tx = db.transaction(storeName, 'readonly');
       const req = tx.objectStore(storeName).getAll();
       req.onsuccess = () => {
-        for (const entry of (req.result as Array<{ gameId: string; embedding: number[] }>)) {
-          if (!entry?.gameId || !Array.isArray(entry.embedding)) continue;
+        for (const entry of (req.result as PooledEmbedding[])) {
+          if (!entry?.gameId) continue;
+          const vec = readPooledVector(entry);
+          if (!vec) continue;
           if (seen.has(entry.gameId)) continue;
           seen.add(entry.gameId);
-          all.push({ gameId: entry.gameId, embedding: entry.embedding });
+          all.push({ gameId: entry.gameId, embedding: Array.from(vec) });
         }
         resolve();
       };
       req.onerror = () => resolve();
     });
   }
-  dbReq.close();
+  // Do not close the shared embedding DB — owned by embedding-service.
   return all;
 }
 
