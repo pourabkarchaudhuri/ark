@@ -315,6 +315,10 @@ contextBridge.exposeInMainWorld('settings', {
   // Set in-game overlay HUD enabled setting (applies live)
   setOverlayEnabled: (enabled) =>
     ipcRenderer.invoke('settings:setOverlayEnabled', enabled),
+
+  // Whether Shift+Win+D (Super+Shift+D) bound successfully this session
+  getOverlayCycleHotkeyRegistered: () =>
+    ipcRenderer.invoke('settings:getOverlayCycleHotkeyRegistered'),
 });
 
 // Overlay HUD bridge — detail-level pushes from main (global hotkeys).

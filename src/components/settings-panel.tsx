@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
 import { gameService } from '@/services/game-service';
 import { embeddingService } from '@/services/embedding-service';
+import { annIndex } from '@/services/ann-index';
 import { useDevMode } from '@/hooks/useDevMode';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
@@ -61,6 +62,7 @@ declare global {
       setBetaFeatures: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
       getOverlayEnabled?: () => Promise<boolean>;
       setOverlayEnabled?: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+      getOverlayCycleHotkeyRegistered?: () => Promise<boolean>;
     };
   }
 }
@@ -92,6 +94,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
   const [annRebuildStatus, setAnnRebuildStatus] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
   const [annRebuildMessage, setAnnRebuildMessage] = useState<string | null>(null);
+  const [annRebuildProgress, setAnnRebuildProgress] = useState<{ done: number; total: number } | null>(null);
   const [useGeminiInstead, setUseGeminiInstead] = useState(false);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
@@ -100,6 +103,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [autoLaunch, setAutoLaunchState] = useState(true);
   // In-game overlay HUD (opt-in)
   const [overlayEnabled, setOverlayEnabledState] = useState(false);
+  const [overlayCycleHotkeyOk, setOverlayCycleHotkeyOk] = useState(true);
   
   // Library import/export state
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
@@ -163,6 +167,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
 
         // In-game overlay HUD toggle — optional until IPC wiring lands.
         window.settings?.getOverlayEnabled?.().then(setOverlayEnabledState).catch(() => {});
+        window.settings?.getOverlayCycleHotkeyRegistered?.().then(setOverlayCycleHotkeyOk).catch(() => {});
         
         // Mark initial load complete after fetching
         initialLoadRef.current = false;
@@ -501,6 +506,11 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       <p className="text-[11px] text-white/25 mt-1.5 font-mono tracking-wide">
                         {OVERLAY_TOGGLE_HOTKEY_LABEL} dismiss / re-enable · {OVERLAY_CYCLE_HOTKEY_LABEL} cycle detail
                       </p>
+                      {!overlayCycleHotkeyOk && (
+                        <p className="text-[11px] text-amber-400/70 mt-1">
+                          Cycle hotkey ({OVERLAY_CYCLE_HOTKEY_LABEL}) failed to bind — already in use.
+                        </p>
+                      )}
                     </div>
                     <button
                       type="button"
@@ -737,6 +747,11 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       <p className="text-[11px] text-white/25 mt-0.5">
                         Clear and rebuild neighbors from cached embeddings (no Ollama calls).
                       </p>
+                      {annRebuildStatus === 'building' && annRebuildProgress && (
+                        <p className="text-[11px] mt-0.5 text-white/40">
+                          {annRebuildProgress.done} / {annRebuildProgress.total} vectors
+                        </p>
+                      )}
                       {annRebuildMessage && (
                         <p className={cn(
                           'text-[11px] mt-0.5',
@@ -754,6 +769,10 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       onClick={async () => {
                         setAnnRebuildStatus('building');
                         setAnnRebuildMessage(null);
+                        setAnnRebuildProgress({ done: 0, total: 1 });
+                        const unsub = annIndex.subscribe(() => {
+                          setAnnRebuildProgress({ ...annIndex.buildProgress });
+                        });
                         try {
                           const count = await embeddingService.rebuildAnnFromCache();
                           setAnnRebuildStatus('done');
@@ -761,8 +780,12 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                           console.log(`[Settings] ANN rebuild complete: ${count} vectors`);
                         } catch (err) {
                           setAnnRebuildStatus('error');
-                          setAnnRebuildMessage('Rebuild failed');
+                          const detail = err instanceof Error ? err.message : String(err);
+                          setAnnRebuildMessage(`Rebuild failed: ${detail}`);
                           console.warn('[Settings] ANN rebuild failed:', err);
+                        } finally {
+                          unsub();
+                          setAnnRebuildProgress(null);
                         }
                       }}
                       className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"

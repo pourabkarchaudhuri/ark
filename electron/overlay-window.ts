@@ -14,7 +14,7 @@
  *    of in-game mouse lag. `focusable: false` keeps the game in focus.
  *  - `backgroundThrottling` starts true at create; we disable it only while the
  *    HUD is shown so the clock/fades keep running under a foreground game.
- *  - Detail levels (collapsed → compact → expanded) resize the HWND; cycling is
+ *  - Detail levels (collapsed ↔ compact) resize the HWND; cycling is
  *    a global hotkey so the renderer stays click-through.
  */
 
@@ -27,6 +27,7 @@ import {
   DEFAULT_OVERLAY_DETAIL_LEVEL,
   OVERLAY_CYCLE_HOTKEY,
   OVERLAY_TOGGLE_HOTKEY,
+  coerceOverlayDetailLevel,
   cycleDetailLevel,
   overlaySizeForLevel,
   type OverlayDetailLevel,
@@ -142,18 +143,19 @@ export function getOverlayDetailLevel(): OverlayDetailLevel {
   return detailLevel;
 }
 
-export function setOverlayDetailLevel(level: OverlayDetailLevel): void {
-  if (detailLevel === level) {
+export function setOverlayDetailLevel(level: OverlayDetailLevel | string): void {
+  const next = coerceOverlayDetailLevel(level);
+  if (detailLevel === next) {
     pushDetailLevelToRenderer();
     return;
   }
-  detailLevel = level;
+  detailLevel = next;
   applyWindowSize();
   positionOverlay();
   pushDetailLevelToRenderer();
 }
 
-/** Cycle collapsed → compact → expanded → collapsed; resize + notify renderer. */
+/** Cycle collapsed ↔ compact; resize + notify renderer. */
 export function cycleOverlayDetailLevel(): OverlayDetailLevel {
   detailLevel = cycleDetailLevel(detailLevel);
   applyWindowSize();
@@ -161,6 +163,11 @@ export function cycleOverlayDetailLevel(): OverlayDetailLevel {
   pushDetailLevelToRenderer();
   logger.log(`[Overlay] Detail level → ${detailLevel}`);
   return detailLevel;
+}
+
+/** Whether Super+Shift+D (Shift+Win+D) registered successfully this session. */
+export function isOverlayCycleHotkeyRegistered(): boolean {
+  return cycleHotkeyRegistered;
 }
 
 // ---------------------------------------------------------------------------

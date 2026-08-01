@@ -104,6 +104,83 @@ async function idbPut<T>(key: string, value: T): Promise<void> {
   });
 }
 
+export type GraphScoreBuffers = {
+  pageRank: Float32Array;
+  personalizedPageRank: Float32Array | null;
+  authority: Float32Array;
+  hub: Float32Array;
+  nodeBetweenness: Float32Array | null;
+  edgeBetweenness: Float32Array | null;
+  prDelta: Float32Array | null;
+  community: Int32Array;
+  degree: Uint16Array;
+};
+
+/**
+ * Slice edges/personalization before worker transfer so the originals stay
+ * attached for adjacency + IDB persist (transferring detaches the buffer).
+ */
+export function prepareGraphWorkerTransfer(
+  edges: Float32Array,
+  personalization: Float32Array | null,
+): {
+  edgesForWorker: Float32Array;
+  personalizationForWorker: Float32Array | null;
+  transferList: ArrayBuffer[];
+} {
+  const edgesForWorker = edges.slice();
+  const personalizationForWorker = personalization ? personalization.slice() : null;
+  const transferList: ArrayBuffer[] = [edgesForWorker.buffer as ArrayBuffer];
+  if (personalizationForWorker) {
+    transferList.push(personalizationForWorker.buffer as ArrayBuffer);
+  }
+  return { edgesForWorker, personalizationForWorker, transferList };
+}
+
+function isDetachedBuffer(view: ArrayBufferView): boolean {
+  const buf = view.buffer as ArrayBuffer;
+  if (typeof buf.detached === 'boolean') return buf.detached;
+  // Fallback: non-empty logical length over a zero-byte buffer ⇒ detached
+  // (empty views also have byteLength 0, so length must be checked).
+  return view.byteLength === 0 && (view as { length?: number }).length! > 0;
+}
+
+/** Fresh Float32Array for IDB; never returns a view over a detached buffer. */
+export function copyFloat32ForPersist(
+  view: Float32Array | null | undefined,
+): Float32Array | null {
+  if (!view) return null;
+  if (isDetachedBuffer(view)) {
+    return new Float32Array(view.length);
+  }
+  return new Float32Array(view);
+}
+
+function copyInt32ForPersist(view: Int32Array): Int32Array {
+  if (isDetachedBuffer(view)) return new Int32Array(view.length);
+  return new Int32Array(view);
+}
+
+function copyUint16ForPersist(view: Uint16Array): Uint16Array {
+  if (isDetachedBuffer(view)) return new Uint16Array(view.length);
+  return new Uint16Array(view);
+}
+
+/** Defensive copies so score buffers are always structured-clone / IDB safe. */
+export function copyScoresForPersist(scores: GraphScoreBuffers): GraphScoreBuffers {
+  return {
+    pageRank: copyFloat32ForPersist(scores.pageRank) ?? new Float32Array(0),
+    personalizedPageRank: copyFloat32ForPersist(scores.personalizedPageRank),
+    authority: copyFloat32ForPersist(scores.authority) ?? new Float32Array(0),
+    hub: copyFloat32ForPersist(scores.hub) ?? new Float32Array(0),
+    nodeBetweenness: copyFloat32ForPersist(scores.nodeBetweenness),
+    edgeBetweenness: copyFloat32ForPersist(scores.edgeBetweenness),
+    prDelta: copyFloat32ForPersist(scores.prDelta),
+    community: copyInt32ForPersist(scores.community),
+    degree: copyUint16ForPersist(scores.degree),
+  };
+}
+
 interface GraphEmbeddingRow { gameId: string; embedding: number[] }
 
 /** Read every cached embedding from both library and catalog stores (decode boundary). */
@@ -520,7 +597,7 @@ class GameGraphStore {
     await idbPut(META_KEY, meta);
     await idbPut(NODE_IDS_KEY, nodeIds);
     await idbPut(EDGES_KEY, edges);
-    await idbPut(SCORES_KEY, this._scores);
+    await idbPut(SCORES_KEY, copyScoresForPersist(this._scores));
 
     this._state = { phase: 'ready', meta };
     this._notify();
@@ -560,15 +637,23 @@ class GameGraphStore {
           this._notify();
         } else if (msg?.type === 'result') {
           worker.terminate();
-          // Defensive re-wrap. Structured-clone preserves typed-array types, but if a
+          // Defensive re-wrap + copy. Structured-clone preserves typed-array types, but if a
           // worker host serializes via JSON or transfers buffers without the view,
           // we'd silently get plain ArrayBuffers and fail downstream `instanceof` checks.
-          const wrapF = (v: Float32Array | null | undefined): Float32Array | null =>
-            v ? (v instanceof Float32Array ? v : new Float32Array(v as unknown as ArrayBuffer)) : null;
-          const wrapI32 = (v: Int32Array | undefined): Int32Array =>
-            v instanceof Int32Array ? v : new Int32Array((v as unknown as ArrayBuffer) ?? 0);
-          const wrapU16 = (v: Uint16Array | undefined): Uint16Array =>
-            v instanceof Uint16Array ? v : new Uint16Array((v as unknown as ArrayBuffer) ?? 0);
+          // Always allocate a fresh view so IDB never sees a detached buffer.
+          const wrapF = (v: Float32Array | null | undefined): Float32Array | null => {
+            if (!v) return null;
+            const asF = v instanceof Float32Array ? v : new Float32Array(v as unknown as ArrayBuffer);
+            return copyFloat32ForPersist(asF);
+          };
+          const wrapI32 = (v: Int32Array | undefined): Int32Array => {
+            const asI = v instanceof Int32Array ? v : new Int32Array((v as unknown as ArrayBuffer) ?? 0);
+            return copyInt32ForPersist(asI);
+          };
+          const wrapU16 = (v: Uint16Array | undefined): Uint16Array => {
+            const asU = v instanceof Uint16Array ? v : new Uint16Array((v as unknown as ArrayBuffer) ?? 0);
+            return copyUint16ForPersist(asU);
+          };
           resolve({
             pageRank: wrapF(msg.pageRank) ?? new Float32Array(0),
             personalizedPageRank: wrapF(msg.personalizedPageRank),
@@ -591,9 +676,14 @@ class GameGraphStore {
         reject(err.error ?? new Error(err.message ?? 'Worker errored'));
       };
 
-      const transfers: ArrayBuffer[] = [edges.buffer as ArrayBuffer];
-      if (personalization) transfers.push(personalization.buffer as ArrayBuffer);
-      worker.postMessage({ type: 'compute', nodeIds, edges, personalization }, transfers);
+      // Transfer copies only — keep caller `edges` / `personalization` attached for
+      // Phase C adjacency + idbPut (transferring would detach the originals).
+      const { edgesForWorker, personalizationForWorker, transferList } =
+        prepareGraphWorkerTransfer(edges, personalization);
+      worker.postMessage(
+        { type: 'compute', nodeIds, edges: edgesForWorker, personalization: personalizationForWorker },
+        transferList,
+      );
     });
   }
 }

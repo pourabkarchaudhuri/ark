@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.57': {
+    title: "What's New in Ark 1.0.57",
+    changes: [
+      'ANN Rebuild fixed — index backfill no longer hangs with TransactionInactiveError; Settings shows real progress and surfaces failures.',
+      'Graph build fixed — no more DataCloneError from transferring edge buffers; Oracle/Embedding Space can reach graph-ready again.',
+      'Overlay simplified to collapsed + compact only; cycle with Shift+Win+D (toggle still Ctrl+Shift+O). Legacy expanded becomes compact. Click-through still without mouse forward.',
+      'Rebuild ANN and What’s New blocks remain in Settings; Timeshear / Cartographer / Monuments stay removed.',
+    ],
+  },
   '1.0.56': {
     title: "What's New in Ark 1.0.56",
     changes: [

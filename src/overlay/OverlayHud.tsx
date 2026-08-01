@@ -4,17 +4,16 @@ import { customGameStore } from '@/services/custom-game-store';
 import {
   DEFAULT_OVERLAY_DETAIL_LEVEL,
   OVERLAY_SHORTCUT_HINT_LABEL,
-  isOverlayDetailLevel,
+  coerceOverlayDetailLevel,
   type OverlayDetailLevel,
 } from './detail-level';
 
 /**
  * OverlayHud — minimal translucent in-game corner HUD.
  *
- * Detail levels (cycled via Ctrl+Shift+D from the main process):
+ * Detail levels (cycled via Shift+Win+D / Super+Shift+D from the main process):
  *  - collapsed: tiny live pill
- *  - compact: game name + timer
- *  - expanded: badge + name + realtime timer + last live sync
+ *  - compact: game name + timer + shortcut hint
  *
  * Event-driven off `window.sessionTracker` — no new tracking logic.
  * Click-through is enforced by the BrowserWindow (no mouse forwarding).
@@ -56,7 +55,7 @@ interface SessionTrackerBridge {
 }
 
 interface OverlayHudBridge {
-  onDetailLevel: (cb: (level: OverlayDetailLevel) => void) => Unsubscribe;
+  onDetailLevel: (cb: (level: OverlayDetailLevel | string) => void) => Unsubscribe;
 }
 
 function normalizeGameId(id: number | string): string {
@@ -108,28 +107,17 @@ function formatCompactDuration(totalSeconds: number): string {
   return formatDuration(s);
 }
 
-function formatClock(epochMs: number): string {
-  if (epochMs <= 0) return '—';
-  try {
-    return new Date(epochMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return '—';
-  }
-}
-
 const FADE_OUT_MS = 320;
 
 interface DisplayedGame {
   gameId: string;
   name: string;
-  startedAt: number;
 }
 
 export function OverlayHud() {
   const [game, setGame] = useState<DisplayedGame | null>(null);
   const [visible, setVisible] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [liveMinutes, setLiveMinutes] = useState<number | null>(null);
   const [detailLevel, setDetailLevel] = useState<OverlayDetailLevel>(DEFAULT_OVERLAY_DETAIL_LEVEL);
 
   const anchorRef = useRef<{ gameId: string; activeSeconds: number; anchoredAt: number } | null>(null);
@@ -146,9 +134,8 @@ export function OverlayHud() {
     clearFadeTimer();
     const activeSeconds = startTime > 0 ? Math.max(0, (Date.now() - startTime) / 1000) : 0;
     anchorRef.current = { gameId, activeSeconds, anchoredAt: Date.now() };
-    setGame({ gameId, name: resolveGameName(gameId), startedAt: startTime });
+    setGame({ gameId, name: resolveGameName(gameId) });
     setElapsedSeconds(activeSeconds);
-    setLiveMinutes(null);
     setVisible(true);
   }, [clearFadeTimer]);
 
@@ -160,16 +147,15 @@ export function OverlayHud() {
       anchorRef.current = null;
       setGame(null);
       setElapsedSeconds(0);
-      setLiveMinutes(null);
     }, FADE_OUT_MS);
   }, [clearFadeTimer]);
 
-  // Detail level from main-process hotkey (Ctrl+Shift+D).
+  // Detail level from main-process hotkey (Super+Shift+D / Shift+Win+D).
   useEffect(() => {
     const bridge = (window as unknown as { overlayHud?: OverlayHudBridge }).overlayHud;
     if (!bridge?.onDetailLevel) return;
     return bridge.onDetailLevel((level) => {
-      if (isOverlayDetailLevel(level)) setDetailLevel(level);
+      setDetailLevel(coerceOverlayDetailLevel(level));
     });
   }, []);
 
@@ -187,8 +173,6 @@ export function OverlayHud() {
           ? startMs
           : Date.now() - (first.elapsedMinutes ?? first.activeMinutes ?? 0) * 60_000;
         showGame(gid, start);
-        const mins = first.elapsedMinutes ?? first.activeMinutes;
-        if (typeof mins === 'number') setLiveMinutes(mins);
       })
       .catch(() => { /* fresh start */ });
 
@@ -202,7 +186,6 @@ export function OverlayHud() {
       const activeSeconds = Math.max(0, (data.activeMinutes ?? 0) * 60);
       anchorRef.current = { gameId: gid, activeSeconds, anchoredAt: Date.now() };
       setElapsedSeconds(activeSeconds);
-      setLiveMinutes(data.activeMinutes ?? 0);
     });
 
     const unsubStatus = bridge.onStatusChange((data) => {
@@ -221,7 +204,7 @@ export function OverlayHud() {
     };
   }, [showGame, hideGame]);
 
-  // Local 1s interpolation — only while compact/expanded (collapsed has no clock).
+  // Local 1s interpolation — only while compact (collapsed has no clock).
   useEffect(() => {
     if (!game || detailLevel === 'collapsed') return;
     const tick = () => {
@@ -265,28 +248,6 @@ export function OverlayHud() {
             {formatCompactDuration(elapsedSeconds)}
           </span>
           <span className="ark-overlay-hint" aria-hidden="true">{OVERLAY_SHORTCUT_HINT_LABEL}</span>
-        </div>
-
-        {/* Expanded: full realtime card + always-visible shortcut strip */}
-        <div className="ark-overlay-layer ark-overlay-expanded" aria-hidden={detailLevel !== 'expanded'}>
-          <span className="ark-overlay-badge">
-            <span className="ark-overlay-badge-dot" />
-            ARK — tracking
-          </span>
-          <span className="ark-overlay-name" title={game.name}>{game.name}</span>
-          <span className="ark-overlay-timer">{formatDuration(elapsedSeconds)}</span>
-          <div className="ark-overlay-meta">
-            <span>Started {formatClock(game.startedAt)}</span>
-            <span className="ark-overlay-meta-sep" />
-            <span>
-              {liveMinutes != null
-                ? `Live ${Math.max(0, Math.floor(liveMinutes))}m sync`
-                : 'Live sync pending'}
-            </span>
-          </div>
-          <span className="ark-overlay-hint ark-overlay-hint--expanded" aria-hidden="true">
-            {OVERLAY_SHORTCUT_HINT_LABEL}
-          </span>
         </div>
       </div>
     </div>

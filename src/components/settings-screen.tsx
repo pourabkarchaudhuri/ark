@@ -28,6 +28,7 @@ import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
 import { embeddingService } from '@/services/embedding-service';
+import { annIndex } from '@/services/ann-index';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
 import {
   OVERLAY_CYCLE_HOTKEY_LABEL,
@@ -73,6 +74,7 @@ declare global {
       setBetaFeatures: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
       getOverlayEnabled?: () => Promise<boolean>;
       setOverlayEnabled?: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+      getOverlayCycleHotkeyRegistered?: () => Promise<boolean>;
     };
   }
 }
@@ -138,6 +140,7 @@ function Toggle({ value, onChange, disabled }: { value: boolean; onChange: () =>
 const GeneralTab = memo(function GeneralTab() {
   const [autoLaunch, setAutoLaunchState] = useState(true);
   const [overlayEnabled, setOverlayEnabledState] = useState(false);
+  const [overlayCycleHotkeyOk, setOverlayCycleHotkeyOk] = useState(true);
   const [betaFeatures, setBetaFeatures] = useBetaFeatures();
   const [devMode, setDevMode] = useDevMode();
   const [allowAdultContent, setAllowAdultContent] = useAllowAdultContent();
@@ -151,6 +154,7 @@ const GeneralTab = memo(function GeneralTab() {
     // In-game overlay HUD toggle — the getter is optional until the main-process
     // IPC wiring lands, so guard the call and default to off.
     window.settings?.getOverlayEnabled?.().then(setOverlayEnabledState).catch(() => {});
+    window.settings?.getOverlayCycleHotkeyRegistered?.().then(setOverlayCycleHotkeyOk).catch(() => {});
   }, []);
 
   const handleAutoLaunchToggle = useCallback(async () => {
@@ -255,6 +259,11 @@ const GeneralTab = memo(function GeneralTab() {
                 <p className="text-[11px] text-white/30 mt-1.5 font-mono tracking-wide">
                   {OVERLAY_TOGGLE_HOTKEY_LABEL} dismiss / re-enable · {OVERLAY_CYCLE_HOTKEY_LABEL} cycle detail
                 </p>
+                {!overlayCycleHotkeyOk && (
+                  <p className="text-[11px] text-amber-400/70 mt-1">
+                    Cycle hotkey ({OVERLAY_CYCLE_HOTKEY_LABEL}) failed to bind — already in use.
+                  </p>
+                )}
               </div>
               <Toggle value={overlayEnabled} onChange={handleOverlayToggle} />
             </div>
@@ -364,6 +373,7 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
   const [annRebuildStatus, setAnnRebuildStatus] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
   const [annRebuildMessage, setAnnRebuildMessage] = useState<string | null>(null);
+  const [annRebuildProgress, setAnnRebuildProgress] = useState<{ done: number; total: number } | null>(null);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [rerankDiag, setRerankDiag] = useState<{
     state: 'idle' | 'testing' | 'ok' | 'fail';
@@ -695,6 +705,11 @@ const AIModelsTab = memo(function AIModelsTab() {
             <p className="text-[11px] text-white/30 mt-0.5">
               Clear and rebuild neighbors from cached embeddings (no Ollama calls).
             </p>
+            {annRebuildStatus === 'building' && annRebuildProgress && (
+              <p className="text-[11px] mt-0.5 text-white/40">
+                {annRebuildProgress.done} / {annRebuildProgress.total} vectors
+              </p>
+            )}
             {annRebuildMessage && (
               <p className={cn(
                 'text-[11px] mt-0.5',
@@ -712,6 +727,10 @@ const AIModelsTab = memo(function AIModelsTab() {
             onClick={async () => {
               setAnnRebuildStatus('building');
               setAnnRebuildMessage(null);
+              setAnnRebuildProgress({ done: 0, total: 1 });
+              const unsub = annIndex.subscribe(() => {
+                setAnnRebuildProgress({ ...annIndex.buildProgress });
+              });
               try {
                 const count = await embeddingService.rebuildAnnFromCache();
                 setAnnRebuildStatus('done');
@@ -719,8 +738,12 @@ const AIModelsTab = memo(function AIModelsTab() {
                 console.log(`[Settings] ANN rebuild complete: ${count} vectors`);
               } catch (err) {
                 setAnnRebuildStatus('error');
-                setAnnRebuildMessage('Rebuild failed');
+                const detail = err instanceof Error ? err.message : String(err);
+                setAnnRebuildMessage(`Rebuild failed: ${detail}`);
                 console.warn('[Settings] ANN rebuild failed:', err);
+              } finally {
+                unsub();
+                setAnnRebuildProgress(null);
               }
             }}
             className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"

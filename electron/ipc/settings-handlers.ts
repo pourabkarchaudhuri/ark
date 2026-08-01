@@ -13,7 +13,11 @@ import {
 } from '../settings-store.js';
 import { resetRerankTierCache } from '../rerank-engine.js';
 import { resetRerankPullAttempts } from '../ollama-setup.js';
-import { activateOverlay, deactivateOverlay } from '../overlay-window.js';
+import {
+  activateOverlay,
+  deactivateOverlay,
+  isOverlayCycleHotkeyRegistered,
+} from '../overlay-window.js';
 import { getActiveSessions } from '../session-tracker.js';
 
 export function register(): void {
@@ -199,6 +203,15 @@ export function register(): void {
     } catch (error) {
       logger.error('[Settings] Error setting overlay enabled:', error);
       return { success: false, error: 'Failed to save' };
+    }
+  });
+
+  ipcMain.handle('settings:getOverlayCycleHotkeyRegistered', async () => {
+    try {
+      return isOverlayCycleHotkeyRegistered();
+    } catch (error) {
+      logger.error('[Settings] Error reading overlay cycle hotkey status:', error);
+      return false;
     }
   });
 }

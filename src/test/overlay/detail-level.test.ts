@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_OVERLAY_DETAIL_LEVEL,
+  OVERLAY_CYCLE_HOTKEY,
+  OVERLAY_CYCLE_HOTKEY_LABEL,
   OVERLAY_DETAIL_LEVELS,
+  OVERLAY_SHORTCUT_HINT_LABEL,
   OVERLAY_SIZES,
+  OVERLAY_TOGGLE_HOTKEY,
+  OVERLAY_TOGGLE_HOTKEY_LABEL,
+  coerceOverlayDetailLevel,
   cycleDetailLevel,
   isOverlayDetailLevel,
   overlaySizeForLevel,
@@ -13,10 +19,13 @@ describe('overlay detail-level helpers', () => {
     expect(DEFAULT_OVERLAY_DETAIL_LEVEL).toBe('compact');
   });
 
-  it('cycles collapsed → compact → expanded → collapsed', () => {
+  it('exposes only collapsed and compact levels', () => {
+    expect(OVERLAY_DETAIL_LEVELS).toEqual(['collapsed', 'compact']);
+  });
+
+  it('cycles collapsed ↔ compact', () => {
     expect(cycleDetailLevel('collapsed')).toBe('compact');
-    expect(cycleDetailLevel('compact')).toBe('expanded');
-    expect(cycleDetailLevel('expanded')).toBe('collapsed');
+    expect(cycleDetailLevel('compact')).toBe('collapsed');
   });
 
   it('walks the full ring without skipping', () => {
@@ -40,19 +49,38 @@ describe('overlay detail-level helpers', () => {
     }
   });
 
-  it('keeps collapsed smaller than compact and compact smaller than expanded', () => {
+  it('keeps collapsed smaller than compact', () => {
     const a = overlaySizeForLevel('collapsed');
     const b = overlaySizeForLevel('compact');
-    const c = overlaySizeForLevel('expanded');
     expect(a.width * a.height).toBeLessThan(b.width * b.height);
-    expect(b.width * b.height).toBeLessThan(c.width * c.height);
   });
 
-  it('type-guards detail levels', () => {
+  it('type-guards detail levels (expanded is no longer valid)', () => {
     expect(isOverlayDetailLevel('collapsed')).toBe(true);
     expect(isOverlayDetailLevel('compact')).toBe(true);
-    expect(isOverlayDetailLevel('expanded')).toBe(true);
+    expect(isOverlayDetailLevel('expanded')).toBe(false);
     expect(isOverlayDetailLevel('full')).toBe(false);
     expect(isOverlayDetailLevel(null)).toBe(false);
+  });
+
+  it('coerces legacy expanded to compact', () => {
+    expect(coerceOverlayDetailLevel('expanded')).toBe('compact');
+    expect(coerceOverlayDetailLevel('collapsed')).toBe('collapsed');
+    expect(coerceOverlayDetailLevel('compact')).toBe('compact');
+    expect(coerceOverlayDetailLevel('full')).toBe(DEFAULT_OVERLAY_DETAIL_LEVEL);
+    expect(coerceOverlayDetailLevel(null)).toBe(DEFAULT_OVERLAY_DETAIL_LEVEL);
+  });
+
+  it('uses Super+Shift+D for cycle and Control+Shift+O for toggle', () => {
+    expect(OVERLAY_CYCLE_HOTKEY).toBe('Super+Shift+D');
+    expect(OVERLAY_CYCLE_HOTKEY_LABEL).toBe('Shift+Win+D');
+    expect(OVERLAY_TOGGLE_HOTKEY).toBe('Control+Shift+O');
+    expect(OVERLAY_TOGGLE_HOTKEY_LABEL).toBe('Ctrl+Shift+O');
+  });
+
+  it('builds compact shortcut hint from shared cycle label', () => {
+    expect(OVERLAY_SHORTCUT_HINT_LABEL).toContain(OVERLAY_CYCLE_HOTKEY_LABEL);
+    expect(OVERLAY_SHORTCUT_HINT_LABEL).toMatch(/O dismiss/i);
+    expect(OVERLAY_SHORTCUT_HINT_LABEL.toLowerCase()).toContain('denser');
   });
 });

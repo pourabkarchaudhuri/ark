@@ -154,6 +154,31 @@ declare global {
   }
 }
 
+/** One decoded pooled vector ready for ANN IPC (collect phase of backfill). */
+export type AnnBackfillRow = { id: string; vector: number[] };
+
+/** Max eligible rows collected per IDB cursor session before closing the tx. */
+const ANN_BACKFILL_PAGE_SIZE = 1000;
+/** IPC addVectors batch size — used only outside IDB transactions. */
+const ANN_BACKFILL_FLUSH_BATCH = 500;
+
+/**
+ * Split collected ANN rows into flush-sized batches for `addVectors` outside IDB.
+ * Pure helper — keeps cursor collect and IPC flush phases separable/testable.
+ */
+export function partitionEmbeddingRowsForAnnBackfill<T>(
+  rows: readonly T[],
+  batchSize: number,
+): T[][] {
+  if (batchSize <= 0) throw new Error('batchSize must be > 0');
+  if (rows.length === 0) return [];
+  const batches: T[][] = [];
+  for (let i = 0; i < rows.length; i += batchSize) {
+    batches.push(rows.slice(i, i + batchSize) as T[]);
+  }
+  return batches;
+}
+
 /** Dual-format pooled row — legacy float or int8+scale. Exactly one vector form. */
 export interface CachedEmbedding {
   gameId: string;
@@ -1776,6 +1801,10 @@ class EmbeddingService {
   /**
    * Populate the ANN index from already-cached embeddings in IDB.
    * Reads both catalog and library stores so the index covers all known vectors.
+   *
+   * IMPORTANT: never `await` IPC (addVectors) before `cursor.continue()` — IDB
+   * transactions go inactive after a turn of the event loop (TransactionInactiveError).
+   * Collect decoded rows with sync continue (paged by key), then flush outside the tx.
    */
   private async _backfillAnnIndex(): Promise<void> {
     const db = await getDB();
@@ -1783,9 +1812,7 @@ class EmbeddingService {
     const seen = new Set<string>();
     let sent = 0;
 
-    // Yield to the main thread so the cursor sweep + ANN.addVectors calls
-    // don't block UI / IPC for the ~30s a full 150K backfill takes.
-    const yieldToEventLoop = () => new Promise<void>(resolve => {
+    const yieldToEventLoop = () => new Promise<void>((resolve) => {
       if (typeof requestIdleCallback === 'function') {
         requestIdleCallback(() => resolve(), { timeout: 50 });
       } else {
@@ -1793,28 +1820,56 @@ class EmbeddingService {
       }
     });
 
-    const streamStore = (storeName: string, ttl: number) =>
-      new Promise<void>((resolve, reject) => {
+    const countStore = (storeName: string): Promise<number> =>
+      new Promise((resolve, reject) => {
+        if (!db.objectStoreNames.contains(storeName)) {
+          resolve(0);
+          return;
+        }
+        const tx = db.transaction(storeName, 'readonly');
+        const req = tx.objectStore(storeName).count();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+
+    // Upper-bound progress total (includes expired / undecodable rows).
+    const [libCount, catCount] = await Promise.all([
+      countStore(LIBRARY_STORE),
+      countStore(CATALOG_STORE),
+    ]);
+    const progressTotal = Math.max(1, libCount + catCount);
+    annIndex.setBuildProgress(0, progressTotal);
+
+    /**
+     * One readonly IDB page: decode up to `pageSize` eligible vectors with
+     * sync `cursor.continue` only — no await inside onsuccess.
+     */
+    const collectPage = (
+      storeName: string,
+      ttl: number,
+      afterKey: string | null,
+      pageSize: number,
+    ): Promise<{ rows: AnnBackfillRow[]; nextAfterKey: string | null }> =>
+      new Promise((resolve, reject) => {
+        if (!db.objectStoreNames.contains(storeName)) {
+          resolve({ rows: [], nextAfterKey: null });
+          return;
+        }
         const tx = db.transaction(storeName, 'readonly');
         const store = tx.objectStore(storeName);
-        const req = store.openCursor();
-        const batch: Array<{ id: string; vector: number[] }> = [];
-        const BATCH = 500;
-
-        const flushBatch = async () => {
-          if (batch.length === 0) return;
-          const chunk = batch.splice(0);
-          await annIndex.addVectors(chunk);
-          sent += chunk.length;
-          annIndex.setBuildProgress(sent, sent);
-        };
+        const range =
+          afterKey != null ? IDBKeyRange.lowerBound(afterKey, true) : undefined;
+        const req = range ? store.openCursor(range) : store.openCursor();
+        const rows: AnnBackfillRow[] = [];
+        let lastKey: string | null = null;
 
         req.onsuccess = () => {
           const cursor = req.result;
           if (!cursor) {
-            flushBatch().then(() => resolve(), reject);
+            resolve({ rows, nextAfterKey: null });
             return;
           }
+          lastKey = String(cursor.key);
           const entry = cursor.value as CachedEmbedding;
           const vec = readPooledVector(entry);
           if (
@@ -1823,26 +1878,52 @@ class EmbeddingService {
             now - entry.timestamp < ttl
           ) {
             seen.add(entry.gameId);
-            batch.push({ id: entry.gameId, vector: Array.from(vec) });
+            rows.push({ id: entry.gameId, vector: Array.from(vec) });
           }
-          if (batch.length >= BATCH) {
-            // Yield after each flush so other work (UI, IPC, sync) gets cycles.
-            flushBatch()
-              .then(yieldToEventLoop)
-              .then(() => cursor.continue(), reject);
-          } else {
-            cursor.continue();
+          if (rows.length >= pageSize) {
+            // Stop this cursor/tx; resume later via nextAfterKey. No await here.
+            resolve({ rows, nextAfterKey: lastKey });
+            return;
           }
+          cursor.continue();
         };
         req.onerror = () => reject(req.error);
       });
+
+    const flushRows = async (rows: AnnBackfillRow[]): Promise<void> => {
+      // addVectors is IPC — only called outside IDB transactions.
+      for (const chunk of partitionEmbeddingRowsForAnnBackfill(rows, ANN_BACKFILL_FLUSH_BATCH)) {
+        await annIndex.addVectors(chunk);
+        sent += chunk.length;
+        annIndex.setBuildProgress(sent, progressTotal);
+        await yieldToEventLoop();
+      }
+    };
+
+    const streamStore = async (storeName: string, ttl: number): Promise<void> => {
+      let afterKey: string | null = null;
+      for (;;) {
+        const page = await collectPage(storeName, ttl, afterKey, ANN_BACKFILL_PAGE_SIZE);
+        if (page.rows.length > 0) {
+          await flushRows(page.rows);
+        }
+        if (page.nextAfterKey == null) break;
+        afterKey = page.nextAfterKey;
+      }
+    };
 
     // Library first (higher priority — dedup via `seen`)
     await streamStore(LIBRARY_STORE, LIBRARY_TTL);
     await streamStore(CATALOG_STORE, CATALOG_TTL);
 
+    annIndex.setBuildProgress(sent, Math.max(sent, 1));
+
     if (sent > 0) {
-      await annIndex.save();
+      const saved = await annIndex.save();
+      // Only hard-fail when ANN IPC exists but save refused — absent ANN is soft-degrade.
+      if (!saved && typeof window !== 'undefined' && window.ann) {
+        throw new Error('ANN index save failed after backfill');
+      }
       console.log(`[EmbeddingService] ANN index backfilled: ${sent} vectors from cache`);
     }
   }
@@ -1850,6 +1931,7 @@ class EmbeddingService {
   /**
    * Clear the ANN index and rebuild from cached library + catalog pooled vectors.
    * Returns the vector count reported by the ANN service after backfill.
+   * Propagates errors so Settings can surface the failure string.
    */
   async rebuildAnnFromCache(): Promise<number> {
     await annIndex.clear();
@@ -1860,6 +1942,10 @@ class EmbeddingService {
       const count = annIndex.vectorCount;
       console.log(`[EmbeddingService] ANN rebuild from cache complete: ${count} vectors`);
       return count;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[EmbeddingService] ANN rebuild from cache failed: ${msg}`, err);
+      throw err instanceof Error ? err : new Error(msg);
     } finally {
       annIndex.finishBuild();
     }
@@ -1948,6 +2034,7 @@ export async function loadAllEmbeddingsForGraph(
   const ids: string[] = [];
 
   const now = Date.now();
+  // Cursor paths below only sync-decode + cursor.continue — never await IPC mid-cursor.
   const collectIds = (storeName: string, label: string, ttl: number) =>
     new Promise<void>((resolve) => {
       const tx = db.transaction(storeName, 'readonly');

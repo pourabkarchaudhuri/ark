@@ -435,8 +435,8 @@ function setupOverlay() {
         activateOverlay();
       }
     });
-    // Cycle collapsed → compact → expanded even when HWND is down so the next
-    // activate opens at the chosen level.
+    // Cycle collapsed ↔ compact even when HWND is down so the next
+    // activate opens at the chosen level (Super+Shift+D / Shift+Win+D).
     registerOverlayCycleHotkey();
   } catch (err) {
     logger.warn('[Overlay] Failed to set up in-game overlay (non-fatal):', err);

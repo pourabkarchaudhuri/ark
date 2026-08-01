@@ -91,8 +91,7 @@ body,
 }
 
 .ark-overlay-card.level-collapsed .ark-overlay-collapsed,
-.ark-overlay-card.level-compact .ark-overlay-compact,
-.ark-overlay-card.level-expanded .ark-overlay-expanded {
+.ark-overlay-card.level-compact .ark-overlay-compact {
   opacity: 1;
   transform: translateY(0);
 }
@@ -105,34 +104,21 @@ body,
 }
 
 .ark-overlay-card.level-compact .ark-overlay-compact {
-  max-height: 78px;
+  max-height: 86px;
   padding: 8px 12px;
   gap: 2px;
-}
-
-.ark-overlay-card.level-expanded .ark-overlay-expanded {
-  max-height: 136px;
-  padding: 10px 14px;
-  gap: 4px;
 }
 
 /* Always-visible, non-interactive shortcut hints (click-through; no mouse forward). */
 .ark-overlay-hint {
   margin-top: 2px;
   font-size: 9px;
-  letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.38);
+  letter-spacing: 0.03em;
+  color: rgba(255, 255, 255, 0.42);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   pointer-events: none;
-}
-
-.ark-overlay-hint--expanded {
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.42);
 }
 
 .ark-overlay-pill {
@@ -154,18 +140,6 @@ body,
   align-items: center;
   gap: 6px;
   min-width: 0;
-}
-
-.ark-overlay-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: 'Orbitron', 'JetBrains Mono', sans-serif;
-  font-weight: 600;
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ark-accent);
 }
 
 .ark-overlay-badge-dot {
@@ -207,26 +181,6 @@ body,
   font-size: 14px;
   letter-spacing: 0.04em;
   color: var(--ark-text-dim);
-}
-
-.ark-overlay-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 2px;
-  font-size: 10px;
-  letter-spacing: 0.02em;
-  color: var(--ark-text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.ark-overlay-meta-sep {
-  width: 3px;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.28);
-  flex-shrink: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

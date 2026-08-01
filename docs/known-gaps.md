@@ -2,7 +2,7 @@
 
 Items identified during security and architecture reviews that are **not safe to fix** without risking regressions, or that require significant effort / design decisions before implementation.
 
-Last updated: 2026-08-01 (Phase A ANN decode/backfill fix)
+Last updated: 2026-08-01 (P0 rebuild/graph/overlay → v1.0.57; Phase B.1 next)
 
 ---
 
@@ -129,13 +129,15 @@ Phase A ships lazy dual-format facet chunks (`chunk-embeddings` + int8 pooled ro
 
 **Upgrade behavior (user risk):** Existing float pooled rows keep serving until that game’s whole-text hash misses. The first rewrite for a game replaces concat-embed geometry with a weighted chunk pool for that id only — ANN neighbors for that game may shift. Unchanged games make zero Ollama calls. Kill switch: Settings → Ollama → “Facet chunk embeddings” (`ollama.embeddingChunkingEnabled`, default on).
 
-**Phase A ANN fix (Aug 2026):** Hardened int8 pooled decode (`coerceInt8Q` for ArrayBuffer / plain arrays), library-path ANN backfill when all-cached but index not ready, and Settings → Rebuild ANN index (clear + backfill from IDB). Addresses Embedding Space “self-only” neighbors from strict decode / empty ANN. Phase B multi-vector ANN remains deferred.
+**Phase A ANN fix (Aug 2026):** Hardened int8 pooled decode (`coerceInt8Q` for ArrayBuffer / plain arrays), library-path ANN backfill when all-cached but index not ready, and Settings → Rebuild ANN index (clear + backfill from IDB). Addresses Embedding Space “self-only” neighbors from strict decode / empty ANN.
+
+**P0 rebuild/graph/overlay (v1.0.57):** ANN backfill collects then flushes outside IDB cursors (no `TransactionInactiveError`). Graph metrics worker transfers edge/personalization **copies** so IDB persist never sees detached buffers. Overlay is collapsed+compact only with `Super+Shift+D` / Shift+Win+D cycle. Phase B multi-vector ANN is next (v1.0.58+).
 
 **Deferred (Phase B / later):**
-- Multi-vector ANN / max-sim over chunk ids
-- MRL-256 dimensionality
-- Live Ollama weight sweep / synthetic-distance neighbor-quality harness for pool weights
-- Idle or forced full-catalog re-chunk on upgrade (explicitly out of scope)
+- Multi-vector ANN / max-sim over chunk ids (Phase B.1 — next ship)
+- MRL-256 dimensionality (Wave 3 — post-B.1 only)
+- Live Ollama weight sweep / synthetic-distance neighbor-quality harness for pool weights (Wave 3)
+- Idle or forced full-catalog re-chunk on upgrade (Wave 3; explicitly out of B.1)
 
 ---
 

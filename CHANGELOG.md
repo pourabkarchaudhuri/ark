@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.57] - 2026-08-01
+
+### Fixed
+- **ANN Rebuild TransactionInactiveError** — `_backfillAnnIndex` now collects IDB pages with sync `cursor.continue`, then flushes `addVectors` outside the transaction (no await-in-cursor). Progress is determinate after store counts; failures surface in Settings.
+- **Graph build DataCloneError** — metrics worker transfers a sliced copy of edges/personalization; originals stay attached for adjacency + IDB persist. Score buffers are defensively re-copied before put.
+
+### Changed
+- **Overlay two levels only** — collapsed ↔ compact; cycle hotkey is **Shift+Win+D** (`Super+Shift+D`). Legacy `expanded` coerces to compact. Compact hint: `O dismiss · Shift+Win+D denser`. Click-through still without `{ forward: true }`.
+
 ## [1.0.56] - 2026-08-01
 
 ### Fixed
