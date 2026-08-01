@@ -9,6 +9,14 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.52': {
+    title: "What's New in Ark 1.0.52",
+    changes: [
+      'Critical startup fix — 1.0.50 installers shipped a corrupted app package that made Ark exit immediately on open. Reinstall this build (or update to it) to restore a working app; in-app update could not recover from a build that never launched.',
+      'Includes the overlay mouse-lag hotfix from 1.0.51 — lazy HUD window (no idle topmost shell), click-through without mouse forwarding, async session polling, leaner HUD (no blur/pulse).',
+      'Includes chunked embeddings Phase A from 1.0.50 — facet chunks with int8 pooled vectors, dual-format upgrade, kill switch in Settings → Ollama.',
+    ],
+  },
   '1.0.51': {
     title: "What's New in Ark 1.0.51",
     changes: [

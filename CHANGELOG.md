@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.52] - 2026-08-01
+
+### Fixed
+- **Critical: app would not start after installing 1.0.50.** The published 1.0.50 installer shipped a corrupted `package.json` inside the app archive, so Electron exited immediately on launch (no window, no in-app update path). Fresh downloads of 1.0.50 were affected. This release rebuilds and republishes a clean package so Latest installs boot normally.
+- Includes the 1.0.51 overlay mouse-lag fixes (lazy HUD window, no mouse-forward click-through, async session polling) on top of 1.0.50 chunked embeddings.
+
 ## [1.0.51] - 2026-08-01
 
 ### Fixed
