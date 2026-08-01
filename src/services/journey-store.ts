@@ -263,10 +263,11 @@ class JourneyStore {
       if (iso) existing.lastPlayedAt = iso;
     }
 
+    // Hours-only live ticks: keep getEntry() readers current without waking React
+    // or writing localStorage every 15s. Session-end / status / rating still persist.
+    if (!structural) return;
     this.invalidateSortedCache();
     this.scheduleSave();
-    // Hours-only live ticks: keep getEntry() readers current without waking React.
-    if (!structural) return;
     this.notifyListeners();
   }
 

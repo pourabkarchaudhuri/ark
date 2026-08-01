@@ -702,8 +702,13 @@ class LibraryStore {
     existing.hoursPlayed = effectiveHours;
     if (lastPlayedAt !== undefined) existing.lastPlayedAt = lastPlayedAt;
     existing.updatedAt = new Date();
-    this.invalidateSortedCache();
-    this.scheduleSave();
+    // Live ticks (~15s) only need in-memory hours for cards. Persisting and
+    // resorting on every tick storms localStorage + sorted-cache while gaming;
+    // session-end (lastPlayedAt set) still persists.
+    if (lastPlayedAt !== undefined) {
+      this.invalidateSortedCache();
+      this.scheduleSave();
+    }
     // Fire the hours-only channel — 15s session ticks must NOT invalidate
     // the games grid memo, Oracle library-signature, or other top-level
     // consumers that only care about status/collection changes.

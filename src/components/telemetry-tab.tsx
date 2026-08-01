@@ -60,6 +60,9 @@ function toGameId(raw: string | number): string {
   return typeof raw === 'number' ? `steam-${raw}` : String(raw);
 }
 
+/** Coalesce live-minute updates so six Recharts panels don't rebuild every poll. */
+const LIVE_SESSION_UI_THROTTLE_MS = 5000;
+
 export default function TelemetryTab({
   gameId,
   gameTitle,
@@ -72,6 +75,9 @@ export default function TelemetryTab({
   const [completedSessions, setCompletedSessions] = React.useState<GameSessionLike[]>([]);
   const [liveSession, setLiveSession] = React.useState<GameSessionLike | null>(null);
   const overheadSamples = useTrackerOverhead(gameId);
+  const liveThrottleRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingLiveRef = React.useRef<{ startTime: string; activeMinutes: number } | null>(null);
+  const liveStartRef = React.useRef<string | null>(null);
 
   // Completed history — subscribe so a session recorded while the tab is open
   // reaches the panels without a remount.
@@ -106,21 +112,47 @@ export default function TelemetryTab({
       return;
     }
 
-    const applyLive = (startTime: string, activeMinutes: number) => {
-      if (!alive) return;
+    const flushLive = () => {
+      liveThrottleRef.current = null;
+      const pending = pendingLiveRef.current;
+      if (!alive || !pending) return;
+      pendingLiveRef.current = null;
+      liveStartRef.current = pending.startTime;
       setLiveSession({
         id: liveSessionId(gameId),
         gameId,
         executablePath: '',
-        startTime,
+        startTime: pending.startTime,
         endTime: '',
-        durationMinutes: Math.max(0, activeMinutes),
+        durationMinutes: Math.max(0, pending.activeMinutes),
         idleMinutes: 0,
       });
     };
 
+    /** Immediate for start/hydrate; coalesced for 15s live ticks. */
+    const applyLive = (startTime: string, activeMinutes: number, immediate = false) => {
+      if (!alive) return;
+      pendingLiveRef.current = { startTime, activeMinutes };
+      if (immediate) {
+        if (liveThrottleRef.current != null) {
+          clearTimeout(liveThrottleRef.current);
+          liveThrottleRef.current = null;
+        }
+        flushLive();
+        return;
+      }
+      if (liveThrottleRef.current != null) return;
+      liveThrottleRef.current = setTimeout(flushLive, LIVE_SESSION_UI_THROTTLE_MS);
+    };
+
     const clearLive = () => {
       if (!alive) return;
+      pendingLiveRef.current = null;
+      liveStartRef.current = null;
+      if (liveThrottleRef.current != null) {
+        clearTimeout(liveThrottleRef.current);
+        liveThrottleRef.current = null;
+      }
       setLiveSession(null);
     };
 
@@ -129,7 +161,7 @@ export default function TelemetryTab({
         if (!alive || !active) return;
         const match = active.find((s) => toGameId(s.gameId) === gameId);
         if (match) {
-          applyLive(match.startTime, match.elapsedMinutes ?? 0);
+          applyLive(match.startTime, match.elapsedMinutes ?? 0, true);
         } else {
           clearLive();
         }
@@ -144,7 +176,7 @@ export default function TelemetryTab({
       unsubs.push(
         bridge.onSessionStarted((data) => {
           if (toGameId(data.gameId) !== gameId) return;
-          applyLive(data.startTime, 0);
+          applyLive(data.startTime, 0, true);
         }),
       );
     }
@@ -153,18 +185,11 @@ export default function TelemetryTab({
       unsubs.push(
         bridge.onLiveUpdate((data) => {
           if (toGameId(data.gameId) !== gameId) return;
-          setLiveSession((prev) => {
-            const startTime = prev?.startTime ?? new Date().toISOString();
-            return {
-              id: liveSessionId(gameId),
-              gameId,
-              executablePath: prev?.executablePath ?? '',
-              startTime,
-              endTime: '',
-              durationMinutes: Math.max(0, data.activeMinutes ?? 0),
-              idleMinutes: prev?.idleMinutes ?? 0,
-            };
-          });
+          const startTime =
+            liveStartRef.current ??
+            pendingLiveRef.current?.startTime ??
+            new Date().toISOString();
+          applyLive(startTime, data.activeMinutes ?? 0, false);
         }),
       );
     }
@@ -189,6 +214,11 @@ export default function TelemetryTab({
 
     return () => {
       alive = false;
+      if (liveThrottleRef.current != null) {
+        clearTimeout(liveThrottleRef.current);
+        liveThrottleRef.current = null;
+      }
+      pendingLiveRef.current = null;
       unsubs.forEach((fn) => fn());
     };
   }, [gameId]);

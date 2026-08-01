@@ -425,14 +425,17 @@ class SystemStatus {
 
   private _startPolling() {
     if (this._storageTimer) return; // already running
+    // One-shot baseline so the navbar LED has numbers; then poll slowly.
+    // Heavy IDB scans + Ollama/ML IPC used to run every 30–60s whenever the
+    // status indicator was mounted — keep that for explicit refresh / splash.
     this._refreshStorage();
     this._refreshModelInfo();
     this._refreshRerankModelInfo();
     this._refreshMlModelInfo();
-    this._storageTimer = setInterval(() => this._refreshStorage(), 30_000);
-    this._modelTimer = setInterval(() => this._refreshModelInfo(), 60_000);
-    this._rerankModelTimer = setInterval(() => this._refreshRerankModelInfo(), 60_000);
-    this._mlModelTimer = setInterval(() => this._refreshMlModelInfo(), 60_000);
+    this._storageTimer = setInterval(() => this._refreshStorage(), 120_000);
+    this._modelTimer = setInterval(() => this._refreshModelInfo(), 300_000);
+    this._rerankModelTimer = setInterval(() => this._refreshRerankModelInfo(), 300_000);
+    this._mlModelTimer = setInterval(() => this._refreshMlModelInfo(), 300_000);
   }
 
   private _stopPolling() {

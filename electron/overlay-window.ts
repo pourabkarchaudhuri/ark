@@ -12,8 +12,8 @@
  *  - Click-through WITHOUT `{ forward: true }` — forwarding forces Chromium to
  *    hit-test every mouse move into the overlay process and is a known source
  *    of in-game mouse lag. `focusable: false` keeps the game in focus.
- *  - `backgroundThrottling` starts true at create; we disable it only while the
- *    HUD is shown so the clock/fades keep running under a foreground game.
+ *  - `backgroundThrottling` starts true at create; we disable it only while a
+ *    visible level needs a live clock (compact/expanded). Collapsed stays throttled.
  *  - Detail levels (collapsed → compact → expanded) resize the HWND; cycling is
  *    a global hotkey so the renderer stays click-through.
  */
@@ -110,6 +110,21 @@ function applyWindowSize(): void {
   }
 }
 
+/**
+ * Collapsed HUD has no live clock — keep Chromium background throttling so a
+ * topmost overlay does not pin a renderer awake during play. Compact/expanded
+ * need ~1s timer ticks, so disable throttling only for those levels.
+ */
+function applyBackgroundThrottlingForLevel(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const needLiveClock = detailLevel !== 'collapsed' && overlayWindow.isVisible();
+  try {
+    overlayWindow.webContents.setBackgroundThrottling(!needLiveClock);
+  } catch (err) {
+    logger.warn('[Overlay] Failed to set background throttling:', err);
+  }
+}
+
 /** Push the current detail level to the overlay renderer (no-op if no HWND). */
 function pushDetailLevelToRenderer(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
@@ -150,6 +165,7 @@ export function setOverlayDetailLevel(level: OverlayDetailLevel): void {
   detailLevel = level;
   applyWindowSize();
   positionOverlay();
+  applyBackgroundThrottlingForLevel();
   pushDetailLevelToRenderer();
 }
 
@@ -158,6 +174,7 @@ export function cycleOverlayDetailLevel(): OverlayDetailLevel {
   detailLevel = cycleDetailLevel(detailLevel);
   applyWindowSize();
   positionOverlay();
+  applyBackgroundThrottlingForLevel();
   pushDetailLevelToRenderer();
   logger.log(`[Overlay] Detail level → ${detailLevel}`);
   return detailLevel;
@@ -271,15 +288,12 @@ export function activateOverlay(): void {
   const win = createOverlayWindow();
   applyWindowSize();
   positionOverlay();
-  try {
-    win.webContents.setBackgroundThrottling(false);
-  } catch (err) {
-    logger.warn('[Overlay] Failed to disable background throttling:', err);
-  }
   win.setAlwaysOnTop(true, 'screen-saver');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   // showInactive() never activates the window, so the game keeps OS focus.
   win.showInactive();
+  // Only wake the overlay renderer when the visible level needs a live clock.
+  applyBackgroundThrottlingForLevel();
   pushDetailLevelToRenderer();
 }
 

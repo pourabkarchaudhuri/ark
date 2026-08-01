@@ -9,6 +9,12 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.54': {
+    title: "What's New in Ark 1.0.54",
+    changes: [
+      'Performance hotfix — fixes lag/CPU hogging while gaming introduced in 1.0.53. Overlay and main UI no longer share one unthrottled renderer; live telemetry/hours ticks are coalesced; embedding polite mode engages for the whole play session; system-status model probes poll far less often when the dropdown is closed.',
+    ],
+  },
   '1.0.53': {
     title: "What's New in Ark 1.0.53",
     changes: [

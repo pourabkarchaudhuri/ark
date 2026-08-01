@@ -168,8 +168,9 @@ app.commandLine.appendSwitch('force-gpu-mem-available-mb', '256');
 app.commandLine.appendSwitch('max-active-webgl-contexts', '1');
 // Aggressively throttle background renderers (timers, rAF).
 app.commandLine.appendSwitch('enable-features', 'IntensiveWakeUpThrottling,OptOutOfSharedZygote');
-// Limit max renderer processes to 1 (single-window app).
-app.commandLine.appendSwitch('renderer-process-limit', '1');
+// Do NOT set renderer-process-limit=1. The in-game overlay is a second BrowserWindow
+// that disables backgroundThrottling while visible; forcing it into the same renderer
+// as the main UI keeps the whole process hot during play (CPU/GPU hitch).
 
 // Register updater IPC handlers early so the renderer never hits
 // "No handler registered" errors — even in dev mode.
@@ -381,7 +382,10 @@ function createWindow() {
 
   mainWindow.on('focus', () => {
     if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
-    setEmbeddingBackgroundMode(false);
+    // Stay polite while a tracked game is running (multi-monitor focus flicker).
+    if (getActiveSessions().length === 0) {
+      setEmbeddingBackgroundMode(false);
+    }
   });
 
   // Minimize / hide are also "user is elsewhere" signals — apply immediately,
@@ -396,11 +400,15 @@ function createWindow() {
   });
   mainWindow.on('restore', () => {
     if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
-    setEmbeddingBackgroundMode(false);
+    if (getActiveSessions().length === 0) {
+      setEmbeddingBackgroundMode(false);
+    }
   });
   mainWindow.on('show', () => {
     if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
-    if (mainWindow?.isFocused()) setEmbeddingBackgroundMode(false);
+    if (mainWindow?.isFocused() && getActiveSessions().length === 0) {
+      setEmbeddingBackgroundMode(false);
+    }
   });
 }
 
@@ -418,11 +426,21 @@ function setupOverlay() {
 
     // Tracker calls back on the 0↔1 active-session transition. Activate only
     // when enabled; deactivate always destroys the HWND (not a mere hide).
+    // Also force embedding polite mode while a tracked game is running — blur
+    // alone can miss multi-monitor / tray cases and leave Ollama on full GPU.
     registerOverlayWindow(null, (shouldShow) => {
-      if (shouldShow && settingsStore.getOverlayEnabled()) {
-        activateOverlay();
+      if (shouldShow) {
+        setEmbeddingBackgroundMode(true);
+        if (settingsStore.getOverlayEnabled()) {
+          activateOverlay();
+        }
       } else {
         deactivateOverlay();
+        if (mainWindow?.isFocused() && !mainWindow.isMinimized()) {
+          setEmbeddingBackgroundMode(false);
+        } else {
+          setEmbeddingBackgroundMode(true);
+        }
       }
     });
 

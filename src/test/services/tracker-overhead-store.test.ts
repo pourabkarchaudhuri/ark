@@ -51,7 +51,7 @@ describe('trackerOverheadStore', () => {
     expect(a).toBe(b);
   });
 
-  it('throttles listener notifications to ~3s while still buffering samples', () => {
+  it('throttles listener notifications to ~5s while still buffering samples', () => {
     const listener = vi.fn();
     const unsub = trackerOverheadStore.subscribe(listener);
 
@@ -75,7 +75,7 @@ describe('trackerOverheadStore', () => {
     // But listeners are coalesced
     expect(listener).not.toHaveBeenCalled();
 
-    vi.advanceTimersByTime(2999);
+    vi.advanceTimersByTime(4999);
     expect(listener).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(1);

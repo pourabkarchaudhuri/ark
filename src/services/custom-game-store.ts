@@ -384,10 +384,10 @@ class CustomGameStore {
       updatedAt: new Date(),
     };
     this.entries.set(gameId, updated);
-    this.scheduleSave();
-    // Live ticks (~15s) pass hours only — keep getGame() current without waking
-    // Library/dashboard subscribers. Session-end (with lastPlayedAt) still notifies.
+    // Live ticks (~15s) keep getGame() current in memory only — skip localStorage
+    // writes every poll. Session-end (with lastPlayedAt) persists + notifies.
     if (lastPlayedAt !== undefined) {
+      this.scheduleSave();
       this.notifyListeners();
     }
     journeyStore.syncProgress(gameId, { hoursPlayed: effectiveHours, lastPlayedAt });

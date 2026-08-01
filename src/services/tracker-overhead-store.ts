@@ -22,8 +22,8 @@ export interface OverheadSample {
 }
 
 const RING_CAPACITY = 4096;
-/** Coalesce UI notifications into the safe 2–5s window. */
-export const OVERHEAD_UI_THROTTLE_MS = 3000;
+/** Coalesce UI notifications — ≥5s keeps Recharts panels cheap during live play. */
+export const OVERHEAD_UI_THROTTLE_MS = 5000;
 
 type Listener = () => void;
 

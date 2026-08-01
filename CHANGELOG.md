@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.54] - 2026-08-01
+
+### Fixed
+- **Performance hotfix.** Stops lag/CPU hogging while gaming from 1.0.53: remove `renderer-process-limit=1` so overlay no longer shares an unthrottled renderer with the main UI; keep overlay background-throttling on when collapsed; coalesce live telemetry UI (≥5s); sample `getAppMetrics` every ~30s; skip localStorage writes on hours-only live ticks; engage embedding polite mode for the whole play session; slow system-status model/storage probes when the status UI is idle.
+
 ## [1.0.53] - 2026-08-01
 
 ### Added

@@ -226,6 +226,9 @@ function isProcessRunning(exePath: string): boolean {
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 /** Skip overlapping ticks when a slow PowerShell snapshot outlives POLL_INTERVAL_MS. */
 let pollInFlight = false;
+/** Emit getAppMetrics telemetry every N active-session polls (UI is already ≥5s coalesced). */
+const TELEMETRY_SAMPLE_EVERY_N_POLLS = 2;
+let telemetrySampleTick = 0;
 let mainWindowRef: BrowserWindowType | null = null;
 let trackedGames: TrackedGame[] = [];
 const activeSessions: Map<string, ActiveSession> = new Map(); // gameId -> session
@@ -477,30 +480,36 @@ async function pollTick(): Promise<void> {
     // If !running && !existingSession → nothing to do
   }
 
-  // Telemetry: emit one sample per active session per tick so per-game panels can chart it.
-  // Sample metrics only when needed — getAppMetrics walks every Chromium process.
+  // Telemetry: emit samples while playing — but not every 15s. getAppMetrics walks
+  // every Chromium process; UI charts coalesce ≥5s, so every other poll (~30s) is enough.
   // timestamp is epoch ms (number) — renderer store/charts expect numeric, not ISO string.
   if (activeSessions.size > 0) {
-    const rssMb = Math.round((process.memoryUsage().rss / (1024 * 1024)) * 100) / 100;
-    let cpuPercent = 0;
-    try {
-      const metrics = app.getAppMetrics();
-      for (const m of metrics) {
-        cpuPercent += m?.cpu?.percentCPUUsage ?? 0;
+    telemetrySampleTick += 1;
+    if (telemetrySampleTick >= TELEMETRY_SAMPLE_EVERY_N_POLLS) {
+      telemetrySampleTick = 0;
+      const rssMb = Math.round((process.memoryUsage().rss / (1024 * 1024)) * 100) / 100;
+      let cpuPercent = 0;
+      try {
+        const metrics = app.getAppMetrics();
+        for (const m of metrics) {
+          cpuPercent += m?.cpu?.percentCPUUsage ?? 0;
+        }
+        cpuPercent = Math.round(cpuPercent * 100) / 100;
+      } catch {
+        cpuPercent = 0;
       }
-      cpuPercent = Math.round(cpuPercent * 100) / 100;
-    } catch {
-      cpuPercent = 0;
+      for (const s of activeSessions.values()) {
+        sendToRenderer('session:telemetrySample', {
+          timestamp: nowMs,
+          gameId: s.gameId,
+          cpuPercent,
+          rssMb,
+          hookLatencyMs,
+        });
+      }
     }
-    for (const s of activeSessions.values()) {
-      sendToRenderer('session:telemetrySample', {
-        timestamp: nowMs,
-        gameId: s.gameId,
-        cpuPercent,
-        rssMb,
-        hookLatencyMs,
-      });
-    }
+  } else {
+    telemetrySampleTick = 0;
   }
 
   // Snapshot in-progress sessions for crash recovery on the next launch.
