@@ -54,6 +54,7 @@ declare global {
         oracleRerankEnabled: boolean;
         oracleRerankBlend: number;
         embeddingChunkingEnabled: boolean;
+        chunkAnnMaxSimEnabled: boolean;
       }>;
       setOllamaSettings: (settings: {
         enabled?: boolean;
@@ -65,6 +66,7 @@ declare global {
         oracleRerankEnabled?: boolean;
         oracleRerankBlend?: number;
         embeddingChunkingEnabled?: boolean;
+        chunkAnnMaxSimEnabled?: boolean;
       }) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
       setAutoLaunch: (enabled: boolean) => Promise<void>;
@@ -371,6 +373,7 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
+  const [chunkAnnMaxSimEnabled, setChunkAnnMaxSimEnabled] = useState(true);
   const [annRebuildStatus, setAnnRebuildStatus] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
   const [annRebuildMessage, setAnnRebuildMessage] = useState<string | null>(null);
   const [annRebuildProgress, setAnnRebuildProgress] = useState<{ done: number; total: number } | null>(null);
@@ -438,6 +441,7 @@ const AIModelsTab = memo(function AIModelsTab() {
         setNeighborRerankEnabled(s.neighborRerankEnabled !== false);
         setOracleRerankEnabled(s.oracleRerankEnabled !== false);
         setEmbeddingChunkingEnabled(s.embeddingChunkingEnabled !== false);
+        setChunkAnnMaxSimEnabled(s.chunkAnnMaxSimEnabled !== false);
         setOracleRerankBlend(
           typeof s.oracleRerankBlend === 'number' && Number.isFinite(s.oracleRerankBlend)
             ? Math.min(1, Math.max(0, s.oracleRerankBlend))
@@ -477,13 +481,14 @@ const AIModelsTab = memo(function AIModelsTab() {
           oracleRerankEnabled,
           oracleRerankBlend,
           embeddingChunkingEnabled,
+          chunkAnnMaxSimEnabled,
         });
         setOllamaSaveStatus('saved');
         setTimeout(() => setOllamaSaveStatus('idle'), 2000);
       }
       catch { /* ignore */ }
     }, 800);
-  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled]);
+  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled]);
 
   useEffect(() => {
     if (initialLoadRef.current || !window.settings || !apiKey.trim()) { setSaveStatus('idle'); return; }
@@ -697,6 +702,18 @@ const AIModelsTab = memo(function AIModelsTab() {
           <Toggle
             value={embeddingChunkingEnabled}
             onChange={() => setEmbeddingChunkingEnabled(!embeddingChunkingEnabled)}
+          />
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-white/70">Chunk ANN max-sim</p>
+            <p className="text-[11px] text-white/30 mt-0.5">
+              Embedding Space + Similar Games use multi-vector max-sim over facet chunks. Off = pooled-only. Oracle/graph stay pooled.
+            </p>
+          </div>
+          <Toggle
+            value={chunkAnnMaxSimEnabled}
+            onChange={() => setChunkAnnMaxSimEnabled(!chunkAnnMaxSimEnabled)}
           />
         </div>
         <div className="flex items-center justify-between gap-3">

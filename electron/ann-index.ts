@@ -40,6 +40,14 @@ function getMetaPath(): string {
   return path.join(app.getPath('userData'), 'ann-hnsw-meta.json');
 }
 
+/**
+ * On-disk ANN id map.
+ *
+ * Id kinds (prefix convention — no separate idKinds field required):
+ * - Pooled game ids: no `::` (e.g. `steam-730`, `epic-ns:offer`)
+ * - Chunk ids: `lib:{gameId}::{kind}#{seq}` or `cat:{gameId}::{kind}#{seq}`
+ *   Filter with `id.includes('::')` / `isChunkAnnId` from ann-max-sim.
+ */
 interface IndexMeta {
   gameIds: string[];
   vectorCount: number;

@@ -317,6 +317,67 @@ function pooledVectorAsNumberArray(entry: CachedEmbedding | null | undefined): n
   return Array.from(f32);
 }
 
+/** Public: all chunk rows for a game (any tier), undecoded. */
+export async function getChunksForGame(gameId: string): Promise<CachedChunk[]> {
+  const db = await getDB();
+  return new Promise((resolve) => {
+    if (!db.objectStoreNames.contains(CHUNK_STORE)) {
+      resolve([]);
+      return;
+    }
+    const tx = db.transaction(CHUNK_STORE, 'readonly');
+    const store = tx.objectStore(CHUNK_STORE);
+    if (!store.indexNames.contains('byGame')) {
+      resolve([]);
+      return;
+    }
+    const req = store.index('byGame').getAll(gameId);
+    req.onsuccess = () => resolve((req.result as CachedChunk[]) ?? []);
+    req.onerror = () => resolve([]);
+  });
+}
+
+/**
+ * Decode all chunk-embeddings rows for ANN ingest.
+ * Uses coerceInt8Q + dequantize; skips undecodable rows.
+ * Chunk ANN ids contain `::`; pooled game ids do not (filter via isChunkAnnId).
+ */
+export async function listChunkVectorsForAnn(): Promise<AnnBackfillRow[]> {
+  const db = await getDB();
+  const now = Date.now();
+  const ttl = Math.max(LIBRARY_TTL, CATALOG_TTL);
+  const out: AnnBackfillRow[] = [];
+
+  await new Promise<void>((resolve) => {
+    if (!db.objectStoreNames.contains(CHUNK_STORE)) {
+      resolve();
+      return;
+    }
+    const tx = db.transaction(CHUNK_STORE, 'readonly');
+    const store = tx.objectStore(CHUNK_STORE);
+    const req = store.openCursor();
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      const row = cursor.value as CachedChunk;
+      if (now - row.timestamp < ttl) {
+        const q = coerceInt8Q(row.q);
+        if (q && typeof row.scale === 'number') {
+          const vec = dequantizeEmbedding(q, row.scale);
+          out.push({ id: row.chunkId, vector: Array.from(vec) });
+        }
+      }
+      cursor.continue();
+    };
+    req.onerror = () => resolve();
+  });
+
+  return out;
+}
+
 async function getCachedEmbeddings(
   storeName: string = LIBRARY_STORE,
   ttl: number = LIBRARY_TTL,
@@ -820,7 +881,7 @@ async function embedAndPersistChunkedGame(opts: {
     chunksWithVectors.push({ ...chunk, vector });
   }
 
-  return writeGameChunksAndPool({
+  const pooled = await writeGameChunksAndPool({
     tier: opts.tier,
     gameId: opts.gameId,
     pooledStore: opts.pooledStore,
@@ -828,6 +889,19 @@ async function embedAndPersistChunkedGame(opts: {
     chunks: chunksWithVectors,
     staleIds,
   });
+
+  // Dual presence: pooled game id + each chunk id in one usearch index.
+  try {
+    await annIndex.addVectors([
+      { id: opts.gameId, vector: Array.from(pooled) },
+      ...chunksWithVectors.map((c) => ({
+        id: c.chunkId,
+        vector: Array.from(c.vector),
+      })),
+    ]);
+  } catch { /* ANN not ready yet */ }
+
+  return pooled;
 }
 
 // ─── Embedding Service ─────────────────────────────────────────────────────────
@@ -1246,12 +1320,9 @@ class EmbeddingService {
                 },
               });
               if (pooled) {
-                const arr = Array.from(pooled);
-                embeddingCacheRef.set(item.game.id, arr);
+                embeddingCacheRef.set(item.game.id, Array.from(pooled));
                 generated++;
-                try {
-                  await annIndex.addVectors([{ id: item.game.id, vector: arr }]);
-                } catch { /* ANN not ready yet */ }
+                // ANN upsert (pooled + chunks) happens inside embedAndPersistChunkedGame
                 await bumpEmbeddingContentEpoch();
               }
             } catch (err) {
@@ -1515,9 +1586,7 @@ class EmbeddingService {
               });
               if (pooled) {
                 totalGenerated++;
-                try {
-                  await annIndex.addVectors([{ id: item.id, vector: Array.from(pooled) }]);
-                } catch { /* ANN not ready yet — non-fatal */ }
+                // ANN upsert (pooled + chunks) happens inside embedAndPersistChunkedGame
                 await bumpEmbeddingContentEpoch();
               }
             } catch (err) {
@@ -1743,9 +1812,7 @@ class EmbeddingService {
               });
               if (pooled) {
                 totalGenerated++;
-                try {
-                  await annIndex.addVectors([{ id: item.id, vector: Array.from(pooled) }]);
-                } catch { /* ANN not ready yet — non-fatal */ }
+                // ANN upsert (pooled + chunks) happens inside embedAndPersistChunkedGame
                 await bumpEmbeddingContentEpoch();
               }
             } catch (err) {
@@ -1832,13 +1899,16 @@ class EmbeddingService {
         req.onerror = () => reject(req.error);
       });
 
-    // Upper-bound progress total (includes expired / undecodable rows).
-    const [libCount, catCount] = await Promise.all([
+    // Upper-bound progress total (pooled + chunks; includes expired / undecodable).
+    const [libCount, catCount, chunkCount] = await Promise.all([
       countStore(LIBRARY_STORE),
       countStore(CATALOG_STORE),
+      countStore(CHUNK_STORE),
     ]);
-    const progressTotal = Math.max(1, libCount + catCount);
+    const progressTotal = Math.max(1, libCount + catCount + chunkCount);
     annIndex.setBuildProgress(0, progressTotal);
+    let pooledSent = 0;
+    let chunkSent = 0;
 
     /**
      * One readonly IDB page: decode up to `pageSize` eligible vectors with
@@ -1890,11 +1960,16 @@ class EmbeddingService {
         req.onerror = () => reject(req.error);
       });
 
-    const flushRows = async (rows: AnnBackfillRow[]): Promise<void> => {
+    const flushRows = async (
+      rows: AnnBackfillRow[],
+      kind: 'pooled' | 'chunk',
+    ): Promise<void> => {
       // addVectors is IPC — only called outside IDB transactions.
       for (const chunk of partitionEmbeddingRowsForAnnBackfill(rows, ANN_BACKFILL_FLUSH_BATCH)) {
         await annIndex.addVectors(chunk);
         sent += chunk.length;
+        if (kind === 'pooled') pooledSent += chunk.length;
+        else chunkSent += chunk.length;
         annIndex.setBuildProgress(sent, progressTotal);
         await yieldToEventLoop();
       }
@@ -1905,7 +1980,7 @@ class EmbeddingService {
       for (;;) {
         const page = await collectPage(storeName, ttl, afterKey, ANN_BACKFILL_PAGE_SIZE);
         if (page.rows.length > 0) {
-          await flushRows(page.rows);
+          await flushRows(page.rows, 'pooled');
         }
         if (page.nextAfterKey == null) break;
         afterKey = page.nextAfterKey;
@@ -1916,6 +1991,12 @@ class EmbeddingService {
     await streamStore(LIBRARY_STORE, LIBRARY_TTL);
     await streamStore(CATALOG_STORE, CATALOG_TTL);
 
+    // Phase B.1: dual presence — also ingest facet chunk vectors (ids contain `::`).
+    const chunkRows = await listChunkVectorsForAnn();
+    if (chunkRows.length > 0) {
+      await flushRows(chunkRows, 'chunk');
+    }
+
     annIndex.setBuildProgress(sent, Math.max(sent, 1));
 
     if (sent > 0) {
@@ -1924,7 +2005,10 @@ class EmbeddingService {
       if (!saved && typeof window !== 'undefined' && window.ann) {
         throw new Error('ANN index save failed after backfill');
       }
-      console.log(`[EmbeddingService] ANN index backfilled: ${sent} vectors from cache`);
+      console.log(
+        `[EmbeddingService] ANN index backfilled: ${sent} vectors ` +
+          `(${pooledSent} pooled + ${chunkSent} chunks) from cache`,
+      );
     }
   }
 

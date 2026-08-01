@@ -2,7 +2,7 @@
 
 Items identified during security and architecture reviews that are **not safe to fix** without risking regressions, or that require significant effort / design decisions before implementation.
 
-Last updated: 2026-08-01 (P0 rebuild/graph/overlay → v1.0.57; Phase B.1 next)
+Last updated: 2026-08-01 (Phase B.1 max-sim → v1.0.58; Wave 3 deferred)
 
 ---
 
@@ -131,13 +131,14 @@ Phase A ships lazy dual-format facet chunks (`chunk-embeddings` + int8 pooled ro
 
 **Phase A ANN fix (Aug 2026):** Hardened int8 pooled decode (`coerceInt8Q` for ArrayBuffer / plain arrays), library-path ANN backfill when all-cached but index not ready, and Settings → Rebuild ANN index (clear + backfill from IDB). Addresses Embedding Space “self-only” neighbors from strict decode / empty ANN.
 
-**P0 rebuild/graph/overlay (v1.0.57):** ANN backfill collects then flushes outside IDB cursors (no `TransactionInactiveError`). Graph metrics worker transfers edge/personalization **copies** so IDB persist never sees detached buffers. Overlay is collapsed+compact only with `Super+Shift+D` / Shift+Win+D cycle. Phase B multi-vector ANN is next (v1.0.58+).
+**P0 rebuild/graph/overlay (v1.0.57):** ANN backfill collects then flushes outside IDB cursors (no `TransactionInactiveError`). Graph metrics worker transfers edge/personalization **copies** so IDB persist never sees detached buffers. Overlay is collapsed+compact only with `Super+Shift+D` / Shift+Win+D cycle.
 
-**Deferred (Phase B / later):**
-- Multi-vector ANN / max-sim over chunk ids (Phase B.1 — next ship)
-- MRL-256 dimensionality (Wave 3 — post-B.1 only)
-- Live Ollama weight sweep / synthetic-distance neighbor-quality harness for pool weights (Wave 3)
-- Idle or forced full-catalog re-chunk on upgrade (Wave 3; explicitly out of B.1)
+**Phase B.1 max-sim (v1.0.58):** Chunk vectors are dual-indexed in ANN (`lib:`/`cat:` ids with `::`). Embedding Space + Similar Games use max-sim aggregation behind `ollama.chunkAnnMaxSimEnabled` (default on). Oracle taste-centroid and graph edge build stay pooled (chunk hits ignored). No forced catalog re-chunk.
+
+**Wave 3 — deferred until B.1 is validated in the wild (post-B.1 only):**
+- MRL-256 dimensionality (truncate/store 256-d; bump ANN `DIMS` + invalidate on-disk index; dual-read or force rebuild)
+- Weight-sweep harness (offline/synthetic neighbor-quality loop over `CHUNK_WEIGHTS`; bump `CURRENT_POOL_VERSION` when shipping new weights)
+- Idle/forced full-catalog re-chunk upgrade job (explicitly out of B.1 scope)
 
 ---
 

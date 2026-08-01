@@ -9,6 +9,7 @@ import type { SteamAppDetails } from '@/types/steam';
 import { getSteamCoverUrl } from '@/types/steam';
 import { annIndex } from '@/services/ann-index';
 import { getEmbeddingById } from '@/services/embedding-service';
+import { queryAnnNeighborGames } from '@/services/ann-neighbor-query';
 import { findGameById } from '@/services/prefetch-store';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
@@ -369,10 +370,8 @@ export async function getSimilarTitlesForReco(
   if (!vec) return [];
 
   const overFetch = Math.max(k * 4 + 12, k + 24);
-  const raw = await annIndex.queryWithDistances(vec, overFetch, sourceGameId);
-  const filtered = raw
-    .filter((r) => r.id !== sourceGameId && r.distance <= SIMILAR_TITLES_DISTANCE_CEILING)
-    .sort((a, b) => a.distance - b.distance);
+  const filtered = (await queryAnnNeighborGames(vec, overFetch, sourceGameId))
+    .filter((r) => r.distance <= SIMILAR_TITLES_DISTANCE_CEILING);
 
   if (filtered.length === 0) return [];
 
@@ -421,10 +420,7 @@ export async function getSimilarGamesForDetails(
   }
 
   const overFetch = Math.max(k * 4 + 12, k + 24);
-  const raw = await annIndex.queryWithDistances(vec, overFetch, sourceGameId);
-  const filtered = raw
-    .filter((r) => r.id !== sourceGameId)
-    .sort((a, b) => a.distance - b.distance);
+  const filtered = await queryAnnNeighborGames(vec, overFetch, sourceGameId);
 
   if (filtered.length === 0) {
     return { status: 'empty', items: [] };

@@ -42,6 +42,7 @@ declare global {
         oracleRerankEnabled: boolean;
         oracleRerankBlend: number;
         embeddingChunkingEnabled: boolean;
+        chunkAnnMaxSimEnabled: boolean;
       }>;
       setOllamaSettings: (settings: {
         enabled?: boolean;
@@ -53,6 +54,7 @@ declare global {
         oracleRerankEnabled?: boolean;
         oracleRerankBlend?: number;
         embeddingChunkingEnabled?: boolean;
+        chunkAnnMaxSimEnabled?: boolean;
       }) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
       setAutoLaunch: (enabled: boolean) => Promise<void>;
@@ -92,6 +94,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
+  const [chunkAnnMaxSimEnabled, setChunkAnnMaxSimEnabled] = useState(true);
   const [annRebuildStatus, setAnnRebuildStatus] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
   const [annRebuildMessage, setAnnRebuildMessage] = useState<string | null>(null);
   const [annRebuildProgress, setAnnRebuildProgress] = useState<{ done: number; total: number } | null>(null);
@@ -154,6 +157,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         setNeighborRerankEnabled(ollamaSettings.neighborRerankEnabled !== false);
         setOracleRerankEnabled(ollamaSettings.oracleRerankEnabled !== false);
         setEmbeddingChunkingEnabled(ollamaSettings.embeddingChunkingEnabled !== false);
+        setChunkAnnMaxSimEnabled(ollamaSettings.chunkAnnMaxSimEnabled !== false);
         setOracleRerankBlend(
           typeof ollamaSettings.oracleRerankBlend === 'number' && Number.isFinite(ollamaSettings.oracleRerankBlend)
             ? Math.min(1, Math.max(0, ollamaSettings.oracleRerankBlend))
@@ -212,6 +216,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
           oracleRerankEnabled,
           oracleRerankBlend,
           embeddingChunkingEnabled,
+          chunkAnnMaxSimEnabled,
           useGeminiInstead,
         });
         setOllamaSaveStatus('saved');
@@ -220,7 +225,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         console.error('Failed to save Ollama settings:', err);
       }
     }, 800);
-  }, [ollamaEnabled, ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, useGeminiInstead]);
+  }, [ollamaEnabled, ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled, useGeminiInstead]);
 
   // Auto-save API key with debounce
   useEffect(() => {
@@ -736,6 +741,32 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                         className={cn(
                           'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
                           embeddingChunkingEnabled ? 'translate-x-6' : 'translate-x-1',
+                        )}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-white/50">Chunk ANN max-sim</p>
+                      <p className="text-[11px] text-white/25 mt-0.5">
+                        ES + Similar Games max-sim over chunks. Off = pooled-only. Oracle/graph stay pooled.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={geminiBlocksOllama}
+                      onClick={() => setChunkAnnMaxSimEnabled(!chunkAnnMaxSimEnabled)}
+                      className={cn(
+                        'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
+                        chunkAnnMaxSimEnabled ? 'bg-fuchsia-500/40' : 'bg-white/[0.08]',
+                        geminiBlocksOllama && 'opacity-40 cursor-not-allowed',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                          chunkAnnMaxSimEnabled ? 'translate-x-6' : 'translate-x-1',
                         )}
                       />
                     </button>

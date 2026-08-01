@@ -73,6 +73,11 @@ interface Settings {
      * Reads always decode both formats.
      */
     embeddingChunkingEnabled?: boolean;
+    /**
+     * When true (default), Embedding Space + Similar Games aggregate ANN hits
+     * with max-sim over chunk ids. Oracle / graph stay pooled.
+     */
+    chunkAnnMaxSimEnabled?: boolean;
   };
 }
 
@@ -142,6 +147,7 @@ class SettingsStore {
         oracleRerankEnabled: true,
         oracleRerankBlend: 1,
         embeddingChunkingEnabled: true,
+        chunkAnnMaxSimEnabled: true,
       },
     });
     try {
@@ -260,6 +266,7 @@ class SettingsStore {
     oracleRerankEnabled: boolean;
     oracleRerankBlend: number;
     embeddingChunkingEnabled: boolean;
+    chunkAnnMaxSimEnabled: boolean;
   } {
     const defaults = {
       enabled: true,
@@ -272,6 +279,7 @@ class SettingsStore {
       oracleRerankEnabled: true,
       oracleRerankBlend: 1,
       embeddingChunkingEnabled: true,
+      chunkAnnMaxSimEnabled: true,
     };
     const o = this.settings.ollama;
     let blend =
@@ -288,6 +296,7 @@ class SettingsStore {
       oracleRerankEnabled: o?.oracleRerankEnabled !== false,
       oracleRerankBlend: blend,
       embeddingChunkingEnabled: o?.embeddingChunkingEnabled !== false,
+      chunkAnnMaxSimEnabled: o?.chunkAnnMaxSimEnabled !== false,
     };
   }
 
@@ -302,6 +311,7 @@ class SettingsStore {
     oracleRerankEnabled?: boolean;
     oracleRerankBlend?: number;
     embeddingChunkingEnabled?: boolean;
+    chunkAnnMaxSimEnabled?: boolean;
   }): void {
     const next = { ...settings };
     if (next.rerankModel !== undefined) {
