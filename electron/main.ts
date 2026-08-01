@@ -86,6 +86,7 @@ import {
   deactivateOverlay,
   isOverlayVisible,
   registerOverlayHotkey,
+  registerOverlayCycleHotkey,
   unregisterOverlayHotkey,
   destroyOverlay,
 } from './overlay-window.js';
@@ -425,8 +426,8 @@ function setupOverlay() {
       }
     });
 
-    // Hotkey toggles visibility. Never show an empty topmost window — require
-    // an active tracked session in addition to the opt-in setting.
+    // Hotkey toggles visibility (dismiss / re-enable). Never show an empty
+    // topmost window — require an active tracked session + opt-in setting.
     registerOverlayHotkey(() => {
       if (isOverlayVisible()) {
         deactivateOverlay();
@@ -434,6 +435,9 @@ function setupOverlay() {
         activateOverlay();
       }
     });
+
+    // Cycle collapsed → compact → expanded (resizes HWND; level survives dismiss).
+    registerOverlayCycleHotkey();
   } catch (err) {
     logger.warn('[Overlay] Failed to set up in-game overlay (non-fatal):', err);
   }

@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.53] - 2026-08-01
+
+### Added
+- **Year Wrapped chrome & richer stats.** Back/close navigation fix for Year Wrapped; enriched year-end stats presentation.
+- **Live telemetry while playing.** Insights update during active sessions; Friction panel works from the first session (`MIN_SESSIONS=1`); session timestamps use millisecond precision.
+- **Overlay detail levels.** `Ctrl+Shift+D` cycles detail density; glassy minimal HUD; `Ctrl+Shift+O` still dismisses. Lazy HWND create/destroy retained; click-through still without `{ forward: true }`.
+- **Qwen3 in system status & settings.** Reranker listed alongside embed/Kaggle-style model status in System Status and Settings.
+
+### Changed
+- **Perf: quieter background work.** Journey hours tick no longer storms store subscribers; idle session poll is tasklist-only; embedding service is polite about in-flight work; overlay no longer receives telemetry samples.
+- **Voyage Scenes & Audit polish.** UX cleanup plus chart TLDRs for quicker scan of analytics.
+
+### Notes (crash-safe packaging)
+- Installers must ship a valid `package.json` inside the app archive (version **1.0.53**). Corrupted packaging (as in 1.0.50) causes immediate exit with no in-app recovery — this release verifies the packaged JSON before publish.
+
 ## [1.0.52] - 2026-08-01
 
 ### Fixed

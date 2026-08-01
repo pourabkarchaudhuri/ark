@@ -287,9 +287,11 @@ const SceneRow = memo(function SceneRow({
       ref={attach}
       data-scene-id={scene.id}
       className={cn(
-        'group relative flex gap-3 rounded-xl border bg-white/[0.015] transition-colors',
+        'group relative flex gap-3 rounded-xl border bg-gradient-to-r from-white/[0.025] to-transparent transition-colors',
         meta.ring,
-        active ? 'border-white/20 bg-white/[0.035]' : 'border-white/[0.06]',
+        active
+          ? 'border-white/25 bg-white/[0.04] shadow-[inset_3px_0_0_0_rgba(232,121,249,0.75)]'
+          : 'border-white/[0.06]',
         density === 'compact' ? 'px-3 py-2' : density === 'comfortable' ? 'px-4 py-3' : 'px-5 py-4',
       )}
       initial={reduced ? false : { opacity: 0, x: scatter.x, y: scatter.y, rotate: scatter.rotate }}
@@ -427,26 +429,67 @@ const LENGTH_CONFIG: ChartConfig = {
 
 const DASH_HEAT = 'rgb(217, 70, 239)'; // fuchsia-500
 
+/** One-line takeaway under a chart — short, data-aware, never moralizing. */
+function ChartTldr({ children }: { children: ReactNode }) {
+  return (
+    <p className="mt-3 border-t border-white/[0.05] pt-2.5 text-[11px] leading-relaxed text-white/45">
+      <span className="mr-1.5 font-mono text-[9px] uppercase tracking-wider text-fuchsia-300/70">
+        TLDR
+      </span>
+      {children}
+    </p>
+  );
+}
+
+function SectionHeader({
+  eyebrow,
+  title,
+  blurb,
+}: {
+  eyebrow: string;
+  title: string;
+  blurb: string;
+}) {
+  return (
+    <header className="mb-4">
+      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-fuchsia-300/70">
+        {eyebrow}
+      </p>
+      <h3 className="mt-1 font-['Orbitron'] text-base font-bold tracking-wide text-white">{title}</h3>
+      <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-white/45">{blurb}</p>
+    </header>
+  );
+}
+
 function StatTile({
   icon: Icon,
   label,
   value,
   hint,
+  reduced,
+  index = 0,
 }: {
   icon: typeof Flame;
   label: string;
   value: string;
   hint?: string;
+  reduced?: boolean;
+  index?: number;
 }) {
   return (
-    <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2.5">
+    <motion.div
+      className="rounded-xl border border-white/[0.07] bg-gradient-to-b from-white/[0.04] to-white/[0.01] px-3 py-2.5"
+      initial={reduced ? false : { opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35, delay: reduced ? 0 : index * 0.04, ease: [0.16, 1, 0.3, 1] }}
+    >
       <div className="flex items-center gap-1.5 text-white/40">
         <Icon className="h-3 w-3" />
         <span className="font-mono text-[9px] uppercase tracking-wider">{label}</span>
       </div>
       <p className="mt-1 font-mono text-xl font-black text-white">{value}</p>
       {hint && <p className="text-[10px] leading-tight text-white/30">{hint}</p>}
-    </div>
+    </motion.div>
   );
 }
 
@@ -470,7 +513,7 @@ function RhythmGrid({ heat }: { heat: ReturnType<typeof computeRhythmHeatmap> })
             return (
               <div
                 key={di}
-                className="flex h-6 items-center justify-center rounded-[3px] border border-white/[0.04]"
+                className="flex h-6 items-center justify-center rounded-[3px] border border-white/[0.04] transition-[opacity,transform] duration-200 hover:scale-[1.04]"
                 style={{ backgroundColor: DASH_HEAT, opacity: count > 0 ? opacity : 0.04 }}
                 title={`${wd} ${DAYPART_LABELS[di]} — ${count} session${count === 1 ? '' : 's'}`}
               >
@@ -490,26 +533,36 @@ function Panel({
   title,
   icon: Icon,
   children,
+  tldr,
   className,
+  reduced,
+  delay = 0,
 }: {
   title: string;
   icon: typeof Flame;
   children: ReactNode;
+  tldr?: ReactNode;
   className?: string;
+  reduced?: boolean;
+  delay?: number;
 }) {
   return (
-    <div
+    <motion.div
       className={cn(
-        'rounded-2xl border border-white/[0.07] bg-white/[0.015] p-4',
+        'rounded-2xl border border-white/[0.07] bg-gradient-to-b from-white/[0.03] to-transparent p-4',
         className,
       )}
+      initial={reduced ? false : { opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, delay: reduced ? 0 : delay, ease: [0.16, 1, 0.3, 1] }}
     >
       <div className="mb-3 flex items-center gap-1.5 text-white/45">
         <Icon className="h-3.5 w-3.5" />
         <span className="font-mono text-[10px] uppercase tracking-wider">{title}</span>
       </div>
       {children}
-    </div>
+      {tldr != null && tldr !== false && <ChartTldr>{tldr}</ChartTldr>}
+    </motion.div>
   );
 }
 
@@ -517,10 +570,12 @@ const PlayRhythmDashboard = memo(function PlayRhythmDashboard({
   sessions,
   scenes,
   medianMinutes,
+  reduced,
 }: {
   sessions: GameSession[];
   scenes: PlayScene[];
   medianMinutes: number;
+  reduced: boolean;
 }) {
   const cadence = useMemo(() => computePlayCadence(sessions, Date.now(), 12), [sessions]);
   const streaks = useMemo(() => computeStreaks(sessions), [sessions]);
@@ -547,8 +602,77 @@ const PlayRhythmDashboard = memo(function PlayRhythmDashboard({
 
   const hasCadence = cadence.some((w) => w.sessions > 0);
 
+  const cadenceTldr = useMemo(() => {
+    if (!hasCadence) return null;
+    const activeWeeks = cadence.filter((w) => w.sessions > 0).length;
+    const peak = cadence.reduce(
+      (best, w) => (w.sessions > best.sessions ? w : best),
+      cadence[0],
+    );
+    const recent = cadence.slice(-4).reduce((s, w) => s + w.sessions, 0);
+    const earlier = cadence.slice(0, 4).reduce((s, w) => s + w.sessions, 0);
+    const trend =
+      recent > earlier * 1.25
+        ? 'Recent weeks are busier than the start of this window.'
+        : earlier > recent * 1.25
+          ? 'Play has thinned out compared with earlier weeks.'
+          : 'Session volume has stayed roughly steady across the window.';
+    return (
+      <>
+        Active in {activeWeeks} of 12 weeks; peak week of {peak.sessions} session
+        {peak.sessions === 1 ? '' : 's'} starting {peak.label}. {trend}
+      </>
+    );
+  }, [cadence, hasCadence]);
+
+  const lengthTldr = useMemo(() => {
+    if (sessions.length === 0) return null;
+    const mode = lengthHist.reduce(
+      (best, b) => (b.count > best.count ? b : best),
+      lengthHist[0],
+    );
+    const total = lengthHist.reduce((s, b) => s + b.count, 0);
+    if (!mode || total === 0) return null;
+    const pct = Math.round((mode.count / total) * 100);
+    return (
+      <>
+        Most sits land in the {mode.label} bucket ({pct}% of sessions) — the shape of a typical
+        sit-down, not a target.
+      </>
+    );
+  }, [lengthHist, sessions.length]);
+
+  const rhythmTldr = useMemo(() => {
+    if (rhythm.total === 0 || peakSlot === '—') return null;
+    return (
+      <>
+        Sessions cluster around {peakSlot}. Brighter cells are busier slots; empty cells stay
+        visible so quiet hours still read.
+      </>
+    );
+  }, [rhythm.total, peakSlot]);
+
+  const notableTldr = useMemo(() => {
+    if (topScenes.length === 0) return null;
+    const top = topScenes[0];
+    const ratio = medianMinutes > 0 ? magnitudeVsMedian(top.minutes, medianMinutes) : 0;
+    return (
+      <>
+        Biggest measured episode: {top.title} ({formatPlayMinutes(top.minutes)}
+        {ratio > 0 ? `, ${ratio.toFixed(1)}× your median` : ''}). Ranked by play time in the curated
+        stream, not by calendar span.
+      </>
+    );
+  }, [topScenes, medianMinutes]);
+
   return (
-    <div className="mb-8 space-y-4">
+    <div className="mb-10 space-y-4">
+      <SectionHeader
+        eyebrow="Play rhythm"
+        title="How your sessions shape up"
+        blurb="Aggregate telemetry the episode stream cannot show — cadence, streaks, session shape, and when play actually happens."
+      />
+
       {/* Headline stat tiles */}
       <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
         <StatTile
@@ -556,37 +680,60 @@ const PlayRhythmDashboard = memo(function PlayRhythmDashboard({
           label="Current streak"
           value={`${streaks.current}d`}
           hint={streaks.current > 0 ? 'in a row' : 'no active streak'}
+          reduced={reduced}
+          index={0}
         />
         <StatTile
           icon={TrendingUp}
           label="Longest streak"
           value={`${streaks.longest}d`}
           hint="your record"
+          reduced={reduced}
+          index={1}
         />
         <StatTile
           icon={CalendarDays}
           label="Active days"
           value={streaks.activeDays.toLocaleString()}
           hint="days with play"
+          reduced={reduced}
+          index={2}
         />
         <StatTile
           icon={Timer}
           label="Tracked time"
           value={totalHours >= 100 ? `${Math.round(totalHours)}h` : `${totalHours.toFixed(1)}h`}
           hint={`${sessions.length.toLocaleString()} sessions`}
+          reduced={reduced}
+          index={3}
         />
         <StatTile
           icon={Coffee}
           label="Median episode"
           value={formatPlayMinutes(medianMinutes)}
           hint="typical run"
+          reduced={reduced}
+          index={4}
         />
-        <StatTile icon={Clock3} label="Peak slot" value={peakSlot} hint="busiest time" />
+        <StatTile
+          icon={Clock3}
+          label="Peak slot"
+          value={peakSlot}
+          hint="busiest time"
+          reduced={reduced}
+          index={5}
+        />
       </div>
 
       {/* Cadence + length distribution */}
       <div className="grid gap-4 lg:grid-cols-2">
-        <Panel title="Weekly cadence — last 12 weeks" icon={Activity}>
+        <Panel
+          title="Weekly cadence — last 12 weeks"
+          icon={Activity}
+          tldr={cadenceTldr}
+          reduced={reduced}
+          delay={0.05}
+        >
           {hasCadence ? (
             <ChartContainer config={CADENCE_CONFIG} className="aspect-[3/1] w-full">
               <AreaChart data={cadence} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -628,7 +775,13 @@ const PlayRhythmDashboard = memo(function PlayRhythmDashboard({
           )}
         </Panel>
 
-        <Panel title="Session-length distribution" icon={Zap}>
+        <Panel
+          title="Session-length distribution"
+          icon={Zap}
+          tldr={lengthTldr}
+          reduced={reduced}
+          delay={0.1}
+        >
           {sessions.length > 0 ? (
             <ChartContainer config={LENGTH_CONFIG} className="aspect-[3/1] w-full">
               <BarChart data={lengthHist} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -659,7 +812,13 @@ const PlayRhythmDashboard = memo(function PlayRhythmDashboard({
 
       {/* Rhythm heatmap + notable episodes */}
       <div className="grid gap-4 lg:grid-cols-2">
-        <Panel title="When you play" icon={CalendarDays}>
+        <Panel
+          title="When you play"
+          icon={CalendarDays}
+          tldr={rhythmTldr}
+          reduced={reduced}
+          delay={0.15}
+        >
           {rhythm.total > 0 ? (
             <RhythmGrid heat={rhythm} />
           ) : (
@@ -669,7 +828,13 @@ const PlayRhythmDashboard = memo(function PlayRhythmDashboard({
           )}
         </Panel>
 
-        <Panel title="Notable episodes" icon={Flame}>
+        <Panel
+          title="Notable episodes"
+          icon={Flame}
+          tldr={notableTldr}
+          reduced={reduced}
+          delay={0.2}
+        >
           {topScenes.length > 0 ? (
             <div className="space-y-2">
               {topScenes.map((scene) => {
@@ -678,7 +843,7 @@ const PlayRhythmDashboard = memo(function PlayRhythmDashboard({
                 return (
                   <div
                     key={scene.id}
-                    className="flex items-center gap-2 rounded-lg border border-white/[0.05] bg-white/[0.015] px-3 py-2"
+                    className="flex items-center gap-2 rounded-lg border border-white/[0.05] bg-white/[0.015] px-3 py-2 transition-colors hover:border-white/12 hover:bg-white/[0.03]"
                   >
                     <span className="min-w-0 flex-1 truncate text-xs font-medium text-white/80">
                       {scene.title}
@@ -961,19 +1126,28 @@ export const JourneyScenesView = memo(function JourneyScenesView({
         sessions={sessions}
         scenes={curated.scenes}
         medianMinutes={medianMinutes}
+        reduced={reduced}
+      />
+
+      <SectionHeader
+        eyebrow="Episode stream"
+        title="Detected play episodes"
+        blurb="Clustered sits, not a calendar. Silence between runs is content — never proportional whitespace."
       />
 
       {/* One control strip: a density stepper and the curation filters. */}
       <div className="mb-5 flex flex-wrap items-center gap-3">
-        <div className="flex items-center rounded-lg border border-white/10 bg-white/5 p-0.5">
+        <div className="flex items-center rounded-lg border border-white/10 bg-white/[0.04] p-0.5 shadow-inner shadow-black/20">
           {DENSITY_ORDER.map((d) => (
             <button
               key={d}
               type="button"
               onClick={() => setDensity(d)}
               className={cn(
-                'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
-                density === d ? 'bg-fuchsia-500 text-white' : 'text-white/55 hover:text-white',
+                'rounded-md px-3 py-1.5 text-xs font-medium transition-all',
+                density === d
+                  ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/25'
+                  : 'text-white/55 hover:text-white',
               )}
             >
               {DENSITY_LABEL[d]}
@@ -986,8 +1160,8 @@ export const JourneyScenesView = memo(function JourneyScenesView({
           onClick={() => setCurationOpen((v) => !v)}
           aria-expanded={curationOpen}
           className={cn(
-            'flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium transition-colors',
-            curationOpen ? 'text-white' : 'text-white/55 hover:text-white',
+            'flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium transition-colors',
+            curationOpen ? 'border-white/20 text-white' : 'text-white/55 hover:text-white',
           )}
         >
           <Filter className="h-3 w-3" />
@@ -998,7 +1172,7 @@ export const JourneyScenesView = memo(function JourneyScenesView({
             </span>
           )}
           <ChevronDown
-            className={cn('h-3 w-3 transition-transform', curationOpen && 'rotate-180')}
+            className={cn('h-3 w-3 transition-transform duration-200', curationOpen && 'rotate-180')}
           />
         </button>
 
@@ -1050,7 +1224,7 @@ export const JourneyScenesView = memo(function JourneyScenesView({
         {/* Navigation spine — virtualized, so a thousand episodes still mount
             a couple of dozen rows. */}
         <aside className="hidden w-56 shrink-0 lg:block">
-          <div className="sticky top-6 rounded-xl border border-white/[0.06] bg-white/[0.015] p-2">
+          <div className="sticky top-6 rounded-xl border border-white/[0.06] bg-gradient-to-b from-white/[0.03] to-white/[0.01] p-2">
             <p className="px-2 pb-2 font-mono text-[10px] uppercase tracking-wider text-white/35">
               Episodes
             </p>

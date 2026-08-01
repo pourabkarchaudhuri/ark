@@ -233,10 +233,22 @@ class JourneyStore {
 
   /**
    * Sync status / hours / rating / lastPlayedAt for a game already in the journey.
+   *
+   * Live session ticks (~15s) call this with **hoursPlayed only**. Those must not
+   * `notifyListeners()` — dashboard mounts `useJourneyHistory()` for the whole
+   * app lifetime, and a full notify re-renders Voyage/Gantt consumers every tick
+   * (render storm). Quiet path: update memory + debounced save, no notify.
+   * Session-end / status / rating / date fields still notify as before.
    */
   syncProgress(gameId: string, fields: { status?: GameStatus; hoursPlayed?: number; rating?: number; firstPlayedAt?: string; lastPlayedAt?: string }) {
     const existing = this.entries.get(gameId);
     if (!existing) return;
+
+    const structural =
+      fields.status !== undefined ||
+      fields.rating !== undefined ||
+      fields.firstPlayedAt !== undefined ||
+      fields.lastPlayedAt !== undefined;
 
     if (fields.status !== undefined) existing.status = fields.status;
     if (fields.hoursPlayed !== undefined) existing.hoursPlayed = fields.hoursPlayed;
@@ -253,6 +265,8 @@ class JourneyStore {
 
     this.invalidateSortedCache();
     this.scheduleSave();
+    // Hours-only live ticks: keep getEntry() readers current without waking React.
+    if (!structural) return;
     this.notifyListeners();
   }
 

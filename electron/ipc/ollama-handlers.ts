@@ -18,11 +18,13 @@ import {
   detectGpuMode,
   getEmbeddingModelInfo,
   getEmbeddingModelSize,
+  getRerankQwenModelInfo,
+  getRerankQwenModelSize,
   ensureRerankModelPull,
   getRerankQwenModelTag,
   EMBEDDING_MODEL_NAME,
 } from '../ollama-setup.js';
-import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
+import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL, DEFAULT_OLLAMA_RERANK_QWEN_MODEL } from '../settings-store.js';
 import { normalizeOllamaRerankRows, type RerankResultRow } from '../ollama-rerank-normalize.js';
 import {
   detectRerankTier,
@@ -371,19 +373,39 @@ export function register(): void {
       };
 
       let cursor = 0;
-      const runWorker = async (): Promise<void> => {
-        while (cursor < subBatches.length) {
-          const myIdx = cursor++;
-          const subBatch = subBatches[myIdx];
-          const texts = subBatch.map(item => item.text);
-          const embeddings = await embedSubBatchWithFallback(texts);
-          for (let k = 0; k < subBatch.length; k++) {
-            const vec = embeddings[k];
-            if (vec) results[subBatch[k].id] = vec;
+      // Dynamic concurrency: blur/focus can flip mid-pass. Workers claim slots
+      // under the *live* inFlight limit so polite mode actually drops from 2→1
+      // instead of leaving both GPU workers racing after background=true.
+      let activeWorkers = 0;
+      const claimNext = async (): Promise<number | null> => {
+        while (true) {
+          if (cursor >= subBatches.length) return null;
+          const limit = Math.max(1, pickProfile().inFlight);
+          if (activeWorkers < limit) {
+            activeWorkers += 1;
+            return cursor++;
           }
-          completed += subBatch.length;
-          if (completed % 100 === 0 || completed === validItems.length) {
-            logger.log(`[Ollama] Embeddings: ${completed}/${validItems.length}`);
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      };
+      const runWorker = async (): Promise<void> => {
+        while (true) {
+          const myIdx = await claimNext();
+          if (myIdx === null) return;
+          try {
+            const subBatch = subBatches[myIdx];
+            const texts = subBatch.map(item => item.text);
+            const embeddings = await embedSubBatchWithFallback(texts);
+            for (let k = 0; k < subBatch.length; k++) {
+              const vec = embeddings[k];
+              if (vec) results[subBatch[k].id] = vec;
+            }
+            completed += subBatch.length;
+            if (completed % 100 === 0 || completed === validItems.length) {
+              logger.log(`[Ollama] Embeddings: ${completed}/${validItems.length}`);
+            }
+          } finally {
+            activeWorkers -= 1;
           }
           // Polite cooldown in background mode — yields the GPU/CPU briefly
           // to the foreground app between bursts.
@@ -394,10 +416,10 @@ export function register(): void {
         }
       };
 
-      const workers = Array.from(
-        { length: Math.min(initialProfile.inFlight, subBatches.length) },
-        runWorker,
-      );
+      // On GPU, spawn up to the foreground ceiling so focus can ramp 1→2 mid-pass;
+      // claimNext parks the spare when polite mode lowers inFlight. CPU stays serial.
+      const maxWorkers = Math.min(onGpu ? EMBED_GPU_INFLIGHT : 1, subBatches.length);
+      const workers = Array.from({ length: maxWorkers }, runWorker);
       await Promise.all(workers);
 
       logger.log(`[Ollama] Generated ${Object.keys(results).length}/${validItems.length} embeddings (mode=${pickProfile().mode})`);
@@ -546,6 +568,31 @@ export function register(): void {
         sizeBytes: 0,
         parameterSize: '568M',
         quantization: 'F16',
+      };
+    }
+  });
+
+  ipcMain.handle('ollama:rerankModelInfo', async () => {
+    try {
+      const info = await getRerankQwenModelInfo();
+      if (info) return info;
+      const size = await getRerankQwenModelSize();
+      const tag = getRerankQwenModelTag();
+      return {
+        name: tag,
+        installed: size > 0,
+        sizeBytes: size,
+        parameterSize: '0.6B',
+        quantization: 'Q8_0',
+      };
+    } catch (error) {
+      logger.error('[Ollama] Rerank model info error:', error);
+      return {
+        name: getRerankQwenModelTag() || DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
+        installed: false,
+        sizeBytes: 0,
+        parameterSize: '0.6B',
+        quantization: 'Q8_0',
       };
     }
   });

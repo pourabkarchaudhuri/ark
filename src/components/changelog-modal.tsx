@@ -9,6 +9,17 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.53': {
+    title: "What's New in Ark 1.0.53",
+    changes: [
+      'Year Wrapped — back/close chrome fixed; richer year-end stats.',
+      'Live Insights while you play — telemetry updates during sessions; Friction works from your first session; tighter overhead sampling.',
+      'Overlay detail levels — Ctrl+Shift+D cycles density (glassy minimal); Ctrl+Shift+O dismisses. Still lazy HUD (no idle topmost shell) and click-through without mouse forwarding.',
+      'Qwen3 reranker status — shown in System Status and Settings alongside embed / Kaggle-style models.',
+      'Smoother Voyage — hours tick no longer storms the UI; quieter idle polling and embedding work; Scenes & Audit charts get short TLDRs.',
+      'Crash-safe packaging reminder — if an install never opens a window, reinstall Latest (corrupted app packages cannot self-update).',
+    ],
+  },
   '1.0.52': {
     title: "What's New in Ark 1.0.52",
     changes: [

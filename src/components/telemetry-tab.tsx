@@ -14,6 +14,7 @@ import PacingPanel from '@/components/telemetry/PacingPanel';
 import FatiguePanel from '@/components/telemetry/FatiguePanel';
 import OverheadPanel from '@/components/telemetry/OverheadPanel';
 import FrictionPanel from '@/components/telemetry/FrictionPanel';
+import { useTrackerOverhead } from '@/hooks/useTrackerOverhead';
 
 export type GameSessionLike = GameSession & { activeInputMinutes?: number };
 
@@ -51,6 +52,14 @@ function formatRange(sessions: GameSessionLike[]): string {
   return `${first} → ${last}`;
 }
 
+function liveSessionId(gameId: string): string {
+  return `live-${gameId}`;
+}
+
+function toGameId(raw: string | number): string {
+  return typeof raw === 'number' ? `steam-${raw}` : String(raw);
+}
+
 export default function TelemetryTab({
   gameId,
   gameTitle,
@@ -60,16 +69,14 @@ export default function TelemetryTab({
   gameTitle?: string;
   gameCoverUrl?: string;
 }): JSX.Element {
-  const [sessions, setSessions] = React.useState<GameSessionLike[]>([]);
+  const [completedSessions, setCompletedSessions] = React.useState<GameSessionLike[]>([]);
+  const [liveSession, setLiveSession] = React.useState<GameSessionLike | null>(null);
+  const overheadSamples = useTrackerOverhead(gameId);
 
-  // The tab is always mounted now, so a session recorded while it is on screen
-  // has to reach it. A load keyed on gameId alone left the panel sitting on its
-  // empty state while a session was recording behind it.
+  // Completed history — subscribe so a session recorded while the tab is open
+  // reaches the panels without a remount.
   React.useEffect(() => {
     let alive = true;
-    // Only swap state when this game's rows actually changed. sessionStore
-    // notifies on every live tick for every game, and each of the six panels
-    // below re-derives from `sessions` on identity change.
     let lastKey = '';
 
     const load = () => {
@@ -79,7 +86,7 @@ export default function TelemetryTab({
         .join('|');
       if (!alive || key === lastKey) return;
       lastKey = key;
-      setSessions(raw);
+      setCompletedSessions(raw);
     };
 
     load();
@@ -89,6 +96,108 @@ export default function TelemetryTab({
       unsubscribe();
     };
   }, [gameId]);
+
+  // In-progress session from the existing sessionTracker bridge (no new polls).
+  React.useEffect(() => {
+    let alive = true;
+    const bridge = typeof window !== 'undefined' ? window.sessionTracker : undefined;
+    if (!bridge) {
+      setLiveSession(null);
+      return;
+    }
+
+    const applyLive = (startTime: string, activeMinutes: number) => {
+      if (!alive) return;
+      setLiveSession({
+        id: liveSessionId(gameId),
+        gameId,
+        executablePath: '',
+        startTime,
+        endTime: '',
+        durationMinutes: Math.max(0, activeMinutes),
+        idleMinutes: 0,
+      });
+    };
+
+    const clearLive = () => {
+      if (!alive) return;
+      setLiveSession(null);
+    };
+
+    bridge.getActiveSessions?.()
+      .then((active) => {
+        if (!alive || !active) return;
+        const match = active.find((s) => toGameId(s.gameId) === gameId);
+        if (match) {
+          applyLive(match.startTime, match.elapsedMinutes ?? 0);
+        } else {
+          clearLive();
+        }
+      })
+      .catch(() => {
+        /* non-critical */
+      });
+
+    const unsubs: Array<() => void> = [];
+
+    if (typeof bridge.onSessionStarted === 'function') {
+      unsubs.push(
+        bridge.onSessionStarted((data) => {
+          if (toGameId(data.gameId) !== gameId) return;
+          applyLive(data.startTime, 0);
+        }),
+      );
+    }
+
+    if (typeof bridge.onLiveUpdate === 'function') {
+      unsubs.push(
+        bridge.onLiveUpdate((data) => {
+          if (toGameId(data.gameId) !== gameId) return;
+          setLiveSession((prev) => {
+            const startTime = prev?.startTime ?? new Date().toISOString();
+            return {
+              id: liveSessionId(gameId),
+              gameId,
+              executablePath: prev?.executablePath ?? '',
+              startTime,
+              endTime: '',
+              durationMinutes: Math.max(0, data.activeMinutes ?? 0),
+              idleMinutes: prev?.idleMinutes ?? 0,
+            };
+          });
+        }),
+      );
+    }
+
+    if (typeof bridge.onSessionEnded === 'function') {
+      unsubs.push(
+        bridge.onSessionEnded((data) => {
+          if (toGameId(data.gameId) !== gameId) return;
+          clearLive();
+        }),
+      );
+    }
+
+    if (typeof bridge.onStatusChange === 'function') {
+      unsubs.push(
+        bridge.onStatusChange((data) => {
+          if (toGameId(data.gameId) !== gameId) return;
+          if (data.status !== 'Playing Now') clearLive();
+        }),
+      );
+    }
+
+    return () => {
+      alive = false;
+      unsubs.forEach((fn) => fn());
+    };
+  }, [gameId]);
+
+  const sessions = React.useMemo(() => {
+    if (!liveSession) return completedSessions;
+    const withoutDup = completedSessions.filter((s) => s.id !== liveSession.id);
+    return [...withoutDup, liveSession];
+  }, [completedSessions, liveSession]);
 
   const totalHours = React.useMemo(
     () => sessions.reduce((sum, s) => sum + (s.durationMinutes || 0), 0) / 60,
@@ -100,7 +209,10 @@ export default function TelemetryTab({
   );
   const rangeLabel = React.useMemo(() => formatRange(sessions), [sessions]);
 
-  if (sessions.length === 0) {
+  // False empty-state fix: completed history is empty while a game is mid-session
+  // (sessions are only recorded on end). Live session + overhead samples count.
+  const hasLiveSignal = liveSession != null || overheadSamples.length > 0;
+  if (sessions.length === 0 && !hasLiveSignal) {
     return (
       <Card>
         <CardHeader>
@@ -130,7 +242,11 @@ export default function TelemetryTab({
             ) : null}
             <div>
               <CardTitle>{gameTitle ? `${gameTitle} — Telemetry` : 'Telemetry'}</CardTitle>
-              <CardDescription>Per-session analytics for this title.</CardDescription>
+              <CardDescription>
+                {liveSession
+                  ? 'Live session in progress — overhead updates every few seconds.'
+                  : 'Per-session analytics for this title.'}
+              </CardDescription>
             </div>
           </div>
         </CardHeader>

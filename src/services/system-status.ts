@@ -43,6 +43,9 @@ export interface EmbeddingModelStatus {
   quantization: string;
 }
 
+/** Qwen3 reranker — same shape as embedding model row in status panels. */
+export type RerankModelStatus = EmbeddingModelStatus;
+
 export interface MLModelStatus {
   loaded: boolean;
   modelCount: number;
@@ -62,6 +65,7 @@ export interface SystemStatusSnapshot {
   ollamaSetup: SyncStatus;
   rerankSetup: SyncStatus;
   embeddingModel: EmbeddingModelStatus | null;
+  rerankModel: RerankModelStatus | null;
   mlModel: MLModelStatus | null;
   storage: StorageMetric[];
   totalStorageBytes: number;
@@ -71,6 +75,9 @@ type Listener = () => void;
 
 /** Must match `EMBEDDING_MODEL_NAME` in electron/ollama-setup.ts (splash embedding row). */
 const EMBEDDING_MODEL_DISPLAY_NAME = 'snowflake-arctic-embed2';
+
+/** Fallback display name when IPC has not resolved the configured Qwen tag yet. */
+const RERANK_QWEN_MODEL_DISPLAY_NAME = 'dengcao/Qwen3-Reranker-0.6B:Q8_0';
 
 // ─── IDB Size Estimation ────────────────────────────────────────────────────────
 
@@ -278,6 +285,9 @@ export function reportRerankDone(ev: RerankProgressEvent) {
     percent: 100,
     elapsed: performance.now() - _rerankSetupStartTime,
   };
+  if (!failed && (tier === 'qwen_graded' || tier === 'qwen_binary')) {
+    systemStatus.seedRerankModelKnownInstalled();
+  }
   systemStatus._notify();
 }
 
@@ -387,15 +397,18 @@ class SystemStatus {
   private _listeners = new Set<Listener>();
   private _storageCache: StorageMetric[] = [];
   private _embeddingModelCache: EmbeddingModelStatus | null = null;
+  private _rerankModelCache: RerankModelStatus | null = null;
   private _mlModelCache: MLModelStatus | null = null;
   private _catalogSyncStartTime = 0;
   private _recoPipelineStartTime = 0;
   private _initialized = false;
   private _storageTimer: ReturnType<typeof setInterval> | null = null;
   private _modelTimer: ReturnType<typeof setInterval> | null = null;
+  private _rerankModelTimer: ReturnType<typeof setInterval> | null = null;
   private _mlModelTimer: ReturnType<typeof setInterval> | null = null;
   /** Bumps when a newer model-info request supersedes older in-flight IPC — avoids stale "not installed". */
   private _modelInfoSeq = 0;
+  private _rerankModelInfoSeq = 0;
 
   subscribe(fn: Listener): () => void {
     this._listeners.add(fn);
@@ -414,15 +427,18 @@ class SystemStatus {
     if (this._storageTimer) return; // already running
     this._refreshStorage();
     this._refreshModelInfo();
+    this._refreshRerankModelInfo();
     this._refreshMlModelInfo();
     this._storageTimer = setInterval(() => this._refreshStorage(), 30_000);
     this._modelTimer = setInterval(() => this._refreshModelInfo(), 60_000);
+    this._rerankModelTimer = setInterval(() => this._refreshRerankModelInfo(), 60_000);
     this._mlModelTimer = setInterval(() => this._refreshMlModelInfo(), 60_000);
   }
 
   private _stopPolling() {
     if (this._storageTimer) { clearInterval(this._storageTimer); this._storageTimer = null; }
     if (this._modelTimer) { clearInterval(this._modelTimer); this._modelTimer = null; }
+    if (this._rerankModelTimer) { clearInterval(this._rerankModelTimer); this._rerankModelTimer = null; }
     if (this._mlModelTimer) { clearInterval(this._mlModelTimer); this._mlModelTimer = null; }
     this._mlLoadAttempts = 0;
   }
@@ -515,6 +531,36 @@ class SystemStatus {
     this._notify();
   }
 
+  private async _refreshRerankModelInfo() {
+    const seq = ++this._rerankModelInfoSeq;
+    try {
+      if (!window.ollama?.getRerankModelInfo) return;
+      const info = await window.ollama.getRerankModelInfo();
+      if (seq !== this._rerankModelInfoSeq) return;
+      if (info) {
+        this._rerankModelCache = info;
+        this._notify();
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  /**
+   * Called when rerank setup reports a working Qwen tier. Prevents the status
+   * panel from flashing "Not installed" while a stale IPC probe is in flight.
+   */
+  seedRerankModelKnownInstalled(): void {
+    this._rerankModelInfoSeq++;
+    const prev = this._rerankModelCache;
+    this._rerankModelCache = {
+      name: prev?.name ?? RERANK_QWEN_MODEL_DISPLAY_NAME,
+      installed: true,
+      sizeBytes: prev?.sizeBytes ?? 0,
+      parameterSize: prev?.parameterSize ?? '0.6B',
+      quantization: prev?.quantization ?? 'Q8_0',
+    };
+    this._notify();
+  }
+
   private _mlLoadAttempts = 0;
 
   private async _refreshMlModelInfo() {
@@ -536,7 +582,12 @@ class SystemStatus {
   }
 
   /** Force an immediate storage refresh. */
-  refreshStorage() { this._refreshStorage(); this._refreshModelInfo(); this._refreshMlModelInfo(); }
+  refreshStorage() {
+    this._refreshStorage();
+    this._refreshModelInfo();
+    this._refreshRerankModelInfo();
+    this._refreshMlModelInfo();
+  }
 
   getSnapshot(): SystemStatusSnapshot {
     // Steam Catalog Sync
@@ -708,6 +759,7 @@ class SystemStatus {
       ollamaSetup: { ..._ollamaSetupStatus },
       rerankSetup: { ..._rerankSetupStatus },
       embeddingModel: this._embeddingModelCache ? { ...this._embeddingModelCache } : null,
+      rerankModel: this._rerankModelCache ? { ...this._rerankModelCache } : null,
       mlModel: this._mlModelCache ? { ...this._mlModelCache } : null,
       storage: [...this._storageCache],
       totalStorageBytes,

@@ -40,6 +40,11 @@ import ShinyText from '@/components/reactbits/ShinyText';
 import SplitText from '@/components/reactbits/SplitText';
 import SpotlightCard from '@/components/reactbits/SpotlightCard';
 import { TooltipCard } from '@/components/ui/tooltip-card';
+import {
+  resolveSwipeNavAction,
+  resolveTapNavAction,
+  type TapNavAction,
+} from '@/lib/year-wrapped-nav';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -92,6 +97,13 @@ interface WrappedStats {
   funFacts: string[];
   topGamePercentage: number;
   newGamesPerWeek: number;
+  // ── Fresh signal enrichment ──
+  hoursPerActiveDay: number;
+  quietestMonth: { month: string; count: number };
+  peakPlayHour: number | null;
+  currentlyPlaying: number;
+  discoveryTop: { source: string; count: number } | null;
+  comebackCount: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -344,6 +356,74 @@ function computeStats(year: number): WrappedStats {
 
   const newGamesPerWeek = yearJourney.length > 0 ? Math.round((yearJourney.length / 52) * 10) / 10 : 0;
 
+  const hoursPerActiveDay = totalActiveDays > 0
+    ? Math.round((totalHoursPlayed / totalActiveDays) * 10) / 10
+    : 0;
+
+  const quietestMonth = monthlyActivity.reduce(
+    (quiet, m) => {
+      const count = m.gamesAdded + m.sessions;
+      return count < quiet.count ? { month: m.month, count } : quiet;
+    },
+    { month: monthlyActivity[0]?.month || 'Jan', count: Number.POSITIVE_INFINITY },
+  );
+  if (!Number.isFinite(quietestMonth.count)) quietestMonth.count = 0;
+
+  const hourBuckets = new Array(24).fill(0) as number[];
+  for (const s of yearSessions) {
+    hourBuckets[new Date(s.startTime).getHours()] += s.durationMinutes;
+  }
+  let peakPlayHour: number | null = null;
+  let peakMinutes = 0;
+  for (let h = 0; h < 24; h++) {
+    if (hourBuckets[h] > peakMinutes) {
+      peakMinutes = hourBuckets[h];
+      peakPlayHour = h;
+    }
+  }
+  if (peakMinutes <= 0) peakPlayHour = null;
+
+  const currentlyPlaying = yearJourney.filter(
+    (e) => e.status === 'Playing' || e.status === 'Playing Now',
+  ).length;
+
+  const discoveryCounts = new Map<string, number>();
+  for (const entry of yearJourney) {
+    const lib = libraryStore.getEntry(entry.gameId);
+    const src = (lib?.recommendationSource || '').trim();
+    if (!src || src.toLowerCase() === 'manual' || src.toLowerCase() === 'unknown') continue;
+    discoveryCounts.set(src, (discoveryCounts.get(src) || 0) + 1);
+  }
+  const discoveryTopEntry = [...discoveryCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+  const discoveryTop = discoveryTopEntry
+    ? { source: discoveryTopEntry[0], count: discoveryTopEntry[1] }
+    : null;
+
+  // Comebacks: On Hold / Completed → Playing (or Playing Now) within the year
+  let comebackCount = 0;
+  for (const change of yearStatusChanges) {
+    const fromRest = change.previousStatus === 'On Hold' || change.previousStatus === 'Completed';
+    const toPlaying = change.newStatus === 'Playing' || change.newStatus === 'Playing Now';
+    if (fromRest && toPlaying) comebackCount++;
+  }
+
+  if (hoursPerActiveDay >= 1) {
+    funFacts.push(`On days you played, you averaged ${hoursPerActiveDay}h — focused sessions`);
+  }
+  if (peakPlayHour != null) {
+    const label = peakPlayHour === 0 ? '12am' : peakPlayHour < 12 ? `${peakPlayHour}am` : peakPlayHour === 12 ? '12pm' : `${peakPlayHour - 12}pm`;
+    funFacts.push(`Your gravity well hour was around ${label}`);
+  }
+  if (discoveryTop) {
+    funFacts.push(`${discoveryTop.count} games arrived via ${discoveryTop.source}`);
+  }
+  if (comebackCount > 0) {
+    funFacts.push(`You revived ${comebackCount} shelved title${comebackCount === 1 ? '' : 's'} this year`);
+  }
+  if (currentlyPlaying > 0) {
+    funFacts.push(`${currentlyPlaying} game${currentlyPlaying === 1 ? '' : 's'} still mid-voyage`);
+  }
+
   const gamerTitle = getGamerTitle(topGenre, completionRate, isNightOwl, totalHoursPlayed);
 
   return {
@@ -381,6 +461,12 @@ function computeStats(year: number): WrappedStats {
     funFacts,
     topGamePercentage,
     newGamesPerWeek,
+    hoursPerActiveDay,
+    quietestMonth,
+    peakPlayHour,
+    currentlyPlaying,
+    discoveryTop,
+    comebackCount,
   };
 }
 
@@ -488,19 +574,19 @@ function FloatingParticles({ intensity = 1 }: { intensity?: number }) {
 
 const slideVariants = {
   enter: (direction: number) => ({
-    x: direction > 0 ? '100%' : '-100%',
+    x: direction > 0 ? '42%' : '-42%',
     opacity: 0,
-    scale: 0.92,
+    filter: 'blur(6px)',
   }),
   center: {
     x: 0,
     opacity: 1,
-    scale: 1,
+    filter: 'blur(0px)',
   },
   exit: (direction: number) => ({
-    x: direction < 0 ? '100%' : '-100%',
+    x: direction < 0 ? '32%' : '-32%',
     opacity: 0,
-    scale: 0.92,
+    filter: 'blur(4px)',
   }),
 };
 
@@ -549,20 +635,17 @@ function ActivityHeatmap({ year, data, active }: { year: number; data: Map<strin
 
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={active ? { opacity: 1, scale: 1 } : {}}
-      transition={{ delay: 0.6, duration: 0.8 }}
-      className="w-full max-w-2xl overflow-x-auto"
+      initial={{ opacity: 0, scale: 0.97, y: 12 }}
+      animate={active ? { opacity: 1, scale: 1, y: 0 } : {}}
+      transition={{ delay: 0.35, duration: 0.55, ease: [0.16, 1, 0.3, 1] }}
+      className="w-full max-w-2xl overflow-x-auto pointer-events-none"
     >
       <div className="flex gap-[2px] min-w-[600px]">
         {weeks.map((week, wi) => (
           <div key={wi} className="flex flex-col gap-[2px]">
-            {week.map((day, di) => (
-              <motion.div
+            {week.map((day) => (
+              <div
                 key={day.date}
-                initial={{ opacity: 0, scale: 0 }}
-                animate={active ? { opacity: 1, scale: 1 } : {}}
-                transition={{ delay: 0.8 + (wi * 7 + di) * 0.002, duration: 0.3 }}
                 className="w-[9px] h-[9px] rounded-[2px]"
                 style={{ backgroundColor: getColor(day.minutes) }}
                 title={day.minutes > 0 ? `${day.date}: ${Math.round(day.minutes)}min` : day.date}
@@ -628,18 +711,39 @@ function SlideIntro({ stats, active }: { stats: WrappedStats; active: boolean })
 
       <motion.p
         initial={{ opacity: 0, y: 20 }}
-        animate={active ? { opacity: 0.5, y: 0 } : {}}
-        transition={{ delay: 1.8, duration: 0.8 }}
-        className="text-white/50 text-lg text-center max-w-md"
+        animate={active ? { opacity: 0.55, y: 0 } : {}}
+        transition={{ delay: 1.5, duration: 0.7 }}
+        className="text-white/55 text-lg text-center max-w-md"
       >
-        A cinematic journey through your gaming memories
+        Your year, distilled into signals — playtime, streaks, and the titles that pulled you in
       </motion.p>
+
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={active ? { opacity: 1, y: 0 } : {}}
+        transition={{ delay: 2, duration: 0.55 }}
+        className="flex flex-wrap items-center justify-center gap-2 max-w-lg"
+      >
+        {[
+          stats.totalSessions > 0 ? `${stats.totalSessions} sessions` : null,
+          stats.totalActiveDays > 0 ? `${stats.totalActiveDays} active days` : null,
+          stats.longestStreak > 0 ? `${stats.longestStreak}d best streak` : null,
+          stats.currentlyPlaying > 0 ? `${stats.currentlyPlaying} still playing` : null,
+        ].filter(Boolean).map((chip) => (
+          <span
+            key={String(chip)}
+            className="px-3 py-1 rounded-full text-[11px] tracking-wide uppercase text-fuchsia-200/70 bg-fuchsia-500/10 border border-fuchsia-500/20"
+          >
+            {chip}
+          </span>
+        ))}
+      </motion.div>
 
       <motion.div
         initial={{ opacity: 0 }}
         animate={active ? { opacity: 1 } : {}}
-        transition={{ delay: 2.8, duration: 0.6 }}
-        className="flex items-center gap-2 text-white/25 text-sm mt-8"
+        transition={{ delay: 2.5, duration: 0.55 }}
+        className="flex items-center gap-2 text-white/30 text-sm mt-6"
       >
         <motion.div
           animate={{ x: [0, 8, 0] }}
@@ -647,7 +751,7 @@ function SlideIntro({ stats, active }: { stats: WrappedStats; active: boolean })
         >
           <ChevronRight className="w-4 h-4" />
         </motion.div>
-        <span>Swipe or press arrow keys</span>
+        <span>Continue, swipe, or use arrow keys</span>
       </motion.div>
     </div>
   );
@@ -655,52 +759,84 @@ function SlideIntro({ stats, active }: { stats: WrappedStats; active: boolean })
 
 function SlideNumbers({ stats, active }: { stats: WrappedStats; active: boolean }) {
   const items = [
-    { icon: Gamepad2, label: 'Games Added', value: stats.totalGamesAdded, color: 'text-fuchsia-400', glow: 'rgba(168, 85, 247, 0.12)' },
-    { icon: Clock, label: 'Hours Played', value: Math.round(stats.totalHoursPlayed), suffix: 'h', color: 'text-blue-400', glow: 'rgba(59, 130, 246, 0.12)' },
-    { icon: TrendingUp, label: 'Play Sessions', value: stats.totalSessions, color: 'text-emerald-400', glow: 'rgba(34, 197, 94, 0.12)' },
-    { icon: Trophy, label: 'Completed', value: stats.gamesCompleted, color: 'text-amber-400', glow: 'rgba(245, 158, 11, 0.12)' },
+    { icon: Gamepad2, label: 'Games Added', value: stats.totalGamesAdded, color: 'text-fuchsia-400', glow: 'rgba(232, 121, 249, 0.14)' },
+    { icon: Clock, label: 'Hours Played', value: Math.round(stats.totalHoursPlayed), suffix: 'h', color: 'text-sky-300', glow: 'rgba(56, 189, 248, 0.12)' },
+    { icon: TrendingUp, label: 'Play Sessions', value: stats.totalSessions, color: 'text-emerald-300', glow: 'rgba(52, 211, 153, 0.12)' },
+    { icon: Trophy, label: 'Completed', value: stats.gamesCompleted, color: 'text-amber-300', glow: 'rgba(251, 191, 36, 0.12)' },
   ];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-8 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-8 px-8 pointer-events-none">
       <BlurText
         text="The Numbers"
-        className="text-4xl md:text-5xl font-bold text-white justify-center mb-4"
-        delay={60}
+        className="text-4xl md:text-5xl font-bold text-white justify-center mb-2"
+        delay={50}
         animateBy="letters"
         startWhen={active}
       />
 
-      <div className="grid grid-cols-2 gap-5 max-w-lg w-full">
+      <div className="grid grid-cols-2 gap-4 max-w-lg w-full">
         {items.map((item, i) => (
           <motion.div
             key={item.label}
-            initial={{ opacity: 0, y: 40, scale: 0.8 }}
+            initial={{ opacity: 0, y: 28, scale: 0.92 }}
             animate={active ? { opacity: 1, y: 0, scale: 1 } : {}}
-            transition={{ delay: 0.5 + i * 0.15, duration: 0.7, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ delay: 0.35 + i * 0.1, duration: 0.55, ease: [0.16, 1, 0.3, 1] }}
           >
             <SpotlightCard
-              className="rounded-2xl p-6 bg-white/[0.02] backdrop-blur-sm text-center"
+              className="rounded-2xl p-5 bg-white/[0.03] backdrop-blur-sm text-center"
               spotlightColor={item.glow}
             >
-              <item.icon className={cn('w-6 h-6 mx-auto mb-3', item.color)} />
-              <div className={cn('text-4xl md:text-5xl font-black', item.color)}>
-                <CountUp to={item.value} duration={2.5} startWhen={active} suffix={item.suffix || ''} separator="," />
+              <item.icon className={cn('w-5 h-5 mx-auto mb-2.5', item.color)} />
+              <div className={cn('text-4xl md:text-5xl font-black tabular-nums', item.color)}>
+                <CountUp to={item.value} duration={2.2} startWhen={active} suffix={item.suffix || ''} separator="," />
               </div>
-              <p className="text-white/40 text-xs mt-2 uppercase tracking-wider">{item.label}</p>
+              <p className="text-white/40 text-[11px] mt-2 uppercase tracking-[0.14em]">{item.label}</p>
             </SpotlightCard>
           </motion.div>
         ))}
       </div>
 
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={active ? { opacity: 1 } : {}}
+        transition={{ delay: 1.4 }}
+        className="flex flex-wrap items-center justify-center gap-3 text-sm text-white/40"
+      >
+        {stats.hoursPerActiveDay > 0 && (
+          <span>
+            <span className="text-fuchsia-300 font-semibold tabular-nums">{stats.hoursPerActiveDay}h</span>
+            {' '}avg on active days
+          </span>
+        )}
+        {stats.avgSessionMinutes > 0 && (
+          <span className="text-white/25">·</span>
+        )}
+        {stats.avgSessionMinutes > 0 && (
+          <span>
+            <span className="text-sky-300 font-semibold tabular-nums">{stats.avgSessionMinutes}m</span>
+            {' '}avg session
+          </span>
+        )}
+        {stats.statusChanges > 0 && (
+          <>
+            <span className="text-white/25">·</span>
+            <span>
+              <span className="text-amber-300 font-semibold tabular-nums">{stats.statusChanges}</span>
+              {' '}status shifts
+            </span>
+          </>
+        )}
+      </motion.div>
+
       {stats.firstGameAdded && (
         <motion.p
           initial={{ opacity: 0 }}
-          animate={active ? { opacity: 0.4 } : {}}
-          transition={{ delay: 2 }}
-          className="text-white/40 text-sm mt-2"
+          animate={active ? { opacity: 0.45 } : {}}
+          transition={{ delay: 1.7 }}
+          className="text-white/45 text-sm mt-1 text-center"
         >
-          It all started with <span className="text-fuchsia-400 font-medium">{stats.firstGameAdded.title}</span> on {stats.firstGameAdded.date}
+          First signal: <span className="text-fuchsia-300 font-medium">{stats.firstGameAdded.title}</span> · {stats.firstGameAdded.date}
         </motion.p>
       )}
     </div>
@@ -709,47 +845,61 @@ function SlideNumbers({ stats, active }: { stats: WrappedStats; active: boolean 
 
 function SlideCalendar({ stats, active }: { stats: WrappedStats; active: boolean }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="Your Gaming Calendar"
         className="text-4xl md:text-5xl font-bold text-white justify-center"
-        delay={60}
+        delay={50}
         animateBy="words"
         startWhen={active}
       />
 
       <motion.p
         initial={{ opacity: 0 }}
-        animate={active ? { opacity: 0.5 } : {}}
-        transition={{ delay: 0.4 }}
-        className="text-white/50 text-sm text-center"
+        animate={active ? { opacity: 0.55 } : {}}
+        transition={{ delay: 0.3 }}
+        className="text-white/55 text-sm text-center"
       >
-        <span className="text-cyan-400 font-semibold">{stats.totalActiveDays}</span> active days this year
+        <span className="text-cyan-300 font-semibold tabular-nums">{stats.totalActiveDays}</span> active days
+        {stats.quietestMonth.count === 0 && stats.busiestMonth.count > 0 && (
+          <> · quietest month <span className="text-white/70">{stats.quietestMonth.month}</span></>
+        )}
       </motion.p>
 
       <ActivityHeatmap year={stats.year} data={stats.heatmapData} active={active} />
 
-      <div className="flex items-center gap-6 mt-2">
+      <div className="flex flex-wrap items-center justify-center gap-5 mt-1">
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={active ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 1.5 }}
+          transition={{ delay: 0.85 }}
           className="flex items-center gap-2"
         >
-          <Flame className="w-4 h-4 text-orange-400" />
-          <span className="text-white/40 text-xs">
-            Current streak: <span className="text-orange-400 font-bold">{stats.currentStreak} days</span>
+          <Flame className="w-4 h-4 text-orange-300" />
+          <span className="text-white/45 text-xs">
+            Current streak: <span className="text-orange-300 font-bold tabular-nums">{stats.currentStreak}d</span>
           </span>
         </motion.div>
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={active ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 1.7 }}
+          transition={{ delay: 0.95 }}
           className="flex items-center gap-2"
         >
-          <Zap className="w-4 h-4 text-amber-400" />
-          <span className="text-white/40 text-xs">
-            Longest streak: <span className="text-amber-400 font-bold">{stats.longestStreak} days</span>
+          <Zap className="w-4 h-4 text-amber-300" />
+          <span className="text-white/45 text-xs">
+            Longest streak: <span className="text-amber-300 font-bold tabular-nums">{stats.longestStreak}d</span>
+          </span>
+        </motion.div>
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={active ? { opacity: 1, y: 0 } : {}}
+          transition={{ delay: 1.05 }}
+          className="flex items-center gap-2"
+        >
+          <Calendar className="w-4 h-4 text-fuchsia-300" />
+          <span className="text-white/45 text-xs">
+            Peak month: <span className="text-fuchsia-300 font-bold">{stats.busiestMonth.month}</span>
           </span>
         </motion.div>
       </div>
@@ -1296,6 +1446,12 @@ function SlideCompletionist({ stats, active }: { stats: WrappedStats; active: bo
   );
 }
 
+function formatPeakHour(hour: number): string {
+  if (hour === 0) return '12am';
+  if (hour === 12) return '12pm';
+  return hour < 12 ? `${hour}am` : `${hour - 12}pm`;
+}
+
 function SlidePlayPatterns({ stats, active }: { stats: WrappedStats; active: boolean }) {
   const icons = { moon: Moon, sunrise: Sunrise, sun: Sun, sunset: Sunset };
   const colors = { moon: 'text-indigo-400', sunrise: 'text-orange-300', sun: 'text-amber-400', sunset: 'text-rose-400' };
@@ -1307,36 +1463,42 @@ function SlidePlayPatterns({ stats, active }: { stats: WrappedStats; active: boo
   };
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
-        text={stats.isNightOwl ? 'Night Owl' : 'Early Bird'}
+        text={stats.isNightOwl ? 'Night Owl' : 'Daylight Runner'}
         className="text-4xl md:text-5xl font-bold text-white justify-center"
-        delay={60}
+        delay={50}
         animateBy="letters"
         startWhen={active}
       />
 
       <motion.div
-        initial={{ opacity: 0, scale: 0.8, rotateZ: -20 }}
+        initial={{ opacity: 0, scale: 0.85, rotateZ: -12 }}
         animate={active ? { opacity: 1, scale: 1, rotateZ: 0 } : {}}
-        transition={{ delay: 0.5, duration: 0.8, type: 'spring' }}
+        transition={{ delay: 0.35, duration: 0.65, type: 'spring', stiffness: 160, damping: 16 }}
       >
         {stats.isNightOwl ? (
-          <Moon className="w-16 h-16 text-indigo-400" />
+          <Moon className="w-16 h-16 text-indigo-300" />
         ) : (
-          <Sun className="w-16 h-16 text-amber-400" />
+          <Sun className="w-16 h-16 text-amber-300" />
         )}
       </motion.div>
 
       <motion.p
         initial={{ opacity: 0 }}
-        animate={active ? { opacity: 0.6 } : {}}
-        transition={{ delay: 0.8 }}
-        className="text-white/60 text-sm text-center max-w-xs"
+        animate={active ? { opacity: 0.65 } : {}}
+        transition={{ delay: 0.6 }}
+        className="text-white/60 text-sm text-center max-w-sm"
       >
         {stats.isNightOwl
-          ? `${stats.nightPercentage}% of your gaming happened in the evening or at night`
-          : 'You prefer gaming during the day — a true early bird'}
+          ? `${stats.nightPercentage}% of your hours landed after dusk`
+          : 'Most of your hours landed in daylight — a steady daytime cadence'}
+        {stats.peakPlayHour != null && (
+          <>
+            {' · '}peak around{' '}
+            <span className="text-fuchsia-300 font-semibold">{formatPeakHour(stats.peakPlayHour)}</span>
+          </>
+        )}
       </motion.p>
 
       <div className="grid grid-cols-2 gap-4 mt-4 w-full max-w-xs">
@@ -1639,6 +1801,7 @@ function SlideFinale({ stats, active, onDownload, onShare, onLaunchFlythrough, i
 
       {/* Share & Download controls */}
       <motion.div
+        data-wrapped-interactive
         initial={{ opacity: 0, y: 20 }}
         animate={active ? { opacity: 1, y: 0 } : {}}
         transition={{ delay: 2.5 }}
@@ -1647,8 +1810,9 @@ function SlideFinale({ stats, active, onDownload, onShare, onLaunchFlythrough, i
         {/* Phase 3.0 — Watch in the Galaxy: handoff to the Cinematic Flythrough */}
         {onLaunchFlythrough && (
           <button
+            type="button"
             onClick={(e) => { e.stopPropagation(); onLaunchFlythrough(); }}
-            className="flex items-center gap-2 px-7 py-3 rounded-full bg-gradient-to-r from-cyan-500/30 via-fuchsia-500/30 to-purple-500/30 hover:from-cyan-500/45 hover:via-fuchsia-500/45 hover:to-purple-500/45 border border-cyan-400/40 text-white text-sm font-medium transition-all shadow-lg shadow-fuchsia-500/20"
+            className="flex items-center gap-2 px-7 py-3 rounded-full bg-gradient-to-r from-cyan-500/30 via-fuchsia-500/30 to-violet-500/30 hover:from-cyan-500/45 hover:via-fuchsia-500/45 hover:to-violet-500/45 border border-cyan-400/35 text-white text-sm font-medium transition-all shadow-lg shadow-fuchsia-500/15"
           >
             <Sparkles className="w-4 h-4" />
             <span>Watch your year in the Galaxy</span>
@@ -1657,9 +1821,10 @@ function SlideFinale({ stats, active, onDownload, onShare, onLaunchFlythrough, i
 
         {/* Download button */}
         <button
+          type="button"
           onClick={(e) => { e.stopPropagation(); onDownload(); }}
           disabled={isExporting}
-          className="flex items-center gap-2 px-6 py-2.5 rounded-full bg-gradient-to-r from-fuchsia-600/20 to-purple-600/20 hover:from-fuchsia-600/30 hover:to-purple-600/30 border border-fuchsia-500/20 text-fuchsia-300 text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center gap-2 px-6 py-2.5 rounded-full bg-gradient-to-r from-fuchsia-600/20 to-violet-600/20 hover:from-fuchsia-600/30 hover:to-violet-600/30 border border-fuchsia-500/25 text-fuchsia-200 text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isExporting ? (
             <>
@@ -1753,6 +1918,8 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
   const slideContainerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
+  const touchStartXRef = useRef<number | null>(null);
+  const navLockRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1766,29 +1933,52 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
       setCurrentSlide(0);
       setDirection(0);
       setCopiedStats(false);
+      navLockRef.current = false;
     }
   }, [isOpen]);
 
-  const goNext = useCallback(() => {
-    if (currentSlide < TOTAL_SLIDES - 1) {
+  const applyNav = useCallback((action: TapNavAction) => {
+    if (action === 'none' || isExporting || navLockRef.current) return;
+    navLockRef.current = true;
+    if (action === 'next') {
       setDirection(1);
-      setCurrentSlide((s) => s + 1);
+      setCurrentSlide((s) => Math.min(s + 1, TOTAL_SLIDES - 1));
+    } else {
+      setDirection(-1);
+      setCurrentSlide((s) => Math.max(s - 1, 0));
     }
-  }, [currentSlide]);
+    window.setTimeout(() => { navLockRef.current = false; }, 320);
+  }, [isExporting]);
+
+  const goNext = useCallback(() => {
+    applyNav(currentSlide < TOTAL_SLIDES - 1 ? 'next' : 'none');
+  }, [applyNav, currentSlide]);
 
   const goPrev = useCallback(() => {
-    if (currentSlide > 0) {
-      setDirection(-1);
-      setCurrentSlide((s) => s - 1);
-    }
-  }, [currentSlide]);
+    applyNav(currentSlide > 0 ? 'prev' : 'none');
+  }, [applyNav, currentSlide]);
+
+  const handleOverlayPointer = useCallback((clientX: number) => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    applyNav(resolveTapNavAction(clientX, rect.left, rect.width, currentSlide, TOTAL_SLIDES));
+  }, [applyNav, currentSlide]);
 
   useEffect(() => {
     if (!isOpen) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowRight' || e.key === ' ') goNext();
-      else if (e.key === 'ArrowLeft') goPrev();
-      else if (e.key === 'Escape') onClose();
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === 'ArrowRight' || e.key === ' ') {
+        e.preventDefault();
+        goNext();
+      } else if (e.key === 'ArrowLeft' || e.key === 'Backspace') {
+        e.preventDefault();
+        goPrev();
+      } else if (e.key === 'Escape') {
+        onClose();
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -1905,6 +2095,9 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
 
   const isFinale = currentSlide === TOTAL_SLIDES - 1;
 
+  const isFirst = currentSlide === 0;
+  const isLast = currentSlide === TOTAL_SLIDES - 1;
+
   return (
     <AnimatePresence>
       <motion.div
@@ -1912,63 +2105,86 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[200] bg-black flex flex-col"
+        className="fixed inset-0 z-[200] bg-black flex flex-col select-none"
         onClick={(e) => {
           if (isExporting) return;
-          const rect = (e.target as HTMLElement).getBoundingClientRect();
-          const clickX = e.clientX - rect.left;
-          if (clickX > rect.width / 2) goNext();
-          else goPrev();
+          const target = e.target as HTMLElement;
+          if (target.closest('[data-wrapped-interactive]')) return;
+          handleOverlayPointer(e.clientX);
+        }}
+        onTouchStart={(e) => {
+          touchStartXRef.current = e.touches[0]?.clientX ?? null;
+        }}
+        onTouchEnd={(e) => {
+          if (isExporting) return;
+          const target = e.target as HTMLElement;
+          if (target.closest('[data-wrapped-interactive]')) return;
+          const startX = touchStartXRef.current;
+          touchStartXRef.current = null;
+          if (startX == null) return;
+          const endX = e.changedTouches[0]?.clientX;
+          if (endX == null) return;
+          applyNav(resolveSwipeNavAction(startX, endX, currentSlide, TOTAL_SLIDES));
         }}
       >
         {/* Animated background gradient */}
         <motion.div
-          className="absolute inset-0"
-          animate={{ opacity: [0.8, 1, 0.8] }}
-          transition={{ repeat: Infinity, duration: 4, ease: 'easeInOut' }}
+          className="absolute inset-0 pointer-events-none"
+          animate={{ opacity: [0.75, 1, 0.75] }}
+          transition={{ repeat: Infinity, duration: 5, ease: 'easeInOut' }}
           style={{ backgroundImage: SLIDE_GRADIENTS[currentSlide % SLIDE_GRADIENTS.length] }}
         />
 
-        <FloatingParticles intensity={isFinale ? 1.5 : 1} />
+        <FloatingParticles intensity={isFinale ? 1.4 : 0.9} />
 
-        {/* Close button */}
-        <button
-          onClick={(e) => { e.stopPropagation(); onClose(); }}
-          className="absolute top-6 right-6 z-50 w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 transition-colors"
+        {/* Top chrome: year · brand · close */}
+        <div
+          data-wrapped-interactive
+          className="absolute top-0 inset-x-0 z-50 flex items-center justify-between px-5 pt-5 pb-2"
         >
-          <X className="w-5 h-5" />
-        </button>
+          <div className="flex items-center gap-2">
+            {[currentYear - 1, currentYear].map((y) => (
+              <button
+                key={y}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedYear(y);
+                  setDirection(0);
+                  setCurrentSlide(0);
+                }}
+                className={cn(
+                  'px-3 py-1 rounded-full text-xs font-medium transition-colors',
+                  selectedYear === y
+                    ? 'bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/35'
+                    : 'bg-white/5 text-white/35 border border-white/10 hover:text-white/55',
+                )}
+              >
+                {y}
+              </button>
+            ))}
+          </div>
 
-        {/* Year selector */}
-        <div className="absolute top-6 left-6 z-50 flex items-center gap-2">
-          {[currentYear - 1, currentYear].map((y) => (
+          <p className="text-white/20 text-[10px] font-bold tracking-[0.42em] uppercase pointer-events-none">
+            Ark Wrapped
+          </p>
+
+          <TooltipCard content="Close Ark Wrapped">
             <button
-              key={y}
-              onClick={(e) => { e.stopPropagation(); setSelectedYear(y); setCurrentSlide(0); }}
-              className={cn(
-                'px-3 py-1 rounded-full text-xs font-medium transition-colors',
-                selectedYear === y
-                  ? 'bg-fuchsia-500/20 text-fuchsia-400 border border-fuchsia-500/30'
-                  : 'bg-white/5 text-white/30 border border-white/10 hover:text-white/50',
-              )}
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onClose(); }}
+              className="h-10 px-3.5 rounded-full bg-white/5 border border-white/10 flex items-center gap-2 text-white/55 hover:text-white hover:bg-white/10 transition-colors"
+              aria-label="Close"
             >
-              {y}
+              <X className="w-4 h-4" />
+              <span className="text-xs font-medium">Close</span>
             </button>
-          ))}
+          </TooltipCard>
         </div>
 
-        {/* Branding */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 0.15 }}
-          className="absolute top-6 left-1/2 -translate-x-1/2 z-40 text-white/15 text-[10px] font-bold tracking-[0.4em] uppercase"
-        >
-          Ark Wrapped
-        </motion.div>
-
         {/* Slides */}
-        <div ref={slideContainerRef} className="relative flex-1 overflow-hidden">
-          <AnimatePresence initial={false} custom={direction} mode="wait">
+        <div ref={slideContainerRef} className="relative flex-1 overflow-hidden pb-28">
+          <AnimatePresence initial={false} custom={direction}>
             <motion.div
               key={currentSlide}
               custom={direction}
@@ -1976,10 +2192,10 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
               initial="enter"
               animate="center"
               exit="exit"
-              transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+              transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
               className="absolute inset-0"
             >
-              {currentSlide === TOTAL_SLIDES - 1 ? (
+              {isLast ? (
                 <SlideFinale
                   stats={stats}
                   active={true}
@@ -1987,7 +2203,6 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
                   onShare={handleShare}
                   isExporting={isExporting}
                   onLaunchFlythrough={onLaunchFlythrough ? () => {
-                    // Stash keyframes for Galaxy view's localStorage one-shot pickup
                     try {
                       const keyframes = buildFlythroughKeyframes(stats);
                       if (keyframes.length >= 2) {
@@ -2009,49 +2224,111 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
           </AnimatePresence>
         </div>
 
-        {/* Navigation arrows */}
-        {currentSlide > 0 && (
-          <button
-            onClick={(e) => { e.stopPropagation(); goPrev(); }}
-            className="absolute left-4 top-1/2 -translate-y-1/2 z-50 w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-white/30 hover:text-white hover:bg-white/10 transition-colors"
-          >
-            <ChevronLeft className="w-5 h-5" />
-          </button>
-        )}
-        {currentSlide < TOTAL_SLIDES - 1 && (
-          <button
-            onClick={(e) => { e.stopPropagation(); goNext(); }}
-            className="absolute right-4 top-1/2 -translate-y-1/2 z-50 w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-white/30 hover:text-white hover:bg-white/10 transition-colors"
-          >
-            <ChevronRight className="w-5 h-5" />
-          </button>
-        )}
+        {/* Side chevrons */}
+        <button
+          data-wrapped-interactive
+          type="button"
+          onClick={(e) => { e.stopPropagation(); goPrev(); }}
+          disabled={isFirst || isExporting}
+          className={cn(
+            'absolute left-3 top-1/2 -translate-y-1/2 z-50 w-11 h-11 rounded-full border flex items-center justify-center transition-colors',
+            isFirst || isExporting
+              ? 'opacity-0 pointer-events-none'
+              : 'bg-black/40 border-white/15 text-white/70 hover:text-white hover:bg-fuchsia-500/20 hover:border-fuchsia-400/40',
+          )}
+          aria-label="Previous slide"
+        >
+          <ChevronLeft className="w-5 h-5" />
+        </button>
+        <button
+          data-wrapped-interactive
+          type="button"
+          onClick={(e) => { e.stopPropagation(); goNext(); }}
+          disabled={isLast || isExporting}
+          className={cn(
+            'absolute right-3 top-1/2 -translate-y-1/2 z-50 w-11 h-11 rounded-full border flex items-center justify-center transition-colors',
+            isLast || isExporting
+              ? 'opacity-0 pointer-events-none'
+              : 'bg-black/40 border-white/15 text-white/70 hover:text-white hover:bg-fuchsia-500/20 hover:border-fuchsia-400/40',
+          )}
+          aria-label="Next slide"
+        >
+          <ChevronRight className="w-5 h-5" />
+        </button>
 
-        {/* Progress bar */}
-        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5">
-          {Array.from({ length: TOTAL_SLIDES }).map((_, i) => (
+        {/* Bottom chrome: Back · progress · Continue — always present */}
+        <div
+          data-wrapped-interactive
+          className="absolute bottom-0 inset-x-0 z-50 px-5 pb-5 pt-3 bg-gradient-to-t from-black via-black/90 to-transparent"
+        >
+          <div className="flex items-center gap-3 max-w-3xl mx-auto">
             <button
-              key={i}
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                setDirection(i > currentSlide ? 1 : -1);
-                setCurrentSlide(i);
+                if (isFirst) onClose();
+                else goPrev();
               }}
-              className={cn(
-                'h-1 rounded-full transition-all duration-500',
-                i === currentSlide
-                  ? 'w-8 bg-gradient-to-r from-fuchsia-500 to-purple-600'
-                  : i < currentSlide
-                  ? 'w-2 bg-fuchsia-500/30'
-                  : 'w-1.5 bg-white/15 hover:bg-white/25',
-              )}
-            />
-          ))}
-        </div>
+              disabled={isExporting}
+              className="shrink-0 h-10 px-4 rounded-full bg-white/[0.06] border border-white/12 text-white/80 hover:bg-white/10 hover:text-white text-sm font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40"
+              aria-label={isFirst ? 'Close' : 'Back'}
+            >
+              <ChevronLeft className="w-4 h-4" />
+              {isFirst ? 'Close' : 'Back'}
+            </button>
 
-        {/* Slide counter */}
-        <div className="absolute bottom-8 right-6 z-50 text-white/20 text-xs font-medium">
-          {currentSlide + 1} / {TOTAL_SLIDES}
+            <div className="flex-1 flex flex-col gap-2 min-w-0">
+              <div className="flex items-center gap-1">
+                {Array.from({ length: TOTAL_SLIDES }).map((_, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (i === currentSlide || isExporting) return;
+                      setDirection(i > currentSlide ? 1 : -1);
+                      setCurrentSlide(i);
+                    }}
+                    className={cn(
+                      'h-1 rounded-full transition-all duration-500',
+                      i === currentSlide
+                        ? 'flex-[2] bg-gradient-to-r from-fuchsia-400 to-violet-500 shadow-[0_0_12px_rgba(232,121,249,0.35)]'
+                        : i < currentSlide
+                        ? 'flex-1 bg-fuchsia-400/35 hover:bg-fuchsia-400/55'
+                        : 'flex-1 bg-white/12 hover:bg-white/25',
+                    )}
+                    aria-label={`Go to slide ${i + 1}`}
+                  />
+                ))}
+              </div>
+              <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-white/30">
+                <span>Step {currentSlide + 1}</span>
+                <span>{TOTAL_SLIDES} beats</span>
+              </div>
+            </div>
+
+            {!isLast ? (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); goNext(); }}
+                disabled={isExporting}
+                className="shrink-0 h-10 px-4 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/35 text-fuchsia-100 hover:bg-fuchsia-500/30 text-sm font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40"
+                aria-label="Continue"
+              >
+                Continue
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onClose(); }}
+                disabled={isExporting}
+                className="shrink-0 h-10 px-4 rounded-full bg-white/[0.08] border border-white/15 text-white/85 hover:bg-white/12 text-sm font-medium transition-colors disabled:opacity-40"
+              >
+                Done
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Copied toast */}
@@ -2061,7 +2338,7 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
               initial={{ opacity: 0, y: 20, scale: 0.9 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -10, scale: 0.9 }}
-              className="fixed bottom-20 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-2 px-4 py-2 rounded-full bg-green-500/20 border border-green-500/30 text-green-400 text-sm"
+              className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/15 border border-emerald-400/30 text-emerald-300 text-sm"
             >
               <Check className="w-4 h-4" />
               Stats copied to clipboard!

@@ -17,6 +17,7 @@ import { promisify } from 'util';
 import path from 'path';
 import * as fs from 'fs';
 import { logger } from './safe-logger.js';
+import { atomicWriteFile } from './safe-write.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 
@@ -113,11 +114,14 @@ const _basenameCollisionWarned: Set<string> = new Set();
  *   - `tasklist /FO CSV /NH` → basenames (fast, always works, no path info)
  *   - `powershell Get-Process | Select-Object Path` → full paths (slower, may
  *     miss elevated processes when we're not admin)
- * Both are populated so we can primarily match on full path and fall back to
- * basename when the path snapshot doesn't include a process (e.g. game
- * launched with elevation).
+ *
+ * PowerShell is expensive (~100–500ms+ of process spawn + WMI). When no session
+ * is active we only need start detection — tasklist basenames are enough
+ * (same fallback we already use when Path is hidden). Full paths refresh while
+ * a session is running so end-detection and collision warnings stay accurate.
  */
-async function refreshProcessSnapshot(): Promise<void> {
+async function refreshProcessSnapshot(opts: { includePaths?: boolean } = {}): Promise<void> {
+  const includePaths = opts.includePaths !== false;
   try {
     if (process.platform === 'win32') {
       // ---- Basenames (fast, primary source of truth for "is anything named X running") ----
@@ -134,6 +138,12 @@ async function refreshProcessSnapshot(): Promise<void> {
         if (match) names.add(match[1].toLowerCase());
       }
       _runningBasenames = names;
+
+      if (!includePaths) {
+        // Idle poll — keep previous _runningPaths (may be empty); basename match
+        // starts sessions the same way a failed PowerShell snapshot would.
+        return;
+      }
 
       // ---- Full paths (slower, best-effort — some processes hide their Path from non-admin) ----
       const paths = new Set<string>();
@@ -265,25 +275,47 @@ function getPersistPath(): string | null {
   }
 }
 
+/** Serialize persist so overlapping async ticks can't reorder writes. */
+let persistChain: Promise<void> = Promise.resolve();
+
 function persistActiveSessions(): void {
   const file = getPersistPath();
   if (!file) return;
-  try {
-    if (activeSessions.size === 0) {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-      return;
-    }
-    const data: PersistedSession[] = Array.from(activeSessions.values()).map((s) => ({
-      gameId: s.gameId,
-      executablePath: s.executablePath,
-      startTime: s.startTime.toISOString(),
-      idleAccumulatedMs: s.idleAccumulatedMs,
-      lastSeenMs: s.lastSeenMs,
-    }));
-    fs.writeFileSync(file, JSON.stringify(data), 'utf-8');
-  } catch (err) {
-    logger.error('[SessionTracker] Failed to persist active sessions:', err);
-  }
+
+  // Snapshot under the current tick — don't capture a later mutation mid-write.
+  const snapshot: PersistedSession[] = Array.from(activeSessions.values()).map((s) => ({
+    gameId: s.gameId,
+    executablePath: s.executablePath,
+    startTime: s.startTime.toISOString(),
+    idleAccumulatedMs: s.idleAccumulatedMs,
+    lastSeenMs: s.lastSeenMs,
+  }));
+
+  persistChain = persistChain.then(
+    () =>
+      new Promise<void>((resolve) => {
+        try {
+          if (snapshot.length === 0) {
+            fs.unlink(file, (err) => {
+              if (err && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
+                logger.error('[SessionTracker] Failed to clear persisted sessions:', err);
+              }
+              resolve();
+            });
+            return;
+          }
+          atomicWriteFile(file, JSON.stringify(snapshot), (err) => {
+            if (err) {
+              logger.error('[SessionTracker] Failed to persist active sessions:', err);
+            }
+            resolve();
+          });
+        } catch (err) {
+          logger.error('[SessionTracker] Failed to persist active sessions:', err);
+          resolve();
+        }
+      }),
+  );
 }
 
 function recoverPersistedSessions(): void {
@@ -338,23 +370,12 @@ async function pollTick(): Promise<void> {
 
   try {
     // Snapshot all running processes ONCE — O(1) lookups for each game below.
-    // Measure OS-probe duration so we can surface hook latency in telemetry.
+    // Idle (no active session): skip Windows PowerShell path scan — tasklist
+    // basenames are enough for start detection and avoid a heavy spawn every 15s.
+    const hasActive = activeSessions.size > 0;
     const _hookStart = performance.now();
-    await refreshProcessSnapshot();
+    await refreshProcessSnapshot({ includePaths: hasActive });
     const hookLatencyMs = Math.round((performance.now() - _hookStart) * 100) / 100;
-
-    // Sample process resource usage for telemetry samples emitted below.
-    const rssMb = Math.round((process.memoryUsage().rss / (1024 * 1024)) * 100) / 100;
-    let cpuPercent = 0;
-    try {
-      const metrics = app.getAppMetrics();
-      for (const m of metrics) {
-        cpuPercent += m?.cpu?.percentCPUUsage ?? 0;
-      }
-      cpuPercent = Math.round(cpuPercent * 100) / 100;
-    } catch {
-      cpuPercent = 0;
-    }
 
     // Get system idle time (seconds)
     let systemIdleS = 0;
@@ -457,11 +478,23 @@ async function pollTick(): Promise<void> {
   }
 
   // Telemetry: emit one sample per active session per tick so per-game panels can chart it.
+  // Sample metrics only when needed — getAppMetrics walks every Chromium process.
+  // timestamp is epoch ms (number) — renderer store/charts expect numeric, not ISO string.
   if (activeSessions.size > 0) {
-    const telemetryTimestamp = new Date(nowMs).toISOString();
+    const rssMb = Math.round((process.memoryUsage().rss / (1024 * 1024)) * 100) / 100;
+    let cpuPercent = 0;
+    try {
+      const metrics = app.getAppMetrics();
+      for (const m of metrics) {
+        cpuPercent += m?.cpu?.percentCPUUsage ?? 0;
+      }
+      cpuPercent = Math.round(cpuPercent * 100) / 100;
+    } catch {
+      cpuPercent = 0;
+    }
     for (const s of activeSessions.values()) {
       sendToRenderer('session:telemetrySample', {
-        timestamp: telemetryTimestamp,
+        timestamp: nowMs,
         gameId: s.gameId,
         cpuPercent,
         rssMb,
@@ -492,8 +525,10 @@ function sendToRenderer(channel: string, data: unknown) {
   } catch (err) {
     logger.error(`[SessionTracker] Failed to send ${channel}:`, err);
   }
-  // Also forward the same payload to the overlay HUD window, if registered.
-  // Guard against a destroyed window (overlay is torn down on app quit).
+  // Overlay HUD only consumes session start/live/end/status — skip telemetry
+  // samples (and any other non-HUD channels) so the click-through window isn't
+  // woken for chart data it never renders.
+  if (channel === 'session:telemetrySample') return;
   try {
     if (overlayWindowRef && !overlayWindowRef.isDestroyed()) {
       overlayWindowRef.webContents.send(channel, data);

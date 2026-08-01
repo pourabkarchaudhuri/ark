@@ -665,7 +665,39 @@ interface GaugeSpec {
   detail: string;
 }
 
-function QualityGauge({ spec }: { spec: GaugeSpec }) {
+/** One-line takeaway under a chart — grades records, never playing. */
+function ChartTldr({ children }: { children: ReactNode }) {
+  return (
+    <p className="mt-3 border-t border-white/[0.05] pt-2.5 text-[11px] leading-relaxed text-white/45">
+      <span className="mr-1.5 font-mono text-[9px] uppercase tracking-wider text-cyan-300/70">
+        TLDR
+      </span>
+      {children}
+    </p>
+  );
+}
+
+function SectionHeader({
+  eyebrow,
+  title,
+  blurb,
+}: {
+  eyebrow: string;
+  title: string;
+  blurb: string;
+}) {
+  return (
+    <header className="mb-4">
+      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300/70">
+        {eyebrow}
+      </p>
+      <h3 className="mt-1 font-['Orbitron'] text-base font-bold tracking-wide text-white">{title}</h3>
+      <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-white/45">{blurb}</p>
+    </header>
+  );
+}
+
+function QualityGauge({ spec, index = 0 }: { spec: GaugeSpec; index?: number }) {
   const size = 92;
   const stroke = 8;
   const r = (size - stroke) / 2;
@@ -674,7 +706,12 @@ function QualityGauge({ spec }: { spec: GaugeSpec }) {
   const Icon = spec.icon;
 
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-3">
+    <motion.div
+      className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-gradient-to-b from-white/[0.04] to-white/[0.01] px-3 py-3"
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, delay: index * 0.06, ease: [0.16, 1, 0.3, 1] }}
+    >
       <div className="relative shrink-0" style={{ width: size, height: size }}>
         <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={spec.label}>
           <g transform={`rotate(-90 ${size / 2} ${size / 2})`}>
@@ -717,7 +754,7 @@ function QualityGauge({ spec }: { spec: GaugeSpec }) {
         <p className="mt-1 text-[11px] leading-tight text-white/45">{spec.detail}</p>
         <p className="text-[10px] leading-tight text-white/25">{spec.blurb}</p>
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -725,19 +762,29 @@ function DashPanel({
   title,
   icon: Icon,
   children,
+  tldr,
+  delay = 0,
 }: {
   title: string;
   icon: typeof Gauge;
   children: ReactNode;
+  tldr?: ReactNode;
+  delay?: number;
 }) {
   return (
-    <div className="rounded-2xl border border-white/[0.06] bg-white/[0.015] p-4">
+    <motion.div
+      className="rounded-2xl border border-white/[0.06] bg-gradient-to-b from-white/[0.03] to-transparent p-4"
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, delay, ease: [0.16, 1, 0.3, 1] }}
+    >
       <div className="mb-3 flex items-center gap-1.5 text-white/45">
         <Icon className="h-3.5 w-3.5" />
         <span className="font-mono text-[10px] uppercase tracking-wider">{title}</span>
       </div>
       {children}
-    </div>
+      {tldr != null && tldr !== false && <ChartTldr>{tldr}</ChartTldr>}
+    </motion.div>
   );
 }
 
@@ -795,16 +842,60 @@ const DataQualityDashboard = memo(function DataQualityDashboard({
   const totalIssues = issuesByRule.reduce((s, r) => s + r.count, 0);
   const hasTrend = debtTrend.some((m) => m.added > 0 || m.decided > 0 || m.open > 0);
 
+  const rulesTldr =
+    totalIssues > 0 && issuesByRule[0] ? (
+      <>
+        {totalIssues} open item{totalIssues === 1 ? '' : 's'} across {issuesByRule.length} rule
+        {issuesByRule.length === 1 ? '' : 's'}. Largest pile: {issuesByRule[0].label} (
+        {issuesByRule[0].count}) — still a question about stored data, not play volume.
+      </>
+    ) : (
+      <>Every enabled rule is clear — nothing waiting in the queue from these checks.</>
+    );
+
+  const statusTotal = statusDist.reduce((s, r) => s + r.count, 0);
+  const statusTop = statusDist.reduce(
+    (best, row) => (row.count > best.count ? row : best),
+    statusDist[0] ?? { status: 'Unset' as const, count: 0 },
+  );
+  const statusTldr =
+    statusTotal > 0 ? (
+      <>
+        {statusTop.status} holds the most rows ({statusTop.count} of {statusTotal}). This is how
+        statuses are stored today — not a verdict on what you should play next.
+      </>
+    ) : null;
+
+  const latest = debtTrend.length > 0 ? debtTrend[debtTrend.length - 1] : null;
+  const earliest = debtTrend.length > 0 ? debtTrend[0] : null;
+  const trendTldr = hasTrend && latest ? (
+    <>
+      {latest.open} record{latest.open === 1 ? '' : 's'} still on the default status as of{' '}
+      {latest.label}
+      {earliest && earliest.open !== latest.open
+        ? ` (was ${earliest.open} at ${earliest.label}).`
+        : '.'}{' '}
+      A row counts from add until its status first moves off the default — curation of the
+      catalog, never play volume.
+    </>
+  ) : null;
+
   return (
-    <div className="mb-6 space-y-4">
+    <div className="mb-8 space-y-4">
+      <SectionHeader
+        eyebrow="Record health"
+        title="How filled-in your library looks"
+        blurb="Coverage gauges and aggregate charts grade stored records only — never how much anyone plays."
+      />
+
       <div className="grid gap-3 md:grid-cols-3">
-        {gauges.map((g) => (
-          <QualityGauge key={g.key} spec={g} />
+        {gauges.map((g, i) => (
+          <QualityGauge key={g.key} spec={g} index={i} />
         ))}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <DashPanel title="Open items by rule" icon={ListChecks}>
+        <DashPanel title="Open items by rule" icon={ListChecks} tldr={rulesTldr} delay={0.08}>
           {totalIssues > 0 ? (
             <ChartContainer config={QUALITY_CONFIG} className="aspect-[3/1] w-full">
               <BarChart
@@ -843,7 +934,7 @@ const DataQualityDashboard = memo(function DataQualityDashboard({
           )}
         </DashPanel>
 
-        <DashPanel title="Status distribution" icon={Layers}>
+        <DashPanel title="Status distribution" icon={Layers} tldr={statusTldr} delay={0.12}>
           {statusDist.length > 0 ? (
             <ChartContainer config={QUALITY_CONFIG} className="aspect-[3/1] w-full">
               <BarChart data={statusDist} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -872,7 +963,7 @@ const DataQualityDashboard = memo(function DataQualityDashboard({
         </DashPanel>
       </div>
 
-      <DashPanel title="Records to review over time" icon={LineChartIcon}>
+      <DashPanel title="Records to review over time" icon={LineChartIcon} tldr={trendTldr} delay={0.16}>
         {hasTrend ? (
           <ChartContainer config={QUALITY_CONFIG} className="aspect-[4/1] w-full">
             <AreaChart data={debtTrend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -923,10 +1014,6 @@ const DataQualityDashboard = memo(function DataQualityDashboard({
             Not enough history to chart record curation yet.
           </p>
         )}
-        <p className="mt-2 text-[10px] leading-relaxed text-white/30">
-          A record counts as “to review” from when it was added until its status first moves off the
-          default. This tracks record curation — never how much you play.
-        </p>
       </DashPanel>
     </div>
   );
@@ -1048,12 +1135,17 @@ const FindingCard = memo(function FindingCard({
 
   return (
     <motion.div
-      className="rounded-xl border border-white/[0.07] bg-white/[0.015] px-4 py-3 transition-colors hover:border-white/15"
+      className="rounded-xl border border-white/[0.07] bg-gradient-to-r from-white/[0.025] to-transparent px-4 py-3 transition-colors hover:border-white/15"
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
     >
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <span
+          className="mr-0.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full"
+          style={{ backgroundColor: meta.color }}
+          aria-hidden
+        />
         <span className={cn('font-mono text-[10px] uppercase tracking-wider', meta.text)}>
           {rule.label}
         </span>
@@ -1380,9 +1472,15 @@ export const JourneyAuditView = memo(function JourneyAuditView({
 
   return (
     <div className="mx-auto max-w-7xl px-4 pb-16 md:px-8 lg:px-10">
+      <SectionHeader
+        eyebrow="Completeness rings"
+        title="Record quality at a glance"
+        blurb="Three rings for completion, hygiene, and accuracy of what is stored — never a score for how much you play."
+      />
+
       {/* Rings — data completeness only. Play volume is not scored here, and
           deliberately never will be. */}
-      <div className="mb-6 flex flex-col items-center gap-6 rounded-2xl border border-white/[0.06] bg-white/[0.015] p-6 sm:flex-row">
+      <div className="mb-8 flex flex-col items-center gap-6 rounded-2xl border border-white/[0.06] bg-gradient-to-br from-white/[0.04] via-white/[0.015] to-transparent p-6 sm:flex-row">
         <AuditRings scores={scores} />
 
         <div className="min-w-0 flex-1">
@@ -1392,7 +1490,7 @@ export const JourneyAuditView = memo(function JourneyAuditView({
               return (
                 <div
                   key={s.area}
-                  className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2"
+                  className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 transition-colors hover:border-white/12"
                 >
                   <div className="flex items-center gap-1.5">
                     <span
@@ -1419,6 +1517,9 @@ export const JourneyAuditView = memo(function JourneyAuditView({
           </div>
 
           <p className="mt-3 text-[11px] leading-relaxed text-white/35">
+            <span className="mr-1.5 font-mono text-[9px] uppercase tracking-wider text-cyan-300/70">
+              TLDR
+            </span>
             These rings score your <span className="text-white/60">records</span> — how much of
             each one is filled in and whether it still matches reality. They never score how much
             you play, because there is no correct amount.
@@ -1437,9 +1538,21 @@ export const JourneyAuditView = memo(function JourneyAuditView({
         />
       )}
 
+      <SectionHeader
+        eyebrow="Resolution"
+        title={tab === 'queue' ? 'Open questions' : tab === 'rules' ? 'Which rules run' : 'What you decided'}
+        blurb={
+          tab === 'queue'
+            ? 'Each card asks whether a stored record is still accurate. Snooze or dismiss anytime — that choice persists.'
+            : tab === 'rules'
+              ? 'Toggle which completeness checks feed the rings and the queue. Disabled rules do not score or nag.'
+              : 'Resolutions, snoozes, and dismissals land here as you make them.'
+        }
+      />
+
       {/* Section switcher */}
       <div className="mb-4 flex items-center gap-2">
-        <div className="flex items-center rounded-xl border border-white/[0.06] bg-white/[0.04] p-1">
+        <div className="flex items-center rounded-xl border border-white/[0.06] bg-white/[0.04] p-1 shadow-inner shadow-black/20">
           {(
             [
               ['queue', 'Queue', ListChecks],
@@ -1452,9 +1565,9 @@ export const JourneyAuditView = memo(function JourneyAuditView({
               type="button"
               onClick={() => setTab(id)}
               className={cn(
-                'flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-xs font-medium transition-colors',
+                'flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-xs font-medium transition-all',
                 tab === id
-                  ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20'
+                  ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/25'
                   : 'text-white/50 hover:text-white/80',
               )}
             >

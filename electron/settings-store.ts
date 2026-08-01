@@ -41,10 +41,9 @@ interface Settings {
      */
     autoOnHoldTransition?: boolean;
     /**
-     * Show the opt-in in-game overlay HUD (transparent corner badge + live
-     * session timer) while a tracked game is running. Default false — the
-     * overlay is entirely disabled unless the user turns it on. A global hotkey
-     * (Ctrl+Shift+O) toggles visibility while enabled.
+     * Show the opt-in in-game overlay HUD (glassy corner badge + live timer)
+     * while a tracked game is running. Default false. Ctrl+Shift+O dismisses /
+     * re-enables; Ctrl+Shift+D cycles collapsed → compact → expanded.
      */
     overlayEnabled?: boolean;
   };

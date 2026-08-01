@@ -14,6 +14,8 @@
  *    of in-game mouse lag. `focusable: false` keeps the game in focus.
  *  - `backgroundThrottling` starts true at create; we disable it only while the
  *    HUD is shown so the clock/fades keep running under a foreground game.
+ *  - Detail levels (collapsed → compact → expanded) resize the HWND; cycling is
+ *    a global hotkey so the renderer stays click-through.
  */
 
 import { createRequire } from 'node:module';
@@ -21,6 +23,14 @@ import { fileURLToPath } from 'node:url';
 import path from 'path';
 import { logger } from './safe-logger.js';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
+import {
+  DEFAULT_OVERLAY_DETAIL_LEVEL,
+  OVERLAY_CYCLE_HOTKEY,
+  OVERLAY_TOGGLE_HOTKEY,
+  cycleDetailLevel,
+  overlaySizeForLevel,
+  type OverlayDetailLevel,
+} from '../src/overlay/detail-level.js';
 
 const require = createRequire(import.meta.url);
 const electron = require('electron');
@@ -33,15 +43,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Configuration
 // ---------------------------------------------------------------------------
 
-/** HUD card size (DIP). The renderer draws inside these bounds. */
-const OVERLAY_WIDTH = 260;
-const OVERLAY_HEIGHT = 84;
 /** Margin (DIP) from the top-right corner of the active display's work area. */
 const OVERLAY_MARGIN = 24;
-/** Global toggle hotkey. */
-const OVERLAY_HOTKEY = 'Control+Shift+O';
 /** Debounce for display-metrics-changed (DPI / resolution / layout churn). */
 const DISPLAY_METRICS_DEBOUNCE_MS = 150;
+
+export { OVERLAY_TOGGLE_HOTKEY, OVERLAY_CYCLE_HOTKEY };
 
 // ---------------------------------------------------------------------------
 // Module state
@@ -49,10 +56,13 @@ const DISPLAY_METRICS_DEBOUNCE_MS = 150;
 
 let overlayWindow: BrowserWindowType | null = null;
 let overlayPreloadPath: string | null = null;
-let hotkeyRegistered = false;
+let toggleHotkeyRegistered = false;
+let cycleHotkeyRegistered = false;
 /** Kept so we can detach the screen listener on destroy (avoids leaks). */
 let displayMetricsHandler: (() => void) | null = null;
 let displayMetricsTimer: ReturnType<typeof setTimeout> | null = null;
+/** Survives dismiss/re-enable within the app session. */
+let detailLevel: OverlayDetailLevel = DEFAULT_OVERLAY_DETAIL_LEVEL;
 
 export type OverlayLifecycleHooks = {
   onCreated?: (win: BrowserWindowType) => void;
@@ -90,6 +100,26 @@ function loadOverlayContent(win: BrowserWindowType): void {
   }
 }
 
+function applyWindowSize(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const { width, height } = overlaySizeForLevel(detailLevel);
+  try {
+    overlayWindow.setSize(width, height);
+  } catch (err) {
+    logger.warn('[Overlay] Failed to resize overlay:', err);
+  }
+}
+
+/** Push the current detail level to the overlay renderer (no-op if no HWND). */
+function pushDetailLevelToRenderer(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  try {
+    overlayWindow.webContents.send('overlay:detailLevel', detailLevel);
+  } catch (err) {
+    logger.warn('[Overlay] Failed to push detail level:', err);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public API — configuration / hooks
 // ---------------------------------------------------------------------------
@@ -102,6 +132,35 @@ export function setOverlayPreloadPath(preloadPath: string): void {
 /** Hooks so session-tracker can track the overlay webContents across create/destroy. */
 export function setOverlayLifecycleHooks(hooks: OverlayLifecycleHooks): void {
   lifecycleHooks = hooks ?? {};
+}
+
+// ---------------------------------------------------------------------------
+// Public API — detail level
+// ---------------------------------------------------------------------------
+
+export function getOverlayDetailLevel(): OverlayDetailLevel {
+  return detailLevel;
+}
+
+export function setOverlayDetailLevel(level: OverlayDetailLevel): void {
+  if (detailLevel === level) {
+    pushDetailLevelToRenderer();
+    return;
+  }
+  detailLevel = level;
+  applyWindowSize();
+  positionOverlay();
+  pushDetailLevelToRenderer();
+}
+
+/** Cycle collapsed → compact → expanded → collapsed; resize + notify renderer. */
+export function cycleOverlayDetailLevel(): OverlayDetailLevel {
+  detailLevel = cycleDetailLevel(detailLevel);
+  applyWindowSize();
+  positionOverlay();
+  pushDetailLevelToRenderer();
+  logger.log(`[Overlay] Detail level → ${detailLevel}`);
+  return detailLevel;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,9 +181,11 @@ export function createOverlayWindow(preloadPath?: string): BrowserWindowType {
     throw new Error('[Overlay] Preload path not set — call setOverlayPreloadPath() first');
   }
 
+  const { width, height } = overlaySizeForLevel(detailLevel);
+
   overlayWindow = new BrowserWindow({
-    width: OVERLAY_WIDTH,
-    height: OVERLAY_HEIGHT,
+    width,
+    height,
     transparent: true,
     frame: false,
     resizable: false,
@@ -151,6 +212,11 @@ export function createOverlayWindow(preloadPath?: string): BrowserWindowType {
 
   loadOverlayContent(overlayWindow);
   positionOverlay();
+
+  // Hydrate the renderer after each load (covers recreate after dismiss).
+  overlayWindow.webContents.on('did-finish-load', () => {
+    pushDetailLevelToRenderer();
+  });
 
   // Reposition when the monitor layout / DPI / resolution changes — debounced,
   // and only while the HUD is actually visible.
@@ -203,6 +269,7 @@ export function positionOverlay(): void {
  */
 export function activateOverlay(): void {
   const win = createOverlayWindow();
+  applyWindowSize();
   positionOverlay();
   try {
     win.webContents.setBackgroundThrottling(false);
@@ -213,6 +280,7 @@ export function activateOverlay(): void {
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   // showInactive() never activates the window, so the game keeps OS focus.
   win.showInactive();
+  pushDetailLevelToRenderer();
 }
 
 /** Alias — prefer `activateOverlay` for the lazy create+show path. */
@@ -244,33 +312,61 @@ export function getOverlayWindow(): BrowserWindowType | null {
 }
 
 /**
- * Register the global toggle hotkey. `onToggle` is invoked on each press — the
- * caller (main.ts) decides the actual show/hide behaviour so it can gate on the
- * `overlayEnabled` setting and active sessions.
+ * Register the global dismiss/re-enable hotkey. `onToggle` is invoked on each
+ * press — the caller (main.ts) gates on `overlayEnabled` and active sessions.
  */
 export function registerOverlayHotkey(onToggle: () => void): void {
-  if (hotkeyRegistered) return;
+  if (toggleHotkeyRegistered) return;
   try {
-    const ok = globalShortcut.register(OVERLAY_HOTKEY, onToggle);
+    const ok = globalShortcut.register(OVERLAY_TOGGLE_HOTKEY, onToggle);
     if (ok) {
-      hotkeyRegistered = true;
-      logger.log(`[Overlay] Registered toggle hotkey ${OVERLAY_HOTKEY}`);
+      toggleHotkeyRegistered = true;
+      logger.log(`[Overlay] Registered toggle hotkey ${OVERLAY_TOGGLE_HOTKEY}`);
     } else {
-      logger.warn(`[Overlay] Failed to register hotkey ${OVERLAY_HOTKEY} (already in use?)`);
+      logger.warn(`[Overlay] Failed to register hotkey ${OVERLAY_TOGGLE_HOTKEY} (already in use?)`);
     }
   } catch (err) {
     logger.error('[Overlay] Error registering hotkey:', err);
   }
 }
 
-export function unregisterOverlayHotkey(): void {
-  if (!hotkeyRegistered) return;
+/**
+ * Register the global detail-cycle hotkey. Cycles even when the HWND is down so
+ * the next activate opens at the chosen level; when visible, resizes live.
+ */
+export function registerOverlayCycleHotkey(onCycle?: () => void): void {
+  if (cycleHotkeyRegistered) return;
+  const handler = onCycle ?? (() => { cycleOverlayDetailLevel(); });
   try {
-    globalShortcut.unregister(OVERLAY_HOTKEY);
+    const ok = globalShortcut.register(OVERLAY_CYCLE_HOTKEY, handler);
+    if (ok) {
+      cycleHotkeyRegistered = true;
+      logger.log(`[Overlay] Registered cycle hotkey ${OVERLAY_CYCLE_HOTKEY}`);
+    } else {
+      logger.warn(`[Overlay] Failed to register hotkey ${OVERLAY_CYCLE_HOTKEY} (already in use?)`);
+    }
   } catch (err) {
-    logger.error('[Overlay] Error unregistering hotkey:', err);
+    logger.error('[Overlay] Error registering cycle hotkey:', err);
   }
-  hotkeyRegistered = false;
+}
+
+export function unregisterOverlayHotkey(): void {
+  if (toggleHotkeyRegistered) {
+    try {
+      globalShortcut.unregister(OVERLAY_TOGGLE_HOTKEY);
+    } catch (err) {
+      logger.error('[Overlay] Error unregistering toggle hotkey:', err);
+    }
+    toggleHotkeyRegistered = false;
+  }
+  if (cycleHotkeyRegistered) {
+    try {
+      globalShortcut.unregister(OVERLAY_CYCLE_HOTKEY);
+    } catch (err) {
+      logger.error('[Overlay] Error unregistering cycle hotkey:', err);
+    }
+    cycleHotkeyRegistered = false;
+  }
 }
 
 /** Destroy the overlay window and detach listeners. Call on deactivate / quit. */

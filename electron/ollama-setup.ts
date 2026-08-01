@@ -798,10 +798,12 @@ export interface OllamaModelInfo {
 }
 
 /**
- * Query Ollama for detailed info about the embedding model.
- * Returns null if Ollama is unavailable or the model isn't installed.
+ * Query Ollama for detailed info about a pulled model tag.
+ * Returns null if Ollama is unavailable, the HTTP status is non-2xx, the body
+ * is `{ error: ... }`, or the model isn't installed. Never treats a parseable
+ * error payload as `installed: true`.
  */
-export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
+async function queryOllamaModelInfo(activeTag: string): Promise<OllamaModelInfo | null> {
   const settings = settingsStore.getOllamaSettings();
   const url = settings.url || 'http://localhost:11434';
   const urlObj = new URL(url);
@@ -809,7 +811,6 @@ export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
   const port = parseInt(urlObj.port) || 11434;
 
   return new Promise<OllamaModelInfo | null>((resolve) => {
-    const activeTag = getEmbeddingModelTag();
     const body = JSON.stringify({ name: activeTag });
 
     const req = http.request(
@@ -825,8 +826,14 @@ export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
         let data = '';
         res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
         res.on('end', () => {
+          const status = res.statusCode ?? 0;
+          if (status < 200 || status >= 300) {
+            resolve(null);
+            return;
+          }
           try {
             const parsed = JSON.parse(data) as {
+              error?: string;
               details?: {
                 parameter_size?: string;
                 quantization_level?: string;
@@ -836,7 +843,12 @@ export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
               size?: number;
             };
 
-            // Sum blob sizes from the model listing API for accurate on-disk size
+            // Ollama returns 200 with `{ error: "..." }` for missing tags on some versions.
+            if (parsed.error) {
+              resolve(null);
+              return;
+            }
+
             resolve({
               name: activeTag,
               installed: true,
@@ -855,6 +867,65 @@ export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
     req.on('timeout', () => { req.destroy(); resolve(null); });
     req.write(body);
     req.end();
+  });
+}
+
+/** Query Ollama for detailed info about the active embedding model tag. */
+export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
+  return queryOllamaModelInfo(getEmbeddingModelTag());
+}
+
+/**
+ * Query Ollama for detailed info about the Qwen3 reranker model.
+ * Returns an `installed: true` info object when `/api/show` succeeds for the
+ * active tag; returns `null` when Ollama is unreachable, the status is
+ * non-2xx, or the body reports `{ error: ... }` (not installed). Callers
+ * (IPC) synthesize an `installed: false` stub from `null` + `/api/tags` size.
+ */
+export async function getRerankQwenModelInfo(): Promise<OllamaModelInfo | null> {
+  return queryOllamaModelInfo(getRerankQwenModelTag());
+}
+
+/**
+ * Get on-disk size of the Qwen3 reranker from the model list.
+ */
+export async function getRerankQwenModelSize(): Promise<number> {
+  const settings = settingsStore.getOllamaSettings();
+  const url = settings.url || 'http://localhost:11434';
+  const urlObj = new URL(url);
+  const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
+  const port = parseInt(urlObj.port) || 11434;
+  const activeTag = getRerankQwenModelTag();
+
+  return new Promise<number>((resolve) => {
+    const req = http.get(
+      { hostname, port, path: '/api/tags', timeout: LIST_TIMEOUT_MS },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data) as {
+              models?: Array<{ name: string; size: number }>;
+            };
+            const tags = parsed.models?.map((m) => m.name) ?? [];
+            if (!isRerankModelInstalled([], tags, activeTag)) {
+              resolve(0);
+              return;
+            }
+            const match = parsed.models?.find((m) =>
+              isRerankModelInstalled([], [m.name], activeTag),
+            );
+            resolve(match?.size ?? 0);
+          } catch {
+            resolve(0);
+          }
+        });
+      },
+    );
+
+    req.on('error', () => resolve(0));
+    req.on('timeout', () => { req.destroy(); resolve(0); });
   });
 }
 

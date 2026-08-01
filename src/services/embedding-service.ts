@@ -85,6 +85,8 @@ declare global {
       generateEmbedding: (text: string) => Promise<number[] | null>;
       generateEmbeddings: (items: Array<{ id: string; text: string }>) => Promise<Record<string, number[]>>;
       getModelInfo: () => Promise<OllamaModelInfo | null>;
+      /** Qwen3 reranker tag info — mirrors `getModelInfo` for the cross-encoder tier. */
+      getRerankModelInfo?: () => Promise<OllamaModelInfo | null>;
       /** Subscribe to setup progress (status, pct) during ollama:setup. Returns unsubscribe. */
       onSetupProgress?: (callback: (data: { status: string; pct: number }) => void) => () => void;
       /**

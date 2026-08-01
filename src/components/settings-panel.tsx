@@ -16,7 +16,7 @@ import { useDevMode } from '@/hooks/useDevMode';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
-import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
+import { DEFAULT_OLLAMA_RERANK_MODEL, DEFAULT_OLLAMA_RERANK_QWEN_MODEL } from '@/services/ollama-rerank';
 
 // Declare settings API type (must match settings-screen.tsx global augmentation)
 declare global {
@@ -32,6 +32,7 @@ declare global {
         model: string;
         useGeminiInstead: boolean;
         rerankModel: string;
+        rerankQwenModel: string;
         neighborRerankEnabled: boolean;
         oracleRerankEnabled: boolean;
         oracleRerankBlend: number;
@@ -43,6 +44,7 @@ declare global {
         model?: string;
         useGeminiInstead?: boolean;
         rerankModel?: string;
+        rerankQwenModel?: string;
         neighborRerankEnabled?: boolean;
         oracleRerankEnabled?: boolean;
         oracleRerankBlend?: number;
@@ -81,6 +83,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
   const [ollamaRerankModel, setOllamaRerankModel] = useState(DEFAULT_OLLAMA_RERANK_MODEL);
+  const [ollamaRerankQwenModel, setOllamaRerankQwenModel] = useState(DEFAULT_OLLAMA_RERANK_QWEN_MODEL);
   const [neighborRerankEnabled, setNeighborRerankEnabled] = useState(true);
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
@@ -138,6 +141,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         setOllamaUrl(ollamaSettings.url);
         setOllamaModel(ollamaSettings.model);
         setOllamaRerankModel(ollamaSettings.rerankModel ?? DEFAULT_OLLAMA_RERANK_MODEL);
+        setOllamaRerankQwenModel(ollamaSettings.rerankQwenModel ?? DEFAULT_OLLAMA_RERANK_QWEN_MODEL);
         setNeighborRerankEnabled(ollamaSettings.neighborRerankEnabled !== false);
         setOracleRerankEnabled(ollamaSettings.oracleRerankEnabled !== false);
         setEmbeddingChunkingEnabled(ollamaSettings.embeddingChunkingEnabled !== false);
@@ -191,6 +195,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
           url: ollamaUrl,
           model: ollamaModel,
           rerankModel: ollamaRerankModel,
+          rerankQwenModel: ollamaRerankQwenModel,
           neighborRerankEnabled,
           oracleRerankEnabled,
           oracleRerankBlend,
@@ -203,7 +208,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         console.error('Failed to save Ollama settings:', err);
       }
     }, 800);
-  }, [ollamaEnabled, ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, useGeminiInstead]);
+  }, [ollamaEnabled, ollamaUrl, ollamaModel, ollamaRerankModel, ollamaRerankQwenModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, useGeminiInstead]);
 
   // Auto-save API key with debounce
   useEffect(() => {
@@ -567,7 +572,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   </div>
 
                   <div>
-                    <label className="text-xs text-white/40 mb-1 block">Rerank model (Embedding Space)</label>
+                    <label className="text-xs text-white/40 mb-1 block">Rerank model (native /api/rerank)</label>
                     <Input
                       type="text"
                       value={ollamaRerankModel}
@@ -579,6 +584,22 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                     <p className="text-[11px] text-white/25 mt-1">
                       Ollama <code className="text-white/40">/api/rerank</code> — run{' '}
                       <code className="text-white/40">ollama pull {DEFAULT_OLLAMA_RERANK_MODEL}</code>
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-white/40 mb-1 block">Qwen reranker model</label>
+                    <Input
+                      type="text"
+                      value={ollamaRerankQwenModel}
+                      onChange={(e) => setOllamaRerankQwenModel(e.target.value)}
+                      placeholder={DEFAULT_OLLAMA_RERANK_QWEN_MODEL}
+                      className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]"
+                      disabled={geminiBlocksOllama}
+                    />
+                    <p className="text-[11px] text-white/25 mt-1">
+                      Graded Oracle rerank via <code className="text-white/40">/api/generate</code> — run{' '}
+                      <code className="text-white/40">ollama pull {DEFAULT_OLLAMA_RERANK_QWEN_MODEL}</code>
                     </p>
                   </div>
 

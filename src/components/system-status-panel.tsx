@@ -158,6 +158,31 @@ function AggregateLed({ snap }: { snap: SystemStatusSnapshot }) {
   return <span className="inline-flex rounded-full h-2 w-2 bg-white/20" />;
 }
 
+function RerankModelBlock({ model, activeTier }: { model: NonNullable<SystemStatusSnapshot['rerankModel']>; activeTier?: string }) {
+  return (
+    <div className="py-0.5 space-y-0.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[9px] text-white/40 truncate">{model.name}</span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {model.installed
+            ? <Check className="w-2.5 h-2.5 text-emerald-400/70" />
+            : <X className="w-2.5 h-2.5 text-red-400/70" />}
+          <span className="text-[9px] text-white/30">{model.installed ? 'Installed' : 'Not installed'}</span>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[8px] text-white/20">
+          {model.parameterSize} params · {model.quantization}
+          {activeTier ? ` · ${activeTier}` : ''}
+        </span>
+        {model.sizeBytes > 0 && (
+          <span className="text-[9px] text-white/20 tabular-nums">{formatBytes(model.sizeBytes)}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Panel (used in navbar dropdown) ───────────────────────────────────────
 
 function StatusPanelContent({ snap, compact }: { snap: SystemStatusSnapshot; compact?: boolean }) {
@@ -208,6 +233,20 @@ function StatusPanelContent({ snap, compact }: { snap: SystemStatusSnapshot; com
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Rerank Model (Qwen3) */}
+      {snap.rerankModel && (
+        <div>
+          <div className="flex items-center gap-1.5 mb-1">
+            <BrainCircuit className="w-3 h-3 text-white/30" />
+            <span className="text-[10px] font-semibold text-white/40 uppercase tracking-wider">Rerank Model</span>
+          </div>
+          <RerankModelBlock
+            model={snap.rerankModel}
+            activeTier={snap.rerankSetup.stage === 'done' ? snap.rerankSetup.detail || undefined : undefined}
+          />
         </div>
       )}
 
@@ -510,6 +549,24 @@ export function SplashStatusPanel() {
                 )}
               </div>
             </div>
+          </motion.div>
+        )}
+
+        {/* Rerank Model (Qwen3) */}
+        {snap.rerankModel && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.4, delay: 2.11 }}
+          >
+            <div className="flex items-center gap-1.5 mb-1">
+              <BrainCircuit className="w-3 h-3 text-white/30" />
+              <span className="text-[10px] font-semibold text-white/40 uppercase tracking-wider">Rerank Model</span>
+            </div>
+            <RerankModelBlock
+              model={snap.rerankModel}
+              activeTier={snap.rerankSetup.stage === 'done' ? snap.rerankSetup.detail || undefined : undefined}
+            />
           </motion.div>
         )}
 

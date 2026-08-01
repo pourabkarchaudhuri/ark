@@ -31,7 +31,8 @@ import {
 
 export type GameSessionLike = GameSession & { activeInputMinutes?: number };
 
-const MIN_SESSIONS = 5;
+/** Live insights: one in-progress session + samples is enough to chart anomalies. */
+const MIN_SESSIONS = 1;
 const PRIMARY = 'hsl(var(--primary))';
 
 const SESSION_HUES = ['210', '30', '150', '280', '350', '90'];
@@ -110,11 +111,11 @@ export default function FrictionPanel({
 
   const spans: SessionSpan[] = React.useMemo(() => {
     const out: SessionSpan[] = [];
+    const now = Date.now();
     for (const s of sessions) {
       const start = toDate(s.startTime).getTime();
-      const end = s.endTime
-        ? toDate(s.endTime).getTime()
-        : start + Math.max(0, s.durationMinutes || 0) * 60000;
+      // Open (in-progress) sessions must span through "now" so live samples match.
+      const end = s.endTime ? toDate(s.endTime).getTime() : now;
       if (Number.isFinite(start) && Number.isFinite(end)) {
         out.push({ session: s, start, end });
       }
@@ -180,7 +181,7 @@ export default function FrictionPanel({
         </CardHeader>
         <CardContent>
           <div className="text-sm text-muted-foreground">
-            Correlation needs at least {MIN_SESSIONS} sessions.
+            Correlation needs at least one tracked session with overhead samples.
           </div>
         </CardContent>
       </Card>

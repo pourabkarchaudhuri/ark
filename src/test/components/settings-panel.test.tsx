@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { SettingsPanel } from '@/components/settings-panel';
-import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
+import { DEFAULT_OLLAMA_RERANK_MODEL, DEFAULT_OLLAMA_RERANK_QWEN_MODEL } from '@/services/ollama-rerank';
 
 // Mock window.settings
 const mockSettings = {
@@ -42,6 +42,7 @@ beforeEach(() => {
     model: 'gemma3:12b',
     useGeminiInstead: true,
     rerankModel: DEFAULT_OLLAMA_RERANK_MODEL,
+    rerankQwenModel: DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
     neighborRerankEnabled: true,
     oracleRerankEnabled: true,
     oracleRerankBlend: 1,

@@ -1,11 +1,21 @@
 /*
- * Overlay HUD styles — this stylesheet is loaded ONLY by the transparent,
- * click-through overlay BrowserWindow (overlay.html → main.tsx). It must never
- * paint an opaque background or the whole game screen would be dimmed.
+ * Overlay HUD styles — loaded ONLY by the transparent, click-through overlay
+ * BrowserWindow. Never paint an opaque full-window background.
+ *
+ * Perf: no backdrop-filter, no infinite pulse. Opacity + max-height transitions
+ * for detail-level changes. Window is resized per level in overlay-window.ts.
  */
 
 :root {
   color-scheme: dark;
+  --ark-glass-bg: rgba(12, 14, 22, 0.52);
+  --ark-glass-border: rgba(255, 255, 255, 0.14);
+  --ark-glass-highlight: rgba(255, 255, 255, 0.06);
+  --ark-accent: rgba(232, 180, 255, 0.85);
+  --ark-accent-dot: #d946ef;
+  --ark-text: rgba(255, 255, 255, 0.92);
+  --ark-text-dim: rgba(255, 255, 255, 0.55);
+  --ark-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 html,
@@ -16,21 +26,13 @@ body,
   width: 100%;
   height: 100%;
   background: transparent !important;
-  /* No scrollbars — the window is exactly HUD-sized and never scrolls. */
   overflow: hidden;
-  /* The window itself is click-through (setIgnoreMouseEvents in main). Belt
-     and suspenders: don't try to capture pointer events in the DOM either. */
   pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
   font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
 }
 
-/* Positioning shell — fills the window, pins the card to the top-right corner
-   with a little breathing room from the edges. The overlay BrowserWindow content
-   area is 260x84 DIP (see electron/overlay-window.ts), so the padding here is
-   kept tight and the card sizing below is tuned to fit inside those bounds
-   without clipping. */
 .ark-overlay-root {
   position: fixed;
   inset: 0;
@@ -41,35 +43,100 @@ body,
   box-sizing: border-box;
 }
 
-/* The corner card. Dark, glassy, subtle fuchsia edge to match the app theme.
-   Sizing is constrained to the 260x84 window: with 4px shell padding the card
-   gets at most 252x76, and the padding/gap/line-heights below sum to ~73px
-   tall, leaving a small safety margin so the timer never clips. */
+/* Glassy translucent card — solid alpha fill (no backdrop-filter over games). */
 .ark-overlay-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  min-width: 220px;
-  max-width: 252px;
-  padding: 8px 12px;
-  border-radius: 12px;
-  /* Solid translucent fill — no backdrop-filter (GPU cost over fullscreen games). */
-  background: rgba(10, 10, 15, 0.9);
-  border: 1px solid rgba(217, 70, 239, 0.28); /* fuchsia-500 @ ~28% */
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  border-radius: 14px;
+  background:
+    linear-gradient(145deg, var(--ark-glass-highlight), transparent 42%),
+    var(--ark-glass-bg);
+  border: 1px solid var(--ark-glass-border);
   box-shadow:
-    0 8px 28px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(255, 255, 255, 0.03) inset;
-
-  /* Opacity-only fade. Controlled by the `.is-visible` class. */
+    0 10px 28px rgba(0, 0, 0, 0.35),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
   opacity: 0;
-  transition: opacity 260ms ease;
+  transform: translateY(-4px) scale(0.98);
+  transition:
+    opacity 280ms var(--ark-ease),
+    transform 280ms var(--ark-ease);
+  overflow: hidden;
 }
 
 .ark-overlay-card.is-visible {
   opacity: 1;
+  transform: translateY(0) scale(1);
 }
 
-/* "ARK — tracking" badge row. */
+/* Stacked layers — only the active level is interactive/visible. */
+.ark-overlay-layer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  opacity: 0;
+  max-height: 0;
+  padding: 0 10px;
+  overflow: hidden;
+  transform: translateY(4px);
+  transition:
+    opacity 220ms var(--ark-ease),
+    max-height 260ms var(--ark-ease),
+    padding 260ms var(--ark-ease),
+    transform 220ms var(--ark-ease);
+  pointer-events: none;
+}
+
+.ark-overlay-card.level-collapsed .ark-overlay-collapsed,
+.ark-overlay-card.level-compact .ark-overlay-compact,
+.ark-overlay-card.level-expanded .ark-overlay-expanded {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.ark-overlay-card.level-collapsed .ark-overlay-collapsed {
+  max-height: 40px;
+  padding: 6px 10px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.ark-overlay-card.level-compact .ark-overlay-compact {
+  max-height: 64px;
+  padding: 8px 12px;
+  gap: 2px;
+}
+
+.ark-overlay-card.level-expanded .ark-overlay-expanded {
+  max-height: 118px;
+  padding: 10px 14px;
+  gap: 4px;
+}
+
+.ark-overlay-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ark-overlay-pill-label {
+  font-family: 'Orbitron', 'JetBrains Mono', sans-serif;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--ark-accent);
+}
+
+.ark-overlay-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .ark-overlay-badge {
   display: inline-flex;
   align-items: center;
@@ -79,31 +146,34 @@ body,
   font-size: 10px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(240, 171, 252, 0.9); /* fuchsia-300 */
+  color: var(--ark-accent);
 }
 
 .ark-overlay-badge-dot {
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: #d946ef; /* fuchsia-500 */
-  /* Static glow only — no infinite pulse animation (CPU/compositor cost). */
-  box-shadow: 0 0 6px rgba(217, 70, 239, 0.8);
+  background: var(--ark-accent-dot);
+  box-shadow: 0 0 6px rgba(217, 70, 239, 0.55);
+  flex-shrink: 0;
 }
 
-/* Game name. */
 .ark-overlay-name {
   font-family: 'Orbitron', 'JetBrains Mono', sans-serif;
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.2;
-  color: rgba(255, 255, 255, 0.94);
+  color: var(--ark-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
-/* Live HH:MM:SS timer. */
+.ark-overlay-card.level-compact .ark-overlay-name {
+  font-size: 12px;
+}
+
 .ark-overlay-timer {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-weight: 500;
@@ -114,6 +184,35 @@ body,
   font-variant-numeric: tabular-nums;
 }
 
+.ark-overlay-timer--compact {
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  color: var(--ark-text-dim);
+}
+
+.ark-overlay-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--ark-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.ark-overlay-meta-sep {
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.28);
+  flex-shrink: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .ark-overlay-card { transition: opacity 120ms linear; }
+  .ark-overlay-card,
+  .ark-overlay-layer {
+    transition-duration: 80ms;
+  }
 }

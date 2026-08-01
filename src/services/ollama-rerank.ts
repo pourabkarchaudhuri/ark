@@ -9,6 +9,9 @@ import { rerankStatus, toRerankTier, type RerankStatus } from '@/services/oracle
 /** Default Ollama library name — keep in sync with `electron/settings-store.ts` `DEFAULT_OLLAMA_RERANK_MODEL`. */
 export const DEFAULT_OLLAMA_RERANK_MODEL = 'dengcao/bge-reranker-v2-m3';
 
+/** Default Qwen3 reranker tag — keep in sync with `electron/settings-store.ts` `DEFAULT_OLLAMA_RERANK_QWEN_MODEL`. */
+export const DEFAULT_OLLAMA_RERANK_QWEN_MODEL = 'dengcao/Qwen3-Reranker-0.6B:Q8_0';
+
 /** Max candidates passed to heuristic rerank before Ollama rerank (matches ANN over-fetch scale). */
 export const NEIGHBOR_HEURISTIC_POOL = 72;
 

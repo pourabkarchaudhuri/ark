@@ -26,7 +26,7 @@ import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
-import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
+import { DEFAULT_OLLAMA_RERANK_MODEL, DEFAULT_OLLAMA_RERANK_QWEN_MODEL } from '@/services/ollama-rerank';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
 
 export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
@@ -44,6 +44,7 @@ declare global {
         model: string;
         useGeminiInstead: boolean;
         rerankModel: string;
+        rerankQwenModel: string;
         neighborRerankEnabled: boolean;
         oracleRerankEnabled: boolean;
         oracleRerankBlend: number;
@@ -55,6 +56,7 @@ declare global {
         model?: string;
         useGeminiInstead?: boolean;
         rerankModel?: string;
+        rerankQwenModel?: string;
         neighborRerankEnabled?: boolean;
         oracleRerankEnabled?: boolean;
         oracleRerankBlend?: number;
@@ -244,7 +246,12 @@ const GeneralTab = memo(function GeneralTab() {
                   <MonitorPlay className="h-3.5 w-3.5 text-white/40" />
                   <p className="text-sm font-medium text-white/90">In-game overlay</p>
                 </div>
-                <p className="text-xs text-white/35 mt-0.5">Show a small corner HUD (badge, game name, live timer) on top of games while they're running. Best with borderless / windowed fullscreen.</p>
+                <p className="text-xs text-white/35 mt-0.5">
+                  Minimal glassy corner HUD while a tracked game runs. Best with borderless / windowed fullscreen.
+                </p>
+                <p className="text-[11px] text-white/30 mt-1.5 font-mono tracking-wide">
+                  Ctrl+Shift+O dismiss / re-enable · Ctrl+Shift+D cycle detail
+                </p>
               </div>
               <Toggle value={overlayEnabled} onChange={handleOverlayToggle} />
             </div>
@@ -348,6 +355,7 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
   const [ollamaRerankModel, setOllamaRerankModel] = useState(DEFAULT_OLLAMA_RERANK_MODEL);
+  const [ollamaRerankQwenModel, setOllamaRerankQwenModel] = useState(DEFAULT_OLLAMA_RERANK_QWEN_MODEL);
   const [neighborRerankEnabled, setNeighborRerankEnabled] = useState(true);
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
@@ -358,6 +366,8 @@ const AIModelsTab = memo(function AIModelsTab() {
     ollamaUp?: boolean;
     modelInstalled?: boolean;
     rerankWorking?: boolean;
+    tierLabel?: string | null;
+    tierModel?: string;
     latencyMs?: number;
     error?: string;
   }>({ state: 'idle' });
@@ -413,6 +423,7 @@ const AIModelsTab = memo(function AIModelsTab() {
         setOllamaUrl(s.url);
         setOllamaModel(s.model);
         setOllamaRerankModel(s.rerankModel ?? DEFAULT_OLLAMA_RERANK_MODEL);
+        setOllamaRerankQwenModel(s.rerankQwenModel ?? DEFAULT_OLLAMA_RERANK_QWEN_MODEL);
         setNeighborRerankEnabled(s.neighborRerankEnabled !== false);
         setOracleRerankEnabled(s.oracleRerankEnabled !== false);
         setEmbeddingChunkingEnabled(s.embeddingChunkingEnabled !== false);
@@ -451,6 +462,7 @@ const AIModelsTab = memo(function AIModelsTab() {
           url: ollamaUrl,
           model: ollamaModel,
           rerankModel: ollamaRerankModel,
+          rerankQwenModel: ollamaRerankQwenModel,
           neighborRerankEnabled,
           oracleRerankEnabled,
           oracleRerankBlend,
@@ -461,7 +473,7 @@ const AIModelsTab = memo(function AIModelsTab() {
       }
       catch { /* ignore */ }
     }, 800);
-  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled]);
+  }, [ollamaUrl, ollamaModel, ollamaRerankModel, ollamaRerankQwenModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled]);
 
   useEffect(() => {
     if (initialLoadRef.current || !window.settings || !apiKey.trim()) { setSaveStatus('idle'); return; }
@@ -595,7 +607,7 @@ const AIModelsTab = memo(function AIModelsTab() {
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
         </div>
         <div>
-          <label className="text-xs text-white/40 mb-1 block">Rerank model (Embedding Space)</label>
+          <label className="text-xs text-white/40 mb-1 block">Rerank model (native /api/rerank)</label>
           <Input type="text" value={ollamaRerankModel} onChange={(e) => setOllamaRerankModel(e.target.value)} placeholder={DEFAULT_OLLAMA_RERANK_MODEL}
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
           <p className="text-[11px] text-white/25 mt-1">
@@ -620,6 +632,8 @@ const AIModelsTab = memo(function AIModelsTab() {
                     ollamaUp: r.ollamaUp,
                     modelInstalled: r.modelInstalled,
                     rerankWorking: r.rerankWorking,
+                    tierLabel: r.tierLabel,
+                    tierModel: r.tierModel,
                     latencyMs: r.latencyMs,
                     error: r.error,
                   });
@@ -638,7 +652,9 @@ const AIModelsTab = memo(function AIModelsTab() {
             {rerankDiag.state === 'ok' && (
               <span className="text-[11px] text-emerald-400/80 flex items-center gap-1">
                 <CheckCircle2 className="h-3 w-3" />
-                Reranker working{typeof rerankDiag.latencyMs === 'number' ? ` (${rerankDiag.latencyMs}ms)` : ''}
+                {rerankDiag.tierLabel || 'Reranker working'}
+                {typeof rerankDiag.latencyMs === 'number' ? ` (${rerankDiag.latencyMs}ms)` : ''}
+                {rerankDiag.tierModel ? ` · ${rerankDiag.tierModel}` : ''}
               </span>
             )}
             {rerankDiag.state === 'fail' && (
@@ -650,6 +666,15 @@ const AIModelsTab = memo(function AIModelsTab() {
               </span>
             )}
           </div>
+        </div>
+        <div>
+          <label className="text-xs text-white/40 mb-1 block">Qwen reranker model</label>
+          <Input type="text" value={ollamaRerankQwenModel} onChange={(e) => setOllamaRerankQwenModel(e.target.value)} placeholder={DEFAULT_OLLAMA_RERANK_QWEN_MODEL}
+            className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
+          <p className="text-[11px] text-white/25 mt-1">
+            Graded Oracle rerank via <code className="text-white/35">/api/generate</code>. Run{' '}
+            <code className="text-white/35">ollama pull {DEFAULT_OLLAMA_RERANK_QWEN_MODEL}</code>
+          </p>
         </div>
         <div className="flex items-center justify-between gap-3">
           <div>
