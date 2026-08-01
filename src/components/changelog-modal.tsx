@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.56': {
+    title: "What's New in Ark 1.0.56",
+    changes: [
+      'Ark Wrapped soft-lock fixed — navigation hit-tests the full overlay (not tiny calendar cells), with always-visible Back / Continue / Done chrome so you can finish without restarting.',
+      'Guided tour stuck dimmer fixed — generation-scoped Joyride leftover cleanup, Escape clears orphan portals after Finish, and spotlight no longer paints a full-screen blocker shadow.',
+      'Overlay detail levels restored (from the 1.0.53 line) — Ctrl+Shift+D cycles collapsed → compact → expanded and resizes the HUD; Ctrl+Shift+O still dismisses / re-enables. Lazy HWND + no mouse-forward click-through preserved.',
+      'Always-visible overlay shortcut hints on compact/expanded (O dismiss · D cycle), with matching Settings copy under In-game overlay.',
+    ],
+  },
   '1.0.55': {
     title: "What's New in Ark 1.0.55",
     changes: [

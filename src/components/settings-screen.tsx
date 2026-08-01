@@ -245,7 +245,12 @@ const GeneralTab = memo(function GeneralTab() {
                   <MonitorPlay className="h-3.5 w-3.5 text-white/40" />
                   <p className="text-sm font-medium text-white/90">In-game overlay</p>
                 </div>
-                <p className="text-xs text-white/35 mt-0.5">Show a small corner HUD (badge, game name, live timer) on top of games while they're running. Best with borderless / windowed fullscreen.</p>
+                <p className="text-xs text-white/35 mt-0.5">
+                  Minimal glassy corner HUD while a tracked game runs. Best with borderless / windowed fullscreen.
+                </p>
+                <p className="text-[11px] text-white/30 mt-1.5 font-mono tracking-wide">
+                  Ctrl+Shift+O dismiss / re-enable · Ctrl+Shift+D cycle detail
+                </p>
               </div>
               <Toggle value={overlayEnabled} onChange={handleOverlayToggle} />
             </div>

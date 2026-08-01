@@ -851,36 +851,82 @@ interface GuidedTourProps {
   onFinish: () => void;
 }
 
+/** Cancels in-flight deferred sweeps when bumped (endTour / run→false / unmount / new tour). */
+let joyrideCleanupGen = 0;
+
+/** @internal test-only */
+export function resetJoyrideCleanupGenForTests() {
+  joyrideCleanupGen = 0;
+}
+
+export function bumpJoyrideCleanupGen(): number {
+  joyrideCleanupGen += 1;
+  return joyrideCleanupGen;
+}
+
 /**
- * Remove orphaned Joyride portal containers that React/Joyride didn't clean up.
+ * Synchronously remove orphaned Joyride portal / step / floater nodes.
  *
- * Only targets **direct children of document.body** — never descendants inside
- * portal containers. React's portal cleanup calls removeChild on children
- * internally; if we remove those children first, React crashes with
+ * Prefer removing whole portal roots (`#react-joyride-portal`, step ids) rather than
+ * nested portal children — React's portal cleanup calls removeChild on children
+ * internally; removing those first can crash with
  * "The node to be removed is not a child of this node."
  *
- * Runs after a double-rAF + setTimeout to ensure React's full commit and
- * Joyride's componentWillUnmount have both completed.
+ * When `expectedGen` is provided, no-ops if a newer generation has been bumped
+ * (stale deferred sweep must not touch a live tour).
  */
-export function removeJoyrideLeftovers() {
+export function sweepJoyrideDom(expectedGen?: number): boolean {
+  if (expectedGen !== undefined && expectedGen !== joyrideCleanupGen) return false;
+  if (typeof document === 'undefined') return true;
+  try {
+    const nodes = document.querySelectorAll(
+      '#react-joyride-portal, [id^="react-joyride-step"]',
+    );
+    for (const el of Array.from(nodes)) {
+      try {
+        el.remove();
+      } catch {
+        /* already gone */
+      }
+    }
+    for (const el of Array.from(document.body.children)) {
+      const id = el.id || '';
+      const cls = el.className || '';
+      if (
+        id.startsWith('react-joyride') ||
+        (typeof cls === 'string' && (cls.includes('react-joyride') || cls.includes('__floater')))
+      ) {
+        try {
+          el.remove();
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+  } catch {
+    /* safe */
+  }
+  return true;
+}
+
+/**
+ * Deferred leftover sweep after React/Joyride unmount (double-rAF + setTimeout(0)).
+ * Bumps generation so any prior scheduled sweep is cancelled.
+ */
+export function scheduleRemoveJoyrideLeftovers() {
+  const gen = bumpJoyrideCleanupGen();
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       setTimeout(() => {
-        try {
-          for (const el of Array.from(document.body.children)) {
-            const id = el.id || '';
-            const cls = el.className || '';
-            if (
-              id.startsWith('react-joyride') ||
-              (typeof cls === 'string' && (cls.includes('react-joyride') || cls.includes('__floater')))
-            ) {
-              try { el.remove(); } catch { /* already gone */ }
-            }
-          }
-        } catch { /* safe */ }
+        sweepJoyrideDom(gen);
       }, 0);
     });
   });
+}
+
+/** @deprecated Prefer scheduleRemoveJoyrideLeftovers / sweepJoyrideDom */
+export function removeJoyrideLeftovers() {
+  scheduleRemoveJoyrideLeftovers();
 }
 
 /**
@@ -940,8 +986,11 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
           /* ignore */
         }
       }
+      // Sync sweep first (cancel stale deferred via gen bump inside schedule), then one deferred pass.
+      bumpJoyrideCleanupGen();
+      sweepJoyrideDom();
       setEffectiveSteps(null);
-      removeJoyrideLeftovers();
+      scheduleRemoveJoyrideLeftovers();
       onFinish();
     },
     [onFinish, tourId],
@@ -954,8 +1003,10 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
     if (run) return;
     clearTimeout(safetyTimerRef.current);
     finishedRef.current = false;
+    bumpJoyrideCleanupGen();
+    sweepJoyrideDom();
     setEffectiveSteps(null);
-    removeJoyrideLeftovers();
+    scheduleRemoveJoyrideLeftovers();
   }, [run]);
 
   /** After paint + retries (handles lazy Suspense views), only mount Joyride with steps in the DOM. */
@@ -963,6 +1014,8 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
     if (!run) {
       return;
     }
+    // Cancel any deferred sweep from a prior tour so it cannot delete this tour's portal.
+    bumpJoyrideCleanupGen();
     finishedRef.current = false;
     setEffectiveSteps(null);
     let cancelled = false;
@@ -1011,7 +1064,9 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
 
   useEffect(() => {
     return () => {
-      removeJoyrideLeftovers();
+      bumpJoyrideCleanupGen();
+      sweepJoyrideDom();
+      scheduleRemoveJoyrideLeftovers();
     };
   }, []);
 
@@ -1026,6 +1081,24 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [run, effectiveSteps, endTour]);
+
+  /**
+   * Safety net: orphan portal can outlive React `run` (Escape handler above unregisters with steps).
+   * Document-level Escape clears leftover dimmer when tour state is already false.
+   */
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (run) return;
+      if (typeof document === 'undefined') return;
+      if (!document.querySelector('#react-joyride-portal')) return;
+      e.preventDefault();
+      bumpJoyrideCleanupGen();
+      sweepJoyrideDom();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [run]);
 
   const handleCallback = useCallback(
     (data: CallBackProps) => {
@@ -1085,7 +1158,8 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
         },
         spotlight: {
           borderRadius: 12,
-          boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.75)',
+          // Dim via overlayColor only — a leftover spotlight with a huge box-shadow
+          // can permanently block the UI if the portal is not torn down cleanly.
         },
       }}
       floaterProps={{

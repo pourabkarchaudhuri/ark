@@ -1,25 +1,10 @@
-# Ark v1.0.52
+## Ark 1.0.56 — UX hotfix trio
 
-## Critical startup fix
+### Fixed
+- **Ark Wrapped soft-lock** — slide navigation uses full-overlay hit-testing (not tiny calendar cells); always-visible Back / Continue / Done chrome.
+- **Guided tour stuck dimmer** — generation-scoped Joyride leftover sweep, Escape clears orphan portals after Finish, spotlight no longer uses a full-screen blocker shadow.
+- **Overlay detail levels restored on main** — Ctrl+Shift+D cycles collapsed → compact → expanded with HWND resize (ported from the 1.0.53 line). Lazy create/destroy and click-through without mouse forward preserved.
 
-**1.0.50 would not open.** The published installer contained a corrupted app package (`package.json` inside the archive was unreadable), so Electron exited immediately — blank/no window, and in-app update could not run. Download and install **Ark-Setup-1.0.52.exe** to replace it.
-
-## Also in this build
-
-### Overlay mouse-lag hotfix (from 1.0.51)
-- Click-through without Chromium mouse forwarding (no system-wide cursor lag)
-- Overlay window created only while a tracked game is running; destroyed when play ends
-- Async session process polling (no sync `tasklist`/PowerShell on the main thread)
-- Leaner HUD — no backdrop blur or pulsing badge
-
-### Chunked embeddings Phase A (from 1.0.50)
-- Facet chunk embeddings with int8 pooled game vectors; lazy dual-format upgrade
-- Kill switch: Settings → Ollama → “Facet chunk embeddings”
-
-### Install
-Download and run **Ark-Setup-1.0.52.exe** (uninstalling 1.0.50 first is optional but fine).
-
-### Smoke test
-1. App opens to the main window (does not exit in under a second).
-2. Settings → enable in-game overlay; start a tracked game — corner HUD appears; mouse feel should match overlay-off.
-3. Quit the game — HUD window goes away.
+### Added
+- Always-visible overlay shortcut hints on compact/expanded (`O dismiss · D cycle`), plus Settings copy for Ctrl+Shift+O / Ctrl+Shift+D.
+- 1.0.55 ANN Settings (Rebuild ANN, What’s New) unchanged.

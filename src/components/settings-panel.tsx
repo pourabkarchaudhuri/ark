@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2, Rocket, RefreshCw } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2, Rocket, RefreshCw, MonitorPlay } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import { Button } from '@/components/ui/button';
@@ -94,6 +94,8 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   
   // Auto-launch state
   const [autoLaunch, setAutoLaunchState] = useState(true);
+  // In-game overlay HUD (opt-in)
+  const [overlayEnabled, setOverlayEnabledState] = useState(false);
   
   // Library import/export state
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
@@ -154,6 +156,9 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         // Load auto-launch setting
         const autoLaunchEnabled = await window.settings.getAutoLaunch();
         setAutoLaunchState(autoLaunchEnabled);
+
+        // In-game overlay HUD toggle — optional until IPC wiring lands.
+        window.settings?.getOverlayEnabled?.().then(setOverlayEnabledState).catch(() => {});
         
         // Mark initial load complete after fetching
         initialLoadRef.current = false;
@@ -283,6 +288,18 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
       setAutoLaunchState(!newValue);
     }
   }, [autoLaunch]);
+
+  const handleOverlayToggle = useCallback(async () => {
+    if (!window.settings?.setOverlayEnabled) return;
+    const newValue = !overlayEnabled;
+    setOverlayEnabledState(newValue);
+    try {
+      const result = await window.settings.setOverlayEnabled(newValue);
+      if (!result?.success) setOverlayEnabledState(!newValue);
+    } catch {
+      setOverlayEnabledState(!newValue);
+    }
+  }, [overlayEnabled]);
 
   // Mask API key for display
   const getMaskedKey = (key: string) => {
@@ -462,6 +479,37 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                         className={cn(
                           "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
                           autoLaunch ? "translate-x-6" : "translate-x-1"
+                        )}
+                      />
+                    </button>
+                  </div>
+
+                  {/* In-game overlay */}
+                  <div className="flex items-center justify-between pt-2 border-t border-white/[0.04]">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <MonitorPlay className="h-3.5 w-3.5 text-white/40" />
+                        <p className="text-sm font-medium text-white/90">In-game overlay</p>
+                      </div>
+                      <p className="text-xs text-white/30 mt-0.5">
+                        Minimal glassy corner HUD while a tracked game runs. Best with borderless / windowed fullscreen.
+                      </p>
+                      <p className="text-[11px] text-white/25 mt-1.5 font-mono tracking-wide">
+                        Ctrl+Shift+O dismiss / re-enable · Ctrl+Shift+D cycle detail
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleOverlayToggle}
+                      className={cn(
+                        'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
+                        overlayEnabled ? 'bg-fuchsia-500/40' : 'bg-white/[0.08]',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                          overlayEnabled ? 'translate-x-6' : 'translate-x-1',
                         )}
                       />
                     </button>

@@ -317,6 +317,15 @@ contextBridge.exposeInMainWorld('settings', {
     ipcRenderer.invoke('settings:setOverlayEnabled', enabled),
 });
 
+// Overlay HUD bridge — detail-level pushes from main (global hotkeys).
+contextBridge.exposeInMainWorld('overlayHud', {
+  onDetailLevel: (callback) => {
+    const handler = (_event, level) => callback(level);
+    ipcRenderer.on('overlay:detailLevel', handler);
+    return () => ipcRenderer.removeListener('overlay:detailLevel', handler);
+  },
+});
+
 // Expose auto-updater API to renderer
 contextBridge.exposeInMainWorld('updater', {
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),

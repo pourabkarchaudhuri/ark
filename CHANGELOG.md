@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.56] - 2026-08-01
+
+### Fixed
+- **Ark Wrapped soft-lock** — slide navigation uses full-overlay hit-testing (not tiny calendar cells); always-visible Back / Continue / Done chrome so you can finish without restarting the app.
+- **Guided tour stuck dimmer** — generation-scoped Joyride leftover sweep (sync + deferred), Escape clears orphan portals after Finish, spotlight no longer uses a full-screen `9999px` box-shadow blocker.
+- **Overlay detail levels restored on main** — Ctrl+Shift+D cycles collapsed → compact → expanded (ported from the 1.0.53 line) with HWND resize; lazy create/destroy and click-through without mouse forward preserved.
+
+### Added
+- **Always-visible overlay shortcut hints** on compact/expanded HUD (`O dismiss · D cycle`) plus Settings copy for Ctrl+Shift+O / Ctrl+Shift+D. Rebuild ANN / What’s New from 1.0.55 unchanged.
+
 ## [1.0.55] - 2026-08-01
 
 ### Fixed

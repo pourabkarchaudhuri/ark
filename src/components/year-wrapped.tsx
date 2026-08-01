@@ -40,6 +40,11 @@ import ShinyText from '@/components/reactbits/ShinyText';
 import SplitText from '@/components/reactbits/SplitText';
 import SpotlightCard from '@/components/reactbits/SpotlightCard';
 import { TooltipCard } from '@/components/ui/tooltip-card';
+import {
+  resolveSwipeNavAction,
+  resolveTapNavAction,
+  type TapNavAction,
+} from '@/lib/year-wrapped-nav';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -552,7 +557,7 @@ function ActivityHeatmap({ year, data, active }: { year: number; data: Map<strin
       initial={{ opacity: 0, scale: 0.95 }}
       animate={active ? { opacity: 1, scale: 1 } : {}}
       transition={{ delay: 0.6, duration: 0.8 }}
-      className="w-full max-w-2xl overflow-x-auto"
+      className="w-full max-w-2xl overflow-x-auto pointer-events-none"
     >
       <div className="flex gap-[2px] min-w-[600px]">
         {weeks.map((week, wi) => (
@@ -662,7 +667,7 @@ function SlideNumbers({ stats, active }: { stats: WrappedStats; active: boolean 
   ];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-8 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-8 px-8 pointer-events-none">
       <BlurText
         text="The Numbers"
         className="text-4xl md:text-5xl font-bold text-white justify-center mb-4"
@@ -709,7 +714,7 @@ function SlideNumbers({ stats, active }: { stats: WrappedStats; active: boolean 
 
 function SlideCalendar({ stats, active }: { stats: WrappedStats; active: boolean }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="Your Gaming Calendar"
         className="text-4xl md:text-5xl font-bold text-white justify-center"
@@ -1307,7 +1312,7 @@ function SlidePlayPatterns({ stats, active }: { stats: WrappedStats; active: boo
   };
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text={stats.isNightOwl ? 'Night Owl' : 'Early Bird'}
         className="text-4xl md:text-5xl font-bold text-white justify-center"
@@ -1639,6 +1644,7 @@ function SlideFinale({ stats, active, onDownload, onShare, onLaunchFlythrough, i
 
       {/* Share & Download controls */}
       <motion.div
+        data-wrapped-interactive
         initial={{ opacity: 0, y: 20 }}
         animate={active ? { opacity: 1, y: 0 } : {}}
         transition={{ delay: 2.5 }}
@@ -1753,6 +1759,8 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
   const slideContainerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
+  const touchStartXRef = useRef<number | null>(null);
+  const navLockRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1766,29 +1774,52 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
       setCurrentSlide(0);
       setDirection(0);
       setCopiedStats(false);
+      navLockRef.current = false;
     }
   }, [isOpen]);
 
-  const goNext = useCallback(() => {
-    if (currentSlide < TOTAL_SLIDES - 1) {
+  const applyNav = useCallback((action: TapNavAction) => {
+    if (action === 'none' || isExporting || navLockRef.current) return;
+    navLockRef.current = true;
+    if (action === 'next') {
       setDirection(1);
-      setCurrentSlide((s) => s + 1);
+      setCurrentSlide((s) => Math.min(s + 1, TOTAL_SLIDES - 1));
+    } else {
+      setDirection(-1);
+      setCurrentSlide((s) => Math.max(s - 1, 0));
     }
-  }, [currentSlide]);
+    window.setTimeout(() => { navLockRef.current = false; }, 320);
+  }, [isExporting]);
+
+  const goNext = useCallback(() => {
+    applyNav(currentSlide < TOTAL_SLIDES - 1 ? 'next' : 'none');
+  }, [applyNav, currentSlide]);
 
   const goPrev = useCallback(() => {
-    if (currentSlide > 0) {
-      setDirection(-1);
-      setCurrentSlide((s) => s - 1);
-    }
-  }, [currentSlide]);
+    applyNav(currentSlide > 0 ? 'prev' : 'none');
+  }, [applyNav, currentSlide]);
+
+  const handleOverlayPointer = useCallback((clientX: number) => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    applyNav(resolveTapNavAction(clientX, rect.left, rect.width, currentSlide, TOTAL_SLIDES));
+  }, [applyNav, currentSlide]);
 
   useEffect(() => {
     if (!isOpen) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowRight' || e.key === ' ') goNext();
-      else if (e.key === 'ArrowLeft') goPrev();
-      else if (e.key === 'Escape') onClose();
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === 'ArrowRight' || e.key === ' ') {
+        e.preventDefault();
+        goNext();
+      } else if (e.key === 'ArrowLeft' || e.key === 'Backspace') {
+        e.preventDefault();
+        goPrev();
+      } else if (e.key === 'Escape') {
+        onClose();
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -1905,6 +1936,9 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
 
   const isFinale = currentSlide === TOTAL_SLIDES - 1;
 
+  const isFirst = currentSlide === 0;
+  const isLast = currentSlide === TOTAL_SLIDES - 1;
+
   return (
     <AnimatePresence>
       <motion.div
@@ -1912,63 +1946,86 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[200] bg-black flex flex-col"
+        className="fixed inset-0 z-[200] bg-black flex flex-col select-none"
         onClick={(e) => {
           if (isExporting) return;
-          const rect = (e.target as HTMLElement).getBoundingClientRect();
-          const clickX = e.clientX - rect.left;
-          if (clickX > rect.width / 2) goNext();
-          else goPrev();
+          const target = e.target as HTMLElement;
+          if (target.closest('[data-wrapped-interactive]')) return;
+          handleOverlayPointer(e.clientX);
+        }}
+        onTouchStart={(e) => {
+          touchStartXRef.current = e.touches[0]?.clientX ?? null;
+        }}
+        onTouchEnd={(e) => {
+          if (isExporting) return;
+          const target = e.target as HTMLElement;
+          if (target.closest('[data-wrapped-interactive]')) return;
+          const startX = touchStartXRef.current;
+          touchStartXRef.current = null;
+          if (startX == null) return;
+          const endX = e.changedTouches[0]?.clientX;
+          if (endX == null) return;
+          applyNav(resolveSwipeNavAction(startX, endX, currentSlide, TOTAL_SLIDES));
         }}
       >
         {/* Animated background gradient */}
         <motion.div
-          className="absolute inset-0"
-          animate={{ opacity: [0.8, 1, 0.8] }}
-          transition={{ repeat: Infinity, duration: 4, ease: 'easeInOut' }}
+          className="absolute inset-0 pointer-events-none"
+          animate={{ opacity: [0.75, 1, 0.75] }}
+          transition={{ repeat: Infinity, duration: 5, ease: 'easeInOut' }}
           style={{ backgroundImage: SLIDE_GRADIENTS[currentSlide % SLIDE_GRADIENTS.length] }}
         />
 
-        <FloatingParticles intensity={isFinale ? 1.5 : 1} />
+        <FloatingParticles intensity={isFinale ? 1.4 : 0.9} />
 
-        {/* Close button */}
-        <button
-          onClick={(e) => { e.stopPropagation(); onClose(); }}
-          className="absolute top-6 right-6 z-50 w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 transition-colors"
+        {/* Top chrome: year · brand · close */}
+        <div
+          data-wrapped-interactive
+          className="absolute top-0 inset-x-0 z-50 flex items-center justify-between px-5 pt-5 pb-2"
         >
-          <X className="w-5 h-5" />
-        </button>
+          <div className="flex items-center gap-2">
+            {[currentYear - 1, currentYear].map((y) => (
+              <button
+                key={y}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedYear(y);
+                  setDirection(0);
+                  setCurrentSlide(0);
+                }}
+                className={cn(
+                  'px-3 py-1 rounded-full text-xs font-medium transition-colors',
+                  selectedYear === y
+                    ? 'bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/35'
+                    : 'bg-white/5 text-white/35 border border-white/10 hover:text-white/55',
+                )}
+              >
+                {y}
+              </button>
+            ))}
+          </div>
 
-        {/* Year selector */}
-        <div className="absolute top-6 left-6 z-50 flex items-center gap-2">
-          {[currentYear - 1, currentYear].map((y) => (
+          <p className="text-white/20 text-[10px] font-bold tracking-[0.42em] uppercase pointer-events-none">
+            Ark Wrapped
+          </p>
+
+          <TooltipCard content="Close Ark Wrapped">
             <button
-              key={y}
-              onClick={(e) => { e.stopPropagation(); setSelectedYear(y); setCurrentSlide(0); }}
-              className={cn(
-                'px-3 py-1 rounded-full text-xs font-medium transition-colors',
-                selectedYear === y
-                  ? 'bg-fuchsia-500/20 text-fuchsia-400 border border-fuchsia-500/30'
-                  : 'bg-white/5 text-white/30 border border-white/10 hover:text-white/50',
-              )}
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onClose(); }}
+              className="h-10 px-3.5 rounded-full bg-white/5 border border-white/10 flex items-center gap-2 text-white/55 hover:text-white hover:bg-white/10 transition-colors"
+              aria-label="Close"
             >
-              {y}
+              <X className="w-4 h-4" />
+              <span className="text-xs font-medium">Close</span>
             </button>
-          ))}
+          </TooltipCard>
         </div>
 
-        {/* Branding */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 0.15 }}
-          className="absolute top-6 left-1/2 -translate-x-1/2 z-40 text-white/15 text-[10px] font-bold tracking-[0.4em] uppercase"
-        >
-          Ark Wrapped
-        </motion.div>
-
         {/* Slides */}
-        <div ref={slideContainerRef} className="relative flex-1 overflow-hidden">
-          <AnimatePresence initial={false} custom={direction} mode="wait">
+        <div ref={slideContainerRef} className="relative flex-1 overflow-hidden pb-28">
+          <AnimatePresence initial={false} custom={direction}>
             <motion.div
               key={currentSlide}
               custom={direction}
@@ -1976,10 +2033,10 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
               initial="enter"
               animate="center"
               exit="exit"
-              transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+              transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
               className="absolute inset-0"
             >
-              {currentSlide === TOTAL_SLIDES - 1 ? (
+              {isLast ? (
                 <SlideFinale
                   stats={stats}
                   active={true}
@@ -1987,7 +2044,6 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
                   onShare={handleShare}
                   isExporting={isExporting}
                   onLaunchFlythrough={onLaunchFlythrough ? () => {
-                    // Stash keyframes for Galaxy view's localStorage one-shot pickup
                     try {
                       const keyframes = buildFlythroughKeyframes(stats);
                       if (keyframes.length >= 2) {
@@ -2009,49 +2065,111 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
           </AnimatePresence>
         </div>
 
-        {/* Navigation arrows */}
-        {currentSlide > 0 && (
-          <button
-            onClick={(e) => { e.stopPropagation(); goPrev(); }}
-            className="absolute left-4 top-1/2 -translate-y-1/2 z-50 w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-white/30 hover:text-white hover:bg-white/10 transition-colors"
-          >
-            <ChevronLeft className="w-5 h-5" />
-          </button>
-        )}
-        {currentSlide < TOTAL_SLIDES - 1 && (
-          <button
-            onClick={(e) => { e.stopPropagation(); goNext(); }}
-            className="absolute right-4 top-1/2 -translate-y-1/2 z-50 w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-white/30 hover:text-white hover:bg-white/10 transition-colors"
-          >
-            <ChevronRight className="w-5 h-5" />
-          </button>
-        )}
+        {/* Side chevrons */}
+        <button
+          data-wrapped-interactive
+          type="button"
+          onClick={(e) => { e.stopPropagation(); goPrev(); }}
+          disabled={isFirst || isExporting}
+          className={cn(
+            'absolute left-3 top-1/2 -translate-y-1/2 z-50 w-11 h-11 rounded-full border flex items-center justify-center transition-colors',
+            isFirst || isExporting
+              ? 'opacity-0 pointer-events-none'
+              : 'bg-black/40 border-white/15 text-white/70 hover:text-white hover:bg-fuchsia-500/20 hover:border-fuchsia-400/40',
+          )}
+          aria-label="Previous slide"
+        >
+          <ChevronLeft className="w-5 h-5" />
+        </button>
+        <button
+          data-wrapped-interactive
+          type="button"
+          onClick={(e) => { e.stopPropagation(); goNext(); }}
+          disabled={isLast || isExporting}
+          className={cn(
+            'absolute right-3 top-1/2 -translate-y-1/2 z-50 w-11 h-11 rounded-full border flex items-center justify-center transition-colors',
+            isLast || isExporting
+              ? 'opacity-0 pointer-events-none'
+              : 'bg-black/40 border-white/15 text-white/70 hover:text-white hover:bg-fuchsia-500/20 hover:border-fuchsia-400/40',
+          )}
+          aria-label="Next slide"
+        >
+          <ChevronRight className="w-5 h-5" />
+        </button>
 
-        {/* Progress bar */}
-        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5">
-          {Array.from({ length: TOTAL_SLIDES }).map((_, i) => (
+        {/* Bottom chrome: Back · progress · Continue — always present */}
+        <div
+          data-wrapped-interactive
+          className="absolute bottom-0 inset-x-0 z-50 px-5 pb-5 pt-3 bg-gradient-to-t from-black via-black/90 to-transparent"
+        >
+          <div className="flex items-center gap-3 max-w-3xl mx-auto">
             <button
-              key={i}
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                setDirection(i > currentSlide ? 1 : -1);
-                setCurrentSlide(i);
+                if (isFirst) onClose();
+                else goPrev();
               }}
-              className={cn(
-                'h-1 rounded-full transition-all duration-500',
-                i === currentSlide
-                  ? 'w-8 bg-gradient-to-r from-fuchsia-500 to-purple-600'
-                  : i < currentSlide
-                  ? 'w-2 bg-fuchsia-500/30'
-                  : 'w-1.5 bg-white/15 hover:bg-white/25',
-              )}
-            />
-          ))}
-        </div>
+              disabled={isExporting}
+              className="shrink-0 h-10 px-4 rounded-full bg-white/[0.06] border border-white/12 text-white/80 hover:bg-white/10 hover:text-white text-sm font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40"
+              aria-label={isFirst ? 'Close' : 'Back'}
+            >
+              <ChevronLeft className="w-4 h-4" />
+              {isFirst ? 'Close' : 'Back'}
+            </button>
 
-        {/* Slide counter */}
-        <div className="absolute bottom-8 right-6 z-50 text-white/20 text-xs font-medium">
-          {currentSlide + 1} / {TOTAL_SLIDES}
+            <div className="flex-1 flex flex-col gap-2 min-w-0">
+              <div className="flex items-center gap-1">
+                {Array.from({ length: TOTAL_SLIDES }).map((_, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (i === currentSlide || isExporting) return;
+                      setDirection(i > currentSlide ? 1 : -1);
+                      setCurrentSlide(i);
+                    }}
+                    className={cn(
+                      'h-1 rounded-full transition-all duration-500',
+                      i === currentSlide
+                        ? 'flex-[2] bg-gradient-to-r from-fuchsia-400 to-violet-500 shadow-[0_0_12px_rgba(232,121,249,0.35)]'
+                        : i < currentSlide
+                        ? 'flex-1 bg-fuchsia-400/35 hover:bg-fuchsia-400/55'
+                        : 'flex-1 bg-white/12 hover:bg-white/25',
+                    )}
+                    aria-label={`Go to slide ${i + 1}`}
+                  />
+                ))}
+              </div>
+              <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-white/30">
+                <span>Step {currentSlide + 1}</span>
+                <span>{TOTAL_SLIDES} beats</span>
+              </div>
+            </div>
+
+            {!isLast ? (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); goNext(); }}
+                disabled={isExporting}
+                className="shrink-0 h-10 px-4 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/35 text-fuchsia-100 hover:bg-fuchsia-500/30 text-sm font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40"
+                aria-label="Continue"
+              >
+                Continue
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onClose(); }}
+                disabled={isExporting}
+                className="shrink-0 h-10 px-4 rounded-full bg-white/[0.08] border border-white/15 text-white/85 hover:bg-white/12 text-sm font-medium transition-colors disabled:opacity-40"
+              >
+                Done
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Copied toast */}
@@ -2061,7 +2179,7 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
               initial={{ opacity: 0, y: 20, scale: 0.9 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -10, scale: 0.9 }}
-              className="fixed bottom-20 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-2 px-4 py-2 rounded-full bg-green-500/20 border border-green-500/30 text-green-400 text-sm"
+              className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/15 border border-emerald-400/30 text-emerald-300 text-sm"
             >
               <Check className="w-4 h-4" />
               Stats copied to clipboard!
@@ -2072,6 +2190,7 @@ export const YearWrapped = memo(function YearWrapped({ isOpen, onClose, onLaunch
     </AnimatePresence>
   );
 });
+
 
 // ─── Snackbar Notification ───────────────────────────────────────────────────
 

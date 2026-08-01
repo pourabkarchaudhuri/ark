@@ -86,6 +86,7 @@ import {
   deactivateOverlay,
   isOverlayVisible,
   registerOverlayHotkey,
+  registerOverlayCycleHotkey,
   unregisterOverlayHotkey,
   destroyOverlay,
 } from './overlay-window.js';
@@ -434,6 +435,9 @@ function setupOverlay() {
         activateOverlay();
       }
     });
+    // Cycle collapsed → compact → expanded even when HWND is down so the next
+    // activate opens at the chosen level.
+    registerOverlayCycleHotkey();
   } catch (err) {
     logger.warn('[Overlay] Failed to set up in-game overlay (non-fatal):', err);
   }
