@@ -8,21 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [1.0.58] - 2026-08-01
 
-### Added
-- **Phase B.1 multi-vector ANN max-sim** — Rebuild/backfill ingests facet chunk ids alongside pooled game vectors. Embedding Space + Similar Games aggregate neighbors with max-sim (min distance per game) when `ollama.chunkAnnMaxSimEnabled` is on (default). Kill switch restores pooled-only queries. Oracle taste path and graph edges stay pooled.
-
-### Changed
-- Settings → Ollama adds **Chunk ANN max-sim** toggle. Rebuild progress counts pooled + chunk vectors.
-
-## [1.0.57] - 2026-08-01
+Published ship for the P0 rebuild/graph/overlay work + Phase B.1 (no separate Latest 1.0.57).
 
 ### Fixed
-- **ANN Rebuild TransactionInactiveError** — `_backfillAnnIndex` now collects IDB pages with sync `cursor.continue`, then flushes `addVectors` outside the transaction (no await-in-cursor). Progress is determinate after store counts; failures surface in Settings.
-- **Graph build DataCloneError** — metrics worker transfers a sliced copy of edges/personalization; originals stay attached for adjacency + IDB persist. Score buffers are defensively re-copied before put.
-- **Overlay phantom session after game close** — session-end always deactivates/destroys the HUD HWND (repairs Settings/hotkey latch desync). Timer stops immediately and does not restart at 0:00 after exit.
+- **ANN Rebuild TransactionInactiveError** — `_backfillAnnIndex` collects IDB pages with sync `cursor.continue`, then flushes `addVectors` outside the transaction. Settings shows determinate progress and surfaces failures.
+- **Graph build DataCloneError** — metrics worker transfers edge/personalization **copies**; originals stay attached for adjacency + IDB persist.
+- **Overlay phantom session after game close** — session-end always destroys the HUD HWND (repairs Settings/hotkey latch desync). Timer does not restart at 0:00 after exit.
+
+### Added
+- **Phase B.1 multi-vector ANN max-sim** — Rebuild/backfill ingests facet chunk ids alongside pooled game vectors. Embedding Space + Similar Games aggregate with max-sim when `ollama.chunkAnnMaxSimEnabled` is on (default). Kill switch restores pooled-only. Oracle and graph stay pooled.
 
 ### Changed
-- **Overlay two levels only** — collapsed ↔ compact; cycle hotkey is **Shift+Win+D** (`Super+Shift+D`). Legacy `expanded` coerces to compact. Compact hint: `O dismiss · Shift+Win+D denser`. Click-through still without `{ forward: true }`.
+- **Overlay two levels only** — collapsed ↔ compact; cycle **Shift+Win+D** (`Super+Shift+D`). Legacy `expanded` → compact. Click-through without `{ forward: true }`.
+- Settings → Ollama **Chunk ANN max-sim** toggle; Rebuild progress counts pooled + chunk vectors.
 
 ## [1.0.56] - 2026-08-01
 
