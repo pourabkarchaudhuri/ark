@@ -138,7 +138,7 @@ export function prepareGraphWorkerTransfer(
 }
 
 function isDetachedBuffer(view: ArrayBufferView): boolean {
-  const buf = view.buffer as ArrayBuffer;
+  const buf = view.buffer as ArrayBuffer & { detached?: boolean };
   if (typeof buf.detached === 'boolean') return buf.detached;
   // Fallback: non-empty logical length over a zero-byte buffer ⇒ detached
   // (empty views also have byteLength 0, so length must be checked).
