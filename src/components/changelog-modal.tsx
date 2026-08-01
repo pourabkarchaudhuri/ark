@@ -9,6 +9,14 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+  '1.0.51': {
+    title: "What's New in Ark 1.0.51",
+    changes: [
+      'In-game overlay no longer causes mouse lag — click-through without mouse forwarding, lazy create/destroy of the HUD window (no idle topmost shell), and async session process polling so tasklist/PowerShell never blocks the main thread.',
+      'Leaner overlay HUD — no backdrop blur or pulsing badge animation; opacity-only fade. Always-on-top and background-throttling off only while the HUD is actually visible.',
+      'Overlay hotkey (Ctrl+Shift+O) only shows the HUD when a tracked game session is active and the setting is enabled.',
+    ],
+  },
   '1.0.50': {
     title: "What's New in Ark 1.0.50",
     changes: [

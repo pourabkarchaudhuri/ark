@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.51] - 2026-08-01
+
+### Fixed
+- **In-game overlay mouse lag.** Overlay click-through no longer uses `{ forward: true }` (Chromium mouse hit-testing into the overlay process). The HUD HWND is created only while a tracked session is active and the setting is on; deactivate fully destroys the window instead of leaving a topmost idle shell. Session process snapshots run async (no sync `tasklist`/PowerShell on the main thread) with overlap skip.
+- **Overlay HUD compositor cost.** Removed backdrop blur and the infinite pulse animation; fade is opacity-only. Background throttling stays on until the HUD is shown; always-on-top is elevated only while visible.
+
+### Changed
+- Overlay settings/hotkey paths call `activateOverlay` / `deactivateOverlay` (lazy create + destroy). Hotkey show requires an active tracked session, not an empty topmost window.
+
 ## [1.0.50] - 2026-08-01
 
 ### Added

@@ -12,12 +12,27 @@
  *   - session:ended         { gameId, session: GameSession }
  */
 
-import { execSync } from 'child_process';
+import { exec, type ExecOptions } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import * as fs from 'fs';
 import { logger } from './safe-logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
+
+/** Async exec so process snapshots never block Electron's main/input pump. */
+const execAsync = promisify(exec);
+
+async function runCommand(
+  command: string,
+  options: ExecOptions,
+): Promise<string> {
+  const { stdout } = await execAsync(command, {
+    ...options,
+    encoding: 'utf8',
+  });
+  return String(stdout ?? '');
+}
 
 const createRequire = (await import('node:module')).createRequire;
 const require = createRequire(import.meta.url);
@@ -102,13 +117,13 @@ const _basenameCollisionWarned: Set<string> = new Set();
  * basename when the path snapshot doesn't include a process (e.g. game
  * launched with elevation).
  */
-function refreshProcessSnapshot(): void {
+async function refreshProcessSnapshot(): Promise<void> {
   try {
     if (process.platform === 'win32') {
       // ---- Basenames (fast, primary source of truth for "is anything named X running") ----
       // /FO CSV /NH → one line per process: "imagename","PID","sessionname","session#","memUsage"
-      const output = execSync('tasklist /FO CSV /NH', {
-        encoding: 'utf-8',
+      // Async — never block the Electron main thread (sync exec was a mouse-hitch source).
+      const output = await runCommand('tasklist /FO CSV /NH', {
         timeout: 10_000,
         windowsHide: true,
       });
@@ -123,9 +138,9 @@ function refreshProcessSnapshot(): void {
       // ---- Full paths (slower, best-effort — some processes hide their Path from non-admin) ----
       const paths = new Set<string>();
       try {
-        const psOut = execSync(
+        const psOut = await runCommand(
           'powershell.exe -NoProfile -NonInteractive -Command "Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -ExpandProperty Path"',
-          { encoding: 'utf-8', timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }
+          { timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
         );
         for (const line of psOut.split('\n')) {
           const trimmed = line.trim();
@@ -139,7 +154,7 @@ function refreshProcessSnapshot(): void {
       _runningPaths = paths;
     } else {
       // macOS / Linux — `ps -eo comm=,command=` prints basename + full command per line
-      const output = execSync('ps -eo comm=,command=', { encoding: 'utf-8', timeout: 5000 });
+      const output = await runCommand('ps -eo comm=,command=', { timeout: 5000 });
       const names = new Set<string>();
       const paths = new Set<string>();
       for (const line of output.split('\n')) {
@@ -199,6 +214,8 @@ function isProcessRunning(exePath: string): boolean {
 // ---------------------------------------------------------------------------
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+/** Skip overlapping ticks when a slow PowerShell snapshot outlives POLL_INTERVAL_MS. */
+let pollInFlight = false;
 let mainWindowRef: BrowserWindowType | null = null;
 let trackedGames: TrackedGame[] = [];
 const activeSessions: Map<string, ActiveSession> = new Map(); // gameId -> session
@@ -308,42 +325,48 @@ function recoverPersistedSessions(): void {
 // Core poll loop
 // ---------------------------------------------------------------------------
 
-function pollTick() {
+async function pollTick(): Promise<void> {
   if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
 
   // Skip expensive process snapshot when nothing is being tracked
   if (trackedGames.length === 0 && activeSessions.size === 0) return;
 
-  // Snapshot all running processes ONCE — O(1) lookups for each game below.
-  // Measure OS-probe duration so we can surface hook latency in telemetry.
-  const _hookStart = performance.now();
-  refreshProcessSnapshot();
-  const hookLatencyMs = Math.round((performance.now() - _hookStart) * 100) / 100;
+  // Don't pile up overlapping tasklist/PowerShell runs — that spikes CPU and
+  // made the old sync path feel like a mouse hitch every poll.
+  if (pollInFlight) return;
+  pollInFlight = true;
 
-  // Sample process resource usage for telemetry samples emitted below.
-  const rssMb = Math.round((process.memoryUsage().rss / (1024 * 1024)) * 100) / 100;
-  let cpuPercent = 0;
   try {
-    const metrics = app.getAppMetrics();
-    for (const m of metrics) {
-      cpuPercent += m?.cpu?.percentCPUUsage ?? 0;
+    // Snapshot all running processes ONCE — O(1) lookups for each game below.
+    // Measure OS-probe duration so we can surface hook latency in telemetry.
+    const _hookStart = performance.now();
+    await refreshProcessSnapshot();
+    const hookLatencyMs = Math.round((performance.now() - _hookStart) * 100) / 100;
+
+    // Sample process resource usage for telemetry samples emitted below.
+    const rssMb = Math.round((process.memoryUsage().rss / (1024 * 1024)) * 100) / 100;
+    let cpuPercent = 0;
+    try {
+      const metrics = app.getAppMetrics();
+      for (const m of metrics) {
+        cpuPercent += m?.cpu?.percentCPUUsage ?? 0;
+      }
+      cpuPercent = Math.round(cpuPercent * 100) / 100;
+    } catch {
+      cpuPercent = 0;
     }
-    cpuPercent = Math.round(cpuPercent * 100) / 100;
-  } catch {
-    cpuPercent = 0;
-  }
 
-  // Get system idle time (seconds)
-  let systemIdleS = 0;
-  try {
-    systemIdleS = powerMonitor.getSystemIdleTime();
-  } catch {
-    // powerMonitor may not be available in all environments
-  }
-  const isSystemIdle = systemIdleS >= IDLE_THRESHOLD_S;
-  const nowMs = Date.now();
+    // Get system idle time (seconds)
+    let systemIdleS = 0;
+    try {
+      systemIdleS = powerMonitor.getSystemIdleTime();
+    } catch {
+      // powerMonitor may not be available in all environments
+    }
+    const isSystemIdle = systemIdleS >= IDLE_THRESHOLD_S;
+    const nowMs = Date.now();
 
-  for (const game of trackedGames) {
+    for (const game of trackedGames) {
     const running = isProcessRunning(game.executablePath);
     const existingSession = activeSessions.get(game.gameId);
 
@@ -452,6 +475,9 @@ function pollTick() {
 
   // Show/hide the overlay HUD based on whether anything is being played now.
   updateOverlayVisibility();
+  } finally {
+    pollInFlight = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -524,8 +550,10 @@ export function startSessionTracker(mainWindow: BrowserWindowType) {
     clearInterval(pollTimer);
   }
 
-  pollTimer = setInterval(pollTick, POLL_INTERVAL_MS);
-  logger.log('[SessionTracker] Started (polling every 15s)');
+  pollTimer = setInterval(() => {
+    void pollTick();
+  }, POLL_INTERVAL_MS);
+  logger.log('[SessionTracker] Started (polling every 15s, async process snapshot)');
 }
 
 /**

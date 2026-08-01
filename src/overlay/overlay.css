@@ -53,23 +53,20 @@ body,
   max-width: 252px;
   padding: 8px 12px;
   border-radius: 12px;
-  background: rgba(10, 10, 15, 0.82);
+  /* Solid translucent fill — no backdrop-filter (GPU cost over fullscreen games). */
+  background: rgba(10, 10, 15, 0.9);
   border: 1px solid rgba(217, 70, 239, 0.28); /* fuchsia-500 @ ~28% */
   box-shadow:
     0 8px 28px rgba(0, 0, 0, 0.55),
     0 0 0 1px rgba(255, 255, 255, 0.03) inset;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
 
-  /* Fade + subtle slide. Controlled by the `.is-visible` class. */
+  /* Opacity-only fade. Controlled by the `.is-visible` class. */
   opacity: 0;
-  transform: translateY(-6px);
-  transition: opacity 260ms ease, transform 260ms ease;
+  transition: opacity 260ms ease;
 }
 
 .ark-overlay-card.is-visible {
   opacity: 1;
-  transform: translateY(0);
 }
 
 /* "ARK — tracking" badge row. */
@@ -90,13 +87,8 @@ body,
   height: 7px;
   border-radius: 999px;
   background: #d946ef; /* fuchsia-500 */
+  /* Static glow only — no infinite pulse animation (CPU/compositor cost). */
   box-shadow: 0 0 6px rgba(217, 70, 239, 0.8);
-  animation: ark-overlay-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes ark-overlay-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.45; transform: scale(0.82); }
 }
 
 /* Game name. */
@@ -123,7 +115,5 @@ body,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ark-overlay-card { transition: opacity 120ms linear; transform: none; }
-  .ark-overlay-card.is-visible { transform: none; }
-  .ark-overlay-badge-dot { animation: none; }
+  .ark-overlay-card { transition: opacity 120ms linear; }
 }

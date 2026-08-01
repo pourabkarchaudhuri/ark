@@ -13,7 +13,7 @@ import {
 } from '../settings-store.js';
 import { resetRerankTierCache } from '../rerank-engine.js';
 import { resetRerankPullAttempts } from '../ollama-setup.js';
-import { showOverlay, hideOverlay } from '../overlay-window.js';
+import { activateOverlay, deactivateOverlay } from '../overlay-window.js';
 import { getActiveSessions } from '../session-tracker.js';
 
 export function register(): void {
@@ -189,12 +189,11 @@ export function register(): void {
     try {
       if (typeof enabled !== 'boolean') return { success: false, error: 'Invalid value' };
       settingsStore.setOverlayEnabled(enabled);
-      // Apply live: turning it on shows the HUD immediately if a game is being
-      // played right now; turning it off hides it regardless of session state.
-      if (enabled) {
-        if (getActiveSessions().length > 0) showOverlay();
+      // Apply live: enable + active sessions → create/show; otherwise destroy HWND.
+      if (enabled && getActiveSessions().length > 0) {
+        activateOverlay();
       } else {
-        hideOverlay();
+        deactivateOverlay();
       }
       return { success: true };
     } catch (error) {

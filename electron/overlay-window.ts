@@ -1,21 +1,19 @@
 /**
- * Overlay Window — a lightweight, transparent, click-through, always-on-top HUD
- * that renders a small corner badge (game name + live session timer) while a
- * tracked game is running.
+ * Overlay Window — a lightweight, transparent, click-through HUD that renders
+ * a small corner badge (game name + live session timer) while a tracked game
+ * is running.
  *
  * Design constraints (see the "Ark in-game overlay HUD" plan):
- *  - Non-injecting: this is a plain topmost Electron window, NOT a DirectX/Present
- *    hook, so it carries the same trust class as Discord/OBS overlays (zero
- *    anti-cheat risk).
- *  - `backgroundThrottling: false` is mandatory. The overlay never holds OS focus
- *    (the game does), and Electron otherwise throttles an unfocused window's
- *    timers/rAF down to ~1fps, which would freeze the HUD clock and fades.
- *  - Click-through + focusable:false so the game receives every click under the
- *    HUD and the overlay never steals focus.
- *
- * The overlay reuses the EXISTING preload (`preload.cjs`) — the `sessionTracker`
- * bridge exposed there is all the HUD renderer needs. `session-tracker.ts`
- * forwards the same `session:*` payloads to this window's webContents.
+ *  - Non-injecting: plain topmost Electron window, NOT a DirectX/Present hook
+ *    (same trust class as Discord/OBS overlays — zero anti-cheat risk).
+ *  - Lazy lifecycle: the HWND is created only when a session is active AND the
+ *    overlay is enabled. Deactivate fully destroys the window so an idle
+ *    topmost BrowserWindow cannot steal GPU/CPU or interfere with mouse input.
+ *  - Click-through WITHOUT `{ forward: true }` — forwarding forces Chromium to
+ *    hit-test every mouse move into the overlay process and is a known source
+ *    of in-game mouse lag. `focusable: false` keeps the game in focus.
+ *  - `backgroundThrottling` starts true at create; we disable it only while the
+ *    HUD is shown so the clock/fades keep running under a foreground game.
  */
 
 import { createRequire } from 'node:module';
@@ -42,15 +40,26 @@ const OVERLAY_HEIGHT = 84;
 const OVERLAY_MARGIN = 24;
 /** Global toggle hotkey. */
 const OVERLAY_HOTKEY = 'Control+Shift+O';
+/** Debounce for display-metrics-changed (DPI / resolution / layout churn). */
+const DISPLAY_METRICS_DEBOUNCE_MS = 150;
 
 // ---------------------------------------------------------------------------
 // Module state
 // ---------------------------------------------------------------------------
 
 let overlayWindow: BrowserWindowType | null = null;
+let overlayPreloadPath: string | null = null;
 let hotkeyRegistered = false;
 /** Kept so we can detach the screen listener on destroy (avoids leaks). */
 let displayMetricsHandler: (() => void) | null = null;
+let displayMetricsTimer: ReturnType<typeof setTimeout> | null = null;
+
+export type OverlayLifecycleHooks = {
+  onCreated?: (win: BrowserWindowType) => void;
+  onDestroyed?: () => void;
+};
+
+let lifecycleHooks: OverlayLifecycleHooks = {};
 
 // ---------------------------------------------------------------------------
 // Load target — dev server entry vs packaged file
@@ -82,17 +91,35 @@ function loadOverlayContent(win: BrowserWindowType): void {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Public API — configuration / hooks
+// ---------------------------------------------------------------------------
+
+/** Store the preload path used when the overlay window is lazily created. */
+export function setOverlayPreloadPath(preloadPath: string): void {
+  overlayPreloadPath = preloadPath;
+}
+
+/** Hooks so session-tracker can track the overlay webContents across create/destroy. */
+export function setOverlayLifecycleHooks(hooks: OverlayLifecycleHooks): void {
+  lifecycleHooks = hooks ?? {};
+}
+
+// ---------------------------------------------------------------------------
+// Public API — window lifecycle
 // ---------------------------------------------------------------------------
 
 /**
  * Create the overlay window (idempotent — returns the existing one if alive).
- * Pass the SAME `preloadPath` that main.ts resolves for the main window so the
- * `sessionTracker` bridge is available to the HUD renderer.
+ * Prefer calling via `activateOverlay()`; do not create at app startup.
  */
-export function createOverlayWindow(preloadPath: string): BrowserWindowType {
+export function createOverlayWindow(preloadPath?: string): BrowserWindowType {
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     return overlayWindow;
+  }
+
+  const resolvedPreload = preloadPath || overlayPreloadPath;
+  if (!resolvedPreload) {
+    throw new Error('[Overlay] Preload path not set — call setOverlayPreloadPath() first');
   }
 
   overlayWindow = new BrowserWindow({
@@ -107,34 +134,44 @@ export function createOverlayWindow(preloadPath: string): BrowserWindowType {
     hasShadow: false,
     show: false,
     backgroundColor: '#00000000',
-    alwaysOnTop: true,
+    // Do NOT set alwaysOnTop here — elevate only when showing.
     webPreferences: {
-      preload: preloadPath,
+      preload: resolvedPreload,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      // Mandatory: keep the HUD clock/fades running while the game is foreground.
-      backgroundThrottling: false,
+      // Start throttled; disable only while the HUD is visible.
+      backgroundThrottling: true,
     },
   });
 
-  // Never intercept clicks — forward mouse events to whatever is underneath.
-  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-  // Sit above fullscreen games / screensavers.
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-  // Stay visible across virtual desktops and while a game is fullscreen.
-  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Click-through WITHOUT forward — `{ forward: true }` hit-tests every mouse
+  // move into the overlay process and causes in-game mouse lag.
+  overlayWindow.setIgnoreMouseEvents(true);
 
   loadOverlayContent(overlayWindow);
   positionOverlay();
 
-  // Reposition when the monitor layout / DPI / resolution changes.
-  displayMetricsHandler = () => positionOverlay();
+  // Reposition when the monitor layout / DPI / resolution changes — debounced,
+  // and only while the HUD is actually visible.
+  displayMetricsHandler = () => {
+    if (displayMetricsTimer) clearTimeout(displayMetricsTimer);
+    displayMetricsTimer = setTimeout(() => {
+      displayMetricsTimer = null;
+      if (isOverlayVisible()) positionOverlay();
+    }, DISPLAY_METRICS_DEBOUNCE_MS);
+  };
   screen.on('display-metrics-changed', displayMetricsHandler);
 
   overlayWindow.on('closed', () => {
     overlayWindow = null;
   });
+
+  try {
+    lifecycleHooks.onCreated?.(overlayWindow);
+  } catch (err) {
+    logger.error('[Overlay] onCreated hook failed:', err);
+  }
 
   logger.log('[Overlay] Overlay window created');
   return overlayWindow;
@@ -160,19 +197,42 @@ export function positionOverlay(): void {
   }
 }
 
-/** Show the overlay WITHOUT stealing focus from the foreground game. */
-export function showOverlay(): void {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+/**
+ * Lazily create (if needed) and show the overlay WITHOUT stealing focus.
+ * Elevates always-on-top only for the visible lifetime of the HWND.
+ */
+export function activateOverlay(): void {
+  const win = createOverlayWindow();
   positionOverlay();
+  try {
+    win.webContents.setBackgroundThrottling(false);
+  } catch (err) {
+    logger.warn('[Overlay] Failed to disable background throttling:', err);
+  }
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   // showInactive() never activates the window, so the game keeps OS focus.
-  overlayWindow.showInactive();
-  // Re-assert topmost after showing (some drivers drop it on show).
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+  win.showInactive();
 }
 
+/** Alias — prefer `activateOverlay` for the lazy create+show path. */
+export function showOverlay(): void {
+  activateOverlay();
+}
+
+/** Thin hide without destroying the HWND. Prefer `deactivateOverlay`. */
 export function hideOverlay(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   overlayWindow.hide();
+}
+
+/**
+ * Fully destroy the overlay HWND and notify lifecycle hooks so session-tracker
+ * clears its webContents ref. This is the path that ends a play session or
+ * turns the setting off — hide alone leaves a topmost window around.
+ */
+export function deactivateOverlay(): void {
+  destroyOverlay();
 }
 
 export function isOverlayVisible(): boolean {
@@ -186,7 +246,7 @@ export function getOverlayWindow(): BrowserWindowType | null {
 /**
  * Register the global toggle hotkey. `onToggle` is invoked on each press — the
  * caller (main.ts) decides the actual show/hide behaviour so it can gate on the
- * `overlayEnabled` setting.
+ * `overlayEnabled` setting and active sessions.
  */
 export function registerOverlayHotkey(onToggle: () => void): void {
   if (hotkeyRegistered) return;
@@ -213,8 +273,12 @@ export function unregisterOverlayHotkey(): void {
   hotkeyRegistered = false;
 }
 
-/** Destroy the overlay window and detach listeners. Call on app quit. */
+/** Destroy the overlay window and detach listeners. Call on deactivate / quit. */
 export function destroyOverlay(): void {
+  if (displayMetricsTimer) {
+    clearTimeout(displayMetricsTimer);
+    displayMetricsTimer = null;
+  }
   if (displayMetricsHandler) {
     try {
       screen.removeListener('display-metrics-changed', displayMetricsHandler);
@@ -223,7 +287,15 @@ export function destroyOverlay(): void {
     }
     displayMetricsHandler = null;
   }
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
+
+  const hadWindow = !!overlayWindow && !overlayWindow.isDestroyed();
+  if (hadWindow && overlayWindow) {
+    try {
+      // Drop topmost before teardown so we don't leave elevated z-order state.
+      overlayWindow.setAlwaysOnTop(false);
+    } catch {
+      // ignore
+    }
     try {
       overlayWindow.destroy();
     } catch (err) {
@@ -231,4 +303,12 @@ export function destroyOverlay(): void {
     }
   }
   overlayWindow = null;
+
+  if (hadWindow) {
+    try {
+      lifecycleHooks.onDestroyed?.();
+    } catch (err) {
+      logger.error('[Overlay] onDestroyed hook failed:', err);
+    }
+  }
 }

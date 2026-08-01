@@ -73,11 +73,17 @@ import { chatStore, processMessage } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
 import { trackAppLaunch } from './analytics.js';
 import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
-import { startSessionTracker, stopSessionTracker, registerOverlayWindow } from './session-tracker.js';
 import {
-  createOverlayWindow,
-  showOverlay,
-  hideOverlay,
+  startSessionTracker,
+  stopSessionTracker,
+  registerOverlayWindow,
+  getActiveSessions,
+} from './session-tracker.js';
+import {
+  setOverlayPreloadPath,
+  setOverlayLifecycleHooks,
+  activateOverlay,
+  deactivateOverlay,
   isOverlayVisible,
   registerOverlayHotkey,
   unregisterOverlayHotkey,
@@ -337,8 +343,8 @@ function createWindow() {
     }
 
     // ---- In-game overlay HUD ----
-    // Create the transparent click-through overlay (reuses the SAME preload),
-    // forward session events to it, and drive show/hide from session activity.
+    // Wire lazy create/destroy (no HWND at startup). Session activity + setting
+    // gate when the transparent click-through overlay appears.
     setupOverlay();
   });
 
@@ -398,31 +404,34 @@ function createWindow() {
 }
 
 /**
- * Create and wire the in-game overlay HUD. Non-fatal on failure — the overlay is
- * an optional, opt-in feature and must never block app startup.
+ * Wire the in-game overlay HUD without creating a window at startup.
+ * Non-fatal on failure — the overlay is optional/opt-in and must never block boot.
  */
 function setupOverlay() {
   try {
-    const overlayWin = createOverlayWindow(getPreloadPath());
+    setOverlayPreloadPath(getPreloadPath());
+    setOverlayLifecycleHooks({
+      onCreated: (win) => registerOverlayWindow(win),
+      onDestroyed: () => registerOverlayWindow(null),
+    });
 
-    // The tracker forwards session:* events to this window and calls us back on
-    // the 0↔1 active-session transition. We gate the actual show on the opt-in
-    // setting; hide is unconditional so the HUD disappears when play ends.
-    registerOverlayWindow(overlayWin, (shouldShow) => {
-      if (shouldShow) {
-        if (settingsStore.getOverlayEnabled()) showOverlay();
+    // Tracker calls back on the 0↔1 active-session transition. Activate only
+    // when enabled; deactivate always destroys the HWND (not a mere hide).
+    registerOverlayWindow(null, (shouldShow) => {
+      if (shouldShow && settingsStore.getOverlayEnabled()) {
+        activateOverlay();
       } else {
-        hideOverlay();
+        deactivateOverlay();
       }
     });
 
-    // Global hotkey toggles visibility. Showing still respects the opt-in
-    // setting, so "overlay off" fully disables the HUD.
+    // Hotkey toggles visibility. Never show an empty topmost window — require
+    // an active tracked session in addition to the opt-in setting.
     registerOverlayHotkey(() => {
       if (isOverlayVisible()) {
-        hideOverlay();
-      } else if (settingsStore.getOverlayEnabled()) {
-        showOverlay();
+        deactivateOverlay();
+      } else if (settingsStore.getOverlayEnabled() && getActiveSessions().length > 0) {
+        activateOverlay();
       }
     });
   } catch (err) {
