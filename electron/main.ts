@@ -78,6 +78,7 @@ import {
   stopSessionTracker,
   registerOverlayWindow,
   getActiveSessions,
+  syncOverlayVisibilityLatch,
 } from './session-tracker.js';
 import {
   setOverlayPreloadPath,
@@ -416,13 +417,15 @@ function setupOverlay() {
       onDestroyed: () => registerOverlayWindow(null),
     });
 
-    // Tracker calls back on the 0↔1 active-session transition. Activate only
-    // when enabled; deactivate always destroys the HWND (not a mere hide).
+    // Tracker calls back when sessions exist / clear. Activate only when
+    // enabled; deactivate always destroys the HWND (not a mere hide).
     registerOverlayWindow(null, (shouldShow) => {
       if (shouldShow && settingsStore.getOverlayEnabled()) {
         activateOverlay();
+        syncOverlayVisibilityLatch(true);
       } else {
         deactivateOverlay();
+        syncOverlayVisibilityLatch(false);
       }
     });
 
@@ -431,8 +434,10 @@ function setupOverlay() {
     registerOverlayHotkey(() => {
       if (isOverlayVisible()) {
         deactivateOverlay();
+        syncOverlayVisibilityLatch(false);
       } else if (settingsStore.getOverlayEnabled() && getActiveSessions().length > 0) {
         activateOverlay();
+        syncOverlayVisibilityLatch(true);
       }
     });
     // Cycle collapsed ↔ compact even when HWND is down so the next

@@ -139,16 +139,26 @@ export function OverlayHud() {
     setVisible(true);
   }, [clearFadeTimer]);
 
-  const hideGame = useCallback((gameId: string) => {
-    if (anchorRef.current?.gameId !== gameId) return;
+  /** Stop the clock immediately; fade the card, then drop DOM state. */
+  const clearHud = useCallback(() => {
+    anchorRef.current = null;
     setVisible(false);
     clearFadeTimer();
     fadeTimerRef.current = setTimeout(() => {
-      anchorRef.current = null;
       setGame(null);
       setElapsedSeconds(0);
     }, FADE_OUT_MS);
   }, [clearFadeTimer]);
+
+  const hideGame = useCallback((gameId: string) => {
+    if (anchorRef.current?.gameId !== gameId) return;
+    clearHud();
+  }, [clearHud]);
+
+  /** Session gate empty — hard clear even if gameId mismatched on the end event. */
+  const hideAll = useCallback(() => {
+    clearHud();
+  }, [clearHud]);
 
   // Detail level from main-process hotkey (Super+Shift+D / Shift+Win+D).
   useEffect(() => {
@@ -182,7 +192,8 @@ export function OverlayHud() {
 
     const unsubLive = bridge.onLiveUpdate((data) => {
       const gid = normalizeGameId(data.gameId);
-      if (anchorRef.current?.gameId !== gid) return;
+      // Ignore live ticks after session clear — prevents a phantom 0:00 clock.
+      if (!anchorRef.current || anchorRef.current.gameId !== gid) return;
       const activeSeconds = Math.max(0, (data.activeMinutes ?? 0) * 60);
       anchorRef.current = { gameId: gid, activeSeconds, anchoredAt: Date.now() };
       setElapsedSeconds(activeSeconds);
@@ -194,6 +205,12 @@ export function OverlayHud() {
 
     const unsubEnded = bridge.onSessionEnded((data) => {
       hideGame(normalizeGameId(data.gameId));
+      // If the tracker has no remaining sessions, hard-clear (covers id mismatch).
+      bridge.getActiveSessions?.()
+        .then((active) => {
+          if (!active || active.length === 0) hideAll();
+        })
+        .catch(() => { /* ignore */ });
     });
 
     return () => {
@@ -202,11 +219,11 @@ export function OverlayHud() {
       unsubStatus?.();
       unsubEnded?.();
     };
-  }, [showGame, hideGame]);
+  }, [showGame, hideGame, hideAll]);
 
-  // Local 1s interpolation — only while compact (collapsed has no clock).
+  // Local 1s interpolation — only while visible + compact (never tick a hidden/phantom HUD).
   useEffect(() => {
-    if (!game || detailLevel === 'collapsed') return;
+    if (!game || !visible || detailLevel === 'collapsed') return;
     const tick = () => {
       const anchor = anchorRef.current;
       if (!anchor) return;
@@ -216,7 +233,7 @@ export function OverlayHud() {
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [game, detailLevel]);
+  }, [game, detailLevel, visible]);
 
   useEffect(() => () => clearFadeTimer(), [clearFadeTimer]);
 

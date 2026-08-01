@@ -18,7 +18,7 @@ import {
   deactivateOverlay,
   isOverlayCycleHotkeyRegistered,
 } from '../overlay-window.js';
-import { getActiveSessions } from '../session-tracker.js';
+import { getActiveSessions, syncOverlayVisibilityLatch } from '../session-tracker.js';
 
 export function register(): void {
   ipcMain.handle('settings:getApiKey', async () => {
@@ -196,8 +196,10 @@ export function register(): void {
       // Apply live: enable + active sessions → create/show; otherwise destroy HWND.
       if (enabled && getActiveSessions().length > 0) {
         activateOverlay();
+        syncOverlayVisibilityLatch(true);
       } else {
         deactivateOverlay();
+        syncOverlayVisibilityLatch(false);
       }
       return { success: true };
     } catch (error) {

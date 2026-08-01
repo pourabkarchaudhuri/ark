@@ -11,12 +11,20 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.58': {
+    title: "What's New in Ark 1.0.58",
+    changes: [
+      'Phase B.1 multi-vector ANN — Rebuild indexes facet chunk embeddings alongside pooled game vectors; Embedding Space + Similar Games use max-sim neighbor expand (default on).',
+      'Kill switch: Settings → Ollama → Chunk ANN max-sim (off = pooled-only queries). Oracle shelves and graph edges stay pooled.',
+      'Rebuild ANN progress counts pooled + chunk vectors; What’s New / Rebuild blocks unchanged.',
+    ],
+  },
   '1.0.57': {
     title: "What's New in Ark 1.0.57",
     changes: [
       'ANN Rebuild fixed — index backfill no longer hangs with TransactionInactiveError; Settings shows real progress and surfaces failures.',
       'Graph build fixed — no more DataCloneError from transferring edge buffers; Oracle/Embedding Space can reach graph-ready again.',
-      'Overlay simplified to collapsed + compact only; cycle with Shift+Win+D (toggle still Ctrl+Shift+O). Legacy expanded becomes compact. Click-through still without mouse forward.',
+      'Overlay closes when the game exits — HUD HWND is destroyed (no phantom 0:00 timer). Cycle is Shift+Win+D; levels are collapsed + compact only. Click-through still without mouse forward.',
       'Rebuild ANN and What’s New blocks remain in Settings; Timeshear / Cartographer / Monuments stay removed.',
     ],
   },

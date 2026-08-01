@@ -504,20 +504,42 @@ function sendToRenderer(channel: string, data: unknown) {
 }
 
 /**
- * Fire the overlay visibility callback when the active-session count crosses the
- * 0↔1 boundary. Only fires on an actual change, so main.ts's handler runs once
- * per transition rather than every poll tick.
+ * Fire the overlay visibility callback for the in-game HUD.
+ *
+ * Show path is edge-triggered (0→1) so we don't recreate the HWND every poll.
+ * Hide path is **level-triggered**: whenever there are zero active sessions we
+ * always request deactivate. That repairs desync when the overlay was shown via
+ * Settings/hotkey without going through this gate (`lastOverlayShouldShow`
+ * stayed false → a later session-end would skip the callback and leave a
+ * phantom HUD with a zeroed timer).
  */
 function updateOverlayVisibility(): void {
   if (!overlayVisibilityCallback) return;
   const shouldShow = activeSessions.size > 0;
-  if (shouldShow === lastOverlayShouldShow) return;
-  lastOverlayShouldShow = shouldShow;
+  if (!shouldShow) {
+    lastOverlayShouldShow = false;
+    try {
+      overlayVisibilityCallback(false);
+    } catch (err) {
+      logger.error('[SessionTracker] Overlay visibility callback failed:', err);
+    }
+    return;
+  }
+  if (lastOverlayShouldShow) return;
+  lastOverlayShouldShow = true;
   try {
-    overlayVisibilityCallback(shouldShow);
+    overlayVisibilityCallback(true);
   } catch (err) {
     logger.error('[SessionTracker] Overlay visibility callback failed:', err);
   }
+}
+
+/**
+ * Keep the session-gate latch in sync when main/settings show or hide the
+ * overlay outside `updateOverlayVisibility` (hotkey / Settings toggle).
+ */
+export function syncOverlayVisibilityLatch(shouldShow: boolean): void {
+  lastOverlayShouldShow = shouldShow;
 }
 
 /**
