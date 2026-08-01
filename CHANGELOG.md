@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.55] - 2026-08-01
+
+### Fixed
+- **Embedding Space ANN “self-only” neighbors after Phase A int8 embeddings.** `readPooledVector` now coerces IDB-revived `q` shapes (ArrayBuffer / plain arrays) so `getEmbeddingById` and ANN queries work again. Library all-cached path backfills ANN when the index is not ready. Single-vector `query` accepts optional `excludeId` (wired for Embedding Space + Similar Games).
+
+### Added
+- **Settings → Ollama → Rebuild ANN index** — clear + backfill from cached pooled embeddings. Latest release notes also shown under Settings → About → What’s New.
+
+## [1.0.54] - 2026-08-01
+
+### Fixed
+- Performance hotfix for ~15s hitch while gaming (PowerShell path parse / main-process work on poll cadence; coalesced notifies; lazy system-status polling).
+
+## [1.0.53] - 2026-08-01
+
+### Added / Fixed
+- Ark Wrapped soft-lock, live telemetry, overlay detail levels, Qwen listing UI, Scenes/Audit polish, quieter session/embedding polling while playing.
+
 ## [1.0.52] - 2026-08-01
 
 ### Fixed

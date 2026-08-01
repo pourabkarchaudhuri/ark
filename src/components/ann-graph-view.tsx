@@ -3784,7 +3784,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         if (selectedIdRef.current !== node.id) return;
         if (vec && annIndex.isReady) {
           const overFetch = neighborK.current * 8 + 1;
-          const results = await annIndex.queryWithDistances(vec, overFetch);
+          const results = await annIndex.queryWithDistances(vec, overFetch, node.id);
           if (selectedIdRef.current !== node.id) return;
           const filtered = results.filter(r => r.id !== node.id);
           const poolK = Math.min(NEIGHBOR_HEURISTIC_POOL, filtered.length);
@@ -4051,7 +4051,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
 
       if (vec && annIndex.isReady) {
         const overFetch = neighborK.current * 8 + 1;
-        const results = await annIndex.queryWithDistances(vec, overFetch);
+        const results = await annIndex.queryWithDistances(vec, overFetch, node.id);
         if (selectedIdRef.current !== node.id) return;
         const filtered = results.filter(r => r.id !== node.id);
         const poolK = Math.min(NEIGHBOR_HEURISTIC_POOL, filtered.length);
@@ -4523,7 +4523,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         if (cancelled || !vec || !annIndex.isReady) return;
 
         const overFetch = k * 4 + 1;
-        const results = await annIndex.queryWithDistances(vec, overFetch);
+        const results = await annIndex.queryWithDistances(vec, overFetch, focNode.id);
         if (cancelled) return;
 
         const filtered = results

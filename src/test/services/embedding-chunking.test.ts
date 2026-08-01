@@ -301,6 +301,64 @@ describe('readPooledVector decode boundary', () => {
     expect(cosineSimilarity(v!, original)).toBeGreaterThan(0.995);
   });
 
+  it('decodes int8 q stored as ArrayBuffer', () => {
+    const original = unitVector(5);
+    const { q, scale } = quantizeEmbedding(original);
+    const asBuffer = q.buffer.slice(q.byteOffset, q.byteOffset + q.byteLength);
+    const entry = {
+      gameId: 'g1',
+      q: asBuffer,
+      scale,
+      textHash: 'h',
+      timestamp: Date.now(),
+      format: 'i8' as const,
+      poolVersion: 1,
+    } as unknown as CachedEmbedding;
+    const v = readPooledVector(entry);
+    expect(v).not.toBeNull();
+    expect(v!.length).toBe(EMBEDDING_DIM);
+    expect(cosineSimilarity(v!, original)).toBeGreaterThan(0.995);
+  });
+
+  it('decodes int8 q stored as plain number[] of length 1024', () => {
+    const original = unitVector(6);
+    const { q, scale } = quantizeEmbedding(original);
+    const entry = {
+      gameId: 'g1',
+      q: Array.from(q),
+      scale,
+      textHash: 'h',
+      timestamp: Date.now(),
+      format: 'i8' as const,
+      poolVersion: 1,
+    } as unknown as CachedEmbedding;
+    const v = readPooledVector(entry);
+    expect(v).not.toBeNull();
+    expect(v!.length).toBe(EMBEDDING_DIM);
+    expect(cosineSimilarity(v!, original)).toBeGreaterThan(0.995);
+  });
+
+  it('returns null when int8 q has wrong length', () => {
+    const entry = {
+      gameId: 'g1',
+      q: new Int8Array(16),
+      scale: 0.01,
+      textHash: 'h',
+      timestamp: Date.now(),
+      format: 'i8' as const,
+    } as CachedEmbedding;
+    expect(readPooledVector(entry)).toBeNull();
+
+    const plainWrong = {
+      gameId: 'g1',
+      q: [1, 2, 3],
+      scale: 0.01,
+      textHash: 'h',
+      timestamp: Date.now(),
+    } as unknown as CachedEmbedding;
+    expect(readPooledVector(plainWrong)).toBeNull();
+  });
+
   it('returns null for invalid rows', () => {
     expect(readPooledVector({ gameId: 'x', textHash: 'h', timestamp: 1 })).toBeNull();
     expect(readPooledVector({

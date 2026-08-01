@@ -7,8 +7,32 @@ import { Button } from '@/components/ui/button';
 // No manual bumps needed; just update package.json.
 export const APP_VERSION: string = __APP_VERSION__;
 
+export type ChangelogEntry = { title: string; changes: string[] };
+
 // Changelog entries - add new versions at the top
-const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
+const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.55': {
+    title: "What's New in Ark 1.0.55",
+    changes: [
+      'Embedding Space neighbors fixed after Phase A int8 embeddings — pooled vectors decode reliably from IDB (ArrayBuffer / plain-array shapes), so ANN queries no longer return an empty neighbor list (selected game only).',
+      'Library embeddings that are already cached now backfill the ANN index when it is empty or not ready (same recovery path as catalog).',
+      'Settings → Ollama → Rebuild ANN index — clears the on-disk HNSW index and rebuilds from cached pooled embeddings. Use this after upgrading if neighbors still look empty.',
+      'ANN single-vector query can exclude the focus game id (Embedding Space + Similar Games), matching batch-query behavior so self is not the only hit.',
+    ],
+  },
+  '1.0.54': {
+    title: "What's New in Ark 1.0.54",
+    changes: [
+      'Performance hotfix — reduces ~15s hitch / lag while gaming from heavy PowerShell path parsing and sync main-process work on the session poll cadence.',
+      'Active sessions: tasklist every 15s; full path snapshots ~every 60s with chunked parse. Metrics/persist and UI notify storms coalesced; system-status heavy polls only while splash/status UI is open.',
+    ],
+  },
+  '1.0.53': {
+    title: "What's New in Ark 1.0.53",
+    changes: [
+      'Ark Wrapped soft-lock fix, live telemetry mid-session, overlay detail levels (Ctrl+Shift+D) + dismiss hotkey, Qwen listing in status/settings, Scenes/Audit polish, and session/embedding polling quieter while playing.',
+    ],
+  },
   '1.0.52': {
     title: "What's New in Ark 1.0.52",
     changes: [
@@ -547,9 +571,14 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
 
 const STORAGE_KEY = 'ark_last_seen_version';
 
+/** Latest release notes for the running app version (Settings / About). */
+export function getLatestChangelog(): ChangelogEntry | null {
+  return CHANGELOG[APP_VERSION] ?? null;
+}
+
 export function ChangelogModal() {
   const [isOpen, setIsOpen] = useState(false);
-  const [changelogData, setChangelogData] = useState<{ title: string; changes: string[] } | null>(null);
+  const [changelogData, setChangelogData] = useState<ChangelogEntry | null>(null);
 
   useEffect(() => {
     // Check if we should show the changelog

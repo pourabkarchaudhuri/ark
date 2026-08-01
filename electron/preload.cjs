@@ -534,7 +534,7 @@ contextBridge.exposeInMainWorld('ann', {
   load: () => ipcRenderer.invoke('ann:load'),
   save: () => ipcRenderer.invoke('ann:save'),
   addVectors: (entries) => ipcRenderer.invoke('ann:addVectors', entries),
-  query: (centroid, k) => ipcRenderer.invoke('ann:query', centroid, k),
+  query: (centroid, k, excludeId) => ipcRenderer.invoke('ann:query', centroid, k, excludeId),
   queryBatch: (entries, k) => ipcRenderer.invoke('ann:queryBatch', entries, k),
   status: () => ipcRenderer.invoke('ann:status'),
   clear: () => ipcRenderer.invoke('ann:clear'),

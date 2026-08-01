@@ -242,13 +242,43 @@ export function getEmbeddingDB(): Promise<IDBDatabase> {
 }
 
 /**
+ * Coerce IDB / structured-clone `q` payloads into Int8Array of EMBEDDING_DIM.
+ * Accepts Int8Array, ArrayBuffer, ArrayBufferView, or array-like length 1024.
+ */
+export function coerceInt8Q(q: unknown): Int8Array | null {
+  if (q instanceof Int8Array) {
+    return q.length === EMBEDDING_DIM ? q : null;
+  }
+  if (q instanceof ArrayBuffer) {
+    if (q.byteLength !== EMBEDDING_DIM) return null;
+    return new Int8Array(q);
+  }
+  if (ArrayBuffer.isView(q)) {
+    const view = q as ArrayBufferView & { length?: number };
+    const len = typeof view.length === 'number' ? view.length : view.byteLength;
+    if (len !== EMBEDDING_DIM) return null;
+    return new Int8Array(view.buffer, view.byteOffset, EMBEDDING_DIM);
+  }
+  if (
+    q != null &&
+    typeof q === 'object' &&
+    typeof (q as { length?: unknown }).length === 'number' &&
+    (q as { length: number }).length === EMBEDDING_DIM
+  ) {
+    return Int8Array.from(q as ArrayLike<number>);
+  }
+  return null;
+}
+
+/**
  * Decode boundary: IDB row → f32 1024 (or null).
  * Legacy float arrays and int8+scale both accepted; TypedArrays rejected by Array.isArray.
  */
 export function readPooledVector(entry: CachedEmbedding | null | undefined): Float32Array | null {
   if (!entry) return null;
-  if (entry.q instanceof Int8Array && entry.q.length === EMBEDDING_DIM && typeof entry.scale === 'number') {
-    return dequantizeEmbedding(entry.q, entry.scale);
+  if (typeof entry.scale === 'number') {
+    const q = coerceInt8Q(entry.q);
+    if (q) return dequantizeEmbedding(q, entry.scale);
   }
   if (Array.isArray(entry.embedding) && entry.embedding.length === EMBEDDING_DIM) {
     return Float32Array.from(entry.embedding);
@@ -738,8 +768,9 @@ async function embedAndPersistChunkedGame(opts: {
 
   const vectorsById = new Map<string, Float32Array>();
   for (const [id, row] of existing) {
-    if (row.q instanceof Int8Array && typeof row.scale === 'number') {
-      vectorsById.set(id, dequantizeEmbedding(row.q, row.scale));
+    const q = coerceInt8Q(row.q);
+    if (q && typeof row.scale === 'number') {
+      vectorsById.set(id, dequantizeEmbedding(q, row.scale));
     }
   }
 
@@ -1107,6 +1138,10 @@ class EmbeddingService {
 
       if (needsEmbedding.length === 0) {
         console.log('[EmbeddingService] All embeddings already cached');
+        // Backfill ANN if empty (parity with catalog path — cached library + empty ANN → self-only neighbors)
+        if (!annIndex.isReady) {
+          await this._backfillAnnIndex();
+        }
         this._setLibraryStatus('ready');
         return 0;
       }
@@ -1809,6 +1844,24 @@ class EmbeddingService {
     if (sent > 0) {
       await annIndex.save();
       console.log(`[EmbeddingService] ANN index backfilled: ${sent} vectors from cache`);
+    }
+  }
+
+  /**
+   * Clear the ANN index and rebuild from cached library + catalog pooled vectors.
+   * Returns the vector count reported by the ANN service after backfill.
+   */
+  async rebuildAnnFromCache(): Promise<number> {
+    await annIndex.clear();
+    annIndex.setBuildProgress(0, 1);
+    try {
+      await this._backfillAnnIndex();
+      await annIndex.refreshStatus();
+      const count = annIndex.vectorCount;
+      console.log(`[EmbeddingService] ANN rebuild from cache complete: ${count} vectors`);
+      return count;
+    } finally {
+      annIndex.finishBuild();
     }
   }
 

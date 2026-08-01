@@ -48,9 +48,9 @@ export function register(): void {
     }
   });
 
-  ipcMain.handle('ann:query', async (_event: any, centroid: number[], k: number) => {
+  ipcMain.handle('ann:query', async (_event: any, centroid: number[], k: number, excludeId?: string) => {
     try {
-      return query(centroid, k);
+      return query(centroid, k, excludeId);
     } catch (err) {
       logger.error('[ANN IPC] query error:', err);
       return [];

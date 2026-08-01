@@ -5,16 +5,17 @@
 
 import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2, Rocket } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2, Rocket, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
 import { gameService } from '@/services/game-service';
+import { embeddingService } from '@/services/embedding-service';
 import { useDevMode } from '@/hooks/useDevMode';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
-import { APP_VERSION } from '@/components/changelog-modal';
+import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
 
@@ -85,6 +86,8 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
+  const [annRebuildStatus, setAnnRebuildStatus] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
+  const [annRebuildMessage, setAnnRebuildMessage] = useState<string | null>(null);
   const [useGeminiInstead, setUseGeminiInstead] = useState(false);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
@@ -675,6 +678,51 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       />
                     </button>
                   </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-white/50">Rebuild ANN index</p>
+                      <p className="text-[11px] text-white/25 mt-0.5">
+                        Clear and rebuild neighbors from cached embeddings (no Ollama calls).
+                      </p>
+                      {annRebuildMessage && (
+                        <p className={cn(
+                          'text-[11px] mt-0.5',
+                          annRebuildStatus === 'error' ? 'text-red-400/70' : 'text-emerald-400/60',
+                        )}>
+                          {annRebuildMessage}
+                        </p>
+                      )}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={annRebuildStatus === 'building' || geminiBlocksOllama}
+                      onClick={async () => {
+                        setAnnRebuildStatus('building');
+                        setAnnRebuildMessage(null);
+                        try {
+                          const count = await embeddingService.rebuildAnnFromCache();
+                          setAnnRebuildStatus('done');
+                          setAnnRebuildMessage(`Rebuilt — ${count} vectors`);
+                          console.log(`[Settings] ANN rebuild complete: ${count} vectors`);
+                        } catch (err) {
+                          setAnnRebuildStatus('error');
+                          setAnnRebuildMessage('Rebuild failed');
+                          console.warn('[Settings] ANN rebuild failed:', err);
+                        }
+                      }}
+                      className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
+                    >
+                      {annRebuildStatus === 'building' ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      )}
+                      <span className="ml-1.5">{annRebuildStatus === 'building' ? 'Rebuilding…' : 'Rebuild'}</span>
+                    </Button>
+                  </div>
                   
                   <div className="flex items-center gap-2 text-xs">
                     {ollamaSaveStatus === 'saving' && (
@@ -960,6 +1008,28 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                 </div>
               </div>
             </div>
+
+            {/* Latest release notes */}
+            {(() => {
+              const notes = getLatestChangelog();
+              if (!notes) return null;
+              return (
+                <div className="px-4 pb-3 space-y-2">
+                  <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">What&apos;s New</h3>
+                  <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-3 space-y-2">
+                    <p className="text-xs font-medium text-white/80">{notes.title}</p>
+                    <ul className="space-y-1.5 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-white/10">
+                      {notes.changes.map((change, i) => (
+                        <li key={i} className="text-[11px] text-white/45 leading-relaxed flex gap-1.5">
+                          <span className="text-fuchsia-400/60 shrink-0">•</span>
+                          <span>{change}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Footer */}
             <div className="px-4 py-3 border-t border-white/[0.05] text-center">

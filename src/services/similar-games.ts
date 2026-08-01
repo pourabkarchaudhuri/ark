@@ -369,7 +369,7 @@ export async function getSimilarTitlesForReco(
   if (!vec) return [];
 
   const overFetch = Math.max(k * 4 + 12, k + 24);
-  const raw = await annIndex.queryWithDistances(vec, overFetch);
+  const raw = await annIndex.queryWithDistances(vec, overFetch, sourceGameId);
   const filtered = raw
     .filter((r) => r.id !== sourceGameId && r.distance <= SIMILAR_TITLES_DISTANCE_CEILING)
     .sort((a, b) => a.distance - b.distance);
@@ -421,7 +421,7 @@ export async function getSimilarGamesForDetails(
   }
 
   const overFetch = Math.max(k * 4 + 12, k + 24);
-  const raw = await annIndex.queryWithDistances(vec, overFetch);
+  const raw = await annIndex.queryWithDistances(vec, overFetch, sourceGameId);
   const filtered = raw
     .filter((r) => r.id !== sourceGameId)
     .sort((a, b) => a.distance - b.distance);

@@ -2,7 +2,7 @@
 
 Items identified during security and architecture reviews that are **not safe to fix** without risking regressions, or that require significant effort / design decisions before implementation.
 
-Last updated: 2026-08-01 (chunked embeddings Phase A)
+Last updated: 2026-08-01 (Phase A ANN decode/backfill fix)
 
 ---
 
@@ -128,6 +128,8 @@ Games available on both Steam and Epic get separate embeddings (`steam-<appid>` 
 Phase A ships lazy dual-format facet chunks (`chunk-embeddings` + int8 pooled rows) without bumping `EMBEDDING_TEXT_VERSION` / `EMBEDDING_MODEL_VERSION` and without forcing a catalog rebuild.
 
 **Upgrade behavior (user risk):** Existing float pooled rows keep serving until that game’s whole-text hash misses. The first rewrite for a game replaces concat-embed geometry with a weighted chunk pool for that id only — ANN neighbors for that game may shift. Unchanged games make zero Ollama calls. Kill switch: Settings → Ollama → “Facet chunk embeddings” (`ollama.embeddingChunkingEnabled`, default on).
+
+**Phase A ANN fix (Aug 2026):** Hardened int8 pooled decode (`coerceInt8Q` for ArrayBuffer / plain arrays), library-path ANN backfill when all-cached but index not ready, and Settings → Rebuild ANN index (clear + backfill from IDB). Addresses Embedding Space “self-only” neighbors from strict decode / empty ANN. Phase B multi-vector ANN remains deferred.
 
 **Deferred (Phase B / later):**
 - Multi-vector ANN / max-sim over chunk ids

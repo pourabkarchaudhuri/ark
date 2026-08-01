@@ -162,10 +162,14 @@ export function addVectors(entries: Array<{ id: string; vector: number[] }>): nu
   return added;
 }
 
-export function query(centroid: number[], k: number): Array<{ id: string; distance: number }> {
+export function query(
+  centroid: number[],
+  k: number,
+  excludeId?: string,
+): Array<{ id: string; distance: number }> {
   if (!index || idMap.length === 0 || !Index) return [];
 
-  const effectiveK = Math.min(k, idMap.length);
+  const effectiveK = Math.min(k + (excludeId ? 1 : 0), idMap.length);
   if (effectiveK <= 0) return [];
 
   const vec = new Float32Array(centroid);
@@ -175,7 +179,10 @@ export function query(centroid: number[], k: number): Array<{ id: string; distan
   for (let i = 0; i < result.keys.length; i++) {
     const slot = Number(result.keys[i]);
     if (slot >= 0 && slot < idMap.length && idMap[slot]) {
-      results.push({ id: idMap[slot], distance: result.distances[i] });
+      const id = idMap[slot];
+      if (excludeId && id === excludeId) continue;
+      results.push({ id, distance: result.distances[i] });
+      if (results.length >= k) break;
     }
   }
 

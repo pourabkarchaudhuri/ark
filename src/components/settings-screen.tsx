@@ -24,9 +24,10 @@ import { gameService } from '@/services/game-service';
 import { useDevMode } from '@/hooks/useDevMode';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
-import { APP_VERSION } from '@/components/changelog-modal';
+import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
+import { embeddingService } from '@/services/embedding-service';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
 
 export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
@@ -352,6 +353,8 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
+  const [annRebuildStatus, setAnnRebuildStatus] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
+  const [annRebuildMessage, setAnnRebuildMessage] = useState<string | null>(null);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [rerankDiag, setRerankDiag] = useState<{
     state: 'idle' | 'testing' | 'ok' | 'fail';
@@ -676,6 +679,50 @@ const AIModelsTab = memo(function AIModelsTab() {
             value={embeddingChunkingEnabled}
             onChange={() => setEmbeddingChunkingEnabled(!embeddingChunkingEnabled)}
           />
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-white/70">Rebuild ANN index</p>
+            <p className="text-[11px] text-white/30 mt-0.5">
+              Clear and rebuild neighbors from cached embeddings (no Ollama calls).
+            </p>
+            {annRebuildMessage && (
+              <p className={cn(
+                'text-[11px] mt-0.5',
+                annRebuildStatus === 'error' ? 'text-red-400/70' : 'text-emerald-400/60',
+              )}>
+                {annRebuildMessage}
+              </p>
+            )}
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={annRebuildStatus === 'building'}
+            onClick={async () => {
+              setAnnRebuildStatus('building');
+              setAnnRebuildMessage(null);
+              try {
+                const count = await embeddingService.rebuildAnnFromCache();
+                setAnnRebuildStatus('done');
+                setAnnRebuildMessage(`Rebuilt — ${count} vectors`);
+                console.log(`[Settings] ANN rebuild complete: ${count} vectors`);
+              } catch (err) {
+                setAnnRebuildStatus('error');
+                setAnnRebuildMessage('Rebuild failed');
+                console.warn('[Settings] ANN rebuild failed:', err);
+              }
+            }}
+            className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
+          >
+            {annRebuildStatus === 'building' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            <span className="ml-1.5">{annRebuildStatus === 'building' ? 'Rebuilding…' : 'Rebuild'}</span>
+          </Button>
         </div>
         {oracleRerankEnabled && (
           <div>
@@ -1057,6 +1104,7 @@ const AboutTab = memo(function AboutTab() {
   const [updateState, setUpdateState] = useState<UpdateCheckState>('idle');
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const latestNotes = getLatestChangelog();
 
   const handleCheckForUpdates = useCallback(async () => {
     if (!window.updater) {
@@ -1185,6 +1233,24 @@ const AboutTab = memo(function AboutTab() {
           <span>Built with Vite</span>
         </div>
       </SectionCard>
+
+      {latestNotes && (
+        <>
+          <SectionHeading icon={Sparkles}>What&apos;s New</SectionHeading>
+          <SectionCard>
+            <p className="text-sm font-medium text-white/90">{latestNotes.title}</p>
+            <p className="text-xs text-white/35 mt-0.5 mb-3">Release notes for the build you are running</p>
+            <ul className="space-y-2.5">
+              {latestNotes.changes.map((change, i) => (
+                <li key={i} className="flex items-start gap-2.5 text-xs text-white/70 leading-relaxed">
+                  <Sparkles className="h-3.5 w-3.5 text-fuchsia-400/80 mt-0.5 shrink-0" />
+                  <span>{change}</span>
+                </li>
+              ))}
+            </ul>
+          </SectionCard>
+        </>
+      )}
 
       {/* Open Source Credits */}
       <SectionHeading icon={Package}>Open Source Credits</SectionHeading>

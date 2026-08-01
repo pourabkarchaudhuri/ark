@@ -15,7 +15,7 @@ declare global {
       load: () => Promise<boolean>;
       save: () => Promise<boolean>;
       addVectors: (entries: Array<{ id: string; vector: number[] }>) => Promise<number>;
-      query: (centroid: number[], k: number) => Promise<Array<{ id: string; distance: number }>>;
+      query: (centroid: number[], k: number, excludeId?: string) => Promise<Array<{ id: string; distance: number }>>;
       queryBatch: (entries: Array<{ id: string; vector: number[] }>, k: number) => Promise<Record<string, Array<{ id: string; distance: number }>>>;
       status: () => Promise<{ ready: boolean; vectorCount: number; dims: number }>;
       clear: () => Promise<boolean>;
@@ -42,16 +42,21 @@ class AnnIndexService {
   get isBuilding(): boolean { return this._building; }
   get buildProgress(): Readonly<{ done: number; total: number }> { return this._buildProgress; }
 
+  private async _syncStatusFromMain(): Promise<void> {
+    if (!window.ann) return;
+    try {
+      const s = await window.ann.status();
+      this._ready = s.ready;
+      this._vectorCount = s.vectorCount;
+      this._notify();
+    } catch { /* ignore */ }
+  }
+
   async load(): Promise<boolean> {
     if (!window.ann) return false;
     try {
       const loaded = await window.ann.load();
-      if (loaded) {
-        const s = await window.ann.status();
-        this._ready = s.ready;
-        this._vectorCount = s.vectorCount;
-        this._notify();
-      }
+      await this._syncStatusFromMain();
       return loaded;
     } catch (err) {
       console.warn('[AnnIndex] load failed:', err);
@@ -73,11 +78,7 @@ class AnnIndexService {
     if (!window.ann || entries.length === 0) return 0;
     try {
       const added = await window.ann.addVectors(entries);
-      if (added > 0) {
-        this._vectorCount += added;
-        this._ready = true;
-        this._notify();
-      }
+      await this._syncStatusFromMain();
       return added;
     } catch (err) {
       console.warn('[AnnIndex] addVectors failed:', err);
@@ -85,11 +86,23 @@ class AnnIndexService {
     }
   }
 
-  async query(centroid: number[] | Float32Array, k: number): Promise<string[]> {
+  async clear(): Promise<boolean> {
+    if (!window.ann) return false;
+    try {
+      const ok = await window.ann.clear();
+      await this._syncStatusFromMain();
+      return ok;
+    } catch (err) {
+      console.warn('[AnnIndex] clear failed:', err);
+      return false;
+    }
+  }
+
+  async query(centroid: number[] | Float32Array, k: number, excludeId?: string): Promise<string[]> {
     if (!window.ann || !this._ready) return [];
     try {
       const centroidArray = centroid instanceof Float32Array ? Array.from(centroid) : centroid;
-      const results = await window.ann.query(centroidArray, k);
+      const results = await window.ann.query(centroidArray, k, excludeId);
       return results.map(r => r.id);
     } catch (err) {
       console.warn('[AnnIndex] query failed:', err);
@@ -97,11 +110,11 @@ class AnnIndexService {
     }
   }
 
-  async queryWithDistances(centroid: number[] | Float32Array, k: number): Promise<Array<{ id: string; distance: number }>> {
+  async queryWithDistances(centroid: number[] | Float32Array, k: number, excludeId?: string): Promise<Array<{ id: string; distance: number }>> {
     if (!window.ann || !this._ready) return [];
     try {
       const centroidArray = centroid instanceof Float32Array ? Array.from(centroid) : centroid;
-      return await window.ann.query(centroidArray, k);
+      return await window.ann.query(centroidArray, k, excludeId);
     } catch (err) {
       console.warn('[AnnIndex] queryWithDistances failed:', err);
       return [];
@@ -119,13 +132,7 @@ class AnnIndexService {
   }
 
   async refreshStatus(): Promise<void> {
-    if (!window.ann) return;
-    try {
-      const s = await window.ann.status();
-      this._ready = s.ready;
-      this._vectorCount = s.vectorCount;
-      this._notify();
-    } catch { /* ignore */ }
+    await this._syncStatusFromMain();
   }
 
   setBuildProgress(done: number, total: number) {
