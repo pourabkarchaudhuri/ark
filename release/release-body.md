@@ -1,13 +1,17 @@
-## Ark 1.0.56 — UX hotfix trio + Embedding Space declutter
+﻿## Ark 1.0.59
+
+Wave 3 + Embedding Space neighbor restore (single ship).
 
 ### Fixed
-- **Ark Wrapped soft-lock** — slide navigation uses full-overlay hit-testing (not tiny calendar cells); always-visible Back / Continue / Done chrome.
-- **Guided tour stuck dimmer** — generation-scoped Joyride leftover sweep, Escape clears orphan portals after Finish, spotlight no longer uses a full-screen blocker shadow.
-- **Overlay detail levels restored on main** — Ctrl+Shift+D cycles collapsed → compact → expanded with HWND resize (ported from the 1.0.53 line). Lazy create/destroy and click-through without mouse forward preserved.
+- **ES neighbor lines empty after Phase B.1** — max-sim no longer passes `excludeId` into usearch; over-fetch `k*16`; nodeMap-only draw; euclidean fallback + status chip.
+- **The Path** — clearer disabled reasons when journey games aren't in the galaxy; Explore Path expands neighbors via the fixed query.
 
 ### Added
-- Always-visible overlay shortcut hints on compact/expanded (`O dismiss · D cycle`), plus Settings copy for Ctrl+Shift+O / Ctrl+Shift+D.
-- 1.0.55 ANN Settings (Rebuild ANN, What’s New) unchanged.
+- **Re-chunk catalog (idle)** — Settings → Ollama; library then catalog facet chunks; progress/cancel; polite during sessions; ANN upsert; Rebuild ANN recommended when done.
+- **Weight-sweep harness (Beta)** — synthetic MRR over `CHUNK_WEIGHTS`; does not auto-change production weights.
+- **MRL-256 (default off)** — `ollama.embeddingMrl256Enabled`; ANN uses 256-d prefixes; toggle clears index for rebuild.
 
-### Changed
-- **Embedding Space declutter** — Timeshear, Cartographer HUD, and Monuments removed. Codex remains via C hotkey (Curator).
+### Preserved
+- Overlay two-level + Shift+Win+D; closes on game exit; no mouse forward.
+- No Timeshear / Cartographer / Monuments.
+- Oracle/graph stay pooled; Rebuild ANN + What’s New intact.

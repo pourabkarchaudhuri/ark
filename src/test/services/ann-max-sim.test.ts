@@ -47,4 +47,19 @@ describe('aggregateMaxSimByGameId', () => {
   it('returns empty for empty hits', () => {
     expect(aggregateMaxSimByGameId([], { excludeGameId: 'x' })).toEqual([]);
   });
+
+  it('overFetch stress: many source chunk-self hits still leave other games', () => {
+    const sourceChunks = Array.from({ length: 40 }, (_, i) => ({
+      id: `lib:steam-src::facets#${i}`,
+      distance: 0.001 * (i + 1),
+    }));
+    const others = [
+      { id: 'lib:steam-a::facets#0', distance: 0.05 },
+      { id: 'steam-b', distance: 0.08 },
+    ];
+    const ranked = aggregateMaxSimByGameId([...sourceChunks, ...others], {
+      excludeGameId: 'steam-src',
+    });
+    expect(ranked.map((r) => r.gameId)).toEqual(['steam-a', 'steam-b']);
+  });
 });

@@ -9,7 +9,11 @@ import type { SteamAppDetails } from '@/types/steam';
 import { getSteamCoverUrl } from '@/types/steam';
 import { annIndex } from '@/services/ann-index';
 import { getEmbeddingById } from '@/services/embedding-service';
-import { queryAnnNeighborGames } from '@/services/ann-neighbor-query';
+import {
+  queryAnnNeighborGames,
+  annNeighborOverFetch,
+  isChunkAnnMaxSimEnabled,
+} from '@/services/ann-neighbor-query';
 import { findGameById } from '@/services/prefetch-store';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
@@ -369,7 +373,8 @@ export async function getSimilarTitlesForReco(
   const vec = await getEmbeddingById(sourceGameId);
   if (!vec) return [];
 
-  const overFetch = Math.max(k * 4 + 12, k + 24);
+  const maxSim = await isChunkAnnMaxSimEnabled();
+  const overFetch = Math.max(annNeighborOverFetch(k, maxSim), k + 24);
   const filtered = (await queryAnnNeighborGames(vec, overFetch, sourceGameId))
     .filter((r) => r.distance <= SIMILAR_TITLES_DISTANCE_CEILING);
 
@@ -419,7 +424,8 @@ export async function getSimilarGamesForDetails(
     return { status: 'no_embedding', items: [] };
   }
 
-  const overFetch = Math.max(k * 4 + 12, k + 24);
+  const maxSim = await isChunkAnnMaxSimEnabled();
+  const overFetch = Math.max(annNeighborOverFetch(k, maxSim), k + 24);
   const filtered = await queryAnnNeighborGames(vec, overFetch, sourceGameId);
 
   if (filtered.length === 0) {

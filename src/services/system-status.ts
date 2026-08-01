@@ -57,6 +57,7 @@ export interface SystemStatusSnapshot {
   steamCatalogSync: SyncStatus;
   recoPipeline: SyncStatus;
   catalogEmbeddings: SyncStatus;
+  rechunkJob: SyncStatus;
   annIndexStatus: SyncStatus;
   galaxyBuild: SyncStatus;
   ollamaSetup: SyncStatus;
@@ -597,6 +598,27 @@ class SystemStatus {
       itemsTotal: embP.total,
     };
 
+    // Wave 3.1 facet re-chunk job (library → catalog, watermarked)
+    const rcP = embeddingService.rechunkProgress;
+    const rcRunning = embeddingService.isRechunkRunning;
+    const rcStatus = embeddingService.rechunkStatus;
+    const rechunkJob: SyncStatus = {
+      label: 'Facet Re-chunk',
+      stage: rcRunning ? 'running'
+        : rcStatus === 'done' ? 'done'
+          : rcStatus === 'error' || rcStatus === 'blocked' ? 'error'
+            : 'idle',
+      detail: rcRunning
+        ? (rcP.total > 0
+          ? `${rcP.phase}: ${rcP.completed.toLocaleString()} / ${rcP.total.toLocaleString()}`
+          : `Starting ${rcP.phase}…`)
+        : (embeddingService.rechunkMessage ?? ''),
+      percent: rcP.total > 0 ? Math.round((rcP.completed / rcP.total) * 100) : 0,
+      elapsed: 0,
+      itemsDone: rcP.completed,
+      itemsTotal: rcP.total,
+    };
+
     // ANN Index
     const annP = annIndex.buildProgress;
     const annReady = annIndex.isReady;
@@ -703,6 +725,7 @@ class SystemStatus {
       steamCatalogSync,
       recoPipeline,
       catalogEmbeddings,
+      rechunkJob,
       annIndexStatus,
       galaxyBuild,
       ollamaSetup: { ..._ollamaSetupStatus },

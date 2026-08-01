@@ -12,6 +12,7 @@ const { app } = require('electron');
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './safe-logger.js';
+import { settingsStore } from './settings-store.js';
 
 let Index: any;
 let MetricKind: any;
@@ -26,11 +27,60 @@ try {
   logger.error('[ANN] Failed to load usearch native module:', err);
 }
 
-const DIMS = 1024;
+const FULL_DIMS = 1024;
+const MRL_DIMS = 256;
+/** Active ANN dimensionality — 256 when MRL flag is on, else 1024. */
+let DIMS = FULL_DIMS;
 const CONNECTIVITY = 48;
 const EF_CONSTRUCTION = 256;
 /** Higher ef_search for distance-gated top‑K (Oracle keeps ≤500 neighbors). */
 const EF_SEARCH = 800;
+
+function resolveDimsFromSettings(): number {
+  try {
+    return settingsStore.getOllamaSettings().embeddingMrl256Enabled ? MRL_DIMS : FULL_DIMS;
+  } catch {
+    return FULL_DIMS;
+  }
+}
+
+/** Sync DIMS from settings; clears in-memory index when dims change. */
+export function syncAnnDimsFromSettings(): number {
+  const next = resolveDimsFromSettings();
+  if (next !== DIMS) {
+    logger.log(`[ANN] Dims ${DIMS} → ${next} (MRL flag)`);
+    DIMS = next;
+    // Drop in-memory index so load/rebuild uses the new dimensionality.
+    index = null;
+    idMap = [];
+    reverseMap.clear();
+  } else {
+    DIMS = next;
+  }
+  return DIMS;
+}
+
+export function getAnnDims(): number {
+  return DIMS;
+}
+
+function prepareAnnVector(vector: number[]): Float32Array | null {
+  if (vector.length < DIMS) return null;
+  if (vector.length === DIMS) return new Float32Array(vector);
+  // MRL: take prefix and L2-renorm
+  const out = new Float32Array(DIMS);
+  let norm = 0;
+  for (let i = 0; i < DIMS; i++) {
+    out[i] = vector[i];
+    norm += out[i] * out[i];
+  }
+  norm = Math.sqrt(norm);
+  if (norm > 1e-12) {
+    const inv = 1 / norm;
+    for (let i = 0; i < DIMS; i++) out[i] *= inv;
+  }
+  return out;
+}
 
 function getIndexPath(): string {
   return path.join(app.getPath('userData'), 'ann-hnsw.usearch');
@@ -73,6 +123,7 @@ function rebuildReverseMap(): void {
 export function loadIndex(): boolean {
   if (!Index) return false;
   try {
+    syncAnnDimsFromSettings();
     const indexPath = getIndexPath();
     const metaPath = getMetaPath();
 
@@ -136,18 +187,22 @@ export function saveIndex(): boolean {
 
 export function addVectors(entries: Array<{ id: string; vector: number[] }>): number {
   if (!Index) return 0;
-  if (!index) createIndex();
+  if (!index) {
+    syncAnnDimsFromSettings();
+    createIndex();
+  }
 
   let added = 0;
   for (const entry of entries) {
-    if (entry.vector.length !== DIMS) continue;
+    const prepared = prepareAnnVector(entry.vector);
+    if (!prepared) continue;
 
     const existingSlot = reverseMap.get(entry.id);
     if (existingSlot !== undefined) {
       let removed = false;
       try { index!.remove(BigInt(existingSlot)); removed = true; } catch { /* usearch version without remove */ }
       if (removed) {
-        index!.add(BigInt(existingSlot), new Float32Array(entry.vector));
+        index!.add(BigInt(existingSlot), prepared);
       } else {
         // remove() unavailable — append at a fresh slot and vacate the old one
         // so query results don't return the stale vector under the old slot
@@ -155,7 +210,7 @@ export function addVectors(entries: Array<{ id: string; vector: number[] }>): nu
         const newSlot = idMap.length;
         idMap.push(entry.id);
         reverseMap.set(entry.id, newSlot);
-        index!.add(BigInt(newSlot), new Float32Array(entry.vector));
+        index!.add(BigInt(newSlot), prepared);
       }
       continue;
     }
@@ -163,7 +218,7 @@ export function addVectors(entries: Array<{ id: string; vector: number[] }>): nu
     const slot = idMap.length;
     idMap.push(entry.id);
     reverseMap.set(entry.id, slot);
-    index!.add(BigInt(slot), new Float32Array(entry.vector));
+    index!.add(BigInt(slot), prepared);
     added++;
   }
 
@@ -180,8 +235,9 @@ export function query(
   const effectiveK = Math.min(k + (excludeId ? 1 : 0), idMap.length);
   if (effectiveK <= 0) return [];
 
-  const vec = new Float32Array(centroid);
-  const result = index.search(vec, effectiveK);
+  const prepared = prepareAnnVector(centroid);
+  if (!prepared) return [];
+  const result = index.search(prepared, effectiveK);
 
   const results: Array<{ id: string; distance: number }> = [];
   for (let i = 0; i < result.keys.length; i++) {
@@ -219,9 +275,9 @@ export function queryBatch(
   const results: Record<string, Array<{ id: string; distance: number }>> = {};
 
   for (const entry of entries) {
-    if (entry.vector.length !== DIMS) continue;
-    const vec = new Float32Array(entry.vector);
-    const searchResult = index.search(vec, effectiveK);
+    const prepared = prepareAnnVector(entry.vector);
+    if (!prepared) continue;
+    const searchResult = index.search(prepared, effectiveK);
 
     const neighbors: Array<{ id: string; distance: number }> = [];
     for (let i = 0; i < searchResult.keys.length; i++) {

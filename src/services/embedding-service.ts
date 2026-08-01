@@ -31,6 +31,20 @@ import {
   type ChunkSpec,
   type EmbeddingTier,
 } from '@/services/embedding-chunks';
+import {
+  RECHUNK_META_KEY,
+  advanceRechunkCursor,
+  beginRechunkPhase,
+  createInitialRechunkWatermark,
+  gameNeedsChunkWork,
+  gamesAfterCursor,
+  nextRechunkPhase,
+  recordRechunkFailure,
+  rechunkBlockedReason,
+  shouldResumeIdleRechunk,
+  type RechunkPhase,
+  type RechunkWatermark,
+} from '@/services/embedding-rechunk';
 
 export { extractFranchiseBase };
 export {
@@ -39,7 +53,48 @@ export {
   hashWholeEmbeddingText,
   buildGameChunks,
 } from '@/services/embedding-chunks';
+export {
+  RECHUNK_META_KEY,
+  shouldResumeIdleRechunk,
+  rechunkProgressPercent,
+  type RechunkPhase,
+  type RechunkWatermark,
+} from '@/services/embedding-rechunk';
 export { EMBEDDING_DIM, quantizeEmbedding, dequantizeEmbedding } from '@/services/embedding-quant';
+
+/** Library/custom game input for the Wave 3.1 re-chunk job. */
+export type RechunkLibraryGame = {
+  id: string;
+  title: string;
+  genres?: string[];
+  themes?: string[];
+  modes?: string[];
+  playerPerspectives?: string[];
+  developer?: string;
+  publisher?: string;
+  summary?: string;
+  description?: string;
+  userNotes?: string;
+  similarGames?: Array<{ name: string }>;
+};
+
+export interface RechunkJobDeps {
+  libraryGames: RechunkLibraryGame[];
+  steamIterator: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>;
+  epicIterator?: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>;
+  /** Optional totals for progress UI (catalog entry counts). */
+  steamTotal?: number;
+  epicTotal?: number;
+}
+
+export interface RechunkJobResult {
+  status: 'done' | 'cancelled' | 'blocked' | 'error';
+  successCount: number;
+  skippedCount: number;
+  failureCount: number;
+  blockedReason?: string;
+  suggestRebuildAnn: boolean;
+}
 
 /**
  * Payload of the `ollama:rerank-progress` channel.
@@ -1402,6 +1457,498 @@ class EmbeddingService {
   cancelLibraryEmbeddings() {
     this._libraryAbort?.abort();
     this._libraryAbort = null;
+  }
+
+  // ── Wave 3.1 idle/forced re-chunk job ──────────────────────────────────────
+  private _rechunkAbort: AbortController | null = null;
+  private _rechunkPromise: Promise<RechunkJobResult> | null = null;
+  private _rechunkRunning = false;
+  private _rechunkStatus: 'idle' | 'running' | 'done' | 'cancelled' | 'blocked' | 'error' = 'idle';
+  private _rechunkProgress: {
+    completed: number;
+    total: number;
+    phase: RechunkPhase;
+  } = { completed: 0, total: 0, phase: 'library' };
+  private _rechunkMessage: string | null = null;
+  private _rechunkSuggestRebuildAnn = false;
+
+  get isRechunkRunning(): boolean { return this._rechunkRunning; }
+  get rechunkStatus() { return this._rechunkStatus; }
+  get rechunkProgress(): Readonly<{ completed: number; total: number; phase: RechunkPhase }> {
+    return this._rechunkProgress;
+  }
+  get rechunkMessage(): string | null { return this._rechunkMessage; }
+  get rechunkSuggestRebuildAnn(): boolean { return this._rechunkSuggestRebuildAnn; }
+
+  clearRechunkSuggestRebuildAnn(): void {
+    this._rechunkSuggestRebuildAnn = false;
+    this._notify();
+  }
+
+  /** Cancel an in-flight re-chunk job (watermark preserved for resume). */
+  cancelRechunkJob(): void {
+    this._rechunkAbort?.abort();
+    this._rechunkAbort = null;
+  }
+
+  /**
+   * Settings / idle entry: walk library then catalog, writing facet chunks for
+   * games that still lack them. Respects kill switch, pause, and cancel.
+   * Watermark advances only after successful write or already-complete skip.
+   *
+   * @param opts.force  Restart from library even if a prior job finished.
+   */
+  startRechunkJob(
+    deps: RechunkJobDeps,
+    opts?: { force?: boolean },
+  ): Promise<RechunkJobResult> {
+    if (this._rechunkPromise) return this._rechunkPromise;
+    this._rechunkPromise = this._runRechunkJob(deps, opts);
+    return this._rechunkPromise;
+  }
+
+  /**
+   * Idle scheduler: resume only when chunking is on and watermark ≠ done.
+   * No-op (resolved blocked/done) when there is nothing to do.
+   */
+  async maybeStartIdleRechunk(deps: RechunkJobDeps): Promise<RechunkJobResult | null> {
+    if (this._rechunkRunning) return this._rechunkPromise;
+    const chunkingEnabled = await isEmbeddingChunkingEnabled();
+    const wm = await getEmbeddingMeta<RechunkWatermark>(RECHUNK_META_KEY);
+    if (!shouldResumeIdleRechunk(wm, chunkingEnabled)) return null;
+    return this.startRechunkJob(deps, { force: false });
+  }
+
+  private async _runRechunkJob(
+    deps: RechunkJobDeps,
+    opts?: { force?: boolean },
+  ): Promise<RechunkJobResult> {
+    const blockedEmpty = (): RechunkJobResult => ({
+      status: 'blocked',
+      successCount: 0,
+      skippedCount: 0,
+      failureCount: 0,
+      suggestRebuildAnn: false,
+    });
+
+    this._rechunkRunning = true;
+    this._rechunkStatus = 'running';
+    this._rechunkMessage = null;
+    this._rechunkSuggestRebuildAnn = false;
+    this._rechunkAbort = new AbortController();
+    const signal = this._rechunkAbort.signal;
+    this._notify();
+
+    try {
+      // Wait for organic embedding passes so we don't fight the same IDB/ANN.
+      if (this._libraryPromise) {
+        try { await this._libraryPromise; } catch { /* non-fatal */ }
+      }
+      if (this._catalogPromise) {
+        try { await this._catalogPromise; } catch { /* non-fatal */ }
+      }
+      if (this._epicCatalogPromise) {
+        try { await this._epicCatalogPromise; } catch { /* non-fatal */ }
+      }
+
+      const chunkingEnabled = await isEmbeddingChunkingEnabled();
+      const ollamaOk = await this.isAvailable();
+      const blocked = rechunkBlockedReason({ chunkingEnabled, ollamaAvailable: ollamaOk });
+      if (blocked) {
+        this._rechunkStatus = 'blocked';
+        this._rechunkMessage = blocked;
+        this._notify();
+        return { ...blockedEmpty(), blockedReason: blocked };
+      }
+
+      let wm =
+        (await getEmbeddingMeta<RechunkWatermark>(RECHUNK_META_KEY)) ??
+        createInitialRechunkWatermark();
+
+      // Force, or a prior completed job → start a fresh library→catalog pass.
+      if (opts?.force || wm.phase === 'done') {
+        wm = createInitialRechunkWatermark();
+      }
+      await setEmbeddingMeta(wm);
+
+      const IDLE_DELAY_MS = 200;
+      const ANN_SAVE_EVERY = 25;
+      let successesSinceSave = 0;
+
+      const persistWm = async (next: RechunkWatermark) => {
+        wm = next;
+        await setEmbeddingMeta(wm);
+      };
+
+      const yieldPolite = async () => {
+        await this._awaitIfPaused();
+        // Pause while a game session is active (reuse embedding polite mid-pass).
+        for (;;) {
+          if (signal.aborted) return;
+          try {
+            const sessions = await window.sessionTracker?.getActiveSessions?.();
+            if (!sessions || sessions.length === 0) break;
+          } catch {
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 4000));
+          await this._awaitIfPaused();
+        }
+        await new Promise<void>((resolve) => {
+          if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(() => resolve(), { timeout: IDLE_DELAY_MS * 2 });
+          } else {
+            setTimeout(resolve, IDLE_DELAY_MS);
+          }
+        });
+      };
+
+      const setProgress = (completed: number, total: number, phase: RechunkPhase) => {
+        this._rechunkProgress = { completed, total, phase };
+        this._rechunkMessage =
+          `${phase}: ${completed.toLocaleString()} / ${Math.max(total, 1).toLocaleString()} games` +
+          (wm.successCount > 0 ? ` · ${wm.successCount} written` : '');
+        this._notify();
+      };
+
+      // ── Library phase ────────────────────────────────────────────────────
+      while (wm.phase === 'library' && !signal.aborted) {
+        if (!(await isEmbeddingChunkingEnabled())) {
+          this._rechunkStatus = 'blocked';
+          this._rechunkMessage = 'Facet chunk embeddings disabled mid-job';
+          this._notify();
+          return {
+            status: 'blocked',
+            successCount: wm.successCount,
+            skippedCount: wm.skippedCount,
+            failureCount: wm.failureCount,
+            blockedReason: this._rechunkMessage,
+            suggestRebuildAnn: wm.successCount > 0,
+          };
+        }
+
+        const queue = gamesAfterCursor(deps.libraryGames, wm.cursorAfter);
+        const already = deps.libraryGames.length - queue.length;
+        setProgress(already, deps.libraryGames.length, 'library');
+
+        for (let i = 0; i < queue.length; i++) {
+          await yieldPolite();
+          if (signal.aborted) break;
+          if (!(await isEmbeddingChunkingEnabled())) break;
+
+          const game = queue[i];
+          const wholeHash = hashText(buildEmbeddingText(game));
+          const desired = buildGameChunks('lib', game.id, {
+            title: game.title,
+            genres: game.genres,
+            themes: game.themes,
+            modes: game.modes,
+            playerPerspectives: game.playerPerspectives,
+            developer: game.developer,
+            summary: game.summary,
+            description: game.description,
+            userNotes: game.userNotes,
+            similarGames: game.similarGames,
+          });
+          const existing = await getChunksForTierGame('lib', game.id);
+          const existingMeta = new Map(
+            [...existing.entries()].map(([id, row]) => [id, { chunkId: id, textHash: row.textHash }]),
+          );
+
+          if (!gameNeedsChunkWork(desired, existingMeta)) {
+            await persistWm(advanceRechunkCursor(wm, game.id, 'skipped'));
+            setProgress(already + i + 1, deps.libraryGames.length, 'library');
+            continue;
+          }
+
+          try {
+            const pooled = await embedAndPersistChunkedGame({
+              tier: 'lib',
+              gameId: game.id,
+              pooledStore: LIBRARY_STORE,
+              wholeHash,
+              chunkInput: {
+                title: game.title,
+                genres: game.genres,
+                themes: game.themes,
+                modes: game.modes,
+                playerPerspectives: game.playerPerspectives,
+                developer: game.developer,
+                summary: game.summary,
+                description: game.description,
+                userNotes: game.userNotes,
+                similarGames: game.similarGames,
+              },
+            });
+            if (pooled) {
+              embeddingCacheRef.set(game.id, Array.from(pooled));
+              setEmbeddingCache(embeddingCacheRef);
+              await bumpEmbeddingContentEpoch();
+              await persistWm(advanceRechunkCursor(wm, game.id, 'success'));
+              successesSinceSave++;
+              if (successesSinceSave >= ANN_SAVE_EVERY) {
+                try { await annIndex.save(); } catch { /* non-fatal */ }
+                successesSinceSave = 0;
+              }
+            } else {
+              await persistWm(advanceRechunkCursor(wm, game.id, 'skipped'));
+            }
+          } catch (err) {
+            console.warn(`[EmbeddingService] Re-chunk library failed for ${game.id}:`, err);
+            await persistWm(recordRechunkFailure(wm));
+            // Do not advance cursor — retry this game next resume.
+            break;
+          }
+          setProgress(already + i + 1, deps.libraryGames.length, 'library');
+        }
+
+        if (signal.aborted) break;
+        if (!(await isEmbeddingChunkingEnabled())) break;
+        // Only advance phase when every library id was processed or skipped.
+        const remaining = gamesAfterCursor(deps.libraryGames, wm.cursorAfter);
+        if (remaining.length === 0) {
+          await persistWm(beginRechunkPhase(wm, nextRechunkPhase('library')));
+        } else {
+          break; // failure pause / kill switch
+        }
+      }
+
+      // ── Steam catalog phase ──────────────────────────────────────────────
+      if (wm.phase === 'steam' && !signal.aborted && (await isEmbeddingChunkingEnabled())) {
+        const items: Array<{ id: string; entry: CatalogEntry }> = [];
+        await deps.steamIterator((batch) => {
+          for (const entry of batch) {
+            items.push({ id: `steam-${entry.appid}`, entry });
+          }
+        });
+        const queue = gamesAfterCursor(items, wm.cursorAfter);
+        const total = deps.steamTotal ?? items.length;
+        const already = items.length - queue.length;
+        setProgress(already, total, 'steam');
+
+        for (let i = 0; i < queue.length; i++) {
+          await yieldPolite();
+          if (signal.aborted) break;
+          if (!(await isEmbeddingChunkingEnabled())) break;
+
+          const item = queue[i];
+          const wholeHash = hashText(buildCatalogEmbeddingText(item.entry));
+          const desired = buildGameChunks('cat', item.id, {
+            title: item.entry.name,
+            genres: item.entry.genres,
+            themes: item.entry.themes,
+            modes: item.entry.modes,
+            developer: item.entry.developer,
+            shortDescription: item.entry.shortDescription,
+            source: 'steam',
+          });
+          const existing = await getChunksForTierGame('cat', item.id);
+          const existingMeta = new Map(
+            [...existing.entries()].map(([id, row]) => [id, { chunkId: id, textHash: row.textHash }]),
+          );
+
+          if (!gameNeedsChunkWork(desired, existingMeta)) {
+            await persistWm(advanceRechunkCursor(wm, item.id, 'skipped'));
+            setProgress(already + i + 1, total, 'steam');
+            continue;
+          }
+
+          try {
+            const pooled = await embedAndPersistChunkedGame({
+              tier: 'cat',
+              gameId: item.id,
+              pooledStore: CATALOG_STORE,
+              wholeHash,
+              chunkInput: {
+                title: item.entry.name,
+                genres: item.entry.genres,
+                themes: item.entry.themes,
+                modes: item.entry.modes,
+                developer: item.entry.developer,
+                shortDescription: item.entry.shortDescription,
+                source: 'steam',
+              },
+            });
+            if (pooled) {
+              await bumpEmbeddingContentEpoch();
+              await persistWm(advanceRechunkCursor(wm, item.id, 'success'));
+              successesSinceSave++;
+              if (successesSinceSave >= ANN_SAVE_EVERY) {
+                try { await annIndex.save(); } catch { /* non-fatal */ }
+                successesSinceSave = 0;
+              }
+            } else {
+              await persistWm(advanceRechunkCursor(wm, item.id, 'skipped'));
+            }
+          } catch (err) {
+            console.warn(`[EmbeddingService] Re-chunk steam failed for ${item.id}:`, err);
+            await persistWm(recordRechunkFailure(wm));
+            break;
+          }
+          setProgress(already + i + 1, total, 'steam');
+        }
+
+        if (!signal.aborted && (await isEmbeddingChunkingEnabled())) {
+          const remaining = gamesAfterCursor(items, wm.cursorAfter);
+          if (remaining.length === 0) {
+            await persistWm(beginRechunkPhase(wm, nextRechunkPhase('steam')));
+          }
+        }
+      }
+
+      // ── Epic catalog phase ───────────────────────────────────────────────
+      if (wm.phase === 'epic' && !signal.aborted && (await isEmbeddingChunkingEnabled())) {
+        const items: Array<{ id: string; entry: EpicCatalogEntry }> = [];
+        if (deps.epicIterator) {
+          await deps.epicIterator((batch) => {
+            for (const entry of batch) {
+              items.push({ id: `epic-${entry.epicId}`, entry });
+            }
+          });
+        }
+        const queue = gamesAfterCursor(items, wm.cursorAfter);
+        const total = deps.epicTotal ?? items.length;
+        const already = items.length - queue.length;
+        setProgress(already, total, 'epic');
+
+        for (let i = 0; i < queue.length; i++) {
+          await yieldPolite();
+          if (signal.aborted) break;
+          if (!(await isEmbeddingChunkingEnabled())) break;
+
+          const item = queue[i];
+          const wholeHash = hashText(buildEpicCatalogEmbeddingText(item.entry));
+          const desired = buildGameChunks('cat', item.id, {
+            title: item.entry.name,
+            genres: item.entry.genres,
+            themes: item.entry.themes,
+            modes: item.entry.modes,
+            developer: item.entry.developer,
+            description: item.entry.description,
+            longDescription: item.entry.longDescription,
+            source: 'epic',
+          });
+          const existing = await getChunksForTierGame('cat', item.id);
+          const existingMeta = new Map(
+            [...existing.entries()].map(([id, row]) => [id, { chunkId: id, textHash: row.textHash }]),
+          );
+
+          if (!gameNeedsChunkWork(desired, existingMeta)) {
+            await persistWm(advanceRechunkCursor(wm, item.id, 'skipped'));
+            setProgress(already + i + 1, total, 'epic');
+            continue;
+          }
+
+          try {
+            const pooled = await embedAndPersistChunkedGame({
+              tier: 'cat',
+              gameId: item.id,
+              pooledStore: CATALOG_STORE,
+              wholeHash,
+              chunkInput: {
+                title: item.entry.name,
+                genres: item.entry.genres,
+                themes: item.entry.themes,
+                modes: item.entry.modes,
+                developer: item.entry.developer,
+                description: item.entry.description,
+                longDescription: item.entry.longDescription,
+                source: 'epic',
+              },
+            });
+            if (pooled) {
+              await bumpEmbeddingContentEpoch();
+              await persistWm(advanceRechunkCursor(wm, item.id, 'success'));
+              successesSinceSave++;
+              if (successesSinceSave >= ANN_SAVE_EVERY) {
+                try { await annIndex.save(); } catch { /* non-fatal */ }
+                successesSinceSave = 0;
+              }
+            } else {
+              await persistWm(advanceRechunkCursor(wm, item.id, 'skipped'));
+            }
+          } catch (err) {
+            console.warn(`[EmbeddingService] Re-chunk epic failed for ${item.id}:`, err);
+            await persistWm(recordRechunkFailure(wm));
+            break;
+          }
+          setProgress(already + i + 1, total, 'epic');
+        }
+
+        if (!signal.aborted && (await isEmbeddingChunkingEnabled())) {
+          const remaining = gamesAfterCursor(items, wm.cursorAfter);
+          if (remaining.length === 0) {
+            await persistWm(beginRechunkPhase(wm, nextRechunkPhase('epic')));
+          }
+        }
+      }
+
+      if (wm.successCount > 0) {
+        try { await annIndex.save(); } catch { /* non-fatal */ }
+      }
+
+      if (signal.aborted) {
+        this._rechunkStatus = 'cancelled';
+        this._rechunkMessage = 'Re-chunk cancelled — progress saved; resume anytime';
+        this._rechunkSuggestRebuildAnn = wm.successCount > 0;
+        this._notify();
+        return {
+          status: 'cancelled',
+          successCount: wm.successCount,
+          skippedCount: wm.skippedCount,
+          failureCount: wm.failureCount,
+          suggestRebuildAnn: wm.successCount > 0,
+        };
+      }
+
+      if (wm.phase === 'done') {
+        this._rechunkStatus = 'done';
+        this._rechunkSuggestRebuildAnn = wm.successCount > 0;
+        this._rechunkMessage = wm.successCount > 0
+          ? `Re-chunk complete — ${wm.successCount} games written. Rebuild ANN recommended.`
+          : 'Re-chunk complete — all games already had facet chunks.';
+        this._notify();
+        return {
+          status: 'done',
+          successCount: wm.successCount,
+          skippedCount: wm.skippedCount,
+          failureCount: wm.failureCount,
+          suggestRebuildAnn: wm.successCount > 0,
+        };
+      }
+
+      // Paused mid-phase (failure / kill switch) — keep watermark for resume.
+      this._rechunkStatus = 'idle';
+      this._rechunkMessage = `Re-chunk paused at ${wm.phase} (cursor ${wm.cursorAfter ?? 'start'})`;
+      this._rechunkSuggestRebuildAnn = wm.successCount > 0;
+      this._notify();
+      return {
+        status: 'cancelled',
+        successCount: wm.successCount,
+        skippedCount: wm.skippedCount,
+        failureCount: wm.failureCount,
+        suggestRebuildAnn: wm.successCount > 0,
+      };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn('[EmbeddingService] Re-chunk job error:', err);
+      this._rechunkStatus = 'error';
+      this._rechunkMessage = `Re-chunk failed: ${detail}`;
+      this._notify();
+      return {
+        status: 'error',
+        successCount: 0,
+        skippedCount: 0,
+        failureCount: 0,
+        blockedReason: detail,
+        suggestRebuildAnn: false,
+      };
+    } finally {
+      this._rechunkAbort = null;
+      this._rechunkRunning = false;
+      this._rechunkPromise = null;
+      this._notify();
+    }
   }
 
   /**

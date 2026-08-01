@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2, Rocket, RefreshCw, MonitorPlay } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2, Rocket, RefreshCw, MonitorPlay, Layers } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
 import { gameService } from '@/services/game-service';
 import { embeddingService } from '@/services/embedding-service';
+import { buildRechunkJobDeps } from '@/services/rechunk-job-deps';
 import { annIndex } from '@/services/ann-index';
 import { useDevMode } from '@/hooks/useDevMode';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
@@ -43,6 +44,7 @@ declare global {
         oracleRerankBlend: number;
         embeddingChunkingEnabled: boolean;
         chunkAnnMaxSimEnabled: boolean;
+        embeddingMrl256Enabled: boolean;
       }>;
       setOllamaSettings: (settings: {
         enabled?: boolean;
@@ -55,6 +57,7 @@ declare global {
         oracleRerankBlend?: number;
         embeddingChunkingEnabled?: boolean;
         chunkAnnMaxSimEnabled?: boolean;
+        embeddingMrl256Enabled?: boolean;
       }) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
       setAutoLaunch: (enabled: boolean) => Promise<void>;
@@ -95,9 +98,16 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
   const [chunkAnnMaxSimEnabled, setChunkAnnMaxSimEnabled] = useState(true);
+  const [embeddingMrl256Enabled, setEmbeddingMrl256Enabled] = useState(false);
   const [annRebuildStatus, setAnnRebuildStatus] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
   const [annRebuildMessage, setAnnRebuildMessage] = useState<string | null>(null);
   const [annRebuildProgress, setAnnRebuildProgress] = useState<{ done: number; total: number } | null>(null);
+  const [weightSweepMsg, setWeightSweepMsg] = useState<string | null>(null);
+  const [weightSweepBusy, setWeightSweepBusy] = useState(false);
+  const [rechunkBusy, setRechunkBusy] = useState(() => embeddingService.isRechunkRunning);
+  const [rechunkMessage, setRechunkMessage] = useState<string | null>(() => embeddingService.rechunkMessage);
+  const [rechunkProgress, setRechunkProgress] = useState(() => embeddingService.rechunkProgress);
+  const [rechunkSuggestAnn, setRechunkSuggestAnn] = useState(() => embeddingService.rechunkSuggestRebuildAnn);
   const [useGeminiInstead, setUseGeminiInstead] = useState(false);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
@@ -158,6 +168,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         setOracleRerankEnabled(ollamaSettings.oracleRerankEnabled !== false);
         setEmbeddingChunkingEnabled(ollamaSettings.embeddingChunkingEnabled !== false);
         setChunkAnnMaxSimEnabled(ollamaSettings.chunkAnnMaxSimEnabled !== false);
+        setEmbeddingMrl256Enabled(ollamaSettings.embeddingMrl256Enabled === true);
         setOracleRerankBlend(
           typeof ollamaSettings.oracleRerankBlend === 'number' && Number.isFinite(ollamaSettings.oracleRerankBlend)
             ? Math.min(1, Math.max(0, ollamaSettings.oracleRerankBlend))
@@ -217,6 +228,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
           oracleRerankBlend,
           embeddingChunkingEnabled,
           chunkAnnMaxSimEnabled,
+          embeddingMrl256Enabled,
           useGeminiInstead,
         });
         setOllamaSaveStatus('saved');
@@ -225,7 +237,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         console.error('Failed to save Ollama settings:', err);
       }
     }, 800);
-  }, [ollamaEnabled, ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled, useGeminiInstead]);
+  }, [ollamaEnabled, ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled, embeddingMrl256Enabled, useGeminiInstead]);
 
   // Auto-save API key with debounce
   useEffect(() => {
@@ -774,6 +786,89 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
 
                   <div className="flex items-center justify-between gap-3">
                     <div>
+                      <p className="text-xs text-white/50">MRL-256 ANN vectors</p>
+                      <p className="text-[11px] text-white/25 mt-0.5">
+                        Truncate to 256-d for ANN. Toggling clears the index — Rebuild ANN after.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={geminiBlocksOllama}
+                      onClick={() => setEmbeddingMrl256Enabled(!embeddingMrl256Enabled)}
+                      className={cn(
+                        'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
+                        embeddingMrl256Enabled ? 'bg-fuchsia-500/40' : 'bg-white/[0.08]',
+                        geminiBlocksOllama && 'opacity-40 cursor-not-allowed',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                          embeddingMrl256Enabled ? 'translate-x-6' : 'translate-x-1',
+                        )}
+                      />
+                    </button>
+                  </div>
+
+                  {betaFeatures && (
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs text-white/50">Weight-sweep harness</p>
+                        <p className="text-[11px] text-white/25 mt-0.5">
+                          Synthetic MRR over CHUNK_WEIGHTS. Does not auto-ship new weights.
+                        </p>
+                        {weightSweepMsg && (
+                          <p className="text-[11px] mt-0.5 text-white/40">{weightSweepMsg}</p>
+                        )}
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={weightSweepBusy || geminiBlocksOllama}
+                        onClick={async () => {
+                          setWeightSweepBusy(true);
+                          setWeightSweepMsg(null);
+                          try {
+                            const { runWeightSweep, generateWeightCandidates } = await import('@/services/embedding-weight-sweep');
+                            const { CHUNK_WEIGHTS } = await import('@/services/embedding-chunks');
+                            const dim = 1024;
+                            const mk = (seed: number) => {
+                              const v = new Array(dim).fill(0);
+                              v[seed % 16] = 1;
+                              return v;
+                            };
+                            const corpus = [
+                              { gameId: 'a', chunks: [{ kind: 'facets' as const, vector: mk(1) }, { kind: 'summary' as const, vector: mk(2) }] },
+                              { gameId: 'b', chunks: [{ kind: 'facets' as const, vector: mk(1) }, { kind: 'summary' as const, vector: mk(3) }] },
+                              { gameId: 'c', chunks: [{ kind: 'facets' as const, vector: mk(9) }, { kind: 'summary' as const, vector: mk(8) }] },
+                            ];
+                            const result = runWeightSweep({
+                              corpus: corpus.slice(1),
+                              queries: [{ queryGameId: 'a', queryChunks: corpus[0].chunks, relevantIds: ['b'] }],
+                              candidates: generateWeightCandidates(CHUNK_WEIGHTS),
+                            });
+                            setWeightSweepMsg(
+                              result.improved
+                                ? `Winner MRR ${result.winner.mrr.toFixed(3)} — suggest pool v${result.suggestedPoolVersion}; not auto-applied`
+                                : `No improvement (MRR ${result.baseline.mrr.toFixed(3)}); weights unchanged`,
+                            );
+                          } catch (err) {
+                            setWeightSweepMsg(err instanceof Error ? err.message : String(err));
+                          } finally {
+                            setWeightSweepBusy(false);
+                          }
+                        }}
+                        className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
+                      >
+                        {weightSweepBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                        <span className={weightSweepBusy ? 'ml-1.5' : ''}>Sweep</span>
+                      </Button>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
                       <p className="text-xs text-white/50">Rebuild ANN index</p>
                       <p className="text-[11px] text-white/25 mt-0.5">
                         Clear and rebuild neighbors from cached embeddings (no Ollama calls).
@@ -808,6 +903,8 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                           const count = await embeddingService.rebuildAnnFromCache();
                           setAnnRebuildStatus('done');
                           setAnnRebuildMessage(`Rebuilt — ${count} vectors`);
+                          embeddingService.clearRechunkSuggestRebuildAnn();
+                          setRechunkSuggestAnn(false);
                           console.log(`[Settings] ANN rebuild complete: ${count} vectors`);
                         } catch (err) {
                           setAnnRebuildStatus('error');
@@ -828,6 +925,77 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       )}
                       <span className="ml-1.5">{annRebuildStatus === 'building' ? 'Rebuilding…' : 'Rebuild'}</span>
                     </Button>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-white/50">Re-chunk catalog (idle)</p>
+                      <p className="text-[11px] text-white/25 mt-0.5">
+                        Library first, then catalog — writes facet chunks with progress/cancel. Polite while a session is active.
+                      </p>
+                      {rechunkBusy && rechunkProgress.total > 0 && (
+                        <p className="text-[11px] mt-0.5 text-white/40">
+                          {rechunkProgress.phase}: {rechunkProgress.completed} / {rechunkProgress.total}
+                        </p>
+                      )}
+                      {(rechunkMessage || rechunkSuggestAnn) && (
+                        <p className={cn(
+                          'text-[11px] mt-0.5',
+                          embeddingService.rechunkStatus === 'error' || embeddingService.rechunkStatus === 'blocked'
+                            ? 'text-red-400/70'
+                            : 'text-emerald-400/60',
+                        )}>
+                          {rechunkMessage}
+                          {rechunkSuggestAnn ? ' — Rebuild ANN recommended.' : ''}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 gap-1.5">
+                      {rechunkBusy ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => embeddingService.cancelRechunkJob()}
+                          className="border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
+                        >
+                          Cancel
+                        </Button>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={geminiBlocksOllama || !embeddingChunkingEnabled || annRebuildStatus === 'building'}
+                          onClick={async () => {
+                            setRechunkBusy(true);
+                            setRechunkMessage(null);
+                            const unsub = embeddingService.subscribe(() => {
+                              setRechunkBusy(embeddingService.isRechunkRunning);
+                              setRechunkMessage(embeddingService.rechunkMessage);
+                              setRechunkProgress({ ...embeddingService.rechunkProgress });
+                              setRechunkSuggestAnn(embeddingService.rechunkSuggestRebuildAnn);
+                            });
+                            try {
+                              const deps = await buildRechunkJobDeps();
+                              // Resume watermark unless prior job finished (service restarts when phase=done).
+                              await embeddingService.startRechunkJob(deps);
+                            } catch (err) {
+                              console.warn('[Settings] Re-chunk failed:', err);
+                            } finally {
+                              unsub();
+                              setRechunkBusy(embeddingService.isRechunkRunning);
+                              setRechunkMessage(embeddingService.rechunkMessage);
+                              setRechunkSuggestAnn(embeddingService.rechunkSuggestRebuildAnn);
+                            }
+                          }}
+                          className="border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
+                        >
+                          <Layers className="h-3.5 w-3.5" />
+                          <span className="ml-1.5">Re-chunk</span>
+                        </Button>
+                      )}
+                    </div>
                   </div>
                   
                   <div className="flex items-center gap-2 text-xs">

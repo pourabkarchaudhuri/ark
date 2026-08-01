@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.59': {
+    title: "What's New in Ark 1.0.59",
+    changes: [
+      'Embedding Space neighbor lines restored — chunk self-hits no longer burn ANN top-k; cyan webs + neighbor panel return; spatial fallback chip when ANN is rebuilding.',
+      'The Path hardened — clearer “not in galaxy” reasons; Explore Path still expands neighbors on the last node.',
+      'Wave 3.1 Re-chunk catalog (idle) — Settings → Ollama; library then catalog facet chunks with progress/cancel; polite during sessions; Rebuild ANN recommended when done.',
+      'Wave 3.2 Weight-sweep harness (Beta) — synthetic neighbor-quality scores; production weights unchanged unless a winner is recorded + pool version bump.',
+      'Wave 3.3 MRL-256 (default off) — optional 256-d ANN vectors; enabling clears the index so Rebuild ANN can refill. Overlay two-level + Shift+Win+D preserved; Timeshear / Cartographer / Monuments stay removed; Oracle/graph stay pooled.',
+    ],
+  },
   '1.0.58': {
     title: "What's New in Ark 1.0.58",
     changes: [

@@ -11,6 +11,7 @@ import {
   startTopSellersPreload,
 } from '@/services/prefetch-store';
 import { embeddingService } from '@/services/embedding-service';
+import { buildRechunkJobDeps } from '@/services/rechunk-job-deps';
 import { catalogStore } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { recoStore } from '@/services/reco-store';
@@ -529,6 +530,20 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
               (onBatch) => epicCatalogStore.getAllEntries(onBatch),
               { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs },
             );
+          }
+
+          // Wave 3.1 — idle resume of library→catalog facet re-chunk (watermarked).
+          try {
+            const deps = await buildRechunkJobDeps();
+            const result = await embeddingService.maybeStartIdleRechunk(deps);
+            if (result) {
+              console.log(
+                `[Splash] Idle re-chunk: ${result.status}` +
+                ` (written=${result.successCount}, skipped=${result.skippedCount})`,
+              );
+            }
+          } catch (err) {
+            console.warn('[Splash] Idle re-chunk:', err);
           }
         })().catch(err => console.warn('[Splash] Catalog embeddings:', err));
       }

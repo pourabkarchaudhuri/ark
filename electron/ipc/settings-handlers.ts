@@ -19,6 +19,7 @@ import {
   isOverlayCycleHotkeyRegistered,
 } from '../overlay-window.js';
 import { getActiveSessions, syncOverlayVisibilityLatch } from '../session-tracker.js';
+import { clearIndex, syncAnnDimsFromSettings } from '../ann-index.js';
 
 export function register(): void {
   ipcMain.handle('settings:getApiKey', async () => {
@@ -91,6 +92,9 @@ export function register(): void {
     neighborRerankEnabled?: boolean;
     oracleRerankEnabled?: boolean;
     oracleRerankBlend?: number;
+    embeddingChunkingEnabled?: boolean;
+    chunkAnnMaxSimEnabled?: boolean;
+    embeddingMrl256Enabled?: boolean;
   }) => {
     try {
       // Security: validate URL scheme (allow http/https only — do NOT block localhost/private IPs
@@ -106,11 +110,23 @@ export function register(): void {
           throw new Error(`Invalid Ollama URL: ${urlErr.message}`);
         }
       }
+      const prevMrl = settingsStore.getOllamaSettings().embeddingMrl256Enabled;
       settingsStore.setOllamaSettings(settings);
       // Session-cached reranker tier and pull cooldown were both resolved
       // against the old URL / model tags, so they no longer describe reality.
       resetRerankTierCache();
       resetRerankPullAttempts();
+      // MRL-256 toggles ANN dimensionality — clear on-disk index so rebuild uses new dims.
+      if (
+        settings.embeddingMrl256Enabled !== undefined
+        && settings.embeddingMrl256Enabled !== prevMrl
+      ) {
+        clearIndex();
+        syncAnnDimsFromSettings();
+        logger.log(
+          `[Settings] MRL-256 ${settings.embeddingMrl256Enabled ? 'enabled' : 'disabled'} — ANN index cleared`,
+        );
+      }
     } catch (error) {
       logger.error('[Settings] Error setting Ollama settings:', error);
       throw error;

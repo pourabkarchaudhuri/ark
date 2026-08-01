@@ -147,7 +147,7 @@ function StorageRow({ metric }: { metric: StorageMetric }) {
 // ─── Aggregate LED for navbar ───────────────────────────────────────────────────
 
 function AggregateLed({ snap }: { snap: SystemStatusSnapshot }) {
-  const syncs = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup, snap.rerankSetup];
+  const syncs = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.rechunkJob, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup, snap.rerankSetup];
   const running = syncs.filter(s => s.stage === 'running').length;
   const errors = syncs.filter(s => s.stage === 'error').length;
   const done = syncs.filter(s => s.stage === 'done').length;
@@ -175,6 +175,7 @@ function StatusPanelContent({ snap, compact }: { snap: SystemStatusSnapshot; com
         <SyncRow sync={snap.steamCatalogSync} />
         <SyncRow sync={snap.recoPipeline} />
         <SyncRow sync={snap.catalogEmbeddings} />
+        <SyncRow sync={snap.rechunkJob} />
         <div className="flex justify-end -mt-0.5">
           <EmbeddingPauseControl />
         </div>
@@ -268,7 +269,7 @@ export function NavbarStatusIndicator() {
   }, []);
 
   // Live tick for elapsed time (every 1s while something is running)
-  const syncsForTick = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup, snap.rerankSetup];
+  const syncsForTick = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.rechunkJob, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup, snap.rerankSetup];
   const hasRunning = syncsForTick.some(s => s.stage === 'running');
   useEffect(() => {
     if (!hasRunning) return;
@@ -454,7 +455,7 @@ export function SplashStatusPanel() {
     return () => clearInterval(id);
   }, []);
 
-  const syncs = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup, snap.rerankSetup];
+  const syncs = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.rechunkJob, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup, snap.rerankSetup];
 
   return (
     <motion.div

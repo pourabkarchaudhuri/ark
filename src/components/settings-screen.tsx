@@ -28,6 +28,7 @@ import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
 import { embeddingService } from '@/services/embedding-service';
+import { buildRechunkJobDeps } from '@/services/rechunk-job-deps';
 import { annIndex } from '@/services/ann-index';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
 import {
@@ -55,6 +56,7 @@ declare global {
         oracleRerankBlend: number;
         embeddingChunkingEnabled: boolean;
         chunkAnnMaxSimEnabled: boolean;
+        embeddingMrl256Enabled: boolean;
       }>;
       setOllamaSettings: (settings: {
         enabled?: boolean;
@@ -67,6 +69,7 @@ declare global {
         oracleRerankBlend?: number;
         embeddingChunkingEnabled?: boolean;
         chunkAnnMaxSimEnabled?: boolean;
+        embeddingMrl256Enabled?: boolean;
       }) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
       setAutoLaunch: (enabled: boolean) => Promise<void>;
@@ -374,9 +377,16 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
   const [chunkAnnMaxSimEnabled, setChunkAnnMaxSimEnabled] = useState(true);
+  const [embeddingMrl256Enabled, setEmbeddingMrl256Enabled] = useState(false);
   const [annRebuildStatus, setAnnRebuildStatus] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
   const [annRebuildMessage, setAnnRebuildMessage] = useState<string | null>(null);
   const [annRebuildProgress, setAnnRebuildProgress] = useState<{ done: number; total: number } | null>(null);
+  const [rechunkBusy, setRechunkBusy] = useState(() => embeddingService.isRechunkRunning);
+  const [rechunkMessage, setRechunkMessage] = useState<string | null>(() => embeddingService.rechunkMessage);
+  const [rechunkProgress, setRechunkProgress] = useState(() => embeddingService.rechunkProgress);
+  const [rechunkSuggestAnn, setRechunkSuggestAnn] = useState(() => embeddingService.rechunkSuggestRebuildAnn);
+  const [weightSweepMsg, setWeightSweepMsg] = useState<string | null>(null);
+  const [weightSweepBusy, setWeightSweepBusy] = useState(false);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [rerankDiag, setRerankDiag] = useState<{
     state: 'idle' | 'testing' | 'ok' | 'fail';
@@ -442,6 +452,7 @@ const AIModelsTab = memo(function AIModelsTab() {
         setOracleRerankEnabled(s.oracleRerankEnabled !== false);
         setEmbeddingChunkingEnabled(s.embeddingChunkingEnabled !== false);
         setChunkAnnMaxSimEnabled(s.chunkAnnMaxSimEnabled !== false);
+        setEmbeddingMrl256Enabled(s.embeddingMrl256Enabled === true);
         setOracleRerankBlend(
           typeof s.oracleRerankBlend === 'number' && Number.isFinite(s.oracleRerankBlend)
             ? Math.min(1, Math.max(0, s.oracleRerankBlend))
@@ -482,13 +493,14 @@ const AIModelsTab = memo(function AIModelsTab() {
           oracleRerankBlend,
           embeddingChunkingEnabled,
           chunkAnnMaxSimEnabled,
+          embeddingMrl256Enabled,
         });
         setOllamaSaveStatus('saved');
         setTimeout(() => setOllamaSaveStatus('idle'), 2000);
       }
       catch { /* ignore */ }
     }, 800);
-  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled]);
+  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled, embeddingMrl256Enabled]);
 
   useEffect(() => {
     if (initialLoadRef.current || !window.settings || !apiKey.trim()) { setSaveStatus('idle'); return; }
@@ -718,6 +730,75 @@ const AIModelsTab = memo(function AIModelsTab() {
         </div>
         <div className="flex items-center justify-between gap-3">
           <div>
+            <p className="text-sm text-white/70">MRL-256 ANN vectors</p>
+            <p className="text-[11px] text-white/30 mt-0.5">
+              Truncate cached embeddings to 256-d for ANN (faster index). Enabling clears the on-disk index — use Rebuild ANN after.
+            </p>
+          </div>
+          <Toggle
+            value={embeddingMrl256Enabled}
+            onChange={() => setEmbeddingMrl256Enabled(!embeddingMrl256Enabled)}
+          />
+        </div>
+        {betaFeatures && (
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm text-white/70">Weight-sweep harness</p>
+              <p className="text-[11px] text-white/30 mt-0.5">
+                Synthetic neighbor-quality score over CHUNK_WEIGHTS perturbations. Does not change production weights without a recorded winner + pool version bump.
+              </p>
+              {weightSweepMsg && (
+                <p className="text-[11px] mt-0.5 text-white/40">{weightSweepMsg}</p>
+              )}
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={weightSweepBusy}
+              onClick={async () => {
+                setWeightSweepBusy(true);
+                setWeightSweepMsg(null);
+                try {
+                  const { runWeightSweep, generateWeightCandidates } = await import('@/services/embedding-weight-sweep');
+                  const { CHUNK_WEIGHTS } = await import('@/services/embedding-chunks');
+                  // Tiny synthetic fixture — production ship leaves CURRENT_POOL_VERSION unchanged unless improved.
+                  const dim = 1024;
+                  const mk = (seed: number) => {
+                    const v = new Array(dim).fill(0);
+                    v[seed % 16] = 1;
+                    return v;
+                  };
+                  const corpus = [
+                    { gameId: 'a', chunks: [{ kind: 'facets' as const, vector: mk(1) }, { kind: 'summary' as const, vector: mk(2) }] },
+                    { gameId: 'b', chunks: [{ kind: 'facets' as const, vector: mk(1) }, { kind: 'summary' as const, vector: mk(3) }] },
+                    { gameId: 'c', chunks: [{ kind: 'facets' as const, vector: mk(9) }, { kind: 'summary' as const, vector: mk(8) }] },
+                  ];
+                  const result = runWeightSweep({
+                    corpus: corpus.slice(1),
+                    queries: [{ queryGameId: 'a', queryChunks: corpus[0].chunks, relevantIds: ['b'] }],
+                    candidates: generateWeightCandidates(CHUNK_WEIGHTS),
+                  });
+                  setWeightSweepMsg(
+                    result.improved
+                      ? `Winner MRR ${result.winner.mrr.toFixed(3)} (baseline ${result.baseline.mrr.toFixed(3)}) — suggest pool v${result.suggestedPoolVersion}; not auto-applied`
+                      : `No improvement — baseline MRR ${result.baseline.mrr.toFixed(3)}; production weights unchanged`,
+                  );
+                } catch (err) {
+                  setWeightSweepMsg(err instanceof Error ? err.message : String(err));
+                } finally {
+                  setWeightSweepBusy(false);
+                }
+              }}
+              className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
+            >
+              {weightSweepBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+              <span className="ml-1.5">Sweep</span>
+            </Button>
+          </div>
+        )}
+        <div className="flex items-center justify-between gap-3">
+          <div>
             <p className="text-sm text-white/70">Rebuild ANN index</p>
             <p className="text-[11px] text-white/30 mt-0.5">
               Clear and rebuild neighbors from cached embeddings (no Ollama calls).
@@ -752,6 +833,8 @@ const AIModelsTab = memo(function AIModelsTab() {
                 const count = await embeddingService.rebuildAnnFromCache();
                 setAnnRebuildStatus('done');
                 setAnnRebuildMessage(`Rebuilt — ${count} vectors`);
+                embeddingService.clearRechunkSuggestRebuildAnn();
+                setRechunkSuggestAnn(false);
                 console.log(`[Settings] ANN rebuild complete: ${count} vectors`);
               } catch (err) {
                 setAnnRebuildStatus('error');
@@ -772,6 +855,74 @@ const AIModelsTab = memo(function AIModelsTab() {
             )}
             <span className="ml-1.5">{annRebuildStatus === 'building' ? 'Rebuilding…' : 'Rebuild'}</span>
           </Button>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-white/70">Re-chunk catalog (idle)</p>
+            <p className="text-[11px] text-white/30 mt-0.5">
+              Library first, then catalog — facet chunks with progress/cancel. Polite during sessions; respects the chunking kill switch.
+            </p>
+            {rechunkBusy && rechunkProgress.total > 0 && (
+              <p className="text-[11px] mt-0.5 text-white/40">
+                {rechunkProgress.phase}: {rechunkProgress.completed} / {rechunkProgress.total}
+              </p>
+            )}
+            {(rechunkMessage || rechunkSuggestAnn) && (
+              <p className={cn(
+                'text-[11px] mt-0.5',
+                embeddingService.rechunkStatus === 'error' || embeddingService.rechunkStatus === 'blocked'
+                  ? 'text-red-400/70'
+                  : 'text-emerald-400/60',
+              )}>
+                {rechunkMessage}
+                {rechunkSuggestAnn ? ' — Rebuild ANN recommended.' : ''}
+              </p>
+            )}
+          </div>
+          {rechunkBusy ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => embeddingService.cancelRechunkJob()}
+              className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
+            >
+              Cancel
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!embeddingChunkingEnabled || annRebuildStatus === 'building'}
+              onClick={async () => {
+                setRechunkBusy(true);
+                setRechunkMessage(null);
+                const unsub = embeddingService.subscribe(() => {
+                  setRechunkBusy(embeddingService.isRechunkRunning);
+                  setRechunkMessage(embeddingService.rechunkMessage);
+                  setRechunkProgress({ ...embeddingService.rechunkProgress });
+                  setRechunkSuggestAnn(embeddingService.rechunkSuggestRebuildAnn);
+                });
+                try {
+                  const deps = await buildRechunkJobDeps();
+                  // Resume watermark unless prior job finished (service restarts when phase=done).
+                  await embeddingService.startRechunkJob(deps);
+                } catch (err) {
+                  console.warn('[Settings] Re-chunk failed:', err);
+                } finally {
+                  unsub();
+                  setRechunkBusy(embeddingService.isRechunkRunning);
+                  setRechunkMessage(embeddingService.rechunkMessage);
+                  setRechunkSuggestAnn(embeddingService.rechunkSuggestRebuildAnn);
+                }
+              }}
+              className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
+            >
+              <Layers className="h-3.5 w-3.5" />
+              <span className="ml-1.5">Re-chunk</span>
+            </Button>
+          )}
         </div>
         {oracleRerankEnabled && (
           <div>

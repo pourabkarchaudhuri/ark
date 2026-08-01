@@ -27,7 +27,11 @@ import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { buildGameImageChain } from '@/lib/utils';
 import { getEmbeddingById, embeddingService, extractFranchiseBase } from '@/services/embedding-service';
 import { annIndex } from '@/services/ann-index';
-import { queryAnnNeighborGames } from '@/services/ann-neighbor-query';
+import {
+  queryAnnNeighborGames,
+  annNeighborOverFetch,
+  isChunkAnnMaxSimEnabled,
+} from '@/services/ann-neighbor-query';
 import { journeyStore } from '@/services/journey-store';
 import {
   type GraphNode,
@@ -1229,6 +1233,8 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
   const [showFilters, setShowFilters] = useState(false);
   const [nodeCount, setNodeCount] = useState(0);
   const [connectionCount, setConnectionCount] = useState(0);
+  /** Shown when ANN is unavailable or empty and we fall back to 3D spatial neighbors. */
+  const [neighborStatusChip, setNeighborStatusChip] = useState<'ann_rebuilding' | 'spatial_fallback' | null>(null);
   const [rendererBackend, setRendererBackend] = useState<RendererBackend | null>(null);
   const [projectionMethod, setProjectionMethod] = useState<string | null>(null);
   const neighborK = useRef(GENRE_PALETTE.length - 1);
@@ -2849,11 +2855,15 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         } else {
           const journeyWithDates = journeyStore.getAllEntries().filter(e => e.firstPlayedAt);
           if (journeyWithDates.length < 2) {
-            setPathDisabledReason('Play at least 2 games to unlock The Path');
+            setPathDisabledReason('Play at least 2 games with a first-played date to unlock The Path');
           } else {
             const mapped = journeyWithDates.filter(e => sceneRef.current!.nodeMap.has(e.gameId));
             if (mapped.length < 2) {
-              setPathDisabledReason('Need embeddings for at least 2 played games');
+              setPathDisabledReason(
+                mapped.length === 0
+                  ? `${journeyWithDates.length} played games aren't in the galaxy yet — wait for projection or rebuild embeddings`
+                  : `Only ${mapped.length} of ${journeyWithDates.length} played games are in the galaxy — need 2+ with positions`,
+              );
             } else {
               setPathDisabledReason(null);
             }
@@ -3228,6 +3238,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     setNeighbors([]);
     setFocusedNbIdx(-1);
     setConnectionCount(0);
+    setNeighborStatusChip(null);
     setShowNeighbors(false);
     setNbSearch('');
     traversalStackRef.current = [];
@@ -3366,10 +3377,37 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     for (const s of scored) {
       if (out.length >= k) break;
       if (s.distance > MAX_DISTANCE) continue;
-      if (s.node?.title.startsWith('Unknown Game')) continue;
+      // Only keep neighbors present in the galaxy (drawable segments).
+      if (!s.node) continue;
+      if (s.node.title.startsWith('Unknown Game')) continue;
       out.push({ id: s.id, distance: s.distance, node: s.node });
     }
     return out;
+  }, []);
+
+  /** 3D spatial nearest neighbors when ANN is empty/unavailable (mock path parity). */
+  const euclideanNeighbors = useCallback((
+    node: GraphNode,
+    nodeMap: Map<string, GraphNode>,
+    k: number,
+    excludeIds?: Set<string>,
+  ): NeighborInfo[] => {
+    const all = loadedNodesRef.current;
+    const dists: { id: string; distance: number }[] = [];
+    for (const other of all) {
+      if (other.id === node.id) continue;
+      if (excludeIds?.has(other.id)) continue;
+      const dx = other.x - node.x;
+      const dy = other.y - node.y;
+      const dz = other.z - node.z;
+      dists.push({ id: other.id, distance: Math.sqrt(dx * dx + dy * dy + dz * dz) });
+    }
+    dists.sort((a, b) => a.distance - b.distance);
+    return dists.slice(0, k).map((d) => ({
+      id: d.id,
+      distance: d.distance,
+      node: nodeMap.get(d.id),
+    })).filter((nb): nb is NeighborInfo & { node: GraphNode } => !!nb.node);
   }, []);
 
   const selectPathNode = useCallback(async (idx: number) => {
@@ -3395,23 +3433,16 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
 
     if (isLast) {
       let nbList: NeighborInfo[] = [];
+      let statusChip: 'ann_rebuilding' | 'spatial_fallback' | null = null;
       if (useMock) {
-        // Mock: euclidean distance neighbors for the final path node
-        const k = neighborK.current;
-        const all = loadedNodesRef.current;
-        const dists: { id: string; distance: number }[] = [];
-        for (const other of all) {
-          if (other.id === node.id) continue;
-          const dx = other.x - node.x, dy = other.y - node.y, dz = other.z - node.z;
-          dists.push({ id: other.id, distance: Math.sqrt(dx * dx + dy * dy + dz * dz) });
-        }
-        dists.sort((a, b) => a.distance - b.distance);
-        nbList = dists.slice(0, k).map(d => ({ id: d.id, distance: d.distance, node: s.nodeMap.get(d.id) }));
+        nbList = euclideanNeighbors(node, s.nodeMap, neighborK.current);
       } else {
         const vec = await getEmbeddingById(node.id);
         if (selectedIdRef.current !== node.id) return;
         if (vec && annIndex.isReady) {
-          const overFetch = neighborK.current * 8 + 1;
+          const maxSim = await isChunkAnnMaxSimEnabled();
+          if (selectedIdRef.current !== node.id) return;
+          const overFetch = annNeighborOverFetch(neighborK.current, maxSim);
           const results = await queryAnnNeighborGames(vec, overFetch, node.id);
           if (selectedIdRef.current !== node.id) return;
           const filtered = results.filter(r => r.id !== node.id);
@@ -3421,14 +3452,22 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
           const rrPath = await applyOllamaNeighborRerank(node, nbList, neighborK.current, {
             neighborRerankEnabled: neighborRerankEnabledRef.current,
           });
-          nbList = rrPath.neighbors;
+          nbList = rrPath.neighbors.filter((nb) => !!nb.node);
           setNeighborRerankHint(neighborRerankBadge(rrPath.status));
           if (selectedIdRef.current !== node.id) return;
+          if (nbList.length === 0 && loadedNodesRef.current.length > 0) {
+            nbList = euclideanNeighbors(node, s.nodeMap, neighborK.current);
+            statusChip = 'spatial_fallback';
+          }
+        } else if (loadedNodesRef.current.length > 0) {
+          nbList = euclideanNeighbors(node, s.nodeMap, neighborK.current);
+          statusChip = annIndex.isReady ? 'spatial_fallback' : 'ann_rebuilding';
         }
       }
       neighborIdsRef.current = new Set(nbList.map(nb => nb.id));
       setNeighbors(nbList);
       setConnectionCount(nbList.length);
+      setNeighborStatusChip(statusChip);
       drawConnections(node, nbList);
     } else {
       const next = pn[idx + 1];
@@ -3466,7 +3505,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     const dir = new THREE.Vector3().subVectors(s.camera.position, starPos).normalize();
     const endCamPos = starPos.clone().add(dir.multiplyScalar(zoomDist));
     startFly(starPos, endCamPos, 2800);
-  }, [rerankNeighbors, drawConnections, updateVisuals, startFly, useMock]);
+  }, [rerankNeighbors, euclideanNeighbors, drawConnections, updateVisuals, startFly, useMock]);
 
   const showThePath = useCallback(async () => {
     const s = sceneRef.current;
@@ -3494,16 +3533,32 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         .filter(n => n.isLibrary && n.hoursPlayed > 0)
         .sort((a, b) => a.releaseYear - b.releaseYear);
       pathVecs = pathNodes.map(() => null); // no real embeddings
+      if (pathNodes.length < 2) {
+        setPathDisabledReason('Need at least 2 library games for The Path');
+        return;
+      }
     } else {
       const journeyEntries = journeyStore.getAllEntries()
         .filter(e => e.firstPlayedAt)
         .sort((a, b) => new Date(a.firstPlayedAt!).getTime() - new Date(b.firstPlayedAt!).getTime());
 
-      if (journeyEntries.length < 2) return;
+      if (journeyEntries.length < 2) {
+        setPathDisabledReason('Play at least 2 games with a first-played date to unlock The Path');
+        return;
+      }
 
       for (const je of journeyEntries) {
         const n = s.nodeMap.get(je.gameId);
         if (n) pathNodes.push(n);
+      }
+
+      if (pathNodes.length < 2) {
+        setPathDisabledReason(
+          pathNodes.length === 0
+            ? `${journeyEntries.length} played games aren't in the galaxy yet — wait for projection or rebuild embeddings`
+            : `Only ${pathNodes.length} of ${journeyEntries.length} played games are in the galaxy — need 2+ with positions`,
+        );
+        return;
       }
     }
 
@@ -3651,34 +3706,18 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     sunStateRef.current.focusedPos = null;
 
     let nbList: NeighborInfo[] = [];
+    let statusChip: 'ann_rebuilding' | 'spatial_fallback' | null = null;
 
     if (useMock) {
-      // In mock mode: compute neighbors by 3D euclidean distance
-      const k = neighborK.current;
-      const all = loadedNodesRef.current;
-      if (all.length > 0) {
-        const dists: { id: string; distance: number }[] = [];
-        for (const other of all) {
-          if (other.id === node.id) continue;
-          const dx = other.x - node.x;
-          const dy = other.y - node.y;
-          const dz = other.z - node.z;
-          dists.push({ id: other.id, distance: Math.sqrt(dx * dx + dy * dy + dz * dz) });
-        }
-        dists.sort((a, b) => a.distance - b.distance);
-        const top = dists.slice(0, k);
-        nbList = top.map(d => ({
-          id: d.id,
-          distance: d.distance,
-          node: s.nodeMap.get(d.id),
-        }));
-      }
+      nbList = euclideanNeighbors(node, s.nodeMap, neighborK.current);
     } else {
       const vec = await getEmbeddingById(node.id);
       if (selectedIdRef.current !== node.id) return;
 
       if (vec && annIndex.isReady) {
-        const overFetch = neighborK.current * 8 + 1;
+        const maxSim = await isChunkAnnMaxSimEnabled();
+        if (selectedIdRef.current !== node.id) return;
+        const overFetch = annNeighborOverFetch(neighborK.current, maxSim);
         const results = await queryAnnNeighborGames(vec, overFetch, node.id);
         if (selectedIdRef.current !== node.id) return;
         const filtered = results.filter(r => r.id !== node.id);
@@ -3688,15 +3727,23 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         const rrSel = await applyOllamaNeighborRerank(node, nbList, neighborK.current, {
           neighborRerankEnabled: neighborRerankEnabledRef.current,
         });
-        nbList = rrSel.neighbors;
+        nbList = rrSel.neighbors.filter((nb) => !!nb.node);
         setNeighborRerankHint(neighborRerankBadge(rrSel.status));
         if (selectedIdRef.current !== node.id) return;
+        if (nbList.length === 0 && loadedNodesRef.current.length > 0) {
+          nbList = euclideanNeighbors(node, s.nodeMap, neighborK.current);
+          statusChip = 'spatial_fallback';
+        }
+      } else if (loadedNodesRef.current.length > 0) {
+        nbList = euclideanNeighbors(node, s.nodeMap, neighborK.current);
+        statusChip = annIndex.isReady ? 'spatial_fallback' : 'ann_rebuilding';
       }
     }
 
     neighborIdsRef.current = new Set(nbList.map(nb => nb.id));
     setNeighbors(nbList);
     setConnectionCount(nbList.length);
+    setNeighborStatusChip(statusChip);
     drawConnections(node, nbList);
     updateVisuals();
 
@@ -3717,7 +3764,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       const endCamPos = starPos.clone().add(dir.multiplyScalar(zoomDist));
       startFly(starPos, endCamPos, 2800);
     }
-  }, [rerankNeighbors, drawConnections, updateVisuals, startFly, pathActive, clearPath, useMock]);
+  }, [rerankNeighbors, euclideanNeighbors, drawConnections, updateVisuals, startFly, pathActive, clearPath, useMock]);
 
   // ─── Camera fly helper ──────────────────────────────────────────────
 
@@ -4129,52 +4176,54 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
 
       let nbList: NeighborInfo[];
 
+      const exclude = new Set<string>([focNode.id]);
+      if (selId) exclude.add(selId);
+      for (const id of primaryNbs) exclude.add(id);
+
       if (useMock) {
-        // Mock mode: compute secondary neighbors by euclidean distance
-        const all = loadedNodesRef.current;
-        const dists: { id: string; distance: number }[] = [];
-        for (const other of all) {
-          if (other.id === focNode.id || other.id === selId || primaryNbs.has(other.id)) continue;
-          const dx = other.x - focNode.x;
-          const dy = other.y - focNode.y;
-          const dz = other.z - focNode.z;
-          dists.push({ id: other.id, distance: Math.sqrt(dx * dx + dy * dy + dz * dz) });
-        }
-        dists.sort((a, b) => a.distance - b.distance);
-        nbList = dists.slice(0, k).map(d => ({
-          id: d.id,
-          distance: +d.distance.toFixed(4),
-          node: s.nodeMap.get(d.id),
-        }));
+        nbList = euclideanNeighbors(focNode, s.nodeMap, k, exclude);
       } else {
         const vec = await getEmbeddingById(focNode.id);
-        if (cancelled || !vec || !annIndex.isReady) return;
-
-        const overFetch = k * 4 + 1;
-        const results = await queryAnnNeighborGames(vec, overFetch, focNode.id);
         if (cancelled) return;
 
-        const filtered = results
-          .filter(r => r.id !== focNode.id && r.id !== selId && !primaryNbs.has(r.id) && r.distance <= 1.5);
+        if (vec && annIndex.isReady) {
+          const maxSim = await isChunkAnnMaxSimEnabled();
+          if (cancelled) return;
+          // Match primary max-sim overFetch scale (was k*4+1 — too small under chunk ANN).
+          const overFetch = annNeighborOverFetch(k, maxSim);
+          const results = await queryAnnNeighborGames(vec, overFetch, focNode.id);
+          if (cancelled) return;
 
-        const poolK = Math.min(NEIGHBOR_HEURISTIC_POOL, filtered.length);
-        nbList = rerankNeighbors(focNode, filtered, s.nodeMap, poolK);
-        if (cancelled) return;
-        const rrFocus = await applyOllamaNeighborRerank(focNode, nbList, k, {
-          neighborRerankEnabled: neighborRerankEnabledRef.current,
-        });
-        nbList = rrFocus.neighbors;
-        const badge = neighborRerankBadge(rrFocus.status);
-        if (badge) setNeighborRerankHint(badge);
-        if (cancelled) return;
+          const filtered = results
+            .filter(r => r.id !== focNode.id && r.id !== selId && !primaryNbs.has(r.id) && r.distance <= 1.5);
+
+          const poolK = Math.min(NEIGHBOR_HEURISTIC_POOL, filtered.length);
+          nbList = rerankNeighbors(focNode, filtered, s.nodeMap, poolK);
+          if (cancelled) return;
+          const rrFocus = await applyOllamaNeighborRerank(focNode, nbList, k, {
+            neighborRerankEnabled: neighborRerankEnabledRef.current,
+          });
+          nbList = rrFocus.neighbors.filter((nb) => !!nb.node);
+          const badge = neighborRerankBadge(rrFocus.status);
+          if (badge) setNeighborRerankHint(badge);
+          if (cancelled) return;
+          if (nbList.length === 0 && loadedNodesRef.current.length > 0) {
+            nbList = euclideanNeighbors(focNode, s.nodeMap, k, exclude);
+          }
+        } else if (loadedNodesRef.current.length > 0) {
+          nbList = euclideanNeighbors(focNode, s.nodeMap, k, exclude);
+        } else {
+          return;
+        }
       }
 
       if (cancelled) return;
-      drawFocusedConnections(focNode, nbList.filter(nb => nb.node));
+      const drawable = nbList.filter((nb) => !!nb.node);
+      drawFocusedConnections(focNode, drawable);
     })();
 
     return () => { cancelled = true; };
-  }, [focusedNbIdx, neighbors, clearFocusedConnections, drawFocusedConnections, useMock, rerankNeighbors]);
+  }, [focusedNbIdx, neighbors, clearFocusedConnections, drawFocusedConnections, useMock, rerankNeighbors, euclideanNeighbors]);
 
   const detailOpenRef = useRef(false);
   detailOpenRef.current = detailOpen;
@@ -4316,12 +4365,18 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
           <div className="w-px h-4 bg-white/[0.06]" />
           <h2 className="text-sm font-medium text-white/70">Embedding Space</h2>
           {!loading && (
-            <span className="text-[10px] text-white/30">
+            <span className="text-[10px] text-white/30 inline-flex items-center gap-1.5">
               {nodeCount.toLocaleString()} games{connectionCount > 0 ? ` · ${connectionCount} connections` : ''}
               {projectionMethod === 'MOCK'
-                ? <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-mono text-[9px] font-bold border border-amber-500/30">MOCK DATA</span>
+                ? <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-mono text-[9px] font-bold border border-amber-500/30">MOCK DATA</span>
                 : projectionMethod ? ` · ${projectionMethod}` : ''}
               {rendererBackend ? ` · ${rendererBackend}` : ''}
+              {neighborStatusChip === 'ann_rebuilding' && (
+                <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300/80 font-mono text-[9px] border border-sky-500/25">ANN rebuilding…</span>
+              )}
+              {neighborStatusChip === 'spatial_fallback' && (
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300/80 font-mono text-[9px] border border-amber-500/25">spatial fallback</span>
+              )}
             </span>
           )}
         </div>

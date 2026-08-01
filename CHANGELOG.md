@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.59] - 2026-08-01
+
+Wave 3 + Embedding Space neighbor restore.
+
+### Fixed
+- **Embedding Space neighbor lines empty after Phase B.1** — max-sim no longer passes `excludeId` into usearch (chunk self-hits burned top-k); over-fetch `k*16`; draw only neighbors with galaxy `nodeMap` entries; euclidean spatial fallback + status chip when ANN empty/rebuilding.
+- **The Path silent no-op** — clearer disabled reasons when journey games lack galaxy positions; Explore Path expands neighbors via the fixed query helper.
+
+### Added
+- **Idle/forced re-chunk** — Settings → Ollama → Re-chunk catalog (idle): library first, then Steam/Epic catalog with progress/cancel, watermark-safe cursor, polite pause during sessions; ANN upsert on writes; Rebuild ANN recommended when done.
+- **Weight-sweep harness** (Beta) — synthetic MRR over `CHUNK_WEIGHTS` perturbations; does not auto-change production weights without a recorded winner + `CURRENT_POOL_VERSION` bump.
+- **MRL-256 flag** — `ollama.embeddingMrl256Enabled` (default off); ANN uses 256-d prefixes; toggling clears the on-disk index for rebuild.
+
+### Changed
+- Secondary neighbor web uses the same max-sim over-fetch scale as primary.
+- Known-gaps §37 Wave 3 marked shipped (MRL default off).
+
+### Preserved
+- Overlay two-level + Shift+Win+D; closes on game exit; no mouse forward.
+- No Timeshear / Cartographer / Monuments.
+- Oracle/graph stay pooled; Rebuild ANN + What’s New intact.
+
 ## [1.0.58] - 2026-08-01
 
 Published ship for the P0 rebuild/graph/overlay work + Phase B.1 (no separate Latest 1.0.57).

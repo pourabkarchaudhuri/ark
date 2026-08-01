@@ -2,7 +2,7 @@
 
 Items identified during security and architecture reviews that are **not safe to fix** without risking regressions, or that require significant effort / design decisions before implementation.
 
-Last updated: 2026-08-01 (Phase B.1 max-sim → v1.0.58; Wave 3 deferred)
+Last updated: 2026-08-01 (Wave 3 + ES neighbor restore → v1.0.59)
 
 ---
 
@@ -135,10 +135,11 @@ Phase A ships lazy dual-format facet chunks (`chunk-embeddings` + int8 pooled ro
 
 **Phase B.1 max-sim (v1.0.58):** Chunk vectors are dual-indexed in ANN (`lib:`/`cat:` ids with `::`). Embedding Space + Similar Games use max-sim aggregation behind `ollama.chunkAnnMaxSimEnabled` (default on). Oracle taste-centroid and graph edge build stay pooled (chunk hits ignored). No forced catalog re-chunk.
 
-**Wave 3 — deferred until B.1 is validated in the wild (post-B.1 only):**
-- MRL-256 dimensionality (truncate/store 256-d; bump ANN `DIMS` + invalidate on-disk index; dual-read or force rebuild)
-- Weight-sweep harness (offline/synthetic neighbor-quality loop over `CHUNK_WEIGHTS`; bump `CURRENT_POOL_VERSION` when shipping new weights)
-- Idle/forced full-catalog re-chunk upgrade job (explicitly out of B.1 scope)
+**Wave 3 (v1.0.59) — shipped:**
+- **ES neighbor restore** — max-sim omit usearch `excludeId`, over-fetch `k*16`, nodeMap-only draw, euclidean fallback + status chip; The Path disabled reasons hardened.
+- **Idle/forced re-chunk** — Settings → Re-chunk catalog (idle); library→Steam→Epic watermarks; cancel/progress; polite during sessions; ANN upsert on write.
+- **Weight-sweep harness** — Beta Settings action; synthetic MRR; does **not** auto-bump `CURRENT_POOL_VERSION` / production `CHUNK_WEIGHTS` without a recorded winner.
+- **MRL-256** — `ollama.embeddingMrl256Enabled` default **off**; ANN dims 256 when on; toggle clears on-disk index (Rebuild ANN after).
 
 ---
 

@@ -78,6 +78,11 @@ interface Settings {
      * with max-sim over chunk ids. Oracle / graph stay pooled.
      */
     chunkAnnMaxSimEnabled?: boolean;
+    /**
+     * When true, ANN uses Matryoshka 256-d prefixes (forces index clear + rebuild).
+     * Default off until rebuild smoke is green.
+     */
+    embeddingMrl256Enabled?: boolean;
   };
 }
 
@@ -148,6 +153,7 @@ class SettingsStore {
         oracleRerankBlend: 1,
         embeddingChunkingEnabled: true,
         chunkAnnMaxSimEnabled: true,
+        embeddingMrl256Enabled: false,
       },
     });
     try {
@@ -267,6 +273,7 @@ class SettingsStore {
     oracleRerankBlend: number;
     embeddingChunkingEnabled: boolean;
     chunkAnnMaxSimEnabled: boolean;
+    embeddingMrl256Enabled: boolean;
   } {
     const defaults = {
       enabled: true,
@@ -280,6 +287,7 @@ class SettingsStore {
       oracleRerankBlend: 1,
       embeddingChunkingEnabled: true,
       chunkAnnMaxSimEnabled: true,
+      embeddingMrl256Enabled: false,
     };
     const o = this.settings.ollama;
     let blend =
@@ -297,6 +305,7 @@ class SettingsStore {
       oracleRerankBlend: blend,
       embeddingChunkingEnabled: o?.embeddingChunkingEnabled !== false,
       chunkAnnMaxSimEnabled: o?.chunkAnnMaxSimEnabled !== false,
+      embeddingMrl256Enabled: o?.embeddingMrl256Enabled === true,
     };
   }
 
@@ -312,6 +321,7 @@ class SettingsStore {
     oracleRerankBlend?: number;
     embeddingChunkingEnabled?: boolean;
     chunkAnnMaxSimEnabled?: boolean;
+    embeddingMrl256Enabled?: boolean;
   }): void {
     const next = { ...settings };
     if (next.rerankModel !== undefined) {
