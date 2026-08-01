@@ -49,7 +49,6 @@ import { narratorBus } from '@/services/narrator-bus';
 import { scannerSelectionStore, type ScannerMode } from '@/services/scanner-selection-store';
 import { userMarksStore, type BannerColor, BANNER_COLORS, BANNER_RGB } from '@/services/user-marks-store';
 import { type LassoPoint, pathLength, toSvgPath, findNodesInsidePolygon, simplifyPath } from '@/services/lasso-geometry';
-import { TIMESHEAR_WEEKS, buildTimelineMatrix, formatWeekLabel } from '@/services/timeshear-store';
 import {
   applyOllamaNeighborRerank,
   NEIGHBOR_HEURISTIC_POOL,
@@ -849,88 +848,6 @@ function getGlowTexture(): THREE.Texture {
   return _glowTexture;
 }
 
-// ─── Monument scaffolding (Commit #4) ──
-// Completed games will eventually crystallize into permanent architectural forms by genre.
-// This commit ships ONLY the empty InstancedMesh batches + the contract — no visible geometry.
-// Five archetypes; capacity 1000 each. count=0 → fully invisible until Phase 2 wires the spawner.
-
-export type GenreArchetype = 'obelisk' | 'ring' | 'crystal' | 'spire' | 'disc';
-
-const ARCHETYPE_LOOKUP: Record<string, GenreArchetype> = {
-  // Obelisks for RPGs and narrative-heavy genres
-  'rpg': 'obelisk', 'crpg': 'obelisk', 'role-playing': 'obelisk', 'role playing': 'obelisk',
-  // Rings for cyclical / loop-based experiences
-  'roguelike': 'ring', 'roguelite': 'ring', 'rogue-like': 'ring', 'rogue-lite': 'ring',
-  // Crystals for narrative + atmospheric / introspective games
-  'visual novel': 'crystal', 'narration': 'crystal', 'walking simulator': 'crystal', 'adventure': 'crystal', 'point and click': 'crystal',
-  // Spires for vertical strategy / management
-  'strategy': 'spire', 'rts': 'spire', 'real-time strategy': 'spire', 'turn-based': 'spire', 'grand strategy': 'spire', 'tower defense': 'spire', 'city builder': 'spire',
-  // Discs for action / racing / fighting
-  'action': 'disc', 'action-adventure': 'disc', 'shooter': 'disc', 'fps': 'disc',
-  'fighting': 'disc', 'racing': 'disc', 'platformer': 'disc', 'sports': 'disc',
-};
-
-export function mapGenreToArchetype(genres: string[]): GenreArchetype {
-  for (const g of genres) {
-    const arch = ARCHETYPE_LOOKUP[g.toLowerCase()];
-    if (arch) return arch;
-  }
-  return 'crystal'; // safe fallback — visually neutral
-}
-
-const MONUMENT_CAPACITY_PER_BATCH = 1000;
-
-interface MonumentBatch {
-  archetype: GenreArchetype;
-  mesh: THREE.InstancedMesh;
-  geo: THREE.BufferGeometry;
-  mat: THREE.MeshStandardMaterial;
-  /** Next free instance index. Incremented when a game completes. */
-  cursor: number;
-}
-
-/**
- * Build the empty InstancedMesh batches that future monuments will populate.
- * Standard PBR material (NOT additive) so monuments don't blow out in clusters.
- * Geometry choices are intentionally simple — final aesthetic comes in Phase 2.
- */
-function createMonumentBatches(): Map<GenreArchetype, MonumentBatch> {
-  const batches = new Map<GenreArchetype, MonumentBatch>();
-  // Per-archetype color + emissive intensity. Subtle, self-illuminating; AmbientLight gives
-  // them just enough ambient lift so they're readable without DirectionalLight (which would
-  // flatten the additive starfield aesthetic).
-  const specs: Array<{
-    archetype: GenreArchetype;
-    geo: () => THREE.BufferGeometry;
-    color: number;
-    emissive: number;
-    emissiveIntensity: number;
-  }> = [
-    { archetype: 'obelisk', geo: () => new THREE.ConeGeometry(0.6, 4, 4),                color: 0xb38cff, emissive: 0x6e3cff, emissiveIntensity: 0.20 },
-    { archetype: 'ring',    geo: () => new THREE.TorusGeometry(1.4, 0.3, 8, 24),         color: 0x6cd9ff, emissive: 0x18b3d9, emissiveIntensity: 0.20 },
-    { archetype: 'crystal', geo: () => new THREE.OctahedronGeometry(1.0, 0),             color: 0xff8fd8, emissive: 0xc83cc8, emissiveIntensity: 0.25 },
-    { archetype: 'spire',   geo: () => new THREE.CylinderGeometry(0.2, 0.6, 3.5, 6),     color: 0xffd870, emissive: 0xd49a30, emissiveIntensity: 0.18 },
-    { archetype: 'disc',    geo: () => new THREE.CylinderGeometry(1.4, 1.4, 0.2, 24),    color: 0xff7060, emissive: 0xc83c2c, emissiveIntensity: 0.22 },
-  ];
-  for (const spec of specs) {
-    const geo = spec.geo();
-    const mat = new THREE.MeshStandardMaterial({
-      color: spec.color,
-      emissive: spec.emissive,
-      emissiveIntensity: spec.emissiveIntensity,
-      metalness: 0.25,
-      roughness: 0.55,
-      transparent: false,
-    });
-    const mesh = new THREE.InstancedMesh(geo, mat, MONUMENT_CAPACITY_PER_BATCH);
-    mesh.count = 0;
-    mesh.instanceMatrix.usage = THREE.DynamicDrawUsage;
-    mesh.renderOrder = 100;
-    batches.set(spec.archetype, { archetype: spec.archetype, mesh, geo, mat, cursor: 0 });
-  }
-  return batches;
-}
-
 function createSunGroup(radius: number) {
   const surfaceGeo = new THREE.IcosahedronGeometry(radius, 4);
   const surfaceMat = new THREE.ShaderMaterial({
@@ -1219,8 +1136,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     namedStarMeta: Array<{ gameId: string; stellarClass: StellarClass } | null>;
     /** gameId → stellar class for fast lookup from the UI side panel. */
     stellarClassByGameId: Map<string, StellarClass>;
-    /** Empty monument batches scaffolded in Commit #4. Visible geometry lands in Phase 2. */
-    monumentBatches: Map<GenreArchetype, MonumentBatch>;
     /** Fault Lines (Commit #5) — null when betweenness not yet computed. */
     faultLines: THREE.LineSegments | null;
     faultLinesMat: THREE.ShaderMaterial | null;
@@ -1266,8 +1181,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
   );
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [neighbors, setNeighbors] = useState<NeighborInfo[]>([]);
-  // Phase 2 — Cartographer HUD + Probe + Stargazer + Banners + Whisper
-  const [streamedLine, setStreamedLine] = useState('');
+  // Phase 2 — Probe + Stargazer + Banners + Whisper
   const [scannerMode, setScannerMode] = useState<ScannerMode>('observer');
   const [stargazerPath, setStargazerPath] = useState<string[]>([]);
   const [stargazerNamePrompt, setStargazerNamePrompt] = useState(false);
@@ -1283,11 +1197,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
   const [lassoNamePrompt, setLassoNamePrompt] = useState(false);
   const [lassoNameInput, setLassoNameInput] = useState('');
   const lassoDrawingRef = useRef(false);
-  // Phase 3.0 — Timeshear
-  const [timeshearActive, setTimeshearActive] = useState(false);
-  const [timeshearWeek, setTimeshearWeek] = useState(TIMESHEAR_WEEKS - 1);
-  const timeshearMatrixRef = useRef<Uint8Array | null>(null);
-  const timeshearRafRef = useRef<number>(0);
   // Phase 3.0 — Year Wrapped Flythrough
   const [flythroughActive, setFlythroughActive] = useState(false);
   const [flythroughLowerThird, setFlythroughLowerThird] = useState<{ title: string; subtitle: string; index: number } | null>(null);
@@ -1300,7 +1209,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     abort: { aborted: boolean };
   } | null>(null);
   const [userMarksVersion, setUserMarksVersion] = useState(0);
-  const charStreamAbortRef = useRef<{ aborted: boolean } | null>(null);
   const probeActiveRef = useRef(false);
   const probeVelocityRef = useRef<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
   const whisperSeenRef = useRef<Set<string>>(new Set());
@@ -1375,17 +1283,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     return libraryStore.subscribe(() => setLibVersion(v => v + 1));
   }, []);
 
-  // Commit #4 — track completion count. No render yet; this is the contract handshake
-  // that future monument-spawning code (Phase 2) will read from.
-  useEffect(() => {
-    const logCompletions = () => {
-      const completed = libraryStore.filterByStatus('Completed');
-      console.log(`[Monuments] Completed games tracked: ${completed.length}`);
-    };
-    logCompletions();
-    return libraryStore.subscribe(logCompletions);
-  }, []);
-
   useEffect(() => {
     if (typeof window === 'undefined' || !window.settings?.getOllamaSettings) return;
     void window.settings.getOllamaSettings().then((s) => {
@@ -1416,11 +1313,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
         clearTimeout(whisperDismissRef.current);
         whisperDismissRef.current = null;
       }
-      if (timeshearRafRef.current) {
-        cancelAnimationFrame(timeshearRafRef.current);
-        timeshearRafRef.current = 0;
-      }
-      timeshearMatrixRef.current = null;
     };
   }, []);
 
@@ -1482,66 +1374,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       bloomWasEnabled,
       abort: { aborted: false },
     };
-  }, []);
-
-  // Phase 3.0 — Timeshear: build timeline matrix on entry; update brightness on scrub.
-  const applyTimeshearWeek = useCallback((week: number) => {
-    const sRef = sceneRef.current;
-    if (!sRef) return;
-    const matrix = timeshearMatrixRef.current;
-    if (!matrix) return;
-    const w = Math.max(0, Math.min(TIMESHEAR_WEEKS - 1, Math.floor(week)));
-    const brightArr = sRef.brightnessAttr.array as Float32Array;
-    const colorArr = sRef.colorAttr.array as Float32Array;
-    const baseBright = sRef.baseBright;
-    const baseColors = sRef.baseColors;
-    // Per-state multipliers: 0=ghost, 1=normal, 2=completion tint
-    for (let i = 0; i < sRef.nodes.length; i++) {
-      const state = matrix[i * TIMESHEAR_WEEKS + w];
-      if (state === 0) {
-        brightArr[i] = baseBright[i] * 0.06;
-        // Keep color but desaturated — leaves base palette intact for reset
-        colorArr[i * 3] = baseColors[i * 3] * 0.45;
-        colorArr[i * 3 + 1] = baseColors[i * 3 + 1] * 0.45;
-        colorArr[i * 3 + 2] = baseColors[i * 3 + 2] * 0.55;
-      } else if (state === 2) {
-        // Completed — warm gold tint, slight brightness boost
-        brightArr[i] = Math.min(1, baseBright[i] * 1.3);
-        colorArr[i * 3] = Math.min(1, baseColors[i * 3] * 0.6 + 1.0 * 0.4);
-        colorArr[i * 3 + 1] = Math.min(1, baseColors[i * 3 + 1] * 0.6 + 0.78 * 0.4);
-        colorArr[i * 3 + 2] = Math.min(1, baseColors[i * 3 + 2] * 0.6 + 0.30 * 0.4);
-      } else {
-        // Owned, not completed — original brightness + color
-        brightArr[i] = baseBright[i];
-        colorArr[i * 3] = baseColors[i * 3];
-        colorArr[i * 3 + 1] = baseColors[i * 3 + 1];
-        colorArr[i * 3 + 2] = baseColors[i * 3 + 2];
-      }
-    }
-    sRef.brightnessAttr.needsUpdate = true;
-    sRef.colorAttr.needsUpdate = true;
-  }, []);
-
-  const enterTimeshear = useCallback(() => {
-    const sRef = sceneRef.current;
-    if (!sRef) return;
-    const nodeIds = sRef.nodes.map((n) => n.id);
-    timeshearMatrixRef.current = buildTimelineMatrix(nodeIds);
-    setTimeshearActive(true);
-    setTimeshearWeek(TIMESHEAR_WEEKS - 1);
-    applyTimeshearWeek(TIMESHEAR_WEEKS - 1);
-  }, [applyTimeshearWeek]);
-
-  const exitTimeshear = useCallback(() => {
-    const sRef = sceneRef.current;
-    if (!sRef) return;
-    // Restore base brightness + colors
-    sRef.brightnessAttr.array.set(sRef.baseBright);
-    sRef.colorAttr.array.set(sRef.baseColors);
-    sRef.brightnessAttr.needsUpdate = true;
-    sRef.colorAttr.needsUpdate = true;
-    timeshearMatrixRef.current = null;
-    setTimeshearActive(false);
   }, []);
 
   const exitFlythrough = useCallback(() => {
@@ -1671,34 +1503,7 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     sRef.constellationLines.geometry = newGeo;
   }, [userMarksVersion, stargazerPath]);
 
-  // ─── Phase 2 — Cartographer HUD char-stream on selectedNode change ───
-  useEffect(() => {
-    if (!selectedNode || scannerMode === 'stargazer') {
-      setStreamedLine('');
-      return;
-    }
-    const constellationName = sceneRef.current?.constellationLabels?.children?.find(
-      (c) => c.userData.communityId === gameGraphStore.getScores(selectedNode.id)?.community,
-    )?.userData.name as string | undefined;
-    const stellarClass = sceneRef.current?.stellarClassByGameId.get(selectedNode.id);
-    const line = narratorBus.getCartographerLine(selectedNode.id, constellationName, stellarClass);
-    setStreamedLine('');
-    const abort = { aborted: false };
-    charStreamAbortRef.current = abort;
-    let i = 0;
-    const intervalId = setInterval(() => {
-      if (abort.aborted) { clearInterval(intervalId); return; }
-      i++;
-      setStreamedLine(line.slice(0, i));
-      if (i >= line.length) clearInterval(intervalId);
-    }, 25);
-    return () => {
-      abort.aborted = true;
-      clearInterval(intervalId);
-    };
-  }, [selectedNode?.id, scannerMode]);
-
-  // ─── Phase 2 — Keyboard mode toggles (P = Probe, S = Stargazer, L = Lasso, Esc = Observer) ───
+  // ─── Phase 2 — Keyboard mode toggles (P = Probe, S = Stargazer, L = Lasso, C = Codex, Esc = Observer) ───
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tgt = e.target as HTMLElement | null;
@@ -1709,6 +1514,9 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       } else if (e.key === 's' || e.key === 'S') {
         e.preventDefault();
         setScannerMode((m) => m === 'stargazer' ? 'observer' : 'stargazer');
+      } else if ((e.key === 'c' || e.key === 'C') && selectedIdRef.current) {
+        e.preventDefault();
+        setCodexOpen(true);
       } else if (e.key === 'l' || e.key === 'L') {
         e.preventDefault();
         setLassoActive((v) => {
@@ -2300,8 +2108,8 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     scene.background = new THREE.Color(0x020208);
     scene.fog = new THREE.FogExp2(0x020208, 0.0008);
 
-    // Commit #8 — Ambient only; DirectionalLight would flatten the additive starfield.
-    // Monuments' emissive component carries most of their visual presence.
+    // Ambient only; DirectionalLight would flatten the additive starfield.
+    // Banner MeshStandardMaterial emissive needs a modest ambient lift.
     scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
     let hdrTex: THREE.Texture | null = null;
@@ -2472,11 +2280,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     constellationLines.renderOrder = 5;
     scene.add(constellationLines);
 
-    // ── Monument scaffolding (Commit #4) — empty batches, no visible geometry yet ──
-    const monumentBatches = createMonumentBatches();
-    for (const batch of monumentBatches.values()) scene.add(batch.mesh);
-    console.log(`[Monuments] Initialized ${monumentBatches.size} empty batches (capacity=${MONUMENT_CAPACITY_PER_BATCH} each)`);
-
     // ── Named Stars layer (Commit #2) ──
     // 50-instance icosahedron, invisible until gameGraphStore enrolls top-PR nodes.
     const namedStarGeo = new THREE.IcosahedronGeometry(NAMED_STAR_RADIUS, 2);
@@ -2549,7 +2352,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
     const sRef = {
       renderer, scene, camera, controls, points, starField, frontierPoints,
       namedStarsMesh, namedStarMeta, stellarClassByGameId,
-      monumentBatches,
       faultLines: null as THREE.LineSegments | null,
       faultLinesMat: null as THREE.ShaderMaterial | null,
       eccentricityArrow: null as THREE.ArrowHelper | null,
@@ -2572,173 +2374,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       animFrameId: 0,
       composer, sunSelected, sunFocused,
     };
-
-    // ── Monument backfill + live spawn (Commit #8) ──
-    // Source of truth: libraryStore. On mount we backfill Completed games in chunked rAF
-    // bursts; afterwards, subscription diffs detect newly-completed games and spawn one matrix
-    // each. cursors live on each MonumentBatch — no per-spawn full-rebuild.
-    const monumentSeenIds = new Set<string>();
-    function spawnMonumentForGame(gameId: string): boolean {
-      const node = nodeMap.get(gameId);
-      if (!node) return false;
-      const archetype = mapGenreToArchetype(node.genres);
-      const batch = monumentBatches.get(archetype);
-      if (!batch || batch.cursor >= MONUMENT_CAPACITY_PER_BATCH) return false;
-      const matrix = new THREE.Matrix4();
-      // Slight outward offset along normalized position so monuments don't sit ON the star;
-      // 2.5 units (≈ named-star radius) gives breathing room without losing association.
-      const len = Math.sqrt(node.x * node.x + node.y * node.y + node.z * node.z) || 1;
-      const offset = 2.5 / len;
-      matrix.setPosition(
-        node.x + node.x * offset * 0.06,
-        node.y + node.y * offset * 0.06,
-        node.z + node.z * offset * 0.06,
-      );
-      batch.mesh.setMatrixAt(batch.cursor, matrix);
-      batch.cursor++;
-      batch.mesh.count = batch.cursor;
-      return true;
-    }
-    function flushMonumentBatchUpdates(): void {
-      for (const batch of monumentBatches.values()) {
-        if (batch.cursor > 0) batch.mesh.instanceMatrix.needsUpdate = true;
-      }
-    }
-
-    // Backfill — chunked at 50 per frame
-    const completedAtMount = libraryStore.filterByStatus('Completed');
-    let backfillIdx = 0;
-    const backfillChunkSize = 50;
-    function backfillTick(): void {
-      const end = Math.min(backfillIdx + backfillChunkSize, completedAtMount.length);
-      for (let i = backfillIdx; i < end; i++) {
-        const entry = completedAtMount[i];
-        if (monumentSeenIds.has(entry.gameId)) continue;
-        if (spawnMonumentForGame(entry.gameId)) monumentSeenIds.add(entry.gameId);
-      }
-      backfillIdx = end;
-      flushMonumentBatchUpdates();
-      if (backfillIdx < completedAtMount.length) {
-        requestAnimationFrame(backfillTick);
-      } else {
-        console.log(`[Monuments] Backfill complete — ${monumentSeenIds.size}/${completedAtMount.length} placed`);
-      }
-    }
-    if (completedAtMount.length > 0) requestAnimationFrame(backfillTick);
-
-    // Phase 2.1 — Completion event chain. Each new completion fires:
-    //   t=0:   supernova billboard at node position (expanding glow)
-    //   t=0.5: shockwave ring (one-hop ANN burst — visual only)
-    //   t=2:   monument lands (existing Wave B path)
-    // EventActors are transient sprites added/removed inline; no new pass, no draw-call budget cost.
-    // Track in-flight RAFs so cleanup can cancel them and short-circuit ticks
-    const eventRafIds = new Set<number>();
-    function spawnSupernova(node: GraphNode): void {
-      if (destroyed) return;
-      const canvas = document.createElement('canvas');
-      canvas.width = canvas.height = 256;
-      const ctx = canvas.getContext('2d')!;
-      const grad = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
-      grad.addColorStop(0, 'rgba(255, 240, 200, 1)');
-      grad.addColorStop(0.3, 'rgba(255, 200, 120, 0.6)');
-      grad.addColorStop(1, 'rgba(255, 120, 80, 0)');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, 256, 256);
-      const tex = new THREE.CanvasTexture(canvas);
-      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
-      const sprite = new THREE.Sprite(mat);
-      sprite.position.set(node.x, node.y, node.z);
-      sprite.scale.setScalar(10);
-      sprite.renderOrder = 90;
-      scene.add(sprite);
-      const start = performance.now();
-      let rafId = 0;
-      const tick = () => {
-        eventRafIds.delete(rafId);
-        if (destroyed) {
-          scene.remove(sprite);
-          mat.dispose();
-          tex.dispose();
-          return;
-        }
-        const t = (performance.now() - start) / 1800;
-        if (t >= 1) {
-          scene.remove(sprite);
-          mat.dispose();
-          tex.dispose();
-          return;
-        }
-        sprite.scale.setScalar(10 + t * 110);
-        mat.opacity = Math.max(0, 1 - t);
-        rafId = requestAnimationFrame(tick);
-        eventRafIds.add(rafId);
-      };
-      rafId = requestAnimationFrame(tick);
-      eventRafIds.add(rafId);
-    }
-
-    function spawnShockwave(node: GraphNode): void {
-      if (destroyed) return;
-      const ringGeo = new THREE.RingGeometry(0.9, 1.0, 48);
-      const ringMat = new THREE.MeshBasicMaterial({
-        color: 0xffd080,
-        transparent: true,
-        side: THREE.DoubleSide,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const ring = new THREE.Mesh(ringGeo, ringMat);
-      ring.position.set(node.x, node.y, node.z);
-      ring.renderOrder = 89;
-      ring.lookAt(camera.position);
-      scene.add(ring);
-      const start = performance.now();
-      let rafId = 0;
-      const tick = () => {
-        eventRafIds.delete(rafId);
-        if (destroyed) {
-          scene.remove(ring);
-          ringGeo.dispose();
-          ringMat.dispose();
-          return;
-        }
-        const t = (performance.now() - start) / 1400;
-        if (t >= 1) {
-          scene.remove(ring);
-          ringGeo.dispose();
-          ringMat.dispose();
-          return;
-        }
-        const scale = 1 + t * 80;
-        ring.scale.setScalar(scale);
-        ring.lookAt(camera.position);
-        ringMat.opacity = Math.max(0, 0.9 * (1 - t));
-        rafId = requestAnimationFrame(tick);
-        eventRafIds.add(rafId);
-      };
-      rafId = requestAnimationFrame(tick);
-      eventRafIds.add(rafId);
-    }
-
-    // Live diff — fires on every libraryStore mutation; only spawns NEW completions.
-    const unsubMonumentDiff = libraryStore.subscribe(() => {
-      const current = libraryStore.filterByStatus('Completed');
-      let dirty = false;
-      for (const entry of current) {
-        if (monumentSeenIds.has(entry.gameId)) continue;
-        const node = nodeMap.get(entry.gameId);
-        if (node) {
-          // Visual prelude — supernova now, shockwave at t+0.5s, monument lands at t+2s
-          spawnSupernova(node);
-          setTimeout(() => spawnShockwave(node), 500);
-        }
-        if (spawnMonumentForGame(entry.gameId)) {
-          monumentSeenIds.add(entry.gameId);
-          dirty = true;
-        }
-      }
-      if (dirty) flushMonumentBatchUpdates();
-    });
 
     // ── Animation loop ──
     const _projVec = new THREE.Vector3();
@@ -3007,10 +2642,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
       starMat.dispose();
       frontierMat.dispose();
       namedStarMat.dispose();
-      for (const batch of monumentBatches.values()) {
-        batch.geo.dispose();
-        batch.mat.dispose();
-      }
       if (sRef.faultLines) {
         sRef.faultLines.geometry.dispose();
       }
@@ -3024,14 +2655,10 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
           }
         });
       }
-      // Phase 2.1 audit fix — cancel pending event RAFs so they don't tick after dispose
-      for (const id of eventRafIds) cancelAnimationFrame(id);
-      eventRafIds.clear();
       bannerGeo.dispose();
       for (const m of bannerMeshes.values()) (m.material as THREE.Material).dispose();
       constellationLines.geometry.dispose();
       constellationLineMat.dispose();
-      unsubMonumentDiff();
       sunSelected.surfaceGeo.dispose();
       sunSelected.surfaceMat.dispose();
       sunSelected.glowSpriteMat.dispose();
@@ -4765,29 +4392,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
           }}
         />
 
-        {/* Phase 2 — Cartographer HUD */}
-        {streamedLine && scannerMode !== 'stargazer' && (
-          <div className="absolute left-4 bottom-4 z-30 max-w-[420px]">
-            <div className="bg-white/[0.04] backdrop-blur-md border border-white/[0.08] rounded-lg px-4 py-3 shadow-2xl shadow-black/40 pointer-events-auto">
-              <div className="flex items-center justify-between mb-1">
-                <div className="text-[10px] uppercase tracking-[0.18em] text-fuchsia-300/55">CARTOGRAPHER</div>
-                {selectedNode && (
-                  <button
-                    onClick={() => setCodexOpen(true)}
-                    className="text-[9px] uppercase tracking-[0.15em] text-cyan-300/60 hover:text-cyan-300 transition-colors"
-                  >
-                    Open Codex ▸
-                  </button>
-                )}
-              </div>
-              <div className="text-[13px] text-white/85 font-light leading-snug">
-                {streamedLine}
-                <span className="inline-block w-[6px] h-[12px] ml-0.5 align-middle bg-fuchsia-300/70 animate-pulse" />
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* Phase 3.0 — Lasso draw + HUD overlay */}
         {lassoActive && (
           <>
@@ -4886,58 +4490,6 @@ export function AnnGraphView({ onBack, useMock = false }: { onBack: () => void; 
               </>
             )}
           </>
-        )}
-
-        {/* Phase 3.0 — Timeshear scrubber */}
-        {timeshearActive && (
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 w-[min(640px,80vw)] pointer-events-auto">
-            <div className="bg-black/70 backdrop-blur-xl border border-cyan-400/25 rounded-xl p-3 shadow-2xl shadow-cyan-500/10">
-              <div className="flex items-center justify-between mb-1.5">
-                <div className="text-[10px] uppercase tracking-[0.18em] text-cyan-300/65">
-                  Timeshear · {formatWeekLabel(timeshearWeek)}
-                </div>
-                <button
-                  onClick={exitTimeshear}
-                  className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white/80 transition-colors"
-                >
-                  Return to now ✕
-                </button>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={TIMESHEAR_WEEKS - 1}
-                step={1}
-                value={timeshearWeek}
-                onChange={(e) => {
-                  const w = Number(e.target.value);
-                  setTimeshearWeek(w);
-                  if (timeshearRafRef.current) cancelAnimationFrame(timeshearRafRef.current);
-                  timeshearRafRef.current = requestAnimationFrame(() => {
-                    timeshearRafRef.current = 0;
-                    applyTimeshearWeek(w);
-                  });
-                }}
-                className="w-full accent-cyan-400"
-              />
-              <div className="flex justify-between text-[9px] text-white/30 mt-1">
-                <span>1 year ago</span>
-                <span>6 months ago</span>
-                <span>now</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Phase 3.0 — Timeshear launch button (only when graph + library are loaded) */}
-        {!timeshearActive && !flythroughActive && !lassoActive && selectedNode === null && !loading && (
-          <button
-            onClick={enterTimeshear}
-            className="absolute bottom-4 right-4 z-20 bg-white/[0.04] hover:bg-white/[0.08] backdrop-blur-md border border-cyan-400/25 rounded-full px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-cyan-300/70 hover:text-cyan-200 transition-colors"
-            title="Scrub the past year of your library"
-          >
-            ◴ Timeshear
-          </button>
         )}
 
         {/* Phase 3.0 — Year Wrapped Flythrough lower-thirds + exit hint */}

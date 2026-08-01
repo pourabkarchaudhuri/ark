@@ -29,6 +29,10 @@ import { YearWrapped } from '@/components/year-wrapped';
 import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
 import { embeddingService } from '@/services/embedding-service';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
+import {
+  OVERLAY_CYCLE_HOTKEY_LABEL,
+  OVERLAY_TOGGLE_HOTKEY_LABEL,
+} from '@/overlay/detail-level';
 
 export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
 
@@ -249,7 +253,7 @@ const GeneralTab = memo(function GeneralTab() {
                   Minimal glassy corner HUD while a tracked game runs. Best with borderless / windowed fullscreen.
                 </p>
                 <p className="text-[11px] text-white/30 mt-1.5 font-mono tracking-wide">
-                  Ctrl+Shift+O dismiss / re-enable · Ctrl+Shift+D cycle detail
+                  {OVERLAY_TOGGLE_HOTKEY_LABEL} dismiss / re-enable · {OVERLAY_CYCLE_HOTKEY_LABEL} cycle detail
                 </p>
               </div>
               <Toggle value={overlayEnabled} onChange={handleOverlayToggle} />

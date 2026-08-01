@@ -609,7 +609,7 @@ function SlideIntro({ stats, active }: { stats: WrappedStats; active: boolean })
   }, [active]);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-8 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-8 px-8 pointer-events-none">
       <motion.div
         initial={{ scale: 0.3, opacity: 0, rotateZ: -10 }}
         animate={active ? { scale: 1, opacity: 1, rotateZ: 0 } : {}}
@@ -775,7 +775,7 @@ function SlideTopGame({ stats, active }: { stats: WrappedStats; active: boolean 
   const movieEquivalent = Math.round(hours / 2);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <motion.div
         initial={{ opacity: 0, y: -20 }}
         animate={active ? { opacity: 1, y: 0 } : {}}
@@ -885,7 +885,7 @@ function SlideTop5({ stats, active }: { stats: WrappedStats; active: boolean }) 
   const badgeColors = ['from-amber-500 to-yellow-600', 'from-zinc-300 to-zinc-400', 'from-orange-600 to-orange-700', '', ''];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="Your Top 5"
         className="text-4xl md:text-5xl font-bold text-white justify-center mb-2"
@@ -979,7 +979,7 @@ function SlideMarathon({ stats, active }: { stats: WrappedStats; active: boolean
   ];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="Marathon & Dedication"
         className="text-4xl md:text-5xl font-bold text-white justify-center"
@@ -1026,7 +1026,7 @@ function SlideGenreDNA({ stats, active }: { stats: WrappedStats; active: boolean
   ];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="Your Genre DNA"
         className="text-4xl md:text-5xl font-bold text-white justify-center"
@@ -1088,7 +1088,7 @@ function SlideBusiestMonth({ stats, active }: { stats: WrappedStats; active: boo
   const maxActivity = Math.max(...stats.monthlyActivity.map((m) => m.gamesAdded + m.sessions), 1);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="Your Hottest Month"
         className="text-4xl md:text-5xl font-bold text-white justify-center"
@@ -1159,7 +1159,7 @@ function SlideDayOfWeek({ stats, active }: { stats: WrappedStats; active: boolea
   ];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="Week at a Glance"
         className="text-4xl md:text-5xl font-bold text-white justify-center"
@@ -1226,7 +1226,7 @@ function SlideDayOfWeek({ stats, active }: { stats: WrappedStats; active: boolea
 
 function SlideCompletionist({ stats, active }: { stats: WrappedStats; active: boolean }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="The Completionist"
         className="text-4xl md:text-5xl font-bold text-white justify-center"
@@ -1391,7 +1391,7 @@ function SlideRatings({ stats, active }: { stats: WrappedStats; active: boolean 
     : 'Silent Observer';
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="The Critic"
         className="text-4xl md:text-5xl font-bold text-white justify-center"
@@ -1493,7 +1493,7 @@ function SlideFunFacts({ stats, active }: { stats: WrappedStats; active: boolean
   const facts = stats.funFacts.slice(0, 6);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 pointer-events-none">
       <BlurText
         text="Fun Facts"
         className="text-4xl md:text-5xl font-bold text-white justify-center"
@@ -1559,7 +1559,7 @@ function SlideFinale({ stats, active, onDownload, onShare, onLaunchFlythrough, i
   }, [active]);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-5 px-8">
+    <div className="flex flex-col items-center justify-center h-full gap-5 px-8 pointer-events-none">
       <motion.div
         initial={{ opacity: 0, scale: 0.5 }}
         animate={active ? { opacity: 1, scale: 1 } : {}}
@@ -1648,7 +1648,7 @@ function SlideFinale({ stats, active, onDownload, onShare, onLaunchFlythrough, i
         initial={{ opacity: 0, y: 20 }}
         animate={active ? { opacity: 1, y: 0 } : {}}
         transition={{ delay: 2.5 }}
-        className="flex flex-col items-center gap-4 mt-4"
+        className="flex flex-col items-center gap-4 mt-4 pointer-events-auto"
       >
         {/* Phase 3.0 — Watch in the Galaxy: handoff to the Cinematic Flythrough */}
         {onLaunchFlythrough && (

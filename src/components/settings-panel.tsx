@@ -18,6 +18,10 @@ import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
+import {
+  OVERLAY_CYCLE_HOTKEY_LABEL,
+  OVERLAY_TOGGLE_HOTKEY_LABEL,
+} from '@/overlay/detail-level';
 
 // Declare settings API type (must match settings-screen.tsx global augmentation)
 declare global {
@@ -495,7 +499,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                         Minimal glassy corner HUD while a tracked game runs. Best with borderless / windowed fullscreen.
                       </p>
                       <p className="text-[11px] text-white/25 mt-1.5 font-mono tracking-wide">
-                        Ctrl+Shift+O dismiss / re-enable · Ctrl+Shift+D cycle detail
+                        {OVERLAY_TOGGLE_HOTKEY_LABEL} dismiss / re-enable · {OVERLAY_CYCLE_HOTKEY_LABEL} cycle detail
                       </p>
                     </div>
                     <button

@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - **Always-visible overlay shortcut hints** on compact/expanded HUD (`O dismiss · D cycle`) plus Settings copy for Ctrl+Shift+O / Ctrl+Shift+D. Rebuild ANN / What’s New from 1.0.55 unchanged.
 
+### Changed
+- **Embedding Space declutter** — removed Timeshear, Cartographer HUD, and Monuments from the galaxy map. Codex remains via the C hotkey (Curator voice).
+
 ## [1.0.55] - 2026-08-01
 
 ### Fixed

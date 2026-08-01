@@ -1,19 +1,10 @@
 /**
  * NarratorBus
  *
- * Per refined plan Move 1: collapses Cartographer + Codex + Logbook + Whisper into ONE
- * service consuming structured fact sheets. Phase 2.0 MVP ships the Cartographer voice
- * with template-only output (deterministic, instant, offline). AI tier is scaffolded
- * for Phase 2.1 — same fact-sheet input, same cache key, swap-in implementation.
+ * Fact-sheet → template narration for Codex (Curator voice). Deterministic, instant, offline.
  *
  * Voices:
- *   - Cartographer (terse, present, 2nd person) — Phase 2.0
- *   - Curator (formal, past, 3rd person — monuments/Codex) — Phase 2.1
- *   - Ghost (lowercase, fragmentary — abandoned) — Phase 2.1
- *
- * Cache:
- *   - In-memory LRU keyed by `gameId:status:hoursBucket` (200 entries).
- *   - Per-gameId invalidation on libraryStore mutation (not global flush — avoids cache thrash).
+ *   - Curator (formal, past, 3rd person — Codex spreads)
  */
 
 import { gameGraphStore } from './game-graph-store';
@@ -55,48 +46,6 @@ type Context =
   | 'abandoned'
   | 'unowned';
 
-const HOUR_BUCKETS = [0, 1, 5, 20, 50, 100, 250, 1000];
-
-function hoursBucket(h: number): number {
-  for (let i = HOUR_BUCKETS.length - 1; i >= 0; i--) if (h >= HOUR_BUCKETS[i]) return i;
-  return 0;
-}
-
-// Cartographer templates — terse, present tense, 2nd person. Mustache vars resolved at render.
-const CARTOGRAPHER_TEMPLATES: Record<Context, readonly string[]> = {
-  firstVisit: [
-    'A new system. {{title}}. The drift carried you here.',
-    'You haven’t seen this one before. {{title}}. Notable in this region.',
-    'First contact. {{title}} sits in the {{communityName}}.',
-  ],
-  recentReturn: [
-    'You’re back. {{title}}. {{hours}}h of it behind you.',
-    'Familiar light. {{title}} — still warm.',
-  ],
-  longAbsence: [
-    'You haven’t touched {{title}} in {{daysAgo}} days.',
-    '{{daysAgo}} days since {{title}}. The corona has dimmed.',
-    'A long quiet. {{title}} — last seen {{daysAgo}} days ago.',
-  ],
-  broker: [
-    '{{title}} is a bridge here — it links territories that rarely meet.',
-    'Watch this one. {{title}} crosses cluster boundaries.',
-    'A waypoint. {{title}} sits between worlds.',
-  ],
-  completed: [
-    'You finished this. {{title}}. {{hours}}h to the end.',
-    'A monument stands. {{title}} — conquered.',
-  ],
-  abandoned: [
-    'You set this down. {{title}}. {{hours}}h, then nothing.',
-    '{{title}} — a held breath. {{daysAgo}} days unmoved.',
-  ],
-  unowned: [
-    'Unclaimed light. {{title}} sits in the {{communityName}}.',
-    'Frontier. {{title}} — unexplored.',
-  ],
-};
-
 /** Deterministic template pick: hash gameId into the array index so a node always speaks the same line. */
 function pickTemplate(templates: readonly string[], gameId: string): string {
   let h = 5381;
@@ -112,10 +61,6 @@ function renderTemplate(tpl: string, vars: Record<string, string | number>): str
 }
 
 class NarratorBus {
-  // LRU cache — keyed by `voice:gameId:status:hoursBucket`.
-  // Map preserves insertion order so we can evict the oldest on overflow.
-  private static readonly MAX_ENTRIES = 200;
-  private _cache = new Map<string, string>();
   /** Mass max for PageRank normalization — recomputed when graph rebuilds. */
   private _prMax = 1e-9;
   private _authMax = 1e-9;
@@ -128,23 +73,14 @@ class NarratorBus {
     if (this._initialized) return;
     this._initialized = true;
     this._refreshNorms();
-    // Per-gameId invalidation on library mutation — NOT a global flush.
-    this._unsubs.push(libraryStore.subscribe(() => {
-      // Cheapest correct approach: nuke the whole cache only when the library's checksum
-      // changed in a way that affects narration (status/hours). For Phase 2.0 we accept
-      // the rare full miss; templates regenerate in <1ms.
-      this._cache.clear();
-    }));
     this._unsubs.push(gameGraphStore.subscribe(() => {
       this._refreshNorms();
-      this._cache.clear();
     }));
   }
 
   dispose(): void {
     for (const u of this._unsubs) u();
     this._unsubs = [];
-    this._cache.clear();
     this._initialized = false;
   }
 
@@ -221,38 +157,6 @@ class NarratorBus {
     return idx >= 0 ? prd[idx] : 0;
   }
 
-  /**
-   * Cartographer voice — terse, present, 2nd person. Returns one line under ~80 chars.
-   * Template-only in Phase 2.0; AI tier slots in with same signature.
-   */
-  getCartographerLine(gameId: string, communityName?: string, stellarClass?: StellarClass): string {
-    const facts = this.buildFactSheet(gameId);
-    if (stellarClass) facts.stellarClass = stellarClass;
-    const key = `cart:${gameId}:${facts.status ?? 'none'}:${hoursBucket(facts.hoursPlayed)}`;
-    const cached = this._cache.get(key);
-    if (cached !== undefined) {
-      // LRU bump — re-insert
-      this._cache.delete(key);
-      this._cache.set(key, cached);
-      return cached;
-    }
-    const ctx = this._chooseContext(facts);
-    const templates = CARTOGRAPHER_TEMPLATES[ctx];
-    const tpl = pickTemplate(templates, gameId);
-    const rendered = renderTemplate(tpl, {
-      title: facts.title,
-      hours: facts.hoursPlayed.toFixed(facts.hoursPlayed < 10 ? 1 : 0),
-      daysAgo: facts.daysSinceLastPlay === Infinity ? 'many' : Math.floor(facts.daysSinceLastPlay),
-      communityName: communityName || 'unmapped reach',
-    });
-    if (this._cache.size >= NarratorBus.MAX_ENTRIES) {
-      const oldest = this._cache.keys().next().value;
-      if (oldest !== undefined) this._cache.delete(oldest);
-    }
-    this._cache.set(key, rendered);
-    return rendered;
-  }
-
   private _chooseContext(facts: FactSheet): Context {
     if (facts.status === 'Completed') return 'completed';
     if (facts.status === 'On Hold' && facts.hoursPlayed > 0) return 'abandoned';
@@ -264,7 +168,7 @@ class NarratorBus {
   }
 
   /**
-   * Curator voice — formal, past tense, 3rd person. For Codex spreads + Monuments.
+   * Curator voice — formal, past tense, 3rd person. For Codex spreads.
    * Returns a left page (classification flavor) + right page (narrative observation).
    */
   getCuratorSpread(gameId: string, communityName?: string, stellarClass?: StellarClass): { left: string; right: string } {
@@ -315,7 +219,7 @@ class NarratorBus {
         'Last recorded activity: {{daysAgo}} days past. The body waits.',
       ],
       broker: [
-        'A bridge. Cartographers note its function more than its substance.',
+        'A bridge. Its function matters more than its substance.',
         'A node of passage. The pilot has crossed here, perhaps unaware.',
       ],
       unowned: [
