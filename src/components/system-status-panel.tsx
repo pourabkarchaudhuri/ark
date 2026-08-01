@@ -306,14 +306,21 @@ export function NavbarStatusIndicator() {
     return unsub;
   }, []);
 
-  // Live tick for elapsed time (every 1s while something is running)
+  // Heavy IDB/Ollama probes only while the dropdown is open — not while gaming
+  // with a closed LED. Pipeline progress still arrives via event-driven notifies.
+  useEffect(() => {
+    if (!open) return;
+    return systemStatus.acquireHeavyPolling();
+  }, [open]);
+
+  // Live tick for elapsed time (every 1s while something is running AND open)
   const syncsForTick = [snap.epicSync, snap.epicCatalogSync, snap.steamBrowseSync, snap.steamCatalogSync, snap.recoPipeline, snap.catalogEmbeddings, snap.annIndexStatus, snap.galaxyBuild, snap.ollamaSetup, snap.rerankSetup];
   const hasRunning = syncsForTick.some(s => s.stage === 'running');
   useEffect(() => {
-    if (!hasRunning) return;
+    if (!hasRunning || !open) return;
     const id = setInterval(() => setSnap(systemStatus.getSnapshot()), 1000);
     return () => clearInterval(id);
-  }, [hasRunning]);
+  }, [hasRunning, open]);
 
   // Close on outside click
   useEffect(() => {
@@ -483,11 +490,15 @@ export function SplashStatusPanel() {
   const [snap, setSnap] = useState<SystemStatusSnapshot>(systemStatus.getSnapshot());
 
   useEffect(() => {
+    const releaseHeavy = systemStatus.acquireHeavyPolling();
     const unsub = systemStatus.subscribe(() => setSnap(systemStatus.getSnapshot()));
-    return unsub;
+    return () => {
+      unsub();
+      releaseHeavy();
+    };
   }, []);
 
-  // Live tick
+  // Live tick — splash only (boot); unmounted before gaming.
   useEffect(() => {
     const id = setInterval(() => setSnap(systemStatus.getSnapshot()), 1000);
     return () => clearInterval(id);

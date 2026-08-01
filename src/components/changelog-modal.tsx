@@ -12,7 +12,7 @@ const CHANGELOG: Record<string, { title: string; changes: string[] }> = {
   '1.0.54': {
     title: "What's New in Ark 1.0.54",
     changes: [
-      'Performance hotfix — fixes lag/CPU hogging while gaming introduced in 1.0.53. Overlay and main UI no longer share one unthrottled renderer; live telemetry/hours ticks are coalesced; embedding polite mode engages for the whole play session; system-status model probes poll far less often when the dropdown is closed.',
+      'Performance hotfix — fixes the consistent ~15s hitch while gaming. Process polling stays async, but PowerShell path scans (and their main-process stdout parse) now run ~every 60s instead of every tick; hours/telemetry UI coalesces; status IDB/Ollama probes only while splash/dropdown is open; overlay stays lazy/no-forward.',
     ],
   },
   '1.0.53': {

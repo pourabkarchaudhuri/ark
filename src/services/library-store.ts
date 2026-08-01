@@ -245,9 +245,32 @@ class LibraryStore {
     this.hoursListeners.forEach((listener) => listener());
   }
 
+  private _hoursNotifyTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly HOURS_NOTIFY_THROTTLE_MS = 5_000;
+
   /** Fire ONLY the hours channel — used by updateHoursFromSessions. */
   private notifyHoursListeners() {
     this.hoursListeners.forEach((listener) => listener());
+  }
+
+  /**
+   * Live session ticks (~15s) coalesce hours-channel wakes so cards don't hitch
+   * on every IPC. Session-end (immediate=true) flushes right away.
+   */
+  private scheduleHoursNotify(immediate = false) {
+    if (immediate) {
+      if (this._hoursNotifyTimer) {
+        clearTimeout(this._hoursNotifyTimer);
+        this._hoursNotifyTimer = null;
+      }
+      this.notifyHoursListeners();
+      return;
+    }
+    if (this._hoursNotifyTimer) return;
+    this._hoursNotifyTimer = setTimeout(() => {
+      this._hoursNotifyTimer = null;
+      this.notifyHoursListeners();
+    }, LibraryStore.HOURS_NOTIFY_THROTTLE_MS);
   }
 
   // Add a game to the library
@@ -705,14 +728,14 @@ class LibraryStore {
     // Live ticks (~15s) only need in-memory hours for cards. Persisting and
     // resorting on every tick storms localStorage + sorted-cache while gaming;
     // session-end (lastPlayedAt set) still persists.
-    if (lastPlayedAt !== undefined) {
+    const sessionEnded = lastPlayedAt !== undefined;
+    if (sessionEnded) {
       this.invalidateSortedCache();
       this.scheduleSave();
     }
-    // Fire the hours-only channel — 15s session ticks must NOT invalidate
-    // the games grid memo, Oracle library-signature, or other top-level
-    // consumers that only care about status/collection changes.
-    this.notifyHoursListeners();
+    // Hours channel: coalesce live ticks; flush immediately on session end.
+    // Must NOT invalidate games-grid / Oracle signature (those use subscribe()).
+    this.scheduleHoursNotify(sessionEnded);
 
     journeyStore.syncProgress(gameId, { hoursPlayed: effectiveHours, lastPlayedAt });
   }

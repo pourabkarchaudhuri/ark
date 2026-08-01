@@ -410,35 +410,63 @@ class SystemStatus {
   private _modelInfoSeq = 0;
   private _rerankModelInfoSeq = 0;
 
+  /** Refcount of UIs that want periodic IDB/Ollama probes (splash, open dropdown). */
+  private _heavyPollingRefs = 0;
+  private _baselineFetched = false;
+
   subscribe(fn: Listener): () => void {
     this._listeners.add(fn);
-    // Start polling when first subscriber arrives
-    if (this._listeners.size === 1) this._startPolling();
+    // One-shot baseline only — no interval until acquireHeavyPolling()
+    // (splash / dropdown open). Pipeline progress still arrives via _notify
+    // from catalog/embedding/reco subscriptions in init().
+    if (this._listeners.size === 1) this._ensureBaseline();
     return () => {
       this._listeners.delete(fn);
-      // Stop polling when last subscriber leaves
-      if (this._listeners.size === 0) this._stopPolling();
+      if (this._listeners.size === 0) {
+        this._heavyPollingRefs = 0;
+        this._stopHeavyTimers();
+        this._baselineFetched = false;
+      }
     };
   }
 
   _notify() { this._listeners.forEach(fn => fn()); }
 
-  private _startPolling() {
-    if (this._storageTimer) return; // already running
-    // One-shot baseline so the navbar LED has numbers; then poll slowly.
-    // Heavy IDB scans + Ollama/ML IPC used to run every 30–60s whenever the
-    // status indicator was mounted — keep that for explicit refresh / splash.
+  private _ensureBaseline() {
+    if (this._baselineFetched) return;
+    this._baselineFetched = true;
     this._refreshStorage();
     this._refreshModelInfo();
     this._refreshRerankModelInfo();
     this._refreshMlModelInfo();
-    this._storageTimer = setInterval(() => this._refreshStorage(), 120_000);
-    this._modelTimer = setInterval(() => this._refreshModelInfo(), 300_000);
-    this._rerankModelTimer = setInterval(() => this._refreshRerankModelInfo(), 300_000);
-    this._mlModelTimer = setInterval(() => this._refreshMlModelInfo(), 300_000);
   }
 
-  private _stopPolling() {
+  /**
+   * Acquire periodic IDB + Ollama/ML probes while a status UI is visible.
+   * Refcounted so splash + navbar dropdown don't stomp each other.
+   * Leave unacquired while gaming so probes can't introduce jitter.
+   */
+  acquireHeavyPolling(): () => void {
+    this._heavyPollingRefs += 1;
+    if (this._heavyPollingRefs === 1) {
+      this._ensureBaseline();
+      if (!this._storageTimer) {
+        this._storageTimer = setInterval(() => this._refreshStorage(), 120_000);
+        this._modelTimer = setInterval(() => this._refreshModelInfo(), 300_000);
+        this._rerankModelTimer = setInterval(() => this._refreshRerankModelInfo(), 300_000);
+        this._mlModelTimer = setInterval(() => this._refreshMlModelInfo(), 300_000);
+      }
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._heavyPollingRefs = Math.max(0, this._heavyPollingRefs - 1);
+      if (this._heavyPollingRefs === 0) this._stopHeavyTimers();
+    };
+  }
+
+  private _stopHeavyTimers() {
     if (this._storageTimer) { clearInterval(this._storageTimer); this._storageTimer = null; }
     if (this._modelTimer) { clearInterval(this._modelTimer); this._modelTimer = null; }
     if (this._rerankModelTimer) { clearInterval(this._rerankModelTimer); this._rerankModelTimer = null; }

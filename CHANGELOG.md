@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [1.0.54] - 2026-08-01
 
 ### Fixed
-- **Performance hotfix.** Stops lag/CPU hogging while gaming from 1.0.53: remove `renderer-process-limit=1` so overlay no longer shares an unthrottled renderer with the main UI; keep overlay background-throttling on when collapsed; coalesce live telemetry UI (≥5s); sample `getAppMetrics` every ~30s; skip localStorage writes on hours-only live ticks; engage embedding polite mode for the whole play session; slow system-status model/storage probes when the status UI is idle.
+- **Performance hotfix (async poll jitter).** The ~15s hitch was not sync `exec` — `promisify(exec)` is non-blocking while the child runs, but PowerShell path snapshots returned multi‑MB stdout that was parsed on the Electron main process every tick while playing. Active sessions now use tasklist every 15s and PowerShell paths only ~every 60s (chunked parse + `setImmediate` yields). `getAppMetrics` / session persist also drop to ~60s. Renderer hours notifies coalesce (≥5s); system-status IDB/Ollama intervals only while splash or the status dropdown is open. Also: no `renderer-process-limit=1`, overlay stays throttled when collapsed, embedding polite mode for the whole play session, no `forward: true`.
 
 ## [1.0.53] - 2026-08-01
 

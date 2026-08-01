@@ -89,6 +89,15 @@ const IDLE_THRESHOLD_S = 300;      // 5 minutes idle threshold
  * "Playing Now" indicator lag more than a minute past a real quit.
  */
 const MISSES_BEFORE_END = 4;
+/**
+ * PowerShell Get-Process is async (doesn't block the Node pump while the child
+ * runs) but parsing its multi‑MB stdout on the main process when it returns
+ * causes a consistent ~15s UI/input hitch. Keep-alive while playing only needs
+ * tasklist basenames; refresh full paths rarely for collision / elevated cases.
+ */
+const PATH_SNAPSHOT_EVERY_N_ACTIVE_POLLS = 4; // ~60s while a session is active
+/** Crash-recovery file — no need to rewrite every 15s; start/end still force a write. */
+const PERSIST_EVERY_N_ACTIVE_POLLS = 4;
 
 // ---------------------------------------------------------------------------
 // Process detection — single OS call per poll tick, not per game
@@ -115,18 +124,18 @@ const _basenameCollisionWarned: Set<string> = new Set();
  *   - `powershell Get-Process | Select-Object Path` → full paths (slower, may
  *     miss elevated processes when we're not admin)
  *
- * PowerShell is expensive (~100–500ms+ of process spawn + WMI). When no session
- * is active we only need start detection — tasklist basenames are enough
- * (same fallback we already use when Path is hidden). Full paths refresh while
- * a session is running so end-detection and collision warnings stay accurate.
+ * PowerShell is expensive (~100–500ms+ of process spawn + WMI) AND its stdout
+ * parse runs synchronously on the Electron main process when the child exits —
+ * that is the consistent ~15s jitter users feel, not a sync exec call.
+ * Idle: tasklist only. Active: tasklist every tick; paths only when includePaths.
  */
 async function refreshProcessSnapshot(opts: { includePaths?: boolean } = {}): Promise<void> {
-  const includePaths = opts.includePaths !== false;
+  const includePaths = opts.includePaths === true;
   try {
     if (process.platform === 'win32') {
       // ---- Basenames (fast, primary source of truth for "is anything named X running") ----
       // /FO CSV /NH → one line per process: "imagename","PID","sessionname","session#","memUsage"
-      // Async — never block the Electron main thread (sync exec was a mouse-hitch source).
+      // Async child — pump stays free while tasklist runs; parse is small (CSV names only).
       const output = await runCommand('tasklist /FO CSV /NH', {
         timeout: 10_000,
         windowsHide: true,
@@ -140,25 +149,31 @@ async function refreshProcessSnapshot(opts: { includePaths?: boolean } = {}): Pr
       _runningBasenames = names;
 
       if (!includePaths) {
-        // Idle poll — keep previous _runningPaths (may be empty); basename match
-        // starts sessions the same way a failed PowerShell snapshot would.
+        // Keep previous _runningPaths (may be empty); basename match is enough for
+        // start detection and most keep-alive ticks while playing.
         return;
       }
 
-      // ---- Full paths (slower, best-effort — some processes hide their Path from non-admin) ----
+      // ---- Full paths (rare, best-effort — elevated processes often hide Path) ----
+      // Yield so tasklist completion doesn't immediately chain into a heavy spawn.
+      await yieldMain();
       const paths = new Set<string>();
       try {
         const psOut = await runCommand(
           'powershell.exe -NoProfile -NonInteractive -Command "Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -ExpandProperty Path"',
           { timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
         );
-        for (const line of psOut.split('\n')) {
-          const trimmed = line.trim();
+        // Chunk the parse so a multi‑MB dump can't pin the message pump for one long slice.
+        const lines = psOut.split('\n');
+        const CHUNK = 500;
+        for (let i = 0; i < lines.length; i += 1) {
+          const trimmed = lines[i].trim();
           if (trimmed) paths.add(trimmed.toLowerCase());
+          if (i > 0 && i % CHUNK === 0) await yieldMain();
         }
       } catch {
-        // PowerShell path snapshot failed — we fall through to basename matching.
-        // Don't clobber the previous _runningPaths, in case this was a transient failure.
+        // PowerShell path snapshot failed — fall through to basename matching.
+        // Don't clobber the previous _runningPaths on a transient failure.
         return;
       }
       _runningPaths = paths;
@@ -227,8 +242,17 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 /** Skip overlapping ticks when a slow PowerShell snapshot outlives POLL_INTERVAL_MS. */
 let pollInFlight = false;
 /** Emit getAppMetrics telemetry every N active-session polls (UI is already ≥5s coalesced). */
-const TELEMETRY_SAMPLE_EVERY_N_POLLS = 2;
+const TELEMETRY_SAMPLE_EVERY_N_POLLS = 4;
 let telemetrySampleTick = 0;
+/** Counts active-session polls for rare PowerShell / persist cadences. */
+let activePollCount = 0;
+/** Tracks last persisted active-session count so end→0 still clears the file. */
+let lastPersistedSessionCount = 0;
+
+/** Yield so IPC / input can drain before sync-heavy post-await work. */
+function yieldMain(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 let mainWindowRef: BrowserWindowType | null = null;
 let trackedGames: TrackedGame[] = [];
 const activeSessions: Map<string, ActiveSession> = new Map(); // gameId -> session
@@ -372,13 +396,22 @@ async function pollTick(): Promise<void> {
   pollInFlight = true;
 
   try {
-    // Snapshot all running processes ONCE — O(1) lookups for each game below.
-    // Idle (no active session): skip Windows PowerShell path scan — tasklist
-    // basenames are enough for start detection and avoid a heavy spawn every 15s.
+    // Snapshot once per tick. Idle: tasklist only. Active: tasklist every tick;
+    // PowerShell paths only every Nth active poll (~60s) so we don't hitch on
+    // stdout parse every 15s while the user is in a game.
     const hasActive = activeSessions.size > 0;
+    if (hasActive) activePollCount += 1;
+    else activePollCount = 0;
+    const wantPaths =
+      hasActive &&
+      (activePollCount === 1 || activePollCount % PATH_SNAPSHOT_EVERY_N_ACTIVE_POLLS === 0);
+
     const _hookStart = performance.now();
-    await refreshProcessSnapshot({ includePaths: hasActive });
+    await refreshProcessSnapshot({ includePaths: wantPaths });
     const hookLatencyMs = Math.round((performance.now() - _hookStart) * 100) / 100;
+
+    // Let the pump breathe before sync idle query + IPC fan-out.
+    await yieldMain();
 
     // Get system idle time (seconds)
     let systemIdleS = 0;
@@ -480,13 +513,13 @@ async function pollTick(): Promise<void> {
     // If !running && !existingSession → nothing to do
   }
 
-  // Telemetry: emit samples while playing — but not every 15s. getAppMetrics walks
-  // every Chromium process; UI charts coalesce ≥5s, so every other poll (~30s) is enough.
-  // timestamp is epoch ms (number) — renderer store/charts expect numeric, not ISO string.
+  // Telemetry: getAppMetrics is SYNC on the main process (walks Chromium procs).
+  // Sample rarely (~60s); UI charts already coalesce ≥5s.
   if (activeSessions.size > 0) {
     telemetrySampleTick += 1;
     if (telemetrySampleTick >= TELEMETRY_SAMPLE_EVERY_N_POLLS) {
       telemetrySampleTick = 0;
+      await yieldMain();
       const rssMb = Math.round((process.memoryUsage().rss / (1024 * 1024)) * 100) / 100;
       let cpuPercent = 0;
       try {
@@ -512,8 +545,17 @@ async function pollTick(): Promise<void> {
     telemetrySampleTick = 0;
   }
 
-  // Snapshot in-progress sessions for crash recovery on the next launch.
-  persistActiveSessions();
+  // Crash-recovery persist: on session start/end boundaries always; otherwise
+  // every Nth active poll so we don't touch disk every 15s while gaming.
+  const sessionCount = activeSessions.size;
+  const boundaryPersist =
+    sessionCount !== lastPersistedSessionCount ||
+    (sessionCount > 0 && activePollCount % PERSIST_EVERY_N_ACTIVE_POLLS === 0) ||
+    (sessionCount === 0 && lastPersistedSessionCount > 0);
+  if (boundaryPersist) {
+    persistActiveSessions();
+    lastPersistedSessionCount = sessionCount;
+  }
 
   // Show/hide the overlay HUD based on whether anything is being played now.
   updateOverlayVisibility();
