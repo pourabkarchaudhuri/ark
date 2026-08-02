@@ -1,6 +1,6 @@
 {
   "name": "ark",
-  "version": "1.0.60",
+  "version": "1.0.61",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -64,6 +64,7 @@
     "canvas-confetti": "^1.9.4",
     "cheerio": "^1.2.0",
     "class-variance-authority": "^0.7.0",
+    "classic-level": "^3.0.0",
     "clsx": "^2.1.0",
     "cross-fetch": "^4.1.0",
     "cuss": "^2.2.0",

@@ -1,6 +1,21 @@
 import { StatusChangeEntry, GameStatus, migrateGameId } from '@/types/game';
 
+// ─── Persistence constants ──────────────────────────────────────────────────
+//
+// Post v1.0.61 this store is backed by LevelDB (main process, exposed via
+// `window.store`). The original localStorage key is preserved unchanged for
+// one release so a user can roll back to a pre-migration build without losing
+// their status log. Once the migration flag is stamped we stop reading /
+// writing localStorage — LevelDB is the source of truth.
+
+/** Legacy localStorage key — retained for boot-time hydrate + rollback. */
 const STORAGE_KEY = 'ark-status-history';
+/** One-shot migration sentinel — stamped after the first successful copy. */
+const MIGRATION_FLAG_KEY = 'ark-status-history-migrated-v1';
+/** LevelDB namespace + key. */
+const LEVEL_NAMESPACE = 'status-history';
+const LEVEL_DATA_KEY = 'data';
+
 const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
 
 interface StoredStatusHistoryData {
@@ -41,21 +56,38 @@ function isValidStatusEntry(entry: unknown): entry is StatusChangeEntry {
   return true;
 }
 
+/** Best-effort feature detect for the preload-exposed LevelDB bridge. */
+type StoreBridge = NonNullable<Window['store']>;
+function getStore(): StoreBridge | null {
+  if (typeof window === 'undefined') return null;
+  return window.store ?? null;
+}
+
 class StatusHistoryStore {
   private entries: StatusChangeEntry[] = [];
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Flips true once initialize() decides LevelDB is the source of truth. */
+  private _useLevelDb = false;
+  /** Resolves once the async initialize() (hydrate + migrate) has run. */
+  private _readyPromise: Promise<void>;
 
   constructor() {
-    this.initialize();
+    this.hydrateFromLocalStorage();
+    this._readyPromise = this.initializeAsync();
     if (typeof window !== 'undefined' && !_statusHistoryBeforeUnloadInstalled) {
       _statusHistoryBeforeUnloadInstalled = true;
       window.addEventListener('beforeunload', () => this.flushSave());
     }
   }
 
-  private initialize() {
+  /**
+   * Synchronous hydrate from localStorage — runs in the constructor so callers
+   * that read (`getAll`, `getFirstPlayingTransition`, …) right after import
+   * still see data. LevelDB hydrate happens async and replaces this cache.
+   */
+  private hydrateFromLocalStorage(): void {
     if (this.isInitialized) return;
 
     let needsResave = false;
@@ -77,11 +109,13 @@ class StatusHistoryStore {
         }
       }
     } catch (error) {
-      console.error('[StatusHistoryStore] Failed to load:', error);
+      console.error('[StatusHistoryStore] Failed to load from localStorage:', error);
     }
 
     if (needsResave && this.entries.length > 0) {
-      this.saveNow();
+      // Rewrite the localStorage snapshot in v2 shape. The async LevelDB
+      // migration below will then pick these up.
+      this.writeLocalStorageSnapshot();
       console.log('[StatusHistoryStore] Migrated entries to v2 (string gameId)');
     }
 
@@ -89,14 +123,92 @@ class StatusHistoryStore {
   }
 
   /**
+   * One-shot LevelDB adoption:
+   *  - If the bridge isn't present (web tests, older builds) stay on
+   *    localStorage entirely.
+   *  - If the migration flag isn't stamped yet, copy the current in-memory
+   *    entries (already hydrated from localStorage) into LevelDB and stamp
+   *    the flag. The original localStorage key is left alone so a rollback
+   *    to a pre-v1.0.61 build keeps the pre-migration snapshot.
+   *  - Otherwise LevelDB is authoritative — hydrate from it and overwrite
+   *    the in-memory cache, then notify listeners so any component that
+   *    rendered off the stale localStorage snapshot re-reads.
+   */
+  private async initializeAsync(): Promise<void> {
+    const store = getStore();
+    if (!store) return; // no bridge → localStorage remains SoT
+
+    const migrated = (() => {
+      try {
+        return localStorage.getItem(MIGRATION_FLAG_KEY) === 'yes';
+      } catch {
+        return false;
+      }
+    })();
+
+    if (!migrated) {
+      // First-time migration. `this.entries` already reflects localStorage.
+      try {
+        const payload: StoredStatusHistoryData = {
+          version: STORAGE_VERSION,
+          entries: this.entries,
+          lastUpdated: new Date().toISOString(),
+        };
+        const res = await store.put(LEVEL_NAMESPACE, LEVEL_DATA_KEY, payload);
+        if (res && res.error) {
+          console.error('[StatusHistoryStore] LevelDB migration put failed:', res.error);
+          return;
+        }
+        try { localStorage.setItem(MIGRATION_FLAG_KEY, 'yes'); } catch { /* ignore */ }
+        this._useLevelDb = true;
+        console.log(
+          `[StatusHistoryStore] Migrated ${this.entries.length} entries to LevelDB (${LEVEL_NAMESPACE})`,
+        );
+      } catch (err) {
+        console.error('[StatusHistoryStore] LevelDB migration failed:', err);
+      }
+      return;
+    }
+
+    // Already migrated on a previous run — LevelDB is authoritative.
+    try {
+      const res = await store.get<StoredStatusHistoryData>(LEVEL_NAMESPACE, LEVEL_DATA_KEY);
+      if (res && res.error) {
+        console.error('[StatusHistoryStore] LevelDB hydrate failed:', res.error);
+        return;
+      }
+      const stored = res?.value ?? null;
+      if (stored && Array.isArray(stored.entries)) {
+        const migratedEntries = stored.entries.map(entry => ({
+          ...entry,
+          gameId: migrateGameId(entry as any),
+        }));
+        this.entries = migratedEntries.filter(isValidStatusEntry);
+      } else {
+        // No LevelDB data yet (flag stamped but row missing) — treat as empty.
+        this.entries = [];
+      }
+      this._useLevelDb = true;
+      this.notifyListeners();
+    } catch (err) {
+      console.error('[StatusHistoryStore] LevelDB hydrate failed:', err);
+    }
+  }
+
+  /** Test / consumer hook — resolves after LevelDB hydrate + migrate. */
+  ready(): Promise<void> {
+    return this._readyPromise;
+  }
+
+  /**
    * Debounced save — coalesces bursts of status writes (rapid status flips,
-   * imports, migrations) into a single localStorage write ~300ms later.
+   * imports, migrations) into a single persistent write ~300ms later.
    */
   private save() {
     if (this._saveTimer) clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
       this._saveTimer = null;
-      this.saveNow();
+      void this.saveNow();
     }, 300);
   }
 
@@ -105,21 +217,44 @@ class StatusHistoryStore {
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
-      this.saveNow();
+      void this.saveNow();
     }
   }
 
-  private saveNow() {
+  private buildPayload(): StoredStatusHistoryData {
+    return {
+      version: STORAGE_VERSION,
+      entries: this.entries,
+      lastUpdated: new Date().toISOString(),
+    };
+  }
+
+  private writeLocalStorageSnapshot(payload?: StoredStatusHistoryData): void {
     try {
-      const data: StoredStatusHistoryData = {
-        version: STORAGE_VERSION,
-        entries: this.entries,
-        lastUpdated: new Date().toISOString(),
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload ?? this.buildPayload()));
     } catch (error) {
-      console.error('[StatusHistoryStore] Failed to save:', error);
+      console.error('[StatusHistoryStore] Failed to write localStorage snapshot:', error);
     }
+  }
+
+  private async saveNow(): Promise<void> {
+    const payload = this.buildPayload();
+    const store = getStore();
+
+    if (this._useLevelDb && store) {
+      try {
+        const res = await store.put(LEVEL_NAMESPACE, LEVEL_DATA_KEY, payload);
+        if (res && res.error) {
+          console.error('[StatusHistoryStore] LevelDB put failed:', res.error);
+        }
+      } catch (error) {
+        console.error('[StatusHistoryStore] LevelDB put threw:', error);
+      }
+      return;
+    }
+
+    // Fallback / pre-migration path.
+    this.writeLocalStorageSnapshot(payload);
   }
 
   // ------ Subscriptions ------
@@ -248,7 +383,7 @@ class StatusHistoryStore {
       this.entries.sort(
         (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
       );
-      this.saveNow(); // direct save for bulk import
+      void this.saveNow(); // direct save for bulk import
       this.notifyListeners();
     }
 
@@ -262,7 +397,15 @@ class StatusHistoryStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
-    localStorage.removeItem(STORAGE_KEY);
+    // Always clear the legacy localStorage snapshot so a rollback doesn't
+    // resurrect deleted data.
+    try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+    const store = getStore();
+    if (this._useLevelDb && store) {
+      void store.clearNamespace(LEVEL_NAMESPACE).catch((err) => {
+        console.error('[StatusHistoryStore] LevelDB clearNamespace failed:', err);
+      });
+    }
     this.notifyListeners();
   }
 }

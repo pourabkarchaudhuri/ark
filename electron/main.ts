@@ -453,6 +453,7 @@ function setupOverlay() {
 // ---------------------------------------------------------------------------
 import { registerAllHandlers, webviewHandlers } from './ipc/index.js';
 import { runFullCatalogAdultFilterTest } from './ipc/catalog-handlers.js';
+import { getLevelStore } from './storage/level-store.js';
 
 // Access the webview's destroy function for window cleanup
 function destroyWebContentsView() {
@@ -946,6 +947,16 @@ app.on('before-quit', () => {
   try { steamAPI.flushCache(); } catch (e) { logger.error('[Shutdown] Steam cache flush failed:', e); }
   try { epicAPI.flushCache(); } catch (e) { logger.error('[Shutdown] Epic cache flush failed:', e); }
   try { chatStore.flushSync(); } catch (e) { logger.error('[Shutdown] Chat store flush failed:', e); }
+});
+
+// Flush LevelDB on shutdown. Fires after all windows have closed but before
+// process exit — the async close usually completes in <10 ms because LevelDB
+// keeps a bounded in-memory memtable. Non-fatal if it fails; the DB will
+// self-recover from its WAL on next open.
+app.on('will-quit', () => {
+  getLevelStore().close().catch((err) => {
+    logger.error('[Shutdown] LevelDB close failed:', err);
+  });
 });
 
 app.on('window-all-closed', () => {

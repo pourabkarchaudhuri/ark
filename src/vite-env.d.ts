@@ -203,6 +203,29 @@ interface CatalogAPI {
   }>;
 }
 
+// LevelDB-backed persistent store (v1.0.61 foundation). Every call returns
+// an envelope so the renderer can distinguish `null`/`false` values from
+// transport errors. `{ error }` indicates a main-process failure (bad input,
+// disk error, or rate-limit trip).
+interface StoreGetResult<T = unknown> { value?: T | null; error?: string; }
+interface StoreGetAllResult<T = unknown> { rows?: Array<{ key: string; value: T }>; error?: string; }
+interface StoreOkResult { ok?: boolean; error?: string; }
+interface StoreHasResult { value?: boolean; error?: string; }
+
+type StoreBatchOp =
+  | { type: 'put'; namespace: string; key: string; value: unknown }
+  | { type: 'del'; namespace: string; key: string };
+
+interface StoreAPI {
+  get: <T = unknown>(namespace: string, key: string) => Promise<StoreGetResult<T>>;
+  getAll: <T = unknown>(namespace: string) => Promise<StoreGetAllResult<T>>;
+  put: (namespace: string, key: string, value: unknown) => Promise<StoreOkResult>;
+  del: (namespace: string, key: string) => Promise<StoreOkResult>;
+  batch: (ops: StoreBatchOp[]) => Promise<StoreOkResult>;
+  has: (namespace: string) => Promise<StoreHasResult>;
+  clearNamespace: (namespace: string) => Promise<StoreOkResult>;
+}
+
 declare global {
   // Build-time constant injected by Vite from package.json (see vite.config.ts `define`)
   const __APP_VERSION__: string;
@@ -219,6 +242,7 @@ declare global {
     eventScraper?: EventScraperAPI;
     egdata?: EgdataAPI;
     catalog?: CatalogAPI;
+    store?: StoreAPI;
   }
 }
 

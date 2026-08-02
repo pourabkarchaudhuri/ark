@@ -3,6 +3,16 @@ import { GameSession, migrateGameId } from '@/types/game';
 const STORAGE_KEY = 'ark-session-history';
 const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
 
+/**
+ * One-shot marker stamped in localStorage after the LevelDB migration
+ * copies the ark-session-history payload across. Presence => never migrate
+ * again. The original STORAGE_KEY stays intact for one release as rollback.
+ */
+const MIGRATION_MARKER_KEY = 'ark-session-history-migrated-v1';
+
+/** LevelDB namespace this store owns. Keys within it are `session.id`. */
+const LEVEL_NAMESPACE = 'session';
+
 interface StoredSessionData {
   version: number;
   entries: GameSession[];
@@ -19,31 +29,173 @@ let _sessionBeforeUnloadInstalled = false;
  * user actively played (minus idle time), and the idle time detected.
  *
  * This data enriches the Journey view with play-time analytics.
+ *
+ * v1.0.61: Primary persistence moved from `localStorage` to LevelDB via the
+ * `window.store` IPC surface (see `electron/ipc/store-handlers.ts`). The
+ * public sync API is unchanged — an in-memory cache is hydrated on init and
+ * every read still returns synchronously. When `window.store` is unavailable
+ * (unit tests, jsdom, pre-preload boot window) the store transparently
+ * falls back to the previous localStorage path.
  */
-class SessionStore {
+export class SessionStore {
   private entries: GameSession[] = [];
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Gate flag captured once at construction — LevelDB path vs. legacy fallback. */
+  private readonly _useLevelDB: boolean;
+
+  /**
+   * Set of session IDs currently persisted in LevelDB. On every debounced
+   * batch we diff `entries` against this to emit `del` ops for anything
+   * that disappeared (e.g. via a future single-session delete or a
+   * post-import prune). Simplification for v1.0.61: we still batch-put
+   * ALL current sessions every debounce cycle (delta-writes come later).
+   */
+  private _knownKeys: Set<string> = new Set();
+
+  /**
+   * Exposed for tests / callers that want to await the async hydration
+   * finishing (LevelDB path only — localStorage path resolves immediately).
+   * Do NOT rely on this in production code — all public reads are safe
+   * before it resolves; they simply return an empty cache during the
+   * boot window.
+   */
+  readonly ready: Promise<void>;
+
   constructor() {
-    this.initialize();
+    this._useLevelDB =
+      typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+    this.ready = this.initialize();
     if (typeof window !== 'undefined' && !_sessionBeforeUnloadInstalled) {
       _sessionBeforeUnloadInstalled = true;
       window.addEventListener('beforeunload', () => this.flushSave());
     }
   }
 
-  private initialize() {
+  private async initialize(): Promise<void> {
     if (this.isInitialized) return;
 
+    if (this._useLevelDB) {
+      await this.initializeFromLevelDB();
+    } else {
+      this.initializeFromLocalStorage();
+    }
+
+    this.isInitialized = true;
+  }
+
+  /**
+   * LevelDB init path:
+   *   1. Load rows from namespace `session`. If any exist, hydrate.
+   *   2. If empty AND `localStorage[STORAGE_KEY]` exists AND no migration
+   *      marker => copy the JSON payload into LevelDB, stamp the marker.
+   *   3. On any hard failure fall back to the localStorage path so the
+   *      user never loses their session log.
+   */
+  private async initializeFromLevelDB(): Promise<void> {
+    try {
+      const res = await window.store!.getAll<GameSession>(LEVEL_NAMESPACE);
+      if (res.error) {
+        console.error('[SessionStore] getAll(session) IPC error:', res.error);
+        this.initializeFromLocalStorage();
+        return;
+      }
+      const rows = res.rows ?? [];
+      if (rows.length > 0) {
+        this.hydrateFromRows(rows.map((r) => r.value));
+        return;
+      }
+      // LevelDB empty — attempt one-shot migration from localStorage.
+      const migrated = await this.tryMigrateFromLocalStorage();
+      if (!migrated) {
+        // Nothing to migrate: keep entries empty. Do not touch localStorage.
+        this.notifyListeners();
+      }
+    } catch (err) {
+      console.error('[SessionStore] Failed to init from LevelDB, falling back:', err);
+      this.initializeFromLocalStorage();
+    }
+  }
+
+  /**
+   * One-shot copy of `localStorage[STORAGE_KEY]` -> LevelDB namespace `session`.
+   *
+   * Runs only when:
+   *   - migration marker is absent (never migrated before), AND
+   *   - LevelDB session namespace is empty (caller already checked), AND
+   *   - localStorage payload exists and parses cleanly.
+   *
+   * Stamps `MIGRATION_MARKER_KEY = 'yes'` on success (or on an empty/invalid
+   * payload) so we don't retry every boot.
+   *
+   * Returns `true` if any rows were copied.
+   */
+  private async tryMigrateFromLocalStorage(): Promise<boolean> {
+    try {
+      if (localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes') return false;
+
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+        return false;
+      }
+
+      const parsed = JSON.parse(raw) as StoredSessionData;
+      if (!Array.isArray(parsed.entries) || parsed.entries.length === 0) {
+        localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+        return false;
+      }
+
+      const migrated = parsed.entries.map((entry) => ({
+        ...entry,
+        gameId: migrateGameId(entry as any),
+      }));
+
+      const ops = migrated
+        .filter((e) => typeof e.id === 'string' && e.id.length > 0)
+        .map((e) => ({
+          type: 'put' as const,
+          namespace: LEVEL_NAMESPACE,
+          key: e.id,
+          value: e,
+        }));
+
+      if (ops.length === 0) {
+        localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+        return false;
+      }
+
+      const res = await window.store!.batch(ops);
+      if (res.error) {
+        console.error('[SessionStore] Migration batch failed:', res.error);
+        return false;
+      }
+
+      // IMPORTANT: keep the original STORAGE_KEY intact for one release as
+      // rollback insurance. Only stamp the marker.
+      localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+      this.hydrateFromRows(migrated);
+      console.log(
+        `[SessionStore] Migrated ${migrated.length} sessions from localStorage -> LevelDB`,
+      );
+      return true;
+    } catch (err) {
+      console.error('[SessionStore] Migration failed:', err);
+      return false;
+    }
+  }
+
+  /** Legacy path — used both as fallback and in test/jsdom environments. */
+  private initializeFromLocalStorage(): void {
     let needsResave = false;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as StoredSessionData;
         if (Array.isArray(parsed.entries)) {
-          this.entries = parsed.entries.map(entry => ({
+          this.entries = parsed.entries.map((entry) => ({
             ...entry,
             gameId: migrateGameId(entry as any),
           }));
@@ -57,16 +209,28 @@ class SessionStore {
     }
 
     if (needsResave && this.entries.length > 0) {
-      this.saveNow();
+      this.saveNowLocalStorage();
       console.log('[SessionStore] Migrated entries to v2 (string gameId)');
     }
+  }
 
-    this.isInitialized = true;
+  /**
+   * Populate the in-memory cache from a list of GameSession rows (from
+   * either LevelDB or the localStorage migration payload) and notify.
+   * Sort chronologically for parity with the legacy stored order.
+   */
+  private hydrateFromRows(rows: GameSession[]): void {
+    this.entries = rows.map((r) => ({ ...r, gameId: migrateGameId(r as any) }));
+    this.entries.sort(
+      (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime(),
+    );
+    this._knownKeys = new Set(this.entries.map((e) => e.id));
+    this.notifyListeners();
   }
 
   /**
    * Debounced save — coalesces bursts of session writes (e.g. rapid session
-   * records during import) into a single localStorage write ~300ms later.
+   * records during import) into a single persistence hit ~300ms later.
    */
   private save() {
     if (this._saveTimer) clearTimeout(this._saveTimer);
@@ -85,7 +249,17 @@ class SessionStore {
     }
   }
 
-  private saveNow() {
+  private saveNow(): void {
+    if (this._useLevelDB) {
+      // Fire-and-forget; errors are logged. Preserves the current
+      // synchronous callsite contract used by importData().
+      void this.saveNowLevelDB();
+      return;
+    }
+    this.saveNowLocalStorage();
+  }
+
+  private saveNowLocalStorage(): void {
     try {
       const data: StoredSessionData = {
         version: STORAGE_VERSION,
@@ -95,6 +269,40 @@ class SessionStore {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch (error) {
       console.error('[SessionStore] Failed to save:', error);
+    }
+  }
+
+  private async saveNowLevelDB(): Promise<void> {
+    try {
+      const currentIds = new Set<string>();
+      const ops: Array<
+        | { type: 'put'; namespace: string; key: string; value: unknown }
+        | { type: 'del'; namespace: string; key: string }
+      > = [];
+
+      for (const e of this.entries) {
+        if (!e.id) continue;
+        currentIds.add(e.id);
+        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: e.id, value: e });
+      }
+
+      // Delta-deletes: anything in _knownKeys that's no longer in entries.
+      for (const oldKey of this._knownKeys) {
+        if (!currentIds.has(oldKey)) {
+          ops.push({ type: 'del', namespace: LEVEL_NAMESPACE, key: oldKey });
+        }
+      }
+
+      if (ops.length === 0) return;
+
+      const res = await window.store!.batch(ops);
+      if (res.error) {
+        console.error('[SessionStore] batch save failed:', res.error);
+        return;
+      }
+      this._knownKeys = currentIds;
+    } catch (err) {
+      console.error('[SessionStore] Failed to save (LevelDB):', err);
     }
   }
 
@@ -331,7 +539,23 @@ class SessionStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
+    if (this._useLevelDB) {
+      // Fire-and-forget: also nuke the LevelDB namespace so subsequent
+      // hydrates see an empty store. Errors are logged.
+      void (async () => {
+        try {
+          const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+          if (res.error) console.error('[SessionStore] clearNamespace failed:', res.error);
+        } catch (err) {
+          console.error('[SessionStore] Failed to clear LevelDB namespace:', err);
+        }
+      })();
+    }
     localStorage.removeItem(STORAGE_KEY);
+    // Reset the migration marker so a subsequent clear-then-import cycle
+    // treats the next non-empty localStorage payload as a fresh migration.
+    localStorage.removeItem(MIGRATION_MARKER_KEY);
+    this._knownKeys = new Set();
     this.notifyListeners();
   }
 }

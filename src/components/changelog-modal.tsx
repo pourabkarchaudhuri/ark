@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.61': {
+    title: "What's New in Ark 1.0.61",
+    changes: [
+      'Storage foundation — LevelDB (via classic-level) is now the persistence backend for the two most write-heavy stores: session history and status-change history. On first launch after upgrade, your existing session log and status history are migrated one-shot from localStorage to LevelDB and stamped with a marker. The original localStorage keys are preserved for one release as a rollback path.',
+      'Fast, non-blocking session writes — the 15-second session-tracker tick that used to synchronously JSON-stringify your entire session log to localStorage now writes to LevelDB in the main process. Save-during-play jank on those two paths is eliminated. The rest of the stores (library, journey, catalog, embeddings, …) will migrate one by one in subsequent releases.',
+      'New window.store API + IPC surface — get, getAll, put, del, batch, has, clearNamespace, with per-channel rate limiting as a safety net (Gap #25 fold-in). This is the platform every remaining store migration will build on.',
+      'Same public API, zero visible change — session and status-history stores keep the exact subscribe/notify shape, so every consumer (game-details, Voyage, Medals, telemetry, Oracle) sees no difference except that saves stop hitching.',
+    ],
+  },
   '1.0.60': {
     title: "What's New in Ark 1.0.60",
     changes: [

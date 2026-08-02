@@ -580,6 +580,20 @@ contextBridge.exposeInMainWorld('eventScraper', {
   clearCache: () => ipcRenderer.invoke('events:clearCache'),
 });
 
+// Expose LevelDB-backed persistent store (v1.0.61 foundation).
+// Renderer wrappers (per namespace) are landed in the parallel Migrate phase;
+// the raw surface exposed here is namespace-generic. Every call returns an
+// envelope object — `{ value }`, `{ rows }`, `{ ok }`, or `{ error }`.
+contextBridge.exposeInMainWorld('store', {
+  get: (ns, key) => ipcRenderer.invoke('store:get', ns, key),
+  getAll: (ns) => ipcRenderer.invoke('store:getAll', ns),
+  put: (ns, key, value) => ipcRenderer.invoke('store:put', ns, key, value),
+  del: (ns, key) => ipcRenderer.invoke('store:del', ns, key),
+  batch: (ops) => ipcRenderer.invoke('store:batch', ops),
+  has: (ns) => ipcRenderer.invoke('store:has', ns),
+  clearNamespace: (ns) => ipcRenderer.invoke('store:clearNamespace', ns),
+});
+
 // Only log exposed APIs in development to avoid leaking IPC surface in production
 if (process.env.NODE_ENV !== 'production') {
   console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.ann, window.analytics, window.devlog exposed');

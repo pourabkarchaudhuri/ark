@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.61] - 2026-08-02
+
+### Added
+- **LevelDB storage foundation.** New main-process module `electron/storage/level-store.ts` — single-owner `classic-level` instance at `%APPDATA%/ark/leveldb` with a namespace-prefixed key layout (`{namespace}::{key}`). Public API: `get`, `getAll`, `put`, `del`, `batch`, `stream`, `has`, `clearNamespace`, `close`. Values are JSON-encoded; errors surface as envelope shapes (`{ error }`) so the renderer can distinguish `null` values from transport failures. Graceful shutdown on `app.will-quit`.
+- **`store:*` IPC surface** (`electron/ipc/store-handlers.ts`) — wires the LevelStore API to the renderer via Electron IPC. Per-channel token-bucket rate limiting (500 calls/sec/channel keyed by `event.sender.id`) as a safety net against runaway renderer loops (Gap #25 fold-in).
+- **`window.store` preload exposure** (`electron/preload.cjs`) — matches the pattern of `window.ollama` / `window.updater`. TypeScript declarations in `src/vite-env.d.ts`.
+- **Two proof-of-concept store migrations.**
+  - `src/services/session-store.ts` — namespace `session`. Public API unchanged (sync reads via in-memory cache; async hydrate on `initialize()`). One-shot migration from `localStorage['ark-session-history']` to LevelDB on first boot after upgrade, stamped with `localStorage['ark-session-history-migrated-v1']`. Original key preserved for one release as rollback. Fallback to localStorage path when `window.store` is undefined (dev browser, tests, boot window before preload).
+  - `src/services/status-history-store.ts` — namespace `status-history`. Same pattern.
+- **Test coverage for the migration paths** — `session-store.test.ts` (11 new tests, previously 0) and `status-history-store.test.ts` (7 new tests). Full suite grew 911 → 929 passing.
+
+### Under the hood
+- `classic-level ^3.0.0` added to `package.json:dependencies`. Ships prebuilt Windows x64 binaries; no rebuild step needed at electron-builder time.
+- Session-store write path still 300 ms-debounced; delta batch includes `del` ops for entries that disappeared. Fire-and-forget async so `importData()`'s sync contract is preserved.
+- Status-history-store constructor is fully sync for boot-time consumers; `initializeAsync()` runs the LevelDB hydrate + `notifyListeners()` so any subscriber that rendered off stale localStorage repaints.
+
+### Deferred
+- Chunked streaming for large namespaces — the `store:stream` IPC handler ships in a follow-up release when catalog-store (155k rows) migrates.
+- Other renderer stores (library, journey, custom-game, reco, catalog, epic-catalog, ann-index, tracker-overhead) migrate in subsequent v1.0.62+ releases.
+
 ## [1.0.60] - 2026-08-01
 
 ### Fixed

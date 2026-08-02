@@ -1,19 +1,37 @@
-# Ark v1.0.60 — Phase 0 hotfix: tracker, card status, reranker, FitGirl removal
+# Ark v1.0.61 — LevelDB storage foundation
 
-Four production-blocking bugs fixed in one release. Phase 0 of the "optimise everything except the visuals" roadmap.
+First slice of the "optimise everything except the visuals" migration. LevelDB (via `classic-level`) is now the persistence backend for the two most write-heavy stores. On first launch, your existing data is migrated one-shot from localStorage to LevelDB. Zero visible UI change; save-during-play jank on those two paths is gone.
 
-## Fixed
+## Added
 
-- **Tracker sessions never end when PowerShell path snapshot fails.** After v1.0.51's async-poll rewrite, any PS timeout under AV/GPU load left `_runningPaths` populated with a stale snapshot. `isProcessRunning` returned `true` from that stale set — `missedPolls` never accumulated, `session:ended` never fired, hours climbed forever. Fix: PS-catch now clears `_runningPaths` and sets a new `_pathSnapshotStale` flag; `isProcessRunning` falls back to basename matching only when the flag is set. `session:ended` fires reliably again within 60 s of a real close.
-- **Card status changes now update the grid immediately.** `useDeferredFilterSort`'s memo fingerprint had no per-game content signal, so a status pill flip left the grid rendering pre-change references — the pill snapped back until you touched a filter or reloaded. Library and custom-game stores now expose a `getVersion()` monotonic counter, dashboard folds it into the fingerprint, small library views recompute synchronously on version bumps.
-- **Reranker no longer thrashes for 24 hours.** Native `/api/rerank` was missing `keep_alive: -1`. On single-GPU boxes bge-reranker unloaded every 5 min and every subsequent call paid a 30–80 s model reload — thrash-swapping with pinned arctic-embed2. Wave 3 (v1.0.59) restored ES neighbor rerank on every graph click, exposing the latent bug on every user interaction. Fix: `keep_alive: -1` in the rerank body; neighbor-rerank cache TTL bumped 45 s → 10 min so path-walking stops re-firing IPC. Expected: 24 h → ~5 min per reco cycle; interactive rerank clicks 30–80 s → <1 s.
-- **FitGirl integration completely removed.** Ark no longer carries any piracy-adjacent code. `src/services/fitgirl-service.ts` deleted. All 11 reference sites in `game-details.tsx` trimmed. Test mock removed. Proxy allow-list emptied. `docs/known-gaps.md #2 (TLS bypass)` marked resolved — the bypass existed solely for FitGirl.
+- **`electron/storage/level-store.ts`** — single-owner LevelDB instance at `%APPDATA%/ark/leveldb`. Namespaced key layout (`{namespace}::{key}`). Public API: `get`, `getAll`, `put`, `del`, `batch`, `stream`, `has`, `clearNamespace`, `close`. JSON-encoded values, envelope-shaped errors so the renderer distinguishes `null` from transport failures.
+- **`store:*` IPC surface** (`electron/ipc/store-handlers.ts`) — per-channel token-bucket rate limit (500/sec/channel keyed by `event.sender.id`) as a safety net against runaway renderer loops. Folds in Gap #25.
+- **`window.store`** preload exposure. Type declarations in `src/vite-env.d.ts`.
 
-## Housekeeping
+## Migrated
 
-- `docs/known-gaps.md #33 (dead theme picker)` and `#34 (Azure/Anthropic settings not consumed)` marked resolved — both had already been fixed in-code pre-v1.0.60; the doc was stale.
+- **`src/services/session-store.ts`** → namespace `session`. Public API unchanged. On first boot after upgrade, `localStorage['ark-session-history']` is copied one-shot to LevelDB and stamped with a marker. The original localStorage key is preserved for one release as rollback. If `window.store` is undefined (dev browser, test env, boot window before preload), the store transparently falls back to localStorage.
+- **`src/services/status-history-store.ts`** → namespace `status-history`. Same migration + fallback pattern.
+
+Both stores keep 300 ms-debounced writes and the exact subscribe/notify semantics. Every consumer (game-details, Voyage, Medals, telemetry, Oracle) sees no difference except that the 15-second session-tracker tick stops hitching.
+
+## Tests
+
+- `src/services/session-store.test.ts` — 11 new tests (previously 0). Covers localStorage fallback, LevelDB hydration + subscriber notification, IPC-error fallback, migration + marker + rollback-key preservation, marker-present skip, non-empty-namespace skip, empty-payload marker stamp, 300 ms debounce batch, `clear()` wiping the namespace.
+- `src/services/status-history-store.test.ts` — 7 new tests covering public-API parity, first-boot migration, post-migration hydration, debounce burst, `clear()` behaviour.
+- Full suite: **911 → 929 passing.** Electron + renderer typecheck clean. Vite build clean.
+
+## Under the hood
+
+- `classic-level ^3.0.0` added. Prebuilt Windows x64 binaries ship with the package — no rebuild step at electron-builder time.
+- Graceful `close()` wired to `app.will-quit` so the DB flushes cleanly on shutdown.
+- Rate-limit trip returns `{ error: 'rate_limited' }` and logs a warning; renderer stores never hit this in practice.
+
+## Deferred to future releases
+
+- **Chunked streaming** for large namespaces — ships when catalog-store (155k rows) migrates.
+- **Other renderer stores** (library, journey, custom-game, reco, catalog, epic-catalog, ann-index, tracker-overhead) migrate one at a time in v1.0.62+.
 
 ---
 
-**Tests:** 911/911 passing. Electron and renderer typecheck clean.
-**Data compatibility:** No IDB migration. No user-visible resets. Existing sessions, library, embeddings all preserved.
+**Data compatibility:** No user-visible reset. Existing localStorage session + status-history data is copied automatically on first launch. Rollback path is preserved.
