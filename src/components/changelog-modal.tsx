@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.60': {
+    title: "What's New in Ark 1.0.60",
+    changes: [
+      'Tracker sessions end reliably even when PowerShell path snapshot fails — v1.0.51\'s async-poll rewrite left `_runningPaths` populated with a stale snapshot when PS timed out, so games that had already exited still looked "running" and sessions never finalised. Fixed: the failed PS path snapshot now clears the path set and marks it stale; `isProcessRunning` falls back to basename matching only. `session:ended` fires within 60 s of a real close again.',
+      'Card status changes now update the grid immediately — clicking the status pill on a Library card used to work at the store level but the grid did not repaint until you touched a filter or reloaded. Root cause: `useDeferredFilterSort`\'s memo fingerprint had no per-game content signal (length + first/last id were unchanged on an in-place edit). Fix: library + custom-game stores now expose a version counter, dashboard subscribes via `useSyncExternalStore`, fingerprint folds it in, and small library views recompute synchronously on version bumps.',
+      'Reranker no longer thrashes for 24 hours — the native `/api/rerank` request body was missing `keep_alive: -1`, so `bge-reranker-v2-m3` (~1.2 GB) unloaded after Ollama\'s 5-min idle and every subsequent call paid a 30–80 s model reload. On single-GPU boxes it thrash-swapped with pinned arctic-embed2, silently absorbed by the 120 s timeout. Fixed at `electron/ipc/ollama-handlers.ts:108`. Neighbor-rerank cache TTL bumped 45 s → 10 min so Embedding Space path-walking (Wave 3) stops re-firing rerank IPC. Expected: 24-hour reco cycles collapse to ~5 min; interactive ES rerank clicks drop from 30–80 s to <1 s.',
+      'FitGirl integration removed — Ark no longer carries any piracy-adjacent code. `src/services/fitgirl-service.ts` deleted; game-details render block + fetch effect + state hooks all trimmed; test mock removed; proxy allow-list emptied. `docs/known-gaps.md #2 (TLS bypass)` marked resolved because the only bypass reason was FitGirl.',
+    ],
+  },
   '1.0.59': {
     title: "What's New in Ark 1.0.59",
     changes: [

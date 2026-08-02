@@ -23,11 +23,6 @@ vi.mock('@/services/prefetch-store', () => ({
   isPrefetchReady: vi.fn(() => false),
 }));
 
-// Mock fitgirl-service — avoids network calls
-vi.mock('@/services/fitgirl-service', () => ({
-  getRepackLinkForGame: vi.fn().mockResolvedValue(null),
-}));
-
 // Ark similar games — avoid IndexedDB + ANN in tests
 vi.mock('@/services/similar-games', () => ({
   getSimilarGamesForDetails: vi.fn().mockResolvedValue({ status: 'ann_unavailable', items: [] }),

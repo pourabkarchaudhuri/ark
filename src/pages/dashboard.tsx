@@ -229,6 +229,17 @@ export function Dashboard() {
     return () => cancelIdleCallback(id);
   }, []);
   const galaxyStage = useSyncExternalStore(subscribeGalaxy, getBuildStage);
+  // v1.0.60 fix: library + custom-game store versions fold into
+  // `useDeferredFilterSort`'s fingerprint so status-pill flips (which don't
+  // change array length or endpoint IDs) still invalidate the memo.
+  const libraryVersion = useSyncExternalStore(
+    (cb) => {
+      const unsub1 = libraryStore.subscribe(cb);
+      const unsub2 = customGameStore.subscribe(cb);
+      return () => { unsub1(); unsub2(); };
+    },
+    () => libraryStore.getVersion() + customGameStore.getVersion(),
+  );
   const galaxyBuilding = galaxyStage === 'scheduled' || galaxyStage === 'waiting' || galaxyStage === 'running';
   // Ollama availability — drives whether Embedding Space is accessible
   const [ollamaUnavailable, setOllamaUnavailable] = useState(false);
@@ -368,6 +379,7 @@ export function Dashboard() {
       sortDirection,
       liveGameIds: liveGames,
       allowAdultContent,
+      libraryVersion,
     });
 
   // In Library view, use the hook result only when it's actually the library list (every

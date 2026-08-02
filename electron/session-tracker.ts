@@ -97,6 +97,16 @@ const MISSES_BEFORE_END = 4;
 let _runningBasenames: Set<string> = new Set();
 /** Cache of lowercased full executable paths from the most recent snapshot. */
 let _runningPaths: Set<string> = new Set();
+/**
+ * True when the PowerShell path snapshot failed on the most recent tick, so
+ * `_runningPaths` is either empty or from an older tick that no longer reflects
+ * reality. When set, `isProcessRunning` must NOT trust `_runningPaths` — it
+ * falls back to basename matching only. Without this, a game that has just
+ * exited but was in the previous good `_runningPaths` snapshot appears
+ * "running" forever and `MISSES_BEFORE_END` never accumulates, so
+ * `session:ended` is never emitted (v1.0.60 tracker-never-ends bug).
+ */
+let _pathSnapshotStale = false;
 
 /**
  * Basenames we have already warned about falling back to basename-only
@@ -147,11 +157,19 @@ async function refreshProcessSnapshot(): Promise<void> {
           if (trimmed) paths.add(trimmed.toLowerCase());
         }
       } catch {
-        // PowerShell path snapshot failed — we fall through to basename matching.
-        // Don't clobber the previous _runningPaths, in case this was a transient failure.
+        // PowerShell path snapshot failed. The basename snapshot on line 136
+        // is FRESH, so a game that just exited will be absent from it. But if
+        // we leave `_runningPaths` populated with the previous good snapshot,
+        // `isProcessRunning` will still say "yes, it's running" from the stale
+        // path — `missedPolls` never increments and `session:ended` never
+        // fires. Clear the path set and mark it stale so `isProcessRunning`
+        // falls back to basename-only for this tick.
+        _runningPaths = new Set();
+        _pathSnapshotStale = true;
         return;
       }
       _runningPaths = paths;
+      _pathSnapshotStale = false;
     } else {
       // macOS / Linux — `ps -eo comm=,command=` prints basename + full command per line
       const output = await runCommand('ps -eo comm=,command=', { timeout: 5000 });
@@ -170,9 +188,14 @@ async function refreshProcessSnapshot(): Promise<void> {
       }
       _runningBasenames = names;
       _runningPaths = paths;
+      _pathSnapshotStale = false;
     }
   } catch {
-    // If the snapshot fails, keep the previous sets — better stale than empty
+    // Outer snapshot failed (e.g. `tasklist` itself threw). Both sets are now
+    // untrustworthy — clear paths and mark stale so we don't keep counting a
+    // just-exited game as running from an older snapshot.
+    _runningPaths = new Set();
+    _pathSnapshotStale = true;
   }
 }
 
@@ -187,15 +210,17 @@ async function refreshProcessSnapshot(): Promise<void> {
 function isProcessRunning(exePath: string): boolean {
   const normalizedPath = exePath.toLowerCase();
 
-  // Primary: exact full-path match
-  if (_runningPaths.has(normalizedPath)) return true;
+  // Primary: exact full-path match. Only trusted when the path snapshot is
+  // fresh — a stale set from an old good snapshot would keep just-exited
+  // games "running" forever (v1.0.60 tracker-never-ends bug).
+  if (!_pathSnapshotStale && _runningPaths.has(normalizedPath)) return true;
 
   // Fallback: basename match. Only trust it if we can't identify by path.
   const basename = path.basename(exePath).toLowerCase();
   if (_runningBasenames.has(basename)) {
     // Warn once per basename per app run — if _runningPaths is populated but
     // this exact path isn't in it, we're guessing based on a common filename.
-    if (_runningPaths.size > 0 && !_basenameCollisionWarned.has(basename)) {
+    if (!_pathSnapshotStale && _runningPaths.size > 0 && !_basenameCollisionWarned.has(basename)) {
       _basenameCollisionWarned.add(basename);
       logger.warn(
         `[SessionTracker] Basename-only match for "${basename}" — the full path ` +

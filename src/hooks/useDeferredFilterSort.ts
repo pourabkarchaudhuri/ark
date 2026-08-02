@@ -48,6 +48,14 @@ export interface FilterSortInput {
   librarySearchIndex?: SearchIndexEntry[] | null;
   /** When false, games classified as adult (by description) are hidden. Default off. */
   allowAdultContent?: boolean;
+  /**
+   * Monotonically-bumped counter reflecting library/custom-game mutations.
+   * Included in the fingerprint so per-game content changes (e.g. status
+   * updates that don't change array length or endpoint IDs) still invalidate
+   * the memo. Without this, the fingerprint was structurally blind to in-place
+   * content edits — the v1.0.60 card-status-selection-broken bug.
+   */
+  libraryVersion?: number;
 }
 
 export interface FilterSortOutput {
@@ -469,7 +477,13 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
   // Uses React's "setState during render" pattern to avoid queue conflicts
   // with the deferred startTransition path. Ensures Top Sellers etc. show the
   // full list immediately when the hook receives the larger set, not one frame later.
+  //
+  // v1.0.60 fix: also recompute synchronously on library-version bumps for
+  // small library-view datasets. A status pill change doesn't change array
+  // length but does change per-game content — the deferred path would still
+  // eventually catch up, but the pill visually snapped back until then.
   const prevDataLenRef = useRef(input.currentGames.length);
+  const prevLibVersionRef = useRef(input.libraryVersion ?? 0);
   if (input.currentGames.length !== prevDataLenRef.current) {
     const prevLen = prevDataLenRef.current;
     const nextLen = input.currentGames.length;
@@ -477,6 +491,16 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
     const emptyToPopulated = prevLen === 0 && nextLen > 0;
     const smallDatasetGrew = nextLen <= 200 && nextLen > prevLen;
     if (emptyToPopulated || smallDatasetGrew) {
+      const fresh = computeAll(augmentInput(input));
+      hasPopulated.current = true;
+      setOutput(fresh);
+    }
+  } else if ((input.libraryVersion ?? 0) !== prevLibVersionRef.current) {
+    // Length unchanged but content changed (status pill flip, priority edit).
+    // Cheap synchronous recompute for small library views; deferred path
+    // handles large browse datasets via the fingerprint-gated effect below.
+    prevLibVersionRef.current = input.libraryVersion ?? 0;
+    if (input.viewMode === 'library' && input.currentGames.length <= 500) {
       const fresh = computeAll(augmentInput(input));
       hasPopulated.current = true;
       setOutput(fresh);
@@ -495,7 +519,12 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
   const livePart = input.viewMode === 'library' ? liveCount : '';
   const adultPart = input.allowAdultContent === true ? '1' : '0';
   const pendingPart = input.browseSearchPending ? '1' : '0';
-  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${pendingPart}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${storeKey}|${input.filters.category}|${input.sortBy}|${input.sortDirection}|${livePart}|${adultPart}`;
+  // v1.0.60 fix: include libraryVersion so per-game content mutations (status
+  // pill change on a library card) invalidate the memo. The rest of the
+  // fingerprint is structurally blind to in-place edits (length + endpoint IDs
+  // don't change when a game's status flips).
+  const libVersionPart = input.libraryVersion ?? 0;
+  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${pendingPart}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${storeKey}|${input.filters.category}|${input.sortBy}|${input.sortDirection}|${livePart}|${adultPart}|${libVersionPart}`;
 
   // ── Inline recompute on viewMode transition ───────────────────────────
   // For small datasets we compute synchronously so the grid paints immediately.

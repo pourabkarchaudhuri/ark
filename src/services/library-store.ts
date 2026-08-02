@@ -81,6 +81,14 @@ class LibraryStore {
    * status/collection changes.
    */
   private hoursListeners: Set<() => void> = new Set();
+  /**
+   * Monotonic version counter bumped by every non-hours mutation. Enables cheap
+   * `useSyncExternalStore` snapshots for consumers that need to know "did the
+   * library change?" without pulling the full entry list. Used by
+   * `useDeferredFilterSort` to fold per-game content edits (status pill flips)
+   * into its memo fingerprint — the v1.0.60 card-status-broken bug.
+   */
+  private _version = 0;
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
   private _sortedCache: LibraryGameEntry[] | null = null;
@@ -239,10 +247,16 @@ class LibraryStore {
   }
 
   private notifyListeners() {
+    this._version++;
     this.listeners.forEach((listener) => listener());
     // Regular mutations are a superset — anyone watching hours also cares
     // about status/collection changes (which can change hoursPlayed too).
     this.hoursListeners.forEach((listener) => listener());
+  }
+
+  /** Monotonic counter — bumps on every non-hours mutation. */
+  getVersion(): number {
+    return this._version;
   }
 
   /** Fire ONLY the hours channel — used by updateHoursFromSessions. */

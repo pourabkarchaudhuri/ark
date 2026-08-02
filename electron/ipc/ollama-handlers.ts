@@ -105,7 +105,13 @@ async function rerankViaNativeEndpoint(
     res = await fetch(`${baseUrl}/api/rerank`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, query, documents, top_n: topN }),
+      // v1.0.60 fix: pin bge-reranker in memory forever. Without keep_alive,
+      // Ollama unloads the ~1.2 GB model after its default 5 min idle. Every
+      // subsequent call pays a 30–80 s reload — and if arctic-embed2 (which
+      // IS pinned) is called between two rerank calls on a single-GPU box
+      // with OLLAMA_NUM_PARALLEL=1, the two models thrash-swap. Wave 3's
+      // ES neighbor rerank made this the top perf bug (24 h reco cycles).
+      body: JSON.stringify({ model, query, documents, top_n: topN, keep_alive: -1 }),
       signal: ac.signal,
     });
   } catch (err) {

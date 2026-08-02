@@ -12,7 +12,12 @@ export const DEFAULT_OLLAMA_RERANK_MODEL = 'dengcao/bge-reranker-v2-m3';
 /** Max candidates passed to heuristic rerank before Ollama rerank (matches ANN over-fetch scale). */
 export const NEIGHBOR_HEURISTIC_POOL = 72;
 
-const NEIGHBOR_RERANK_CACHE_TTL_MS = 45_000;
+// v1.0.60: bumped 45 s → 10 min so path-walk / repeat-selection through
+// Embedding Space (Wave 3 restored ES neighbor rerank on every click) doesn't
+// re-fire /api/rerank IPC for the same anchor within a browsing session.
+// Interactive cost drops to zero on cache hit, and the LRU-style prune below
+// still keeps memory bounded.
+const NEIGHBOR_RERANK_CACHE_TTL_MS = 600_000;
 const neighborRerankCache = new Map<string, { neighbors: NeighborInfo[]; status: NeighborRerankStatus; expires: number }>();
 
 function pruneNeighborRerankCache(now: number = Date.now()) {

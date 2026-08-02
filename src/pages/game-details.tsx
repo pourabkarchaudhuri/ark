@@ -43,7 +43,6 @@ import { customGameStore } from '@/services/custom-game-store';
 import { sessionStore } from '@/services/session-store';
 import { GameDialogInitialEntry } from '@/components/game-dialog';
 import { useToast } from '@/components/ui/toast';
-import { getRepackLinkForGame } from '@/services/fitgirl-service';
 import { steamService } from '@/services/steam-service';
 import { epicService } from '@/services/epic-service';
 import { gameService } from '@/services/game-service';
@@ -738,8 +737,6 @@ export function GameDetailsPage() {
   const [similarGamesPhase, setSimilarGamesPhase] = useState<SimilarGamesSectionPhase>('hidden');
   const [annReady, setAnnReady] = useState(() => annIndex.isReady);
   const [annBuilding, setAnnBuilding] = useState(() => annIndex.isBuilding);
-  const [fitgirlRepack, setFitgirlRepack] = useState<{ url: string; downloadLink: string | null } | null>(null);
-  const [fitgirlLoading, setFitgirlLoading] = useState(false);
   const [isRecommendationsPaused, setIsRecommendationsPaused] = useState(false);
   const [steamNews, setSteamNews] = useState<SteamNewsItem[]>([]);
   const [steamNewsLoading, setSteamNewsLoading] = useState(false);
@@ -996,8 +993,6 @@ export function GameDetailsPage() {
       setHeaderImageLoaded(false);
       setSimilarGames([]);
       setSimilarGamesPhase('hidden');
-      setFitgirlRepack(null);
-      setFitgirlLoading(false);
       setIsRecommendationsPaused(false);
       setEpicNews([]);
       setEpicNewsLoading(false);
@@ -1480,38 +1475,7 @@ export function GameDetailsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gameId, hasDetails, annReady, annBuilding, details?.name, epicGame?.title]);
 
-  // Fetch FitGirl repack link (asynchronously, after main content)
-  useEffect(() => {
-    const gameName = details?.name || epicGame?.title;
-    if (!gameName) {
-      return;
-    }
-
-    const controller = new AbortController();
-
-    const fetchFitgirlRepack = async () => {
-      setFitgirlLoading(true);
-      try {
-        const repackData = await getRepackLinkForGame(gameName);
-        if (!controller.signal.aborted) {
-          setFitgirlRepack(repackData);
-        }
-      } catch (err) {
-        console.warn('[GameDetails] Failed to fetch FitGirl repack:', err);
-        if (!controller.signal.aborted) {
-          setFitgirlRepack(null);
-        }
-      } finally {
-        if (!controller.signal.aborted) setFitgirlLoading(false);
-      }
-    };
-
-    fetchFitgirlRepack();
-
-    return () => {
-      controller.abort();
-    };
-  }, [details?.name, epicGame?.title]);
+  // v1.0.60: FitGirl repack lookup removed — Ark no longer carries any piracy-adjacent code.
 
   // Fetch Steam news for this game (IPC with fetch fallback)
   useEffect(() => {
@@ -2150,8 +2114,6 @@ export function GameDetailsPage() {
                 setHeaderImageLoaded={setHeaderImageLoaded}
                 similarGames={similarGames}
                 similarGamesPhase={similarGamesPhase}
-                fitgirlRepack={fitgirlRepack}
-                fitgirlLoading={fitgirlLoading}
                 isRecommendationsPaused={isRecommendationsPaused}
                 setIsRecommendationsPaused={setIsRecommendationsPaused}
                 similarGamesScrollRef={similarGamesScrollRef}
@@ -2209,8 +2171,6 @@ export function GameDetailsPage() {
             setHeaderImageLoaded={setHeaderImageLoaded}
             similarGames={similarGames}
             similarGamesPhase={similarGamesPhase}
-            fitgirlRepack={fitgirlRepack}
-            fitgirlLoading={fitgirlLoading}
             isRecommendationsPaused={isRecommendationsPaused}
             setIsRecommendationsPaused={setIsRecommendationsPaused}
             similarGamesScrollRef={similarGamesScrollRef}
@@ -2277,8 +2237,6 @@ interface GameDetailsContentProps {
   setHeaderImageLoaded: (loaded: boolean) => void;
   similarGames: SimilarGameCard[];
   similarGamesPhase: SimilarGamesSectionPhase;
-  fitgirlRepack: { url: string; downloadLink: string | null } | null;
-  fitgirlLoading: boolean;
   isRecommendationsPaused: boolean;
   setIsRecommendationsPaused: (paused: boolean) => void;
   similarGamesScrollRef: React.RefObject<HTMLDivElement>;
@@ -2320,8 +2278,6 @@ const GameDetailsContent = memo(function GameDetailsContent({
   setHeaderImageLoaded,
   similarGames,
   similarGamesPhase,
-  fitgirlRepack,
-  fitgirlLoading,
   isRecommendationsPaused: _isRecommendationsPaused, // Used for scrolling pause state
   setIsRecommendationsPaused,
   similarGamesScrollRef,
@@ -3344,39 +3300,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
                 </Button>
               )}
 
-              {/* FitGirl Repack Link */}
-              {fitgirlLoading ? (
-                <div className="h-10 w-full rounded-md bg-white/5 border border-white/10 animate-pulse" />
-              ) : fitgirlRepack && (fitgirlRepack.downloadLink || fitgirlRepack.url) ? (
-                <div className="space-y-2">
-                  {fitgirlRepack.downloadLink ? (
-                    <Button
-                      variant="outline"
-                      className="w-full border-green-500/50 hover:bg-green-500/10 text-green-400"
-                      onClick={() => {
-                        if (fitgirlRepack.downloadLink) {
-                          openExternalUrl(fitgirlRepack.downloadLink);
-                        }
-                      }}
-                    >
-                      <Download className="w-3 h-3 mr-2" />
-                      Download Repack
-                    </Button>
-                  ) : null}
-                  <Button
-                    variant="ghost"
-                    className="w-full text-sm text-white/70 hover:text-white"
-                    onClick={() => openExternalUrl(fitgirlRepack.url)}
-                  >
-                    <ExternalLink className="w-3 h-3 mr-2" />
-                    View on FitGirl
-                  </Button>
-                </div>
-              ) : (
-                <div className="text-center py-2 text-white/40 text-xs">
-                  No FitGirl repack found
-                </div>
-              )}
+              {/* v1.0.60: FitGirl repack section removed — Ark no longer surfaces piracy links. */}
             </div>
 
             {/* Details Card */}

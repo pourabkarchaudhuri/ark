@@ -11,9 +11,11 @@ const electron = require('electron');
 const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
 
-const PROXY_FETCH_ALLOWED_DOMAINS = [
-  'fitgirl-repacks.site',
-];
+// v1.0.60: `fitgirl-repacks.site` was the only allowed host. With the FitGirl
+// integration removed, the allow-list is empty. The IPC handler stays wired
+// so any lingering caller gets a graceful reject rather than a crash; the
+// preload surface can be removed in a follow-up sweep.
+const PROXY_FETCH_ALLOWED_DOMAINS: string[] = [];
 
 const MAX_RESPONSE_SIZE = 5 * 1024 * 1024; // 5 MB
 

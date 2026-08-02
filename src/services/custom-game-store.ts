@@ -42,6 +42,8 @@ class CustomGameStore {
   private entries: Map<string, CustomGameEntry> = new Map(); // keyed by "custom-N"
   private nextCounter: number = 1; // Start from 1, increment for each new game
   private listeners: Set<() => void> = new Set();
+  /** Monotonic version counter — see LibraryStore.getVersion() for rationale. */
+  private _version = 0;
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -198,7 +200,13 @@ class CustomGameStore {
   }
 
   private notifyListeners() {
+    this._version++;
     this.listeners.forEach((listener) => listener());
+  }
+
+  /** Monotonic counter — bumps on every mutation. */
+  getVersion(): number {
+    return this._version;
   }
 
   // Add a custom game

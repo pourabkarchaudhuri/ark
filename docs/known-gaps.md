@@ -13,10 +13,8 @@ The Steam Web API key is hardcoded in `electron/steam-api.ts`. Moving it to user
 
 **Why deferred:** Needs new UI flow (settings panel entry + validation), migration path for existing installs, and fallback behavior if no key is provided.
 
-### 2. SSL Certificate Validation Disabled
-`NODE_TLS_REJECT_UNAUTHORIZED=0` is set in `electron/main.ts` to allow HTTPS requests to `fitgirl-repacks.site`, which has certificate issues. Re-enabling strict TLS would break FitGirl repack lookups.
-
-**Why deferred:** The target site (`fitgirl-repacks.site`) intermittently serves invalid certificates. Fixing requires either a site-scoped TLS override (custom agent per request) or dropping FitGirl integration entirely.
+### 2. SSL Certificate Validation Disabled — RESOLVED in v1.0.60
+`NODE_TLS_REJECT_UNAUTHORIZED=0` was set in `electron/main.ts` solely for `fitgirl-repacks.site`. With the FitGirl integration fully removed in v1.0.60, the bypass has been reverted and strict TLS is enforced globally again.
 
 ### 3. No Content Security Policy (CSP)
 The application loads resources from many external origins (Steam CDN, Epic CDN, IGDB, YouTube embeds, etc.). A strict CSP would require an exhaustive allowlist that is difficult to maintain and could break image/video loading.
@@ -109,10 +107,8 @@ The session tracking implementation in `electron/session-tracker.ts` uses Window
 
 **Why deferred:** Cross-platform process detection requires platform-specific implementations (e.g., `ps` on macOS/Linux). The app currently only ships for Windows.
 
-### 30. News Service Lacks Cancellation Support
-The news service (`src/services/news-service.ts`) does not support cancellation of in-flight fetch requests. If the user navigates away from the Buzz view while news is loading, the requests continue in the background.
-
-**Why deferred:** Adding cancellation requires changing the service API signature to accept an `AbortSignal`, plus updating all call sites. The requests are lightweight and complete quickly.
+### 30. News Service Lacks Cancellation Support — DEFERRED (already mitigated at UI layer)
+The service still accepts no `AbortSignal`, but the sole caller `buzz-view.tsx:1028` uses an `abortedRef.current` guard around all `setState` calls so late responses no longer cause stale-state bugs. Adding `AbortSignal` plumbing would free network sockets ~2 s sooner on nav-away but has no observable user impact. Re-evaluate if the fetches ever become expensive.
 
 ### 31. Epic Catalog Limited Luminance Signals
 Epic Games Store does not expose review scores or review counts via its API. Epic nodes in the galaxy map lack `steamPositivity` / `steamReviewCount` signals, but still benefit from `userRating`, `mlRecRate`, and `metacriticScore` when available. Luminance falls back to a neutral 0.5 only when all signals are absent.
@@ -143,15 +139,11 @@ Phase A ships lazy dual-format facet chunks (`chunk-embeddings` + int8 pooled ro
 
 ---
 
-### 33. Color Theme Picker Not Wired
-The Appearance tab in settings saves the selected accent color to `localStorage('ark-accent-color')`, but no code reads this value to apply it to the UI. The app uses hardcoded Tailwind fuchsia classes. Wiring the theme requires either CSS custom properties or a React context that maps the stored color to Tailwind class variants.
+### 33. Color Theme Picker Not Wired — RESOLVED (already removed pre-v1.0.60)
+No `ark-accent-color` writes remain in the codebase and the Appearance tab does not surface a picker. Only `--ark-accent` CSS vars in `src/overlay/overlay.css` remain, and they are static (not user-configurable). No action needed.
 
-**Why deferred:** Requires a theme provider that dynamically swaps Tailwind classes across all components. Significant refactor touching dozens of files.
-
-### 34. Azure OpenAI / Anthropic Settings Not Consumed
-The AI Models tab saves Azure OpenAI and Anthropic configuration to localStorage, but the AI chat backend (`electron/ai-chat.ts`) only supports Ollama and Gemini providers. The settings are persisted but have no effect on AI behavior.
-
-**Why deferred:** Integrating Azure OpenAI requires `@langchain/openai` with Azure-specific config, and Anthropic requires `@langchain/anthropic`. Both need changes to the unified LLM proxy in `ai-chat.ts` to add provider selection logic.
+### 34. Azure OpenAI / Anthropic Settings Not Consumed — RESOLVED (already wired pre-v1.0.60)
+`electron/ai-chat.ts` now handles both providers (`azure-openai` branch at ~line 111, `anthropic` branch at ~line 138). Both providers ship as first-class picks in the chat provider dropdown. No action needed.
 
 ---
 
