@@ -14,7 +14,7 @@
  */
 
 import { annIndex } from './ann-index';
-import { getEmbeddingDB, readPooledVector, type CachedEmbedding as PooledEmbedding } from './embedding-service';
+import { getAllPooledEmbeddingsForGraph } from './embedding-service';
 
 export interface GraphScores {
   pageRank: number;
@@ -183,37 +183,18 @@ export function copyScoresForPersist(scores: GraphScoreBuffers): GraphScoreBuffe
 
 interface GraphEmbeddingRow { gameId: string; embedding: number[] }
 
-/** Read every cached embedding from both library and catalog stores (decode boundary). */
+/**
+ * Read every cached embedding from both library and catalog pooled stores.
+ * Routed entirely through `embedding-service.ts`'s public
+ * `getAllPooledEmbeddingsForGraph()` so this file never needs to know which
+ * storage backend (IndexedDB or LevelDB) actually holds the data.
+ */
 async function readAllEmbeddings(): Promise<GraphEmbeddingRow[]> {
-  let db: IDBDatabase;
   try {
-    db = await getEmbeddingDB();
+    return await getAllPooledEmbeddingsForGraph();
   } catch {
     return [];
   }
-  const all: GraphEmbeddingRow[] = [];
-  const seen = new Set<string>();
-  for (const storeName of ['embeddings', 'catalog-embeddings']) {
-    if (!db.objectStoreNames.contains(storeName)) continue;
-    await new Promise<void>((resolve) => {
-      const tx = db.transaction(storeName, 'readonly');
-      const req = tx.objectStore(storeName).getAll();
-      req.onsuccess = () => {
-        for (const entry of (req.result as PooledEmbedding[])) {
-          if (!entry?.gameId) continue;
-          const vec = readPooledVector(entry);
-          if (!vec) continue;
-          if (seen.has(entry.gameId)) continue;
-          seen.add(entry.gameId);
-          all.push({ gameId: entry.gameId, embedding: Array.from(vec) });
-        }
-        resolve();
-      };
-      req.onerror = () => resolve();
-    });
-  }
-  // Do not close the shared embedding DB — owned by embedding-service.
-  return all;
 }
 
 class GameGraphStore {

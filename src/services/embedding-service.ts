@@ -321,6 +321,371 @@ export function getEmbeddingDB(): Promise<IDBDatabase> {
   return getDB();
 }
 
+// ─── LevelDB migration (v1.0.67) ────────────────────────────────────────────
+//
+// Same hardened pattern established in catalog-store.ts / epic-catalog-store.ts
+// (v1.0.65, refined after an adversarial review found 6 real bugs in the first
+// draft): no `store.has()`-based "already migrated" shortcut — a crashed prior
+// attempt that wrote some rows would satisfy that check and permanently
+// orphan the rest. No trust in a single meta value's presence as a proxy for
+// "does data exist." The migration marker + meta counts are stamped only
+// after a FULL successful stream, using the ACTUAL migrated counts. A failed
+// attempt never permanently blocks a later retry (in-session or a future
+// launch). Concurrent callers share one in-flight migration via a memoized
+// promise.
+//
+// Namespace layout (all in the same LevelDB used by every other store):
+//   embed-library  — Tier 1 pooled embeddings, key = gameId.
+//   embed-catalog  — Tier 2 pooled embeddings, key = gameId (steam-/epic- prefixed).
+//   embed-chunks   — facet chunks, DENORMALIZED: key = `${tier}:${gameId}`,
+//                    value = CachedChunk[] for that exact (tier,gameId) pair.
+//                    This directly replaces IDB's `byTierGame` index (used by
+//                    4 call sites) with a single point lookup instead of an
+//                    index range scan. IDB's `byGame` index (cross-tier, used
+//                    by the exported `getChunksForGame` — confirmed to have
+//                    ZERO callers anywhere in the codebase today) is not
+//                    replicated as its own structure; `getChunksForGame`
+//                    below falls back to a full-namespace scan + filter on
+//                    the LevelDB path, which is fine since nothing calls it.
+//   embed-meta     — small KV: embeddingContentEpoch, rechunk-job watermark,
+//                    steam-catalog / epic-catalog embedding-pass watermarks.
+//
+// LevelDB values are JSON-encoded — an Int8Array does NOT survive
+// JSON.stringify/parse (it round-trips as a plain object with numeric string
+// keys: `{"0":1,"1":2,...}`, which fails every branch of `coerceInt8Q` since
+// that object has no `.length`). Every LevelDB write below converts `q`
+// fields to a plain `number[]` via `Array.from()` before storing; no special
+// handling is needed on read, since `coerceInt8Q`'s array-like branch
+// (`typeof q.length === 'number' && q.length === EMBEDDING_DIM`) already
+// accepts a real `Array` and converts it back to `Int8Array`.
+
+const LEVEL_LIBRARY_NAMESPACE = 'embed-library';
+const LEVEL_CATALOG_NAMESPACE = 'embed-catalog';
+const LEVEL_CHUNKS_NAMESPACE = 'embed-chunks';
+const LEVEL_META_NAMESPACE = 'embed-meta';
+const LEVEL_CHUNK_PAGE_SIZE = 1000;
+const LEVEL_MIGRATION_MARKER_KEY = 'ark-embeddings-migrated-v1';
+
+function useLevelDB(): boolean {
+  return typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+}
+
+/** Convert a pooled row's Int8Array `q` (if present) to a plain array for LevelDB's JSON encoding. */
+function toLevelPooled(entry: CachedEmbedding): CachedEmbedding {
+  if (entry.q == null) return entry;
+  return { ...entry, q: Array.from(entry.q) as unknown as Int8Array };
+}
+
+/** Convert a chunk row's Int8Array `q` to a plain array for LevelDB's JSON encoding. */
+function toLevelChunk(row: CachedChunk): CachedChunk {
+  return { ...row, q: Array.from(row.q) as unknown as Int8Array };
+}
+
+function pooledNamespaceFor(storeName: string): string {
+  return storeName === CATALOG_STORE ? LEVEL_CATALOG_NAMESPACE : LEVEL_LIBRARY_NAMESPACE;
+}
+
+async function levelGetMeta<T>(key: string): Promise<T | null> {
+  const res = await window.store!.get<T>(LEVEL_META_NAMESPACE, key);
+  if (res.error) {
+    console.error(`[EmbeddingService] meta get(${key}) failed:`, res.error);
+    return null;
+  }
+  return (res.value ?? null) as T | null;
+}
+
+async function levelSetMeta<T extends { key: string }>(value: T): Promise<void> {
+  const res = await window.store!.put(LEVEL_META_NAMESPACE, value.key, value);
+  if (res.error) console.error(`[EmbeddingService] meta put(${value.key}) failed:`, res.error);
+}
+
+async function levelGetPooled(namespace: string, gameId: string): Promise<CachedEmbedding | null> {
+  const res = await window.store!.get<CachedEmbedding>(namespace, gameId);
+  if (res.error) {
+    console.error(`[EmbeddingService] get(${namespace}, ${gameId}) failed:`, res.error);
+    return null;
+  }
+  return res.value ?? null;
+}
+
+async function levelPutPooledBatch(namespace: string, entries: CachedEmbedding[]): Promise<void> {
+  if (entries.length === 0) return;
+  const ops = entries.map((e) => ({
+    type: 'put' as const,
+    namespace,
+    key: e.gameId,
+    value: toLevelPooled(e),
+  }));
+  const res = await window.store!.batch(ops);
+  if (res.error) throw new Error(`[EmbeddingService] batch put(${namespace}) failed: ${res.error}`);
+}
+
+/** Paginated full-namespace walk over a pooled store (embed-library / embed-catalog). */
+async function levelStreamPooled(
+  namespace: string,
+  onEntry: (entry: CachedEmbedding) => void | Promise<void>,
+): Promise<number> {
+  let startAfter: string | undefined;
+  let total = 0;
+  while (true) {
+    const res = await window.store!.getChunk<CachedEmbedding>(namespace, { startAfter, limit: LEVEL_CHUNK_PAGE_SIZE });
+    if (res.error) {
+      console.error(`[EmbeddingService] getChunk(${namespace}) failed:`, res.error);
+      break;
+    }
+    const rows = res.rows ?? [];
+    for (const row of rows) { await onEntry(row.value); total++; }
+    if (res.done || !res.nextKey) break;
+    startAfter = res.nextKey;
+  }
+  return total;
+}
+
+async function levelGetChunkGroup(tier: EmbeddingTier, gameId: string): Promise<CachedChunk[]> {
+  const res = await window.store!.get<CachedChunk[]>(LEVEL_CHUNKS_NAMESPACE, `${tier}:${gameId}`);
+  if (res.error) {
+    console.error('[EmbeddingService] get(embed-chunks) failed:', res.error);
+    return [];
+  }
+  return res.value ?? [];
+}
+
+/** Paginated full-namespace walk over embed-chunks (each row is one game's chunk array). */
+async function levelStreamAllChunkGroups(
+  onGroup: (chunks: CachedChunk[]) => void,
+): Promise<number> {
+  let startAfter: string | undefined;
+  let total = 0;
+  while (true) {
+    const res = await window.store!.getChunk<CachedChunk[]>(LEVEL_CHUNKS_NAMESPACE, { startAfter, limit: LEVEL_CHUNK_PAGE_SIZE });
+    if (res.error) {
+      console.error('[EmbeddingService] getChunk(embed-chunks) failed:', res.error);
+      break;
+    }
+    const rows = res.rows ?? [];
+    for (const row of rows) { onGroup(row.value); total++; }
+    if (res.done || !res.nextKey) break;
+    startAfter = res.nextKey;
+  }
+  return total;
+}
+
+/**
+ * Cursor-stream every row of an IDB object store, invoking `onBatch` with up
+ * to `size` rows per hop. Mirrors the hardened pattern from
+ * `catalog-store.ts`'s `idbStreamAllEntries`: the cursor advances without
+ * awaiting each write (awaiting would let the IDB transaction go inactive
+ * between ticks), `pending` chains the writes so the final empty-cursor
+ * branch can await full completion, a write failure stops further reads via
+ * the `failed` flag, and `onerror` rejects (with the real `IDBRequest.error`)
+ * instead of silently resolving with a truncated count.
+ */
+async function idbStreamStore<T>(
+  storeName: string,
+  onBatch: (rows: T[]) => Promise<void>,
+  size = 500,
+): Promise<number> {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    if (!db.objectStoreNames.contains(storeName)) { resolve(0); return; }
+    const tx = db.transaction(storeName, 'readonly');
+    const store = tx.objectStore(storeName);
+    const req = store.openCursor();
+    let count = 0;
+    let batch: T[] = [];
+    let pending: Promise<void> = Promise.resolve();
+    let failed: unknown = null;
+
+    req.onsuccess = async () => {
+      const cursor = req.result;
+      if (failed) return;
+      if (!cursor) {
+        try {
+          await pending;
+          if (batch.length > 0) await onBatch(batch);
+          resolve(count);
+        } catch (err) {
+          reject(err);
+        }
+        return;
+      }
+      batch.push(cursor.value as T);
+      count++;
+      if (batch.length >= size) {
+        const drain = batch;
+        batch = [];
+        pending = pending.then(() => onBatch(drain)).catch((err) => {
+          failed = err;
+          throw err;
+        });
+      }
+      if (failed) return;
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error ?? new Error(`[EmbeddingService] IDB cursor error streaming ${storeName}`));
+  });
+}
+
+/**
+ * Cursor-stream CHUNK_STORE grouped by (tier,gameId), flushing each completed
+ * group's chunks as soon as the cursor moves to a different group.
+ *
+ * Iterates via the `byTierGame` COMPOUND INDEX (`[tier, gameId]`), not the
+ * primary key (`chunkId`). This is deliberate: an earlier version grouped by
+ * comparing the STRING `` `${tier}:${gameId}` `` while iterating the primary
+ * key (chunkId = `` `${tier}:${gameId}::${kind}#${seq}` ``), reasoning that
+ * chunks sharing a gameId share an identical chunkId prefix and are
+ * therefore contiguous. That reasoning is false whenever one game's id is a
+ * proper prefix of another's — e.g. gameId "42" and gameId "42::ghost" (Epic
+ * ids can contain arbitrary API-supplied text after their `namespace:` part,
+ * unsanitized) produce chunkIds that *interleave* in ascending string order
+ * (`lib:42::facets#0` < `lib:42::ghost::facets#0` < `lib:42::notes#0`),
+ * causing this game's chunks to be flushed twice with the LATER flush
+ * silently overwriting — and losing — the earlier one's chunks.
+ *
+ * IDB's compound-index key comparison has no such ambiguity: it compares
+ * the actual `[tier, gameId]` field VALUES pairwise, not a synthesized
+ * concatenated string, so two rows share the exact same index key if and
+ * only if their `tier` and `gameId` are literally equal — no prefix/
+ * separator collision is possible regardless of what characters either
+ * field contains. This guarantees every one of one game's chunks is
+ * contiguous in this iteration, bounding in-memory buffering to one game's
+ * chunk count (a handful) rather than the whole store (which can be several
+ * hundred thousand rows for a full catalog).
+ */
+async function idbStreamChunkGroups(
+  onGroup: (tier: EmbeddingTier, gameId: string, chunks: CachedChunk[]) => Promise<void>,
+): Promise<number> {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    if (!db.objectStoreNames.contains(CHUNK_STORE)) { resolve(0); return; }
+    const tx = db.transaction(CHUNK_STORE, 'readonly');
+    const store = tx.objectStore(CHUNK_STORE);
+    if (!store.indexNames.contains('byTierGame')) { resolve(0); return; }
+    const req = store.index('byTierGame').openCursor();
+    let totalRows = 0;
+    let currentTier: EmbeddingTier | null = null;
+    let currentGameId: string | null = null;
+    let currentGroup: CachedChunk[] = [];
+    let pending: Promise<void> = Promise.resolve();
+    let failed: unknown = null;
+
+    const flush = (tier: EmbeddingTier, gameId: string, chunks: CachedChunk[]) => {
+      pending = pending.then(() => onGroup(tier, gameId, chunks)).catch((err) => {
+        failed = err;
+        throw err;
+      });
+    };
+
+    req.onsuccess = async () => {
+      const cursor = req.result;
+      if (failed) return;
+      if (!cursor) {
+        if (currentGroup.length > 0 && currentTier !== null && currentGameId !== null) {
+          flush(currentTier, currentGameId, currentGroup);
+        }
+        try {
+          await pending;
+          resolve(totalRows);
+        } catch (err) {
+          reject(err);
+        }
+        return;
+      }
+      const row = cursor.value as CachedChunk;
+      totalRows++;
+      const isNewGroup = currentTier !== null && (row.tier !== currentTier || row.gameId !== currentGameId);
+      if (isNewGroup) {
+        flush(currentTier as EmbeddingTier, currentGameId as string, currentGroup);
+        currentGroup = [];
+      }
+      currentTier = row.tier;
+      currentGameId = row.gameId;
+      currentGroup.push(row);
+      if (failed) return;
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error ?? new Error('[EmbeddingService] IDB cursor error streaming chunk-embeddings'));
+  });
+}
+
+let _embedMigrationChecked = false;
+let _embedMigrationPromise: Promise<void> | null = null;
+
+/**
+ * One-shot IDB → LevelDB migration for all four embedding stores, memoized
+ * so every concurrent caller shares one in-flight attempt. See the namespace
+ * layout comment above for the full design rationale.
+ */
+function migrateEmbeddingsFromIdbIfNeeded(): Promise<void> {
+  if (_embedMigrationChecked) return Promise.resolve();
+  if (!useLevelDB()) {
+    _embedMigrationChecked = true;
+    return Promise.resolve();
+  }
+  if (localStorage.getItem(LEVEL_MIGRATION_MARKER_KEY) === 'yes') {
+    _embedMigrationChecked = true;
+    return Promise.resolve();
+  }
+  if (_embedMigrationPromise) return _embedMigrationPromise;
+
+  _embedMigrationPromise = runEmbeddingsMigration().finally(() => {
+    _embedMigrationPromise = null;
+  });
+  return _embedMigrationPromise;
+}
+
+async function runEmbeddingsMigration(): Promise<void> {
+  try {
+    let libraryCount = 0;
+    await idbStreamStore<CachedEmbedding>(LIBRARY_STORE, async (rows) => {
+      await levelPutPooledBatch(LEVEL_LIBRARY_NAMESPACE, rows);
+      libraryCount += rows.length;
+    }, 500);
+
+    let catalogCount = 0;
+    await idbStreamStore<CachedEmbedding>(CATALOG_STORE, async (rows) => {
+      await levelPutPooledBatch(LEVEL_CATALOG_NAMESPACE, rows);
+      catalogCount += rows.length;
+    }, 500);
+
+    let chunkGroupCount = 0;
+    await idbStreamChunkGroups(async (tier, gameId, chunks) => {
+      const res = await window.store!.put(
+        LEVEL_CHUNKS_NAMESPACE,
+        `${tier}:${gameId}`,
+        chunks.map(toLevelChunk),
+      );
+      if (res.error) {
+        throw new Error(`[EmbeddingService] chunk group put failed: ${res.error}`);
+      }
+      chunkGroupCount++;
+    });
+
+    // Meta keys: copy whichever of the 4 known keys actually exist. Missing
+    // keys (e.g. a fresh install that never ran the rechunk job) are simply
+    // skipped — there is nothing to preserve.
+    const metaKeys = ['embeddingContentEpoch', RECHUNK_META_KEY, 'steam-catalog', 'epic-catalog'];
+    for (const key of metaKeys) {
+      const legacy = await idbGetEmbeddingMeta<{ key: string }>(key);
+      if (legacy) await levelSetMeta(legacy);
+    }
+
+    localStorage.setItem(LEVEL_MIGRATION_MARKER_KEY, 'yes');
+    _embedMigrationChecked = true;
+    console.log(
+      `[EmbeddingService] Migrated ${libraryCount} library + ${catalogCount} catalog embeddings, ` +
+      `${chunkGroupCount} chunk groups, IDB -> LevelDB`,
+    );
+  } catch (err) {
+    console.error('[EmbeddingService] IDB->LevelDB migration failed, will retry on next attempt:', err);
+    // Deliberately do NOT set _embedMigrationChecked or stamp the marker —
+    // leave both unset so a later call retries the full stream. IDB is
+    // untouched throughout, and any rows already written to LevelDB this
+    // attempt are harmless (they'll simply be overwritten again on retry).
+  }
+}
+
 /**
  * Coerce IDB / structured-clone `q` payloads into Int8Array of EMBEDDING_DIM.
  * Accepts Int8Array, ArrayBuffer, ArrayBufferView, or array-like length 1024.
@@ -373,7 +738,21 @@ function pooledVectorAsNumberArray(entry: CachedEmbedding | null | undefined): n
 }
 
 /** Public: all chunk rows for a game (any tier), undecoded. */
+/**
+ * All chunk rows for a game, any tier. No consumer calls this anywhere in the
+ * codebase today (confirmed dead export, kept for API compatibility) — the
+ * LevelDB path implements it correctly via a full-namespace scan + filter
+ * rather than a dedicated index, since nothing depends on it being fast.
+ */
 export async function getChunksForGame(gameId: string): Promise<CachedChunk[]> {
+  await migrateEmbeddingsFromIdbIfNeeded();
+  if (useLevelDB()) {
+    const out: CachedChunk[] = [];
+    await levelStreamAllChunkGroups((chunks) => {
+      for (const c of chunks) if (c.gameId === gameId) out.push(c);
+    });
+    return out;
+  }
   const db = await getDB();
   return new Promise((resolve) => {
     if (!db.objectStoreNames.contains(CHUNK_STORE)) {
@@ -398,11 +777,26 @@ export async function getChunksForGame(gameId: string): Promise<CachedChunk[]> {
  * Chunk ANN ids contain `::`; pooled game ids do not (filter via isChunkAnnId).
  */
 export async function listChunkVectorsForAnn(): Promise<AnnBackfillRow[]> {
-  const db = await getDB();
+  await migrateEmbeddingsFromIdbIfNeeded();
   const now = Date.now();
   const ttl = Math.max(LIBRARY_TTL, CATALOG_TTL);
   const out: AnnBackfillRow[] = [];
 
+  if (useLevelDB()) {
+    await levelStreamAllChunkGroups((chunks) => {
+      for (const row of chunks) {
+        if (now - row.timestamp >= ttl) continue;
+        const q = coerceInt8Q(row.q);
+        if (q && typeof row.scale === 'number') {
+          const vec = dequantizeEmbedding(q, row.scale);
+          out.push({ id: row.chunkId, vector: Array.from(vec) });
+        }
+      }
+    });
+    return out;
+  }
+
+  const db = await getDB();
   await new Promise<void>((resolve) => {
     if (!db.objectStoreNames.contains(CHUNK_STORE)) {
       resolve();
@@ -437,14 +831,23 @@ async function getCachedEmbeddings(
   storeName: string = LIBRARY_STORE,
   ttl: number = LIBRARY_TTL,
 ): Promise<Map<string, CachedEmbedding>> {
+  await migrateEmbeddingsFromIdbIfNeeded();
+  const map = new Map<string, CachedEmbedding>();
+  const now = Date.now();
+
+  if (useLevelDB()) {
+    await levelStreamPooled(pooledNamespaceFor(storeName), (entry) => {
+      if (now - entry.timestamp < ttl) map.set(entry.gameId, entry);
+    });
+    return map;
+  }
+
   const db = await getDB();
   return new Promise((resolve) => {
     const tx = db.transaction(storeName, 'readonly');
     const store = tx.objectStore(storeName);
     const req = store.getAll();
     req.onsuccess = () => {
-      const map = new Map<string, CachedEmbedding>();
-      const now = Date.now();
       for (const entry of (req.result as CachedEmbedding[])) {
         if (now - entry.timestamp < ttl) {
           map.set(entry.gameId, entry);
@@ -461,6 +864,10 @@ async function saveCachedEmbeddings(
   storeName: string = LIBRARY_STORE,
 ): Promise<void> {
   if (entries.length === 0) return;
+  await migrateEmbeddingsFromIdbIfNeeded();
+  if (useLevelDB()) {
+    return levelPutPooledBatch(pooledNamespaceFor(storeName), entries);
+  }
   const db = await getDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
@@ -478,6 +885,13 @@ async function getChunksForTierGame(
   tier: EmbeddingTier,
   gameId: string,
 ): Promise<Map<string, CachedChunk>> {
+  await migrateEmbeddingsFromIdbIfNeeded();
+  if (useLevelDB()) {
+    const chunks = await levelGetChunkGroup(tier, gameId);
+    const map = new Map<string, CachedChunk>();
+    for (const row of chunks) map.set(row.chunkId, row);
+    return map;
+  }
   const db = await getDB();
   return new Promise((resolve) => {
     const tx = db.transaction(CHUNK_STORE, 'readonly');
@@ -527,6 +941,53 @@ async function writeGameChunksAndPool(opts: {
     poolVersion: CURRENT_POOL_VERSION,
   };
 
+  const chunkRows: CachedChunk[] = chunks.map((chunk) => {
+    const cq = quantizeEmbedding(chunk.vector);
+    return {
+      chunkId: chunk.chunkId,
+      tier,
+      gameId,
+      kind: chunk.kind,
+      seq: chunk.seq,
+      q: cq.q,
+      scale: cq.scale,
+      textHash: chunk.textHash,
+      weight: chunk.weight,
+      timestamp: now,
+    };
+  });
+
+  await migrateEmbeddingsFromIdbIfNeeded();
+
+  if (useLevelDB()) {
+    // `chunks` is already the game's FULL current desired set (every facet
+    // chunk currently wanted, whether newly-embedded or reused unchanged),
+    // so writing it as the whole denormalized array for this (tier,gameId)
+    // key implicitly drops anything in `staleIds` — no separate delete step
+    // needed, unlike IDB's per-row store. One atomic `batch()` call spans
+    // both the chunk-group row and the pooled row, matching IDB's
+    // single-transaction guarantee (callers must not ANN-upsert or advance
+    // watermarks if this rejects).
+    const res = await window.store!.batch([
+      {
+        type: 'put',
+        namespace: LEVEL_CHUNKS_NAMESPACE,
+        key: `${tier}:${gameId}`,
+        value: chunkRows.map(toLevelChunk),
+      },
+      {
+        type: 'put',
+        namespace: pooledNamespaceFor(pooledStore),
+        key: gameId,
+        value: toLevelPooled(pooledRow),
+      },
+    ]);
+    if (res.error) {
+      throw new Error(`[EmbeddingService] writeGameChunksAndPool batch failed: ${res.error}`);
+    }
+    return pooledF32;
+  }
+
   const db = await getDB();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction([CHUNK_STORE, pooledStore], 'readwrite');
@@ -536,20 +997,7 @@ async function writeGameChunksAndPool(opts: {
     for (const id of staleIds) {
       chunkStore.delete(id);
     }
-    for (const chunk of chunks) {
-      const cq = quantizeEmbedding(chunk.vector);
-      const row: CachedChunk = {
-        chunkId: chunk.chunkId,
-        tier,
-        gameId,
-        kind: chunk.kind,
-        seq: chunk.seq,
-        q: cq.q,
-        scale: cq.scale,
-        textHash: chunk.textHash,
-        weight: chunk.weight,
-        timestamp: now,
-      };
+    for (const row of chunkRows) {
       chunkStore.put(row);
     }
     // Clear legacy float field by writing int8-only row.
@@ -587,7 +1035,7 @@ interface EmbeddingPassWatermark {
   completedAt: number;
 }
 
-async function getEmbeddingMeta<T extends { key: string }>(key: string): Promise<T | null> {
+async function idbGetEmbeddingMeta<T extends { key: string }>(key: string): Promise<T | null> {
   const db = await getDB();
   return new Promise((resolve) => {
     const tx = db.transaction(META_STORE, 'readonly');
@@ -597,7 +1045,7 @@ async function getEmbeddingMeta<T extends { key: string }>(key: string): Promise
   });
 }
 
-async function setEmbeddingMeta<T extends { key: string }>(value: T): Promise<void> {
+async function idbSetEmbeddingMeta<T extends { key: string }>(value: T): Promise<void> {
   const db = await getDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(META_STORE, 'readwrite');
@@ -606,6 +1054,20 @@ async function setEmbeddingMeta<T extends { key: string }>(value: T): Promise<vo
     tx.onerror = () => reject(tx.error ?? new Error('setEmbeddingMeta failed'));
     tx.onabort = () => reject(tx.error ?? new Error('setEmbeddingMeta aborted'));
   });
+}
+
+/** Dual-path meta getter — LevelDB (post-migration) or legacy IDB fallback. */
+async function getEmbeddingMeta<T extends { key: string }>(key: string): Promise<T | null> {
+  await migrateEmbeddingsFromIdbIfNeeded();
+  if (useLevelDB()) return levelGetMeta<T>(key);
+  return idbGetEmbeddingMeta<T>(key);
+}
+
+/** Dual-path meta setter — LevelDB (post-migration) or legacy IDB fallback. */
+async function setEmbeddingMeta<T extends { key: string }>(value: T): Promise<void> {
+  await migrateEmbeddingsFromIdbIfNeeded();
+  if (useLevelDB()) return levelSetMeta(value);
+  return idbSetEmbeddingMeta(value);
 }
 
 /**
@@ -618,8 +1080,35 @@ async function refreshCachedTimestamps(
   storeName: string,
 ): Promise<void> {
   if (ids.length === 0) return;
-  const db = await getDB();
+  await migrateEmbeddingsFromIdbIfNeeded();
   const now = Date.now();
+
+  if (useLevelDB()) {
+    // Chunked to EMBEDDING_POINT_LOOKUP_CHUNK per round-trip, same as
+    // getCatalogEmbeddingsForIds — `ids` here accumulates every unchanged
+    // entry across a full catalog scan (can be thousands), so firing every
+    // get() in one unchunked Promise.all would burst well past the
+    // store:get rate limiter's burst budget, silently dropping the refresh
+    // for ids beyond that window.
+    const namespace = pooledNamespaceFor(storeName);
+    for (let i = 0; i < ids.length; i += EMBEDDING_POINT_LOOKUP_CHUNK) {
+      const slice = ids.slice(i, i + EMBEDDING_POINT_LOOKUP_CHUNK);
+      const gets = await Promise.all(slice.map((id) => levelGetPooled(namespace, id)));
+      const ops: Array<{ type: 'put'; namespace: string; key: string; value: unknown }> = [];
+      for (let j = 0; j < slice.length; j++) {
+        const entry = gets[j];
+        if (!entry) continue;
+        ops.push({ type: 'put', namespace, key: slice[j], value: toLevelPooled({ ...entry, timestamp: now }) });
+      }
+      if (ops.length > 0) {
+        const res = await window.store!.batch(ops);
+        if (res.error) console.error('[EmbeddingService] refreshCachedTimestamps batch failed:', res.error);
+      }
+    }
+    return;
+  }
+
+  const db = await getDB();
   return new Promise((resolve) => {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
@@ -791,13 +1280,24 @@ export function buildEpicCatalogEmbeddingText(entry: EpicCatalogEntry): string {
  * must not short-circuit re-embed.
  */
 async function getCatalogHashIndex(): Promise<Map<string, { textHash: string; poolVersion?: number }>> {
+  await migrateEmbeddingsFromIdbIfNeeded();
+  const map = new Map<string, { textHash: string; poolVersion?: number }>();
+  const now = Date.now();
+
+  if (useLevelDB()) {
+    await levelStreamPooled(LEVEL_CATALOG_NAMESPACE, (entry) => {
+      if (now - entry.timestamp < CATALOG_TTL && readPooledVector(entry)) {
+        map.set(entry.gameId, { textHash: entry.textHash, poolVersion: entry.poolVersion });
+      }
+    });
+    return map;
+  }
+
   const db = await getDB();
   return new Promise((resolve) => {
     const tx = db.transaction(CATALOG_STORE, 'readonly');
     const store = tx.objectStore(CATALOG_STORE);
     const req = store.openCursor();
-    const map = new Map<string, { textHash: string; poolVersion?: number }>();
-    const now = Date.now();
 
     req.onsuccess = () => {
       const cursor = req.result;
@@ -818,12 +1318,21 @@ async function getCatalogHashIndex(): Promise<Map<string, { textHash: string; po
  * approaching TTL expiry and need a timestamp refresh.
  */
 async function getCatalogTimestampIndex(): Promise<Map<string, number>> {
+  await migrateEmbeddingsFromIdbIfNeeded();
+  const map = new Map<string, number>();
+
+  if (useLevelDB()) {
+    await levelStreamPooled(LEVEL_CATALOG_NAMESPACE, (entry) => {
+      map.set(entry.gameId, entry.timestamp);
+    });
+    return map;
+  }
+
   const db = await getDB();
   return new Promise((resolve) => {
     const tx = db.transaction(CATALOG_STORE, 'readonly');
     const store = tx.objectStore(CATALOG_STORE);
     const req = store.openCursor();
-    const map = new Map<string, number>();
 
     req.onsuccess = () => {
       const cursor = req.result;
@@ -836,6 +1345,11 @@ async function getCatalogTimestampIndex(): Promise<Map<string, number>> {
   });
 }
 
+// Point-lookup round-trip size — kept well under the store:get rate
+// limiter's 500/s-per-channel-per-sender budget, mirroring the same
+// pattern applied to catalog-store.ts's getEntries in v1.0.65.
+const EMBEDDING_POINT_LOOKUP_CHUNK = 400;
+
 /**
  * Fetch catalog embeddings for a specific set of game IDs (on-demand).
  * Avoids loading the entire catalog embedding store into memory.
@@ -844,12 +1358,30 @@ async function getCatalogEmbeddingsForIds(
   gameIds: Set<string>,
 ): Promise<Map<string, number[]>> {
   if (gameIds.size === 0) return new Map();
+  await migrateEmbeddingsFromIdbIfNeeded();
+  const now = Date.now();
+  const result = new Map<string, number[]>();
+
+  if (useLevelDB()) {
+    const ids = Array.from(gameIds);
+    for (let i = 0; i < ids.length; i += EMBEDDING_POINT_LOOKUP_CHUNK) {
+      const slice = ids.slice(i, i + EMBEDDING_POINT_LOOKUP_CHUNK);
+      const entries = await Promise.all(slice.map((id) => levelGetPooled(LEVEL_CATALOG_NAMESPACE, id)));
+      for (let j = 0; j < slice.length; j++) {
+        const entry = entries[j];
+        if (entry && (now - entry.timestamp < CATALOG_TTL)) {
+          const vec = pooledVectorAsNumberArray(entry);
+          if (vec) result.set(slice[j], vec);
+        }
+      }
+    }
+    return result;
+  }
+
   const db = await getDB();
   return new Promise((resolve) => {
     const tx = db.transaction(CATALOG_STORE, 'readonly');
     const store = tx.objectStore(CATALOG_STORE);
-    const result = new Map<string, number[]>();
-    const now = Date.now();
     let remaining = gameIds.size;
 
     for (const gameId of gameIds) {
@@ -2429,6 +2961,10 @@ class EmbeddingService {
    * Collect decoded rows with sync continue (paged by key), then flush outside the tx.
    */
   private async _backfillAnnIndex(): Promise<void> {
+    await migrateEmbeddingsFromIdbIfNeeded();
+    if (useLevelDB()) {
+      return this._backfillAnnIndexLevel();
+    }
     const db = await getDB();
     const now = Date.now();
     const seen = new Set<string>();
@@ -2568,6 +3104,95 @@ class EmbeddingService {
   }
 
   /**
+   * LevelDB counterpart to `_backfillAnnIndex`. Same algorithm (library then
+   * catalog pooled vectors, deduped via `seen`, then facet chunk vectors),
+   * paginated via `getChunk` instead of a raw IDB cursor. Buffers at most
+   * `ANN_BACKFILL_PAGE_SIZE` rows before flushing to the ANN index — the
+   * pre-count pass below does a full page-through of both namespaces purely
+   * to size the progress bar, which costs a second full scan; acceptable
+   * since this only runs when the ANN index is empty (first launch after
+   * ANN was added, or the index file was deleted), not a hot path.
+   */
+  private async _backfillAnnIndexLevel(): Promise<void> {
+    const now = Date.now();
+    const seen = new Set<string>();
+    let sent = 0;
+
+    const yieldToEventLoop = () => new Promise<void>((resolve) => {
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(() => resolve(), { timeout: 50 });
+      } else {
+        setTimeout(resolve, 0);
+      }
+    });
+
+    let libCount = 0;
+    let catCount = 0;
+    let chunkRowCount = 0;
+    await levelStreamPooled(LEVEL_LIBRARY_NAMESPACE, () => { libCount++; });
+    await levelStreamPooled(LEVEL_CATALOG_NAMESPACE, () => { catCount++; });
+    await levelStreamAllChunkGroups((chunks) => { chunkRowCount += chunks.length; });
+    const progressTotal = Math.max(1, libCount + catCount + chunkRowCount);
+    annIndex.setBuildProgress(0, progressTotal);
+    let pooledSent = 0;
+    let chunkSent = 0;
+
+    const flushRows = async (
+      rows: AnnBackfillRow[],
+      kind: 'pooled' | 'chunk',
+    ): Promise<void> => {
+      for (const chunk of partitionEmbeddingRowsForAnnBackfill(rows, ANN_BACKFILL_FLUSH_BATCH)) {
+        await annIndex.addVectors(chunk);
+        sent += chunk.length;
+        if (kind === 'pooled') pooledSent += chunk.length;
+        else chunkSent += chunk.length;
+        annIndex.setBuildProgress(sent, progressTotal);
+        await yieldToEventLoop();
+      }
+    };
+
+    const streamPooledNs = async (namespace: string, ttl: number): Promise<void> => {
+      let buffer: AnnBackfillRow[] = [];
+      await levelStreamPooled(namespace, async (entry) => {
+        if (seen.has(entry.gameId)) return;
+        const vec = readPooledVector(entry);
+        if (!vec || now - entry.timestamp >= ttl) return;
+        seen.add(entry.gameId);
+        buffer.push({ id: entry.gameId, vector: Array.from(vec) });
+        if (buffer.length >= ANN_BACKFILL_PAGE_SIZE) {
+          const toFlush = buffer;
+          buffer = [];
+          await flushRows(toFlush, 'pooled');
+        }
+      });
+      if (buffer.length > 0) await flushRows(buffer, 'pooled');
+    };
+
+    // Library first (higher priority — dedup via `seen`)
+    await streamPooledNs(LEVEL_LIBRARY_NAMESPACE, LIBRARY_TTL);
+    await streamPooledNs(LEVEL_CATALOG_NAMESPACE, CATALOG_TTL);
+
+    // Phase B.1: dual presence — also ingest facet chunk vectors (ids contain `::`).
+    const chunkRows = await listChunkVectorsForAnn();
+    if (chunkRows.length > 0) {
+      await flushRows(chunkRows, 'chunk');
+    }
+
+    annIndex.setBuildProgress(sent, Math.max(sent, 1));
+
+    if (sent > 0) {
+      const saved = await annIndex.save();
+      if (!saved && typeof window !== 'undefined' && window.ann) {
+        throw new Error('ANN index save failed after backfill');
+      }
+      console.log(
+        `[EmbeddingService] ANN index backfilled: ${sent} vectors ` +
+          `(${pooledSent} pooled + ${chunkSent} chunks) from cache`,
+      );
+    }
+  }
+
+  /**
    * Clear the ANN index and rebuild from cached library + catalog pooled vectors.
    * Returns the vector count reported by the ANN service after backfill.
    * Propagates errors so Settings can surface the failure string.
@@ -2606,8 +3231,21 @@ export const embeddingService = new EmbeddingService();
 
 /**
  * Pooled embedding count only (library + catalog). Never includes chunk-embeddings.
+ *
+ * On the LevelDB path this is a full paginated count (via `getChunk`) rather
+ * than a native store count — LevelDB has no cheap analog to IDB's
+ * `IDBObjectStore.count()`. Acceptable since callers (e.g. `galaxy-cache.ts`'s
+ * staleness check) call this occasionally, not on a hot per-frame path.
  */
 export async function getPooledEmbeddingCount(): Promise<number> {
+  await migrateEmbeddingsFromIdbIfNeeded();
+  if (useLevelDB()) {
+    let lib = 0;
+    let cat = 0;
+    await levelStreamPooled(LEVEL_LIBRARY_NAMESPACE, () => { lib++; });
+    await levelStreamPooled(LEVEL_CATALOG_NAMESPACE, () => { cat++; });
+    return lib + cat;
+  }
   const db = await getDB();
   const countStore = (name: string): Promise<number> =>
     new Promise((resolve) => {
@@ -2636,8 +3274,20 @@ export async function getEmbeddingCount(): Promise<number> {
  * then catalog). Returns null if not found. Always dequantized f32 number[].
  */
 export async function getEmbeddingById(gameId: string): Promise<number[] | null> {
-  const db = await getDB();
+  await migrateEmbeddingsFromIdbIfNeeded();
   const now = Date.now();
+
+  if (useLevelDB()) {
+    const fromNamespace = async (namespace: string, ttl: number): Promise<number[] | null> => {
+      const entry = await levelGetPooled(namespace, gameId);
+      if (entry && now - entry.timestamp < ttl) return pooledVectorAsNumberArray(entry);
+      return null;
+    };
+    return (await fromNamespace(LEVEL_LIBRARY_NAMESPACE, LIBRARY_TTL))
+      ?? (await fromNamespace(LEVEL_CATALOG_NAMESPACE, CATALOG_TTL));
+  }
+
+  const db = await getDB();
   const fromStore = (name: string, ttl: number): Promise<number[] | null> =>
     new Promise((resolve) => {
       const tx = db.transaction(name, 'readonly');
@@ -2656,6 +3306,48 @@ export async function getEmbeddingById(gameId: string): Promise<number[] | null>
 }
 
 /**
+ * Every pooled embedding (library + catalog), deduped by gameId with library
+ * taking priority, decoded to a plain number[] vector. Used by
+ * `game-graph-store.ts` in place of that file's former direct IDB access
+ * (which hardcoded the `'embeddings'`/`'catalog-embeddings'` store names and
+ * would have silently broken on any storage-backend change).
+ */
+export async function getAllPooledEmbeddingsForGraph(): Promise<Array<{ gameId: string; embedding: number[] }>> {
+  await migrateEmbeddingsFromIdbIfNeeded();
+  const seen = new Set<string>();
+  const out: Array<{ gameId: string; embedding: number[] }> = [];
+
+  const collect = (entry: CachedEmbedding) => {
+    if (seen.has(entry.gameId)) return;
+    const vec = readPooledVector(entry);
+    if (!vec) return;
+    seen.add(entry.gameId);
+    out.push({ gameId: entry.gameId, embedding: Array.from(vec) });
+  };
+
+  if (useLevelDB()) {
+    await levelStreamPooled(LEVEL_LIBRARY_NAMESPACE, collect);
+    await levelStreamPooled(LEVEL_CATALOG_NAMESPACE, collect);
+    return out;
+  }
+
+  const db = await getDB();
+  for (const storeName of [LIBRARY_STORE, CATALOG_STORE]) {
+    if (!db.objectStoreNames.contains(storeName)) continue;
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const req = tx.objectStore(storeName).getAll();
+      req.onsuccess = () => {
+        for (const entry of (req.result as CachedEmbedding[])) collect(entry);
+        resolve();
+      };
+      req.onerror = () => resolve();
+    });
+  }
+  return out;
+}
+
+/**
  * Load ALL embeddings from both library and catalog IDB stores.
  * Returns a flat Float32Array (n × 1024) + parallel id array for maximum
  * performance during PCA. Library embeddings take priority over catalog
@@ -2664,15 +3356,53 @@ export async function getEmbeddingById(gameId: string): Promise<number[] | null>
 export async function loadAllEmbeddingsForGraph(
   onProgress?: (loaded: number, store: string) => void,
 ): Promise<{ ids: string[]; data: Float32Array; dim: number }> {
-  const db = await getDB();
+  await migrateEmbeddingsFromIdbIfNeeded();
   const dim = 1024;
-
-  // Pass 1: collect IDs only — no vectors in memory yet.
-  // This gives us exact count + dedup order for pre-allocating the Float32Array.
+  const now = Date.now();
   const seen = new Set<string>();
   const ids: string[] = [];
 
-  const now = Date.now();
+  if (useLevelDB()) {
+    const collectIdsLevel = async (namespace: string, label: string, ttl: number) => {
+      let count = 0;
+      await levelStreamPooled(namespace, (entry) => {
+        if (readPooledVector(entry) && !seen.has(entry.gameId) && now - entry.timestamp < ttl) {
+          seen.add(entry.gameId);
+          ids.push(entry.gameId);
+          count++;
+          if (count % 2000 === 0) onProgress?.(count, label);
+        }
+      });
+    };
+    await collectIdsLevel(LEVEL_LIBRARY_NAMESPACE, 'library', LIBRARY_TTL);
+    onProgress?.(ids.length, 'library');
+    await collectIdsLevel(LEVEL_CATALOG_NAMESPACE, 'catalog', CATALOG_TTL);
+    onProgress?.(ids.length, 'catalog');
+
+    const n = ids.length;
+    const data = new Float32Array(n * dim);
+    const idToIdx = new Map<string, number>();
+    for (let i = 0; i < n; i++) idToIdx.set(ids[i], i);
+
+    const fillFromLevel = async (namespace: string, ttl: number) => {
+      await levelStreamPooled(namespace, (entry) => {
+        const vec = readPooledVector(entry);
+        if (vec && now - entry.timestamp < ttl) {
+          const idx = idToIdx.get(entry.gameId);
+          if (idx !== undefined) data.set(vec, idx * dim);
+        }
+      });
+    };
+    await fillFromLevel(LEVEL_LIBRARY_NAMESPACE, LIBRARY_TTL);
+    await fillFromLevel(LEVEL_CATALOG_NAMESPACE, CATALOG_TTL);
+
+    return { ids, data, dim };
+  }
+
+  const db = await getDB();
+
+  // Pass 1: collect IDs only — no vectors in memory yet.
+  // This gives us exact count + dedup order for pre-allocating the Float32Array.
   // Cursor paths below only sync-decode + cursor.continue — never await IPC mid-cursor.
   const collectIds = (storeName: string, label: string, ttl: number) =>
     new Promise<void>((resolve) => {
@@ -2766,12 +3496,70 @@ function generateGaussianProjectionMatrix(srcDim: number, tgtDim: number): Float
 export async function loadProjectedEmbeddingsForGraph(
   onProgress?: (loaded: number, store: string) => void,
 ): Promise<{ ids: string[]; projected: Float32Array; projDim: number }> {
-  const db = await getDB();
+  await migrateEmbeddingsFromIdbIfNeeded();
   const srcDim = 1024;
-
   const seen = new Set<string>();
   const ids: string[] = [];
   const now = Date.now();
+
+  if (useLevelDB()) {
+    const collectIdsLevel = async (namespace: string, label: string, ttl: number) => {
+      let count = 0;
+      await levelStreamPooled(namespace, (entry) => {
+        if (readPooledVector(entry) && !seen.has(entry.gameId) && now - entry.timestamp < ttl) {
+          seen.add(entry.gameId);
+          ids.push(entry.gameId);
+          count++;
+          if (count % 2000 === 0) onProgress?.(count, label);
+        }
+      });
+    };
+    await collectIdsLevel(LEVEL_LIBRARY_NAMESPACE, 'library', LIBRARY_TTL);
+    onProgress?.(ids.length, 'library');
+    await collectIdsLevel(LEVEL_CATALOG_NAMESPACE, 'catalog', CATALOG_TTL);
+    onProgress?.(ids.length, 'catalog');
+
+    const n = ids.length;
+    if (n === 0) return { ids, projected: new Float32Array(0), projDim: PROJ_DIM };
+
+    const R = generateGaussianProjectionMatrix(srcDim, PROJ_DIM);
+    const projected = new Float32Array(n * PROJ_DIM);
+    const idToIdx = new Map<string, number>();
+    for (let i = 0; i < n; i++) idToIdx.set(ids[i], i);
+
+    const projectFromLevel = async (namespace: string, ttl: number) => {
+      await levelStreamPooled(namespace, (entry) => {
+        const emb = readPooledVector(entry);
+        if (!emb || now - entry.timestamp >= ttl) return;
+        const idx = idToIdx.get(entry.gameId);
+        if (idx === undefined) return;
+        let norm = 0;
+        for (let j = 0; j < srcDim; j++) norm += emb[j] * emb[j];
+        norm = Math.sqrt(norm);
+        const invNorm = norm > 1e-10 ? 1 / norm : 0;
+        const dstOff = idx * PROJ_DIM;
+        for (let k = 0; k < PROJ_DIM; k++) {
+          let s = 0;
+          const rOff = k * srcDim;
+          for (let j = 0; j < srcDim; j++) s += R[rOff + j] * (emb[j] * invNorm);
+          projected[dstOff + k] = s;
+        }
+      });
+    };
+    await projectFromLevel(LEVEL_LIBRARY_NAMESPACE, LIBRARY_TTL);
+    await projectFromLevel(LEVEL_CATALOG_NAMESPACE, CATALOG_TTL);
+
+    const mean = new Float32Array(PROJ_DIM);
+    for (let i = 0; i < n; i++)
+      for (let j = 0; j < PROJ_DIM; j++) mean[j] += projected[i * PROJ_DIM + j];
+    for (let j = 0; j < PROJ_DIM; j++) mean[j] /= n;
+    for (let i = 0; i < n; i++)
+      for (let j = 0; j < PROJ_DIM; j++) projected[i * PROJ_DIM + j] -= mean[j];
+
+    return { ids, projected, projDim: PROJ_DIM };
+  }
+
+  const db = await getDB();
 
   const collectIds = (storeName: string, label: string, ttl: number) =>
     new Promise<void>((resolve) => {

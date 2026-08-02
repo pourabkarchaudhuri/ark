@@ -11,6 +11,17 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.67': {
+    title: "What's New in Ark 1.0.67",
+    changes: [
+      'Embeddings moved to LevelDB — your library embeddings, catalog embeddings, and facet chunks (the pieces Oracle uses to score recommendations) now persist through the same LevelDB backend as the rest of your data, completing the storage migration started in 1.0.61. This is the last IndexedDB-backed store; going forward every part of Ark shares one consistent, faster storage layer.',
+      'One-shot background migration on first launch after upgrade — your existing embeddings copy over automatically the first time Ark needs them. No re-embedding, no waiting on Ollama again.',
+      'Hardened before ship — an independent adversarial review found and fixed two real edge cases: a rare data-migration bug that could have dropped a game\'s embedding data if its internal ID happened to be a text-prefix of another game\'s ID, and a rate-limiting edge case in the background timestamp-refresh path for very large catalogs.',
+      'A file that read embeddings directly from the database (bypassing the normal path) now goes through the same storage layer as everything else, so it can never silently fall out of sync with a future change.',
+      'Zero visible change to recommendations, Embedding Space, or the game graph — every consumer sees identical data through identical public interfaces.',
+      'Test coverage expanded — 9 new unit tests covering the migration, including a case specifically checking that games with similar internal IDs don\'t get their data mixed up during the copy. Full suite: 1056 → 1065 passing.',
+    ],
+  },
   '1.0.66': {
     title: "What's New in Ark 1.0.66",
     changes: [

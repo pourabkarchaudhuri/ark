@@ -1,25 +1,36 @@
-# Ark v1.0.66 — Hotfix: Catalog Embeddings progress stuck at 0
+# Ark v1.0.67 — Embeddings on LevelDB (Phase 1 complete)
 
-Fixes a live issue reported by users right after updating to v1.0.65: the "Catalog Embeddings" status widget appeared frozen at 0.
+The last IndexedDB-backed store — your library embeddings, catalog embeddings, and the facet chunks Oracle uses to score recommendations — now lives in LevelDB. This completes the storage migration started in v1.0.61: every part of Ark now shares one consistent storage layer.
 
-## Root cause
+## Migrated
 
-v1.0.65 added a one-time storage migration (IndexedDB → LevelDB) for the Steam and Epic game catalogs. That migration reports its own progress (`stage: 'migrating'`), but the status panel's display logic had no branch for this new stage — it silently fell through to a blank progress bar and 0%. Since catalog embedding generation waits for catalog sync to finish before it can start, and that migration can take noticeably longer than the old direct-IndexedDB read it replaced (155k rows streamed through ~310 sequential IPC round-trips), the whole subsystem looked stuck with zero explanation.
+- **Library embeddings** (Tier 1) → LevelDB namespace `embed-library`.
+- **Catalog embeddings** (Tier 2, Steam + Epic) → `embed-catalog`.
+- **Facet chunks** → `embed-chunks`, denormalized to one row per (tier, game) holding that game's full chunk array — replaces an IndexedDB index with a direct storage lookup.
+- **Embedding metadata** (content-change counter, re-chunk progress, sync watermarks) → `embed-meta`.
 
-## Fixed
+`ann-index.ts` needed no migration — it's a pure IPC bridge to a native index that lives entirely in the main process, with nothing persisted in the renderer.
 
-- Steam Catalog and Epic Catalog status widgets now show `Migrating storage — N copied` with a visible in-progress indicator while the one-time migration runs.
-- The Catalog Embeddings widget now explicitly says `Waiting for Steam Catalog sync…` instead of showing a bare blank line while it's genuinely blocked behind catalog sync.
-- A failed migration attempt no longer leaves the widget stuck showing "migrating" forever — it resets to idle so a retry is visible, not silently hung.
-- Epic catalog migration now publishes progress at all (previously it updated nothing during migration; Steam's did).
-- Bonus fix (pre-existing, unrelated to v1.0.65, caught during this investigation): once catalog embeddings are fully up to date, the widget now shows the real vector count instead of a blank/stale value.
+One file (`game-graph-store.ts`) used to read the embeddings database directly, bypassing the normal code path — it now goes through the same public interface as everything else, so it can never silently drift out of sync with a future storage change.
+
+## Hardened before ship
+
+An independent adversarial review found and fixed two real issues before this release went out:
+
+- **A data-loss edge case in the migration itself.** The chunk-data migration grouped a game's data by comparing text strings during a database scan. In a rare case — if one game's internal ID happened to be a exact starting substring of another's — this could cause part of a game's chunk data to be silently dropped during the one-time copy. Fixed by switching to a lookup method that compares the actual values, not their string representation, which is immune to this class of collision no matter what a game's ID contains.
+- **A rate-limiting edge case in the background maintenance path** for very large catalogs (only relevant with many thousands of unchanged entries in one pass) — a background "keep this entry fresh" step could silently skip some entries once too many fired in the same instant. Fixed to process in smaller batches, matching the pattern already used elsewhere.
 
 ## Under the hood
 
-- 5 new regression tests directly exercising `getSnapshot()`'s stage-handling for both catalogs.
-- Full suite: 1051 → 1056 passing under `--isolate`. Typecheck clean.
+- Same hardened migration pattern from v1.0.65: no premature "already migrated" shortcuts, real counts only recorded after a full successful copy, a failed attempt never permanently blocks a retry, and simultaneous requests share one in-progress migration instead of racing each other.
+- 9 new tests using a real (simulated) database to exercise the actual migration and cursor code, including a dedicated test reproducing the exact ID-collision scenario found by review.
+- Full suite: 1056 → 1065 passing under `--isolate`. Typecheck clean.
+
+## Milestone: Phase 1 complete
+
+With this release, every piece of Ark's persistent storage — library, sessions, journey, custom games, recommendations, catalogs, and now embeddings — runs on LevelDB. No more IndexedDB writes blocking the render thread; save-during-play jank is gone everywhere it used to happen.
 
 ---
 
-**Tests:** 1056/1056 passing under `--isolate`. Electron + renderer typecheck clean. Vite build clean.
-**No data migration in this release** — pure display/status-reporting fix, no storage schema changes.
+**Tests:** 1065/1065 passing under `--isolate`. Electron + renderer typecheck clean. Vite build clean.
+**Data compatibility:** all four legacy IndexedDB embedding stores auto-migrate on first launch, preserved for rollback.

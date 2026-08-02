@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.67] - 2026-08-03
+
+### Migrated to LevelDB
+- **`src/services/embedding-service.ts`** — the last IndexedDB-backed store. Four IDB object stores (database `ark-embeddings`) migrated:
+  - `embeddings` (Tier 1 library pooled embeddings) → namespace `embed-library`, key = gameId.
+  - `catalog-embeddings` (Tier 2 catalog pooled embeddings) → namespace `embed-catalog`, key = gameId (steam-/epic- prefixed).
+  - `chunk-embeddings` (facet chunks) → namespace `embed-chunks`, **denormalized**: one row per `(tier,gameId)` holding the full array of that game's chunks, keyed `${tier}:${gameId}`. This replaces IDB's `byTierGame` index (4 call sites) with a direct point lookup. IDB's `byGame` index (cross-tier — backing the exported `getChunksForGame`, confirmed to have zero callers anywhere in the codebase) is not separately replicated; the LevelDB path implements it via a full-namespace scan + filter, which is fine since nothing calls it.
+  - `embedding-meta` (small KV: `embeddingContentEpoch`, rechunk-job watermark, `steam-catalog`/`epic-catalog` embedding-pass watermarks) → namespace `embed-meta`.
+- **`ann-index.ts` needed no migration** — confirmed via full-file read that it's a pure IPC wrapper around a main-process usearch native index; it holds no renderer-side persistence at all.
+- **`src/services/game-graph-store.ts`** — its `readAllEmbeddings()` used to open the shared embedding IndexedDB handle directly and hardcode the `'embeddings'`/`'catalog-embeddings'` store name strings, bypassing every public method on `embedding-service.ts`. Replaced with a call to the new exported `getAllPooledEmbeddingsForGraph()`, which handles both the LevelDB and legacy-IDB paths internally — this file no longer has any storage-backend-specific code at all.
+
+### Fixed (encoding correctness, caught before any data hit LevelDB)
+- **Int8Array does not survive `JSON.stringify`/`parse` as an array** — it round-trips as a plain object with numeric string keys (`{"0":1,"1":2,...}`), which fails every branch of `coerceInt8Q` (no `.length` property). Every LevelDB write path converts a row's `q` field to a plain `number[]` via `Array.from()` before storing (`toLevelPooled`/`toLevelChunk`); no special handling is needed on read, since `coerceInt8Q`'s array-like branch already accepts a real `Array`.
+
+### Fixed (found by adversarial review before ship)
+- **Chunk-grouping migration could silently lose chunks when one game's id is a byte-prefix of another's.** The first draft grouped chunk rows during migration by comparing the STRING `` `${tier}:${gameId}` `` while iterating IDB's cursor in primary-key (`chunkId`) order, reasoning that chunks sharing a gameId share an identical chunkId prefix and are therefore contiguous. That's false whenever one game's id is a proper prefix of another's — e.g. gameId `"42"` and gameId `"42::ghost"` produce chunkIds that *interleave* in ascending string order (`lib:42::facets#0` < `lib:42::ghost::facets#0` < `lib:42::notes#0`), causing game `"42"`'s chunks to be flushed twice, with the later flush silently overwriting — and losing — the earlier one's chunks. Fixed by iterating the `byTierGame` **compound index** instead of the primary key: IDB's compound-index comparison is on the actual `[tier, gameId]` field values, not a synthesized string, so two rows share the same index key if and only if their `tier` and `gameId` are literally equal — no prefix/separator collision is possible regardless of what characters either field contains.
+- **`refreshCachedTimestamps`'s LevelDB path could burst past the IPC rate limiter on a large catalog pass.** Unlike its sibling `getCatalogEmbeddingsForIds` (already chunked to 400 ids/round-trip), this function fired every `window.store.get()` in one unchunked `Promise.all` — for the thousands of ids a full catalog scan can accumulate, calls beyond the rate limiter's burst budget silently returned `rate_limited` and were dropped, meaning those entries' TTL never got refreshed. Fixed to chunk identically to `getCatalogEmbeddingsForIds`.
+
+### Under the hood
+- Same hardened migration pattern established in v1.0.65 (and refined after that release's adversarial review found 6 real bugs): no `store.has()`-based "already migrated" shortcut, no trust in a single meta value's presence as proof data exists, marker + counts stamped only after a full successful stream using actual migrated counts, a failed attempt never permanently blocks retry, concurrent callers share one in-flight migration via a memoized promise.
+- `writeGameChunksAndPool` (previously one atomic IDB transaction spanning `chunk-embeddings` + a pooled store) now issues one atomic `window.store.batch()` call spanning both LevelDB namespaces — same all-or-nothing guarantee, callers still correctly skip ANN-upsert/watermark-advance on rejection.
+- 9 new unit tests using `fake-indexeddb` against the real migration/cursor code, including a dedicated regression test reproducing the exact `"42"` / `"42::ghost"` adjacency-collision scenario found by review.
+- Full suite: 1056 → 1065 passing under `--isolate`. Typecheck clean.
+- Adversarially reviewed (3 dimensions, 2 independent skeptical verifiers per finding, 2 candidates found and both confirmed real) before ship.
+
 ## [1.0.66] - 2026-08-02
 
 ### Fixed
