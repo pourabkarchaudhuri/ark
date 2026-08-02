@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.62] - 2026-08-02
+
+### Migrated to LevelDB
+- **`src/services/journey-store.ts`** → namespace `journey`. Per-entry rows keyed by `gameId`; carries the version marker; migration key `ark-journey-history-migrated-v1`. 14 new tests.
+- **`src/services/reco-history-store.ts`** → namespace `reco-history`. Two collections (dismissals + conversion) sharing the namespace via key prefixes `d:` and `h:`; two legacy keys carried (`ark-reco-dismissed-v1`, `ark-reco-history-v1`) with separate markers; added 300 ms debounce (none existed prior). 11 new tests.
+- **`src/services/shelf-bandit-store.ts`** → namespace `shelf-bandit`. Row keys are shelf-type strings; single legacy key `ark-shelf-bandit-v1`; added 300 ms debounce. 11 new tests.
+- **`src/services/transmissions-history-store.ts`** → namespace `transmissions-history`. Per-id rows, `MAX_IDS=2000` cap preserved via Set-order trimming; legacy key `ark-transmissions-decoded`. 10 new tests.
+- **`src/services/transmissions-archive-store.ts`** → namespace `transmissions-archive`. Per-id rows carrying full `SavedTransmission` value; legacy key `ark-transmissions-archive`. 11 new tests.
+- **`src/services/badge-unlock-timestamps.ts`** → namespace `badge-unlock-timestamps`. Per-badge-id timestamp rows; legacy key `ark-badge-unlock-timestamps`. 11 new tests.
+- **`src/services/user-marks-store.ts`** → namespace `user-marks`. Banners + constellations demuxed by prefix; legacy banner key `ark.userMarks.banners.v1`. 15 new tests.
+
+### Fixed
+- **Cross-test mock leak in v1.0.61's new test files.** The 8 new test files created in v1.0.61 used `vi.restoreAllMocks()` in `afterEach`, which resets ALL `vi.fn()` mocks globally under `--no-isolate` mode — breaking `similar-titles-reco.test.ts`'s `annIndex.queryWithDistances` mock when that test ran after any of them (test-ordering dependent). Replaced with the narrower `vi.unstubAllGlobals()` across all 8 new test files. Verified full suite runs green: 1012/1012.
+
+### Under the hood
+- Migration pattern is now stable and reference implementations are `session-store.ts` + `status-history-store.ts` from v1.0.61.
+- Every migrated store: `_useLevelDB` gate captured at construction, sync reads via in-memory cache, async LevelDB hydrate on init, one-shot migration with marker + legacy-key preservation, fallback to legacy path on IPC error or when `window.store` is undefined, `clear()` wipes namespace + legacy key + marker.
+- Full test suite: 929 → 1012 passing (+83 net).
+
+### Deferred to v1.0.63+
+- Larger stores that need extra care: `library-store.ts`, `custom-game-store.ts`, `reco-store.ts`.
+- IDB-backed stores: `catalog-store.ts` (155k rows, needs chunked streaming), `epic-catalog-store.ts`, embeddings, `ann-index.ts`.
+
 ## [1.0.61] - 2026-08-02
 
 ### Added

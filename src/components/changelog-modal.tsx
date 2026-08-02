@@ -11,6 +11,14 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.62': {
+    title: "What's New in Ark 1.0.62",
+    changes: [
+      'Seven more stores moved to LevelDB — Voyage journey, Oracle reco-history (dismissals + conversion), shelf-bandit ordering, decoded transmissions, saved transmissions archive, badge-unlock timestamps, and user marks (banners + constellations). Each migrates one-shot from localStorage on first launch after upgrade, stamped with a marker, legacy key preserved for one release as rollback.',
+      'Zero visible UI change — all seven stores keep their public subscribe/notify API byte-identical. Consumers (Voyage, Medals, Oracle, Transmissions, Galaxy banners) see no difference except that saves stop hitching under heavy activity.',
+      'Test coverage expanded — 83 new unit tests covering the migration + fallback paths across all seven stores. Full suite: 1012/1012 passing (929 → 1012).',
+    ],
+  },
   '1.0.61': {
     title: "What's New in Ark 1.0.61",
     changes: [

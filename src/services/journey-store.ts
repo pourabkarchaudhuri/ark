@@ -5,6 +5,16 @@ import { statusHistoryStore } from './status-history-store';
 const STORAGE_KEY = 'ark-journey-history';
 const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
 
+/**
+ * One-shot marker stamped in localStorage after the LevelDB migration copies
+ * the ark-journey-history payload across. Presence => never migrate again.
+ * The original STORAGE_KEY stays intact for one release as rollback insurance.
+ */
+const MIGRATION_MARKER_KEY = 'ark-journey-history-migrated-v1';
+
+/** LevelDB namespace this store owns. Keys within it are `entry.gameId`. */
+const LEVEL_NAMESPACE = 'journey';
+
 // Module-level guard so HMR doesn't stack duplicate beforeunload listeners.
 let _journeyBeforeUnloadInstalled = false;
 
@@ -50,48 +60,197 @@ interface StoredJourneyData {
 }
 
 /**
+ * Sanitize an incoming entry so garbage date strings never end up persisted
+ * back into storage or displayed downstream.
+ */
+function sanitizeEntry(entry: JourneyEntry, id: string): JourneyEntry {
+  return {
+    ...entry,
+    gameId: id,
+    addedAt: toValidIso(entry.addedAt) ?? new Date().toISOString(),
+    firstPlayedAt: toValidIso(entry.firstPlayedAt),
+    lastPlayedAt: toValidIso(entry.lastPlayedAt),
+    removedAt: toValidIso(entry.removedAt),
+  };
+}
+
+/**
  * Journey Store — persists a historical record of every game the user adds to their library.
  * Unlike the library store, entries here are NEVER deleted when a game is removed.
  * This powers the Journey timeline view.
+ *
+ * v1.0.61: Primary persistence moved from `localStorage` to LevelDB via the
+ * `window.store` IPC surface (see `electron/ipc/store-handlers.ts`). The
+ * public sync API is unchanged — an in-memory cache is hydrated on init and
+ * every read still returns synchronously. When `window.store` is unavailable
+ * (unit tests, jsdom, pre-preload boot window) the store transparently
+ * falls back to the previous localStorage path.
  */
-class JourneyStore {
+export class JourneyStore {
   private entries: Map<string, JourneyEntry> = new Map(); // keyed by universal gameId string
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
   private _sortedCache: JourneyEntry[] | null = null;
 
+  /** Gate flag captured once at construction — LevelDB path vs. legacy fallback. */
+  private readonly _useLevelDB: boolean;
+
+  /**
+   * Set of gameIds currently persisted in LevelDB. On every debounced batch
+   * we diff `entries` against this to emit `del` ops for anything that
+   * disappeared (e.g. via `deleteEntry`). Simplification for v1.0.61: we
+   * still batch-put ALL current entries every debounce cycle (delta-writes
+   * come later).
+   */
+  private _knownKeys: Set<string> = new Set();
+
+  /**
+   * Exposed for tests / callers that want to await the async hydration
+   * finishing (LevelDB path only — localStorage path resolves immediately).
+   * Do NOT rely on this in production code — all public reads are safe
+   * before it resolves; they simply return an empty cache during the
+   * boot window.
+   */
+  readonly ready: Promise<void>;
+
   constructor() {
-    this.initialize();
+    this._useLevelDB =
+      typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+    this.ready = this.initialize();
     if (typeof window !== 'undefined' && !_journeyBeforeUnloadInstalled) {
       _journeyBeforeUnloadInstalled = true;
       window.addEventListener('beforeunload', () => this.flushSave());
     }
   }
 
-  private scheduleSave() {
-    if (this._saveTimer) clearTimeout(this._saveTimer);
-    this._saveTimer = setTimeout(() => {
-      this._saveTimer = null;
-      this.save();
-    }, 300);
+  private async initialize(): Promise<void> {
+    if (this.isInitialized) return;
+
+    if (this._useLevelDB) {
+      await this.initializeFromLevelDB();
+    } else {
+      this.initializeFromLocalStorage();
+    }
+
+    this.isInitialized = true;
   }
 
-  private flushSave() {
-    if (this._saveTimer) {
-      clearTimeout(this._saveTimer);
-      this._saveTimer = null;
-      this.save();
+  /**
+   * LevelDB init path:
+   *   1. Load rows from namespace `journey`. If any exist, hydrate.
+   *   2. If empty AND `localStorage[STORAGE_KEY]` exists AND no migration
+   *      marker => copy the JSON payload into LevelDB, stamp the marker.
+   *   3. On any hard failure fall back to the localStorage path so the
+   *      user never loses their journey.
+   */
+  private async initializeFromLevelDB(): Promise<void> {
+    try {
+      const res = await window.store!.getAll<JourneyEntry>(LEVEL_NAMESPACE);
+      if (res.error) {
+        console.error('[JourneyStore] getAll(journey) IPC error:', res.error);
+        this.initializeFromLocalStorage();
+        return;
+      }
+      const rows = res.rows ?? [];
+      if (rows.length > 0) {
+        this.hydrateFromRows(rows.map((r) => r.value));
+        return;
+      }
+      // LevelDB empty — attempt one-shot migration from localStorage.
+      const migrated = await this.tryMigrateFromLocalStorage();
+      if (!migrated) {
+        // Nothing to migrate: keep entries empty. Do not touch localStorage.
+        this.notifyListeners();
+      }
+    } catch (err) {
+      console.error('[JourneyStore] Failed to init from LevelDB, falling back:', err);
+      this.initializeFromLocalStorage();
     }
   }
 
-  private invalidateSortedCache() {
-    this._sortedCache = null;
+  /**
+   * One-shot copy of `localStorage[STORAGE_KEY]` -> LevelDB namespace `journey`.
+   *
+   * Runs only when:
+   *   - migration marker is absent (never migrated before), AND
+   *   - LevelDB journey namespace is empty (caller already checked), AND
+   *   - localStorage payload exists and parses cleanly.
+   *
+   * Stamps `MIGRATION_MARKER_KEY = 'yes'` on success (or on an empty/invalid
+   * payload) so we don't retry every boot.
+   *
+   * Returns `true` if any rows were copied.
+   */
+  private async tryMigrateFromLocalStorage(): Promise<boolean> {
+    try {
+      if (localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes') return false;
+
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+        return false;
+      }
+
+      let parsed: StoredJourneyData;
+      try {
+        parsed = JSON.parse(raw) as StoredJourneyData;
+      } catch (e) {
+        console.error('[JourneyStore] Legacy payload parse failed:', e);
+        localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+        return false;
+      }
+
+      if (!Array.isArray(parsed.entries) || parsed.entries.length === 0) {
+        localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+        return false;
+      }
+
+      const sanitized: JourneyEntry[] = [];
+      for (const entry of parsed.entries) {
+        const id = migrateGameId(entry as any);
+        if (!id) continue;
+        sanitized.push(sanitizeEntry(entry, id));
+      }
+
+      if (sanitized.length === 0) {
+        // Migration produced 0 entries — do NOT stamp the marker or wipe
+        // localStorage; something went wrong and we must not lose the journey.
+        console.warn(
+          '[JourneyStore] Migration produced 0 entries — skipping to prevent data loss',
+        );
+        return false;
+      }
+
+      const ops = sanitized.map((e) => ({
+        type: 'put' as const,
+        namespace: LEVEL_NAMESPACE,
+        key: e.gameId,
+        value: e,
+      }));
+
+      const res = await window.store!.batch(ops);
+      if (res.error) {
+        console.error('[JourneyStore] Migration batch failed:', res.error);
+        return false;
+      }
+
+      // IMPORTANT: keep the original STORAGE_KEY intact for one release as
+      // rollback insurance. Only stamp the marker.
+      localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+      this.hydrateFromRows(sanitized);
+      console.log(
+        `[JourneyStore] Migrated ${sanitized.length} entries from localStorage -> LevelDB`,
+      );
+      return true;
+    } catch (err) {
+      console.error('[JourneyStore] Migration failed:', err);
+      return false;
+    }
   }
 
-  private initialize() {
-    if (this.isInitialized) return;
-
+  /** Legacy path — used both as fallback and in test/jsdom environments. */
+  private initializeFromLocalStorage(): void {
     let needsResave = false;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -103,14 +262,7 @@ class JourneyStore {
             if (id) {
               // Sanitize dates on load so pre-existing garbage never gets
               // re-persisted, and downstream views never see "Invalid Date".
-              this.entries.set(id, {
-                ...entry,
-                gameId: id,
-                addedAt: toValidIso(entry.addedAt) ?? new Date().toISOString(),
-                firstPlayedAt: toValidIso(entry.firstPlayedAt),
-                lastPlayedAt: toValidIso(entry.lastPlayedAt),
-                removedAt: toValidIso(entry.removedAt),
-              });
+              this.entries.set(id, sanitizeEntry(entry, id));
             }
           }
           if (parsed.version < STORAGE_VERSION) {
@@ -125,16 +277,64 @@ class JourneyStore {
     // GUARD: Never overwrite existing data with an empty store — if all entries
     // failed migration something went wrong and we must not wipe the journey.
     if (needsResave && this.entries.size > 0) {
-      this.save();
+      this.saveNowLocalStorage();
       console.log(`[JourneyStore] Migrated ${this.entries.size} entries to v2 (string gameId)`);
     } else if (needsResave && this.entries.size === 0) {
-      console.warn('[JourneyStore] Migration produced 0 entries — skipping save to prevent data loss');
+      console.warn(
+        '[JourneyStore] Migration produced 0 entries — skipping save to prevent data loss',
+      );
     }
-
-    this.isInitialized = true;
   }
 
-  private save() {
+  /**
+   * Populate the in-memory cache from a list of JourneyEntry rows (from
+   * either LevelDB or the localStorage migration payload) and notify.
+   */
+  private hydrateFromRows(rows: JourneyEntry[]): void {
+    this.entries.clear();
+    for (const row of rows) {
+      const id = migrateGameId(row as any);
+      if (!id) continue;
+      this.entries.set(id, sanitizeEntry(row, id));
+    }
+    this._knownKeys = new Set(this.entries.keys());
+    this.invalidateSortedCache();
+    this.notifyListeners();
+  }
+
+  /**
+   * Debounced save — coalesces bursts of journey writes (rapid record()
+   * calls during import, cross-store sync) into a single persistence hit
+   * ~300ms later.
+   */
+  private scheduleSave() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.saveNow();
+    }, 300);
+  }
+
+  /** Flush any pending debounced save (used on beforeunload). */
+  private flushSave() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+      this.saveNow();
+    }
+  }
+
+  private saveNow(): void {
+    if (this._useLevelDB) {
+      // Fire-and-forget; errors are logged. Preserves the current synchronous
+      // callsite contract used by importData().
+      void this.saveNowLevelDB();
+      return;
+    }
+    this.saveNowLocalStorage();
+  }
+
+  private saveNowLocalStorage(): void {
     try {
       const data: StoredJourneyData = {
         version: STORAGE_VERSION,
@@ -145,6 +345,44 @@ class JourneyStore {
     } catch (error) {
       console.error('[JourneyStore] Failed to save:', error);
     }
+  }
+
+  private async saveNowLevelDB(): Promise<void> {
+    try {
+      const currentIds = new Set<string>();
+      const ops: Array<
+        | { type: 'put'; namespace: string; key: string; value: unknown }
+        | { type: 'del'; namespace: string; key: string }
+      > = [];
+
+      for (const [gameId, entry] of this.entries.entries()) {
+        if (!gameId) continue;
+        currentIds.add(gameId);
+        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: gameId, value: entry });
+      }
+
+      // Delta-deletes: anything in _knownKeys that's no longer in entries.
+      for (const oldKey of this._knownKeys) {
+        if (!currentIds.has(oldKey)) {
+          ops.push({ type: 'del', namespace: LEVEL_NAMESPACE, key: oldKey });
+        }
+      }
+
+      if (ops.length === 0) return;
+
+      const res = await window.store!.batch(ops);
+      if (res.error) {
+        console.error('[JourneyStore] batch save failed:', res.error);
+        return;
+      }
+      this._knownKeys = currentIds;
+    } catch (err) {
+      console.error('[JourneyStore] Failed to save (LevelDB):', err);
+    }
+  }
+
+  private invalidateSortedCache() {
+    this._sortedCache = null;
   }
 
   // ------ Subscriptions ------
@@ -427,7 +665,7 @@ class JourneyStore {
     }
     if (added > 0 || updated > 0 || backfilled > 0) {
       this.invalidateSortedCache();
-      this.save(); // direct save for bulk import
+      this.saveNow(); // direct save for bulk import
       this.notifyListeners();
     }
 
@@ -452,8 +690,27 @@ class JourneyStore {
   clear() {
     this.entries.clear();
     this.invalidateSortedCache();
-    this.flushSave();
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._useLevelDB) {
+      // Fire-and-forget: also nuke the LevelDB namespace so subsequent
+      // hydrates see an empty store. Errors are logged.
+      void (async () => {
+        try {
+          const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+          if (res.error) console.error('[JourneyStore] clearNamespace failed:', res.error);
+        } catch (err) {
+          console.error('[JourneyStore] Failed to clear LevelDB namespace:', err);
+        }
+      })();
+    }
     localStorage.removeItem(STORAGE_KEY);
+    // Reset the migration marker so a subsequent clear-then-import cycle
+    // treats the next non-empty localStorage payload as a fresh migration.
+    localStorage.removeItem(MIGRATION_MARKER_KEY);
+    this._knownKeys = new Set();
     this.notifyListeners();
   }
 }

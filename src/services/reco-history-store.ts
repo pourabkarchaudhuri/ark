@@ -6,7 +6,16 @@
  *      Persists dismiss metadata (franchise/developer/at) for hard-negative expand (F3).
  *   2. Recommendation conversions: click → library add → play → rate.
  *
- * Persists to localStorage with a simple versioned key.
+ * v1.0.61: Primary persistence moved from `localStorage` to LevelDB via the
+ * `window.store` IPC surface (see `electron/ipc/store-handlers.ts`). Both
+ * collections live in the same namespace with prefixed keys so a single
+ * `getAll` fills the in-memory cache. The public sync API is unchanged —
+ * the constructor still hydrates synchronously from localStorage (so any
+ * caller that reads on the same tick sees data), and the async LevelDB
+ * layer either migrates or overrides that cache once ready. When
+ * `window.store` is unavailable (unit tests, jsdom, pre-preload boot
+ * window) the store transparently falls back to the previous localStorage
+ * path.
  */
 
 import { canonicalFranchiseBase } from '@/services/franchise';
@@ -15,10 +24,28 @@ import type { DismissMeta } from '@/services/hard-negative';
 const LS_DISMISSED_KEY = 'ark-reco-dismissed-v1';
 const LS_HISTORY_KEY = 'ark-reco-history-v1';
 
+/**
+ * One-shot markers stamped in localStorage after the LevelDB migration
+ * copies each payload across. Presence => never migrate again. Both legacy
+ * keys stay intact for one release as rollback insurance.
+ */
+const MIGRATION_MARKER_DISMISSED = 'ark-reco-dismissed-v1-migrated-v1';
+const MIGRATION_MARKER_HISTORY = 'ark-reco-history-v1-migrated-v1';
+
+/** LevelDB namespace this store owns. Row keys are prefixed by kind. */
+const LEVEL_NAMESPACE = 'reco-history';
+/** Prefix for dismissal rows within the namespace: `d:${gameId}` */
+const KEY_PREFIX_DISMISS = 'd:';
+/** Prefix for conversion-history rows within the namespace: `h:${gameId}` */
+const KEY_PREFIX_HISTORY = 'h:';
+
 /** Soft bound — drop oldest dismissals by `at`. */
 const MAX_DISMISSALS = 500;
 /** Soft bound — drop oldest conversion history by `clickedAt`. */
 const MAX_HISTORY = 200;
+
+/** Debounce window for coalescing bursts of writes into a single LevelDB batch. */
+const SAVE_DEBOUNCE_MS = 300;
 
 /** Tracks the lifecycle of a single recommendation. */
 export interface RecoConversion {
@@ -41,16 +68,50 @@ export interface RecoConversion {
 
 export type { DismissMeta };
 
+// Module-level guard so HMR doesn't stack duplicate beforeunload listeners.
+let _recoHistoryBeforeUnloadInstalled = false;
+
 class RecoHistoryStore {
   /** Rich dismiss records (migrated from bare id arrays). */
   private dismissals: Map<string, DismissMeta>;
   private history: Map<string, RecoConversion>;
   private listeners: Set<() => void> = new Set();
 
+  /** Gate flag captured once at construction — LevelDB path vs. legacy fallback. */
+  private readonly _useLevelDB: boolean;
+
+  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Set of row keys currently persisted in LevelDB (prefixed). On every
+   * debounced batch we diff the current in-memory state against this to
+   * emit `del` ops for anything that disappeared (undismiss, prune, etc.).
+   */
+  private _knownKeys: Set<string> = new Set();
+
+  /**
+   * Exposed for tests / callers that want to await the async hydration
+   * finishing (LevelDB path only — localStorage path resolves immediately).
+   */
+  readonly ready: Promise<void>;
+
   constructor() {
     this.dismissals = new Map();
     this.history = new Map();
-    this.load();
+    this._useLevelDB =
+      typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+
+    // Always run a synchronous hydrate from localStorage so callers that
+    // read immediately after construction (e.g. isDismissed during render)
+    // still see data even in the LevelDB pre-hydrate boot window.
+    this.hydrateFromLocalStorage();
+
+    this.ready = this._useLevelDB ? this.initializeFromLevelDB() : Promise.resolve();
+
+    if (typeof window !== 'undefined' && !_recoHistoryBeforeUnloadInstalled) {
+      _recoHistoryBeforeUnloadInstalled = true;
+      window.addEventListener('beforeunload', () => this.flushSave());
+    }
   }
 
   // ── Subscriptions ──
@@ -64,9 +125,9 @@ class RecoHistoryStore {
     this.listeners.forEach(fn => fn());
   }
 
-  // ── Persistence ──
+  // ── Persistence: sync load ──
 
-  private load() {
+  private hydrateFromLocalStorage() {
     try {
       const rawDismissed = localStorage.getItem(LS_DISMISSED_KEY);
       if (rawDismissed) {
@@ -95,12 +156,142 @@ class RecoHistoryStore {
       const rawHistory = localStorage.getItem(LS_HISTORY_KEY);
       if (rawHistory) {
         const entries: RecoConversion[] = JSON.parse(rawHistory);
-        for (const entry of entries) {
-          this.history.set(entry.gameId, entry);
+        if (Array.isArray(entries)) {
+          for (const entry of entries) {
+            if (entry && typeof entry.gameId === 'string') {
+              this.history.set(entry.gameId, entry);
+            }
+          }
         }
       }
     } catch { /* corrupted */ }
   }
+
+  // ── Persistence: async LevelDB init ──
+
+  /**
+   * LevelDB init path:
+   *   1. Load rows from namespace `reco-history`. If any exist, replace
+   *      the in-memory cache and notify.
+   *   2. Otherwise, if either migration marker is missing, batch-put the
+   *      current in-memory entries (already hydrated from localStorage)
+   *      into LevelDB and stamp both markers. Legacy localStorage keys
+   *      remain intact for one-release rollback.
+   *   3. On any hard IPC failure, keep the localStorage-hydrated cache and
+   *      leave `_knownKeys` empty so subsequent writes still fall back to
+   *      the localStorage path via `saveNow()`.
+   */
+  private async initializeFromLevelDB(): Promise<void> {
+    try {
+      const res = await window.store!.getAll<unknown>(LEVEL_NAMESPACE);
+      if (res.error) {
+        console.error('[RecoHistoryStore] getAll IPC error:', res.error);
+        return;
+      }
+      const rows = res.rows ?? [];
+      if (rows.length > 0) {
+        this.hydrateFromRows(rows);
+        this.notify();
+        return;
+      }
+      // LevelDB empty — attempt one-shot migration from localStorage.
+      await this.tryMigrateFromLocalStorage();
+    } catch (err) {
+      console.error('[RecoHistoryStore] Failed to init from LevelDB, falling back:', err);
+    }
+  }
+
+  private hydrateFromRows(rows: Array<{ key: string; value: unknown }>) {
+    const dismissals = new Map<string, DismissMeta>();
+    const history = new Map<string, RecoConversion>();
+    const known = new Set<string>();
+
+    for (const row of rows) {
+      known.add(row.key);
+      if (row.key.startsWith(KEY_PREFIX_DISMISS)) {
+        const m = row.value as DismissMeta | null;
+        if (m && typeof m.gameId === 'string') {
+          dismissals.set(m.gameId, {
+            gameId: m.gameId,
+            at: typeof m.at === 'number' ? m.at : 0,
+            franchiseBase: m.franchiseBase,
+            developer: m.developer,
+            title: m.title,
+          });
+        }
+      } else if (row.key.startsWith(KEY_PREFIX_HISTORY)) {
+        const e = row.value as RecoConversion | null;
+        if (e && typeof e.gameId === 'string') {
+          history.set(e.gameId, e);
+        }
+      }
+    }
+
+    this.dismissals = dismissals;
+    this.history = history;
+    this._knownKeys = known;
+  }
+
+  /**
+   * One-shot copy of the current in-memory state -> LevelDB namespace.
+   *
+   * Runs only when:
+   *   - migration markers are absent (never migrated before), AND
+   *   - LevelDB namespace is empty (caller already checked).
+   *
+   * Stamps both migration markers on success (or on an empty in-memory
+   * state) so we don't retry every boot. Preserves the two legacy
+   * localStorage keys for one-release rollback insurance.
+   */
+  private async tryMigrateFromLocalStorage(): Promise<void> {
+    try {
+      const dismissedMarked = localStorage.getItem(MIGRATION_MARKER_DISMISSED) === 'yes';
+      const historyMarked = localStorage.getItem(MIGRATION_MARKER_HISTORY) === 'yes';
+      if (dismissedMarked && historyMarked) return;
+
+      const ops: Array<
+        | { type: 'put'; namespace: string; key: string; value: unknown }
+        | { type: 'del'; namespace: string; key: string }
+      > = [];
+      const known = new Set<string>();
+
+      if (!dismissedMarked) {
+        for (const [gameId, meta] of this.dismissals) {
+          const key = KEY_PREFIX_DISMISS + gameId;
+          ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key, value: meta });
+          known.add(key);
+        }
+      }
+      if (!historyMarked) {
+        for (const [gameId, entry] of this.history) {
+          const key = KEY_PREFIX_HISTORY + gameId;
+          ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key, value: entry });
+          known.add(key);
+        }
+      }
+
+      if (ops.length > 0) {
+        const res = await window.store!.batch(ops);
+        if (res.error) {
+          console.error('[RecoHistoryStore] Migration batch failed:', res.error);
+          return;
+        }
+        this._knownKeys = known;
+        console.log(
+          `[RecoHistoryStore] Migrated ${this.dismissals.size} dismissals + ${this.history.size} history entries from localStorage -> LevelDB`,
+        );
+      }
+
+      // Stamp both markers even if the in-memory state was empty so we
+      // don't retry every boot.
+      localStorage.setItem(MIGRATION_MARKER_DISMISSED, 'yes');
+      localStorage.setItem(MIGRATION_MARKER_HISTORY, 'yes');
+    } catch (err) {
+      console.error('[RecoHistoryStore] Migration failed:', err);
+    }
+  }
+
+  // ── Persistence: prune + save ──
 
   private pruneSoftCaps() {
     if (this.dismissals.size > MAX_DISMISSALS) {
@@ -121,12 +312,82 @@ class RecoHistoryStore {
     }
   }
 
+  /**
+   * Schedules a debounced save. Pruning is done synchronously here so
+   * callers that read `getDismissedCount()` / `getHistorySize()` on the
+   * same tick see the capped values.
+   */
   private save() {
     this.pruneSoftCaps();
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.saveNow();
+    }, SAVE_DEBOUNCE_MS);
+  }
+
+  private flushSave() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+      this.saveNow();
+    }
+  }
+
+  private saveNow(): void {
+    if (this._useLevelDB) {
+      // Fire-and-forget; errors are logged. Preserves the current
+      // synchronous callsite contract.
+      void this.saveNowLevelDB();
+      return;
+    }
+    this.saveNowLocalStorage();
+  }
+
+  private saveNowLocalStorage(): void {
     try {
       localStorage.setItem(LS_DISMISSED_KEY, JSON.stringify([...this.dismissals.values()]));
       localStorage.setItem(LS_HISTORY_KEY, JSON.stringify([...this.history.values()]));
     } catch { /* storage full */ }
+  }
+
+  private async saveNowLevelDB(): Promise<void> {
+    try {
+      const currentKeys = new Set<string>();
+      const ops: Array<
+        | { type: 'put'; namespace: string; key: string; value: unknown }
+        | { type: 'del'; namespace: string; key: string }
+      > = [];
+
+      for (const [gameId, meta] of this.dismissals) {
+        const key = KEY_PREFIX_DISMISS + gameId;
+        currentKeys.add(key);
+        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key, value: meta });
+      }
+      for (const [gameId, entry] of this.history) {
+        const key = KEY_PREFIX_HISTORY + gameId;
+        currentKeys.add(key);
+        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key, value: entry });
+      }
+
+      // Delta-deletes: anything in _knownKeys that's no longer present.
+      for (const oldKey of this._knownKeys) {
+        if (!currentKeys.has(oldKey)) {
+          ops.push({ type: 'del', namespace: LEVEL_NAMESPACE, key: oldKey });
+        }
+      }
+
+      if (ops.length === 0) return;
+
+      const res = await window.store!.batch(ops);
+      if (res.error) {
+        console.error('[RecoHistoryStore] batch save failed:', res.error);
+        return;
+      }
+      this._knownKeys = currentKeys;
+    } catch (err) {
+      console.error('[RecoHistoryStore] Failed to save (LevelDB):', err);
+    }
   }
 
   // ── Dismissed Games ──
@@ -363,8 +624,29 @@ class RecoHistoryStore {
   reset() {
     this.dismissals.clear();
     this.history.clear();
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._useLevelDB) {
+      // Fire-and-forget: also nuke the LevelDB namespace so subsequent
+      // hydrates see an empty store. Errors are logged.
+      void (async () => {
+        try {
+          const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+          if (res.error) console.error('[RecoHistoryStore] clearNamespace failed:', res.error);
+        } catch (err) {
+          console.error('[RecoHistoryStore] Failed to clear LevelDB namespace:', err);
+        }
+      })();
+    }
     localStorage.removeItem(LS_DISMISSED_KEY);
     localStorage.removeItem(LS_HISTORY_KEY);
+    // Reset markers so a subsequent reset-then-repopulate cycle treats
+    // the next non-empty state as a fresh migration.
+    localStorage.removeItem(MIGRATION_MARKER_DISMISSED);
+    localStorage.removeItem(MIGRATION_MARKER_HISTORY);
+    this._knownKeys = new Set();
     this.notify();
   }
 }
