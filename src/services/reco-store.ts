@@ -193,7 +193,17 @@ const INITIAL_STATE: RecoState = {
 
 // ─── Store ─────────────────────────────────────────────────────────────────────
 
-class RecoStore {
+/**
+ * LevelDB migration constants for the Oracle result cache (v1.0.64).
+ * Only a single row is stored — the cached shelves + library signature +
+ * pipeline stages that let cold starts serve a warm result within TTL.
+ * The row key inside the namespace is `RESULT_CACHE_ROW_KEY`.
+ */
+const RECO_CACHE_LEVEL_NAMESPACE = 'reco-cache';
+const RECO_CACHE_ROW_KEY = 'results';
+const RECO_CACHE_MIGRATION_MARKER_KEY = 'ark-oracle-results-migrated-v1';
+
+export class RecoStore {
   private state: RecoState = { ...INITIAL_STATE };
   private listeners: Set<() => void> = new Set();
   private worker: Worker | null = null;
@@ -203,6 +213,16 @@ class RecoStore {
   // Cold-start result caching — persists across app restarts
   private static readonly RESULT_CACHE_KEY = 'ark-oracle-results';
   private static readonly RESULT_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+
+  /** LevelDB gate captured lazily (deferred — reco-store has no constructor). */
+  private _useLevelDBCached: boolean | null = null;
+  private get _useLevelDB(): boolean {
+    if (this._useLevelDBCached === null) {
+      this._useLevelDBCached =
+        typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+    }
+    return this._useLevelDBCached;
+  }
 
   // ── Subscriptions ──
 
@@ -235,32 +255,94 @@ class RecoStore {
         librarySignature: buildOracleLibrarySignature(),
         pipelineStages: currentOraclePipelineStages(),
       };
+      if (this._useLevelDB) {
+        // Fire-and-forget — same contract as the localStorage path (errors ignored).
+        void (async () => {
+          try {
+            const res = await window.store!.put(
+              RECO_CACHE_LEVEL_NAMESPACE,
+              RECO_CACHE_ROW_KEY,
+              cache,
+            );
+            if (res.error) console.error('[RecoStore] cache put failed:', res.error);
+          } catch (err) {
+            console.error('[RecoStore] cache put failed:', err);
+          }
+        })();
+        return;
+      }
       localStorage.setItem(RecoStore.RESULT_CACHE_KEY, JSON.stringify(cache));
     } catch {
       // localStorage full or unavailable — ignore
     }
   }
 
-  private loadResultsFromCache(): Partial<RecoState> | null {
+  /**
+   * v1.0.64: async — reads from LevelDB when available, falls back to
+   * localStorage otherwise. Also folds in the one-shot migration from
+   * `ark-oracle-results` (localStorage) to the `reco-cache` LevelDB
+   * namespace. Because this is a 15-minute TTL cache, preserving the
+   * legacy row across upgrade is optional — but doing it avoids an
+   * unnecessary Oracle recompute on the first cold start after upgrade.
+   */
+  private async loadResultsFromCache(): Promise<Partial<RecoState> | null> {
     try {
-      const raw = localStorage.getItem(RecoStore.RESULT_CACHE_KEY);
-      if (!raw) return null;
-      const cache = JSON.parse(raw);
+      let cache: any = null;
+      if (this._useLevelDB) {
+        const res = await window.store!.get<any>(
+          RECO_CACHE_LEVEL_NAMESPACE,
+          RECO_CACHE_ROW_KEY,
+        );
+        if (res.error) {
+          console.error('[RecoStore] cache get failed, falling back:', res.error);
+          const raw = localStorage.getItem(RecoStore.RESULT_CACHE_KEY);
+          if (raw) cache = JSON.parse(raw);
+        } else if (res.value != null) {
+          cache = res.value;
+        } else {
+          // LevelDB row missing — attempt one-shot migration from localStorage.
+          if (localStorage.getItem(RECO_CACHE_MIGRATION_MARKER_KEY) !== 'yes') {
+            const raw = localStorage.getItem(RecoStore.RESULT_CACHE_KEY);
+            if (raw) {
+              try {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object') {
+                  const putRes = await window.store!.put(
+                    RECO_CACHE_LEVEL_NAMESPACE,
+                    RECO_CACHE_ROW_KEY,
+                    parsed,
+                  );
+                  if (!putRes.error) {
+                    localStorage.setItem(RECO_CACHE_MIGRATION_MARKER_KEY, 'yes');
+                    cache = parsed;
+                    console.log('[RecoStore] Migrated Oracle result cache -> LevelDB');
+                  }
+                } else {
+                  localStorage.setItem(RECO_CACHE_MIGRATION_MARKER_KEY, 'yes');
+                }
+              } catch {
+                localStorage.setItem(RECO_CACHE_MIGRATION_MARKER_KEY, 'yes');
+              }
+            } else {
+              localStorage.setItem(RECO_CACHE_MIGRATION_MARKER_KEY, 'yes');
+            }
+          }
+        }
+      } else {
+        const raw = localStorage.getItem(RecoStore.RESULT_CACHE_KEY);
+        if (raw) cache = JSON.parse(raw);
+      }
+      if (!cache) return null;
       if (!cache.lastComputed || Date.now() - cache.lastComputed > RecoStore.RESULT_CACHE_TTL) {
         return null;
       }
       if (!cache.shelves || cache.shelves.length === 0) return null;
-      // Drop stale disk cache if library/notes no longer match (cold-start correctness).
       if (
         typeof cache.librarySignature !== 'string' ||
         cache.librarySignature !== buildOracleLibrarySignature()
       ) {
         return null;
       }
-      // Restore only replays the rerank pass, so a cache written before a
-      // retrieval or scoring stage came online would silently serve shelves
-      // that a fresh compute would not produce. Pre-signature caches are
-      // dropped because there is no way to tell what produced them.
       if (!isPipelineStages(cache.pipelineStages)) return null;
       if (pipelineGainedStages(cache.pipelineStages, currentOraclePipelineStages())) {
         console.log('[RecoStore] Dropping cached results — pipeline gained a stage since they were computed');
@@ -274,6 +356,19 @@ class RecoStore {
 
   private clearResultsCache() {
     try {
+      if (this._useLevelDB) {
+        void (async () => {
+          try {
+            const res = await window.store!.del(
+              RECO_CACHE_LEVEL_NAMESPACE,
+              RECO_CACHE_ROW_KEY,
+            );
+            if (res.error) console.error('[RecoStore] cache del failed:', res.error);
+          } catch {
+            // ignore
+          }
+        })();
+      }
       localStorage.removeItem(RecoStore.RESULT_CACHE_KEY);
     } catch {
       // ignore
@@ -305,8 +400,8 @@ class RecoStore {
   ) {
     if (this.state.status === 'computing') return; // prevent double-fire
 
-    // Cold-start optimization: restore recent results from localStorage
-    const cached = this.loadResultsFromCache();
+    // Cold-start optimization: restore recent results from LevelDB (v1.0.64+) / localStorage.
+    const cached = await this.loadResultsFromCache();
     if (cached && cached.shelves && cached.shelves.length > 0) {
       console.log(`[RecoStore] Restored cached results (${cached.shelves.length} shelves, computed ${Math.round((Date.now() - (cached.lastComputed || 0)) / 1000)}s ago)`);
       const tasteProfile = (cached.tasteProfile as RecoState['tasteProfile']) ?? null;

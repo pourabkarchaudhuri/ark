@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.64] - 2026-08-02
+
+### Migrated to LevelDB
+- **`src/services/reco-store.ts`** — the Oracle 15-minute cold-start result cache. Single row `results` under namespace `reco-cache`. `saveResultsToCache` fire-and-forgets an async LevelDB put on the LevelDB path (same contract as the localStorage path — errors ignored). `loadResultsFromCache` is now async; it awaits a LevelDB `get`, falls back to the localStorage row on IPC error, and runs a one-shot migration copying `ark-oracle-results` -> LevelDB the first time the row is missing (stamped with marker `ark-oracle-results-migrated-v1`). `clearResultsCache` wipes both paths.
+- **Caller updated**: `compute()` now `await`s the async cache load. This was the only call site.
+
+### Under the hood
+- Reco-store had no constructor, so `_useLevelDB` is captured lazily on first access via a getter (`_useLevelDBCached`). Matches the same gate semantics as the constructor-based stores from prior releases.
+- Legacy TTL semantics preserved — 15-minute window, library-signature check, pipeline-stage-gain check. Restore is still refused when any of them fails.
+
+### Deferred to v1.0.65+
+- IDB-backed stores: `catalog-store.ts` (155k rows, chunked streaming), `epic-catalog-store.ts`, embeddings, `ann-index.ts`.
+- No new unit tests for `reco-store.ts` in this release — the cache paths are integration-heavy and would require mocking ~15 dependent stores. Coverage will be added as part of the catalog-store migration when the test scaffolding for cross-store IPC settles.
+
 ## [1.0.63] - 2026-08-02
 
 ### Migrated to LevelDB

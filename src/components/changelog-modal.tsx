@@ -11,6 +11,13 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.64': {
+    title: "What's New in Ark 1.0.64",
+    changes: [
+      'Oracle result cache moved to LevelDB — the 15-minute cold-start cache that lets Oracle show shelves instantly on app open (before a full recompute) now writes to LevelDB namespace `reco-cache` instead of localStorage. Existing cached shelves migrate one-shot on first launch after upgrade so you don\'t re-wait for a recompute.',
+      'Zero visible UI change — Oracle keeps its same subscribe/notify shape and same behavior for cache hits, cache misses, pipeline-stage invalidation, and library-signature changes. Only the persistence path swapped.',
+    ],
+  },
   '1.0.63': {
     title: "What's New in Ark 1.0.63",
     changes: [
