@@ -11,6 +11,23 @@ import { statusHistoryStore } from '@/services/status-history-store';
 const STORAGE_KEY = 'ark-custom-games';
 const STORAGE_VERSION = 2; // v2: id migrated from negative number to "custom-N" string
 
+/**
+ * One-shot marker stamped in localStorage after LevelDB migration copies
+ * the ark-custom-games payload across. Presence => never migrate again.
+ * Original STORAGE_KEY stays intact one release for rollback.
+ */
+const MIGRATION_MARKER_KEY = 'ark-custom-games-migrated-v1';
+
+/**
+ * LevelDB namespace this store owns. Keys are prefixed so the nextCounter
+ * meta row co-lives with entry rows without namespace pollution:
+ *   `e:{id}`   → CustomGameEntry
+ *   `m:nextCounter` → { nextCounter: number }
+ */
+const LEVEL_NAMESPACE = 'custom-game';
+const KEY_PREFIX_ENTRY = 'e:';
+const KEY_META_NEXT_COUNTER = 'm:nextCounter';
+
 // Module-level guard so HMR doesn't stack duplicate beforeunload listeners.
 let _customGameBeforeUnloadInstalled = false;
 
@@ -38,7 +55,7 @@ interface StoredData {
  * Custom Game Store - Manages user-created games not from Steam/Epic
  * Uses "custom-N" string IDs to distinguish from store games
  */
-class CustomGameStore {
+export class CustomGameStore {
   private entries: Map<string, CustomGameEntry> = new Map(); // keyed by "custom-N"
   private nextCounter: number = 1; // Start from 1, increment for each new game
   private listeners: Set<() => void> = new Set();
@@ -47,8 +64,22 @@ class CustomGameStore {
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Gate flag captured once at construction — LevelDB path vs. legacy. */
+  private readonly _useLevelDB: boolean;
+
+  /** Entry-key set (gameIds) currently persisted in LevelDB for delta-del ops. */
+  private _knownKeys: Set<string> = new Set();
+
+  /** Last persisted nextCounter; skip meta-write if unchanged. */
+  private _lastPersistedCounter: number = 1;
+
+  /** Resolves when async LevelDB hydration finishes. */
+  readonly ready: Promise<void>;
+
   constructor() {
-    this.initialize();
+    this._useLevelDB =
+      typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+    this.ready = this.initializeAsync();
     if (typeof window !== 'undefined' && !_customGameBeforeUnloadInstalled) {
       _customGameBeforeUnloadInstalled = true;
       window.addEventListener('beforeunload', () => this.flushSave());
@@ -59,7 +90,7 @@ class CustomGameStore {
     if (this._saveTimer) clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
       this._saveTimer = null;
-      this.saveToStorage();
+      this.saveNow();
     }, 300);
   }
 
@@ -67,7 +98,67 @@ class CustomGameStore {
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
-      this.saveToStorage();
+      this.saveNow();
+    }
+  }
+
+  private saveNow(): void {
+    if (this._useLevelDB) {
+      void this.saveNowLevelDB();
+      return;
+    }
+    this.saveToStorage();
+  }
+
+  private async saveNowLevelDB(): Promise<void> {
+    try {
+      const currentIds = new Set<string>();
+      const ops: Array<
+        | { type: 'put'; namespace: string; key: string; value: unknown }
+        | { type: 'del'; namespace: string; key: string }
+      > = [];
+
+      for (const [id, entry] of this.entries) {
+        if (!id) continue;
+        currentIds.add(id);
+        ops.push({
+          type: 'put',
+          namespace: LEVEL_NAMESPACE,
+          key: `${KEY_PREFIX_ENTRY}${id}`,
+          value: entry,
+        });
+      }
+
+      for (const oldKey of this._knownKeys) {
+        if (!currentIds.has(oldKey)) {
+          ops.push({
+            type: 'del',
+            namespace: LEVEL_NAMESPACE,
+            key: `${KEY_PREFIX_ENTRY}${oldKey}`,
+          });
+        }
+      }
+
+      if (this.nextCounter !== this._lastPersistedCounter) {
+        ops.push({
+          type: 'put',
+          namespace: LEVEL_NAMESPACE,
+          key: KEY_META_NEXT_COUNTER,
+          value: { nextCounter: this.nextCounter },
+        });
+      }
+
+      if (ops.length === 0) return;
+
+      const res = await window.store!.batch(ops);
+      if (res.error) {
+        console.error('[CustomGameStore] batch save failed:', res.error);
+        return;
+      }
+      this._knownKeys = currentIds;
+      this._lastPersistedCounter = this.nextCounter;
+    } catch (err) {
+      console.error('[CustomGameStore] Failed to save (LevelDB):', err);
     }
   }
 
@@ -78,33 +169,143 @@ class CustomGameStore {
     return Number.isNaN(d.getTime()) ? fallback : d;
   }
 
-  private initialize() {
+  private async initializeAsync(): Promise<void> {
     if (this.isInitialized) return;
+    if (this._useLevelDB) {
+      await this.initializeFromLevelDB();
+    } else {
+      this.initializeFromLocalStorage();
+    }
+    this.isInitialized = true;
+    this.backfillJourneyEntries();
+  }
 
+  private ingestEntries(entries: CustomGameEntry[]): number {
+    let count = 0;
+    entries.forEach((entry) => {
+      const id = this.migrateId(entry.id);
+      const addedAt = CustomGameStore.toValidDate(entry.addedAt, new Date());
+      const updatedAt = CustomGameStore.toValidDate(entry.updatedAt, addedAt);
+      this.entries.set(id, { ...entry, id, addedAt, updatedAt });
+      count++;
+    });
+    return count;
+  }
+
+  private recomputeCounterFromEntries(): number {
+    let maxCounter = 0;
+    for (const key of this.entries.keys()) {
+      const num = parseInt(key.replace('custom-', ''), 10);
+      if (!isNaN(num) && num > maxCounter) maxCounter = num;
+    }
+    return maxCounter + 1;
+  }
+
+  private async initializeFromLevelDB(): Promise<void> {
+    try {
+      const res = await window.store!.getAll<any>(LEVEL_NAMESPACE);
+      if (res.error) {
+        console.error('[CustomGameStore] getAll IPC error:', res.error);
+        this.initializeFromLocalStorage();
+        return;
+      }
+      const rows = res.rows ?? [];
+      const entryRows: CustomGameEntry[] = [];
+      let storedCounter: number | null = null;
+      for (const r of rows) {
+        if (r.key.startsWith(KEY_PREFIX_ENTRY)) {
+          entryRows.push(r.value as CustomGameEntry);
+        } else if (r.key === KEY_META_NEXT_COUNTER) {
+          const c = (r.value as any)?.nextCounter;
+          if (typeof c === 'number' && Number.isFinite(c) && c >= 1) storedCounter = c;
+        }
+      }
+      if (entryRows.length > 0) {
+        this.ingestEntries(entryRows);
+        this._knownKeys = new Set(this.entries.keys());
+        this.nextCounter = storedCounter ?? this.recomputeCounterFromEntries();
+        this._lastPersistedCounter = this.nextCounter;
+        this.notifyListeners();
+        return;
+      }
+      const migrated = await this.tryMigrateFromLocalStorage();
+      if (!migrated) {
+        this.notifyListeners();
+      }
+    } catch (err) {
+      console.error('[CustomGameStore] Failed to init from LevelDB, falling back:', err);
+      this.initializeFromLocalStorage();
+    }
+  }
+
+  private async tryMigrateFromLocalStorage(): Promise<boolean> {
+    try {
+      if (localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes') return false;
+
+      const stored = this.loadFromStorage();
+      if (!stored || stored.entries.length === 0) {
+        localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+        return false;
+      }
+
+      const count = this.ingestEntries(stored.entries);
+      if (count === 0) {
+        console.warn('[CustomGameStore] Migration produced 0 entries — leaving marker unset');
+        return false;
+      }
+
+      // Preserve the stored counter if v2; otherwise recompute (matches
+      // legacy initialize() semantics for v1 payloads).
+      this.nextCounter = stored.version >= STORAGE_VERSION
+        ? stored.nextCounter
+        : this.recomputeCounterFromEntries();
+
+      const ops: Array<{ type: 'put'; namespace: string; key: string; value: unknown }> = [];
+      for (const [id, entry] of this.entries) {
+        ops.push({
+          type: 'put',
+          namespace: LEVEL_NAMESPACE,
+          key: `${KEY_PREFIX_ENTRY}${id}`,
+          value: entry,
+        });
+      }
+      ops.push({
+        type: 'put',
+        namespace: LEVEL_NAMESPACE,
+        key: KEY_META_NEXT_COUNTER,
+        value: { nextCounter: this.nextCounter },
+      });
+
+      const res = await window.store!.batch(ops);
+      if (res.error) {
+        console.error('[CustomGameStore] Migration batch failed:', res.error);
+        this.entries.clear();
+        this.nextCounter = 1;
+        return false;
+      }
+
+      this._knownKeys = new Set(this.entries.keys());
+      this._lastPersistedCounter = this.nextCounter;
+      localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+      console.log(
+        `[CustomGameStore] Migrated ${this.entries.size} entries from localStorage -> LevelDB`,
+      );
+      this.notifyListeners();
+      return true;
+    } catch (err) {
+      console.error('[CustomGameStore] Migration failed:', err);
+      return false;
+    }
+  }
+
+  private initializeFromLocalStorage(): void {
     let needsResave = false;
     try {
       const stored = this.loadFromStorage();
       if (stored) {
-        stored.entries.forEach((entry) => {
-          // Migrate legacy negative numeric IDs to "custom-N" format
-          const id = this.migrateId(entry.id);
-          const addedAt = CustomGameStore.toValidDate(entry.addedAt, new Date());
-          const updatedAt = CustomGameStore.toValidDate(entry.updatedAt, addedAt);
-          this.entries.set(id, {
-            ...entry,
-            id,
-            addedAt,
-            updatedAt,
-          });
-        });
+        this.ingestEntries(stored.entries);
         if (stored.version < STORAGE_VERSION) {
-          // Recalculate nextCounter from migrated entries
-          let maxCounter = 0;
-          for (const key of this.entries.keys()) {
-            const num = parseInt(key.replace('custom-', ''), 10);
-            if (!isNaN(num) && num > maxCounter) maxCounter = num;
-          }
-          this.nextCounter = maxCounter + 1;
+          this.nextCounter = this.recomputeCounterFromEntries();
           needsResave = true;
         } else {
           this.nextCounter = stored.nextCounter;
@@ -114,20 +315,18 @@ class CustomGameStore {
       console.error('Failed to load custom games data:', error);
     }
 
-    this.isInitialized = true;
-
     if (needsResave) {
       this.saveToStorage();
       console.log('[CustomGameStore] Migrated entries to v2 (string id)');
     }
+  }
 
-    // Backfill: ensure custom games that are Playing, Playing Now, or Completed have a journey entry (so they appear in Your Ark / Logs)
+  private backfillJourneyEntries(): void {
     const arkStatuses: Array<'Playing' | 'Playing Now' | 'Completed'> = ['Playing', 'Playing Now', 'Completed'];
     for (const entry of this.entries.values()) {
       if (!arkStatuses.includes(entry.status as any) || journeyStore.has(entry.id)) continue;
       const addedAtIso = entry.addedAt instanceof Date ? entry.addedAt.toISOString() : String(entry.addedAt);
       const fallback = entry.lastPlayedAt ?? addedAtIso;
-      // Prefer real play evidence (session or first Playing transition) over addedAt.
       const firstPlayedAt = computeFirstPlayedAt(entry.id, fallback);
       journeyStore.record({
         gameId: entry.id,
@@ -455,8 +654,24 @@ class CustomGameStore {
   clear() {
     this.entries.clear();
     this.nextCounter = 1;
-    this.flushSave();
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._useLevelDB) {
+      void (async () => {
+        try {
+          const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+          if (res.error) console.error('[CustomGameStore] clearNamespace failed:', res.error);
+        } catch (err) {
+          console.error('[CustomGameStore] Failed to clear LevelDB namespace:', err);
+        }
+      })();
+    }
     localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(MIGRATION_MARKER_KEY);
+    this._knownKeys = new Set();
+    this._lastPersistedCounter = 1;
     this.notifyListeners();
   }
 }

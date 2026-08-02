@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.63': {
+    title: "What's New in Ark 1.0.63",
+    changes: [
+      'Two of the biggest stores moved to LevelDB — the main library (ark-library-data) and custom games (ark-custom-games). Each migrates one-shot from localStorage on first launch after upgrade, stamped with a marker, legacy key preserved for one release as rollback.',
+      'Custom-game nextCounter preserved across migration — the ID sequence continues where you left off (e.g., if your last custom game was custom-15, the next one is custom-16, not custom-1). Stored as a namespaced meta row inside LevelDB so it survives entry deletions.',
+      'Zero visible UI change — library and custom-game stores keep their public subscribe/notify APIs byte-identical. Consumers (dashboard, Oracle, Voyage, Medals) see no difference except that saves during play stop hitching. Library baseline preserves user-entered hours through session updates as before.',
+      'Test coverage expanded — 19 new unit tests covering both stores\' migration + fallback paths. --isolate suite: 1031/1031 passing.',
+      'Fixed a pre-existing test-mock leak that was making the framer-motion mock in timeline.test.tsx flake under --no-isolate mode when other tests loaded framer-motion first. Timeline now uses the same robust Proxy-based mock as journey-view.test.tsx.',
+    ],
+  },
   '1.0.62': {
     title: "What's New in Ark 1.0.62",
     changes: [

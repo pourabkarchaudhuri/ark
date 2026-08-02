@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.63] - 2026-08-02
+
+### Migrated to LevelDB
+- **`src/services/library-store.ts`** → namespace `library`. Per-entry rows keyed by `gameId`; legacy key `ark-library-data` preserved with marker `ark-library-data-migrated-v1`. Ingest path (`ingestEntries`) is shared between the LevelDB hydrate path and the localStorage fallback so v5 migration (numeric→string gameId) + Dropped→On Hold rewrite semantics stay identical. 10 new tests.
+- **`src/services/custom-game-store.ts`** → namespace `custom-game`. Entry rows keyed as `e:{id}`; the `nextCounter` sequence stored as a meta row `m:nextCounter` under the same namespace, so ID monotonicity survives across restarts and entry deletions. Legacy key `ark-custom-games` preserved with marker `ark-custom-games-migrated-v1`. 9 new tests.
+
+### Fixed
+- **Pre-existing timeline.test.tsx flake under `--no-isolate` mode.** The lightweight `motion.div`-only mock was being shadowed by `journey-view.test.tsx`'s richer Proxy mock depending on test collection order under `pool: 'forks', isolate: false`. Replaced timeline's mock with the same Proxy pattern journey-view uses. Baseline flake existed even without the v1.0.63 changes — the fix is an unrelated but necessary robustness upgrade.
+
+### Under the hood
+- Both stores follow the v1.0.61 canonical pattern (`session-store.ts`, `status-history-store.ts`): `_useLevelDB` gate at construction, sync reads via in-memory cache, async LevelDB hydrate on init, one-shot migration with marker + legacy-key preservation, fallback on IPC error or missing `window.store`, `clear()` wipes namespace + legacy key + marker.
+- Library-store: hours-listener channel and cross-store status-propagation logic untouched — only the persistence path swapped.
+- Custom-game-store: `nextCounter` meta row is a shared-namespace design that avoids polluting LevelDB with extra top-level namespaces for tiny scalars. `initializeFromLevelDB` filters rows by prefix (`e:` vs `m:nextCounter`).
+- Under `--isolate` mode: full suite 1031/1031 passing.
+
+### Deferred to v1.0.64+
+- `reco-store.ts` (2122 lines, most surface area next).
+- IDB-backed stores: `catalog-store.ts` (155k rows, needs chunked streaming), `epic-catalog-store.ts`, embeddings, `ann-index.ts`.
+
 ## [1.0.62] - 2026-08-02
 
 ### Migrated to LevelDB

@@ -55,6 +55,16 @@ import { sessionStore } from './session-store';
 const STORAGE_KEY = 'ark-library-data';
 const STORAGE_VERSION = 5; // v5: gameId migrated from number to string
 
+/**
+ * One-shot marker stamped in localStorage after the LevelDB migration
+ * copies the ark-library-data payload across. Presence => never migrate
+ * again. Original STORAGE_KEY stays intact one release for rollback.
+ */
+const MIGRATION_MARKER_KEY = 'ark-library-data-migrated-v1';
+
+/** LevelDB namespace this store owns. Keys within it are gameId. */
+const LEVEL_NAMESPACE = 'library';
+
 interface StoredData {
   version: number;
   entries: LibraryGameEntry[];
@@ -68,7 +78,7 @@ let _libraryBeforeUnloadInstalled = false;
  * Library Store - Manages user's personal game library
  * Stores only user-specific data (status, priority, notes) for games added from Steam/Epic
  */
-class LibraryStore {
+export class LibraryStore {
   private entries: Map<string, LibraryGameEntry> = new Map(); // keyed by universal gameId string
   private listeners: Set<() => void> = new Set();
   /**
@@ -95,8 +105,25 @@ class LibraryStore {
   /** v1.0.45 — guard so `syncCrossStoreStatusesOnce` only ever sweeps once. */
   private _crossStoreSweepDone = false;
 
+  /** Gate flag captured once at construction — LevelDB path vs. legacy fallback. */
+  private readonly _useLevelDB: boolean;
+
+  /**
+   * Set of gameIds currently persisted in LevelDB. Diff against `entries`
+   * on each debounced batch to emit `del` ops for removed entries.
+   */
+  private _knownKeys: Set<string> = new Set();
+
+  /**
+   * Resolves when the async LevelDB hydration finishes. Public reads are safe
+   * before it resolves — they just see an empty cache during the boot window.
+   */
+  readonly ready: Promise<void>;
+
   constructor() {
-    this.initialize();
+    this._useLevelDB =
+      typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+    this.ready = this.initializeAsync();
     if (typeof window !== 'undefined' && !_libraryBeforeUnloadInstalled) {
       _libraryBeforeUnloadInstalled = true;
       window.addEventListener('beforeunload', () => this.flushSave());
@@ -107,7 +134,7 @@ class LibraryStore {
     if (this._saveTimer) clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
       this._saveTimer = null;
-      this.saveToStorage();
+      this.saveNow();
     }, 300);
   }
 
@@ -115,7 +142,48 @@ class LibraryStore {
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
-      this.saveToStorage();
+      this.saveNow();
+    }
+  }
+
+  private saveNow(): void {
+    if (this._useLevelDB) {
+      void this.saveNowLevelDB();
+      return;
+    }
+    this.saveToStorage();
+  }
+
+  private async saveNowLevelDB(): Promise<void> {
+    try {
+      const currentIds = new Set<string>();
+      const ops: Array<
+        | { type: 'put'; namespace: string; key: string; value: unknown }
+        | { type: 'del'; namespace: string; key: string }
+      > = [];
+
+      for (const [id, entry] of this.entries) {
+        if (!id) continue;
+        currentIds.add(id);
+        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: id, value: entry });
+      }
+
+      for (const oldKey of this._knownKeys) {
+        if (!currentIds.has(oldKey)) {
+          ops.push({ type: 'del', namespace: LEVEL_NAMESPACE, key: oldKey });
+        }
+      }
+
+      if (ops.length === 0) return;
+
+      const res = await window.store!.batch(ops);
+      if (res.error) {
+        console.error('[LibraryStore] batch save failed:', res.error);
+        return;
+      }
+      this._knownKeys = currentIds;
+    } catch (err) {
+      console.error('[LibraryStore] Failed to save (LevelDB):', err);
     }
   }
 
@@ -130,45 +198,132 @@ class LibraryStore {
     return Number.isNaN(d.getTime()) ? fallback : d;
   }
 
-  private initialize() {
+  private async initializeAsync(): Promise<void> {
     if (this.isInitialized) return;
+    if (this._useLevelDB) {
+      await this.initializeFromLevelDB();
+    } else {
+      this.initializeFromLocalStorage();
+    }
+    this.isInitialized = true;
+  }
 
+  /**
+   * Hydrate the in-memory Map from a list of raw entries (v3/v4/v5 shapes).
+   * Applies gameId migration + Dropped→On Hold + Date coercion.
+   * Returns count actually inserted.
+   */
+  private ingestEntries(entries: LibraryGameEntry[]): { count: number; migratedStatus: boolean } {
+    let migratedStatus = false;
+    let count = 0;
+    entries.forEach((entry) => {
+      const id = migrateGameId(entry as any);
+      if (!id) return;
+      let status = entry.status;
+      if ((status as string) === 'Dropped') {
+        status = 'On Hold';
+        migratedStatus = true;
+      }
+      const addedAt = LibraryStore.toValidDate(entry.addedAt, new Date());
+      const updatedAt = LibraryStore.toValidDate(entry.updatedAt, addedAt);
+      this.entries.set(id, {
+        ...entry,
+        gameId: id,
+        status,
+        hoursPlayed: entry.hoursPlayed ?? 0,
+        rating: entry.rating ?? 0,
+        addedAt,
+        updatedAt,
+      });
+      count++;
+    });
+    return { count, migratedStatus };
+  }
+
+  private async initializeFromLevelDB(): Promise<void> {
+    try {
+      const res = await window.store!.getAll<LibraryGameEntry>(LEVEL_NAMESPACE);
+      if (res.error) {
+        console.error('[LibraryStore] getAll IPC error:', res.error);
+        this.initializeFromLocalStorage();
+        return;
+      }
+      const rows = res.rows ?? [];
+      if (rows.length > 0) {
+        const values = rows.map((r) => r.value);
+        const { migratedStatus } = this.ingestEntries(values);
+        this._knownKeys = new Set(this.entries.keys());
+        if (migratedStatus && this.entries.size > 0) {
+          // Persist Dropped→On Hold rewrite
+          this.saveNow();
+        }
+        this.notifyListeners();
+        return;
+      }
+      const migrated = await this.tryMigrateFromLocalStorage();
+      if (!migrated) {
+        this.notifyListeners();
+      }
+    } catch (err) {
+      console.error('[LibraryStore] Failed to init from LevelDB, falling back:', err);
+      this.initializeFromLocalStorage();
+    }
+  }
+
+  private async tryMigrateFromLocalStorage(): Promise<boolean> {
+    try {
+      if (localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes') return false;
+
+      const stored = this.loadFromStorage();
+      if (!stored || stored.entries.length === 0) {
+        localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+        return false;
+      }
+
+      const { count } = this.ingestEntries(stored.entries);
+      if (count === 0) {
+        // Migration produced nothing — do NOT stamp marker so we retry next boot.
+        console.warn('[LibraryStore] Migration produced 0 entries — leaving marker unset');
+        return false;
+      }
+
+      const ops = Array.from(this.entries.entries()).map(([id, entry]) => ({
+        type: 'put' as const,
+        namespace: LEVEL_NAMESPACE,
+        key: id,
+        value: entry,
+      }));
+
+      const res = await window.store!.batch(ops);
+      if (res.error) {
+        console.error('[LibraryStore] Migration batch failed:', res.error);
+        // Wipe cache to avoid presenting un-persisted data — retry next boot.
+        this.entries.clear();
+        return false;
+      }
+
+      this._knownKeys = new Set(this.entries.keys());
+      localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
+      console.log(
+        `[LibraryStore] Migrated ${this.entries.size} entries from localStorage -> LevelDB`,
+      );
+      this.notifyListeners();
+      return true;
+    } catch (err) {
+      console.error('[LibraryStore] Migration failed:', err);
+      return false;
+    }
+  }
+
+  private initializeFromLocalStorage(): void {
     try {
       const stored = this.loadFromStorage();
       let needsResave = false;
       if (stored && stored.entries.length > 0) {
-        stored.entries.forEach((entry) => {
-          // Migrate numeric gameId to string format
-          const id = migrateGameId(entry as any);
-          if (id) {
-            // Migrate removed 'Dropped' status → 'On Hold'
-            let status = entry.status;
-            if ((status as string) === 'Dropped') {
-              status = 'On Hold';
-              needsResave = true;
-            }
-            const addedAt = LibraryStore.toValidDate(entry.addedAt, new Date());
-            const updatedAt = LibraryStore.toValidDate(entry.updatedAt, addedAt);
-            this.entries.set(id, {
-              ...entry,
-              gameId: id,
-              status,
-              hoursPlayed: entry.hoursPlayed ?? 0,
-              rating: entry.rating ?? 0,
-              addedAt,
-              updatedAt,
-            });
-          }
-        });
-        // Always resave if we loaded data (ensures migration persists)
-        if (stored.version < STORAGE_VERSION) {
-          needsResave = true;
-        }
+        const { migratedStatus } = this.ingestEntries(stored.entries);
+        if (migratedStatus) needsResave = true;
+        if (stored.version < STORAGE_VERSION) needsResave = true;
       }
-      // Persist migrated entries so the migration only runs once.
-      // GUARD: Never overwrite existing data with an empty store — if all
-      // entries failed migration something went wrong and we must not wipe
-      // the user's library.
       if (needsResave && this.entries.size > 0) {
         this.saveToStorage();
         console.log(`[LibraryStore] Migrated ${this.entries.size} entries to v5 (string gameId)`);
@@ -178,8 +333,6 @@ class LibraryStore {
     } catch (error) {
       console.error('Failed to load library data:', error);
     }
-
-    this.isInitialized = true;
   }
 
   private loadFromStorage(): StoredData | null {
@@ -737,8 +890,23 @@ class LibraryStore {
   clear() {
     this.entries.clear();
     this.invalidateSortedCache();
-    this.flushSave();
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._useLevelDB) {
+      void (async () => {
+        try {
+          const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+          if (res.error) console.error('[LibraryStore] clearNamespace failed:', res.error);
+        } catch (err) {
+          console.error('[LibraryStore] Failed to clear LevelDB namespace:', err);
+        }
+      })();
+    }
     localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(MIGRATION_MARKER_KEY);
+    this._knownKeys = new Set();
     this.notifyListeners();
   }
 
@@ -789,7 +957,7 @@ class LibraryStore {
         }
       });
 
-      this.saveToStorage();
+      this.saveNow();
       this.notifyListeners();
 
       // Import journey history if present
@@ -853,7 +1021,7 @@ class LibraryStore {
         added++;
       });
 
-      this.saveToStorage();
+      this.saveNow();
       this.notifyListeners();
 
       // Import journey history if present

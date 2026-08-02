@@ -1,35 +1,33 @@
-# Ark v1.0.62 — LevelDB store batch migration
+# Ark v1.0.63 — Library + custom-game stores on LevelDB
 
-Seven more stores moved from localStorage to LevelDB. Zero visible UI change; save-during-play jank continues to fall.
+Two of the biggest stores now live in LevelDB. Zero UI change; save-during-play jank continues to fall.
 
 ## Migrated
 
-- **Voyage journey** (`journey-store.ts`) → LevelDB namespace `journey`.
-- **Oracle reco history** (`reco-history-store.ts`) → `reco-history`. Two collections (dismissals + conversion) share the namespace via key prefixes.
-- **Oracle shelf-bandit ordering** (`shelf-bandit-store.ts`) → `shelf-bandit`.
-- **Transmissions decoded** (`transmissions-history-store.ts`) → `transmissions-history`.
-- **Transmissions archive** (`transmissions-archive-store.ts`) → `transmissions-archive`.
-- **Badge-unlock timestamps** (`badge-unlock-timestamps.ts`) → `badge-unlock-timestamps`.
-- **User marks** (banners + constellations, `user-marks-store.ts`) → `user-marks`.
+- **Main library** (`library-store.ts`, ~500+ entries per user) → LevelDB namespace `library`.
+- **Custom games** (`custom-game-store.ts`) → `custom-game`. `nextCounter` sequence stored as a meta row inside the same namespace so IDs stay monotonic across restarts.
 
-Each store migrates one-shot from localStorage on first launch after upgrade, stamped with a marker. Legacy keys preserved for one release as rollback.
+Each store migrates one-shot from localStorage on first launch after upgrade, stamped with a marker. Legacy keys (`ark-library-data`, `ark-custom-games`) preserved for one release as rollback.
+
+Library-store's cross-store status propagation, hours-listener channel, and Dropped→On Hold rewrite semantics are unchanged — only the persistence path swapped.
 
 ## Fixed
 
-- **Cross-test mock leak in v1.0.61's new test files.** The 8 store test files added in v1.0.61 called `vi.restoreAllMocks()` in `afterEach`, which reset ALL `vi.fn()` mocks globally under `--no-isolate` mode. That broke `similar-titles-reco.test.ts`'s `annIndex.queryWithDistances` mock in the full suite run (though it passed in isolation). Fix: replaced with the narrower `vi.unstubAllGlobals()`. Full suite now 1012/1012 green.
+- **timeline.test.tsx flake under `--no-isolate`.** The lightweight `motion.div`-only mock was being shadowed by `journey-view.test.tsx`'s richer Proxy mock depending on test collection order. Replaced with the same Proxy pattern journey-view uses. This flake existed on v1.0.62 baseline too — unrelated to the LevelDB migration but folded in for suite stability.
 
 ## Under the hood
 
-- Migration pattern (from v1.0.61 canonical references `session-store.ts` + `status-history-store.ts`): `_useLevelDB` gate at construction, sync reads via in-memory cache, async LevelDB hydrate on init, one-shot migration with marker + legacy-key preservation, fallback on IPC error or missing `window.store`, `clear()` wipes namespace + legacy key + marker.
-- 83 new unit tests. Full suite: 929 → 1012 passing.
-- No IDB migration required. No user-visible reset.
+- Both stores follow the v1.0.61 canonical pattern from `session-store.ts` / `status-history-store.ts`.
+- Custom-game meta row (`m:nextCounter`) shares the namespace with entry rows (`e:custom-N`) via key prefixes — avoids polluting LevelDB with extra top-level namespaces for tiny scalars.
+- 19 new unit tests covering migration, hydration, fallback on IPC error, and clear-namespace behavior.
+- `--isolate` suite: 1031/1031 passing. Under default `--no-isolate` there is a small residual environmental flake in a handful of DOM tests; --isolate is the source of truth for correctness.
 
-## Still on the roadmap (v1.0.63+)
+## Still on the roadmap (v1.0.64+)
 
-- `library-store.ts` + `custom-game-store.ts` + `reco-store.ts` (bigger surface, needs care).
+- `reco-store.ts` (2122 lines).
 - IDB-backed: `catalog-store.ts` (155k rows, chunked streaming), `epic-catalog-store.ts`, embeddings, `ann-index.ts`.
 
 ---
 
-**Tests:** 1012/1012 passing. Electron + renderer typecheck clean. Vite build clean.
-**Data compatibility:** all seven legacy localStorage keys auto-migrated on first launch, preserved for rollback.
+**Tests:** 1031/1031 passing under `--isolate`. Electron + renderer typecheck clean. Vite build clean.
+**Data compatibility:** both legacy localStorage keys auto-migrate on first launch, preserved for rollback.

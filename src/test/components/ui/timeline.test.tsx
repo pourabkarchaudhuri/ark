@@ -2,18 +2,40 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { Timeline } from '@/components/ui/timeline';
 
-// Mock framer-motion to avoid scroll/animation issues in tests
-vi.mock('framer-motion', () => ({
-  motion: {
-    div: ({ children, style, className, ...props }: Record<string, unknown>) => (
-      <div style={style as React.CSSProperties} className={className as string} {...props}>
-        {children as React.ReactNode}
-      </div>
-    ),
-  },
-  useScroll: () => ({ scrollYProgress: { get: () => 0 } }),
-  useTransform: () => ({ get: () => 0 }),
-}));
+// Mock framer-motion — Proxy pattern (matches journey-view.test.tsx) so
+// this file is resilient to whichever framer-motion mock the shared module
+// registry sees first under --no-isolate.
+vi.mock('framer-motion', () => {
+  const motionHandler = {
+    get(_: unknown, tag: string) {
+      return ({ children, style, className, ...props }: Record<string, unknown>) => {
+        const Tag = tag as keyof JSX.IntrinsicElements;
+        const safe: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(props)) {
+          if (
+            !['initial', 'animate', 'exit', 'whileInView', 'viewport', 'transition',
+              'variants', 'whileHover', 'whileTap', 'whileFocus', 'whileDrag',
+              'layout', 'layoutId', 'onAnimationComplete'].includes(k)
+          ) {
+            safe[k] = v;
+          }
+        }
+        return (
+          <Tag style={style as React.CSSProperties} className={className as string} {...safe}>
+            {children as React.ReactNode}
+          </Tag>
+        );
+      };
+    },
+  };
+  return {
+    motion: new Proxy({}, motionHandler),
+    AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+    useScroll: () => ({ scrollYProgress: { get: () => 0 } }),
+    useTransform: () => ({ get: () => 0 }),
+    useMotionValue: () => ({ get: () => 0, set: () => {}, on: () => () => {} }),
+  };
+});
 
 describe('Timeline', () => {
   it('renders timeline entries with titles', () => {
