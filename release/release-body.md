@@ -1,36 +1,23 @@
-# Ark v1.0.67 — Embeddings on LevelDB (Phase 1 complete)
+# Ark v1.0.68 — Hotfix: "Waiting for embeddings" stuck indefinitely
 
-The last IndexedDB-backed store — your library embeddings, catalog embeddings, and the facet chunks Oracle uses to score recommendations — now lives in LevelDB. This completes the storage migration started in v1.0.61: every part of Ark now shares one consistent storage layer.
+Fixes a live issue reported after updating to v1.0.67: the Embedding Space status showed "Waiting for embeddings" indefinitely, with catalog embedding generation appearing to hang.
 
-## Migrated
+## Root cause
 
-- **Library embeddings** (Tier 1) → LevelDB namespace `embed-library`.
-- **Catalog embeddings** (Tier 2, Steam + Epic) → `embed-catalog`.
-- **Facet chunks** → `embed-chunks`, denormalized to one row per (tier, game) holding that game's full chunk array — replaces an IndexedDB index with a direct storage lookup.
-- **Embedding metadata** (content-change counter, re-chunk progress, sync watermarks) → `embed-meta`.
+v1.0.67's storage migration for embeddings retried itself on every call after a failure — a policy that's safe for infrequently-called storage functions (like the catalog stores) but dangerous here: the affected functions run once per game during a full catalog embedding pass, up to ~163,000 times. A single transient hiccup early in that pass meant every subsequent per-game call independently kicked off a brand-new full re-migration attempt, and since the underlying cause typically failed again too, this became an unbounded retry storm — turning a one-time hiccup into an effectively permanent hang.
 
-`ann-index.ts` needed no migration — it's a pure IPC bridge to a native index that lives entirely in the main process, with nothing persisted in the renderer.
+## Fixed
 
-One file (`game-graph-store.ts`) used to read the embeddings database directly, bypassing the normal code path — it now goes through the same public interface as everything else, so it can never silently drift out of sync with a future storage change.
-
-## Hardened before ship
-
-An independent adversarial review found and fixed two real issues before this release went out:
-
-- **A data-loss edge case in the migration itself.** The chunk-data migration grouped a game's data by comparing text strings during a database scan. In a rare case — if one game's internal ID happened to be a exact starting substring of another's — this could cause part of a game's chunk data to be silently dropped during the one-time copy. Fixed by switching to a lookup method that compares the actual values, not their string representation, which is immune to this class of collision no matter what a game's ID contains.
-- **A rate-limiting edge case in the background maintenance path** for very large catalogs (only relevant with many thousands of unchanged entries in one pass) — a background "keep this entry fresh" step could silently skip some entries once too many fired in the same instant. Fixed to process in smaller batches, matching the pattern already used elsewhere.
+- A failed migration attempt now settles cleanly after one try per app session — no more retry storm.
+- The app correctly falls back to reading your existing data through the old storage path for the rest of that session (never silently working from a partially-migrated, incomplete copy).
+- The next time you launch Ark, migration retries fresh from a clean slate.
 
 ## Under the hood
 
-- Same hardened migration pattern from v1.0.65: no premature "already migrated" shortcuts, real counts only recorded after a full successful copy, a failed attempt never permanently blocks a retry, and simultaneous requests share one in-progress migration instead of racing each other.
-- 9 new tests using a real (simulated) database to exercise the actual migration and cursor code, including a dedicated test reproducing the exact ID-collision scenario found by review.
-- Full suite: 1056 → 1065 passing under `--isolate`. Typecheck clean.
-
-## Milestone: Phase 1 complete
-
-With this release, every piece of Ark's persistent storage — library, sessions, journey, custom games, recommendations, catalogs, and now embeddings — runs on LevelDB. No more IndexedDB writes blocking the render thread; save-during-play jank is gone everywhere it used to happen.
+- 2 tests that encoded the old (buggy) "retry on every call" expectation were rewritten to verify the fix: one simulating the exact per-game-loop retry-storm scenario (confirms zero additional migration attempts and consistently correct data across 20 repeated calls after a failure), one confirming a fresh app restart retries and succeeds normally.
+- Full suite: 1065 → 1066 passing, verified clean across repeated isolated runs.
 
 ---
 
-**Tests:** 1065/1065 passing under `--isolate`. Electron + renderer typecheck clean. Vite build clean.
-**Data compatibility:** all four legacy IndexedDB embedding stores auto-migrate on first launch, preserved for rollback.
+**Tests:** 1066/1066 passing under `--isolate` (verified via repeated isolated runs of the affected test file). Electron + renderer typecheck clean. Vite build clean.
+**No storage schema changes** — this is a pure retry-logic correctness fix.

@@ -366,7 +366,18 @@ const LEVEL_META_NAMESPACE = 'embed-meta';
 const LEVEL_CHUNK_PAGE_SIZE = 1000;
 const LEVEL_MIGRATION_MARKER_KEY = 'ark-embeddings-migrated-v1';
 
+/**
+ * Set once a migration attempt fails this session (see
+ * `runEmbeddingsMigration`'s catch block for the full rationale). While
+ * true, `useLevelDB()` reports false so every dual-pathed function
+ * genuinely falls back to the legacy IDB path — which still holds the
+ * complete, untouched data — instead of silently operating on a LevelDB
+ * namespace that a failed migration may have only partially populated.
+ */
+let _embedMigrationFailedThisSession = false;
+
 function useLevelDB(): boolean {
+  if (_embedMigrationFailedThisSession) return false;
   return typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
 }
 
@@ -678,11 +689,31 @@ async function runEmbeddingsMigration(): Promise<void> {
       `${chunkGroupCount} chunk groups, IDB -> LevelDB`,
     );
   } catch (err) {
-    console.error('[EmbeddingService] IDB->LevelDB migration failed, will retry on next attempt:', err);
-    // Deliberately do NOT set _embedMigrationChecked or stamp the marker —
-    // leave both unset so a later call retries the full stream. IDB is
-    // untouched throughout, and any rows already written to LevelDB this
-    // attempt are harmless (they'll simply be overwritten again on retry).
+    console.error('[EmbeddingService] IDB->LevelDB migration failed, will retry next session:', err);
+    // Deliberately do NOT stamp the localStorage marker — a fresh app
+    // launch (new module load, all migration flags reset to their initial
+    // false) will retry the full stream then, self-healing across restarts.
+    //
+    // BUT this differs from catalog-store.ts's "retry on next call" policy:
+    // there, dual-pathed functions are called infrequently (top-level sync
+    // orchestration). Here, `getChunksForTierGame`/`writeGameChunksAndPool`
+    // are called from `embedAndPersistChunkedGame`, invoked ONCE PER GAME
+    // inside a tight loop that runs up to ~163k times during a full catalog
+    // embedding pass. If migration were left retryable per-call, EVERY one
+    // of those thousands of calls would independently kick off a brand-new
+    // full migration attempt (re-streaming the entire library+catalog+
+    // chunks IDB data every time), and if the underlying cause is anything
+    // other than a one-off transient hiccup, every retry fails too — a
+    // retry-storm that manifests as the whole embedding pass hanging
+    // indefinitely (reported by users as progress stuck at "Waiting for
+    // embeddings"). Setting BOTH flags here stops that at the source:
+    // `_embedMigrationChecked` skips the retry attempt itself, and
+    // `_embedMigrationFailedThisSession` makes `useLevelDB()` report false
+    // so every dual-pathed function falls back to the legacy IDB path
+    // (still complete and untouched) instead of silently reading/writing a
+    // LevelDB namespace a failed migration may have only partially filled.
+    _embedMigrationChecked = true;
+    _embedMigrationFailedThisSession = true;
   }
 }
 

@@ -371,25 +371,85 @@ describe('embedding-service migration — meta keys', () => {
 });
 
 describe('embedding-service migration — retry after failure', () => {
-  it('does not permanently lock out migration when the first attempt fails', async () => {
+  it('does NOT retry migration on every call within the same session (regression: retry-storm)', async () => {
+    // Root cause of a real user-reported hang ("progress stuck at Waiting
+    // for embeddings"): `getChunksForTierGame`/`writeGameChunksAndPool` are
+    // called ONCE PER GAME inside a tight loop during a full catalog
+    // embedding pass (up to ~163k iterations). The original implementation
+    // left migration retryable on every call after a failure — meaning a
+    // single transient failure early in a catalog pass triggered a fresh
+    // full re-migration attempt on EVERY subsequent per-game call, an
+    // unbounded retry storm that made the whole pass hang indefinitely.
+    //
+    // This test simulates exactly that shape: one failure, then MANY
+    // subsequent calls (standing in for the per-game loop) within the same
+    // session — none of them should re-attempt migration.
+    await seedIdb({ library: [makePooled('steam-1', 1), makePooled('steam-2', 2)] });
+    const { calls } = installFakeStore();
+
+    const { getPooledEmbeddingCount, getEmbeddingById } = await import('./embedding-service');
+
+    const originalBatch = (window as any).store.batch;
+    let failOnce = true;
+    let batchAttempts = 0;
+    (window as any).store.batch = async (ops: any[]) => {
+      batchAttempts++;
+      if (failOnce) { failOnce = false; return { error: 'simulated_transient_failure' }; }
+      return originalBatch(ops);
+    };
+
+    // First call: migration attempted, fails, settles (no retry this
+    // session). useLevelDB() now reports false post-failure, so this
+    // correctly falls back to the legacy IDB path and reports the REAL
+    // count (2) — not an incomplete LevelDB view.
+    const first = await getPooledEmbeddingCount();
+    expect(first).toBe(2);
+    expect(localStorage.getItem(MIGRATION_MARKER)).toBeNull();
+    expect(batchAttempts).toBe(1); // the one (failed) attempt happened
+
+    // Simulate the per-game loop: many more calls in the same session.
+    // None of these should trigger another migration attempt, and each
+    // should correctly fall back to the legacy IDB path rather than
+    // silently reading an incomplete LevelDB namespace.
+    for (let i = 0; i < 20; i++) {
+      const count = await getPooledEmbeddingCount();
+      expect(count).toBe(2); // consistently correct via IDB fallback, every time
+    }
+    expect(batchAttempts).toBe(1); // zero additional migration attempts
+    expect(calls.batch).toBe(0); // originalBatch (the real writer) never even ran
+
+    // Falls back to legacy IDB correctly — still sees the real data.
+    const vec = await getEmbeddingById('steam-1');
+    expect(vec).not.toBeNull();
+    expect(vec!.length).toBe(1024);
+
+    // Marker never stamped this session (by design — retry happens on the
+    // next fresh session/module load, not mid-session).
+    expect(localStorage.getItem(MIGRATION_MARKER)).toBeNull();
+  });
+
+  it('retries fresh on the next session (module reload) after a failed attempt', async () => {
     await seedIdb({ library: [makePooled('steam-1', 1), makePooled('steam-2', 2)] });
     installFakeStore();
 
-    const { getPooledEmbeddingCount } = await import('./embedding-service');
-
+    // Session 1: fails once.
+    let mod = await import('./embedding-service');
     const originalBatch = (window as any).store.batch;
     let failOnce = true;
     (window as any).store.batch = async (ops: any[]) => {
       if (failOnce) { failOnce = false; return { error: 'simulated_transient_failure' }; }
       return originalBatch(ops);
     };
-
-    const first = await getPooledEmbeddingCount();
-    expect(first).toBe(0);
+    const duringSession1 = await mod.getPooledEmbeddingCount();
+    expect(duringSession1).toBe(2); // correct via IDB fallback after the failed attempt
     expect(localStorage.getItem(MIGRATION_MARKER)).toBeNull();
 
-    const second = await getPooledEmbeddingCount();
-    expect(second).toBe(2);
+    // Session 2: fresh module load (simulates app restart) — migration
+    // state resets, so the (no-longer-failing) batch call succeeds now.
+    vi.resetModules();
+    mod = await import('./embedding-service');
+    const secondSessionCount = await mod.getPooledEmbeddingCount();
+    expect(secondSessionCount).toBe(2);
     expect(localStorage.getItem(MIGRATION_MARKER)).toBe('yes');
   });
 });

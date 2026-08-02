@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.68] - 2026-08-03
+
+### Fixed
+- **"Waiting for embeddings" progress stuck indefinitely** (live user reports following v1.0.67). Root cause: `embedding-service.ts`'s LevelDB migration gate (`migrateEmbeddingsFromIdbIfNeeded`), on a failed attempt, deliberately left both `_embedMigrationChecked` and the localStorage marker unset so "a later call retries the full stream" — matching the retry policy already shipped for `catalog-store.ts` in v1.0.65. That policy is safe there because catalog-store's dual-pathed methods are called infrequently (top-level sync orchestration). It is NOT safe in `embedding-service.ts`: `getChunksForTierGame`/`writeGameChunksAndPool` are invoked from `embedAndPersistChunkedGame`, which runs **once per game** inside the catalog embedding loop — up to ~163k iterations for a full Steam+Epic pass. A single transient migration failure early in that loop meant every one of those thousands of subsequent per-game calls independently kicked off a brand-new full re-migration attempt (re-streaming the entire library+catalog+chunks IDB data each time) — and since the underlying cause typically fails again too, this became an unbounded retry storm that manifested as the whole embedding pass — and by extension the Galaxy view's "Waiting for embeddings" status, which blocks behind it — hanging indefinitely.
+  - Fixed: once a migration attempt fails, `_embedMigrationChecked` is now set immediately (no per-call retry storm) and a new `_embedMigrationFailedThisSession` flag makes `useLevelDB()` report `false` for the rest of the session — every dual-pathed read/write function correctly falls back to the complete, untouched legacy IndexedDB data instead of silently operating on a LevelDB namespace a failed migration may have only partially populated. A fresh app launch retries migration cleanly from scratch.
+  - This is a narrower, call-pattern-aware retry policy than catalog-store.ts's (session-level here vs. call-level there) — documented inline so a future migration doesn't copy the wrong one for its own call pattern.
+
+### Under the hood
+- 2 of the existing migration-retry tests were rewritten: the old "second call after failure succeeds" expectation was itself the encoded bug — replaced with tests verifying (a) 20 simulated per-game-loop calls after one failure trigger zero additional migration attempts and consistently return the correct data via IDB fallback, and (b) a fresh module load (simulating app restart) retries and succeeds normally.
+- Full suite: 1065 → 1066 passing under `--isolate` (3x repeat-verified clean in isolation; the full-suite run shows the same pre-existing, unrelated `--isolate` flake documented in earlier releases — different tests fail nondeterministically across repeat runs, consistent with environmental test-order sensitivity, not a regression from this fix).
+
 ## [1.0.67] - 2026-08-03
 
 ### Migrated to LevelDB

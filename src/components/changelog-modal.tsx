@@ -11,6 +11,13 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.68': {
+    title: "What's New in Ark 1.0.68",
+    changes: [
+      'Fixed: "Waiting for embeddings" progress appearing stuck indefinitely after updating to 1.0.67. Root cause — a single transient hiccup early in a catalog embedding pass could trigger the storage migration to retry itself thousands of times in a row (once per game in the catalog), turning a one-time hiccup into a hang. The retry logic now gives up cleanly after one failed attempt per app session, falls back correctly to reading your existing data the old way, and tries the migration again fresh the next time you open Ark.',
+      'Zero visible change for anyone who never hit this — the fix only changes behavior in the rare case where the one-time migration hits a snag.',
+    ],
+  },
   '1.0.67': {
     title: "What's New in Ark 1.0.67",
     changes: [
