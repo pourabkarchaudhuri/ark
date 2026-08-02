@@ -11,6 +11,14 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.66': {
+    title: "What's New in Ark 1.0.66",
+    changes: [
+      'Fixed: "Catalog Embeddings" progress appearing stuck at 0 after updating to 1.0.65. Root cause — 1.0.65 added a one-time "migrating" stage to the Steam/Epic catalog sync status (while your existing catalog copies from IndexedDB to the new LevelDB storage), but the status panel never learned to display it, so the Steam/Epic Catalog widgets showed a blank progress bar during that migration — and since catalog embedding generation waits for that sync to finish, it looked frozen too, with no explanation.',
+      'The status panel now shows "Migrating storage — N copied" while this one-time migration runs, and the Catalog Embeddings widget explicitly says "Waiting for Steam Catalog sync…" instead of showing nothing. A failed migration attempt also no longer leaves the widget stuck showing "migrating" forever — it now correctly resets so a retry is visible.',
+      'Also fixed a smaller, pre-existing cosmetic gap: once catalog embeddings are already fully up to date, the widget now shows the real vector count instead of a blank line.',
+    ],
+  },
   '1.0.65': {
     title: "What's New in Ark 1.0.65",
     changes: [

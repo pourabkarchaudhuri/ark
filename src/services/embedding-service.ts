@@ -2043,6 +2043,10 @@ class EmbeddingService {
 
       if (needsEmbedding.length === 0) {
         console.log(`[EmbeddingService] All ${scannedTotal} catalog embeddings already cached`);
+        // Reflect the scanned total so the status widget shows "N vectors"
+        // instead of a stale/blank {0,0} after a no-op pass.
+        this._catalogProgress = { completed: scannedTotal, total: scannedTotal };
+        this._notify();
         // Backfill ANN index if it's empty (e.g. first launch after ANN was added, or index file deleted)
         if (!annIndex.isReady) {
           await this._backfillAnnIndex();
@@ -2274,6 +2278,10 @@ class EmbeddingService {
 
       if (needsEmbedding.length === 0) {
         console.log(`[EmbeddingService] All ${scannedTotal} Epic catalog embeddings already cached`);
+        // Reflect the scanned total so the status widget shows "N vectors"
+        // instead of a stale/blank {0,0} after a no-op pass.
+        this._catalogProgress = { completed: scannedTotal, total: scannedTotal };
+        this._notify();
         if (lastSyncTimestamp > 0) {
           await setEmbeddingMeta<EmbeddingPassWatermark>({
             key: storeKey,

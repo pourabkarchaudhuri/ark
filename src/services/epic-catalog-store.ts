@@ -395,7 +395,7 @@ function transformItem(item: EpicCatalogItem): EpicCatalogEntry | null {
 // ─── EpicCatalogStore ───────────────────────────────────────────────────────────
 
 export type EpicCatalogSyncProgress = {
-  stage: 'idle' | 'fetching' | 'persisting' | 'done' | 'error';
+  stage: 'idle' | 'migrating' | 'fetching' | 'persisting' | 'done' | 'error';
   itemsFetched: number;
   itemsStored: number;
   error?: string;
@@ -458,10 +458,15 @@ export class EpicCatalogStore {
 
   private async runMigration(): Promise<void> {
     try {
+      this._syncProgress = { stage: 'migrating', itemsFetched: 0, itemsStored: 0 };
+      this.notify();
+
       let migrated = 0;
       await idbStreamAllEntries(async (entries) => {
         await levelPutBatch(entries);
         migrated += entries.length;
+        this._syncProgress = { stage: 'migrating', itemsFetched: 0, itemsStored: migrated };
+        this.notify();
       }, 500);
 
       if (migrated > 0) {
@@ -476,11 +481,15 @@ export class EpicCatalogStore {
       localStorage.setItem(LEVEL_MIGRATION_MARKER_KEY, 'yes');
       this._migrationChecked = true;
       console.log(`[EpicCatalogStore] Migrated ${migrated} entries IDB -> LevelDB`);
+      this._syncProgress = { stage: 'done', itemsFetched: migrated, itemsStored: migrated };
+      this.notify();
     } catch (err) {
       console.error('[EpicCatalogStore] IDB->LevelDB migration failed, will retry on next attempt:', err);
       // Leave _migrationChecked/marker unset — a later call retries the
       // full stream. IDB is untouched; any rows already written to
       // LevelDB this attempt are harmless (overwritten again on retry).
+      this._syncProgress = { stage: 'idle', itemsFetched: 0, itemsStored: 0 };
+      this.notify();
     }
   }
 

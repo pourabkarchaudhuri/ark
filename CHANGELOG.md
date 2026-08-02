@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.66] - 2026-08-02
+
+### Fixed
+- **"Catalog Embeddings" progress stuck at 0 after updating to 1.0.65** (live user reports). Root cause: v1.0.65 added a `'migrating'` stage to `CatalogSyncProgress` (`catalog-store.ts`) for the one-time IDB→LevelDB migration, but `system-status.ts`'s `getSnapshot()` never learned to handle it — the Steam Catalog widget's `detail`/`percent` ternary chains had no branch for `'migrating'`, so it fell through to a blank string / 0%, while `stage` still reported `'running'`. Because the embedding pipeline (`startCatalogEmbeddingPipeline` in `oracle-view.tsx`) awaits `catalogStore.sync()` — which now blocks on this migration — before it can even start, and that migration can take noticeably longer than the old raw-IDB-cursor path (155k rows streamed through ~310 sequential `store:batch` IPC round-trips), the whole subsystem looked frozen with zero explanation during what is otherwise ordinary one-time migration work.
+  - `system-status.ts`: Steam Catalog and Epic Catalog widgets now show `Migrating storage — N copied` and a non-zero indicative percent while `stage === 'migrating'`.
+  - `system-status.ts`: the Catalog Embeddings widget now shows `Waiting for Steam Catalog sync…` instead of a bare blank string while it's genuinely blocked behind catalog sync/migration.
+  - `epic-catalog-store.ts`: added a `'migrating'` stage to `EpicCatalogSyncProgress` and wired `_syncProgress` updates into its migration loop — it previously published no progress at all during migration (Steam's migration already did; this brings Epic to parity).
+  - `catalog-store.ts` + `epic-catalog-store.ts`: a failed migration attempt now resets `_syncProgress`/`stage` back to `'idle'` in the catch block — previously a failure left the widget stuck displaying `'migrating'` indefinitely until a later successful retry, with no visible indication anything had gone wrong.
+- **Pre-existing cosmetic gap** (not introduced in v1.0.65, but fixed while investigating): once catalog embeddings are fully up to date and a pass finds nothing new to embed, `embedding-service.ts`'s `_catalogProgress` was never updated to reflect the scanned total — the widget showed a blank/stale value instead of the real vector count. Fixed for both the Steam and Epic catalog embedding passes.
+
+### Under the hood
+- 5 new unit tests in `system-status.test.ts` covering the `'migrating'` stage for both catalogs and the "waiting on sync" messaging.
+- Full suite: 1051 → 1056 passing under `--isolate`. Typecheck clean.
+
 ## [1.0.65] - 2026-08-02
 
 ### Added

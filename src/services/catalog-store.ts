@@ -489,6 +489,13 @@ export class CatalogStore {
       // launch) retries the full stream. IDB is untouched throughout, and
       // any entries already written to LevelDB this attempt are harmless
       // (they'll simply be overwritten again on retry).
+      this._syncProgress = {
+        stage: 'idle',
+        batchesCompleted: 0,
+        batchesTotal: 0,
+        gamesStored: 0,
+      };
+      this.notify();
     }
   }
 

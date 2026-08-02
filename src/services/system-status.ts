@@ -549,15 +549,20 @@ class SystemStatus {
       stage: catP.stage === 'done' ? 'done'
         : catP.stage === 'error' ? 'error'
           : catP.stage === 'idle' ? 'idle' : 'running',
-      detail: catP.stage === 'fetching-ids' ? 'Fetching app list...'
-        : catP.stage === 'fetching-tags' ? 'Resolving tags...'
-          : catP.stage === 'fetching-metadata' ? `Batch ${catP.batchesCompleted}/${catP.batchesTotal}`
-            : catP.stage === 'done' ? `${catP.gamesStored.toLocaleString()} games`
-              : catP.stage === 'error' ? (catP.error ?? 'Failed') : '',
+      detail: catP.stage === 'migrating' ? `Migrating storage — ${catP.gamesStored.toLocaleString()} copied`
+        : catP.stage === 'fetching-ids' ? 'Fetching app list...'
+          : catP.stage === 'fetching-tags' ? 'Resolving tags...'
+            : catP.stage === 'fetching-metadata' ? `Batch ${catP.batchesCompleted}/${catP.batchesTotal}`
+              : catP.stage === 'done' ? `${catP.gamesStored.toLocaleString()} games`
+                : catP.stage === 'error' ? (catP.error ?? 'Failed') : '',
+      // One-time migration has no known total up front (a full IDB row count
+      // would require its own scan) — 15% is a deliberate "clearly in
+      // progress, not stalled" indicator rather than a real completion ratio.
       percent: catP.stage === 'done' ? 100
-        : catP.batchesTotal > 0 ? Math.round((catP.batchesCompleted / catP.batchesTotal) * 100)
-          : catP.stage === 'fetching-ids' ? 5
-            : catP.stage === 'fetching-tags' ? 10 : 0,
+        : catP.stage === 'migrating' ? 15
+          : catP.batchesTotal > 0 ? Math.round((catP.batchesCompleted / catP.batchesTotal) * 100)
+            : catP.stage === 'fetching-ids' ? 5
+              : catP.stage === 'fetching-tags' ? 10 : 0,
       elapsed: catElapsed,
       itemsDone: catP.batchesCompleted,
       itemsTotal: catP.batchesTotal,
@@ -586,12 +591,19 @@ class SystemStatus {
     // Catalog Embeddings
     const embP = embeddingService.catalogProgress;
     const embRunning = embeddingService.isCatalogRunning;
+    // Embedding generation is gated behind the Steam catalog sync/migration
+    // finishing (see startCatalogEmbeddingPipeline in oracle-view.tsx) — while
+    // that's still in flight, show why this widget is at 0 instead of a bare
+    // blank, so a slow one-time migration doesn't read as "stuck".
+    const waitingOnCatalogSync = !embRunning && embP.total === 0 &&
+      (catP.stage === 'migrating' || catP.stage === 'fetching-ids' || catP.stage === 'fetching-tags' || catP.stage === 'fetching-metadata');
     const catalogEmbeddings: SyncStatus = {
       label: 'Catalog Embeddings',
       stage: embRunning ? 'running' : embP.total > 0 && embP.completed >= embP.total ? 'done' : 'idle',
       detail: embRunning
         ? (embP.total > 0 ? `${embP.completed.toLocaleString()} / ${embP.total.toLocaleString()}` : 'Comparing Embedding Deltas')
-        : embP.total > 0 ? `${embP.total.toLocaleString()} vectors` : '',
+        : waitingOnCatalogSync ? 'Waiting for Steam Catalog sync…'
+          : embP.total > 0 ? `${embP.total.toLocaleString()} vectors` : '',
       percent: embP.total > 0 ? Math.round((embP.completed / embP.total) * 100) : 0,
       elapsed: 0,
       itemsDone: embP.completed,
@@ -702,15 +714,17 @@ class SystemStatus {
       stage: epicCatP.stage === 'done' ? 'done'
         : epicCatP.stage === 'error' ? 'error'
           : epicCatP.stage === 'idle' ? 'idle' : 'running',
-      detail: epicCatP.stage === 'fetching' ? 'Fetching catalog...'
-        : epicCatP.stage === 'persisting' ? `Persisting ${epicCatP.itemsFetched.toLocaleString()} games`
-          : epicCatP.stage === 'done' ? `${epicCatP.itemsStored.toLocaleString()} games`
-            : epicCatP.stage === 'error' ? (epicCatP.error ?? 'Failed') : '',
+      detail: epicCatP.stage === 'migrating' ? `Migrating storage — ${epicCatP.itemsStored.toLocaleString()} copied`
+        : epicCatP.stage === 'fetching' ? 'Fetching catalog...'
+          : epicCatP.stage === 'persisting' ? `Persisting ${epicCatP.itemsFetched.toLocaleString()} games`
+            : epicCatP.stage === 'done' ? `${epicCatP.itemsStored.toLocaleString()} games`
+              : epicCatP.stage === 'error' ? (epicCatP.error ?? 'Failed') : '',
       percent: epicCatP.stage === 'done' ? 100
-        : epicCatP.stage === 'fetching' ? 30
-          : epicCatP.stage === 'persisting' && epicCatP.itemsFetched > 0
-            ? Math.round((epicCatP.itemsStored / epicCatP.itemsFetched) * 100)
-            : 0,
+        : epicCatP.stage === 'migrating' ? 15
+          : epicCatP.stage === 'fetching' ? 30
+            : epicCatP.stage === 'persisting' && epicCatP.itemsFetched > 0
+              ? Math.round((epicCatP.itemsStored / epicCatP.itemsFetched) * 100)
+              : 0,
       elapsed: 0,
       itemsDone: epicCatP.itemsStored,
       itemsTotal: epicCatP.itemsFetched,
