@@ -211,6 +211,17 @@ interface StoreGetResult<T = unknown> { value?: T | null; error?: string; }
 interface StoreGetAllResult<T = unknown> { rows?: Array<{ key: string; value: T }>; error?: string; }
 interface StoreOkResult { ok?: boolean; error?: string; }
 interface StoreHasResult { value?: boolean; error?: string; }
+/**
+ * Paginated chunk result (v1.0.65+). Callers pass `nextKey` back as
+ * `startAfter` on the next `getChunk` call. `done` is true when the
+ * returned slice was shorter than `limit`, meaning iteration is complete.
+ */
+interface StoreChunkResult<T = unknown> {
+  rows?: Array<{ key: string; value: T }>;
+  nextKey?: string;
+  done?: boolean;
+  error?: string;
+}
 
 type StoreBatchOp =
   | { type: 'put'; namespace: string; key: string; value: unknown }
@@ -219,6 +230,11 @@ type StoreBatchOp =
 interface StoreAPI {
   get: <T = unknown>(namespace: string, key: string) => Promise<StoreGetResult<T>>;
   getAll: <T = unknown>(namespace: string) => Promise<StoreGetAllResult<T>>;
+  /** Paginated chunk read for large namespaces (catalog: 155k, epic-catalog: 40k). */
+  getChunk: <T = unknown>(
+    namespace: string,
+    opts: { startAfter?: string; limit: number },
+  ) => Promise<StoreChunkResult<T>>;
   put: (namespace: string, key: string, value: unknown) => Promise<StoreOkResult>;
   del: (namespace: string, key: string) => Promise<StoreOkResult>;
   batch: (ops: StoreBatchOp[]) => Promise<StoreOkResult>;

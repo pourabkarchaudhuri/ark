@@ -103,11 +103,32 @@ export function register(): void {
   ipcMain.handle('store:getAll', async (event: any, namespace: string) => {
     if (!checkRateLimit('store:getAll', senderIdOf(event))) return rateLimited('store:getAll', senderIdOf(event));
     try {
-      // TODO(v1.0.62+): switch to chunked streaming for the catalog namespace
-      // (~155k rows). For v1.0.61 we return the full array in one response.
+      // NOTE: fine for small/medium namespaces. For the large catalog
+      // namespaces (~40k epic, ~155k steam) callers MUST use `store:getChunk`
+      // instead — a single-response getAll would marshal a ~75MB payload.
       return { rows: await store.getAll(namespace) };
     } catch (err) {
       logger.error('[Store IPC] store:getAll failed:', err);
+      return toError(err);
+    }
+  });
+
+  ipcMain.handle('store:getChunk', async (
+    event: any,
+    namespace: string,
+    opts: { startAfter?: string; limit: number },
+  ) => {
+    if (!checkRateLimit('store:getChunk', senderIdOf(event))) {
+      return rateLimited('store:getChunk', senderIdOf(event));
+    }
+    try {
+      if (!opts || typeof opts.limit !== 'number' || opts.limit <= 0) {
+        return { error: 'limit must be a positive number' };
+      }
+      const res = await store.getChunk(namespace, opts);
+      return res;
+    } catch (err) {
+      logger.error('[Store IPC] store:getChunk failed:', err);
       return toError(err);
     }
   });

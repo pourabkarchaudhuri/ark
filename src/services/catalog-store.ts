@@ -9,7 +9,10 @@
  *  2. Fetch rich metadata via IStoreBrowseService/GetItems/v1 (renderer-side,
  *     no API key needed, 200 games/batch, 50 concurrent)
  *  3. Resolve numeric tag IDs using IStoreService/GetTagList/v1
- *  4. Persist to IndexedDB with incremental batch writes (resumable)
+ *  4. Persist to LevelDB (v1.0.65+) with incremental batch writes (resumable).
+ *     Legacy IndexedDB (`ark-steam-catalog`) is read one-shot on first launch
+ *     after upgrade to hydrate the new store, then left in place for one
+ *     release as rollback insurance.
  *
  * Designed for:
  *  - First run: ~30s to download 156K games, ~100MB
@@ -35,6 +38,22 @@ const META_STORE = 'meta';
 const BATCH_SIZE = 200;
 const CONCURRENCY = 8;
 const SYNC_STALE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * LevelDB namespaces (v1.0.65+).
+ *   - `catalog-entries`  → per-appid CatalogEntry rows keyed as `${appid}`.
+ *   - `catalog-meta`     → 'tag-name-map' and 'sync-state' rows.
+ * Two namespaces so prefix scans over meta don't walk 155k entry rows,
+ * and vice versa.
+ */
+const LEVEL_ENTRIES_NAMESPACE = 'catalog-entries';
+const LEVEL_META_NAMESPACE = 'catalog-meta';
+const LEVEL_CHUNK_SIZE = 1000; // rows per getChunk hop (renderer-side pagination)
+const LEVEL_MIGRATION_MARKER_KEY = 'ark-steam-catalog-migrated-v1';
+// Point-lookup (getEntries) round-trip size — kept comfortably under the
+// store:get rate limiter's 500/s-per-channel-per-sender budget so any
+// caller, regardless of how many ids it passes in one call, stays safe.
+const POINT_LOOKUP_CHUNK = 400;
 
 // ─── IDB Helpers (connection pooled) ─────────────────────────────────────────
 
@@ -100,6 +119,131 @@ async function idbSetMeta<T>(key: string, value: T): Promise<void> {
   });
 }
 
+/**
+ * Cursor-stream every IDB entry, invoking `onBatch` with up to `size`
+ * entries per hop. Used only for the one-shot IDB → LevelDB migration.
+ */
+async function idbStreamAllEntries(
+  onBatch: (entries: CatalogEntry[]) => Promise<void>,
+  size = 500,
+): Promise<number> {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(ENTRIES_STORE, 'readonly');
+    const store = tx.objectStore(ENTRIES_STORE);
+    const req = store.openCursor();
+    let count = 0;
+    let batch: CatalogEntry[] = [];
+    // Buffer for `onBatch` calls that outlive a cursor tick — the cursor
+    // must not `continue()` until the async batch write finishes.
+    let pending: Promise<void> = Promise.resolve();
+    // Set as soon as any batch write rejects. Once true, the cursor stops
+    // advancing (see below) so we never silently drop further batches by
+    // chaining `.then()` onto an already-rejected `pending` — every batch
+    // we have already read but not yet flushed is either flushed or
+    // accounted for in the final rejection.
+    let failed: unknown = null;
+
+    req.onsuccess = async () => {
+      const cursor = req.result;
+      if (failed) {
+        // A previous batch write already failed — stop reading further rows.
+        // `pending` is already rejected; let the tx wind down naturally.
+        return;
+      }
+      if (!cursor) {
+        try {
+          await pending;
+          if (batch.length > 0) await onBatch(batch);
+          resolve(count);
+        } catch (err) {
+          reject(err);
+        }
+        return;
+      }
+      batch.push(cursor.value as CatalogEntry);
+      count++;
+      if (batch.length >= size) {
+        const drain = batch;
+        batch = [];
+        pending = pending.then(() => onBatch(drain)).catch((err) => {
+          failed = err;
+          throw err;
+        });
+      }
+      if (failed) return; // the batch we just queued may have already settled synchronously as a rejection
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error ?? new Error('[CatalogStore] IDB cursor error during migration stream'));
+  });
+}
+
+// ─── LevelDB Helpers ────────────────────────────────────────────────────────────
+
+function useLevelDB(): boolean {
+  return typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+}
+
+async function levelPutBatch(entries: CatalogEntry[]): Promise<void> {
+  if (entries.length === 0) return;
+  const ops = entries.map((e) => ({
+    type: 'put' as const,
+    namespace: LEVEL_ENTRIES_NAMESPACE,
+    key: String(e.appid),
+    value: e,
+  }));
+  const res = await window.store!.batch(ops);
+  if (res.error) {
+    throw new Error(`[CatalogStore] batch put failed: ${res.error}`);
+  }
+}
+
+async function levelGetMeta<T>(key: string): Promise<T | null> {
+  const res = await window.store!.get<T>(LEVEL_META_NAMESPACE, key);
+  if (res.error) {
+    console.error(`[CatalogStore] meta get(${key}) failed:`, res.error);
+    return null;
+  }
+  return (res.value ?? null) as T | null;
+}
+
+async function levelSetMeta<T>(key: string, value: T): Promise<void> {
+  const res = await window.store!.put(LEVEL_META_NAMESPACE, key, value);
+  if (res.error) {
+    console.error(`[CatalogStore] meta put(${key}) failed:`, res.error);
+  }
+}
+
+/**
+ * Chunked walk of every LevelDB entry row, invoking `onEntry` per row.
+ * Returns total rows visited. Uses `store.getChunk` under the hood so
+ * we never marshal all 155k rows at once.
+ */
+async function levelStreamAllEntries(
+  onEntry: (entry: CatalogEntry) => void,
+): Promise<number> {
+  let startAfter: string | undefined;
+  let total = 0;
+  while (true) {
+    const res = await window.store!.getChunk<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, {
+      startAfter,
+      limit: LEVEL_CHUNK_SIZE,
+    });
+    if (res.error) {
+      console.error('[CatalogStore] getChunk failed:', res.error);
+      break;
+    }
+    const rows = res.rows ?? [];
+    for (const row of rows) {
+      onEntry(row.value);
+      total++;
+    }
+    if (res.done || !res.nextKey) break;
+    startAfter = res.nextKey;
+  }
+  return total;
+}
+
 // ─── Tag Resolver ───────────────────────────────────────────────────────────────
 
 let tagNameMap: Map<number, string> | null = null;
@@ -107,7 +251,9 @@ let tagNameMap: Map<number, string> | null = null;
 async function fetchTagList(): Promise<Map<number, string>> {
   if (tagNameMap) return tagNameMap;
 
-  const cached = await idbGetMeta<Record<number, string>>('tag-name-map');
+  const cached = useLevelDB()
+    ? await levelGetMeta<Record<number, string>>('tag-name-map')
+    : await idbGetMeta<Record<number, string>>('tag-name-map');
   if (cached) {
     tagNameMap = new Map(Object.entries(cached).map(([k, v]) => [Number(k), v]));
     return tagNameMap;
@@ -123,7 +269,9 @@ async function fetchTagList(): Promise<Map<number, string>> {
     plain[t.tagid] = t.name;
   }
 
-  await idbSetMeta('tag-name-map', plain);
+  if (useLevelDB()) await levelSetMeta('tag-name-map', plain);
+  else await idbSetMeta('tag-name-map', plain);
+
   tagNameMap = map;
   console.log(`[CatalogStore] Tag list loaded: ${map.size} tags`);
   return map;
@@ -180,10 +328,25 @@ async function fetchBatch(
   return entries;
 }
 
+async function putEntriesBatch(entries: CatalogEntry[]): Promise<void> {
+  if (useLevelDB()) return levelPutBatch(entries);
+  return idbPutBatch(entries);
+}
+
+async function getMeta<T>(key: string): Promise<T | null> {
+  if (useLevelDB()) return levelGetMeta<T>(key);
+  return idbGetMeta<T>(key);
+}
+
+async function setMeta<T>(key: string, value: T): Promise<void> {
+  if (useLevelDB()) return levelSetMeta(key, value);
+  return idbSetMeta(key, value);
+}
+
 // ─── CatalogStore ───────────────────────────────────────────────────────────────
 
 export type CatalogSyncProgress = {
-  stage: 'idle' | 'fetching-ids' | 'fetching-tags' | 'fetching-metadata' | 'done' | 'error';
+  stage: 'idle' | 'migrating' | 'fetching-ids' | 'fetching-tags' | 'fetching-metadata' | 'done' | 'error';
   batchesCompleted: number;
   batchesTotal: number;
   gamesStored: number;
@@ -192,13 +355,26 @@ export type CatalogSyncProgress = {
 
 type Listener = () => void;
 
-class CatalogStore {
+export class CatalogStore {
   private listeners = new Set<Listener>();
   private _syncProgress: CatalogSyncProgress = {
     stage: 'idle', batchesCompleted: 0, batchesTotal: 0, gamesStored: 0,
   };
   private _syncing = false;
   private _syncAbort: AbortController | null = null;
+  /**
+   * Guard against re-running the one-shot IDB→LevelDB migration within a
+   * single session. Set to true ONLY after the marker is stamped (real
+   * success) or after we confirm the marker is already set. Left false on
+   * any failure so a later call (this session or a future launch) retries.
+   */
+  private _migrationChecked = false;
+  /**
+   * In-flight migration promise, shared by every concurrent caller so two
+   * callers can never independently run — and prematurely conclude —
+   * their own copy of the migration. `null` when no migration is running.
+   */
+  private _migrationPromise: Promise<void> | null = null;
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
@@ -214,16 +390,120 @@ class CatalogStore {
     this._syncAbort = null;
   }
 
+  /**
+   * One-shot IDB → LevelDB migration, memoized so every concurrent caller
+   * (isFresh, getEntryCount, sync, queryForCandidates, getAllEntries,
+   * getEntries all call this first) shares exactly one in-flight attempt
+   * instead of racing independent copies.
+   *
+   * Deliberately does NOT trust a `store.has()` "namespace is non-empty"
+   * check as proof of a complete prior migration — that check cannot
+   * distinguish "fully migrated" from "a previous attempt partially wrote
+   * some batches before crashing," and treating it as proof let stale/
+   * partial meta be read as if the whole catalog were present. Instead,
+   * every attempt (while the marker is unset) re-streams the ENTIRE IDB
+   * `entries` store. This is safe and cheap to repeat because
+   * `levelPutBatch` is a keyed overwrite (`put` by `String(appid)`), so
+   * re-writing rows that already migrated is a no-op in effect, not a
+   * duplicate. The marker + `sync-state` meta are only written AFTER the
+   * full stream completes successfully, using the ACTUAL migrated count —
+   * never the legacy IDB meta's (possibly stale/absent/non-atomic) claim.
+   *
+   * The migration is intentionally NOT abortable — cancelling mid-flight
+   * would leave the LevelDB store in an ambiguous state. IDB is left in
+   * place so a downgrade to v1.0.64 recovers cleanly.
+   */
+  private migrateFromIdbIfNeeded(): Promise<void> {
+    if (this._migrationChecked) return Promise.resolve();
+    if (!useLevelDB()) {
+      this._migrationChecked = true;
+      return Promise.resolve();
+    }
+    if (localStorage.getItem(LEVEL_MIGRATION_MARKER_KEY) === 'yes') {
+      this._migrationChecked = true;
+      return Promise.resolve();
+    }
+    if (this._migrationPromise) return this._migrationPromise;
+
+    this._migrationPromise = this.runMigration().finally(() => {
+      this._migrationPromise = null;
+    });
+    return this._migrationPromise;
+  }
+
+  private async runMigration(): Promise<void> {
+    try {
+      const legacyTagMap = await idbGetMeta<Record<number, string>>('tag-name-map');
+      if (legacyTagMap) await levelSetMeta('tag-name-map', legacyTagMap);
+
+      this._syncProgress = {
+        stage: 'migrating',
+        batchesCompleted: 0,
+        batchesTotal: 0,
+        gamesStored: 0,
+      };
+      this.notify();
+
+      let migrated = 0;
+      await idbStreamAllEntries(async (entries) => {
+        await levelPutBatch(entries);
+        migrated += entries.length;
+        this._syncProgress = {
+          stage: 'migrating',
+          batchesCompleted: 0,
+          batchesTotal: 0,
+          gamesStored: migrated,
+        };
+        this.notify();
+      }, 500);
+
+      // Stream completed without throwing — persist the REAL count we just
+      // wrote (not whatever IDB's possibly-stale/absent sync-state claims)
+      // and only now stamp the marker.
+      if (migrated > 0) {
+        const legacySync = await idbGetMeta<CatalogSyncState>('sync-state');
+        const state: CatalogSyncState = {
+          lastSyncTimestamp: legacySync?.lastSyncTimestamp ?? Date.now(),
+          totalEntries: migrated,
+          batchesCompleted: legacySync?.batchesCompleted ?? 0,
+          batchesTotal: legacySync?.batchesTotal ?? 0,
+          inProgress: false,
+        };
+        await levelSetMeta('sync-state', state);
+      }
+
+      localStorage.setItem(LEVEL_MIGRATION_MARKER_KEY, 'yes');
+      this._migrationChecked = true;
+      console.log(`[CatalogStore] Migrated ${migrated} entries IDB -> LevelDB`);
+      this._syncProgress = {
+        stage: 'done',
+        batchesCompleted: 0,
+        batchesTotal: 0,
+        gamesStored: migrated,
+      };
+      this.notify();
+    } catch (err) {
+      console.error('[CatalogStore] IDB->LevelDB migration failed, will retry on next attempt:', err);
+      // Deliberately do NOT set _migrationChecked or stamp the marker —
+      // leave both unset so a later call (this session or a future
+      // launch) retries the full stream. IDB is untouched throughout, and
+      // any entries already written to LevelDB this attempt are harmless
+      // (they'll simply be overwritten again on retry).
+    }
+  }
+
   /** Check if catalog data is fresh enough (< 24h). */
   async isFresh(): Promise<boolean> {
-    const state = await idbGetMeta<CatalogSyncState>('sync-state');
+    await this.migrateFromIdbIfNeeded();
+    const state = await getMeta<CatalogSyncState>('sync-state');
     if (!state || state.totalEntries === 0) return false;
     return (Date.now() - state.lastSyncTimestamp) < SYNC_STALE_TTL;
   }
 
   /** Get the total number of catalog entries stored. */
   async getEntryCount(): Promise<number> {
-    const state = await idbGetMeta<CatalogSyncState>('sync-state');
+    await this.migrateFromIdbIfNeeded();
+    const state = await getMeta<CatalogSyncState>('sync-state');
     return state?.totalEntries ?? 0;
   }
 
@@ -233,7 +513,8 @@ class CatalogStore {
    * as a watermark to skip the cursor scan when the catalog is unchanged.
    */
   async getLastSyncTimestamp(): Promise<number> {
-    const state = await idbGetMeta<CatalogSyncState>('sync-state');
+    await this.migrateFromIdbIfNeeded();
+    const state = await getMeta<CatalogSyncState>('sync-state');
     return state?.lastSyncTimestamp ?? 0;
   }
 
@@ -243,11 +524,12 @@ class CatalogStore {
    */
   async sync(force = false): Promise<void> {
     if (this._syncing) return;
+    await this.migrateFromIdbIfNeeded();
 
     if (!force) {
       const fresh = await this.isFresh();
       if (fresh) {
-        const syncState = await idbGetMeta<CatalogSyncState>('sync-state');
+        const syncState = await getMeta<CatalogSyncState>('sync-state');
         if (syncState && syncState.totalEntries > 0) {
           this._syncProgress = {
             stage: 'done',
@@ -311,7 +593,7 @@ class CatalogStore {
             try {
               const entries = await fetchBatch(batch, tags);
               if (entries.length > 0) {
-                await idbPutBatch(entries);
+                await putEntriesBatch(entries);
                 totalGamesStored += entries.length;
               }
             } catch (err) {
@@ -342,7 +624,7 @@ class CatalogStore {
         batchesTotal: batches.length,
         inProgress: false,
       };
-      await idbSetMeta('sync-state', syncState);
+      await setMeta('sync-state', syncState);
 
       this._syncProgress = {
         stage: 'done',
@@ -367,6 +649,10 @@ class CatalogStore {
   /**
    * Query catalog entries matching a set of genre names and/or developer names.
    * Used by the recommendation pre-filter to narrow 156K → ~5-8K candidates.
+   *
+   * v1.0.65+: LevelDB path streams via `getChunk` (default 1000 rows/hop) so
+   * the full 155k-row scan never blocks IPC on a single-shot payload. IDB path
+   * keeps the cursor semantics identical to pre-v1.0.65.
    */
   async queryForCandidates(opts: {
     topGenres: string[];
@@ -394,61 +680,77 @@ class CatalogStore {
     const devSet = new Set(loyalDevelopers.map(d => d.toLowerCase()));
     const pubSet = new Set(loyalPublishers.map(p => p.toLowerCase()));
 
-    const db = await getDB();
-    return new Promise((resolve) => {
-      const tx = db.transaction(ENTRIES_STORE, 'readonly');
-      const store = tx.objectStore(ENTRIES_STORE);
-      const req = store.openCursor();
-      const matched: CatalogEntry[] = [];
-      const popularOnly: CatalogEntry[] = [];
+    await this.migrateFromIdbIfNeeded();
 
-      req.onsuccess = () => {
-        const cursor = req.result;
-        if (!cursor) {
-          popularOnly.sort((a, b) => b.reviewCount - a.reviewCount);
-          const popularCap = popularOnly.slice(0, maxPopularQuota);
-          const combined = [...matched, ...popularCap];
-          combined.sort((a, b) => b.reviewCount - a.reviewCount);
-          resolve(combined.slice(0, maxResults));
-          return;
-        }
+    const matched: CatalogEntry[] = [];
+    const popularOnly: CatalogEntry[] = [];
 
-        const entry: CatalogEntry = cursor.value;
-        const id = `steam-${entry.appid}`;
+    const admit = (entry: CatalogEntry) => {
+      const id = `steam-${entry.appid}`;
+      if (excludeIds.has(id)) return;
+      if (entry.reviewCount < minReviews || entry.reviewPositivity < minPositivity) return;
 
-        if (excludeIds.has(id)) {
+      const hasGenreMatch = entry.genres.some(g => genreSet.has(g.toLowerCase()));
+      const hasDevMatch = entry.developer && devSet.has(entry.developer.toLowerCase());
+      const hasPubMatch = entry.publisher && pubSet.size > 0 && pubSet.has(entry.publisher.toLowerCase());
+
+      if (hasGenreMatch || hasDevMatch || hasPubMatch) {
+        matched.push(entry);
+      } else if (entry.reviewCount >= 1000) {
+        popularOnly.push(entry);
+      }
+    };
+
+    if (useLevelDB()) {
+      await levelStreamAllEntries(admit);
+    } else {
+      const db = await getDB();
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction(ENTRIES_STORE, 'readonly');
+        const store = tx.objectStore(ENTRIES_STORE);
+        const req = store.openCursor();
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) {
+            resolve();
+            return;
+          }
+          admit(cursor.value as CatalogEntry);
           cursor.continue();
-          return;
-        }
+        };
+        req.onerror = () => resolve();
+      });
+    }
 
-        if (entry.reviewCount < minReviews || entry.reviewPositivity < minPositivity) {
-          cursor.continue();
-          return;
-        }
-
-        const hasGenreMatch = entry.genres.some(g => genreSet.has(g.toLowerCase()));
-        const hasDevMatch = entry.developer && devSet.has(entry.developer.toLowerCase());
-        const hasPubMatch = entry.publisher && pubSet.size > 0 && pubSet.has(entry.publisher.toLowerCase());
-
-        if (hasGenreMatch || hasDevMatch || hasPubMatch) {
-          matched.push(entry);
-        } else if (entry.reviewCount >= 1000) {
-          // Small capped popular quota — no longer OR-floods the whole pool
-          popularOnly.push(entry);
-        }
-
-        cursor.continue();
-      };
-
-      req.onerror = () => resolve([]);
-    });
+    popularOnly.sort((a, b) => b.reviewCount - a.reviewCount);
+    const popularCap = popularOnly.slice(0, maxPopularQuota);
+    const combined = [...matched, ...popularCap];
+    combined.sort((a, b) => b.reviewCount - a.reviewCount);
+    return combined.slice(0, maxResults);
   }
 
   /**
    * Get all catalog entries (for embedding generation).
-   * Returns entries in batches via a callback to avoid loading everything into memory.
+   * Returns entries in batches via a callback to avoid loading everything
+   * into memory. LevelDB path uses `getChunk` (1000/hop); IDB path uses a
+   * cursor with a 500-row buffer.
    */
   async getAllEntries(onBatch: (entries: CatalogEntry[]) => void): Promise<number> {
+    await this.migrateFromIdbIfNeeded();
+    if (useLevelDB()) {
+      let count = 0;
+      let buffer: CatalogEntry[] = [];
+      await levelStreamAllEntries((entry) => {
+        buffer.push(entry);
+        count++;
+        if (buffer.length >= 500) {
+          onBatch(buffer);
+          buffer = [];
+        }
+      });
+      if (buffer.length > 0) onBatch(buffer);
+      return count;
+    }
     const db = await getDB();
     return new Promise((resolve) => {
       const tx = db.transaction(ENTRIES_STORE, 'readonly');
@@ -478,9 +780,31 @@ class CatalogStore {
 
   /**
    * Get specific entries by appid.
+   *
+   * On the LevelDB path, point-lookups are chunked internally
+   * (`POINT_LOOKUP_CHUNK` per round-trip, run sequentially) rather than
+   * firing every id in one `Promise.all`. `store:get` is rate-limited to
+   * 500/s per channel per sender (see `electron/ipc/store-handlers.ts`);
+   * a caller passing thousands of ids in one call (e.g. galaxy-cache's
+   * embedding-enrichment pass) would otherwise burst past that budget in
+   * a single tick. Chunking here means every caller gets the same safe
+   * behavior without needing to know the IPC rate-limit internals.
    */
   async getEntries(appIds: number[]): Promise<CatalogEntry[]> {
     if (appIds.length === 0) return [];
+    await this.migrateFromIdbIfNeeded();
+    if (useLevelDB()) {
+      const results: CatalogEntry[] = [];
+      for (let i = 0; i < appIds.length; i += POINT_LOOKUP_CHUNK) {
+        const slice = appIds.slice(i, i + POINT_LOOKUP_CHUNK);
+        const gets = slice.map((id) => window.store!.get<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, String(id)));
+        const settled = await Promise.all(gets);
+        for (const res of settled) {
+          if (res.value) results.push(res.value);
+        }
+      }
+      return results;
+    }
     const db = await getDB();
     return new Promise((resolve) => {
       const tx = db.transaction(ENTRIES_STORE, 'readonly');

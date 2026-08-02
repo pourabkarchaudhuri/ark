@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.65] - 2026-08-02
+
+### Added
+- **`store:getChunk` IPC** — paginated chunk-read surface for large LevelDB namespaces. `electron/storage/level-store.ts`'s `getChunkImpl` iterates with `gt`/`gte` bounds (exclusive `startAfter` cursor when supplied), returning `{ rows, nextKey, done }`; `done` is true whenever the returned slice is shorter than `limit`, so callers loop until a short/empty page. Wired through `electron/ipc/store-handlers.ts` (`store:getChunk`, same rate-limit middleware as every other store channel) and `electron/preload.cjs` (`window.store.getChunk`). `src/vite-env.d.ts` gains `StoreChunkResult<T>` + the `getChunk` method on `StoreAPI`.
+
+### Migrated to LevelDB
+- **`src/services/catalog-store.ts`** — the ~155k-row Steam catalog. Two new namespaces: `catalog-entries` (per-appid rows, key = `String(appid)`) and `catalog-meta` (`tag-name-map`, `sync-state`). One-shot migration (`migrateFromIdbIfNeeded`) streams every legacy IDB row via a cursor (500-row async-batched hops that don't `cursor.continue()` until the LevelDB batch write resolves) and copies both meta rows; guarded by a `localStorage` marker (`ark-steam-catalog-migrated-v1`) plus a `store.has()` check so a missed marker never double-migrates. `queryForCandidates` and `getAllEntries` page through the namespace via `store.getChunk` (1000 rows/hop) instead of an IDB cursor; `getEntries` (point lookups) fans out to parallel `store.get` calls. IndexedDB (`ark-steam-catalog`) is left in place, untouched, as a one-release rollback path.
+- **`src/services/epic-catalog-store.ts`** — the Epic catalog (~2-8k games). Namespaces `epic-catalog-entries` (key = `epicId`, i.e. `namespace:offerId`) and `epic-catalog-meta` (`sync-state`). Same migration pattern and marker convention (`ark-epic-catalog-migrated-v1`) as the Steam catalog.
+
+### Fixed (found by adversarial multi-pass review before ship)
+The one-shot IDB→LevelDB migration went through an independent multi-agent adversarial review pass (3 dimensions × 2 skeptical verifiers per finding) before release. Six real bugs were confirmed and fixed in both `catalog-store.ts` and `epic-catalog-store.ts`:
+- **`store.has()`-true no longer proves a prior migration fully completed.** The original migration skipped re-migrating if the LevelDB entries namespace was merely non-empty — but a crashed prior attempt that wrote only a few batches also makes `has()` return true, permanently orphaning every un-migrated row. Fixed: the migration no longer trusts `has()` as a completeness signal at all. It always re-streams the full IDB `entries` store while the marker is unset; this is safe because `levelPutBatch`/writes are keyed overwrites (by `appid` / `epicId`), so re-migrating already-present rows is a no-op in effect, not a duplicate.
+- **A missing/zero legacy `sync-state` meta no longer skips real data.** The old code trusted IDB's `sync-state.totalEntries` (written non-atomically, after all entry batches) as a proxy for "any rows exist." A crash between the last entry write and that trailing meta write left real rows in IDB with no meta to prove it — and migration silently skipped them forever. Fixed: migration no longer gates on `sync-state` at all; it always attempts the real cursor stream, which correctly costs near-nothing when IDB is genuinely empty.
+- **`sync-state` written to LevelDB now uses the actual migrated count**, not whatever the legacy IDB meta claimed (which could be stale or absent).
+- **The IDB cursor's `onerror` handler now rejects** (with the real `IDBRequest.error`) instead of silently resolving with a truncated count and letting the caller believe migration fully succeeded.
+- **A failed migration attempt no longer permanently disables retries.** The in-session guard is only set after real success (or a confirmed-already-migrated marker) — a transient IPC hiccup no longer locks the store into treating IDB-only reads as "already migrated: nothing more to do" for the rest of the process lifetime.
+- **Concurrent callers now share a single in-flight migration** via a memoized promise, instead of each independently racing its own `has()` check and one prematurely declaring victory while another is still streaming.
+- **`getEntries()` (point lookups) now internally chunks to 400 ids per IPC round-trip**, regardless of how many ids a caller passes in one call — `galaxy-cache.ts`'s embedding-enrichment pass was calling it with chunks of 5,000, 10x the rate-limiter's per-tick burst budget.
+
+### Under the hood
+- Both catalog stores keep a `useLevelDB()` gate checked per-call (not cached at construction) since these are lazily-constructed singletons with no async init step — the check is a cheap `typeof window.store !== 'undefined'`.
+- `CatalogStore` and `EpicCatalogStore` classes exported (previously module-private) to allow direct instantiation in tests.
+- Added `fake-indexeddb` as a devDependency so the migration's real cursor/error-handling paths could be exercised against an actual (fake) IndexedDB in tests, rather than only mocked shortcuts.
+- 24 new unit tests: chunked-pagination correctness (exact multiples of `LEVEL_CHUNK_SIZE`, partial final page), `queryForCandidates` genre/developer/publisher/popularity filtering, point-lookup `getEntries`, sync-state freshness/TTL, and 10 dedicated migration-regression tests (partial-data-doesn't-shortcut, missing-meta-doesn't-skip, actual-count-not-legacy-count, retry-after-failure, concurrent-callers-share-one-attempt) against real fake-indexeddb state.
+- Full suite: 1031 → 1051 passing under `--isolate`. Typecheck (both tsconfig.json and tsconfig.node.json) clean.
+
+### Deferred to v1.0.66+
+- Remaining IDB-backed stores: embeddings, `ann-index.ts`.
+- Phase 2 (Node-side heavy work): catalog dedup+sort move to main process; `SharedArrayBuffer` for embedding IPC.
+
 ## [1.0.64] - 2026-08-02
 
 ### Migrated to LevelDB

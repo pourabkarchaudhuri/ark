@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.65': {
+    title: "What's New in Ark 1.0.65",
+    changes: [
+      'Both game catalogs moved to LevelDB — the Steam catalog (~155k games) and the Epic catalog (~2-8k games) now persist through the same LevelDB backend as the rest of your data, instead of IndexedDB. A new paginated chunk-read IPC path (store:getChunk) streams the Steam catalog 1,000 rows at a time so the migration and every subsequent read stay off the main thread without ever marshaling the whole catalog in one IPC round-trip.',
+      'One-shot background migration — on first launch after upgrade, your existing IndexedDB catalog is copied into LevelDB automatically the first time Ark needs it (browsing Catalog, generating embeddings, or computing Oracle recommendations). No re-download from Steam/Epic needed. IndexedDB is left untouched for one release as a rollback path.',
+      'Zero visible UI change — Catalog browsing, Oracle candidate pre-filtering, and the embedding pipeline all see the same data through the same public APIs. Only the storage plumbing underneath changed.',
+      'Hardened before ship — an independent adversarial review found and fixed six real edge cases in the migration logic: a crashed prior attempt could falsely be treated as complete, a missing meta row could cause real data to be silently skipped, a cursor read error could go unnoticed, a failed attempt could permanently block retries for the session, concurrent callers could race each other, and one internal consumer was bursting past the point-lookup rate budget.',
+      'Test coverage expanded — 24 new unit tests, including 10 migration-regression tests run against real (fake) IndexedDB state. Full suite: 1031 → 1051 passing.',
+    ],
+  },
   '1.0.64': {
     title: "What's New in Ark 1.0.64",
     changes: [

@@ -1,6 +1,6 @@
 {
   "name": "ark",
-  "version": "1.0.64",
+  "version": "1.0.65",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -127,6 +127,7 @@
     "cross-env": "^7.0.3",
     "electron": "^33.4.11",
     "electron-builder": "^26.4.0",
+    "fake-indexeddb": "^6.2.5",
     "happy-dom": "^12.10.3",
     "jsdom": "^23.0.1",
     "png-to-ico": "^3.0.1",

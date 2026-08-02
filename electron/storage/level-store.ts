@@ -51,6 +51,21 @@ export interface LevelStore {
     namespace: string,
     opts?: { start?: string; end?: string; limit?: number },
   ): AsyncGenerator<{ key: string; value: T }>;
+  /**
+   * Paginated chunk read (v1.0.65+). Returns up to `limit` rows starting
+   * strictly AFTER `startAfter` (exclusive). The `nextKey` is the last
+   * key in `rows` — pass it back as `startAfter` for the next chunk.
+   * `done` is true when the returned slice was shorter than `limit`,
+   * meaning the caller can stop iterating.
+   *
+   * This is the IPC-friendly counterpart to `stream()` for large namespaces
+   * (e.g. the ~155k-row Steam catalog) where marshalling everything in one
+   * `getAll` payload would be prohibitive.
+   */
+  getChunk<T>(
+    namespace: string,
+    opts: { startAfter?: string; limit: number },
+  ): Promise<{ rows: Array<{ key: string; value: T }>; nextKey?: string; done: boolean }>;
   /** Fast "does this namespace have any keys?" check — returns on first hit. */
   has(namespace: string): Promise<boolean>;
   clearNamespace(namespace: string): Promise<void>;
@@ -268,6 +283,40 @@ async function* streamImpl<T>(
   }
 }
 
+async function getChunkImpl<T>(
+  namespace: string,
+  opts: { startAfter?: string; limit: number },
+): Promise<{ rows: Array<{ key: string; value: T }>; nextKey?: string; done: boolean }> {
+  validateNamespace(namespace);
+  const limit = Math.max(1, Math.min(10_000, Math.floor(opts.limit)));
+  const db = await openDb();
+  const prefix = `${namespace}${NS_SEP}`;
+  const lt = `${namespace}${NS_SEP}${NS_HIGH}`;
+  // Exclusive start when a cursor is supplied — the caller already saw `startAfter`.
+  const iterOpts: Record<string, unknown> = opts.startAfter
+    ? { gt: encodeKey(namespace, opts.startAfter), lt, limit }
+    : { gte: prefix, lt, limit };
+  const rows: Array<{ key: string; value: T }> = [];
+  const iter = db.iterator(iterOpts);
+  try {
+    for await (const [fullKey, raw] of iter) {
+      rows.push({ key: decodeKey(namespace, fullKey), value: decodeValue<T>(raw) });
+    }
+  } catch (err) {
+    logger.error(`[LevelStore] getChunk(${namespace}) failed:`, err);
+    throw err;
+  } finally {
+    try {
+      await iter.close();
+    } catch {
+      /* ignore */
+    }
+  }
+  const nextKey = rows.length > 0 ? rows[rows.length - 1].key : undefined;
+  const done = rows.length < limit;
+  return { rows, nextKey, done };
+}
+
 async function hasImpl(namespace: string): Promise<boolean> {
   validateNamespace(namespace);
   const db = await openDb();
@@ -334,6 +383,7 @@ export function getLevelStore(): LevelStore {
     del: delImpl,
     batch: batchImpl,
     stream: streamImpl,
+    getChunk: getChunkImpl,
     has: hasImpl,
     clearNamespace: clearNamespaceImpl,
     close: closeImpl,
