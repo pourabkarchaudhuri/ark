@@ -1,0 +1,30 @@
+[package]
+name = "ark-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", default-features = false, features = ["napi4"] }
+napi-derive = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+  "Win32_Foundation",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+  "Win32_Security",
+] }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+# Rust debug info (.pdb) is large and useless to end users; keep it out of
+# the shipped .node binary. Full symbols can still be produced by a separate
+# CI artifact build if crash triage ever needs them.
+debug = false
+lto = true

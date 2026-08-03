@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.69] - 2026-08-03
+
+### Added
+- **Rust native sidecar (`native/ark-native`), Phase 3 of the perf plan.** A `napi-rs` crate compiled to `ark-native.win32-x64-msvc.node`, replacing the session tracker's Windows process enumeration. `session_enumerate()` calls `EnumProcesses`/`OpenProcess`/`QueryFullProcessImageNameW` (`windows-sys`) directly — no PowerShell subprocess spawn, no `Get-Process | Select-Object Path` parse. Benchmarked at ~18ms for 567 real processes (340 with resolved paths) vs. hundreds of ms for a PowerShell round-trip.
+- **`electron/native-bridge.ts`** — safe wrapper around the addon. Every export degrades to `null`/`false` instead of throwing if the native module fails to load (missing binary, wrong arch, AV quarantine) or the loaded module's shape doesn't match — callers always have a working JS/PowerShell fallback path, never a crash.
+- **`electron/session-tracker.ts`** — `refreshProcessSnapshot()`'s Windows branch now tries `nativeSessionEnumerate()` first; falls back to the existing PowerShell path when native is unavailable OR returns an empty result (a real Windows system always has hundreds of processes running, so an empty native result can only mean the underlying syscall failed — treated as "native unavailable," not "nothing is running"). The `tasklist`-based basename fallback (for permission-denied processes PowerShell/native can't resolve a path for) is unchanged.
+- **`npm run rust:build`** script (`cd native/ark-native && napi build --platform --release`) to rebuild the addon from source.
+
+### Fixed
+- **`build:app` script had the wrong step order.** `tsc && tsc -p tsconfig.node.json` ran the frontend typecheck BEFORE building the electron/node project — but `tsconfig.json` references `tsconfig.node.json` for the shared `src/overlay/detail-level.ts` file, and TypeScript's project-reference redirect requires that referenced project's declaration output to already exist on a truly clean build (`npm run clean` wipes `dist-electron` as the first step of the same script). This only surfaced on a genuinely clean build — a stale `dist-electron` left over from a previous run masked it in most day-to-day invocations. Fixed by building `tsconfig.node.json` first. Affects `test:electron`/`test:electron:headed`/`test:electron:debug` (the only scripts that invoke `build:app`); the shipping `release`/`build` scripts were unaffected (they never ran the frontend `tsc` step at all, relying on `vite build`'s transpile-only pipeline).
+
+### Under the hood
+- Test-only seam added to `native-bridge.ts` (`__resetNativeBridgeForTests`, overridable module loader) so `nativeSessionEnumerate`/`nativeBridgeStatus`'s fallback contract is covered by real unit tests without needing an actual `.node` binary present.
+- 7 new tests in `src/test/electron/native-bridge.test.ts`: load failure, malformed-module shape, call-time throw, and successful-load paths.
+- `package.json`: `build.files`/`build.asarUnpack` updated so the `.node` binary ships outside `app.asar` (native modules must be unpacked to be `require()`-able) — same treatment as `preload.cjs`.
+- Full suite: 1066 → 1073 passing under `--no-isolate`. Typecheck clean on both `tsconfig.json` and `tsconfig.node.json`.
+
 ## [1.0.68] - 2026-08-03
 
 ### Fixed

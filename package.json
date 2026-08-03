@@ -1,15 +1,16 @@
 {
   "name": "ark",
-  "version": "1.0.68",
+  "version": "1.0.69",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "clean": "rm -rf dist dist-electron",
+    "rust:build": "cd native/ark-native && napi build --platform --release",
     "dev": "vite",
     "build": "npm run clean && tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && electron-builder",
-    "build:app": "npm run clean && tsc && tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build",
+    "build:app": "npm run clean && tsc -p tsconfig.node.json && tsc && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build",
     "preview": "vite preview",
     "electron:compile": "tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs",
     "electron:dev": "npm run electron:compile && concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
@@ -107,6 +108,7 @@
     "wouter": "^3.9.0"
   },
   "devDependencies": {
+    "@napi-rs/cli": "^3.8.2",
     "@playwright/test": "^1.57.0",
     "@testing-library/jest-dom": "^6.2.0",
     "@testing-library/react": "^14.1.2",
@@ -149,10 +151,12 @@
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "native/ark-native/*.node"
     ],
     "asarUnpack": [
-      "**/preload.cjs"
+      "**/preload.cjs",
+      "**/*.node"
     ],
     "extraFiles": [
       {

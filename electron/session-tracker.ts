@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import { logger } from './safe-logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
+import { nativeSessionEnumerate } from './native-bridge.js';
 
 /** Async exec so process snapshots never block Electron's main/input pump. */
 const execAsync = promisify(exec);
@@ -145,7 +146,35 @@ async function refreshProcessSnapshot(): Promise<void> {
       }
       _runningBasenames = names;
 
-      // ---- Full paths (slower, best-effort — some processes hide their Path from non-admin) ----
+      // ---- Full paths ----
+      // Phase 3: prefer the native ark-native module (single in-process
+      // EnumProcesses + QueryFullProcessImageName syscall pass, ~10-20ms for
+      // a full system snapshot — see native/ark-native/src/lib.rs) over the
+      // PowerShell subprocess this replaces. PowerShell was both slow
+      // (~100ms-multi-second under AV/GPU load) AND the root cause class of
+      // the v1.0.60 tracker-never-ends bug when it failed outright. Falls
+      // back to the original PowerShell call when the native module isn't
+      // loaded (missing binary, wrong platform/arch, corrupted install) —
+      // every consumer of `_runningPaths`/`_pathSnapshotStale` is unchanged,
+      // so this swap is invisible below this function.
+      // A real Windows system always has hundreds of processes running
+      // (Ark itself, explorer.exe, system services) — an empty result can
+      // only mean the underlying EnumProcesses syscall itself failed
+      // (extremely rare: e.g. transient low-memory condition), not that
+      // nothing is running. Treat it the same as "native unavailable" and
+      // fall through to the PowerShell path, rather than trusting a
+      // spuriously-empty snapshot and marking every tracked game as missing.
+      const nativeResult = nativeSessionEnumerate();
+      if (nativeResult !== null && nativeResult.length > 0) {
+        const paths = new Set<string>();
+        for (const proc of nativeResult) {
+          if (proc.path) paths.add(proc.path.toLowerCase());
+        }
+        _runningPaths = paths;
+        _pathSnapshotStale = false;
+        return;
+      }
+
       const paths = new Set<string>();
       try {
         const psOut = await runCommand(

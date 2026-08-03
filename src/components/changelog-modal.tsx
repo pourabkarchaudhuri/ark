@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.69': {
+    title: "What's New in Ark 1.0.69",
+    changes: [
+      'Faster, more reliable game-session tracking on Windows — the session tracker now uses a small native module to check which games are running, instead of spawning a PowerShell process every poll. Removes an occasional source of slowness and makes the "is this game still running" check near-instant.',
+      'If the native module ever fails to load for any reason (rare — e.g. antivirus quarantine), Ark automatically falls back to the previous PowerShell-based method with no interruption and no crash.',
+      'Fixed a build-tooling bug affecting only the developer/CI test-build path (`test:electron`) — no impact on the app itself.',
+      'Test coverage expanded — 7 new tests covering the native module\'s fallback behavior. Full suite: 1066 → 1073 passing.',
+    ],
+  },
   '1.0.68': {
     title: "What's New in Ark 1.0.68",
     changes: [

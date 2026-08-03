@@ -1,0 +1,12 @@
+{
+  "name": "ark-native",
+  "version": "0.1.0",
+  "private": true,
+  "napi": {
+    "binaryName": "ark-native",
+    "targets": ["x86_64-pc-windows-msvc"]
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.8.2"
+  }
+}

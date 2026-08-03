@@ -1,23 +1,26 @@
-# Ark v1.0.68 — Hotfix: "Waiting for embeddings" stuck indefinitely
+# Ark v1.0.69 — Rust native sidecar for session tracking (Phase 3)
 
-Fixes a live issue reported after updating to v1.0.67: the Embedding Space status showed "Waiting for embeddings" indefinitely, with catalog embedding generation appearing to hang.
+Replaces the session tracker's Windows process enumeration with a small native Rust module, removing the PowerShell subprocess spawn from the hot polling path.
 
-## Root cause
+## Added
 
-v1.0.67's storage migration for embeddings retried itself on every call after a failure — a policy that's safe for infrequently-called storage functions (like the catalog stores) but dangerous here: the affected functions run once per game during a full catalog embedding pass, up to ~163,000 times. A single transient hiccup early in that pass meant every subsequent per-game call independently kicked off a brand-new full re-migration attempt, and since the underlying cause typically failed again too, this became an unbounded retry storm — turning a one-time hiccup into an effectively permanent hang.
+- **`ark-native`** — a `napi-rs` Rust addon calling `EnumProcesses`/`OpenProcess`/`QueryFullProcessImageNameW` directly via `windows-sys`. Benchmarked at ~18ms to enumerate 567 real processes (vs. hundreds of ms for the previous `Get-Process | Select-Object Path` PowerShell round-trip).
+- **Safe fallback by design** — if the native module fails to load for any reason (missing binary, wrong architecture, antivirus quarantine, corrupted install), Ark automatically falls back to the existing PowerShell-based path. No crash, no user-visible failure — just the same behavior as before this release.
+- The `tasklist`-based basename-matching fallback (used for permission-denied processes neither PowerShell nor the native path can resolve a full path for) is unchanged.
 
 ## Fixed
 
-- A failed migration attempt now settles cleanly after one try per app session — no more retry storm.
-- The app correctly falls back to reading your existing data through the old storage path for the rest of that session (never silently working from a partially-migrated, incomplete copy).
-- The next time you launch Ark, migration retries fresh from a clean slate.
+- A build-tooling step-order bug in `build:app` (used only by the `test:electron` developer/CI test path, not the shipping build) — no user-facing impact.
 
 ## Under the hood
 
-- 2 tests that encoded the old (buggy) "retry on every call" expectation were rewritten to verify the fix: one simulating the exact per-game-loop retry-storm scenario (confirms zero additional migration attempts and consistently correct data across 20 repeated calls after a failure), one confirming a fresh app restart retries and succeeds normally.
-- Full suite: 1065 → 1066 passing, verified clean across repeated isolated runs.
+- New test-only seam in `native-bridge.ts` lets the fallback contract be verified with real unit tests without needing the actual compiled binary present.
+- 7 new tests covering load failure, malformed module shape, call-time failure, and the successful-load path.
+- Full suite: 1066 → 1073 passing. Typecheck clean on both the renderer and electron/node TypeScript projects.
 
 ---
 
-**Tests:** 1066/1066 passing under `--isolate` (verified via repeated isolated runs of the affected test file). Electron + renderer typecheck clean. Vite build clean.
-**No storage schema changes** — this is a pure retry-logic correctness fix.
+**Full download, not incremental.** Adding the native module changes the installer's contents enough that this update downloads as a complete ~300 MB installer rather than a small differential patch — same as every Ark release (differential downloads have been off since v1.0.42).
+
+**Tests:** 1073/1073 passing under `--no-isolate`. Electron + renderer typecheck clean. Vite build clean. Installer size delta: +~0.3 MB (native binary is 229 KB).
+**Rollback:** if this release ever regresses on your machine, the native module's failure path is exercised automatically — Ark will keep working via the PowerShell fallback with only a log warning, never a crash.

@@ -8,6 +8,7 @@ dist/
 dist-electron/
 release/
 out/
+native/ark-native/target/
 
 # Environment variables
 .env
