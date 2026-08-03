@@ -545,7 +545,14 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
           } catch (err) {
             console.warn('[Splash] Idle re-chunk:', err);
           }
-        })().catch(err => console.warn('[Splash] Catalog embeddings:', err));
+        })()
+          // embedding-service.ts's generate* functions are now self-healing on
+          // every exit path (they always leave _steamCatalogProgress /
+          // _epicCatalogProgress / annIndex._building in a coherent terminal
+          // state, even on throw) — this catch is just to stop a rejection
+          // here from becoming an unhandled promise rejection; there's no
+          // state left to reset on this side.
+          .catch(err => console.warn('[Splash] Catalog embeddings:', err));
       }
     }).catch((err) => {
       console.warn('[Splash] Embedding check:', err);

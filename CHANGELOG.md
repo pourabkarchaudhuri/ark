@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.71] - 2026-08-03
+
+### Fixed
+- **"Catalog Embeddings" / "Embedding Space" progress bars getting stuck below 100% and never reaching done** (live user reports, distinct from the v1.0.68 migration-retry-storm fix). Root-caused five separate exit paths in `embedding-service.ts`'s catalog embedding pipeline that never wrote a terminal progress value:
+  - The Ollama-unavailable early return, both `canSkipScan` watermark-shortcut branches, and both `catch` blocks (Steam and Epic) all used to leave whatever partial `{completed, total}` reading was last written — visible forever as a stalled, non-advancing bar. All five now reset to a coherent `{0,0}` (idle) state before returning.
+  - A mid-run cancel (`signal.aborted` breaking the batch loop) used to leave the last completed batch's partial count on display; now resets to `{0,0}` so a cancelled pass reads as cleanly retryable instead of "stuck at 58%".
+  - `_catalogProgress` was a single field shared by the Steam and Epic passes — Epic starting its own run reset it to its own `{0, N}`, silently erasing the fact Steam had just finished at `{N,N}`. Split into independent `_steamCatalogProgress`/`_epicCatalogProgress` fields; the public `catalogProgress` getter now returns their sum, so the existing widget code needed no changes.
+  - The ANN index's internal "building" flag could get stuck `true` forever: when 0 vectors were eligible for backfill, the flag's own arithmetic (`done < total`) evaluated `0 < 1 → true` with nothing left to ever flip it back; a thrown save error skipped cleanup entirely; and the Epic pass's success path never called the ANN completion signal at all (Steam's did — this asymmetry meant a successful Epic-only run could still leave the "Embedding Space" widget spinning). All three ANN backfill/generation paths now guarantee cleanup via `try/finally`.
+  - Also fixed in this pass (found while tracing the same bug class): `startCatalogEmbeddingPipeline()`'s re-entry guard in `oracle-view.tsx` had no top-level error handling — a single rejection anywhere in its catalog-sync-then-embed chain permanently disabled the pipeline from ever restarting for the rest of the session, with no visible error. Now settles the guard flag in `.finally()` regardless of outcome.
+
+### Added
+- **"Force re-index catalog embeddings" button** (Settings → AI/Embeddings). Cancels any in-flight background pass, then regenerates every Steam and Epic catalog embedding from scratch — bypassing both the watermark shortcut and the per-entry content-hash skip, so it also recovers from suspected cache corruption (a stored vector that's gone bad while its hash bookkeeping still agrees nothing changed). Confirmation dialog explains the scope; library, playtime, and journey data are never touched.
+- `generateCatalogEmbeddings`/`generateEpicCatalogEmbeddings` gained a `force?: boolean` option powering the button above.
+
+### Under the hood
+- 6 new tests in `embedding-service.progress.test.ts` covering: Ollama-unavailable terminal state, a full successful run's terminal state, a thrown-batch terminal state, Steam/Epic progress-field independence, the `force` option's hash-skip bypass, and the ANN "never stuck building" invariant across a `canSkipScan` pass.
+- Full suite: 1085 → 1091 passing under `--no-isolate` (one unrelated, pre-existing environmental flake observed and confirmed via a clean repeat run — same class documented in earlier releases, not caused by this change). Typecheck clean on both TypeScript projects.
+
 ## [1.0.70] - 2026-08-03
 
 ### Added

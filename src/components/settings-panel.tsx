@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2, Rocket, RefreshCw, MonitorPlay, Layers } from 'lucide-react';
+import { Settings, X, Key, Eye, EyeOff, Check, AlertCircle, Trash2, Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2, Rocket, RefreshCw, MonitorPlay, Layers, RotateCcw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,9 @@ import { gameService } from '@/services/game-service';
 import { embeddingService } from '@/services/embedding-service';
 import { buildRechunkJobDeps } from '@/services/rechunk-job-deps';
 import { annIndex } from '@/services/ann-index';
+import { catalogStore } from '@/services/catalog-store';
+import { epicCatalogStore } from '@/services/epic-catalog-store';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useDevMode } from '@/hooks/useDevMode';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
@@ -108,6 +111,10 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [rechunkMessage, setRechunkMessage] = useState<string | null>(() => embeddingService.rechunkMessage);
   const [rechunkProgress, setRechunkProgress] = useState(() => embeddingService.rechunkProgress);
   const [rechunkSuggestAnn, setRechunkSuggestAnn] = useState(() => embeddingService.rechunkSuggestRebuildAnn);
+  const [forceReindexStatus, setForceReindexStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [forceReindexMessage, setForceReindexMessage] = useState<string | null>(null);
+  const [forceReindexProgress, setForceReindexProgress] = useState<{ completed: number; total: number } | null>(null);
+  const [forceReindexConfirmOpen, setForceReindexConfirmOpen] = useState(false);
   const [useGeminiInstead, setUseGeminiInstead] = useState(false);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
@@ -997,6 +1004,91 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       )}
                     </div>
                   </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-white/50">Force re-index catalog embeddings</p>
+                      <p className="text-[11px] text-white/25 mt-0.5">
+                        Regenerates every Steam and Epic catalog embedding from scratch — use this if a
+                        progress bar gets stuck or you suspect corrupted cached vectors. Library, playtime,
+                        and journey data are not touched.
+                      </p>
+                      {forceReindexStatus === 'running' && forceReindexProgress && (
+                        <p className="text-[11px] mt-0.5 text-white/40">
+                          {forceReindexProgress.completed.toLocaleString()} / {forceReindexProgress.total.toLocaleString()} vectors
+                        </p>
+                      )}
+                      {forceReindexMessage && (
+                        <p className={cn(
+                          'text-[11px] mt-0.5',
+                          forceReindexStatus === 'error' ? 'text-red-400/70' : 'text-emerald-400/60',
+                        )}>
+                          {forceReindexMessage}
+                        </p>
+                      )}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={forceReindexStatus === 'running' || geminiBlocksOllama}
+                      onClick={() => setForceReindexConfirmOpen(true)}
+                      className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
+                    >
+                      {forceReindexStatus === 'running' ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      )}
+                      <span className="ml-1.5">{forceReindexStatus === 'running' ? 'Re-indexing…' : 'Force Re-index'}</span>
+                    </Button>
+                  </div>
+                  <ConfirmDialog
+                    open={forceReindexConfirmOpen}
+                    onOpenChange={setForceReindexConfirmOpen}
+                    title="Force Re-index Catalog Embeddings"
+                    description="This will re-scan and regenerate every Steam and Epic catalog embedding from scratch. It can take a while and will use Ollama to re-embed the full catalog. Your library, playtime, and journey data are not affected. Continue?"
+                    confirmText="Re-index"
+                    cancelText="Cancel"
+                    variant="warning"
+                    onConfirm={async () => {
+                      setForceReindexStatus('running');
+                      setForceReindexMessage(null);
+                      setForceReindexProgress({ completed: 0, total: 0 });
+
+                      embeddingService.cancelCatalogEmbeddings();
+
+                      const unsub = embeddingService.subscribe(() => {
+                        setForceReindexProgress({ ...embeddingService.catalogProgress });
+                      });
+
+                      try {
+                        const steamSyncTs = await catalogStore.getLastSyncTimestamp();
+                        const steamCount = await embeddingService.generateCatalogEmbeddings(
+                          (onBatch) => catalogStore.getAllEntries(onBatch),
+                          { storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs, force: true },
+                        );
+
+                        const epicSyncTs = await epicCatalogStore.getLastSyncTimestamp();
+                        const epicCount = await embeddingService.generateEpicCatalogEmbeddings(
+                          (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+                          { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs, force: true },
+                        );
+
+                        setForceReindexStatus('done');
+                        setForceReindexMessage(`Re-indexed — ${steamCount + epicCount} vectors regenerated`);
+                        console.log(`[Settings] Force re-index complete: ${steamCount} Steam + ${epicCount} Epic`);
+                      } catch (err) {
+                        setForceReindexStatus('error');
+                        const detail = err instanceof Error ? err.message : String(err);
+                        setForceReindexMessage(`Re-index failed: ${detail}`);
+                        console.warn('[Settings] Force re-index failed:', err);
+                      } finally {
+                        unsub();
+                        setForceReindexProgress(null);
+                      }
+                    }}
+                  />
                   
                   <div className="flex items-center gap-2 text-xs">
                     {ollamaSaveStatus === 'saving' && (

@@ -132,12 +132,11 @@ function startCatalogEmbeddingPipeline() {
     if (!available) {
       // Still warm BM25 from catalogs even without embeddings.
       bm25Index.scheduleIdleRebuild();
-      _pipelineStarted = false;
       return;
     }
 
     const entryCount = await catalogStore.getEntryCount();
-    if (entryCount === 0) { _pipelineStarted = false; return; }
+    if (entryCount === 0) return;
 
     const steamSyncTs = await catalogStore.getLastSyncTimestamp();
     await embeddingService.generateCatalogEmbeddings(
@@ -158,8 +157,24 @@ function startCatalogEmbeddingPipeline() {
     }
 
     bm25Index.scheduleIdleRebuild();
-    _pipelineStarted = false;
-  })();
+  })()
+    // Unlike the early-return branches above, generateCatalogEmbeddings/
+    // generateEpicCatalogEmbeddings/getEntryCount/getLastSyncTimestamp are
+    // unguarded here — a single rejection anywhere in that chain used to
+    // leave _pipelineStarted permanently true for the rest of the session
+    // (no top-level catch/finally), silently disabling every future retry
+    // from this trigger and wedging the "Catalog Embeddings"/"Embedding
+    // Space" status widgets on their last "waiting" text with no visible
+    // error. Reset the guard in finally so a failure here can always be
+    // retried the next time the user opens Oracle, same as every other
+    // session-guard flag in this codebase (embedding-service.ts's
+    // _embedMigrationFailedThisSession, galaxy-cache.ts's _bgScheduled).
+    .catch((err) => {
+      console.warn('[Oracle] Catalog embedding pipeline failed, will retry next time Oracle opens:', err);
+    })
+    .finally(() => {
+      _pipelineStarted = false;
+    });
 }
 
 // ─── Hook to subscribe to the reco store ───────────────────────────────────────

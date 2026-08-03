@@ -1985,15 +1985,40 @@ class EmbeddingService {
    * @returns Number of newly generated embeddings
    */
   private _catalogAbort: AbortController | null = null;
-  private _catalogProgress: { completed: number; total: number } = { completed: 0, total: 0 };
+  // Split Steam/Epic so Epic's run starting at {0,N} can never overwrite
+  // Steam's already-completed {N,N} — they used to share one field and Epic
+  // unconditionally reset it to its own {0, needsEmbedding.length} the
+  // moment it started, hiding a just-finished Steam pass from the widget.
+  private _steamCatalogProgress: { completed: number; total: number } = { completed: 0, total: 0 };
+  private _epicCatalogProgress: { completed: number; total: number } = { completed: 0, total: 0 };
   private _catalogRunning = false;
   private _catalogPromise: Promise<number> | null = null;
 
+  /** Merged Steam + Epic progress for the "Catalog Embeddings" status widget. */
   get catalogProgress(): Readonly<{ completed: number; total: number }> {
-    return this._catalogProgress;
+    return {
+      completed: this._steamCatalogProgress.completed + this._epicCatalogProgress.completed,
+      total: this._steamCatalogProgress.total + this._epicCatalogProgress.total,
+    };
   }
 
   get isCatalogRunning(): boolean { return this._catalogRunning; }
+
+  /**
+   * Clears a leftover partial progress reading (completed < total) left by an
+   * interrupted prior pass, so a subsequent no-op/skip/error exit never shows
+   * a stuck-looking bar once `embRunning` goes false again. A pass that
+   * genuinely finished (completed >= total) is left untouched.
+   */
+  private _resetProgressIfStale(which: 'steam' | 'epic'): void {
+    const field = which === 'steam' ? this._steamCatalogProgress : this._epicCatalogProgress;
+    if (field.completed < field.total) {
+      const cleared = { completed: 0, total: 0 };
+      if (which === 'steam') this._steamCatalogProgress = cleared;
+      else this._epicCatalogProgress = cleared;
+      this._notify();
+    }
+  }
 
   /** True once the Ollama availability check has completed (regardless of result). */
   get isOllamaChecked(): boolean { return this.ollamaAvailable !== null; }
@@ -2524,10 +2549,18 @@ class EmbeddingService {
    * @param opts.lastSyncTimestamp   When the source catalog was last synced. If
    *                                 ≤ the recorded watermark AND version stamp
    *                                 matches, the cursor scan is skipped entirely.
+   * @param opts.force               Bypass both the watermark short-circuit and
+   *                                 the per-entry content-hash skip, so every
+   *                                 entry is regenerated even if its cached
+   *                                 vector's hash still matches — used by the
+   *                                 Settings "Force Re-index" action to recover
+   *                                 from suspected cache corruption, where the
+   *                                 hash bookkeeping may still agree with a
+   *                                 corrupted stored vector.
    */
   generateCatalogEmbeddings(
     catalogIterator: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>,
-    opts?: { storeKey?: string; lastSyncTimestamp?: number },
+    opts?: { storeKey?: string; lastSyncTimestamp?: number; force?: boolean },
   ): Promise<number> {
     if (this._catalogPromise) return this._catalogPromise;
     this._catalogPromise = this._runCatalogEmbeddings(catalogIterator, opts);
@@ -2536,9 +2569,13 @@ class EmbeddingService {
 
   private async _runCatalogEmbeddings(
     catalogIterator: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>,
-    opts?: { storeKey?: string; lastSyncTimestamp?: number },
+    opts?: { storeKey?: string; lastSyncTimestamp?: number; force?: boolean },
   ): Promise<number> {
-    if (!(await this.isAvailable())) { this._catalogPromise = null; return 0; }
+    if (!(await this.isAvailable())) {
+      this._catalogPromise = null;
+      this._resetProgressIfStale('steam');
+      return 0;
+    }
 
     this._catalogRunning = true;
     this._catalogAbort = new AbortController();
@@ -2547,13 +2584,17 @@ class EmbeddingService {
 
     const storeKey = opts?.storeKey ?? 'steam-catalog';
     const lastSyncTimestamp = opts?.lastSyncTimestamp ?? 0;
+    const force = opts?.force ?? false;
 
     try {
       // ─── Watermark short-circuit ──────────────────────────────────────────
       // If the source catalog hasn't been re-synced since our last embedding
       // pass AND the version stamp is unchanged, skip the entire cursor scan.
+      // `force` always bypasses this — a forced re-index means "regenerate
+      // everything," not "trust the watermark."
       const watermark = await getEmbeddingMeta<EmbeddingPassWatermark>(storeKey);
       const canSkipScan =
+        !force &&
         watermark &&
         lastSyncTimestamp > 0 &&
         lastSyncTimestamp <= watermark.syncTimestamp &&
@@ -2565,6 +2606,7 @@ class EmbeddingService {
           await this._backfillAnnIndex();
         }
         annIndex.finishBuild();
+        this._resetProgressIfStale('steam');
         return 0;
       }
 
@@ -2583,7 +2625,7 @@ class EmbeddingService {
           const text = buildCatalogEmbeddingText(entry);
           const hash = hashText(text);
           const existing = cachedHashes.get(id);
-          if (shouldSkipPooled(existing, hash)) {
+          if (!force && shouldSkipPooled(existing, hash)) {
             // Same content — just touch the timestamp if it's getting stale.
             const ts = cachedTimestamps.get(id) ?? 0;
             if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
@@ -2608,7 +2650,7 @@ class EmbeddingService {
         console.log(`[EmbeddingService] All ${scannedTotal} catalog embeddings already cached`);
         // Reflect the scanned total so the status widget shows "N vectors"
         // instead of a stale/blank {0,0} after a no-op pass.
-        this._catalogProgress = { completed: scannedTotal, total: scannedTotal };
+        this._steamCatalogProgress = { completed: scannedTotal, total: scannedTotal };
         this._notify();
         // Backfill ANN index if it's empty (e.g. first launch after ANN was added, or index file deleted)
         if (!annIndex.isReady) {
@@ -2631,7 +2673,7 @@ class EmbeddingService {
         `[EmbeddingService] Generating ${needsEmbedding.length} catalog embeddings ` +
         `(chunking=${chunkingEnabled ? 'on' : 'off'})...`,
       );
-      this._catalogProgress = { completed: 0, total: needsEmbedding.length };
+      this._steamCatalogProgress = { completed: 0, total: needsEmbedding.length };
       this._notify();
 
       const EMBED_BATCH = 100;
@@ -2711,7 +2753,7 @@ class EmbeddingService {
         }
 
         completed += batch.length;
-        this._catalogProgress = { completed, total: needsEmbedding.length };
+        this._steamCatalogProgress = { completed, total: needsEmbedding.length };
         annIndex.setBuildProgress(completed, needsEmbedding.length);
         this._notify();
 
@@ -2724,6 +2766,17 @@ class EmbeddingService {
         });
       }
 
+      if (signal.aborted) {
+        // Cancelled mid-run — don't report a misleading partial vector count
+        // once embRunning goes false; fall back to idle so this pass reads as
+        // unambiguously retryable rather than "stuck".
+        annIndex.finishBuild();
+        this._steamCatalogProgress = { completed: 0, total: 0 };
+        this._notify();
+        console.log('[EmbeddingService] Catalog embeddings cancelled');
+        return totalGenerated;
+      }
+
       // Persist the updated ANN index to disk
       if (totalGenerated > 0 && annIndex.vectorCount > 0) {
         await annIndex.save();
@@ -2732,7 +2785,7 @@ class EmbeddingService {
       annIndex.finishBuild();
 
       // Watermark only when pass completed with no unpersisted failures.
-      if (!signal.aborted && writeFailures === 0 && lastSyncTimestamp > 0) {
+      if (writeFailures === 0 && lastSyncTimestamp > 0) {
         await setEmbeddingMeta<EmbeddingPassWatermark>({
           key: storeKey,
           syncTimestamp: lastSyncTimestamp,
@@ -2747,6 +2800,10 @@ class EmbeddingService {
       if (!signal.aborted) {
         console.warn('[EmbeddingService] Catalog embedding error:', err);
       }
+      // Never leave a partial completed<total reading once embRunning flips
+      // false — this is the exit path a bug used to leave permanently wedged.
+      this._steamCatalogProgress = { completed: 0, total: 0 };
+      annIndex.finishBuild();
       return 0;
     } finally {
       this._catalogAbort = null;
@@ -2765,7 +2822,7 @@ class EmbeddingService {
 
   generateEpicCatalogEmbeddings(
     epicIterator: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>,
-    opts?: { storeKey?: string; lastSyncTimestamp?: number },
+    opts?: { storeKey?: string; lastSyncTimestamp?: number; force?: boolean },
   ): Promise<number> {
     if (this._epicCatalogPromise) return this._epicCatalogPromise;
     this._epicCatalogPromise = this._runEpicCatalogEmbeddings(epicIterator, opts);
@@ -2774,14 +2831,18 @@ class EmbeddingService {
 
   private async _runEpicCatalogEmbeddings(
     epicIterator: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>,
-    opts?: { storeKey?: string; lastSyncTimestamp?: number },
+    opts?: { storeKey?: string; lastSyncTimestamp?: number; force?: boolean },
   ): Promise<number> {
     // Wait for any in-flight Steam catalog embedding run to finish first
     if (this._catalogPromise) {
       try { await this._catalogPromise; } catch { /* non-fatal */ }
     }
 
-    if (!(await this.isAvailable())) { this._epicCatalogPromise = null; return 0; }
+    if (!(await this.isAvailable())) {
+      this._epicCatalogPromise = null;
+      this._resetProgressIfStale('epic');
+      return 0;
+    }
 
     this._catalogRunning = true;
     this._catalogAbort = new AbortController();
@@ -2790,11 +2851,14 @@ class EmbeddingService {
 
     const storeKey = opts?.storeKey ?? 'epic-catalog';
     const lastSyncTimestamp = opts?.lastSyncTimestamp ?? 0;
+    const force = opts?.force ?? false;
 
     try {
       // Watermark short-circuit (see Steam loop for full explanation).
+      // `force` always bypasses this — see generateCatalogEmbeddings' doc comment.
       const watermark = await getEmbeddingMeta<EmbeddingPassWatermark>(storeKey);
       const canSkipScan =
+        !force &&
         watermark &&
         lastSyncTimestamp > 0 &&
         lastSyncTimestamp <= watermark.syncTimestamp &&
@@ -2802,6 +2866,11 @@ class EmbeddingService {
 
       if (canSkipScan) {
         console.log(`[EmbeddingService] Epic catalog unchanged since last pass — skipping scan`);
+        if (!annIndex.isReady) {
+          await this._backfillAnnIndex();
+        }
+        annIndex.finishBuild();
+        this._resetProgressIfStale('epic');
         return 0;
       }
 
@@ -2820,7 +2889,7 @@ class EmbeddingService {
           const text = buildEpicCatalogEmbeddingText(entry);
           const hash = hashText(text);
           const existing = cachedHashes.get(id);
-          if (shouldSkipPooled(existing, hash)) {
+          if (!force && shouldSkipPooled(existing, hash)) {
             const ts = cachedTimestamps.get(id) ?? 0;
             if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
             continue;
@@ -2843,8 +2912,14 @@ class EmbeddingService {
         console.log(`[EmbeddingService] All ${scannedTotal} Epic catalog embeddings already cached`);
         // Reflect the scanned total so the status widget shows "N vectors"
         // instead of a stale/blank {0,0} after a no-op pass.
-        this._catalogProgress = { completed: scannedTotal, total: scannedTotal };
+        this._epicCatalogProgress = { completed: scannedTotal, total: scannedTotal };
         this._notify();
+        // Backfill ANN index if it's empty, symmetric with the Steam pass's
+        // equivalent branch above.
+        if (!annIndex.isReady) {
+          await this._backfillAnnIndex();
+        }
+        annIndex.finishBuild();
         if (lastSyncTimestamp > 0) {
           await setEmbeddingMeta<EmbeddingPassWatermark>({
             key: storeKey,
@@ -2860,7 +2935,7 @@ class EmbeddingService {
         `[EmbeddingService] Generating ${needsEmbedding.length} Epic catalog embeddings ` +
         `(chunking=${chunkingEnabled ? 'on' : 'off'})...`,
       );
-      this._catalogProgress = { completed: 0, total: needsEmbedding.length };
+      this._epicCatalogProgress = { completed: 0, total: needsEmbedding.length };
       this._notify();
 
       const EMBED_BATCH = 100;
@@ -2941,7 +3016,7 @@ class EmbeddingService {
         }
 
         completed += batch.length;
-        this._catalogProgress = { completed, total: needsEmbedding.length };
+        this._epicCatalogProgress = { completed, total: needsEmbedding.length };
         annIndex.setBuildProgress(completed, needsEmbedding.length);
         this._notify();
 
@@ -2954,12 +3029,30 @@ class EmbeddingService {
         });
       }
 
+      if (signal.aborted) {
+        // Cancelled mid-run — same handling as the Steam pass above: don't
+        // leave a misleading partial vector count visible once embRunning
+        // flips false.
+        annIndex.finishBuild();
+        this._epicCatalogProgress = { completed: 0, total: 0 };
+        this._notify();
+        console.log('[EmbeddingService] Epic catalog embeddings cancelled');
+        return totalGenerated;
+      }
+
       if (totalGenerated > 0 && annIndex.vectorCount > 0) {
         await annIndex.save();
         console.log(`[EmbeddingService] ANN index saved (Epic): ${annIndex.vectorCount} vectors`);
       }
+      // Unlike the Steam pass, this function previously never called
+      // finishBuild() on its success path at all — it relied on the last
+      // setBuildProgress(completed, total) call in the loop above naturally
+      // converging to done<total===false. That's true only when the loop
+      // runs to completion uninterrupted; call it explicitly for the same
+      // guarantee the Steam pass already has.
+      annIndex.finishBuild();
 
-      if (!signal.aborted && writeFailures === 0 && lastSyncTimestamp > 0) {
+      if (writeFailures === 0 && lastSyncTimestamp > 0) {
         await setEmbeddingMeta<EmbeddingPassWatermark>({
           key: storeKey,
           syncTimestamp: lastSyncTimestamp,
@@ -2974,6 +3067,8 @@ class EmbeddingService {
       if (!signal.aborted) {
         console.warn('[EmbeddingService] Epic catalog embedding error:', err);
       }
+      this._epicCatalogProgress = { completed: 0, total: 0 };
+      annIndex.finishBuild();
       return 0;
     } finally {
       this._catalogAbort = null;
@@ -3109,28 +3204,36 @@ class EmbeddingService {
       }
     };
 
-    // Library first (higher priority — dedup via `seen`)
-    await streamStore(LIBRARY_STORE, LIBRARY_TTL);
-    await streamStore(CATALOG_STORE, CATALOG_TTL);
+    // try/finally guarantees annIndex._building always resolves to false when
+    // this function exits, regardless of how — including 0-vectors-eligible
+    // (setBuildProgress(0, Math.max(sent,1)) below would otherwise read as
+    // done<total===true forever) and a thrown save error.
+    try {
+      // Library first (higher priority — dedup via `seen`)
+      await streamStore(LIBRARY_STORE, LIBRARY_TTL);
+      await streamStore(CATALOG_STORE, CATALOG_TTL);
 
-    // Phase B.1: dual presence — also ingest facet chunk vectors (ids contain `::`).
-    const chunkRows = await listChunkVectorsForAnn();
-    if (chunkRows.length > 0) {
-      await flushRows(chunkRows, 'chunk');
-    }
-
-    annIndex.setBuildProgress(sent, Math.max(sent, 1));
-
-    if (sent > 0) {
-      const saved = await annIndex.save();
-      // Only hard-fail when ANN IPC exists but save refused — absent ANN is soft-degrade.
-      if (!saved && typeof window !== 'undefined' && window.ann) {
-        throw new Error('ANN index save failed after backfill');
+      // Phase B.1: dual presence — also ingest facet chunk vectors (ids contain `::`).
+      const chunkRows = await listChunkVectorsForAnn();
+      if (chunkRows.length > 0) {
+        await flushRows(chunkRows, 'chunk');
       }
-      console.log(
-        `[EmbeddingService] ANN index backfilled: ${sent} vectors ` +
-          `(${pooledSent} pooled + ${chunkSent} chunks) from cache`,
-      );
+
+      annIndex.setBuildProgress(sent, Math.max(sent, 1));
+
+      if (sent > 0) {
+        const saved = await annIndex.save();
+        // Only hard-fail when ANN IPC exists but save refused — absent ANN is soft-degrade.
+        if (!saved && typeof window !== 'undefined' && window.ann) {
+          throw new Error('ANN index save failed after backfill');
+        }
+        console.log(
+          `[EmbeddingService] ANN index backfilled: ${sent} vectors ` +
+            `(${pooledSent} pooled + ${chunkSent} chunks) from cache`,
+        );
+      }
+    } finally {
+      annIndex.finishBuild();
     }
   }
 
@@ -3199,27 +3302,33 @@ class EmbeddingService {
       if (buffer.length > 0) await flushRows(buffer, 'pooled');
     };
 
-    // Library first (higher priority — dedup via `seen`)
-    await streamPooledNs(LEVEL_LIBRARY_NAMESPACE, LIBRARY_TTL);
-    await streamPooledNs(LEVEL_CATALOG_NAMESPACE, CATALOG_TTL);
+    // try/finally guarantees annIndex._building always resolves to false when
+    // this function exits — same rationale as _backfillAnnIndex's IDB path.
+    try {
+      // Library first (higher priority — dedup via `seen`)
+      await streamPooledNs(LEVEL_LIBRARY_NAMESPACE, LIBRARY_TTL);
+      await streamPooledNs(LEVEL_CATALOG_NAMESPACE, CATALOG_TTL);
 
-    // Phase B.1: dual presence — also ingest facet chunk vectors (ids contain `::`).
-    const chunkRows = await listChunkVectorsForAnn();
-    if (chunkRows.length > 0) {
-      await flushRows(chunkRows, 'chunk');
-    }
-
-    annIndex.setBuildProgress(sent, Math.max(sent, 1));
-
-    if (sent > 0) {
-      const saved = await annIndex.save();
-      if (!saved && typeof window !== 'undefined' && window.ann) {
-        throw new Error('ANN index save failed after backfill');
+      // Phase B.1: dual presence — also ingest facet chunk vectors (ids contain `::`).
+      const chunkRows = await listChunkVectorsForAnn();
+      if (chunkRows.length > 0) {
+        await flushRows(chunkRows, 'chunk');
       }
-      console.log(
-        `[EmbeddingService] ANN index backfilled: ${sent} vectors ` +
-          `(${pooledSent} pooled + ${chunkSent} chunks) from cache`,
-      );
+
+      annIndex.setBuildProgress(sent, Math.max(sent, 1));
+
+      if (sent > 0) {
+        const saved = await annIndex.save();
+        if (!saved && typeof window !== 'undefined' && window.ann) {
+          throw new Error('ANN index save failed after backfill');
+        }
+        console.log(
+          `[EmbeddingService] ANN index backfilled: ${sent} vectors ` +
+            `(${pooledSent} pooled + ${chunkSent} chunks) from cache`,
+        );
+      }
+    } finally {
+      annIndex.finishBuild();
     }
   }
 

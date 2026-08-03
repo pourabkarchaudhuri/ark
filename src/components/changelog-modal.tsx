@@ -11,6 +11,14 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.71': {
+    title: "What's New in Ark 1.0.71",
+    changes: [
+      'Fixed: the "Catalog Embeddings" and "Embedding Space" progress bars getting stuck below 100% and never finishing. Several different spots could leave a stale, non-advancing reading on screen after a hiccup — all now settle back to a clean, retryable state instead of looking permanently stuck.',
+      'New: a "Force Re-index" button in Settings — if embeddings ever look stuck or you suspect something got corrupted, this cancels whatever is running and rebuilds every Steam and Epic catalog embedding from scratch. Your library, playtime, and journey data are completely untouched.',
+      'Test coverage: 6 new tests covering the progress-tracking fixes. Full suite: 1085 → 1091 passing.',
+    ],
+  },
   '1.0.70': {
     title: "What's New in Ark 1.0.70",
     changes: [
