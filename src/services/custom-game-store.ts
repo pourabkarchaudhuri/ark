@@ -642,6 +642,7 @@ export class CustomGameStore {
       updatedAt: entry.updatedAt,
       isInLibrary: true,
       isCustom: true,
+      executablePath: entry.executablePath,
     };
   }
 

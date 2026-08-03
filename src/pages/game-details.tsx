@@ -2312,6 +2312,24 @@ const GameDetailsContent = memo(function GameDetailsContent({
   // Determine whether Epic is the primary store for this game
   const isEpicPrimary = !!epicGame;
 
+  const { error: toastLaunchError } = useToast();
+
+  // Resolve the tracked executable for this game (library or custom entry) —
+  // re-read fresh on every render since it can change via the Edit dialog.
+  const launchExecutablePath = gameId
+    ? (libraryStore.getEntry(gameId)?.executablePath ?? customGameStore.getGame(gameId)?.executablePath)
+    : undefined;
+
+  const handlePlayGame = useCallback(async () => {
+    if (!launchExecutablePath) return;
+    if (!window.gameLauncher?.launch) {
+      toastLaunchError('Launching games is not available in this build.');
+      return;
+    }
+    const result = await window.gameLauncher.launch(launchExecutablePath);
+    if (!result.success) toastLaunchError(result.error || 'Failed to launch game.');
+  }, [launchExecutablePath, toastLaunchError]);
+
   // ── Memoized derived JSX ─────────────────────────────────────────────────
   // These heavy .map() calls produce stable element arrays that survive the
   // 5-second autoplay re-renders (currentMediaIndex changes) without being
@@ -3262,6 +3280,17 @@ const GameDetailsContent = memo(function GameDetailsContent({
                   </>
                   );
               })()}
+
+              {/* Play (Phase 4a) — only shown when a tracked executable is set */}
+              {gameInLibrary && launchExecutablePath && (
+                <Button
+                  onClick={handlePlayGame}
+                  className="w-full bg-emerald-600 hover:bg-emerald-700"
+                >
+                  <Play className="w-4 h-4 mr-2" />
+                  Play
+                </Button>
+              )}
 
               {/* Add to Library / Edit Library Entry */}
               <Button

@@ -388,6 +388,13 @@ contextBridge.exposeInMainWorld('fileDialog', {
     ipcRenderer.invoke('dialog:saveImage', options),
 });
 
+// Expose Game Launcher API to renderer (Phase 4a — Launch games from Ark)
+contextBridge.exposeInMainWorld('gameLauncher', {
+  // Launch a tracked game's executable via the OS shell
+  launch: (exePath) =>
+    ipcRenderer.invoke('game:launch', exePath),
+});
+
 // Expose Session Tracker API to renderer
 contextBridge.exposeInMainWorld('sessionTracker', {
   // Send the list of games with executable paths to track
@@ -599,5 +606,5 @@ contextBridge.exposeInMainWorld('store', {
 
 // Only log exposed APIs in development to avoid leaking IPC surface in production
 if (process.env.NODE_ENV !== 'production') {
-  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.ann, window.analytics, window.devlog exposed');
+  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.ann, window.analytics, window.devlog, window.gameLauncher exposed');
 }

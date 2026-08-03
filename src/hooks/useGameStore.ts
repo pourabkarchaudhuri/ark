@@ -878,7 +878,7 @@ export function useSteamGames(category: GameCategory = 'trending') {
       if (enrichment) merged = { ...merged, ...enrichment };
       if (pc !== undefined) merged = { ...merged, playerCount: pc, playerCountSource: 'steam' as const };
       if (libraryEntry) {
-        merged = { ...merged, isInLibrary: true, status: libraryEntry.status || merged.status };
+        merged = { ...merged, isInLibrary: true, status: libraryEntry.status || merged.status, executablePath: libraryEntry.executablePath };
       }
 
       // Mark as different (merged objects are always new references)

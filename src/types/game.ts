@@ -71,6 +71,7 @@ export interface Game {
   updatedAt: Date;
   isInLibrary?: boolean;
   isCustom?: boolean; // True for user-added games not from Steam/Epic
+  executablePath?: string; // Path to game executable (present if in library or custom), for tracking + launching
 }
 
 export type GameStatus = 'Want to Play' | 'Playing' | 'Playing Now' | 'Completed' | 'On Hold';

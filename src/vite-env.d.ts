@@ -57,6 +57,11 @@ interface ElectronAPI {
   fetchHtml: (url: string) => Promise<string | null>;
 }
 
+// Game Launcher API types (exposed via Electron preload, Phase 4a)
+interface GameLauncherAPI {
+  launch: (exePath: string) => Promise<{ success: boolean; error?: string }>;
+}
+
 // Session Tracker API types (exposed via Electron preload)
 interface SessionTrackerAPI {
   setTrackedGames: (games: Array<{ gameId: string; executablePath: string }>) => Promise<{ success: boolean }>;
@@ -250,6 +255,7 @@ declare global {
     fileDialog?: FileDialogAPI;
     electron?: ElectronAPI;
     sessionTracker?: SessionTrackerAPI;
+    gameLauncher?: GameLauncherAPI;
     newsApi?: NewsAPI;
     webviewApi?: WebviewAPI;
     analytics?: AnalyticsAPI;

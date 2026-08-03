@@ -239,11 +239,81 @@ describe('GameCard', () => {
       
       if (card) {
         fireEvent.contextMenu(card);
-        
+
         // Menu should appear with "Add to Library" option
         await waitFor(() => {
           expect(screen.getByText('Add to Library')).toBeInTheDocument();
         });
+      }
+    });
+  });
+
+  describe('Play Button (Phase 4a)', () => {
+    it('shows Play in the right-click context menu when executablePath and onPlay are both set', async () => {
+      const onPlay = vi.fn();
+      const gameWithExe = { ...mockGame, executablePath: 'C:\\Games\\Test\\game.exe' };
+      render(
+        <GameCard
+          game={gameWithExe}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          onPlay={onPlay}
+          isInLibrary={true}
+        />
+      );
+
+      const card = screen.getByText('Test Game').closest('.group');
+      expect(card).toBeInTheDocument();
+      if (card) {
+        fireEvent.contextMenu(card);
+        await waitFor(() => {
+          expect(screen.getByText('Play')).toBeInTheDocument();
+        });
+        fireEvent.click(screen.getByText('Play'));
+        expect(onPlay).toHaveBeenCalledWith(gameWithExe.id);
+      }
+    });
+
+    it('does not show Play when the game has no executablePath', async () => {
+      const onPlay = vi.fn();
+      render(
+        <GameCard
+          game={mockGame} // no executablePath
+          onEdit={() => {}}
+          onDelete={() => {}}
+          onPlay={onPlay}
+          isInLibrary={true}
+        />
+      );
+
+      const card = screen.getByText('Test Game').closest('.group');
+      if (card) {
+        fireEvent.contextMenu(card);
+        await waitFor(() => {
+          expect(screen.getByText('Edit Entry')).toBeInTheDocument();
+        });
+        expect(screen.queryByText('Play')).not.toBeInTheDocument();
+      }
+    });
+
+    it('does not show Play when no onPlay handler is provided, even with an executablePath', async () => {
+      const gameWithExe = { ...mockGame, executablePath: 'C:\\Games\\Test\\game.exe' };
+      render(
+        <GameCard
+          game={gameWithExe}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          isInLibrary={true}
+        />
+      );
+
+      const card = screen.getByText('Test Game').closest('.group');
+      if (card) {
+        fireEvent.contextMenu(card);
+        await waitFor(() => {
+          expect(screen.getByText('Edit Entry')).toBeInTheDocument();
+        });
+        expect(screen.queryByText('Play')).not.toBeInTheDocument();
       }
     });
   });

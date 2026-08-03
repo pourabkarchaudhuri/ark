@@ -12,13 +12,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { 
-  Edit, 
-  Trash2, 
+import {
+  Edit,
+  Trash2,
   Heart,
   MoreVertical,
   Library,
   Plus,
+  Play,
 } from 'lucide-react';
 import { FaWindows, FaApple, FaLinux, FaSteam } from 'react-icons/fa';
 import { SiEpicgames } from 'react-icons/si';
@@ -33,6 +34,8 @@ interface GameCardProps {
   onEdit: (gameId: string) => void;
   /** Callback receives gameId so parent can use a single stable function */
   onDelete: (gameId: string) => void;
+  /** Callback receives gameId so parent can use a single stable function. Only shown when game.executablePath is set. */
+  onPlay?: (gameId: string) => void;
   onClick?: () => void;
   isInLibrary?: boolean;
   isPlayingNow?: boolean; // Live indicator: game's exe is currently running
@@ -166,10 +169,11 @@ const statusColors: Record<GameStatus, string> = {
 };
 
 function GameCardComponent({ 
-  game, 
-  onEdit, 
-  onDelete, 
-  onClick, 
+  game,
+  onEdit,
+  onDelete,
+  onPlay,
+  onClick,
   isInLibrary,
   isPlayingNow,
   onAddToLibrary,
@@ -546,6 +550,15 @@ function GameCardComponent({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="bg-card border-white/10 whitespace-nowrap">
+                  {game.executablePath && onPlay && (
+                    <>
+                      <DropdownMenuItem onClick={() => onPlay(game.id)} className="cursor-pointer">
+                        <AnimateIcon hover="pulse" className="mr-2"><Play className="h-4 w-4" /></AnimateIcon>
+                        Play
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                    </>
+                  )}
                   <DropdownMenuItem onClick={() => onEdit(game.id)} className="cursor-pointer">
                     <AnimateIcon hover="pulse" className="mr-2"><Edit className="h-4 w-4" /></AnimateIcon>
                     Edit Entry
@@ -680,6 +693,18 @@ function GameCardComponent({
         >
           {inLibrary ? (
             <>
+              {game.executablePath && onPlay && (
+                <>
+                  <button
+                    className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-white/10 cursor-pointer"
+                    onClick={() => { setCtxMenu(null); onPlay(game.id); }}
+                  >
+                    <AnimateIcon hover="pulse" className="mr-2"><Play className="h-4 w-4" /></AnimateIcon>
+                    Play
+                  </button>
+                  <div className="my-1 h-px bg-white/10" />
+                </>
+              )}
               <button
                 className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-white/10 cursor-pointer"
                 onClick={() => { setCtxMenu(null); onEdit(game.id); }}
@@ -731,6 +756,7 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.game.store === nextProps.game.store &&
     prevProps.game.availableOn?.length === nextProps.game.availableOn?.length &&
     prevProps.game.status === nextProps.game.status &&
+    prevProps.game.executablePath === nextProps.game.executablePath &&
     prevProps.isInLibrary === nextProps.isInLibrary &&
     prevProps.isPlayingNow === nextProps.isPlayingNow &&
     prevProps.hideLibraryBadge === nextProps.hideLibraryBadge &&
@@ -738,6 +764,7 @@ export const GameCard = memo(GameCardComponent, (prevProps, nextProps) => {
     prevProps.onClick === nextProps.onClick &&
     prevProps.onEdit === nextProps.onEdit &&
     prevProps.onDelete === nextProps.onDelete &&
+    prevProps.onPlay === nextProps.onPlay &&
     prevProps.onAddToLibrary === nextProps.onAddToLibrary &&
     prevProps.onRemoveFromLibrary === nextProps.onRemoveFromLibrary &&
     prevProps.onStatusChange === nextProps.onStatusChange &&

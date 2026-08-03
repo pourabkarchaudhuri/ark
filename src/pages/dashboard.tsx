@@ -802,6 +802,23 @@ export function Dashboard() {
     if (game) handleStatusChange(game, status);
   }, [handleStatusChange, resolveGame]);
 
+  const handleCardPlay = useCallback(async (gameId: string) => {
+    const game = resolveGame(gameId);
+    const exePath = game?.executablePath;
+    if (!exePath) {
+      showError('No executable set for this game — add one via Edit Entry.');
+      return;
+    }
+    if (!window.gameLauncher?.launch) {
+      showError('Launching games is not available in this build.');
+      return;
+    }
+    const result = await window.gameLauncher.launch(exePath);
+    if (!result.success) {
+      showError(result.error || 'Failed to launch game.');
+    }
+  }, [resolveGame, showError]);
+
   // ── Library grouped sections ───────────────────────────────────────────
   const isLibraryView = viewMode === 'library';
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
@@ -850,6 +867,7 @@ export function Dashboard() {
         game={game}
         onEdit={handleCardEdit}
         onDelete={handleCardDelete}
+        onPlay={handleCardPlay}
         isInLibrary={game.isInLibrary}
         isPlayingNow={isPlayingNowRef.current(game.steamAppId ?? game.id)}
         onAddToLibrary={handleCardAddToLibrary}
@@ -860,7 +878,7 @@ export function Dashboard() {
       />
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLibraryView, handleCardEdit, handleCardDelete, handleCardAddToLibrary, handleCardRemoveFromLibrary, handleCardStatusChange]);
+  }, [isLibraryView, handleCardEdit, handleCardDelete, handleCardPlay, handleCardAddToLibrary, handleCardRemoveFromLibrary, handleCardStatusChange]);
 
   const handleDeleteConfirm = useCallback(() => {
     if (deleteConfirm.game) {

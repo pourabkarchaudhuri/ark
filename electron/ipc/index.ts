@@ -25,6 +25,7 @@ import { register as registerEgdataHandlers } from './egdata-handlers.js';
 import { register as registerCatalogHandlers } from './catalog-handlers.js';
 import { register as registerExeInfoHandlers } from './exe-info-handlers.js';
 import { register as registerStoreHandlers } from './store-handlers.js';
+import { register as registerLaunchHandlers } from './launch-handlers.js';
 
 export function registerAllHandlers(getMainWindow: () => BrowserWindowType | null): void {
   registerWindowHandlers(getMainWindow);
@@ -48,6 +49,7 @@ export function registerAllHandlers(getMainWindow: () => BrowserWindowType | nul
   registerDevlogHandlers();
   registerEventScraperHandlers();
   registerStoreHandlers();
+  registerLaunchHandlers();
 }
 
 // Re-export webview handler's destroy function for window cleanup

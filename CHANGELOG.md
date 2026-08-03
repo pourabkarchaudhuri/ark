@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.70] - 2026-08-03
+
+### Added
+- **Play button — launch games directly from Ark (Phase 4a).** Library and custom games with a tracked executable (`Edit Entry → Executable`) now show a Play option in the card's ellipsis menu, its right-click context menu, and a dedicated button on the game-details page. Clicking it launches the game via the OS shell — no need to alt-tab to Steam/Epic/your desktop first. The existing session tracker picks up the launch automatically (it already polls every game with a saved executable path — no separate "start tracking" step was needed).
+- New IPC surface `game:launch` (`electron/ipc/launch-handlers.ts`, exposed as `window.gameLauncher.launch(path)`): validates the path is absolute and ends in `.exe` (same rule session tracking already enforces), confirms the file still exists, then calls `shell.openPath`. Failures (missing file, no launch handler for the file type, etc.) surface as a toast instead of silently doing nothing.
+
+### Fixed
+- Two Play-adjacent codepaths that build a `Game` object from a library/custom entry were dropping `executablePath` during the merge, which would have made the Play button invisible for any game viewed outside the dedicated Library tab: the Browse-view catalog+library merge in `useGameStore.ts` and `CustomGameStore.toGame()`.
+- `GameCard`'s custom memo comparator didn't compare `executablePath`/`onPlay`, so setting an executable path for the first time wouldn't have repainted an already-rendered card — the same class of staleness bug fixed for status pills in v1.0.60. Added both to the comparator before the button shipped, not after a bug report.
+
+### Under the hood
+- `Game` interface gained a real `executablePath?: string` field — previously this data reached the runtime object only via an `as Game` cast that bypassed the type checker entirely.
+- 12 new tests: 9 for `launch-handlers.ts`'s path-validation + `shell.openPath` success/failure/throw contract (via an injectable-dependency seam, since `vi.mock('electron', ...)` does not actually intercept the `createRequire`-based `require('electron')` pattern used here — see `launch-handlers.ts` for the seam), 3 for the Play button's render/gating/click behavior in `game-card.tsx`.
+- Full suite: 1073 → 1085 passing. Typecheck clean on both TypeScript projects.
+
 ## [1.0.69] - 2026-08-03
 
 ### Added

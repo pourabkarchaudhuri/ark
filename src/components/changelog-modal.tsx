@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.70': {
+    title: "What's New in Ark 1.0.70",
+    changes: [
+      'New: a Play button! Any game with a saved executable path (set it via Edit Entry → Executable) now has a Play option in the card menu, the right-click menu, and the game details page — launch it right from Ark instead of hunting down a shortcut.',
+      'Ark keeps tracking your session exactly as before — nothing extra to set up.',
+      'If a game can\'t be launched (the file moved, got deleted, etc.), Ark now tells you why instead of doing nothing.',
+      'Fixed two spots where a game\'s saved executable path could get silently dropped when building its card data, which would have made the new Play button invisible in some views.',
+      'Test coverage: 12 new tests covering the launch flow and the Play button. Full suite: 1073 → 1085 passing.',
+    ],
+  },
   '1.0.69': {
     title: "What's New in Ark 1.0.69",
     changes: [

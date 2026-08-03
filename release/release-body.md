@@ -1,26 +1,26 @@
-# Ark v1.0.69 — Rust native sidecar for session tracking (Phase 3)
+# Ark v1.0.70 — Play button: launch games from Ark (Phase 4a)
 
-Replaces the session tracker's Windows process enumeration with a small native Rust module, removing the PowerShell subprocess spawn from the hot polling path.
+Ark can now launch your games directly — no more alt-tabbing to Steam, Epic, or a desktop shortcut first.
 
 ## Added
 
-- **`ark-native`** — a `napi-rs` Rust addon calling `EnumProcesses`/`OpenProcess`/`QueryFullProcessImageNameW` directly via `windows-sys`. Benchmarked at ~18ms to enumerate 567 real processes (vs. hundreds of ms for the previous `Get-Process | Select-Object Path` PowerShell round-trip).
-- **Safe fallback by design** — if the native module fails to load for any reason (missing binary, wrong architecture, antivirus quarantine, corrupted install), Ark automatically falls back to the existing PowerShell-based path. No crash, no user-visible failure — just the same behavior as before this release.
-- The `tasklist`-based basename-matching fallback (used for permission-denied processes neither PowerShell nor the native path can resolve a full path for) is unchanged.
+- **Play button** on library/custom game cards (ellipsis menu + right-click menu) and on the game details page, shown for any game with a saved executable path (set via Edit Entry → Executable).
+- Launching goes through the OS shell, and Ark's existing session tracker picks it up automatically — it already polls every game with a saved executable path, so there's nothing new to configure.
+- Friendly error messages (via toast) if a game can't be launched — missing file, no application associated with it, etc. — instead of the click silently doing nothing.
 
 ## Fixed
 
-- A build-tooling step-order bug in `build:app` (used only by the `test:electron` developer/CI test path, not the shipping build) — no user-facing impact.
+- Two places that build a game's in-memory representation from its library/custom entry were silently dropping the saved executable path during the merge, which would have made the new Play button invisible outside the dedicated Library tab. Caught before shipping, not after a bug report.
+- `GameCard`'s render-memoization comparator didn't account for the executable path, so setting one for the first time wouldn't have repainted an already-visible card — the same class of staleness bug fixed for status pills in v1.0.60. Fixed proactively.
 
 ## Under the hood
 
-- New test-only seam in `native-bridge.ts` lets the fallback contract be verified with real unit tests without needing the actual compiled binary present.
-- 7 new tests covering load failure, malformed module shape, call-time failure, and the successful-load path.
-- Full suite: 1066 → 1073 passing. Typecheck clean on both the renderer and electron/node TypeScript projects.
+- `Game`'s `executablePath` field is now a real part of the type (previously reached the runtime object only through a cast that bypassed the type checker).
+- New `game:launch` IPC handler validates the path (absolute, `.exe`), confirms the file exists, then calls `shell.openPath` — same validation rule session tracking already enforces.
+- 12 new tests covering the launch handler's validation/success/failure contract and the Play button's render/gating/click behavior.
+- Full suite: 1073 → 1085 passing. Typecheck clean on both TypeScript projects.
 
 ---
 
-**Full download, not incremental.** Adding the native module changes the installer's contents enough that this update downloads as a complete ~300 MB installer rather than a small differential patch — same as every Ark release (differential downloads have been off since v1.0.42).
-
-**Tests:** 1073/1073 passing under `--no-isolate`. Electron + renderer typecheck clean. Vite build clean. Installer size delta: +~0.3 MB (native binary is 229 KB).
-**Rollback:** if this release ever regresses on your machine, the native module's failure path is exercised automatically — Ark will keep working via the PowerShell fallback with only a log warning, never a crash.
+**Tests:** 1085/1085 passing under `--no-isolate`. Electron + renderer typecheck clean. Vite build clean.
+**No storage schema changes.**
