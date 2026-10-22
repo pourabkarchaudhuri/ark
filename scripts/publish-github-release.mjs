@@ -1,6 +1,6 @@
 /**
  * Create a GitHub release for the current package.json version and upload
- * NSIS installer, blockmap, and latest.yml from release/.
+ * NSIS installer, blockmap, and latest.yml from release/builds/<version>/.
  * Requires: GITHUB_TOKEN with repo scope (or contents + write for releases).
  */
 import fs from 'fs';
@@ -54,7 +54,7 @@ async function main() {
   ];
 
   for (const name of files) {
-    const filePath = path.join(root, 'release', name);
+    const filePath = path.join(root, 'release', 'builds', v, name);
     const buf = fs.readFileSync(filePath);
     const url = `https://uploads.github.com/repos/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`;
     const up = await fetch(url, {

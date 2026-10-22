@@ -98,13 +98,25 @@ This is the exact command that worked for v1.0.31. The `.nsis-cache/` directory 
 
 ### Output
 
-Build artifacts appear in `release/`:
+Build artifacts appear in **`release/builds/<version>/`** (set by `build.directories.output` in package.json — one folder per version, inside the gitignored `release/`). Never pass `--config.directories.output` to point a build at a new root-level folder: that is what used to litter the repo root with `release-NNNN/` directories.
 
 | File | Purpose |
 |------|---------|
 | `Ark-Setup-X.Y.Z.exe` | NSIS installer (~134 MB as of v1.0.31) |
 | `Ark-Setup-X.Y.Z.exe.blockmap` | Delta update blockmap |
 | `latest.yml` | Auto-updater manifest (version, sha512, size) |
+
+### Managing local build folders
+
+Each build keeps its own folder, so old ones accumulate (~0.3–1.5 GB each). Published versions live on GitHub, so only the latest couple are worth keeping locally:
+
+```bash
+npm run release:prune                    # dry run: lists what would go (keeps 2 newest)
+npm run release:prune -- --apply         # delete them
+npm run release:prune -- --legacy --apply  # also clear pre-1.0.72 leftovers (root release-NNNN/, _asar-cmp/, release/builds/_legacy/)
+```
+
+If a folder refuses to delete or move, a file inside `win-unpacked/resources` (`app.asar` or a native `.node` module) is still held open by Windows — close any Ark launched from that folder, or reboot, then re-run. Do not work around a locked folder by building into a new output directory.
 
 ### If NSIS Cache Is Missing
 
@@ -184,21 +196,21 @@ curl -X POST \
   -H "Authorization: token $PAT" \
   -H "Content-Type: application/octet-stream" \
   "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=Ark-Setup-1.0.NEW_VERSION.exe" \
-  --data-binary "@release/Ark-Setup-1.0.NEW_VERSION.exe"
+  --data-binary "@release/builds/1.0.NEW_VERSION/Ark-Setup-1.0.NEW_VERSION.exe"
 
 # 2. Blockmap (for delta updates)
 curl -s -X POST \
   -H "Authorization: token $PAT" \
   -H "Content-Type: application/octet-stream" \
   "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=Ark-Setup-1.0.NEW_VERSION.exe.blockmap" \
-  --data-binary "@release/Ark-Setup-1.0.NEW_VERSION.exe.blockmap"
+  --data-binary "@release/builds/1.0.NEW_VERSION/Ark-Setup-1.0.NEW_VERSION.exe.blockmap"
 
 # 3. latest.yml (auto-updater manifest)
 curl -s -X POST \
   -H "Authorization: token $PAT" \
   -H "Content-Type: application/octet-stream" \
   "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=latest.yml" \
-  --data-binary "@release/latest.yml"
+  --data-binary "@release/builds/1.0.NEW_VERSION/latest.yml"
 ```
 
 ### Verify the release
@@ -234,7 +246,8 @@ const d=[];process.stdin.on('data',c=>d.push(c));process.stdin.on('end',()=>{
 | Run tests | `npx vitest run` |
 | Build Step 1 | `npm run clean && npx tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && npx vite build` |
 | Build Step 2 | `ELECTRON_BUILDER_NSIS_DIR="$(pwd)/.nsis-cache/nsis-3.0.4.1" ELECTRON_BUILDER_NSIS_RESOURCES_DIR="$(pwd)/.nsis-cache/nsis-resources-3.4.1" npx electron-builder --win nsis --publish never` |
-| Verify artifacts | `ls -lh release/Ark-Setup-*.exe release/*.yml release/*.blockmap` |
+| Verify artifacts | `ls -lh release/builds/1.0.NEW_VERSION/` |
+| Prune old builds | `npm run release:prune` (dry run) → `npm run release:prune -- --apply` |
 | Check latest release | `curl -s -H "Authorization: token $PAT" "https://api.github.com/repos/pourabkarchaudhuri/ark/releases/latest"` |
 
 ---

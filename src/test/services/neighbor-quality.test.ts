@@ -53,7 +53,7 @@ function extractFranchiseBase(title: string): string {
   return base.toLowerCase().trim();
 }
 
-// ─── Inline reranking logic (mirrors ann-graph-view.tsx rerankNeighbors) ─────
+// ─── Inline reranking logic (mirrors features/embedding-space/data/neighbors.ts rerankNeighbors) ─
 
 interface TestNode {
   id: string;

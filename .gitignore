@@ -60,3 +60,16 @@ splash screen.zip
 
 # Temporary release payload (generated during release process)
 release/release-payload.json
+
+# Per-version electron-builder outputs belong in release/builds/<version>/ (see
+# docs/release-process.md). Guard against stray root-level build dirs and scratch.
+/release-*/
+/_asar-cmp/
+/smoke-electron-*.txt
+
+# Design handoffs (Claude Design exports) — source material, not app code
+Embedding space page recreation.zip
+design_handoff_*/
+
+# Mimir code-graph output
+graphify-out/

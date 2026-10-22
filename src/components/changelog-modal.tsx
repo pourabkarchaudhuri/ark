@@ -11,6 +11,17 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.72': {
+    title: "What's New in Ark 1.0.72",
+    changes: [
+      'New: a completely rebuilt Embedding Space. Scroll from a wide Cosmos view, through an Approach layer, right down into a single game — the closer you get, the more of the galaxy comes alive.',
+      'Pick any game to see its 12 closest matches drawn as a glowing web with orbiting neighbours. Step through them with the arrow keys or the bottom dock, and dive into any one to keep exploring.',
+      'The Path traces every game you have played, in the order you first played it, as a ribbon through the galaxy. See the whole route at once, then hop stop to stop.',
+      'Lasso (L) any region to see what genres live there, fly freely with Probe mode (P), and capture a high-resolution screenshot of the view.',
+      'Smoother and lighter: shader warm-up removes first-use stutters, quality adapts on slower GPUs, and the view drops to almost nothing while you are in a game.',
+      'Smaller install: two large unused sky textures (about 158 MB) are gone.',
+    ],
+  },
   '1.0.71': {
     title: "What's New in Ark 1.0.71",
     changes: [

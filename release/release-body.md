@@ -1,28 +1,28 @@
-# Ark v1.0.71 — Hotfix: embeddings progress stuck + a Force Re-index button
+# Ark v1.0.72 — Embedding Space, rebuilt
 
-Fixes live reports that "Catalog Embeddings" / "Embedding Space" progress bars get stuck below 100% and never finish, and adds a Settings escape hatch for whenever that (or suspected data corruption) happens.
+The Embedding Space has been rebuilt from the ground up. It's now one continuous dive from a view of the whole galaxy down to a single game and its closest matches.
 
-## Root cause
+## New
 
-Five separate exit paths in the catalog-embedding pipeline never wrote a terminal progress value — a network hiccup, a mid-run cancel, or even a perfectly normal "nothing changed since last time" shortcut could all leave a stale partial reading on screen forever, with no error and no way to retry short of restarting the whole app. On top of that, Steam and Epic passes shared one progress field, so Epic starting its own run could silently erase the fact Steam had just finished. The ANN index's internal "building" flag had its own version of the same bug.
+- **Three depths.** Scroll from **Cosmos** (the whole catalog as a galaxy) through **Approach** into **Node** view. The depth rail and zone pills show where you are and jump between depths.
+- **Neighbour webs.** Pick a game to see its 12 most similar games as glowing links with orbiting systems. Step through them with ← / →, dive deeper with ↓, and come back with ↑. Each focused neighbour shows its own secondary web.
+- **The Path.** Every game you've played, in the order you first played it, drawn as a ribbon through the galaxy. See the whole route at once, then hop stop by stop.
+- **Tools.** Lasso (L) a region to see which genres live there. Probe mode (P) lets you fly freely. You can also filter by genre, jump in from your library, and save a high-resolution screenshot.
 
-## Fixed
+## Faster and lighter
 
-- Every exit path in the catalog embedding pipeline (success, cancelled, skipped, and errored) now leaves progress in a clean, coherent state — either fully done or fully idle, never stuck partway.
-- Steam and Epic catalog embedding progress are now tracked independently, so one can't overwrite the other's just-finished state.
-- The ANN index's "building" indicator can no longer get stuck on — it's now guaranteed to clear on every exit path, including zero-work and error cases.
-- A background pipeline trigger (`oracle-view.tsx`) had no error handling around its re-entry guard — a single hiccup could permanently disable it for the rest of your session. Fixed.
-
-## Added
-
-- **Force Re-index Catalog Embeddings** (Settings). Cancels anything in-flight and regenerates every Steam/Epic catalog embedding from scratch — including entries whose cached data might have quietly gone bad. Your library, playtime, and journey data are never touched.
+- Shaders warm up in the background, so the first approach, selection and hop don't stutter.
+- Quality adapts automatically on slower GPUs.
+- The view drops to almost no GPU use while Ark is in the background (for example, while you're in a game).
+- About 158 MB of unused sky textures were removed from the install.
 
 ## Under the hood
 
-- 6 new tests covering the progress-state fixes and the Force Re-index bypass logic.
-- Full suite: 1085 → 1091 passing. Typecheck clean on both TypeScript projects.
+- New feature module at `src/features/embedding-space/` replaces `ann-graph-view.tsx`. Removed features that aren't part of the new design: constellation namer, narrator, scanner selection and user marks.
+- Local build outputs now go to `release/builds/<version>/`. A new `npm run release:prune` command cleans up old ones.
+- 17 new tests. Typecheck is clean on both TypeScript projects.
 
 ---
 
-**Tests:** 1091/1091 passing under `--no-isolate` (one unrelated, pre-existing environmental flake observed and confirmed via a clean repeat run — not caused by this change). Electron + renderer typecheck clean. Vite build clean.
-**No storage schema changes** — this is a pure state-management and UX fix.
+**Tests:** All new tests pass. In the full suite, 2 timing-sensitive tests in unrelated, unchanged files failed under parallel load; both pass when re-run on their own.
+**Storage:** No schema changes. Two IndexedDB stores used only by the removed features (`ark-user-marks`, `ark-constellations`) are no longer read.

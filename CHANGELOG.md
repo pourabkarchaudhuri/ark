@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.72] - 2026-10-22
+
+### Added
+- **Embedding Space v2** — full rebuild from the Claude Design handoff, as a feature module at `src/features/embedding-space/` (engine / data / ui). Replaces `ann-graph-view.tsx`.
+  - Camera-distance zones: **Cosmos** (GLTF point-cloud overview), **Approach**, **Node**, with a depth rail, zone pills, damped wheel dolly and an approach magnet. Leaving Node fades node assets with the pull-back.
+  - Selection shows 12 ANN neighbours (heuristic + Ollama rerank, spatial fallback with an "ANN REBUILDING" / "SPATIAL" tag) as flow lines, halos, suns and orbiting systems; neighbour dock, focus cycling, traversal (↓ / ↑) and a secondary web for the focused neighbour.
+  - **The Path**: played games in first-played order as a ribbon with a travel head; overview, hop-by-hop exploring, NEIGHBORS toggle per stop.
+  - Lasso genre capture (L), Probe free-flight (P), Year Wrapped flythrough handoff, library and genre panels, detail panel (Steam/Epic), screenshot export.
+  - Rendering: EffectComposer (MSAA → half-res bloom → cinema pass), baked nebulae and space dressing, adaptive quality, background throttling when the window is unfocused, shader prewarm so first approach/selection/hop don't hitch.
+- `npm run release:prune` (`scripts/prune-release-builds.mjs`) — dry-run-by-default cleanup of old local build outputs; `--keep N`, `--apply`, `--legacy`.
+
+### Changed
+- electron-builder output moved to `release/builds/<version>/` (was ad-hoc `release-NNNN/` folders in the repo root). `publish-github-release.mjs` and `docs/release-process.md` updated. Root `release-*/`, `_asar-cmp/` and smoke logs are gitignored.
+
+### Removed
+- Constellation namer, narrator bus, scanner selection store, user marks store, whisper phrases (features not in the new design).
+- `public/HDR_hazy_nebulae.hdr`, `public/HDR_multi_nebulae_2.hdr` (~158 MB); the skybox is now a JPEG at `public/embedding-space/skybox.jpg`.
+
+### Under the hood
+- `gsap` 3.12.5 added (camera flight timelines, driven from the render loop).
+- Review pass fixed: stranded landing callbacks when a flight is superseded, Path arrival waiting on the rerank, stale secondary webs after a hop, lasso re-rendering per pointer move, named stars frustum-culled at the origin, stuck arrival flash, NaN parallax on a hidden host, nebulae lost on GPU context restore, OrbitControls key listener leak on unmount.
+- 17 new tests (`src/test/features/embedding-space/`). Typecheck clean on both TypeScript projects.
+
 ## [1.0.71] - 2026-08-03
 
 ### Fixed

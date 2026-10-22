@@ -1,6 +1,6 @@
 {
   "name": "ark",
-  "version": "1.0.71",
+  "version": "1.0.72",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -36,7 +36,8 @@
     "fetch-epic-requirements-node": "node scripts/fetch-epic-requirements-node.mjs",
     "release": "npm run build:app && electron-builder --publish always",
     "release:draft": "npm run build:app && electron-builder --publish onTagOrDraft",
-    "release:local": "npm run build:app && electron-builder --publish never"
+    "release:local": "npm run build:app && electron-builder --publish never",
+    "release:prune": "node scripts/prune-release-builds.mjs"
   },
   "dependencies": {
     "@cliqz/adblocker-electron": "^1.34.0",
@@ -81,6 +82,7 @@
     "graphology-metrics": "^2.4.0",
     "graphology-types": "^0.24.8",
     "gravatar": "^1.8.2",
+    "gsap": "3.12.5",
     "html-to-image": "^1.11.13",
     "jszip": "^3.10.1",
     "langchain": "^1.2.3",
@@ -147,7 +149,7 @@
     "icon": "build/icon",
     "npmRebuild": false,
     "directories": {
-      "output": "release"
+      "output": "release/builds/${version}"
     },
     "files": [
       "dist/**/*",

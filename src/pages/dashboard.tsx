@@ -27,7 +27,7 @@ import { ViewErrorBoundary } from '@/components/view-error-boundary';
 import { BuzzView } from '@/components/buzz-view';
 import { ReleaseCalendar } from '@/components/release-calendar';
 const OracleView = lazy(() => import('@/components/oracle-view').then(m => ({ default: m.OracleView })));
-const AnnGraphView = lazy(() => import('@/components/ann-graph-view').then(m => ({ default: m.AnnGraphView })));
+const EmbeddingSpaceView = lazy(() => import('@/features/embedding-space/ui/EmbeddingSpaceView'));
 const DataFlowView = lazy(() => import('@/components/data-flow-view').then(m => ({ default: m.DataFlowView })));
 const DevLogView = lazy(() => import('@/components/devlog-view').then(m => ({ default: m.DevLogView })));
 import { useToast } from '@/components/ui/toast';
@@ -1453,7 +1453,7 @@ export function Dashboard() {
                 />
               }
             >
-              <AnnGraphView onBack={switchToOracle} />
+              <EmbeddingSpaceView onBack={switchToOracle} />
             </Suspense>
           </div>
         ) : (

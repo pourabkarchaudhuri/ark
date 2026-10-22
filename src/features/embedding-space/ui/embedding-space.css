@@ -1,0 +1,65 @@
+/* Embedding Space v2 — styles that can't be expressed inline (keyframes,
+   descendant hover states, idle-hide). Everything is scoped to .es-root. */
+
+.es-root { font-family: 'JetBrains Mono', monospace; -webkit-font-smoothing: antialiased; }
+.es-root * { scrollbar-width: none; -ms-overflow-style: none; box-sizing: border-box; }
+.es-root *::-webkit-scrollbar { display: none; }
+.es-root button { font-family: inherit; background: none; border: none; padding: 0; color: inherit; }
+.es-root input { font-family: inherit; }
+
+@keyframes es-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@keyframes es-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+@keyframes hint-orbit { 0%, 100% { transform: rotate(-20deg); } 50% { transform: rotate(20deg); } }
+@keyframes hint-pan { 0%, 100% { transform: translateX(-3px); } 50% { transform: translateX(3px); } }
+@keyframes hint-zoom { 0%, 100% { transform: scale(0.8); } 50% { transform: scale(1.2); } }
+@keyframes hint-tap { 0%, 80% { transform: scale(1); opacity: 0.35; } 90% { transform: scale(0.75); opacity: 0.7; } 100% { transform: scale(1); opacity: 0.35; } }
+@keyframes es-panel-in-left { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes es-panel-in-right { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes es-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes es-rise-in { from { opacity: 0; transform: translate(-50%, 24px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes es-card-rise { from { opacity: 0; transform: translateY(10px) scale(0.94); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
+
+/* Idle hide: chrome fades to 15% after 4 s without input, returns on any movement */
+.es-root .screenshot-exclude, .es-root [data-chrome] { transition: filter 0.35s ease; }
+.es-root[data-es-idle="1"] .screenshot-exclude, .es-root[data-es-idle="1"] [data-chrome] { filter: opacity(0.15); transition: filter 1.2s ease; }
+
+.es-root [data-side="1"] > .es-leader { display: none; }
+.es-zone-btn { pointer-events: auto; cursor: pointer; padding: 3px 7px; margin-left: -7px; border-radius: 4px; border: 1px solid transparent !important; background: transparent; font-family: 'JetBrains Mono', monospace; transition: background 0.2s, border-color 0.2s, color 0.3s; }
+.es-zone-btn:hover { background: rgba(255,255,255,0.06) !important; border-color: rgba(255,255,255,0.12) !important; }
+.es-dock-thumb:hover { opacity: 1 !important; transform: translateY(-2px) !important; border-color: rgba(255,255,255,0.4) !important; }
+.es-anchor { transition: background 0.2s, border-color 0.2s; }
+.es-anchor:hover { border-color: rgba(147,197,253,0.45) !important; background: rgba(10,14,30,0.85) !important; }
+
+/* Neighbour mini-card expansion */
+.nb-mini { width: 112px; background: rgba(6,6,14,0.55); border: 1px solid rgba(255,255,255,0.06); opacity: 0.32; }
+.nb-mini:hover, .nb-mini.is-hot { width: 160px; background: rgba(6,6,14,0.88); border-color: rgba(255,255,255,0.3); opacity: 1; }
+.nb-mini .nb-mini-img { height: 0; padding-top: 56.25%; position: relative; }
+.nb-mini-meta { color: rgba(34,211,238,0.15); }
+.nb-card-group:hover .nb-mini-meta { color: rgba(34,211,238,0.6); }
+
+.lib-tab-ch { transition: transform 0.2s; }
+.lib-tab:hover .lib-tab-ch { transform: translateX(2px); }
+.nb-tab-ch { transition: transform 0.2s; }
+.nb-tab:hover .nb-tab-ch { transform: translateX(-2px); }
+
+/* Small hover affordances the prototype expressed as style-hover */
+.es-hov-ghost { transition: color 0.15s, background 0.15s; }
+.es-hov-ghost:hover { color: rgba(255,255,255,0.7) !important; background: rgba(255,255,255,0.05) !important; }
+.es-hov-icon { transition: color 0.15s, background 0.15s; }
+.es-hov-icon:hover { color: rgba(255,255,255,0.8) !important; background: rgba(255,255,255,0.1) !important; }
+.es-hov-amber { transition: color 0.15s, background 0.15s; }
+.es-hov-amber:hover { color: #fbbf24 !important; background: rgba(245,158,11,0.15) !important; }
+.es-hov-emerald { transition: color 0.15s, background 0.15s; }
+.es-hov-emerald:hover { color: #34d399 !important; background: rgba(16,185,129,0.15) !important; }
+.es-hov-step { transition: color 0.15s, background 0.15s; }
+.es-hov-step:hover { color: #ffffff !important; background: rgba(255,255,255,0.08) !important; }
+.es-hov-blue { transition: color 0.15s, background 0.15s; }
+.es-hov-blue:hover { color: #ffffff !important; background: rgba(59,130,246,0.18) !important; }
+.es-hov-tab { transition: color 0.2s, background 0.2s; }
+.es-hov-tab:hover { color: rgba(255,255,255,0.7) !important; background: rgba(0,0,0,0.7) !important; }
+.es-hov-row:hover { background: rgba(255,255,255,0.04); }
+.es-hov-clear:hover { background: rgba(255,255,255,0.12) !important; }
+.es-hov-explore:hover { background: rgba(59,130,246,0.3) !important; border-color: rgba(59,130,246,0.5) !important; }
+.es-hov-shot:hover { color: rgba(255,255,255,0.8) !important; border-color: rgba(255,255,255,0.2) !important; background: rgba(255,255,255,0.1) !important; }
+.es-focus-emerald:focus { border-color: rgba(16,185,129,0.3) !important; }
+.es-focus-cyan:focus { border-color: rgba(6,182,212,0.3) !important; }
