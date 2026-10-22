@@ -25,13 +25,17 @@ import { getLevelStore } from '../storage/level-store.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Max sustained calls/sec/channel per sender WebContents. Renderer stores
- * batch their writes, so 500 calls/sec is well above normal traffic and
- * acts purely as a runaway-loop safety net.
+ * Max sustained calls/sec/channel per sender WebContents — a runaway-loop
+ * safety net only. v1.0.73: raised from 500/s. At 500 the limiter itself was
+ * the failure: bulk paths (embedding migration's per-row puts, 400-wide point
+ * lookups for catalog metadata / candidate embeddings) exhausted the bucket in
+ * one burst and every further call silently came back `rate_limited` — the
+ * migration then failed and re-ran on every launch, and lookups lost most of
+ * their rows. Bulk callers should use `store:getMany` / `store:batch`.
  */
-const RATE_LIMIT_TOKENS = 500;
-const RATE_LIMIT_REFILL_PER_SEC = 500; // tokens replenished per second
-const RATE_LIMIT_BURST = 500; // == bucket capacity
+const RATE_LIMIT_TOKENS = 10_000;
+const RATE_LIMIT_REFILL_PER_SEC = 10_000; // tokens replenished per second
+const RATE_LIMIT_BURST = 20_000; // bucket capacity
 
 interface Bucket {
   tokens: number;
@@ -60,8 +64,16 @@ function checkRateLimit(channel: string, senderId: number): boolean {
   return true;
 }
 
+// One warning per channel+sender per second — a storm of rejections used to log once per call.
+const lastRateWarn = new Map<string, number>();
+
 function rateLimited(channel: string, senderId: number): { error: string } {
-  logger.warn(`[Store IPC] Rate limit hit on ${channel} sender=${senderId} (limit=${RATE_LIMIT_TOKENS}/s)`);
+  const key = `${channel}:${senderId}`;
+  const now = Date.now();
+  if (now - (lastRateWarn.get(key) ?? 0) > 1000) {
+    lastRateWarn.set(key, now);
+    logger.warn(`[Store IPC] Rate limit hit on ${channel} sender=${senderId} (limit=${RATE_LIMIT_TOKENS}/s)`);
+  }
   return { error: 'rate_limited' };
 }
 
@@ -96,6 +108,18 @@ export function register(): void {
       return { value: await store.get(namespace, key) };
     } catch (err) {
       logger.error('[Store IPC] store:get failed:', err);
+      return toError(err);
+    }
+  });
+
+  ipcMain.handle('store:getMany', async (event: any, namespace: string, keys: unknown) => {
+    if (!checkRateLimit('store:getMany', senderIdOf(event))) return rateLimited('store:getMany', senderIdOf(event));
+    try {
+      if (!Array.isArray(keys) || keys.some((k) => typeof k !== 'string')) return { error: 'keys must be a string[]' };
+      if (keys.length > 10_000) return { error: 'getMany is capped at 10000 keys per call' };
+      return { values: await store.getMany(namespace, keys as string[]) };
+    } catch (err) {
+      logger.error('[Store IPC] store:getMany failed:', err);
       return toError(err);
     }
   });

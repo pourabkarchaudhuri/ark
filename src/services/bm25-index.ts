@@ -407,8 +407,11 @@ class Bm25IndexService {
       this.generation = gen;
       this.ready = true;
 
-      // Persist (may be large — fire-and-forget after assign so search can proceed)
-      void this.persist(index, gen, docs.length);
+      // Persist (may be large — fire-and-forget after assign so search can proceed).
+      // Deferred to idle: `persist` runs a synchronous JSON.stringify of the
+      // whole index, which used to execute inline here (before this method
+      // even returned) and stall whoever awaited the build.
+      this.schedulePersist(index, gen, docs.length);
 
       console.log(`[Bm25Index] Built ${docs.length.toLocaleString()} docs (gen=${gen})`);
       return true;
@@ -420,6 +423,23 @@ class Bm25IndexService {
     } finally {
       this.building = false;
       this.notify();
+    }
+  }
+
+  private schedulePersist(
+    index: MiniSearch<Bm25Document>,
+    generation: string,
+    docCount: number,
+  ): void {
+    const run = () => {
+      // A newer build/invalidate superseded this index — don't persist stale data.
+      if (this.index !== index) return;
+      void this.persist(index, generation, docCount);
+    };
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(run, { timeout: 10_000 });
+    } else {
+      setTimeout(run, 1_000);
     }
   }
 

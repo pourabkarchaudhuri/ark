@@ -4,6 +4,7 @@ vi.mock('@/services/ann-index', () => ({
   annIndex: {
     isReady: true,
     queryWithDistances: vi.fn(),
+    queryBatch: vi.fn(),
   },
 }));
 
@@ -39,7 +40,7 @@ vi.mock('@/services/custom-game-store', () => ({
 
 import { annIndex } from '@/services/ann-index';
 import { getEmbeddingById } from '@/services/embedding-service';
-import { getSimilarTitlesForReco } from '@/services/similar-games';
+import { getSimilarTitlesForReco, getSimilarTitlesForRecoBatch } from '@/services/similar-games';
 
 describe('getSimilarTitlesForReco', () => {
   beforeEach(() => {
@@ -62,5 +63,33 @@ describe('getSimilarTitlesForReco', () => {
   it('returns empty when embedding missing (no fake titles)', async () => {
     vi.mocked(getEmbeddingById).mockResolvedValue(null);
     expect(await getSimilarTitlesForReco('steam-source', 6)).toEqual([]);
+  });
+});
+
+describe('getSimilarTitlesForRecoBatch', () => {
+  it('resolves titles for many sources in one ANN round-trip using caller vectors', async () => {
+    vi.mocked(annIndex.queryBatch).mockResolvedValue({
+      'steam-source': [
+        { id: 'steam-source', distance: 0 },
+        { id: 'steam-10', distance: 0.12 },
+        { id: 'steam-12', distance: 0.6 },
+      ],
+      'steam-other': [
+        { id: 'steam-11', distance: 0.2 },
+      ],
+    });
+    vi.mocked(getEmbeddingById).mockClear();
+
+    const out = await getSimilarTitlesForRecoBatch([
+      { gameId: 'steam-source', vector: new Array(8).fill(0.1) },
+      { gameId: 'steam-other', vector: new Array(8).fill(0.2) },
+      { gameId: 'steam-none', vector: new Array(8).fill(0.3) },
+    ], 6);
+
+    expect(annIndex.queryBatch).toHaveBeenCalledTimes(1);
+    expect(getEmbeddingById).not.toHaveBeenCalled();
+    expect(out.get('steam-source')).toEqual(['Neighbor Alpha']);
+    expect(out.get('steam-other')).toEqual(['Neighbor Beta']);
+    expect(out.has('steam-none')).toBe(false);
   });
 });

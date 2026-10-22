@@ -16,6 +16,17 @@ function isElectron(): boolean {
 
 // In-memory cache for game details
 const gameDetailsCache = new Map<number, SteamAppDetails>();
+/** Session cap — the cache used to grow without bound across long browse sessions. */
+const MAX_DETAILS_CACHE = 3000;
+
+function cacheDetails(appId: number, details: SteamAppDetails): void {
+  gameDetailsCache.delete(appId);
+  gameDetailsCache.set(appId, details);
+  if (gameDetailsCache.size > MAX_DETAILS_CACHE) {
+    const oldest = gameDetailsCache.keys().next().value;
+    if (oldest !== undefined) gameDetailsCache.delete(oldest);
+  }
+}
 const mostPlayedCache: { games: SteamMostPlayedGame[]; timestamp: number } = { games: [], timestamp: 0 };
 
 /**
@@ -205,7 +216,7 @@ class SteamService {
       detailsArray.forEach(({ appId, details }) => {
         if (details) {
           detailsMap.set(appId, details);
-          gameDetailsCache.set(appId, details);
+          cacheDetails(appId, details);
         }
       });
 
@@ -417,7 +428,7 @@ class SteamService {
       const details = await window.steam!.getAppDetails(appId);
       if (!details) return null;
       
-      gameDetailsCache.set(appId, details);
+      cacheDetails(appId, details);
       const libraryEntry = libraryStore.getEntry(`steam-${appId}`);
       return transformSteamGame(details, libraryEntry);
     } catch (error) {

@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.73] - 2026-10-22
+
+Pipeline hardening for user reports of slowness and "stuck for hours" in ingestion, embeddings and Oracle (three code audits → fixes → independent regression review).
+
+### Fixed — storage / IPC
+- **Store IPC rate limiter was the failure** — 500 calls/s per channel silently rejected bulk work: the IDB→LevelDB embedding migration failed (and re-ran) every launch, and catalog / candidate-embedding point lookups lost most of their rows. Raised to 10k/s (burst 20k), rejection warnings throttled to 1/s.
+- New `store:getMany` IPC (one round trip, ≤10k keys, a corrupt row reads as missing) and `storeGetMany` renderer helper; `catalogStore.getEntries`, candidate-embedding and timestamp-refresh lookups use it.
+
+### Fixed — ingestion
+- Steam / Epic / egdata fetch timeouts were cleared once headers arrived, so a stalled body hung the caller (and the whole catalog sync) forever. Timers now bound the body read; Steam app-list pages get 120 s.
+- Steam catalog sync: concurrent callers share one run; `GetItems` batches retry on 429 (Retry-After) / 5xx with backoff and the IPC now reports failures instead of returning `[]`; one renderer retry round; a run with >1% retryable failures is no longer stamped fresh for 24 h (partial runs keep the larger stored count); non-429 4xx batches don't block freshness.
+- Epic: launch prefetch and catalog sync share one crawl; truncated crawls (Cloudflare fallback, failed pages) aren't cached or stamped fresh.
+- Steam / Epic IDB→LevelDB catalog migration: at most 2 attempts per session, then IDB for the rest of it (no more full re-stream on every call).
+- An empty Steam tag list is never cached (was cached forever → every tag `tag_<id>`, empty genres).
+- Persistent disk cache honours long TTLs and always keeps long-lived entries (the app list was evicted after ~500 detail fetches → refetched every launch); saves debounced to 15 s.
+- Steam appdetails pauses after a 429 instead of queueing more doomed requests; the detail enricher retries empty results (3×) instead of giving up for the session; renderer details cache capped.
+
+### Fixed — embeddings
+- Migration writes in batches with bounded memory; ANN backfill streams vectors page by page (was one multi-GB array → renderer OOM).
+- ANN index: saves deferred (≤60 s) and atomic (temp + rename), forced at the end of a pass before the watermark; `addVectors` yields between batches so the main process stays responsive.
+- Chunked catalog pass sends ~48 games per Ollama call; CPU mode uses max(2, cores/2) threads; progress updates ~1/s; one fixed Ollama option set per session (no model reload churn); OOM step-down only on a real OOM error.
+- Circuit breaker: an all-empty call is confirmed with a one-text probe and stops the pass; it resumes automatically with backoff (Steam and Epic). Availability re-checks after 60 s and when Ollama settings are saved.
+- Poison games: 3 real failures → skipped and the watermark advances; timeouts / never-sent texts (new `reportTransient` reply) don't count as strikes but are retried. Re-chunk job no longer stalls on one bad game.
+- Force re-index awaits the cancelled run; pause is session-only, wakes on cancel, and shows a Resume button outside dev mode; Steam and Epic passes have independent state; galaxy builds share one in-flight build with retry backoff.
+
+### Fixed — Oracle / recommendations
+- Pre-worker phase embedded ~4k candidates through Ollama with no deadline. Now: catalog vectors load first, only the user's games are embedded (abortable), and the whole pre-worker phase has a 120 s budget with per-step caps.
+- Compute generation + abort: `refresh()` cancels the in-flight compute; stale runs can't overwrite newer results.
+- Shelves publish as `done` before the Oracle rerank (15 s background budget; a dismiss in between is not re-cached).
+- Game graph: rebuilds throttled (≤1 / 10 min, not during catalog embedding), stale graph served and rebuild re-requested, metrics-worker timeout, PPR repair once per signature, forced builds queue behind unforced ones; only candidate/user scores cross to the worker.
+- Log-scale hours buckets, debounced library-triggered refresh, previous shelves kept on screen while recomputing, memoised bandit shelf order, BM25 skipped until ready, batched title lookups, 5 s caps on detail fetches (Oracle + Similar Games), ML load failure latched per session, pre-filter bug that emptied small candidate pools.
+
+### Under the hood
+- ~30 new regression tests (`catalog-store-sync`, `embedding-pipeline-hardening`, `reco-store-compute`, `game-graph-build`, graph-scores cases). Typecheck clean on both TypeScript projects.
+
 ## [1.0.72] - 2026-10-22
 
 ### Added

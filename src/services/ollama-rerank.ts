@@ -4,7 +4,7 @@
  */
 
 import type { GraphNode, NeighborInfo } from '@/services/galaxy-cache';
-import { rerankStatus, toRerankTier, type RerankStatus } from '@/services/oracle-rerank';
+import { ORACLE_RERANK_POOL, rerankStatus, toRerankTier, type RerankStatus } from '@/services/oracle-rerank';
 
 /** Default Ollama library name — keep in sync with `electron/settings-store.ts` `DEFAULT_OLLAMA_RERANK_MODEL`. */
 export const DEFAULT_OLLAMA_RERANK_MODEL = 'dengcao/bge-reranker-v2-m3';
@@ -66,7 +66,9 @@ export async function applyOllamaNeighborRerank(
     return { neighbors: baseSlice, status: rerankStatus('skipped_disabled') };
   }
 
-  const trimmed = neighbors.slice(0, Math.min(neighbors.length, 256));
+  // The rerank IPC scores at most 100 documents (RERANK_MAX_DOCS in
+  // electron/ipc/ollama-handlers.ts); building more only wastes the payload.
+  const trimmed = neighbors.slice(0, Math.min(neighbors.length, ORACLE_RERANK_POOL));
   if (typeof window === 'undefined' || !window.ollama?.rerank) {
     return { neighbors: baseSlice, status: rerankStatus('skipped_no_client') };
   }

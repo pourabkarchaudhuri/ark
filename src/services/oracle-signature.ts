@@ -13,10 +13,17 @@ export function djb2Fingerprint(s: string): string {
   return (h >>> 0).toString(36);
 }
 
-/** Coarse hours bucket so engagement shifts invalidate Oracle cache. */
+/**
+ * Coarse log-scale hours bucket so meaningful engagement shifts invalidate the
+ * Oracle cache. Half-octave steps: 0 → 0, (0, √2) → 1, then a new bucket each
+ * time hours grow by ~41% (2h, 2.8h, 4h, 5.7h, 8h, 11h, 16h …). The previous
+ * floor(hours) bucket changed every played hour, so an active session forced
+ * a full Oracle recompute roughly once an hour per game.
+ */
 export function hoursPlayedBucket(hoursPlayed: number | undefined | null): number {
   const h = typeof hoursPlayed === 'number' && Number.isFinite(hoursPlayed) ? hoursPlayed : 0;
-  return Math.floor(h) | 0;
+  if (h <= 0) return 0;
+  return 1 + Math.floor(Math.log2(Math.max(1, h)) * 2);
 }
 
 /**

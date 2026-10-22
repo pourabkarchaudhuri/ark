@@ -42,6 +42,31 @@ const MAX_MEMORY_SIZE = 2_000;
 /** Default TTL for fresh data (5 minutes) */
 const DEFAULT_TTL = 5 * 60 * 1000;
 
+/** Entries with a TTL at least this long (app list, tag list, catalog crawls) always persist. */
+const LONG_LIVED_TTL = 60 * 60 * 1000;
+
+/** Debounce for disk saves — each save stringifies the whole cache on the main thread. */
+const SAVE_DEBOUNCE_MS = 15_000;
+
+/**
+ * Hard expiry: STALE_TTL, or the entry's own TTL when longer. Using STALE_TTL alone
+ * threw away the 7-day tag list (and similar) after a day, forcing refetches.
+ */
+const expiresAfter = (e: CacheEntry<unknown>) => Math.max(STALE_TTL, e.ttl);
+
+/**
+ * Entries to write: every unexpired long-lived entry plus the newest short-lived ones.
+ * A plain `.slice(-500)` by insertion order used to push the app list (set once a day)
+ * off disk after a few hundred detail fetches, so it was refetched every launch.
+ */
+function entriesToPersist(store: Map<string, CacheEntry<unknown>>): Array<[string, CacheEntry<unknown>]> {
+  const now = Date.now();
+  const live = Array.from(store.entries()).filter(([, e]) => now - e.timestamp < expiresAfter(e));
+  const long = live.filter(([, e]) => e.ttl >= LONG_LIVED_TTL);
+  const short = live.filter(([, e]) => e.ttl < LONG_LIVED_TTL).slice(-Math.max(0, MAX_CACHE_SIZE - long.length));
+  return [...long, ...short];
+}
+
 // ---------------------------------------------------------------------------
 // PersistentCache class
 // ---------------------------------------------------------------------------
@@ -72,7 +97,7 @@ export class PersistentCache {
         let loadedCount = 0;
         for (const [key, entry] of Object.entries(parsed)) {
           const cacheEntry = entry as CacheEntry<unknown>;
-          if (Date.now() - cacheEntry.timestamp < STALE_TTL) {
+          if (Date.now() - cacheEntry.timestamp < expiresAfter(cacheEntry)) {
             this.memoryStore.set(key, cacheEntry);
             loadedCount++;
           }
@@ -85,7 +110,7 @@ export class PersistentCache {
   }
 
   /**
-   * Save cache to disk (debounced by 5 seconds)
+   * Save cache to disk (debounced by SAVE_DEBOUNCE_MS)
    */
   private saveToDisk(): void {
     if (this.saveTimeout) {
@@ -94,9 +119,7 @@ export class PersistentCache {
 
     this.saveTimeout = setTimeout(() => {
       try {
-        const entries = Array.from(this.memoryStore.entries())
-          .filter(([, entry]) => Date.now() - entry.timestamp < STALE_TTL)
-          .slice(-MAX_CACHE_SIZE);
+        const entries = entriesToPersist(this.memoryStore);
 
         const obj: Record<string, CacheEntry<unknown>> = {};
         for (const [key, value] of entries) {
@@ -116,10 +139,12 @@ export class PersistentCache {
       } catch (error) {
         logger.error(`[Cache:${this.label}] Failed to save disk cache:`, error);
       }
-    }, 5000);
+    }, SAVE_DEBOUNCE_MS);
   }
 
   set<T>(key: string, data: T, ttl: number = DEFAULT_TTL): void {
+    // Re-insert so Map order tracks recency (Map.set on an existing key keeps its old slot)
+    this.memoryStore.delete(key);
     this.memoryStore.set(key, { data, timestamp: Date.now(), ttl });
 
     // Evict oldest in-memory entries when over the cap
@@ -153,12 +178,12 @@ export class PersistentCache {
     }
 
     // Stale but usable
-    if (allowStale && age <= STALE_TTL) {
+    if (allowStale && age <= expiresAfter(entry)) {
       return entry.data as T;
     }
 
     // Completely expired
-    if (age > STALE_TTL) {
+    if (age > expiresAfter(entry)) {
       this.memoryStore.delete(key);
     }
 
@@ -176,7 +201,7 @@ export class PersistentCache {
   hasStale(key: string): boolean {
     const entry = this.memoryStore.get(key);
     if (!entry) return false;
-    if (Date.now() - entry.timestamp > STALE_TTL) {
+    if (Date.now() - entry.timestamp > expiresAfter(entry)) {
       this.memoryStore.delete(key);
       return false;
     }
@@ -207,9 +232,7 @@ export class PersistentCache {
     }
     if (!this.isDirty && this.memoryStore.size === 0) return;
     try {
-      const entries = Array.from(this.memoryStore.entries())
-        .filter(([, entry]) => Date.now() - entry.timestamp < STALE_TTL)
-        .slice(-MAX_CACHE_SIZE);
+      const entries = entriesToPersist(this.memoryStore);
       const obj: Record<string, CacheEntry<unknown>> = {};
       for (const [key, value] of entries) obj[key] = value;
       atomicWriteFileSync(this.cacheFilePath, JSON.stringify(obj));

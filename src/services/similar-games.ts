@@ -14,10 +14,28 @@ import {
   annNeighborOverFetch,
   isChunkAnnMaxSimEnabled,
 } from '@/services/ann-neighbor-query';
+import { aggregateMaxSimByGameId, parseAnnIdToGameId } from '@/services/ann-max-sim';
 import { findGameById } from '@/services/prefetch-store';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { transformEpicGame } from '@/services/epic-service';
+
+/** Cap on store-detail enrichment for neighbor rows (Steam rate limiter is shared). */
+const NEIGHBOR_DETAILS_TIMEOUT_MS = 5_000;
+
+/** Resolve `fallback` if `p` hasn't settled within `ms`; a late result is dropped. */
+function raceWithTimeout<T>(p: Promise<T>, ms: number, fallback: T, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      console.warn(`[similar-games] ${label} exceeded ${ms}ms — rendering with local metadata`);
+      resolve(fallback);
+    }, ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
 
 export type SimilarGamesSectionPhase =
   | 'hidden'
@@ -255,7 +273,14 @@ async function enrichNeighborRows(
   const steamDetailsByApp = new Map<number, SteamAppDetails>();
   if (steamAppIds.length > 0 && typeof window !== 'undefined' && window.steam?.getMultipleAppDetails) {
     try {
-      const arr = await window.steam.getMultipleAppDetails(steamAppIds);
+      // Shares the Steam rate limiter with Oracle hydrate / library sync — cap
+      // the wait; local meta + cached names below fill in what didn't arrive.
+      const arr = await raceWithTimeout(
+        window.steam.getMultipleAppDetails(steamAppIds),
+        NEIGHBOR_DETAILS_TIMEOUT_MS,
+        [],
+        'getMultipleAppDetails',
+      );
       for (const { appId, details } of arr) {
         if (details) steamDetailsByApp.set(appId, details as SteamAppDetails);
       }
@@ -310,15 +335,20 @@ async function enrichNeighborRows(
 
   const epicByKey = new Map<string, EpicCatalogItem>();
   if (epicKeys.size > 0 && typeof window !== 'undefined' && window.epic?.getGameDetails) {
-    await Promise.all(
-      [...epicKeys.values()].map(async (p) => {
-        try {
-          const item = await window.epic!.getGameDetails(p.ns, p.offerId);
-          if (item) epicByKey.set(`${p.ns}:${p.offerId}`, item);
-        } catch {
-          /* ignore */
-        }
-      }),
+    await raceWithTimeout(
+      Promise.all(
+        [...epicKeys.values()].map(async (p) => {
+          try {
+            const item = await window.epic!.getGameDetails(p.ns, p.offerId);
+            if (item) epicByKey.set(`${p.ns}:${p.offerId}`, item);
+          } catch {
+            /* ignore */
+          }
+        }),
+      ),
+      NEIGHBOR_DETAILS_TIMEOUT_MS,
+      [],
+      'epic getGameDetails',
     );
   }
 
@@ -375,8 +405,17 @@ export async function getSimilarTitlesForReco(
 
   const maxSim = await isChunkAnnMaxSimEnabled();
   const overFetch = Math.max(annNeighborOverFetch(k, maxSim), k + 24);
-  const filtered = (await queryAnnNeighborGames(vec, overFetch, sourceGameId))
-    .filter((r) => r.distance <= SIMILAR_TITLES_DISTANCE_CEILING);
+  const neighbors = await queryAnnNeighborGames(vec, overFetch, sourceGameId);
+  return pickSimilarTitles(sourceGameId, neighbors, k);
+}
+
+/** Distance-gate, dedupe and resolve display titles for one source's ANN neighbors. */
+function pickSimilarTitles(
+  sourceGameId: string,
+  neighbors: Array<{ id: string; distance: number }>,
+  k: number,
+): string[] {
+  const filtered = neighbors.filter((r) => r.distance <= SIMILAR_TITLES_DISTANCE_CEILING);
 
   if (filtered.length === 0) return [];
 
@@ -403,6 +442,44 @@ export async function getSimilarTitlesForReco(
   }
 
   return titles;
+}
+
+/**
+ * Batched `getSimilarTitlesForReco` for Oracle survivor hydrate: one ANN
+ * `queryBatch` round-trip for every source, using vectors the caller already
+ * holds in memory. Replaces up to 80 sequential lookups at ~3 IPC each
+ * (embedding read + settings read + ANN query).
+ */
+export async function getSimilarTitlesForRecoBatch(
+  sources: Array<{ gameId: string; vector: number[] }>,
+  k: number = 6,
+): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (!annIndex.isReady || sources.length === 0) return out;
+
+  const maxSim = await isChunkAnnMaxSimEnabled();
+  const overFetch = Math.max(annNeighborOverFetch(k, maxSim), k + 24);
+  const raw = await annIndex.queryBatch(
+    sources.map((s) => ({ id: s.gameId, vector: s.vector })),
+    overFetch,
+  );
+
+  for (const { gameId } of sources) {
+    const hits = raw[gameId];
+    if (!hits || hits.length === 0) continue;
+    // Same game-level folding as queryAnnNeighborGames.
+    const neighbors = maxSim
+      ? aggregateMaxSimByGameId(hits, { excludeGameId: gameId }).map((r) => ({
+        id: r.gameId,
+        distance: r.distance,
+      }))
+      : hits
+        .filter((r) => !r.id.includes('::') && parseAnnIdToGameId(r.id) !== gameId)
+        .sort((a, b) => a.distance - b.distance);
+    const titles = pickSimilarTitles(gameId, neighbors, k);
+    if (titles.length > 0) out.set(gameId, titles);
+  }
+  return out;
 }
 
 /**

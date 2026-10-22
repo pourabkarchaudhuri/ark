@@ -503,33 +503,39 @@ async function buildCoOccurrenceEdges(
   for (let ci = 0; ci < candidates.length; ci++) {
     const c = candidates[ci];
     const myTags = tagSets.get(c.gameId)!;
-    const neighborIds = new Set<string>();
+    // Walk genre buckets lazily and stop at the cap. This used to materialize
+    // the full union of every shared-genre bucket (thousands of ids per
+    // candidate in a 3K pool) before the 150 cap was ever applied. Visiting
+    // order is unchanged — bucket by bucket, first occurrence wins.
+    const visited = new Set<string>();
 
+    let neighborCount = 0;
+    outer:
     for (const g of c.genres) {
       const can = toCanonicalGenre(g);
       if (!can) continue;
       const ids = genreIndex.get(norm(can));
-      if (ids) for (const id of ids) if (id !== c.gameId) neighborIds.add(id);
-    }
+      if (!ids) continue;
+      for (const otherId of ids) {
+        if (neighborCount >= MAX_NEIGHBORS) break outer;
+        if (otherId === c.gameId || visited.has(otherId)) continue;
+        visited.add(otherId);
+        const otherTags = tagSets.get(otherId);
+        if (!otherTags) continue;
 
-    let neighborCount = 0;
-    for (const otherId of neighborIds) {
-      if (neighborCount >= MAX_NEIGHBORS) break;
-      const otherTags = tagSets.get(otherId);
-      if (!otherTags) continue;
+        let intersection = 0;
+        for (const t of myTags) {
+          if (otherTags.has(t)) intersection++;
+        }
+        if (intersection < 3) continue;
 
-      let intersection = 0;
-      for (const t of myTags) {
-        if (otherTags.has(t)) intersection++;
+        const union = myTags.size + otherTags.size - intersection;
+        const jaccard = union > 0 ? intersection / union : 0;
+
+        if (!edges.has(c.gameId)) edges.set(c.gameId, new Map());
+        edges.get(c.gameId)!.set(otherId, jaccard);
+        neighborCount++;
       }
-      if (intersection < 3) continue;
-
-      const union = myTags.size + otherTags.size - intersection;
-      const jaccard = union > 0 ? intersection / union : 0;
-
-      if (!edges.has(c.gameId)) edges.set(c.gameId, new Map());
-      edges.get(c.gameId)!.set(otherId, jaccard);
-      neighborCount++;
     }
 
     if (onProgress && ci % progressStep === 0) {
@@ -1221,7 +1227,10 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const userCommunityTotal = Math.max(1, input.userCommunityTotal ?? 0);
   const hasGraphScores = Object.keys(graphScores).length > 0;
   let maxGraphPageRank = 1e-9;
-  if (hasGraphScores) {
+  if (typeof input.graphMaxPageRank === 'number' && input.graphMaxPageRank > 0) {
+    // Global normalizer from the full graph — graphScores is a candidate/user subset.
+    maxGraphPageRank = input.graphMaxPageRank;
+  } else if (hasGraphScores) {
     for (const g of Object.values(graphScores)) {
       if (g.pageRank > maxGraphPageRank) maxGraphPageRank = g.pageRank;
     }

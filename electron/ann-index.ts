@@ -12,6 +12,7 @@ const { app } = require('electron');
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './safe-logger.js';
+import { atomicWriteFileSync } from './safe-write.js';
 import { settingsStore } from './settings-store.js';
 
 let Index: any;
@@ -54,6 +55,8 @@ export function syncAnnDimsFromSettings(): number {
     index = null;
     idMap = [];
     reverseMap.clear();
+    indexGeneration++;
+    dirty = false;
   } else {
     DIMS = next;
   }
@@ -107,6 +110,22 @@ interface IndexMeta {
 let index: InstanceType<typeof Index> | null = null;
 let idMap: string[] = [];
 let reverseMap = new Map<string, number>();
+/** Bumped whenever the in-memory index is replaced/dropped — lets a yielding addVectors bail. */
+let indexGeneration = 0;
+
+// ─── Save throttling ─────────────────────────────────────────────────────────
+// `index.save()` is a synchronous native call that serialises the whole HNSW
+// graph (hundreds of MB for a full catalog) on the MAIN process, freezing
+// every window while it runs. The re-chunk job used to request it every 25
+// games. Saves are now: skipped when nothing changed, coalesced to at most one
+// per SAVE_MIN_INTERVAL_MS (a deferred save covers requests inside the window),
+// written atomically (temp file + rename), and flushed once on quit.
+const SAVE_MIN_INTERVAL_MS = 60_000;
+/** Vectors added per slice before yielding the main-process event loop. */
+const ADD_SLICE = 64;
+let dirty = false;
+let lastSaveAt = 0;
+let deferredSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
 function createIndex(): void {
   if (!Index) return;
@@ -150,6 +169,8 @@ export function loadIndex(): boolean {
 
     idMap = meta.gameIds;
     rebuildReverseMap();
+    indexGeneration++;
+    dirty = false;
 
     logger.log(`[ANN] Index loaded: ${idMap.length} vectors (built ${new Date(meta.builtAt).toISOString()})`);
     return true;
@@ -162,21 +183,35 @@ export function loadIndex(): boolean {
   }
 }
 
-export function saveIndex(): boolean {
+/** Serialise index + id map to disk atomically. Synchronous — callers throttle. */
+function writeIndexNow(): boolean {
   if (!index || idMap.length === 0) return false;
   try {
     const indexPath = getIndexPath();
     const metaPath = getMetaPath();
+    const tmpIndexPath = indexPath + '.tmp';
 
-    index.save(indexPath);
+    // Index first (temp + rename), then meta. A crash between the two renames
+    // leaves a NEWER index with an OLDER (shorter) id map — harmless, since
+    // query() ignores slots past idMap.length. The reverse order could leave
+    // meta pointing at slots the on-disk index doesn't have.
+    index.save(tmpIndexPath);
+    try {
+      fs.renameSync(tmpIndexPath, indexPath);
+    } catch (err) {
+      try { fs.unlinkSync(tmpIndexPath); } catch { /* ignore */ }
+      throw err;
+    }
 
     const meta: IndexMeta = {
       gameIds: idMap,
       vectorCount: reverseMap.size,
       builtAt: Date.now(),
     };
-    fs.writeFileSync(metaPath, JSON.stringify(meta), 'utf-8');
+    atomicWriteFileSync(metaPath, JSON.stringify(meta));
 
+    dirty = false;
+    lastSaveAt = Date.now();
     logger.log(`[ANN] Index saved: ${idMap.length} vectors`);
     return true;
   } catch (err) {
@@ -185,41 +220,101 @@ export function saveIndex(): boolean {
   }
 }
 
-export function addVectors(entries: Array<{ id: string; vector: number[] }>): number {
+/**
+ * Request a save. Returns true when the index is (or will shortly be)
+ * persisted: a no-op when nothing changed since the last save, an immediate
+ * write when the last one is older than SAVE_MIN_INTERVAL_MS, otherwise a
+ * deferred write at the end of that window. Pending changes are also flushed
+ * on app quit (`flushAnnIndexSync`).
+ */
+export function saveIndex(opts: { force?: boolean } = {}): boolean {
+  if (!index || idMap.length === 0) return false;
+  if (!dirty) return true;
+  const sinceLast = Date.now() - lastSaveAt;
+  // `force`: end of an embedding pass — the caller writes a watermark next, so the vectors must
+  // be on disk first (a crash inside the deferral window would otherwise lose them for good).
+  if (opts.force || sinceLast >= SAVE_MIN_INTERVAL_MS) {
+    if (deferredSaveTimer) { clearTimeout(deferredSaveTimer); deferredSaveTimer = null; }
+    return writeIndexNow();
+  }
+  if (!deferredSaveTimer) {
+    deferredSaveTimer = setTimeout(() => {
+      deferredSaveTimer = null;
+      if (dirty) writeIndexNow();
+    }, SAVE_MIN_INTERVAL_MS - sinceLast);
+    deferredSaveTimer.unref?.();
+  }
+  return true;
+}
+
+/** Write any unsaved changes immediately (app quit). */
+export function flushAnnIndexSync(): void {
+  if (deferredSaveTimer) { clearTimeout(deferredSaveTimer); deferredSaveTimer = null; }
+  if (dirty) writeIndexNow();
+}
+
+try {
+  app?.on?.('before-quit', () => {
+    try { flushAnnIndexSync(); } catch (err) { logger.error('[ANN] Flush on quit failed:', err); }
+  });
+} catch { /* not running under Electron (tests) */ }
+
+/** Insert or replace one vector. Returns true when a NEW id was added. */
+function upsertOne(entry: { id: string; vector: number[] }): boolean {
+  const prepared = prepareAnnVector(entry.vector);
+  if (!prepared) return false;
+
+  const existingSlot = reverseMap.get(entry.id);
+  if (existingSlot !== undefined) {
+    let removed = false;
+    try { index!.remove(BigInt(existingSlot)); removed = true; } catch { /* usearch version without remove */ }
+    if (removed) {
+      index!.add(BigInt(existingSlot), prepared);
+    } else {
+      // remove() unavailable — append at a fresh slot and vacate the old one
+      // so query results don't return the stale vector under the old slot
+      idMap[existingSlot] = '';
+      const newSlot = idMap.length;
+      idMap.push(entry.id);
+      reverseMap.set(entry.id, newSlot);
+      index!.add(BigInt(newSlot), prepared);
+    }
+    dirty = true;
+    return false;
+  }
+
+  const slot = idMap.length;
+  idMap.push(entry.id);
+  reverseMap.set(entry.id, slot);
+  index!.add(BigInt(slot), prepared);
+  dirty = true;
+  return true;
+}
+
+/**
+ * Add/replace vectors in slices of ADD_SLICE, yielding the main-process event
+ * loop (setImmediate) between slices so a large backfill batch never blocks
+ * window input / other IPC for its whole duration. Stops early if the index
+ * is cleared or rebuilt (dims change) while it is yielding.
+ */
+export async function addVectors(entries: Array<{ id: string; vector: number[] }>): Promise<number> {
   if (!Index) return 0;
   if (!index) {
     syncAnnDimsFromSettings();
     createIndex();
   }
+  const gen = indexGeneration;
 
   let added = 0;
-  for (const entry of entries) {
-    const prepared = prepareAnnVector(entry.vector);
-    if (!prepared) continue;
-
-    const existingSlot = reverseMap.get(entry.id);
-    if (existingSlot !== undefined) {
-      let removed = false;
-      try { index!.remove(BigInt(existingSlot)); removed = true; } catch { /* usearch version without remove */ }
-      if (removed) {
-        index!.add(BigInt(existingSlot), prepared);
-      } else {
-        // remove() unavailable — append at a fresh slot and vacate the old one
-        // so query results don't return the stale vector under the old slot
-        idMap[existingSlot] = '';
-        const newSlot = idMap.length;
-        idMap.push(entry.id);
-        reverseMap.set(entry.id, newSlot);
-        index!.add(BigInt(newSlot), prepared);
-      }
-      continue;
+  for (let i = 0; i < entries.length; i += ADD_SLICE) {
+    if (gen !== indexGeneration || !index) break;
+    const end = Math.min(i + ADD_SLICE, entries.length);
+    for (let j = i; j < end; j++) {
+      if (upsertOne(entries[j])) added++;
     }
-
-    const slot = idMap.length;
-    idMap.push(entry.id);
-    reverseMap.set(entry.id, slot);
-    index!.add(BigInt(slot), prepared);
-    added++;
+    if (end < entries.length) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
   }
 
   return added;
@@ -299,6 +394,9 @@ export function clearIndex(): void {
   index = null;
   idMap = [];
   reverseMap.clear();
+  indexGeneration++;
+  dirty = false;
+  if (deferredSaveTimer) { clearTimeout(deferredSaveTimer); deferredSaveTimer = null; }
 
   try {
     const indexPath = getIndexPath();

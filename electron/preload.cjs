@@ -513,8 +513,8 @@ contextBridge.exposeInMainWorld('ollama', {
     ipcRenderer.invoke('ollama:generateEmbedding', text),
 
   // Generate embeddings for multiple texts (batched)
-  generateEmbeddings: (items) =>
-    ipcRenderer.invoke('ollama:generateEmbeddings', items),
+  generateEmbeddings: (items, opts) =>
+    ipcRenderer.invoke('ollama:generateEmbeddings', items, opts),
 
   // Get embedding model info (name, size, installed status)
   getModelInfo: () =>
@@ -552,7 +552,7 @@ contextBridge.exposeInMainWorld('ollama', {
 // Expose ANN Index API to renderer (HNSW nearest-neighbor search)
 contextBridge.exposeInMainWorld('ann', {
   load: () => ipcRenderer.invoke('ann:load'),
-  save: () => ipcRenderer.invoke('ann:save'),
+  save: (opts) => ipcRenderer.invoke('ann:save', opts),
   addVectors: (entries) => ipcRenderer.invoke('ann:addVectors', entries),
   query: (centroid, k, excludeId) => ipcRenderer.invoke('ann:query', centroid, k, excludeId),
   queryBatch: (entries, k) => ipcRenderer.invoke('ann:queryBatch', entries, k),
@@ -593,6 +593,7 @@ contextBridge.exposeInMainWorld('eventScraper', {
 // envelope object — `{ value }`, `{ rows }`, `{ ok }`, or `{ error }`.
 contextBridge.exposeInMainWorld('store', {
   get: (ns, key) => ipcRenderer.invoke('store:get', ns, key),
+  getMany: (ns, keys) => ipcRenderer.invoke('store:getMany', ns, keys),
   getAll: (ns) => ipcRenderer.invoke('store:getAll', ns),
   // Paginated chunk read (v1.0.65+) for large namespaces (catalog, epic-catalog).
   // opts = { startAfter?: string, limit: number }

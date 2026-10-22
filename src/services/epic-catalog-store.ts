@@ -247,8 +247,21 @@ async function idbStreamAllEntries(
 
 // ─── LevelDB Helpers ────────────────────────────────────────────────────────────
 
+/**
+ * Set once the IDB→LevelDB migration has failed MAX_MIGRATION_ATTEMPTS_PER_SESSION times: the
+ * rest of the session uses IDB (complete and kept current) and the next launch retries. Without
+ * it every call re-streamed the whole IDB store (the v1.0.68 retry storm, Epic edition).
+ */
+let levelDisabledForSession = false;
+const MAX_MIGRATION_ATTEMPTS_PER_SESSION = 2;
+
+/** Test hook — module state otherwise outlives individual store instances. */
+export function __resetEpicCatalogStoreSessionState(): void {
+  levelDisabledForSession = false;
+}
+
 function useLevelDB(): boolean {
-  return typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+  return !levelDisabledForSession && typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
 }
 
 async function levelPutBatch(entries: EpicCatalogEntry[]): Promise<void> {
@@ -409,6 +422,9 @@ export class EpicCatalogStore {
     stage: 'idle', itemsFetched: 0, itemsStored: 0,
   };
   private _syncing = false;
+  /** In-flight sync shared with concurrent callers (they used to return before it finished). */
+  private _syncPromise: Promise<void> | null = null;
+  private _migrationAttempts = 0;
   /**
    * Set ONLY after the marker is stamped (real success) or after we confirm
    * the marker is already set. Left false on failure so a later call
@@ -449,6 +465,13 @@ export class EpicCatalogStore {
       return Promise.resolve();
     }
     if (this._migrationPromise) return this._migrationPromise;
+    if (this._migrationAttempts >= MAX_MIGRATION_ATTEMPTS_PER_SESSION) {
+      levelDisabledForSession = true;
+      this._migrationChecked = true;
+      console.warn('[EpicCatalogStore] LevelDB migration keeps failing — using IndexedDB for this session');
+      return Promise.resolve();
+    }
+    this._migrationAttempts++;
 
     this._migrationPromise = this.runMigration().finally(() => {
       this._migrationPromise = null;
@@ -520,7 +543,13 @@ export class EpicCatalogStore {
    * Sync the Epic catalog. Fetches all items from the Epic GraphQL API
    * via IPC, transforms them, and persists to IndexedDB.
    */
-  async sync(force = false): Promise<void> {
+  sync(force = false): Promise<void> {
+    if (this._syncPromise) return this._syncPromise;
+    this._syncPromise = this.runSync(force).finally(() => { this._syncPromise = null; });
+    return this._syncPromise;
+  }
+
+  private async runSync(force: boolean): Promise<void> {
     if (this._syncing) return;
     if (!window.epic) return;
     await this.migrateFromIdbIfNeeded();
@@ -579,9 +608,16 @@ export class EpicCatalogStore {
         this.notify();
       }
 
+      // A crawl cut short (Cloudflare 403 → ~12-game promo fallback, a run of failed pages) used
+      // to be stamped as a complete sync, fresh for 24h. Rows are keyed overwrites, so keep the
+      // larger count and leave the timestamp alone so the next launch tries again.
+      const prev = await getMeta<EpicCatalogSyncState>('sync-state');
+      const prevTotal = prev?.totalEntries ?? 0;
+      const truncated = prevTotal >= 500 && stored < prevTotal * 0.6;
+      if (truncated) console.warn(`[EpicCatalogStore] Crawl looks truncated (${stored} vs ${prevTotal} last time) — not marking fresh`);
       await setMeta('sync-state', {
-        lastSyncTimestamp: Date.now(),
-        totalEntries: stored,
+        lastSyncTimestamp: truncated ? (prev?.lastSyncTimestamp ?? 0) : Date.now(),
+        totalEntries: truncated ? prevTotal : stored,
         inProgress: false,
       } satisfies EpicCatalogSyncState);
 

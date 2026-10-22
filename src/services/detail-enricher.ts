@@ -90,6 +90,9 @@ const BATCH_COOLDOWN_MS = 3000; // Wait between batches to avoid 429s
 
 // Memory caps — prevent unbounded growth during long browsing sessions
 const MAX_ENRICHED_IDS = 5_000;
+
+/** Tries per game before an empty result is accepted for the session. */
+const MAX_ENRICH_ATTEMPTS = 3;
 const MAX_ELEMENT_MAP_SIZE = 500;
 
 class DetailEnricher {
@@ -101,6 +104,9 @@ class DetailEnricher {
   private enrichedIds = new Set<string>();
   /** Game IDs currently in-flight (IPC call running) */
   private inFlightIds = new Set<string>();
+
+  /** Empty-result attempts per game (only games still below MAX_ENRICH_ATTEMPTS). */
+  private attempts = new Map<string, number>();
 
   // --- priority queue (LIFO — most recently visible first) ---
   private pendingQueue: string[] = [];
@@ -199,6 +205,7 @@ class DetailEnricher {
     this.pendingQueue = [];
     this.enrichedIds.clear();
     this.inFlightIds.clear();
+    this.attempts.clear();
     // Disconnect & recreate observer so stale entries don't fire
     if (this.observer) {
       this.observer.disconnect();
@@ -303,10 +310,14 @@ class DetailEnricher {
         }
       }
 
-      // Mark all as enriched (even those that returned null — don't retry)
+      // Games that came back empty (often a Steam 429 pause) may be retried — up to
+      // MAX_ENRICH_ATTEMPTS, next time their card is seen — instead of staying bare all session.
       for (const id of batch) {
         this.inFlightIds.delete(id);
-        this.enrichedIds.add(id);
+        if (enrichments.has(id)) { this.enrichedIds.add(id); this.attempts.delete(id); continue; }
+        const n = (this.attempts.get(id) ?? 0) + 1;
+        if (n >= MAX_ENRICH_ATTEMPTS) { this.enrichedIds.add(id); this.attempts.delete(id); }
+        else this.attempts.set(id, n);
       }
 
       if (enrichments.size > 0 && this.config) {

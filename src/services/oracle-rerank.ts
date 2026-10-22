@@ -4,7 +4,12 @@
 
 import type { TasteProfile, RecoShelf, ScoredGame } from '@/types/reco';
 
-const ORACLE_RERANK_POOL = 200;
+/**
+ * Unique games sent per rerank call. Matches `RERANK_MAX_DOCS` in
+ * electron/ipc/ollama-handlers.ts — the IPC truncates anything past 100, so a
+ * bigger pool only built documents that were never scored.
+ */
+export const ORACLE_RERANK_POOL = 100;
 
 /**
  * Which reranker tier produced an ordering.
@@ -20,6 +25,8 @@ export type RerankOutcome =
   | 'skipped_no_client'
   | 'skipped_blend_zero'
   | 'skipped_empty_pool'
+  /** Rerank overran its renderer-side budget; shelves keep the worker order. */
+  | 'skipped_timeout'
   | 'empty_results'
   | 'error';
 
@@ -180,7 +187,7 @@ export type OracleRerankOptions = {
 };
 
 /**
- * Rerank up to 80 unique games (shelf order) with the taste query, then reorder games within each shelf.
+ * Rerank up to ORACLE_RERANK_POOL unique games (round-robin across shelves) with the taste query, then reorder games within each shelf.
  */
 export async function applyOracleRerankShelves(
   profile: TasteProfile,

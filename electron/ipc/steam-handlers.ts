@@ -305,7 +305,9 @@ export function register(): void {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.warn(`[Steam IPC] fetchCatalogBatch #${++_catalogBatchCount} failed (${appIds.length} ids):`, msg);
-      return [];
+      // Rethrow (was `return []`): the catalog sync must see the failure to retry the
+      // batch and to avoid stamping a partial catalog as a fresh, complete sync.
+      throw error;
     }
   });
 

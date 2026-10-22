@@ -38,6 +38,8 @@ const { ClassicLevel } = require('classic-level') as { ClassicLevel: any };
 
 export interface LevelStore {
   get<T>(namespace: string, key: string): Promise<T | null>;
+  /** Bulk point lookup — one round trip; `null` for missing keys, same order as `keys`. */
+  getMany<T>(namespace: string, keys: string[]): Promise<Array<T | null>>;
   getAll<T>(namespace: string): Promise<Array<{ key: string; value: T }>>;
   put<T>(namespace: string, key: string, value: T): Promise<void>;
   del(namespace: string, key: string): Promise<void>;
@@ -179,6 +181,24 @@ async function getImpl<T>(namespace: string, key: string): Promise<T | null> {
     // classic-level throws LEVEL_NOT_FOUND for missing keys.
     if ((err as any)?.code === 'LEVEL_NOT_FOUND') return null;
     logger.error(`[LevelStore] get(${namespace}, ${key}) failed:`, err);
+    throw err;
+  }
+}
+
+async function getManyImpl<T>(namespace: string, keys: string[]): Promise<Array<T | null>> {
+  validateNamespace(namespace);
+  for (const k of keys) validateKey(k);
+  if (keys.length === 0) return [];
+  const db = await openDb();
+  try {
+    const raws: Array<string | undefined> = await db.getMany(keys.map((k) => encodeKey(namespace, k)));
+    // A corrupt row reads as missing instead of failing every other key in the slice
+    return raws.map((raw) => {
+      if (raw === undefined || raw === null) return null;
+      try { return decodeValue<T>(raw); } catch { return null; }
+    });
+  } catch (err) {
+    logger.error(`[LevelStore] getMany(${namespace}, ${keys.length} keys) failed:`, err);
     throw err;
   }
 }
@@ -378,6 +398,7 @@ export function getLevelStore(): LevelStore {
   if (storeSingleton) return storeSingleton;
   storeSingleton = {
     get: getImpl,
+    getMany: getManyImpl,
     getAll: getAllImpl,
     put: putImpl,
     del: delImpl,

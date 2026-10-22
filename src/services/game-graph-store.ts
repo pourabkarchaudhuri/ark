@@ -14,7 +14,7 @@
  */
 
 import { annIndex } from './ann-index';
-import { getAllPooledEmbeddingsForGraph } from './embedding-service';
+import { embeddingService, getAllPooledEmbeddingsForGraph } from './embedding-service';
 
 export interface GraphScores {
   pageRank: number;
@@ -58,6 +58,133 @@ const SCORES_KEY = 'scores';
 
 const NEIGHBORS_K = 10;
 const QUERY_BATCH_SIZE = 200; // Tradeoff: larger = fewer IPC round-trips but bigger payloads
+
+/**
+ * Hard ceiling for the PageRank/PPR/HITS/Brandes/Louvain worker. It used to
+ * have none, so a wedged worker left `phase: 'building'` forever and every
+ * consumer waiting on the graph waited on nothing.
+ */
+export const GRAPH_METRICS_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * The ANN signature (`ann-${vectorCount}`) changes every time the background
+ * catalog embedder adds vectors, so a signature mismatch alone must not force
+ * a full rebuild (read every embedding + thousands of ANN queries + metrics).
+ * With a graph already loaded, rebuild at most once per this interval and
+ * never while catalog embedding is still running; the loaded graph keeps
+ * serving in the meantime.
+ */
+export const GRAPH_REBUILD_MIN_INTERVAL_MS = 10 * 60_000;
+/** Back-off after a failed build before another attempt is allowed. */
+const GRAPH_BUILD_FAILURE_COOLDOWN_MS = 2 * 60_000;
+
+function isCatalogEmbeddingRunning(): boolean {
+  try {
+    return embeddingService?.isCatalogRunning === true;
+  } catch {
+    return false;
+  }
+}
+
+type MetricsWorkerResult = {
+  pageRank: Float32Array;
+  personalizedPageRank: Float32Array | null;
+  authority: Float32Array;
+  hub: Float32Array;
+  nodeBetweenness: Float32Array | null;
+  edgeBetweenness: Float32Array | null;
+  prDelta: Float32Array | null;
+  community: Int32Array;
+  degree: Uint16Array;
+  communityCount: number;
+};
+
+/**
+ * Run the graph-metrics worker once with a hard timeout. On timeout the worker
+ * is terminated and the promise rejects, so `build()` can flip the store to
+ * `phase: 'error'` instead of staying in 'building' forever.
+ */
+export function runGraphMetricsWorker(
+  createWorker: () => Worker,
+  nodeIds: string[],
+  edges: Float32Array,
+  personalization: Float32Array | null,
+  opts: { timeoutMs?: number; onProgress?: (stage: string, percent: number) => void } = {},
+): Promise<MetricsWorkerResult> {
+  const timeoutMs = opts.timeoutMs ?? GRAPH_METRICS_TIMEOUT_MS;
+  return new Promise((resolve, reject) => {
+    let worker: Worker;
+    try {
+      worker = createWorker();
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    let settled = false;
+    const settle = (apply: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { worker.terminate(); } catch { /* already gone */ }
+      apply();
+    };
+    const timer = setTimeout(() => {
+      settle(() => reject(new Error(`Graph metrics worker timed out after ${Math.round(timeoutMs / 1000)}s`)));
+    }, timeoutMs);
+
+    worker.onmessage = (e: MessageEvent) => {
+      const msg = e.data;
+      if (msg?.type === 'progress') {
+        if (!settled) opts.onProgress?.(msg.stage, msg.percent);
+      } else if (msg?.type === 'result') {
+        // Defensive re-wrap + copy. Structured-clone preserves typed-array types, but if a
+        // worker host serializes via JSON or transfers buffers without the view,
+        // we'd silently get plain ArrayBuffers and fail downstream `instanceof` checks.
+        // Always allocate a fresh view so IDB never sees a detached buffer.
+        const wrapF = (v: Float32Array | null | undefined): Float32Array | null => {
+          if (!v) return null;
+          const asF = v instanceof Float32Array ? v : new Float32Array(v as unknown as ArrayBuffer);
+          return copyFloat32ForPersist(asF);
+        };
+        const wrapI32 = (v: Int32Array | undefined): Int32Array => {
+          const asI = v instanceof Int32Array ? v : new Int32Array((v as unknown as ArrayBuffer) ?? 0);
+          return copyInt32ForPersist(asI);
+        };
+        const wrapU16 = (v: Uint16Array | undefined): Uint16Array => {
+          const asU = v instanceof Uint16Array ? v : new Uint16Array((v as unknown as ArrayBuffer) ?? 0);
+          return copyUint16ForPersist(asU);
+        };
+        settle(() => resolve({
+          pageRank: wrapF(msg.pageRank) ?? new Float32Array(0),
+          personalizedPageRank: wrapF(msg.personalizedPageRank),
+          authority: wrapF(msg.authority) ?? new Float32Array(0),
+          hub: wrapF(msg.hub) ?? new Float32Array(0),
+          nodeBetweenness: wrapF(msg.nodeBetweenness),
+          edgeBetweenness: wrapF(msg.edgeBetweenness),
+          prDelta: wrapF(msg.prDelta),
+          community: wrapI32(msg.community),
+          degree: wrapU16(msg.degree),
+          communityCount: msg.communityCount,
+        }));
+      } else if (msg?.type === 'error') {
+        settle(() => reject(new Error(msg.error)));
+      }
+    };
+    worker.onerror = (err) => {
+      settle(() => reject(err.error ?? new Error(err.message ?? 'Worker errored')));
+    };
+
+    // Transfer copies only — keep caller `edges` / `personalization` attached for
+    // Phase C adjacency + idbPut (transferring would detach the originals).
+    const { edgesForWorker, personalizationForWorker, transferList } =
+      prepareGraphWorkerTransfer(edges, personalization);
+    worker.postMessage(
+      { type: 'compute', nodeIds, edges: edgesForWorker, personalization: personalizationForWorker },
+      transferList,
+    );
+  });
+}
 
 let dbInstance: IDBDatabase | null = null;
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -197,8 +324,16 @@ async function readAllEmbeddings(): Promise<GraphEmbeddingRow[]> {
   }
 }
 
-class GameGraphStore {
+export class GameGraphStore {
+  constructor(private readonly _opts: { metricsTimeoutMs?: number } = {}) {}
+
   private _listeners = new Set<() => void>();
+  /** Shared in-flight build — set synchronously, before any await, so concurrent callers join it. */
+  private _buildPromise: Promise<boolean> | null = null;
+  private _buildForced = false;
+  private _lastBuildStartedAt = 0;
+  private _lastBuildFailedAt = 0;
+  private _maxPageRank: number | null = null;
   private _state: BuildState = { phase: 'idle' };
   private _nodeIds: string[] = [];
   private _idIndex = new Map<string, number>();
@@ -226,6 +361,50 @@ class GameGraphStore {
   get isReady(): boolean { return this._state.phase === 'ready'; }
   get meta(): GraphMeta | null { return this._meta; }
   get nodeCount(): number { return this._nodeIds.length; }
+  /** True while a (possibly older-signature) graph's scores are loaded in memory — usable even mid-rebuild. */
+  get hasScores(): boolean { return this._scores != null; }
+  /** True while a build/restore started via `build()` is in flight. */
+  get isBuildInFlight(): boolean { return this._buildPromise != null; }
+
+  hasNode(gameId: string): boolean {
+    return this._idIndex.has(gameId);
+  }
+
+  /** Max PageRank across every node — the worker's global normalizer (memoized per graph). */
+  getMaxPageRank(): number {
+    if (!this._scores) return 0;
+    if (this._maxPageRank == null) {
+      let max = 0;
+      const pr = this._scores.pageRank;
+      for (let i = 0; i < pr.length; i++) if (pr[i] > max) max = pr[i];
+      this._maxPageRank = max;
+    }
+    return this._maxPageRank;
+  }
+
+  /**
+   * Scores for just these ids (unknown ids skipped). Oracle packs only its
+   * candidate + user ids; `getAllScores()` materialized an object per node
+   * (100K+) that was then structured-cloned to the worker on every compute.
+   */
+  getScoresFor(gameIds: Iterable<string>): Record<string, GraphScores> | null {
+    if (!this._scores) return null;
+    const out: Record<string, GraphScores> = {};
+    const s = this._scores;
+    for (const id of gameIds) {
+      const i = this._idIndex.get(id);
+      if (i === undefined || id in out) continue;
+      out[id] = {
+        pageRank: s.pageRank[i],
+        personalizedPageRank: s.personalizedPageRank?.[i] ?? 0,
+        authority: s.authority?.[i] ?? 0,
+        hub: s.hub?.[i] ?? 0,
+        community: s.community[i],
+        degree: s.degree[i],
+      };
+    }
+    return out;
+  }
 
   /** Get aggregate graph scores for a single gameId. Returns null if graph not built. */
   getScores(gameId: string): GraphScores | null {
@@ -345,11 +524,17 @@ class GameGraphStore {
     return list.slice(0, k);
   }
 
-  /** Try restoring from IDB. Returns true if cached graph matches current ANN signature. */
-  async tryRestore(annSignature: string): Promise<boolean> {
+  /**
+   * Try restoring from IDB. Returns true if cached graph matches current ANN signature.
+   * With `acceptStale`, any persisted graph is restored even when the signature
+   * moved on (catalog embedding churns it) — callers then decide, through the
+   * throttled `build()`, whether a rebuild is due.
+   */
+  async tryRestore(annSignature: string, opts?: { acceptStale?: boolean }): Promise<boolean> {
     try {
       const meta = await idbGet<GraphMeta>(META_KEY);
-      if (!meta || meta.signature !== annSignature) return false;
+      if (!meta) return false;
+      if (meta.signature !== annSignature && !opts?.acceptStale) return false;
 
       const nodeIds = await idbGet<string[]>(NODE_IDS_KEY);
       const scoresRaw = await idbGet<{
@@ -404,6 +589,7 @@ class GameGraphStore {
       this._adjacency = this._buildAdjacencyFromEdges(edgesRaw, nodeIds);
       this._meta = meta;
       this._brokerSet = null; // invalidate memoized broker set on restore
+      this._maxPageRank = null;
       this._state = { phase: 'ready', meta };
       this._notify();
       return true;
@@ -444,14 +630,49 @@ class GameGraphStore {
    *                    When provided, the worker computes Personalized PageRank seeded
    *                    on these nodes — the foundation for Frontier Aurora.
    */
-  async build(annSignature: string, opts?: { force?: boolean; librarySeed?: LibrarySeed | null }): Promise<boolean> {
-    if (!opts?.force && this._state.phase === 'building') return false;
+  build(annSignature: string, opts?: { force?: boolean; librarySeed?: LibrarySeed | null }): Promise<boolean> {
+    // Join an in-flight build instead of racing a second one. Claimed synchronously so
+    // two callers in the same tick cannot both start. A forced build (PPR seed repair)
+    // queues behind an unforced one rather than being absorbed by it.
+    if (this._buildPromise) {
+      if (opts?.force && !this._buildForced) return this._buildPromise.then(() => this.build(annSignature, opts));
+      return this._buildPromise;
+    }
+    if (this.isRebuildThrottled(annSignature, opts?.force === true)) {
+      return Promise.resolve(this._scores != null);
+    }
+    this._buildForced = opts?.force === true;
+    const p = this._doBuild(annSignature, opts).finally(() => {
+      if (this._buildPromise === p) this._buildPromise = null;
+    });
+    this._buildPromise = p;
+    return p;
+  }
+  /**
+   * True when a rebuild should be skipped for now: a graph is already loaded
+   * and either one was (re)built recently, or catalog embedding is still
+   * moving the ANN signature. Also backs off after a failed build.
+   */
+  isRebuildThrottled(annSignature: string, force = false): boolean {
+    const now = Date.now();
+    if (this._lastBuildFailedAt > 0 && now - this._lastBuildFailedAt < GRAPH_BUILD_FAILURE_COOLDOWN_MS) {
+      return true;
+    }
+    if (!this._scores || !this._meta) return false; // nothing to serve — must build
+    if (!force && this._meta.signature === annSignature) return false; // cheap restore/no-op path
+    const last = Math.max(this._meta.builtAt, this._lastBuildStartedAt);
+    if (now - last < GRAPH_REBUILD_MIN_INTERVAL_MS) return true;
+    if (isCatalogEmbeddingRunning()) return true;
+    return false;
+  }
+
+  private async _doBuild(annSignature: string, opts?: { force?: boolean; librarySeed?: LibrarySeed | null }): Promise<boolean> {
+    this._lastBuildStartedAt = Date.now();
     if (!opts?.force && await this.tryRestore(annSignature)) {
       return true;
     }
     if (!annIndex.isReady) {
-      this._state = { phase: 'error', error: 'ANN index not ready' };
-      this._notify();
+      this._failBuild('ANN index not ready');
       return false;
     }
 
@@ -460,8 +681,7 @@ class GameGraphStore {
 
     const embeddings = await readAllEmbeddings();
     if (embeddings.length === 0) {
-      this._state = { phase: 'error', error: 'No embeddings cached' };
-      this._notify();
+      this._failBuild('No embeddings cached', { cooldown: true });
       return false;
     }
 
@@ -539,10 +759,23 @@ class GameGraphStore {
       communityCount: number;
     };
     try {
-      workerResult = await this._runMetricsWorker(nodeIds, edges, personalization);
+      workerResult = await runGraphMetricsWorker(
+        () => new Worker(new URL('../workers/graph-metrics.worker.ts', import.meta.url), { type: 'module' }),
+        nodeIds,
+        edges,
+        personalization,
+        {
+          timeoutMs: this._opts.metricsTimeoutMs,
+          onProgress: (stage, percent) => {
+            const pct = 60 + Math.round((percent / 100) * 40);
+            this._state = { phase: 'building', stage, percent: pct };
+            this._notify();
+          },
+        },
+      );
     } catch (err) {
-      this._state = { phase: 'error', error: err instanceof Error ? err.message : 'Metrics worker failed' };
-      this._notify();
+      console.warn('[GameGraph] metrics worker failed:', err);
+      this._failBuild(err instanceof Error ? err.message : 'Metrics worker failed', { cooldown: true });
       return false;
     }
 
@@ -572,6 +805,8 @@ class GameGraphStore {
     };
     this._edges = edges;
     this._brokerSet = null; // invalidate memoized broker set on rebuild
+    this._maxPageRank = null;
+    this._lastBuildFailedAt = 0;
     this._adjacency = this._buildAdjacencyFromEdges(edges, nodeIds);
     this._meta = meta;
 
@@ -585,87 +820,20 @@ class GameGraphStore {
     return true;
   }
 
-  private _runMetricsWorker(
-    nodeIds: string[],
-    edges: Float32Array,
-    personalization: Float32Array | null,
-  ): Promise<{
-    pageRank: Float32Array;
-    personalizedPageRank: Float32Array | null;
-    authority: Float32Array;
-    hub: Float32Array;
-    nodeBetweenness: Float32Array | null;
-    edgeBetweenness: Float32Array | null;
-    prDelta: Float32Array | null;
-    community: Int32Array;
-    degree: Uint16Array;
-    communityCount: number;
-  }> {
-    return new Promise((resolve, reject) => {
-      let worker: Worker;
-      try {
-        worker = new Worker(new URL('../workers/graph-metrics.worker.ts', import.meta.url), { type: 'module' });
-      } catch (err) {
-        reject(err);
-        return;
-      }
-
-      worker.onmessage = (e: MessageEvent) => {
-        const msg = e.data;
-        if (msg?.type === 'progress') {
-          const pct = 60 + Math.round((msg.percent / 100) * 40);
-          this._state = { phase: 'building', stage: msg.stage, percent: pct };
-          this._notify();
-        } else if (msg?.type === 'result') {
-          worker.terminate();
-          // Defensive re-wrap + copy. Structured-clone preserves typed-array types, but if a
-          // worker host serializes via JSON or transfers buffers without the view,
-          // we'd silently get plain ArrayBuffers and fail downstream `instanceof` checks.
-          // Always allocate a fresh view so IDB never sees a detached buffer.
-          const wrapF = (v: Float32Array | null | undefined): Float32Array | null => {
-            if (!v) return null;
-            const asF = v instanceof Float32Array ? v : new Float32Array(v as unknown as ArrayBuffer);
-            return copyFloat32ForPersist(asF);
-          };
-          const wrapI32 = (v: Int32Array | undefined): Int32Array => {
-            const asI = v instanceof Int32Array ? v : new Int32Array((v as unknown as ArrayBuffer) ?? 0);
-            return copyInt32ForPersist(asI);
-          };
-          const wrapU16 = (v: Uint16Array | undefined): Uint16Array => {
-            const asU = v instanceof Uint16Array ? v : new Uint16Array((v as unknown as ArrayBuffer) ?? 0);
-            return copyUint16ForPersist(asU);
-          };
-          resolve({
-            pageRank: wrapF(msg.pageRank) ?? new Float32Array(0),
-            personalizedPageRank: wrapF(msg.personalizedPageRank),
-            authority: wrapF(msg.authority) ?? new Float32Array(0),
-            hub: wrapF(msg.hub) ?? new Float32Array(0),
-            nodeBetweenness: wrapF(msg.nodeBetweenness),
-            edgeBetweenness: wrapF(msg.edgeBetweenness),
-            prDelta: wrapF(msg.prDelta),
-            community: wrapI32(msg.community),
-            degree: wrapU16(msg.degree),
-            communityCount: msg.communityCount,
-          });
-        } else if (msg?.type === 'error') {
-          worker.terminate();
-          reject(new Error(msg.error));
-        }
-      };
-      worker.onerror = (err) => {
-        worker.terminate();
-        reject(err.error ?? new Error(err.message ?? 'Worker errored'));
-      };
-
-      // Transfer copies only — keep caller `edges` / `personalization` attached for
-      // Phase C adjacency + idbPut (transferring would detach the originals).
-      const { edgesForWorker, personalizationForWorker, transferList } =
-        prepareGraphWorkerTransfer(edges, personalization);
-      worker.postMessage(
-        { type: 'compute', nodeIds, edges: edgesForWorker, personalization: personalizationForWorker },
-        transferList,
-      );
-    });
+  /**
+   * Record a failed build. When an older graph is still loaded it keeps
+   * serving (phase back to 'ready' on its own meta) instead of every consumer
+   * losing graph signals over a failed refresh.
+   */
+  private _failBuild(error: string, opts?: { cooldown?: boolean }): void {
+    if (opts?.cooldown) this._lastBuildFailedAt = Date.now();
+    if (this._scores && this._meta) {
+      console.warn(`[GameGraph] build failed (${error}) — keeping previously loaded graph`);
+      this._state = { phase: 'ready', meta: this._meta };
+    } else {
+      this._state = { phase: 'error', error };
+    }
+    this._notify();
   }
 }
 

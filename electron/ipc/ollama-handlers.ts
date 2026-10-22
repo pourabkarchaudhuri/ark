@@ -15,6 +15,12 @@ import {
   runOllamaSetup,
   generateEmbedding,
   generateEmbeddingsBatch,
+  generateEmbeddingsBatchDetailed,
+  getSessionEmbedOptions,
+  getSessionNumBatch,
+  stepDownSessionNumBatch,
+  isOllamaOomError,
+  EMBED_NUM_THREAD_CPU,
   detectGpuMode,
   getEmbeddingModelInfo,
   getEmbeddingModelSize,
@@ -167,21 +173,7 @@ function looksLikeModelMissing(httpStatus: number, bodyText: string): boolean {
 // GPU mode: 256 — GPU eats them fast, HTTP overhead is the bottleneck instead.
 const EMBED_SUB_BATCH_CPU = 100;
 const EMBED_SUB_BATCH_GPU = 256;
-const EMBED_SUB_BATCH_BG = 100; // polite mode — same as CPU even on GPU
-// CPU-mode thread cap. Combined with serial requests keeps CPU ≤10% on
-// CPU-only machines. Ignored when GPU mode is detected (GPU does the work,
-// CPU threads aren't the bottleneck).
-const EMBED_NUM_THREAD_CPU = 1;
-// GPU-mode Ollama internal batch — tokens processed per inference pass.
-// Ladder is descended on VRAM OOM (all-null result). 2048 is sweet spot on a
-// 6+ GB GPU; 512 ≈ Ollama default (works on most). `undefined` lets Ollama
-// pick (final fallback — should always succeed if model loaded).
-const EMBED_NUM_BATCH_LADDER: Array<number | undefined> = [2048, 1024, 512, undefined];
-// Polite (background) mode keeps GPU pressure low so a foreground game runs smoothly.
-const EMBED_NUM_BATCH_BG = 256;
-// Force ALL layers to GPU — Ollama's auto-detect can leave layers on CPU
-// on hybrid laptops (Intel iGPU + dGPU), capping throughput.
-const EMBED_NUM_GPU_OFFLOAD = 999;
+const EMBED_SUB_BATCH_BG = 64; // polite mode — smaller bursts even on GPU
 // Concurrent in-flight requests on GPU. Two overlaps HTTP/JSON-shuffle wall-clock
 // of one batch with GPU compute of another. Requires OLLAMA_NUM_PARALLEL≥2 on the
 // server side to actually parallelize inference — without it, Ollama queues
@@ -190,20 +182,25 @@ const EMBED_GPU_INFLIGHT = 2;
 // Per-batch sleep when in background mode — gives the foreground app (likely a
 // game) uninterrupted GPU/CPU windows between embedding bursts.
 const EMBED_BG_COOLDOWN_MS = 100;
+// Extra requests one IPC call may spend bisecting sub-batches that Ollama
+// rejected with an error body, to isolate the offending text(s) instead of
+// failing every innocent text that shared its sub-batch.
+const EMBED_BISECT_BUDGET = 24;
+
+// Runner options (num_thread / num_batch / num_gpu) are NOT chosen here any
+// more — they are fixed per session by `getSessionEmbedOptions()` so Ollama
+// never reloads the model on alt-tab. Background mode only changes pacing.
 
 // ─── Session-scoped state ─────────────────────────────────────────────────
-// Mutates over the session as we discover VRAM limits and window-focus state.
 const embedState = {
-  /** Index into EMBED_NUM_BATCH_LADDER. Starts at 0 (largest). Steps down on OOM, never back up. */
-  numBatchIdx: 0,
   /** True when main window has been blurred for >2s — assume user is in another app (likely gaming). */
   background: false,
 };
 
 /**
  * Toggle polite background mode. Called by main.ts when the main window
- * blur/focus state changes. Affects only the GPU-mode embedding profile —
- * CPU mode is already polite by default (1 thread, serial).
+ * blur/focus state changes. Affects only app-side pacing (sub-batch size,
+ * in-flight count, cooldown) — never the Ollama runner options.
  */
 export function setEmbeddingBackgroundMode(on: boolean): void {
   if (embedState.background === on) return;
@@ -279,12 +276,17 @@ export function register(): void {
   // Generate embeddings for multiple texts.
   // Sends sub-batches as array requests to Ollama (/api/embed accepts string[])
   // so Ollama handles them sequentially internally — no parallel-requests CPU spike.
-  ipcMain.handle('ollama:generateEmbeddings', async (_event: any, items: Array<{ id: string; text: string }>) => {
+  // `opts.reportTransient` (v1.0.73): return `{ results, transientIds }` instead of the bare map.
+  // transientIds = items that got no vector for a reason that says nothing about the text
+  // (timeout / server gone / never sent) — the caller must not count those as the game's fault.
+  ipcMain.handle('ollama:generateEmbeddings', async (_event: any, items: Array<{ id: string; text: string }>, opts?: { reportTransient?: boolean }) => {
+    const transientIds: string[] = [];
+    const reply = (results: Record<string, number[]>) => (opts?.reportTransient ? { results, transientIds } : results);
     try {
-      if (!Array.isArray(items)) return {};
+      if (!Array.isArray(items)) return reply({});
 
       const validItems = items.filter(item => item.id && item.text);
-      if (validItems.length === 0) return {};
+      if (validItems.length === 0) return reply({});
 
       // Length-sort: group texts of similar length into the same sub-batch.
       // Ollama processes the array sequentially so cross-text padding doesn't
@@ -298,40 +300,41 @@ export function register(): void {
       // input order is irrelevant.
       validItems.sort((a, b) => a.text.length - b.text.length);
 
-      // Probe whether the model is GPU-loaded. When it is, we skip the
-      // CPU thread cap entirely and push GPU-specific knobs (full layer
-      // offload + larger internal batch). Probe is cached after first call.
+      // Probe whether the model is GPU-loaded — decides app-side pacing only
+      // (sub-batch size / in-flight count). Conclusive answers are cached;
+      // an early "model not loaded yet" probe is retried later.
       const onGpu = await detectGpuMode();
 
       const results: Record<string, number[]> = {};
       let completed = 0;
+      // Set once Ollama times out / refuses the connection: the rest of this
+      // call's sub-batches fail fast instead of each waiting out its own timeout.
+      let serverDown = false;
+      let bisectBudget = EMBED_BISECT_BUDGET;
 
-      // Profile is recomputed PER sub-batch so window blur/focus or a VRAM
-      // step-down mid-pass takes effect immediately on the next sub-batch.
+      // Pacing is recomputed PER sub-batch so window blur/focus takes effect
+      // immediately. Runner options are session-fixed (see getSessionEmbedOptions).
       const pickProfile = () => {
         const background = embedState.background;
+        const numBatch = getSessionNumBatch();
         if (!onGpu) {
           return {
-            subBatch: EMBED_SUB_BATCH_CPU,
-            opts: { numThread: EMBED_NUM_THREAD_CPU } as const,
+            subBatch: background ? EMBED_SUB_BATCH_BG : EMBED_SUB_BATCH_CPU,
             inFlight: 1,
             cooldownMs: background ? EMBED_BG_COOLDOWN_MS : 0,
-            mode: background ? `CPU-bg (threads=${EMBED_NUM_THREAD_CPU})` : `CPU (threads=${EMBED_NUM_THREAD_CPU})`,
+            mode: `${background ? 'CPU-bg' : 'CPU'} (threads=${EMBED_NUM_THREAD_CPU}, num_batch=${numBatch ?? 'default'})`,
           };
         }
         if (background) {
           return {
             subBatch: EMBED_SUB_BATCH_BG,
-            opts: { numGpu: EMBED_NUM_GPU_OFFLOAD, numBatch: EMBED_NUM_BATCH_BG },
             inFlight: 1, // single in-flight so foreground app gets GPU windows
             cooldownMs: EMBED_BG_COOLDOWN_MS,
-            mode: `GPU-bg (subBatch=${EMBED_SUB_BATCH_BG}, num_batch=${EMBED_NUM_BATCH_BG}, inFlight=1)`,
+            mode: `GPU-bg (subBatch=${EMBED_SUB_BATCH_BG}, num_batch=${numBatch ?? 'default'}, inFlight=1)`,
           };
         }
-        const numBatch = EMBED_NUM_BATCH_LADDER[embedState.numBatchIdx];
         return {
           subBatch: EMBED_SUB_BATCH_GPU,
-          opts: { numGpu: EMBED_NUM_GPU_OFFLOAD, numBatch },
           inFlight: EMBED_GPU_INFLIGHT,
           cooldownMs: 0,
           mode: `GPU (subBatch=${EMBED_SUB_BATCH_GPU}, num_batch=${numBatch ?? 'default'}, inFlight=${EMBED_GPU_INFLIGHT})`,
@@ -346,46 +349,48 @@ export function register(): void {
         subBatches.push(validItems.slice(i, i + initialProfile.subBatch));
       }
 
-      // Per-sub-batch embed with VRAM OOM fallback. If the result is all-null
-      // (likely Ollama error like "out of memory") AND we sent valid texts
-      // AND we're on GPU with a num_batch set, step the ladder down once and
-      // retry. The stepped-down value sticks for the rest of the session via
-      // `embedState.numBatchIdx`.
-      const embedSubBatchWithFallback = async (
-        texts: string[],
-      ): Promise<(number[] | null)[]> => {
-        const profile = pickProfile();
-        let embeddings = await generateEmbeddingsBatch(texts, profile.opts);
+      // Embed one slice of texts. Failure handling is driven by what Ollama
+      // actually reported, never by an all-null guess:
+      //   - OOM error body  → step num_batch down (session-sticky), retry once.
+      //   - other error body → bisect, so one poison text only fails itself
+      //     rather than its whole sub-batch (bounded by EMBED_BISECT_BUDGET).
+      //   - timeout / network → server hung or gone: stop this call.
+      const embedTexts = async (texts: string[], oomRetried = false): Promise<(number[] | null)[]> => {
+        if (serverDown) return texts.map(() => null);
+        const { embeddings, error } = await generateEmbeddingsBatchDetailed(texts);
+        if (!error) return embeddings;
 
-        const allNull = embeddings.length > 0 && embeddings.every(e => e === null);
-        const looksLikeOom = allNull
-          && onGpu
-          && !embedState.background
-          && profile.opts.numBatch !== undefined
-          && embedState.numBatchIdx < EMBED_NUM_BATCH_LADDER.length - 1;
-
-        if (looksLikeOom) {
-          embedState.numBatchIdx += 1;
-          const nextBatch = EMBED_NUM_BATCH_LADDER[embedState.numBatchIdx];
-          logger.warn(`[Ollama] Embedding batch returned all-null on GPU — assuming VRAM tight, stepping num_batch → ${nextBatch ?? 'Ollama default'}`);
-          embeddings = await generateEmbeddingsBatch(texts, {
-            numGpu: EMBED_NUM_GPU_OFFLOAD,
-            numBatch: nextBatch,
-          });
+        if (error.kind === 'timeout' || error.kind === 'network') {
+          serverDown = true;
+          logger.warn(`[Ollama] Embedding request failed (${error.kind}: ${error.message}) — skipping the rest of this batch`);
+          return texts.map(() => null);
         }
-        return embeddings;
+        if (error.kind === 'http' && isOllamaOomError(error.message) && !oomRetried && stepDownSessionNumBatch()) {
+          return embedTexts(texts, true);
+        }
+        if (error.kind === 'http' && texts.length > 1 && bisectBudget >= 2) {
+          bisectBudget -= 2;
+          const mid = Math.ceil(texts.length / 2);
+          const left = await embedTexts(texts.slice(0, mid), oomRetried);
+          const right = await embedTexts(texts.slice(mid), oomRetried);
+          return [...left, ...right];
+        }
+        logger.warn(`[Ollama] Embedding request failed for ${texts.length} text(s): ${error.kind} ${error.status ?? ''} ${error.message.slice(0, 200)}`);
+        return texts.map(() => null);
       };
 
       let cursor = 0;
       const runWorker = async (): Promise<void> => {
-        while (cursor < subBatches.length) {
+        while (cursor < subBatches.length && !serverDown) {
           const myIdx = cursor++;
           const subBatch = subBatches[myIdx];
           const texts = subBatch.map(item => item.text);
-          const embeddings = await embedSubBatchWithFallback(texts);
+          const embeddings = await embedTexts(texts);
           for (let k = 0; k < subBatch.length; k++) {
             const vec = embeddings[k];
             if (vec) results[subBatch[k].id] = vec;
+            // Once the server is down, every null in this slice is suspect — conservative on purpose
+            else if (serverDown) transientIds.push(subBatch[k].id);
           }
           completed += subBatch.length;
           if (completed % 100 === 0 || completed === validItems.length) {
@@ -405,12 +410,15 @@ export function register(): void {
         runWorker,
       );
       await Promise.all(workers);
+      // Sub-batches never sent because the server went down mid-call
+      for (let i = cursor; i < subBatches.length; i++) for (const item of subBatches[i]) transientIds.push(item.id);
 
       logger.log(`[Ollama] Generated ${Object.keys(results).length}/${validItems.length} embeddings (mode=${pickProfile().mode})`);
-      return results;
+      return reply(results);
     } catch (error) {
       logger.error('[Ollama] Batch embedding error:', error);
-      return {};
+      for (const item of Array.isArray(items) ? items : []) if (item?.id) transientIds.push(item.id);
+      return reply({});
     }
   });
 
@@ -495,15 +503,11 @@ export function register(): void {
       );
       const avgChars = probeTexts.reduce((a, t) => a + t.length, 0) / probeTexts.length;
 
-      // Use the same profile picker our handler uses — so the number reflects
-      // actual production throughput, not best-case theoretical.
+      // Same session-fixed runner options as production — so the number
+      // reflects real throughput and the probe never triggers a model reload.
       const onGpu = result.onGpu;
       const background = embedState.background;
-      const opts = !onGpu
-        ? { numThread: EMBED_NUM_THREAD_CPU }
-        : background
-          ? { numGpu: EMBED_NUM_GPU_OFFLOAD, numBatch: EMBED_NUM_BATCH_BG }
-          : { numGpu: EMBED_NUM_GPU_OFFLOAD, numBatch: EMBED_NUM_BATCH_LADDER[embedState.numBatchIdx] };
+      const opts = getSessionEmbedOptions();
 
       const t0 = Date.now();
       const embeddings = await generateEmbeddingsBatch(probeTexts, opts);

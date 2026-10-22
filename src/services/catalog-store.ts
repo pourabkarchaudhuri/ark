@@ -27,6 +27,7 @@ import type {
   SteamTagDefinition,
 } from '@/types/catalog';
 import { classifyTags } from '@/data/steam-tag-map';
+import { storeGetMany } from './store-bulk';
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
 
@@ -50,10 +51,10 @@ const LEVEL_ENTRIES_NAMESPACE = 'catalog-entries';
 const LEVEL_META_NAMESPACE = 'catalog-meta';
 const LEVEL_CHUNK_SIZE = 1000; // rows per getChunk hop (renderer-side pagination)
 const LEVEL_MIGRATION_MARKER_KEY = 'ark-steam-catalog-migrated-v1';
-// Point-lookup (getEntries) round-trip size — kept comfortably under the
-// store:get rate limiter's 500/s-per-channel-per-sender budget so any
-// caller, regardless of how many ids it passes in one call, stays safe.
-const POINT_LOOKUP_CHUNK = 400;
+/** Migration attempts per session before falling back to IDB for the rest of it (see migrateFromIdbIfNeeded). */
+const MAX_MIGRATION_ATTEMPTS_PER_SESSION = 2;
+/** A sync with more failed batches than this (after one retry round) is not stamped fresh. */
+const MAX_FAILED_BATCH_RATIO = 0.01;
 
 // ─── IDB Helpers (connection pooled) ─────────────────────────────────────────
 
@@ -180,8 +181,22 @@ async function idbStreamAllEntries(
 
 // ─── LevelDB Helpers ────────────────────────────────────────────────────────────
 
+/**
+ * Set when the IDB→LevelDB migration has failed MAX_MIGRATION_ATTEMPTS_PER_SESSION
+ * times: the rest of the session reads and writes IDB (complete, and kept current),
+ * and the next launch retries. Without it every store call re-streamed the whole
+ * ~155k-row IDB store into LevelDB again (the v1.0.68 retry storm, catalog edition)
+ * while reads hit the partially filled LevelDB namespace.
+ */
+let levelDisabledForSession = false;
+
+/** Test hook — module state otherwise outlives individual CatalogStore instances. */
+export function __resetCatalogStoreSessionState(): void {
+  levelDisabledForSession = false;
+}
+
 function useLevelDB(): boolean {
-  return typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
+  return !levelDisabledForSession && typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
 }
 
 async function levelPutBatch(entries: CatalogEntry[]): Promise<void> {
@@ -254,7 +269,9 @@ async function fetchTagList(): Promise<Map<number, string>> {
   const cached = useLevelDB()
     ? await levelGetMeta<Record<number, string>>('tag-name-map')
     : await idbGetMeta<Record<number, string>>('tag-name-map');
-  if (cached) {
+  // An empty map is a cached failure (GetTagList returned [] — no key, 403, timeout),
+  // not a tag list: treat it as missing so every later sync doesn't label tags `tag_<id>`.
+  if (cached && Object.keys(cached).length > 0) {
     tagNameMap = new Map(Object.entries(cached).map(([k, v]) => [Number(k), v]));
     return tagNameMap;
   }
@@ -269,6 +286,10 @@ async function fetchTagList(): Promise<Map<number, string>> {
     plain[t.tagid] = t.name;
   }
 
+  if (map.size === 0) {
+    console.warn('[CatalogStore] Tag list unavailable — tags will be unnamed this sync; retrying next sync');
+    return map; // not cached in memory or on disk
+  }
   if (useLevelDB()) await levelSetMeta('tag-name-map', plain);
   else await idbSetMeta('tag-name-map', plain);
 
@@ -361,7 +382,10 @@ export class CatalogStore {
     stage: 'idle', batchesCompleted: 0, batchesTotal: 0, gamesStored: 0,
   };
   private _syncing = false;
+  /** In-flight sync shared with every concurrent caller (splash + Oracle used to start two). */
+  private _syncPromise: Promise<void> | null = null;
   private _syncAbort: AbortController | null = null;
+  private _migrationAttempts = 0;
   /**
    * Guard against re-running the one-shot IDB→LevelDB migration within a
    * single session. Set to true ONLY after the marker is stamped (real
@@ -424,6 +448,14 @@ export class CatalogStore {
       return Promise.resolve();
     }
     if (this._migrationPromise) return this._migrationPromise;
+    if (this._migrationAttempts >= MAX_MIGRATION_ATTEMPTS_PER_SESSION) {
+      // Give up for this session: serve IDB (see levelDisabledForSession); next launch retries.
+      levelDisabledForSession = true;
+      this._migrationChecked = true;
+      console.warn('[CatalogStore] LevelDB migration keeps failing — using IndexedDB for this session');
+      return Promise.resolve();
+    }
+    this._migrationAttempts++;
 
     this._migrationPromise = this.runMigration().finally(() => {
       this._migrationPromise = null;
@@ -529,7 +561,15 @@ export class CatalogStore {
    * Run a full catalog sync. Safe to call multiple times — skips if fresh.
    * Progress is published via subscribe().
    */
-  async sync(force = false): Promise<void> {
+  sync(force = false): Promise<void> {
+    // Late callers join the running sync instead of returning before it finishes
+    // (the embedding pipeline used to start on a half-synced catalog).
+    if (this._syncPromise) return this._syncPromise;
+    this._syncPromise = this.runSync(force).finally(() => { this._syncPromise = null; });
+    return this._syncPromise;
+  }
+
+  private async runSync(force: boolean): Promise<void> {
     if (this._syncing) return;
     await this.migrateFromIdbIfNeeded();
 
@@ -586,62 +626,87 @@ export class CatalogStore {
       // Step 4: Fetch metadata with concurrency-limited queue
       let batchesCompleted = 0;
       let totalGamesStored = 0;
+      const failed: Array<{ batch: number[]; idx: number }> = [];
+      let permanentlyFailed = 0;
 
-      // Proper queue: each dequeue is atomic (no shared mutable index)
-      const queue = batches.map((b, i) => ({ batch: b, idx: i }));
-      const dequeue = () => queue.shift();
-
-      const workers: Promise<void>[] = [];
-      for (let w = 0; w < CONCURRENCY; w++) {
-        workers.push((async () => {
-          let item: ReturnType<typeof dequeue>;
-          while (!signal.aborted && (item = dequeue())) {
-            const { batch, idx } = item;
-            try {
-              const entries = await fetchBatch(batch, tags);
-              if (entries.length > 0) {
-                await putEntriesBatch(entries);
-                totalGamesStored += entries.length;
+      const runQueue = async (items: Array<{ batch: number[]; idx: number }>, concurrency: number, isRetry: boolean) => {
+        // Proper queue: each dequeue is atomic (no shared mutable index)
+        const queue = [...items];
+        const dequeue = () => queue.shift();
+        const workers: Promise<void>[] = [];
+        for (let w = 0; w < concurrency; w++) {
+          workers.push((async () => {
+            let item: ReturnType<typeof dequeue>;
+            while (!signal.aborted && (item = dequeue())) {
+              const { batch, idx } = item;
+              try {
+                const entries = await fetchBatch(batch, tags);
+                if (entries.length > 0) {
+                  await putEntriesBatch(entries);
+                  totalGamesStored += entries.length;
+                }
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                console.warn(`[CatalogStore] Batch ${idx} failed${isRetry ? ' on retry' : ''}:`, msg);
+                // A 4xx other than 429 is Steam rejecting the request itself — retrying won't help,
+                // and counting it would keep the catalog "stale" (full re-sync) on every launch.
+                if (/IStoreBrowseService 4(?!29)\d\d/.test(msg)) permanentlyFailed++;
+                else failed.push(item);
               }
-            } catch (err) {
-              console.warn(`[CatalogStore] Batch ${idx} failed:`, err instanceof Error ? err.message : err);
-            }
-            batchesCompleted++;
+              if (isRetry) continue;
+              batchesCompleted++;
 
-            if (batchesCompleted % 20 === 0 || batchesCompleted === batches.length) {
-              this._syncProgress = {
-                stage: 'fetching-metadata',
-                batchesCompleted,
-                batchesTotal: batches.length,
-                gamesStored: totalGamesStored,
-              };
-              this.notify();
+              if (batchesCompleted % 20 === 0 || batchesCompleted === batches.length) {
+                this._syncProgress = {
+                  stage: 'fetching-metadata',
+                  batchesCompleted,
+                  batchesTotal: batches.length,
+                  gamesStored: totalGamesStored,
+                };
+                this.notify();
+              }
             }
-          }
-        })());
+          })());
+        }
+        await Promise.all(workers);
+      };
+
+      await runQueue(batches.map((b, i) => ({ batch: b, idx: i })), CONCURRENCY, false);
+      // One gentler retry round for batches lost to rate limiting / transient errors
+      if (failed.length > 0 && !signal.aborted) {
+        const retry = failed.splice(0);
+        console.log(`[CatalogStore] Retrying ${retry.length} failed batches`);
+        await new Promise((r) => setTimeout(r, 5000));
+        await runQueue(retry, 2, true);
       }
 
-      await Promise.all(workers);
-
-      // Step 5: Save sync state
+      // Step 5: Save sync state. Only a complete run is stamped fresh — an aborted or
+      // heavily rate-limited run used to count as a full sync for 24h (and moved the
+      // embedding watermark), leaving the catalog short until the next day.
+      const prev = await getMeta<CatalogSyncState>('sync-state');
+      const complete = !signal.aborted && failed.length <= Math.ceil(batches.length * MAX_FAILED_BATCH_RATIO);
       const syncState: CatalogSyncState = {
-        lastSyncTimestamp: Date.now(),
-        totalEntries: totalGamesStored,
+        lastSyncTimestamp: complete ? Date.now() : (prev?.lastSyncTimestamp ?? 0),
+        // Rows are keyed overwrites, so a partial run never shrinks what's stored
+        totalEntries: complete ? totalGamesStored : Math.max(totalGamesStored, prev?.totalEntries ?? 0),
         batchesCompleted,
         batchesTotal: batches.length,
         inProgress: false,
       };
       await setMeta('sync-state', syncState);
 
+      // A partial run still leaves a usable catalog — downstream (embeddings, Oracle) proceeds;
+      // `error` carries the shortfall and the next sync retries since it isn't stamped fresh.
       this._syncProgress = {
-        stage: 'done',
+        stage: complete || syncState.totalEntries > 0 ? 'done' : 'error',
         batchesCompleted,
         batchesTotal: batches.length,
         gamesStored: totalGamesStored,
+        ...(complete ? {} : { error: signal.aborted ? 'Sync cancelled' : `${failed.length} of ${batches.length} batches failed — will retry next sync` }),
       };
       this.notify();
 
-      console.log(`[CatalogStore] Sync complete: ${totalGamesStored} games in ${batches.length} batches`);
+      console.log(`[CatalogStore] Sync ${complete ? 'complete' : 'incomplete'}: ${totalGamesStored} games in ${batches.length} batches (${failed.length} failed, ${permanentlyFailed} rejected by Steam)`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[CatalogStore] Sync failed:', msg);
@@ -788,29 +853,17 @@ export class CatalogStore {
   /**
    * Get specific entries by appid.
    *
-   * On the LevelDB path, point-lookups are chunked internally
-   * (`POINT_LOOKUP_CHUNK` per round-trip, run sequentially) rather than
-   * firing every id in one `Promise.all`. `store:get` is rate-limited to
-   * 500/s per channel per sender (see `electron/ipc/store-handlers.ts`);
-   * a caller passing thousands of ids in one call (e.g. galaxy-cache's
-   * embedding-enrichment pass) would otherwise burst past that budget in
-   * a single tick. Chunking here means every caller gets the same safe
-   * behavior without needing to know the IPC rate-limit internals.
+   * On the LevelDB path this is one `store:getMany` round trip per 2000 ids
+   * (`storeGetMany`). The previous 400-wide `store:get` fan-out ran into the
+   * store IPC rate limiter and silently dropped most rows for large callers
+   * (galaxy-cache's ~155k-id enrichment pass).
    */
   async getEntries(appIds: number[]): Promise<CatalogEntry[]> {
     if (appIds.length === 0) return [];
     await this.migrateFromIdbIfNeeded();
     if (useLevelDB()) {
-      const results: CatalogEntry[] = [];
-      for (let i = 0; i < appIds.length; i += POINT_LOOKUP_CHUNK) {
-        const slice = appIds.slice(i, i + POINT_LOOKUP_CHUNK);
-        const gets = slice.map((id) => window.store!.get<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, String(id)));
-        const settled = await Promise.all(gets);
-        for (const res of settled) {
-          if (res.value) results.push(res.value);
-        }
-      }
-      return results;
+      const values = await storeGetMany<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, appIds.map(String));
+      return values.filter((v): v is CatalogEntry => !!v);
     }
     const db = await getDB();
     return new Promise((resolve) => {

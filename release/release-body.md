@@ -1,28 +1,33 @@
-# Ark v1.0.72 — Embedding Space, rebuilt
+# Ark v1.0.73 — No more "stuck for hours"
 
-The Embedding Space has been rebuilt from the ground up. It's now one continuous dive from a view of the whole galaxy down to a single game and its closest matches.
+This release fixes the slowness and hangs people reported in catalog syncing, embeddings and Oracle recommendations.
 
-## New
+## Fixed
 
-- **Three depths.** Scroll from **Cosmos** (the whole catalog as a galaxy) through **Approach** into **Node** view. The depth rail and zone pills show where you are and jump between depths.
-- **Neighbour webs.** Pick a game to see its 12 most similar games as glowing links with orbiting systems. Step through them with ← / →, dive deeper with ↓, and come back with ↑. Each focused neighbour shows its own secondary web.
-- **The Path.** Every game you've played, in the order you first played it, drawn as a ribbon through the galaxy. See the whole route at once, then hop stop by stop.
-- **Tools.** Lasso (L) a region to see which genres live there. Probe mode (P) lets you fly freely. You can also filter by genre, jump in from your library, and save a high-resolution screenshot.
+- **Oracle no longer sits on "Generating semantic embeddings…" for hours.** Before scoring, it used to send thousands of candidate games through Ollama with no time limit. Now it only prepares your own games and starts scoring within a couple of minutes at most. It also no longer pauses at 92%: the final re-ordering happens in the background.
+- **Embeddings no longer stall or crawl.**
+  - Ollama now processes many games per request instead of one at a time.
+  - If Ollama stops answering, Ark notices within minutes instead of waiting for hours, and picks the work back up by itself when Ollama recovers.
+  - One game that keeps failing is skipped after three tries instead of blocking everything.
+- **Catalog syncs no longer hang or quietly come up short.**
+  - A download that stalled midway used to freeze the whole sync forever.
+  - Steam's "too many requests" replies used to drop batches of games. They are now retried.
+  - An incomplete sync is no longer treated as complete for the day.
+- **Internal storage no longer drops data.** A built-in safety limit was so tight that large reads and writes were silently rejected. This made the storage upgrade fail and restart on every launch, and caused lookups to come back mostly empty.
+- **"Force re-index" really restarts.** "Pause" can no longer leave embeddings stopped after a restart, and there is now a Resume button in System Status.
 
-## Faster and lighter
+## Faster everyday use
 
-- Shaders warm up in the background, so the first approach, selection and hop don't stutter.
-- Quality adapts automatically on slower GPUs.
-- The view drops to almost no GPU use while Ark is in the background (for example, while you're in a game).
-- About 158 MB of unused sky textures were removed from the install.
+- Editing your library triggers fewer full refreshes.
+- Your current recommendations stay on screen while new ones are calculated.
+- Game details load without holding up the page.
 
 ## Under the hood
 
-- New feature module at `src/features/embedding-space/` replaces `ann-graph-view.tsx`. Removed features that aren't part of the new design: constellation namer, narrator, scanner selection and user marks.
-- Local build outputs now go to `release/builds/<version>/`. A new `npm run release:prune` command cleans up old ones.
-- 17 new tests. Typecheck is clean on both TypeScript projects.
+- New bulk-read channel for local storage. The similar-games index is saved safely (written to a temp file, then swapped in) without freezing the app.
+- About 30 new regression tests. Typecheck is clean on both TypeScript projects.
 
 ---
 
-**Tests:** All new tests pass. In the full suite, 2 timing-sensitive tests in unrelated, unchanged files failed under parallel load; both pass when re-run on their own.
-**Storage:** No schema changes. Two IndexedDB stores used only by the removed features (`ark-user-marks`, `ark-constellations`) are no longer read.
+**Tests:** All new tests pass. In the full suite, one small UI test file fails per run under parallel load. It's a different file each time, none of them touch this change, and each passes when run on its own.
+**Storage:** No schema changes. CPU-only machines now use more threads for embeddings.

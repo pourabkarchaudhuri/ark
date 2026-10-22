@@ -347,10 +347,10 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     const computeWithEmbeddings = async () => {
       await embeddingLoadPromise;
       recoStore.compute(
-        async (games) => {
+        async (games, signal) => {
           const available = await embeddingService.isAvailable();
           if (!available) return 0;
-          return embeddingService.generateMissing(games);
+          return embeddingService.generateMissing(games, undefined, { signal });
         },
         (candidateIds) => embeddingService.enrichWithCatalogEmbeddings(candidateIds),
       );

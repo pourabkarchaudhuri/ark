@@ -353,6 +353,12 @@ export interface RecoWorkerInput {
     degree: number;
   }>;
   /**
+   * Max PageRank over the WHOLE graph. `graphScores` now only carries the
+   * candidate + user ids (not every node), so the worker cannot derive the
+   * global normalizer from it; falls back to the max over `graphScores`.
+   */
+  graphMaxPageRank?: number;
+  /**
    * Map of the user's library game IDs to their Louvain community.
    * Lets the worker compute "fraction of library in same community as candidate" cheaply.
    */

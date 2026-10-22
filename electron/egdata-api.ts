@@ -83,8 +83,10 @@ async function egdataFetch(
       return await electron.net.fetch(url, merged);
     }
     return await fetch(url, merged);
-  } finally {
+  } catch (err) {
+    // Cleared only on failure: left armed, the timer also bounds the caller's body read.
     clearTimeout(timer);
+    throw err;
   }
 }
 

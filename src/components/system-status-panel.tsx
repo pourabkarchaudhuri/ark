@@ -26,25 +26,35 @@ function useEmbeddingPaused(): boolean {
   );
 }
 
+/**
+ * Pause / resume for the embedding pipelines. Pausing is a dev-mode control,
+ * but a paused pipeline is always surfaced — with a Resume button — because
+ * otherwise a pause looks exactly like embeddings being stuck.
+ */
 function EmbeddingPauseControl() {
   const [devMode] = useDevMode();
   const paused = useEmbeddingPaused();
-  if (!devMode) return null;
+  if (!devMode && !paused) return null;
   return (
-    <button
-      type="button"
-      onClick={() => (paused ? embeddingService.resume() : embeddingService.pause())}
-      title={paused ? 'Resume catalog embeddings' : 'Pause catalog embeddings'}
-      className={`flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded border transition-colors ${
-        paused
-          ? 'text-amber-300/80 border-amber-400/30 bg-amber-400/10 hover:bg-amber-400/20'
-          : 'text-white/40 border-white/10 hover:bg-white/5 hover:text-white/60'
-      }`}
-    >
-      {paused
-        ? (<><Play className="w-2.5 h-2.5" /> Resume</>)
-        : (<><Pause className="w-2.5 h-2.5" /> Pause</>)}
-    </button>
+    <div className="flex items-center gap-1.5">
+      {paused && (
+        <span className="text-[9px] text-amber-300/70">Embeddings paused</span>
+      )}
+      <button
+        type="button"
+        onClick={() => (paused ? embeddingService.resume() : embeddingService.pause())}
+        title={paused ? 'Resume embeddings' : 'Pause embeddings (this session)'}
+        className={`flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded border transition-colors ${
+          paused
+            ? 'text-amber-300/80 border-amber-400/30 bg-amber-400/10 hover:bg-amber-400/20'
+            : 'text-white/40 border-white/10 hover:bg-white/5 hover:text-white/60'
+        }`}
+      >
+        {paused
+          ? (<><Play className="w-2.5 h-2.5" /> Resume</>)
+          : (<><Pause className="w-2.5 h-2.5" /> Pause</>)}
+      </button>
+    </div>
   );
 }
 

@@ -618,6 +618,8 @@ class EpicAPIClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const merged: RequestInit = { ...init, signal: controller.signal };
 
+    // The timer is only cleared on failure: left armed, it also bounds the caller's body read
+    // (a stalled body used to hang the catalog crawl forever). Aborting a consumed response is a no-op.
     try {
       try {
         if (electron?.net?.fetch) {
@@ -631,8 +633,9 @@ class EpicAPIClient {
         // net not available — fall through to global fetch
       }
       return await fetch(url, merged);
-    } finally {
+    } catch (err) {
       clearTimeout(timer);
+      throw err;
     }
   }
 
@@ -1250,7 +1253,18 @@ class EpicAPIClient {
    * Returns a large set of games for the general browse view (not limited
    * to new releases or coming soon).
    */
-  async browseCatalog(totalLimit: number = 0): Promise<EpicCatalogItem[]> {
+  /** In-flight full crawls, keyed by limit — the launch prefetch and the catalog sync used to crawl twice in parallel. */
+  private browseInFlight = new Map<number, Promise<EpicCatalogItem[]>>();
+
+  browseCatalog(totalLimit: number = 0): Promise<EpicCatalogItem[]> {
+    const pending = this.browseInFlight.get(totalLimit);
+    if (pending) return pending;
+    const p = this.browseCatalogUncached(totalLimit).finally(() => this.browseInFlight.delete(totalLimit));
+    this.browseInFlight.set(totalLimit, p);
+    return p;
+  }
+
+  private async browseCatalogUncached(totalLimit: number): Promise<EpicCatalogItem[]> {
     // totalLimit=0 means "fetch everything"
     const cacheKey = `epic:catalog-browse-full`;
     const cached = this.cache.get<EpicCatalogItem[]>(cacheKey, true);
@@ -1344,7 +1358,12 @@ class EpicAPIClient {
       const uniqueItems = filterDummyOffers(Array.from(uniqueMap.values()));
 
       if (uniqueItems.length > 0) {
-        this.cache.set(cacheKey, uniqueItems, RELEASES_CACHE_TTL);
+        // A crawl cut short (Cloudflare block, run of failed pages) isn't cached as the full catalog
+        // (expected is capped by MAX_PAGES; the slack covers dedupe + dummy-offer filtering)
+        const expected = Math.min(effectiveLimit, MAX_PAGES * PAGE_SIZE);
+        const truncated = Number.isFinite(expected) && totalLimit === 0 && uniqueItems.length < expected * 0.6;
+        if (truncated) logger.warn(`[EpicAPI] Catalog crawl truncated: ${uniqueItems.length}/${expected} — not caching`);
+        else this.cache.set(cacheKey, uniqueItems, RELEASES_CACHE_TTL);
         logger.log(`[EpicAPI] Catalog browse complete: ${uniqueItems.length} unique games from ${totalAvailable} total`);
         return uniqueItems;
       }

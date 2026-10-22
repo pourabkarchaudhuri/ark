@@ -502,6 +502,8 @@ const AIModelsTab = memo(function AIModelsTab() {
           chunkAnnMaxSimEnabled,
           embeddingMrl256Enabled,
         });
+        // A new URL/model may make Ollama reachable — drop any cached "unavailable" verdict now
+        embeddingService.clearUnavailableVerdict();
         setOllamaSaveStatus('saved');
         setTimeout(() => setOllamaSaveStatus('idle'), 2000);
       }
@@ -982,15 +984,16 @@ const AIModelsTab = memo(function AIModelsTab() {
             setForceReindexMessage(null);
             setForceReindexProgress({ completed: 0, total: 0 });
 
-            // Cancel any in-flight background pass first so it doesn't race
-            // this forced run over the same ANN index / progress fields.
-            embeddingService.cancelCatalogEmbeddings();
-
             const unsub = embeddingService.subscribe(() => {
               setForceReindexProgress({ ...embeddingService.catalogProgress });
             });
 
             try {
+              // Cancel any in-flight background pass and wait for it to fully
+              // unwind, so it neither races this forced run over the same ANN
+              // index / progress fields nor hands its stale promise back.
+              await embeddingService.cancelCatalogEmbeddingsAndWait();
+
               const steamSyncTs = await catalogStore.getLastSyncTimestamp();
               const steamCount = await embeddingService.generateCatalogEmbeddings(
                 (onBatch) => catalogStore.getAllEntries(onBatch),

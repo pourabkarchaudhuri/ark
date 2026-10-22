@@ -297,18 +297,25 @@ import { logger } from './safe-logger.js';
 // Alias for backwards compatibility
 const Cache = PersistentCache;
 
-/** Fetch with a timeout (default 30s). Uses Electron net.fetch when available for correct TLS/certificate handling. */
+/**
+ * Fetch with a timeout (default 30s). Uses Electron net.fetch when available for correct TLS/certificate handling.
+ * The timer stays armed after the headers arrive so it also bounds the body read (`res.json()`) — a body
+ * that stalls mid-transfer used to hang its caller (and any sync awaiting it) forever. Aborting a request
+ * whose body was already consumed is a no-op.
+ */
 function fetchWithTimeout(url: string, timeoutMs: number = 30000): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const fetchFn: typeof globalThis.fetch = electron?.net?.fetch ?? globalThis.fetch;
-  return fetchFn(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+  return fetchFn(url, { signal: controller.signal }).catch((err) => { clearTimeout(timer); throw err; });
 }
 
 // Steam API Client
 class SteamAPIClient {
   private rateLimiter = new RateLimiter();
   private cache = new Cache('steam-cache.json');
+  /** appdetails circuit: set from a 429 (Retry-After, capped at 5 min; default 60s). */
+  private appDetailsPausedUntil = 0;
 
   /**
    * Get most played games from Steam Charts
@@ -428,10 +435,20 @@ class SteamAPIClient {
   private async refreshAppDetails(appId: number): Promise<SteamAppDetails['data'] | null> {
     const cacheKey = `app-details-${appId}`;
     const url = `${STEAM_STORE_API_BASE}/appdetails?appids=${appId}&cc=in&l=english`;
-    
+    // While Steam is answering 429, don't queue more appdetails calls behind the limiter —
+    // every one would wait its turn only to be rejected, starving browse/Oracle/Similar Games.
+    if (Date.now() < this.appDetailsPausedUntil) return null;
+
     try {
       const response = await this.rateLimiter.execute(async () => {
+        if (Date.now() < this.appDetailsPausedUntil) throw new Error('Steam appdetails paused after 429');
         const res = await fetchWithTimeout(url);
+        if (res.status === 429) {
+          const retryAfterSec = Number(res.headers.get('retry-after'));
+          const pauseMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? Math.min(retryAfterSec * 1000, 5 * 60_000) : 60_000;
+          this.appDetailsPausedUntil = Date.now() + pauseMs;
+          logger.warn(`[Steam] appdetails rate-limited (429) — pausing appdetails for ${Math.round(pauseMs / 1000)}s`);
+        }
         if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
         return res.json() as Promise<{ [key: string]: SteamAppDetails }>;
       }, `appdetails-${appId}`);
@@ -1209,7 +1226,8 @@ class SteamAPIClient {
 
       const response = await this.rateLimiter.execute(async () => {
         logger.log(`[Steam] getAppList page ${page}${lastAppId ? ` (after appid ${lastAppId})` : ''}...`);
-        const res = await fetchWithTimeout(url);
+        // 50k-entry pages: the timeout now covers the whole download, so give slow links room
+        const res = await fetchWithTimeout(url, 120_000);
         if (!res.ok) throw new Error(`Steam IStoreService API error: ${res.status}`);
         return res.json() as Promise<{
           response: {
@@ -1266,10 +1284,28 @@ class SteamAPIClient {
       },
     });
     const url = `${STEAM_WEB_API_BASE}/IStoreBrowseService/GetItems/v1/?input_json=${encodeURIComponent(inputJson)}`;
-    const res = await fetchWithTimeout(url, 15000);
-    if (!res.ok) throw new Error(`IStoreBrowseService ${res.status}`);
-    const data = await res.json() as { response?: { store_items?: any[] } };
-    return data.response?.store_items ?? [];
+    // Bounded retry with backoff: 429s (Retry-After honoured, capped) and transient 5xx /
+    // network errors. Previously the first failure dropped the whole 200-game batch.
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const res = await fetchWithTimeout(url, 15000);
+        if (res.ok) {
+          const data = await res.json() as { response?: { store_items?: any[] } };
+          return data.response?.store_items ?? [];
+        }
+        const retryable = res.status === 429 || res.status >= 500;
+        if (!retryable || attempt >= MAX_ATTEMPTS) throw new Error(`IStoreBrowseService ${res.status}`);
+        const retryAfterSec = Number(res.headers.get('retry-after'));
+        const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+          ? Math.min(retryAfterSec * 1000, 60_000)
+          : 2000 * 2 ** (attempt - 1);
+        await new Promise((r) => setTimeout(r, waitMs));
+      } catch (err) {
+        if (attempt >= MAX_ATTEMPTS || (err instanceof Error && /IStoreBrowseService 4\d\d/.test(err.message) && !/429/.test(err.message))) throw err;
+        await new Promise((r) => setTimeout(r, 2000 * 2 ** (attempt - 1)));
+      }
+    }
   }
 
   /**
@@ -1293,7 +1329,7 @@ class SteamAPIClient {
     const tags = data.response?.tags ?? [];
 
     logger.log(`[Steam] getTagList: fetched ${tags.length} tags`);
-    this.cache.set(cacheKey, tags, TAG_TTL);
+    if (tags.length > 0) this.cache.set(cacheKey, tags, TAG_TTL); // never cache an empty list for 7 days
     return tags;
   }
 

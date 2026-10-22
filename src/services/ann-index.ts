@@ -13,7 +13,7 @@ declare global {
   interface Window {
     ann?: {
       load: () => Promise<boolean>;
-      save: () => Promise<boolean>;
+      save: (opts?: { force?: boolean }) => Promise<boolean>;
       addVectors: (entries: Array<{ id: string; vector: number[] }>) => Promise<number>;
       query: (centroid: number[], k: number, excludeId?: string) => Promise<Array<{ id: string; distance: number }>>;
       queryBatch: (entries: Array<{ id: string; vector: number[] }>, k: number) => Promise<Record<string, Array<{ id: string; distance: number }>>>;
@@ -29,6 +29,10 @@ class AnnIndexService {
   private _vectorCount = 0;
   private _buildProgress = { done: 0, total: 0 };
   private _building = false;
+  /** Last status round-trip after addVectors — throttled to one per STATUS_SYNC_MS. */
+  private _lastStatusSyncAt = 0;
+  private _statusSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly STATUS_SYNC_MS = 1000;
 
   subscribe(fn: () => void): () => void {
     this._listeners.add(fn);
@@ -52,6 +56,29 @@ class AnnIndexService {
     } catch { /* ignore */ }
   }
 
+  /**
+   * Status sync after a write. The embedding passes call addVectors once per
+   * group of games, so an unthrottled sync doubled their ANN IPC traffic and
+   * re-rendered every subscriber per call. Sync immediately until the index
+   * reports ready (so `isReady` flips promptly), then at most once per second
+   * with a trailing sync so the final count is never stale.
+   */
+  private async _syncStatusAfterWrite(): Promise<void> {
+    const now = Date.now();
+    if (!this._ready || now - this._lastStatusSyncAt >= AnnIndexService.STATUS_SYNC_MS) {
+      this._lastStatusSyncAt = now;
+      await this._syncStatusFromMain();
+      return;
+    }
+    if (!this._statusSyncTimer) {
+      this._statusSyncTimer = setTimeout(() => {
+        this._statusSyncTimer = null;
+        this._lastStatusSyncAt = Date.now();
+        void this._syncStatusFromMain();
+      }, AnnIndexService.STATUS_SYNC_MS);
+    }
+  }
+
   async load(): Promise<boolean> {
     if (!window.ann) return false;
     try {
@@ -64,10 +91,11 @@ class AnnIndexService {
     }
   }
 
-  async save(): Promise<boolean> {
+  /** `force` writes now instead of within the main process's 60s save window (use before a watermark). */
+  async save(opts?: { force?: boolean }): Promise<boolean> {
     if (!window.ann) return false;
     try {
-      return await window.ann.save();
+      return await window.ann.save(opts);
     } catch (err) {
       console.warn('[AnnIndex] save failed:', err);
       return false;
@@ -78,7 +106,7 @@ class AnnIndexService {
     if (!window.ann || entries.length === 0) return 0;
     try {
       const added = await window.ann.addVectors(entries);
-      await this._syncStatusFromMain();
+      await this._syncStatusAfterWrite();
       return added;
     } catch (err) {
       console.warn('[AnnIndex] addVectors failed:', err);

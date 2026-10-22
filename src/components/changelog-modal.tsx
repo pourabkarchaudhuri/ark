@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.73': {
+    title: "What's New in Ark 1.0.73",
+    changes: [
+      'Fixed: Oracle could sit on "Generating semantic embeddings…" for hours. It now only prepares your own games, starts showing recommendations within a couple of minutes at most, and no longer waits at 92% for the final re-ordering — that now happens quietly in the background.',
+      'Fixed: catalog and embedding progress that stalled or crawled for hours. Embeddings are now generated many games at a time, a stuck or unreachable Ollama is detected in minutes (and work resumes by itself once it answers again), and one problem game can no longer block the rest.',
+      'Fixed: Steam and Epic catalog syncs that could hang forever on a stalled download, or quietly finish with games missing. Rate-limited batches are retried, and an incomplete sync is no longer treated as done for the day.',
+      'Fixed: "Force re-index" now really restarts from scratch, and "Pause" can no longer leave embeddings silently stopped after a restart (there\'s a Resume button in System Status).',
+      'Faster everyday use: fewer full refreshes when you edit your library, recommendations stay on screen while they update, and game details load without holding up the page.',
+    ],
+  },
   '1.0.72': {
     title: "What's New in Ark 1.0.72",
     changes: [

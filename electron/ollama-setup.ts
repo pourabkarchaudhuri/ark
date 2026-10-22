@@ -22,6 +22,7 @@ import {
   DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
 } from './settings-store.js';
 import http from 'http';
+import os from 'os';
 // Type-only — the runtime import of rerank-engine.ts is dynamic (see
 // settleRerankModelStatus) because that module imports this one.
 import type { RerankTier } from './rerank-engine.js';
@@ -398,6 +399,73 @@ export async function generateEmbedding(text: string): Promise<number[] | null> 
   return results[0];
 }
 
+// ─── Session-fixed embedding runner options ─────────────────────────────────
+// Ollama reloads the model whenever a request's runner options (num_thread,
+// num_batch, num_gpu, ...) differ from the loaded runner's. Varying them per
+// request — foreground vs background on alt-tab, none at all for the warm-up,
+// rerank fallback and query embeddings — made Ollama reload arctic-embed2
+// (up to ~80 s each) over and over. Every embed request now sends ONE option
+// set per session; background politeness is app-side pacing only (sub-batch
+// size, in-flight count, cooldown — see ollama-handlers.ts).
+//
+// The set changes at most when GPU detection finds a partially-offloaded model
+// (adds num_gpu=999 once) or when Ollama reports a real out-of-memory error
+// (num_batch steps down the ladder).
+
+/** CPU thread count — half the logical cores, never below 2. */
+export const EMBED_NUM_THREAD_CPU = Math.max(2, Math.floor((os.cpus()?.length || 2) / 2));
+// Internal Ollama batch — tokens per inference pass. Descended only on an
+// explicit OOM error body. `undefined` lets Ollama pick (final fallback).
+const EMBED_NUM_BATCH_LADDER: Array<number | undefined> = [2048, 1024, 512, undefined];
+// Force ALL layers to GPU — only applied when /api/ps shows the model split
+// between VRAM and RAM (hybrid laptops), where Ollama's auto-detect caps throughput.
+const EMBED_NUM_GPU_OFFLOAD = 999;
+let _numBatchIdx = 0;
+
+/** The single option set every embed request uses this session. */
+export function getSessionEmbedOptions(): EmbedBatchOptions {
+  const opts: EmbedBatchOptions = {
+    numThread: EMBED_NUM_THREAD_CPU,
+    numBatch: EMBED_NUM_BATCH_LADDER[_numBatchIdx],
+  };
+  if (_gpuModeChecked && _gpuModeAvailable && _gpuPartialOffload) opts.numGpu = EMBED_NUM_GPU_OFFLOAD;
+  return opts;
+}
+
+/** Current num_batch (for diagnostics). */
+export function getSessionNumBatch(): number | undefined {
+  return EMBED_NUM_BATCH_LADDER[_numBatchIdx];
+}
+
+/**
+ * Step num_batch down after Ollama reported out-of-memory. Sticks for the
+ * session. Returns false when already at the bottom of the ladder.
+ */
+export function stepDownSessionNumBatch(): boolean {
+  if (_numBatchIdx >= EMBED_NUM_BATCH_LADDER.length - 1) return false;
+  _numBatchIdx += 1;
+  logger.warn(`[Ollama Setup] Embedding OOM — num_batch → ${EMBED_NUM_BATCH_LADDER[_numBatchIdx] ?? 'Ollama default'}`);
+  return true;
+}
+
+/** True only when an Ollama error body explicitly reports memory exhaustion. */
+export function isOllamaOomError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const m = message.toLowerCase();
+  return m.includes('out of memory')
+    || m.includes('cudamalloc')
+    || m.includes('insufficient memory')
+    || m.includes('failed to allocate')
+    || /\boom\b/.test(m);
+}
+
+export interface EmbedBatchError {
+  /** timeout / network = server unreachable or hung; http = Ollama answered with an error. */
+  kind: 'timeout' | 'network' | 'http' | 'parse' | 'empty';
+  status?: number;
+  message: string;
+}
+
 export interface EmbedBatchOptions {
   /** CPU thread cap. Ignored when GPU does the work. */
   numThread?: number;
@@ -417,14 +485,28 @@ export interface EmbedBatchOptions {
  * so this avoids the CPU spike caused by many parallel single-text requests.
  *
  * @param texts    Texts to embed (order preserved in output).
- * @param opts     Tuning knobs — see EmbedBatchOptions. Pass {} on CPU mode
- *                 with a numThread cap; pass {numGpu:999, numBatch:2048} on GPU.
+ * @param opts     Runner options. Omit to use the session-fixed set
+ *                 (`getSessionEmbedOptions`) — callers should, since any
+ *                 difference makes Ollama reload the model.
  */
 export async function generateEmbeddingsBatch(
   texts: string[],
-  opts: EmbedBatchOptions = {},
+  opts?: EmbedBatchOptions,
 ): Promise<(number[] | null)[]> {
-  if (texts.length === 0) return [];
+  return (await generateEmbeddingsBatchDetailed(texts, opts)).embeddings;
+}
+
+/**
+ * Same as `generateEmbeddingsBatch`, but also reports WHY a request failed so
+ * callers can tell a hung/unreachable server (stop sending) from an Ollama
+ * error body (bisect / OOM step-down) instead of guessing from all-null output.
+ */
+export async function generateEmbeddingsBatchDetailed(
+  texts: string[],
+  opts?: EmbedBatchOptions,
+): Promise<{ embeddings: (number[] | null)[]; error: EmbedBatchError | null }> {
+  if (texts.length === 0) return { embeddings: [], error: null };
+  const effectiveOpts = opts ?? getSessionEmbedOptions();
 
   const settings = settingsStore.getOllamaSettings();
   const url = settings.url || 'http://localhost:11434';
@@ -436,9 +518,9 @@ export async function generateEmbeddingsBatch(
   const timeout = EMBED_TIMEOUT_MS + texts.length * 4_000;
 
   const ollamaOpts: Record<string, unknown> = {};
-  if (opts.numThread) ollamaOpts.num_thread = opts.numThread;
-  if (opts.numBatch) ollamaOpts.num_batch = opts.numBatch;
-  if (opts.numGpu) ollamaOpts.num_gpu = opts.numGpu;
+  if (effectiveOpts.numThread) ollamaOpts.num_thread = effectiveOpts.numThread;
+  if (effectiveOpts.numBatch) ollamaOpts.num_batch = effectiveOpts.numBatch;
+  if (effectiveOpts.numGpu) ollamaOpts.num_gpu = effectiveOpts.numGpu;
 
   const bodyObj: Record<string, unknown> = {
     model: getEmbeddingModelTag(),
@@ -451,7 +533,15 @@ export async function generateEmbeddingsBatch(
   if (Object.keys(ollamaOpts).length > 0) bodyObj.options = ollamaOpts;
   const bodyStr = JSON.stringify(bodyObj);
 
-  return new Promise<(number[] | null)[]>((resolve) => {
+  const nulls = () => texts.map(() => null);
+
+  return new Promise<{ embeddings: (number[] | null)[]; error: EmbedBatchError | null }>((resolve) => {
+    let settled = false;
+    const done = (embeddings: (number[] | null)[], error: EmbedBatchError | null) => {
+      if (settled) return;
+      settled = true;
+      resolve({ embeddings, error });
+    };
     const req = http.request(
       {
         hostname,
@@ -468,22 +558,42 @@ export async function generateEmbeddingsBatch(
         let data = '';
         res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
         res.on('end', () => {
+          const status = res.statusCode ?? 0;
+          let parsed: { embeddings?: number[][]; error?: string } | null = null;
           try {
-            const parsed = JSON.parse(data) as { embeddings?: number[][] };
-            if (parsed.embeddings?.length) {
-              resolve(parsed.embeddings.map(e => e ?? null));
-            } else {
-              resolve(texts.map(() => null));
-            }
+            parsed = JSON.parse(data) as { embeddings?: number[][]; error?: string };
           } catch {
-            resolve(texts.map(() => null));
+            parsed = null;
+          }
+          if (status >= 400 || parsed?.error) {
+            done(nulls(), {
+              kind: 'http',
+              status,
+              message: parsed?.error || data.slice(0, 300) || `HTTP ${status}`,
+            });
+            return;
+          }
+          if (!parsed) {
+            done(nulls(), { kind: 'parse', status, message: 'Unparseable /api/embed response' });
+            return;
+          }
+          if (parsed.embeddings?.length) {
+            const out: (number[] | null)[] = parsed.embeddings.map(e => e ?? null);
+            while (out.length < texts.length) out.push(null);
+            done(out, null);
+          } else {
+            done(nulls(), { kind: 'empty', status, message: 'No embeddings in /api/embed response' });
           }
         });
+        res.on('error', (err: Error) => done(nulls(), { kind: 'network', message: err.message }));
       },
     );
 
-    req.on('error', () => resolve(texts.map(() => null)));
-    req.on('timeout', () => { req.destroy(); resolve(texts.map(() => null)); });
+    req.on('error', (err: Error) => done(nulls(), { kind: 'network', message: err.message }));
+    req.on('timeout', () => {
+      req.destroy();
+      done(nulls(), { kind: 'timeout', message: `No response within ${Math.round(timeout / 1000)}s` });
+    });
     req.write(bodyStr);
     req.end();
   });
@@ -510,17 +620,26 @@ async function warmUpEmbeddingModel(): Promise<boolean> {
 
 let _gpuModeChecked = false;
 let _gpuModeAvailable = false;
+/** Model loaded partly in VRAM, partly in RAM — the only case num_gpu=999 helps. */
+let _gpuPartialOffload = false;
 let _gpuDetectInFlight: Promise<boolean> | null = null;
+/** Last inconclusive probe (model not loaded / Ollama down) — throttles re-probes. */
+let _gpuLastInconclusiveAt = 0;
+const GPU_REPROBE_INTERVAL_MS = 30_000;
 
 /**
  * Detect whether the embedding model is running on GPU.
- * Result is cached for the session — call after the model has been loaded
- * at least once (warm-up or first embed call). Returns false if Ollama is
- * down, the model isn't loaded yet, or the response can't be parsed.
+ *
+ * Only a CONCLUSIVE answer (the model is listed in /api/ps) is cached for the
+ * session. Probing before the model has loaded used to cache "CPU" for the
+ * whole session, pinning GPU machines to the slow CPU profile; an
+ * inconclusive probe now returns false and is retried after
+ * `GPU_REPROBE_INTERVAL_MS`.
  */
 export async function detectGpuMode(): Promise<boolean> {
   if (_gpuModeChecked) return _gpuModeAvailable;
   if (_gpuDetectInFlight) return _gpuDetectInFlight;
+  if (Date.now() - _gpuLastInconclusiveAt < GPU_REPROBE_INTERVAL_MS) return false;
 
   _gpuDetectInFlight = (async () => {
     const settings = settingsStore.getOllamaSettings();
@@ -544,19 +663,31 @@ export async function detectGpuMode(): Promise<boolean> {
                 const n = (m.name || '').toLowerCase();
                 return n.startsWith(EMBEDDING_MODEL) || n.split(':')[0] === EMBEDDING_MODEL;
               });
-              const onGpu = !!(model && model.size_vram && model.size_vram > 0);
+              if (!model) {
+                // Not loaded yet — inconclusive, re-check later.
+                _gpuLastInconclusiveAt = Date.now();
+                resolve(false);
+                return;
+              }
+              const vram = model.size_vram ?? 0;
+              const size = model.size ?? 0;
+              const onGpu = vram > 0;
               _gpuModeChecked = true;
               _gpuModeAvailable = onGpu;
-              logger.log(`[Ollama Setup] Embedding model GPU mode: ${onGpu ? 'yes' : 'no (CPU)'}`);
+              _gpuPartialOffload = onGpu && size > 0 && vram < size * 0.95;
+              logger.log(
+                `[Ollama Setup] Embedding model GPU mode: ${onGpu ? (_gpuPartialOffload ? 'yes (partial offload)' : 'yes') : 'no (CPU)'}`,
+              );
               resolve(onGpu);
             } catch {
+              _gpuLastInconclusiveAt = Date.now();
               resolve(false);
             }
           });
         },
       );
-      req.on('error', () => resolve(false));
-      req.on('timeout', () => { req.destroy(); resolve(false); });
+      req.on('error', () => { _gpuLastInconclusiveAt = Date.now(); resolve(false); });
+      req.on('timeout', () => { req.destroy(); _gpuLastInconclusiveAt = Date.now(); resolve(false); });
     });
   })().finally(() => { _gpuDetectInFlight = null; });
 
@@ -567,6 +698,8 @@ export async function detectGpuMode(): Promise<boolean> {
 export function resetGpuModeCache(): void {
   _gpuModeChecked = false;
   _gpuModeAvailable = false;
+  _gpuPartialOffload = false;
+  _gpuLastInconclusiveAt = 0;
 }
 
 /**
@@ -776,12 +909,18 @@ export async function runOllamaSetup(
  * Idempotent across calls (warmUp is cheap once loaded; detectGpuMode caches).
  */
 function warmUpAndDetectGpu(): void {
+  const before = JSON.stringify(getSessionEmbedOptions());
   warmUpEmbeddingModel().then(async ok => {
     logger.log(`[Ollama Setup] Model warm-up: ${ok ? 'ready' : 'deferred'}`);
     if (ok) {
       // Only meaningful once the model is loaded — /api/ps reports VRAM
       // only for currently-loaded models.
       try { await detectGpuMode(); } catch { /* non-fatal */ }
+      // Detection can add num_gpu (partial offload) — pay the one reload it
+      // causes here, during boot, instead of on the first real batch.
+      if (JSON.stringify(getSessionEmbedOptions()) !== before) {
+        void warmUpEmbeddingModel();
+      }
     }
   });
 }

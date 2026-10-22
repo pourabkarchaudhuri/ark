@@ -44,7 +44,7 @@ import {
 } from '@/services/linked-ids';
 import { expandHardNegativeIds } from '@/services/hard-negative';
 import { keepAnnNeighborsUnderCeiling } from '@/services/ann-retrieve';
-import { getSimilarTitlesForReco } from '@/services/similar-games';
+import { getSimilarTitlesForRecoBatch } from '@/services/similar-games';
 import { canonicalFranchiseBase } from '@/services/franchise';
 import {
   djb2Fingerprint,
@@ -52,7 +52,9 @@ import {
   fingerprintThumbsUp,
   hoursPlayedBucket,
 } from '@/services/oracle-signature';
-import { resolveGraphScores } from '@/services/resolve-graph-scores';
+import { resolveGraphScores, GRAPH_BUILD_TIMEOUT_MS } from '@/services/resolve-graph-scores';
+import type { GraphScoresPack } from '@/services/resolve-graph-scores';
+import type { EpicCatalogEntry } from '@/services/epic-catalog-store';
 
 /** ANN cosine-distance ceiling for Oracle taste retrieval (Cos metric). */
 const ANN_DISTANCE_CEILING = 0.45;
@@ -60,6 +62,93 @@ const ANN_MAX_KEEP = 500;
 const ANN_QUERY_K = 2_000;
 const QUOTA_COLD = 300;
 const SURVIVOR_HYDRATE_CAP = 80;
+
+// ─── Pre-worker time budget ──────────────────────────────────────────────────
+//
+// The worker has its own 10-min idle watchdog, but everything before it
+// (candidate gather, Ollama embedding generation, ML load, graph restore) used
+// to be unbounded — on CPU-only Ollama the embedding step alone could sit at
+// "Generating semantic embeddings… 10%" for hours. The whole pre-worker phase
+// now shares one overall deadline, and each optional step also has its own cap
+// so one slow stage cannot starve the rest. A step that overruns resolves to
+// its fallback and the pipeline proceeds with what it has.
+
+/** Overall budget for everything before the worker is dispatched. */
+export const PRE_WORKER_BUDGET_MS = 120_000;
+const RESULT_CACHE_READ_TIMEOUT_MS = 10_000;
+const CANDIDATE_POOL_TIMEOUT_MS = 60_000;
+const OPTIONAL_SOURCE_TIMEOUT_MS = 20_000;
+const SURVIVOR_HYDRATE_TIMEOUT_MS = 15_000;
+const SURVIVOR_STEAM_DETAILS_TIMEOUT_MS = 5_000;
+const CATALOG_ENRICH_TIMEOUT_MS = 20_000;
+const EMBEDDING_GEN_TIMEOUT_MS = 90_000;
+const ML_SCORING_TIMEOUT_MS = 30_000;
+const GRAPH_SCORES_TIMEOUT_MS = 15_000;
+/** Background Oracle rerank budget — shelves are already published by then. */
+export const ORACLE_RERANK_BUDGET_MS = 15_000;
+/** Library / thumbs-up changes coalesce into one recompute after this quiet period. */
+export const LIBRARY_REFRESH_DEBOUNCE_MS = 3_000;
+
+const EMPTY_GRAPH_PACK: GraphScoresPack = {
+  graphScoresMap: undefined,
+  userCommunityCounts: undefined,
+  userCommunityTotal: undefined,
+};
+
+/**
+ * Race `fn` against a deadline and an optional parent abort signal.
+ *
+ * Resolves `fallback` when the deadline passes or the parent aborts; the child
+ * signal handed to `fn` is aborted at that point so cooperative work can stop
+ * mutating shared state. A rejection from `fn` before the deadline propagates.
+ * `timeoutMs <= 0` (budget exhausted) skips `fn` entirely.
+ */
+export function runWithDeadline<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+  parent?: AbortSignal,
+  label?: string,
+): Promise<T> {
+  const ac = new AbortController();
+  if (parent?.aborted) {
+    ac.abort();
+    return Promise.resolve(fallback);
+  }
+  if (timeoutMs <= 0) {
+    if (label) console.warn(`[RecoStore] ${label} skipped — pre-worker budget exhausted`);
+    ac.abort();
+    return Promise.resolve(fallback);
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (apply: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      parent?.removeEventListener('abort', onAbort);
+      apply();
+    };
+    const onAbort = () => finish(() => { ac.abort(); resolve(fallback); });
+    const timer = setTimeout(() => finish(() => {
+      if (label) console.warn(`[RecoStore] ${label} exceeded ${timeoutMs}ms — continuing without it`);
+      ac.abort();
+      resolve(fallback);
+    }), timeoutMs);
+    parent?.addEventListener('abort', onAbort, { once: true });
+    let p: Promise<T>;
+    try {
+      p = fn(ac.signal);
+    } catch (err) {
+      finish(() => reject(err));
+      return;
+    }
+    p.then(
+      (v) => finish(() => resolve(v)),
+      (err) => finish(() => reject(err)),
+    );
+  });
+}
 
 // ─── Embedding cache (populated externally by embedding-service) ────────────
 
@@ -207,8 +296,18 @@ export class RecoStore {
   private state: RecoState = { ...INITIAL_STATE };
   private listeners: Set<() => void> = new Set();
   private worker: Worker | null = null;
-  /** Incremented each time `runWorker` starts; stale async `finishWorkerResult` must not apply. */
+  /**
+   * Incremented at the very start of every `compute()` and by `refresh()` /
+   * `reset()`. Every await in the pipeline re-checks it, so a superseded run
+   * (or its worker / background rerank) can never overwrite newer state.
+   */
   private computeGeneration = 0;
+  /** Bumped by invalidateCacheOnly (dismiss) — background work must not re-save older shelves. */
+  private cacheEpoch = 0;
+  /** Aborts the in-flight compute's pre-worker steps on refresh/reset. */
+  private computeAbort: AbortController | null = null;
+  /** Pending debounced `refresh()` from library / thumbs-up changes. */
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Cold-start result caching — persists across app restarts
   private static readonly RESULT_CACHE_KEY = 'ark-oracle-results';
@@ -382,10 +481,12 @@ export class RecoStore {
    * and dispatch to the worker for scoring.
    *
    * @param embeddingGenerator Optional callback invoked after data gathering
-   *   to generate missing semantic embeddings via Ollama.  Receives the full
-   *   game list (user + candidates) and should return the number of newly
-   *   generated embeddings.  Keeps reco-store free of circular deps on
-   *   embedding-service — the caller (OracleView) wires them together.
+   *   to generate missing semantic embeddings via Ollama. Receives the user's
+   *   own games only (library + journey) — candidates are never embedded
+   *   inline; without a cached/catalog vector they simply score semantic 0.
+   *   Should return the number of newly generated embeddings. Keeps reco-store
+   *   free of circular deps on embedding-service — the caller wires them.
+   *   Bounded by the pre-worker deadline; an overrun proceeds without it.
    */
   async compute(
     embeddingGenerator?: (
@@ -395,57 +496,89 @@ export class RecoStore {
         playerPerspectives?: string[]; summary?: string; description?: string;
         userNotes?: string; similarGames?: Array<{ name: string }>;
       }>,
+      /** Aborted when this compute is superseded or overruns its budget — stop using Ollama. */
+      signal?: AbortSignal,
     ) => Promise<number>,
     catalogEmbeddingEnricher?: (candidateIds: Set<string>) => Promise<number>,
   ) {
     if (this.state.status === 'computing') return; // prevent double-fire
 
-    // Cold-start optimization: restore recent results from LevelDB (v1.0.64+) / localStorage.
-    const cached = await this.loadResultsFromCache();
-    if (cached && cached.shelves && cached.shelves.length > 0) {
-      console.log(`[RecoStore] Restored cached results (${cached.shelves.length} shelves, computed ${Math.round((Date.now() - (cached.lastComputed || 0)) / 1000)}s ago)`);
-      const tasteProfile = (cached.tasteProfile as RecoState['tasteProfile']) ?? null;
-      const shelves = cached.shelves as RecoShelf[];
-      this.state = {
-        ...this.state,
-        status: 'done',
-        progress: { stage: 'Complete (cached)', percent: 100 },
-        tasteProfile,
-        shelves,
-        computeTimeMs: (cached.computeTimeMs as number) ?? 0,
-        lastComputed: (cached.lastComputed as number) ?? Date.now(),
-        libraryCount: (cached.libraryCount as number) ?? 0,
-        candidateCount: (cached.candidateCount as number) ?? 0,
-        oracleRerankStatus: rerankStatus('none'),
-      };
-      this.notify();
-      // Cache restore used to skip rerank entirely. When Oracle rerank is still
-      // enabled, refine shelf order in the background (cross-encoder or embed fallback).
-      if (tasteProfile && shelves.length > 0) {
-        void this.rerankRestoredCachedShelves(tasteProfile, shelves);
-      }
-      return;
-    }
+    // Claim the run synchronously — before any await — so a second caller
+    // (splash + OracleView mount, or a refresh mid-gather) sees 'computing'
+    // and bails instead of starting a parallel pipeline.
+    const gen = ++this.computeGeneration;
+    this.computeAbort?.abort();
+    const abort = new AbortController();
+    this.computeAbort = abort;
+    const signal = abort.signal;
+    const isStale = () => signal.aborted || gen !== this.computeGeneration;
 
     this.state = {
       ...this.state,
       status: 'computing',
-      progress: { stage: 'Gathering data...', percent: 5 },
+      progress: { stage: 'Checking cached results...', percent: 1 },
       error: null,
       oracleRerankStatus: rerankStatus('none'),
     };
     this.notify();
 
-    try {
-      // 1. Build user game snapshots from library + journey
-      this.state = { ...this.state, progress: { stage: 'Building user profile...', percent: 3 } };
+    const setProgress = (stage: string, percent: number) => {
+      if (isStale()) return;
+      this.state = { ...this.state, progress: { stage, percent } };
       this.notify();
+    };
+
+    try {
+      // Cold-start optimization: restore recent results from LevelDB (v1.0.64+) / localStorage.
+      const cached = await runWithDeadline(
+        () => this.loadResultsFromCache(),
+        RESULT_CACHE_READ_TIMEOUT_MS, null, signal, 'Result-cache read',
+      );
+      if (isStale()) return;
+      if (cached && cached.shelves && cached.shelves.length > 0) {
+        console.log(`[RecoStore] Restored cached results (${cached.shelves.length} shelves, computed ${Math.round((Date.now() - (cached.lastComputed || 0)) / 1000)}s ago)`);
+        const tasteProfile = (cached.tasteProfile as RecoState['tasteProfile']) ?? null;
+        const shelves = cached.shelves as RecoShelf[];
+        this.state = {
+          ...this.state,
+          status: 'done',
+          progress: { stage: 'Complete (cached)', percent: 100 },
+          tasteProfile,
+          shelves,
+          computeTimeMs: (cached.computeTimeMs as number) ?? 0,
+          lastComputed: (cached.lastComputed as number) ?? Date.now(),
+          libraryCount: (cached.libraryCount as number) ?? 0,
+          candidateCount: (cached.candidateCount as number) ?? 0,
+          oracleRerankStatus: rerankStatus('none'),
+        };
+        this.notify();
+        // Cache restore used to skip rerank entirely. When Oracle rerank is still
+        // enabled, refine shelf order in the background (cross-encoder or embed fallback).
+        if (tasteProfile && shelves.length > 0) {
+          void this.rerankShelvesInBackground(gen, tasteProfile, shelves, { persist: 'if-applied' });
+        }
+        return;
+      }
+
+      // Every step below draws from one overall budget (see PRE_WORKER_BUDGET_MS).
+      const deadline = Date.now() + PRE_WORKER_BUDGET_MS;
+      const budget = (capMs: number) => Math.max(0, Math.min(capMs, deadline - Date.now()));
+
+      // 1. Build user game snapshots from library + journey
+      setProgress('Building user profile...', 3);
       const userGames = this.buildUserGameSnapshots();
 
-      // 2. Build candidate pool (from cached browse data + similar games)
-      this.state = { ...this.state, progress: { stage: 'Loading candidate pool...', percent: 5 } };
-      this.notify();
-      const candidates = await this.buildCandidatePool(userGames);
+      // 2. Build candidate pool (from cached browse data + similar games).
+      // Sources append into `poolSink` as they finish, so a deadline overrun
+      // keeps whatever was gathered so far instead of dropping everything.
+      setProgress('Loading candidate pool...', 5);
+      const poolSink: CandidateGame[] = [];
+      await runWithDeadline(
+        (s) => this.buildCandidatePool(userGames, poolSink, s),
+        budget(CANDIDATE_POOL_TIMEOUT_MS), poolSink, signal, 'Candidate pool',
+      );
+      if (isStale()) return;
+      const candidates = poolSink.slice();
 
       // Store counts for the UI (before pre-filter, so the user sees the real pool size)
       this.state = {
@@ -456,91 +589,92 @@ export class RecoStore {
       this.notify();
 
       // 2.1. Pre-filter candidates with shelf-aware quotas (25K → ~3K)
-      this.state = { ...this.state, progress: { stage: 'Pre-filtering candidates...', percent: 6 } };
-      this.notify();
+      setProgress('Pre-filtering candidates...', 6);
       const poolSizeBefore = candidates.length;
       const filtered = this.preFilterCandidates(candidates, userGames);
-      candidates.length = 0;
-      candidates.push(...filtered);
+      // preFilterCandidates returns the SAME array when the pool is already
+      // ≤ MAX_POOL — clearing it in place would then wipe every candidate.
+      if (filtered !== candidates) {
+        candidates.length = 0;
+        candidates.push(...filtered);
+      }
       console.log(`[RecoStore] Pre-filter: ${poolSizeBefore.toLocaleString()} → ${candidates.length.toLocaleString()} candidates`);
 
       // 2.2. Survivor metadata hydrate — ANN neighbor titles + metacritic (F4)
-      this.state = { ...this.state, progress: { stage: 'Hydrating ANN neighbor titles + metacritic...', percent: 7 } };
-      this.notify();
-      await this.hydrateSurvivorMetadata(candidates);
+      setProgress('Hydrating ANN neighbor titles + metacritic...', 7);
+      await runWithDeadline(
+        (s) => this.hydrateSurvivorMetadata(candidates, s),
+        budget(SURVIVOR_HYDRATE_TIMEOUT_MS), undefined, signal, 'Survivor hydrate',
+      );
+      if (isStale()) return;
 
-      // 2.5. Generate missing semantic embeddings if a generator was provided
+      // 2.5. Catalog embeddings first — cheap local reads that usually cover
+      // most of the pool (and the user's Steam games), so Ollama generation
+      // below only has to fill genuine gaps in the user's own library.
+      if (catalogEmbeddingEnricher) {
+        setProgress('Enriching catalog embeddings...', 9);
+        const catalogIds = new Set<string>();
+        for (const c of candidates) {
+          if (!c.embedding && c.gameId.startsWith('steam-')) catalogIds.add(c.gameId);
+        }
+        for (const ug of userGames) {
+          if (!ug.embedding && ug.gameId.startsWith('steam-')) catalogIds.add(ug.gameId);
+        }
+        if (catalogIds.size > 0) {
+          const enriched = await runWithDeadline(
+            () => catalogEmbeddingEnricher(catalogIds),
+            budget(CATALOG_ENRICH_TIMEOUT_MS), 0, signal, 'Catalog embedding enrich',
+          );
+          if (isStale()) return;
+          if (enriched > 0) {
+            for (const ug of userGames) ug.embedding ??= embeddingCache.get(ug.gameId);
+            for (const c of candidates) c.embedding ??= embeddingCache.get(c.gameId);
+          }
+        }
+      }
+
+      // 2.7. Generate missing semantic embeddings — user's own games only.
+      // Candidates without a vector score semantic 0 this run; the background
+      // catalog pipeline fills them in for next time.
       if (embeddingGenerator) {
-        this.state = {
-          ...this.state,
-          progress: { stage: 'Generating semantic embeddings...', percent: 10 },
-        };
-        this.notify();
-
-        const embeddingInput = [
-          ...userGames.map(g => {
-            const lib = libraryStore.getEntry(g.gameId);
-            const meta = lib?.cachedMeta;
-            return {
-              id: g.gameId, title: g.title, genres: g.genres,
-              themes: g.themes, modes: g.gameModes, developer: g.developer,
-              publisher: g.publisher,
-              playerPerspectives: g.perspectives,
-              summary: meta?.summary,
-              description: meta?.longDescription,
-              similarGames: meta?.similarGames,
-              userNotes: lib?.publicReviews || undefined,
-            };
-          }),
-          ...candidates.map(g => ({
+        setProgress('Generating semantic embeddings...', 10);
+        const embeddingInput = userGames.map(g => {
+          const lib = libraryStore.getEntry(g.gameId);
+          const meta = lib?.cachedMeta;
+          return {
             id: g.gameId, title: g.title, genres: g.genres,
             themes: g.themes, modes: g.gameModes, developer: g.developer,
             publisher: g.publisher,
             playerPerspectives: g.perspectives,
-            similarGames: g.similarGameTitles?.length
-              ? g.similarGameTitles.map(t => ({ name: t }))
-              : undefined,
-          })),
-        ];
+            summary: meta?.summary,
+            description: meta?.longDescription,
+            similarGames: meta?.similarGames,
+            userNotes: lib?.publicReviews || undefined,
+          };
+        });
 
-        const generated = await embeddingGenerator(embeddingInput);
-
-        if (generated > 0) {
-          // Re-attach embeddings from the now-populated cache
-          for (const ug of userGames) {
-            ug.embedding ??= embeddingCache.get(ug.gameId);
-          }
-          for (const c of candidates) {
-            c.embedding ??= embeddingCache.get(c.gameId);
-          }
-        }
-      }
-
-      // 2.7. Enrich candidates with catalog embeddings
-      this.state = { ...this.state, progress: { stage: 'Enriching catalog embeddings...', percent: 12 } };
-      this.notify();
-      if (catalogEmbeddingEnricher) {
-        const catalogCandidateIds = new Set(
-          candidates.filter(c => !c.embedding && c.gameId.startsWith('steam-')).map(c => c.gameId),
+        await runWithDeadline(
+          (s) => embeddingGenerator(embeddingInput, s),
+          budget(EMBEDDING_GEN_TIMEOUT_MS), 0, signal, 'Library embedding generation',
         );
-        if (catalogCandidateIds.size > 0) {
-          const enriched = await catalogEmbeddingEnricher(catalogCandidateIds);
-          if (enriched > 0) {
-            for (const c of candidates) {
-              c.embedding ??= embeddingCache.get(c.gameId);
-            }
-          }
-        }
+        if (isStale()) return;
+
+        // Re-attach unconditionally: a generation that overran the deadline may
+        // still have populated part of the cache before we moved on.
+        for (const ug of userGames) ug.embedding ??= embeddingCache.get(ug.gameId);
+        for (const c of candidates) c.embedding ??= embeddingCache.get(c.gameId);
       }
 
       // 2.9. ML model scoring — Kaggle-trained LightGBM
-      this.state = { ...this.state, progress: { stage: 'ML model scoring...', percent: 14 } };
-      this.notify();
-      await this.applyMLScores(userGames, candidates);
+      setProgress('ML model scoring...', 14);
+      await runWithDeadline(
+        (s) => this.applyMLScores(userGames, candidates, s),
+        budget(ML_SCORING_TIMEOUT_MS), undefined, signal, 'ML scoring',
+      );
+      if (isStale()) return;
 
       // 3. Compute taste centroid & embedding coverage
-      this.state = { ...this.state, progress: { stage: 'Preparing scoring engine...', percent: 16 } };
-      this.notify();
+      setProgress('Preparing scoring engine...', 16);
 
       // 3.5. Precompute taste centroid for the worker
       const userEmbs = userGames
@@ -609,9 +743,18 @@ export class RecoStore {
         linkedEntries,
       );
 
-      // 4.5. Graph metrics — prefer restore / single wait; cold build is non-blocking
-      const { graphScoresMap, userCommunityCounts, userCommunityTotal } =
-        await resolveGraphScores(userGames);
+      // 4.5. Graph metrics — prefer restore / single wait; cold build is non-blocking.
+      // Only the candidate + user ids are packed (the graph can hold 100K+ nodes).
+      const graphPack = await runWithDeadline(
+        () => resolveGraphScores(
+          userGames,
+          Math.min(GRAPH_BUILD_TIMEOUT_MS, budget(GRAPH_SCORES_TIMEOUT_MS)),
+          candidates.map(c => c.gameId),
+        ),
+        budget(GRAPH_SCORES_TIMEOUT_MS), EMPTY_GRAPH_PACK, signal, 'Graph scores',
+      );
+      if (isStale()) return;
+      const { graphScoresMap, userCommunityCounts, userCommunityTotal, graphMaxPageRank } = graphPack;
 
       // 5. Dispatch to worker
       const input: RecoWorkerInput = {
@@ -626,12 +769,14 @@ export class RecoStore {
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
         precomputedSemanticScores,
         graphScores: graphScoresMap,
+        graphMaxPageRank,
         userCommunityCounts,
         userCommunityTotal,
       };
 
-      this.runWorker(input);
+      this.runWorker(input, gen);
     } catch (err) {
+      if (isStale()) return;
       console.error('[RecoStore] compute failed:', err);
       this.state = {
         ...this.state,
@@ -821,15 +966,29 @@ export class RecoStore {
    * through the shared worker so we don't interfere with in-flight save/load
    * operations from the prefetch store.
    */
-  private async buildCandidatePool(userGames: UserGameSnapshot[]): Promise<CandidateGame[]> {
+  private async buildCandidatePool(
+    userGames: UserGameSnapshot[],
+    candidates: CandidateGame[] = [],
+    signal?: AbortSignal,
+  ): Promise<CandidateGame[]> {
     // Exclude library primaries + secondaryGameId twins across all sources
     const userGameIds = buildLinkedExclusionIds(
       libraryStore.getAllEntries(),
       userGames.map(g => g.gameId),
     );
 
-    const candidates: CandidateGame[] = [];
     const seenIds = new Set<string>();
+
+    // The Epic catalog used to be streamed up to three times per compute
+    // (genre match, ANN hydrate, BM25 hydrate). Read it once, lazily, bounded.
+    let epicMapPromise: Promise<Map<string, EpicCatalogEntry>> | null = null;
+    const getEpicMap = () => {
+      epicMapPromise ??= runWithDeadline(
+        () => this.loadEpicCatalogMap(),
+        OPTIONAL_SOURCE_TIMEOUT_MS, new Map<string, EpicCatalogEntry>(), signal, 'Epic catalog read',
+      ).catch(() => new Map<string, EpicCatalogEntry>());
+      return epicMapPromise;
+    };
 
     // ── Source 1: Browse cache (existing path — 3K–6K games) ──
     let rawGames: Record<string, any>[] = [];
@@ -886,10 +1045,13 @@ export class RecoStore {
       });
     }
 
+    if (signal?.aborted) return candidates;
+
     // ── Source 2: Full Steam catalog (pre-filtered to ~5–8K) ──
     const browseCount = candidates.length;
     try {
       const catalogCandidates = await this.loadCatalogCandidates(userGames, userGameIds, seenIds);
+      if (signal?.aborted) return candidates;
       candidates.push(...catalogCandidates);
     } catch (err) {
       console.warn('[RecoStore] Catalog candidate loading failed (non-fatal):', err);
@@ -899,7 +1061,8 @@ export class RecoStore {
     // ── Source 2b: Epic catalog (genre/developer match) ──
     let epicCatalogCount = 0;
     try {
-      const epicCandidates = await this.loadEpicCatalogCandidates(userGames, userGameIds, seenIds);
+      const epicCandidates = this.loadEpicCatalogCandidates(userGames, userGameIds, seenIds, await getEpicMap());
+      if (signal?.aborted) return candidates;
       candidates.push(...epicCandidates);
       epicCatalogCount = epicCandidates.length;
     } catch (err) {
@@ -910,7 +1073,16 @@ export class RecoStore {
     let annCount = 0;
     try {
       if (annIndex.isReady) {
-        const annCandidates = await this.retrieveByANN(userGames, userGameIds, seenIds);
+        // Own seen-set, merged only if the source finished in time: a timed-out source keeps
+        // running and would otherwise mark ids as taken that never reach `candidates`.
+        const annSeen = new Set(seenIds);
+        let annFinished = false;
+        const annCandidates = await runWithDeadline(
+          async () => { const r = await this.retrieveByANN(userGames, userGameIds, annSeen, getEpicMap); annFinished = true; return r; },
+          OPTIONAL_SOURCE_TIMEOUT_MS, [] as CandidateGame[], signal, 'ANN retrieval',
+        );
+        if (signal?.aborted) return candidates;
+        if (annFinished) for (const id of annSeen) seenIds.add(id);
         candidates.push(...annCandidates);
         annCount = annCandidates.length;
       }
@@ -921,7 +1093,14 @@ export class RecoStore {
     // ── Source 4: BM25 lexical retrieval (taste keywords → ~500) ──
     let bm25Count = 0;
     try {
-      const bm25Candidates = await this.retrieveByBM25(userGames, userGameIds, seenIds);
+      const bm25Seen = new Set(seenIds);
+      let bm25Finished = false;
+      const bm25Candidates = await runWithDeadline(
+        async () => { const r = await this.retrieveByBM25(userGames, userGameIds, bm25Seen, getEpicMap); bm25Finished = true; return r; },
+        OPTIONAL_SOURCE_TIMEOUT_MS, [] as CandidateGame[], signal, 'BM25 retrieval',
+      );
+      if (signal?.aborted) return candidates;
+      if (bm25Finished) for (const id of bm25Seen) seenIds.add(id);
       candidates.push(...bm25Candidates);
       bm25Count = bm25Candidates.length;
     } catch (err) {
@@ -1027,31 +1206,41 @@ export class RecoStore {
    * F4: ANN neighbor titles into similarGameTitles; Steam details for
    * metacritic/studio/comingSoon only (never recommendations.total as fake titles).
    */
-  private async hydrateSurvivorMetadata(candidates: CandidateGame[]): Promise<void> {
+  private async hydrateSurvivorMetadata(candidates: CandidateGame[], signal?: AbortSignal): Promise<void> {
     const pri = (c: CandidateGame) =>
       (c.semanticRetrieved ? 2 : 0) + (c.lexicalRetrieved ? 2 : 0) + (c.coldStartSeeded ? 1 : 0);
 
-    // 1) ANN neighbor display titles (cap ≤ 80 survivors missing titles)
+    // 1) ANN neighbor display titles (cap ≤ 80 survivors missing titles).
+    // One batched ANN query using the in-memory vectors — this used to be 80
+    // sequential lookups at ~3 IPC round-trips each.
     const needTitles = candidates
       .filter(c => c.similarGameTitles.length === 0 && embeddingCache.has(c.gameId))
       .sort((a, b) => pri(b) - pri(a))
       .slice(0, SURVIVOR_HYDRATE_CAP);
 
-    let annHydrated = 0;
-    for (const c of needTitles) {
+    if (needTitles.length > 0) {
+      let annHydrated = 0;
       try {
-        const titles = await getSimilarTitlesForReco(c.gameId, 6);
-        if (titles.length > 0) {
-          c.similarGameTitles = titles;
-          annHydrated++;
+        const titlesById = await getSimilarTitlesForRecoBatch(
+          needTitles.map(c => ({ gameId: c.gameId, vector: embeddingCache.get(c.gameId)! })),
+          6,
+        );
+        if (signal?.aborted) return;
+        for (const c of needTitles) {
+          const titles = titlesById.get(c.gameId);
+          if (titles && titles.length > 0) {
+            c.similarGameTitles = titles;
+            annHydrated++;
+          }
         }
       } catch {
-        /* non-fatal per id */
+        /* non-fatal */
+      }
+      if (annHydrated > 0) {
+        console.log(`[RecoStore] Survivor ANN titles: ${annHydrated}/${needTitles.length}`);
       }
     }
-    if (annHydrated > 0) {
-      console.log(`[RecoStore] Survivor ANN titles: ${annHydrated}/${needTitles.length}`);
-    }
+    if (signal?.aborted) return;
 
     // 2) Steam details — metacritic / studio / comingSoon / recommendations count only
     if (typeof window === 'undefined' || !window.steam?.getMultipleAppDetails) return;
@@ -1072,7 +1261,14 @@ export class RecoStore {
     if (appIds.length === 0) return;
 
     try {
-      const detailsArr = await window.steam.getMultipleAppDetails(appIds);
+      // Shares the Steam rate limiter with every other details caller — never
+      // let it hold the pipeline; a late response still warms the main-process cache.
+      const steam = window.steam;
+      const detailsArr = await runWithDeadline(
+        () => steam.getMultipleAppDetails(appIds),
+        SURVIVOR_STEAM_DETAILS_TIMEOUT_MS, [], signal, 'Survivor Steam details',
+      );
+      if (signal?.aborted) return;
       const byApp = new Map<number, any>();
       for (const { appId, details } of detailsArr || []) {
         if (details) byApp.set(appId, details);
@@ -1196,13 +1392,13 @@ export class RecoStore {
    * Simpler filtering than Steam (no review scores), but includes Epic's
    * richer descriptions in the candidate pool.
    */
-  private async loadEpicCatalogCandidates(
+  private loadEpicCatalogCandidates(
     userGames: UserGameSnapshot[],
     userGameIds: Set<string>,
     seenIds: Set<string>,
-  ): Promise<CandidateGame[]> {
-    const entryCount = await epicCatalogStore.getEntryCount();
-    if (entryCount === 0) return [];
+    epicMap: Map<string, EpicCatalogEntry>,
+  ): CandidateGame[] {
+    if (epicMap.size === 0) return [];
 
     const genreSet = new Set<string>();
     const devSet = new Set<string>();
@@ -1212,48 +1408,62 @@ export class RecoStore {
     }
 
     const results: CandidateGame[] = [];
-    await epicCatalogStore.getAllEntries((batch) => {
-      for (const entry of batch) {
-        const id = `epic-${entry.epicId}`;
-        if (isLinkedExcluded(id, undefined, userGameIds) || isLinkedExcluded(id, undefined, seenIds)) continue;
+    for (const entry of epicMap.values()) {
+      const id = `epic-${entry.epicId}`;
+      if (isLinkedExcluded(id, undefined, userGameIds) || isLinkedExcluded(id, undefined, seenIds)) continue;
 
-        const hasGenreMatch = entry.genres.some(g => genreSet.has(g.toLowerCase()));
-        const hasDevMatch = entry.developer && devSet.has(entry.developer.toLowerCase());
-        if (!hasGenreMatch && !hasDevMatch) continue;
+      const hasGenreMatch = entry.genres.some(g => genreSet.has(g.toLowerCase()));
+      const hasDevMatch = entry.developer && devSet.has(entry.developer.toLowerCase());
+      if (!hasGenreMatch && !hasDevMatch) continue;
 
-        seenIds.add(id);
-        const embedding = embeddingCache.get(id);
-        const releaseStr = entry.releaseDate
-          ? new Date(entry.releaseDate).toISOString().slice(0, 10)
-          : '';
+      seenIds.add(id);
+      results.push(this.epicEntryToCandidate(entry));
+    }
 
-        results.push({
-          gameId: id,
-          title: entry.name,
-          coverUrl: entry.coverUrl || undefined,
-          developer: entry.developer,
-          publisher: entry.publisher,
-          genres: entry.genres || [],
-          themes: entry.themes || [],
-          gameModes: entry.modes || [],
-          perspectives: [],
-          platforms: ['Windows'],
-          metacriticScore: null,
-          playerCount: null,
-          releaseDate: releaseStr,
-          similarGameTitles: [],
-          price: {
-            isFree: entry.isFree,
-            finalFormatted: entry.priceFormatted,
-            discountPercent: entry.discountPercent,
-          },
-          ...(embedding ? { embedding } : {}),
-        });
-      }
-    });
-
-    console.log(`[RecoStore] Epic catalog pre-filter: ${entryCount} total → ${results.length} matched`);
+    console.log(`[RecoStore] Epic catalog pre-filter: ${epicMap.size} total → ${results.length} matched`);
     return results;
+  }
+
+  /** Stream the Epic catalog once per compute into an epicId-keyed map. */
+  private async loadEpicCatalogMap(): Promise<Map<string, EpicCatalogEntry>> {
+    const map = new Map<string, EpicCatalogEntry>();
+    const entryCount = await epicCatalogStore.getEntryCount();
+    if (entryCount === 0) return map;
+    await epicCatalogStore.getAllEntries((batch) => {
+      for (const entry of batch) map.set(entry.epicId, entry);
+    });
+    return map;
+  }
+
+  private epicEntryToCandidate(entry: EpicCatalogEntry, extra?: Partial<CandidateGame>): CandidateGame {
+    const id = `epic-${entry.epicId}`;
+    const embedding = embeddingCache.get(id);
+    const releaseStr = entry.releaseDate
+      ? new Date(entry.releaseDate).toISOString().slice(0, 10)
+      : '';
+    return {
+      gameId: id,
+      title: entry.name,
+      coverUrl: entry.coverUrl || undefined,
+      developer: entry.developer,
+      publisher: entry.publisher,
+      genres: entry.genres || [],
+      themes: entry.themes || [],
+      gameModes: entry.modes || [],
+      perspectives: [],
+      platforms: ['Windows'],
+      metacriticScore: null,
+      playerCount: null,
+      releaseDate: releaseStr,
+      similarGameTitles: [],
+      price: {
+        isFree: entry.isFree,
+        finalFormatted: entry.priceFormatted,
+        discountPercent: entry.discountPercent,
+      },
+      ...extra,
+      ...(embedding ? { embedding } : {}),
+    };
   }
 
   /**
@@ -1264,6 +1474,7 @@ export class RecoStore {
     userGames: UserGameSnapshot[],
     userGameIds: Set<string>,
     seenIds: Set<string>,
+    getEpicMap: () => Promise<Map<string, EpicCatalogEntry>>,
   ): Promise<CandidateGame[]> {
     const userEmbs = userGames
       .filter(ug => ug.embedding && ug.embedding.length > 0)
@@ -1347,43 +1558,17 @@ export class RecoStore {
       }
     }
 
-    // Epic catalog entries — stream all and match by ID
+    // Epic catalog entries — looked up in the once-per-compute Epic map
     if (newEpicIds.length > 0) {
-      const epicIdSet = new Set(newEpicIds.map(id => id.slice(5))); // strip "epic-" prefix
-      await epicCatalogStore.getAllEntries((batch) => {
-        for (const entry of batch) {
-          if (!epicIdSet.has(entry.epicId)) continue;
-          const id = `epic-${entry.epicId}`;
-          const embedding = embeddingCache.get(id);
-          const releaseStr = entry.releaseDate
-            ? new Date(entry.releaseDate).toISOString().slice(0, 10)
-            : '';
-          results.push({
-            gameId: id,
-            title: entry.name,
-            coverUrl: entry.coverUrl || undefined,
-            developer: entry.developer,
-            publisher: entry.publisher,
-            genres: entry.genres || [],
-            themes: entry.themes || [],
-            gameModes: entry.modes || [],
-            perspectives: [],
-            platforms: ['Windows'],
-            metacriticScore: null,
-            playerCount: null,
-            releaseDate: releaseStr,
-            similarGameTitles: [],
-            price: {
-              isFree: entry.isFree,
-              finalFormatted: entry.priceFormatted,
-              discountPercent: entry.discountPercent,
-            },
-            semanticRetrieved: true,
-            annDistance: distanceById.get(id),
-            ...(embedding ? { embedding } : {}),
-          });
-        }
-      });
+      const epicMap = await getEpicMap();
+      for (const id of newEpicIds) {
+        const entry = epicMap.get(id.slice(5)); // strip "epic-" prefix
+        if (!entry) continue;
+        results.push(this.epicEntryToCandidate(entry, {
+          semanticRetrieved: true,
+          annDistance: distanceById.get(id),
+        }));
+      }
     }
 
     console.log(`[RecoStore] ANN retrieval: ${neighbors.length} queried → ${kept.length} kept (ceiling ${ANN_DISTANCE_CEILING} / top ${ANN_MAX_KEEP}) → ${results.length} loaded`);
@@ -1398,9 +1583,16 @@ export class RecoStore {
     userGames: UserGameSnapshot[],
     userGameIds: Set<string>,
     seenIds: Set<string>,
+    getEpicMap: () => Promise<Map<string, EpicCatalogEntry>>,
   ): Promise<CandidateGame[]> {
-    const ready = await bm25Index.ensureReady();
-    if (!ready) return [];
+    // Never build/load MiniSearch inline — a cold build indexes the whole
+    // catalog. Use the index only when it is already in memory, and let the
+    // idle scheduler load / refresh it (generation check included) for next run.
+    bm25Index.scheduleIdleRebuild();
+    if (!bm25Index.isReady) {
+      console.log('[RecoStore] BM25 index not ready — skipping lexical retrieval this run');
+      return [];
+    }
 
     const lexicalQuery = this.buildLexicalQueryFromLibrary(userGames);
     if (!lexicalQuery) return [];
@@ -1475,40 +1667,12 @@ export class RecoStore {
     }
 
     if (newEpicIds.length > 0) {
-      const epicIdSet = new Set(newEpicIds.map((id) => id.slice(5)));
-      await epicCatalogStore.getAllEntries((batch) => {
-        for (const entry of batch) {
-          if (!epicIdSet.has(entry.epicId)) continue;
-          const id = `epic-${entry.epicId}`;
-          const embedding = embeddingCache.get(id);
-          const releaseStr = entry.releaseDate
-            ? new Date(entry.releaseDate).toISOString().slice(0, 10)
-            : '';
-          results.push({
-            gameId: id,
-            title: entry.name,
-            coverUrl: entry.coverUrl || undefined,
-            developer: entry.developer,
-            publisher: entry.publisher,
-            genres: entry.genres || [],
-            themes: entry.themes || [],
-            gameModes: entry.modes || [],
-            perspectives: [],
-            platforms: ['Windows'],
-            metacriticScore: null,
-            playerCount: null,
-            releaseDate: releaseStr,
-            similarGameTitles: [],
-            price: {
-              isFree: entry.isFree,
-              finalFormatted: entry.priceFormatted,
-              discountPercent: entry.discountPercent,
-            },
-            lexicalRetrieved: true,
-            ...(embedding ? { embedding } : {}),
-          });
-        }
-      });
+      const epicMap = await getEpicMap();
+      for (const id of newEpicIds) {
+        const entry = epicMap.get(id.slice(5));
+        if (!entry) continue;
+        results.push(this.epicEntryToCandidate(entry, { lexicalRetrieved: true }));
+      }
     }
 
     console.log(
@@ -1799,6 +1963,7 @@ export class RecoStore {
   private async applyMLScores(
     userGames: UserGameSnapshot[],
     candidates: CandidateGame[],
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!window.ml) return;
 
@@ -1844,8 +2009,11 @@ export class RecoStore {
       const gameIds = candidates.map(c => c.gameId);
 
       for (let start = 0; start < gameIds.length; start += BATCH_SIZE) {
+        // Deadline passed — stop mutating candidates the pipeline has moved on with.
+        if (signal?.aborted) return;
         const batchIds = gameIds.slice(start, start + BATCH_SIZE);
         const scores = await window.ml.scoreGames(userProfile, batchIds);
+        if (signal?.aborted) return;
 
         for (const result of scores) {
           // scoreGames only returns real Kaggle-profile titles (no 0.5 placeholders)
@@ -1973,7 +2141,6 @@ export class RecoStore {
   private async runOracleRerankPass(
     tasteProfile: TasteProfile,
     shelves: RecoShelf[],
-    opts?: { showProgress?: boolean },
   ): Promise<{ shelves: RecoShelf[]; status: RerankStatus }> {
     let settings: {
       oracleRerankEnabled?: boolean;
@@ -1994,29 +2161,43 @@ export class RecoStore {
       return { shelves, status: rerankStatus('skipped_no_client') };
     }
 
-    if (opts?.showProgress) {
-      this.state = {
-        ...this.state,
-        progress: { stage: 'Refining recommendations (Ollama)...', percent: 92 },
-      };
-      this.notify();
-    }
     const { applyOracleRerankShelves } = await import('@/services/oracle-rerank');
     return applyOracleRerankShelves(tasteProfile, shelves, { enabled: true, blend });
   }
 
   /**
-   * After cache restore: replay only the Oracle rerank pass. The heavier
-   * retrieval and scoring stages are not re-run, which is safe because
-   * `loadResultsFromCache` already refused the cache if any of them became
-   * available since it was written.
+   * Refine the published shelf order with the Oracle rerank pass, in the
+   * background. Shelves are already on screen (status 'done') when this runs;
+   * the main-process rerank cascade can take minutes on CPU, so it gets a
+   * fixed budget and the worker order simply stays when it overruns.
+   *
+   * Used after worker completion and after cache restore. The cache-restore
+   * path replays only this pass; the heavier retrieval and scoring stages are
+   * not re-run, which is safe because `loadResultsFromCache` already refused
+   * the cache if any of them became available since it was written.
    */
-  private async rerankRestoredCachedShelves(tasteProfile: TasteProfile, shelves: RecoShelf[]) {
-    const genAtStart = this.computeGeneration;
+  private async rerankShelvesInBackground(
+    genAtStart: number,
+    tasteProfile: TasteProfile,
+    shelves: RecoShelf[],
+    opts: { persist: 'if-applied' | 'never' },
+  ) {
+    const cacheEpochAtStart = this.cacheEpoch;
+    const isCurrent = () =>
+      genAtStart === this.computeGeneration
+      && this.state.status === 'done'
+      && this.state.shelves === shelves;
     try {
-      const out = await this.runOracleRerankPass(tasteProfile, shelves, { showProgress: false });
-      if (genAtStart !== this.computeGeneration) return;
-      if (this.state.status !== 'done') return;
+      const out = await runWithDeadline(
+        () => this.runOracleRerankPass(tasteProfile, shelves),
+        ORACLE_RERANK_BUDGET_MS, null, undefined, 'Oracle rerank',
+      );
+      if (!isCurrent()) return;
+      if (!out) {
+        this.state = { ...this.state, oracleRerankStatus: rerankStatus('skipped_timeout') };
+        this.notify();
+        return;
+      }
       this.state = {
         ...this.state,
         shelves: out.shelves,
@@ -2024,28 +2205,25 @@ export class RecoStore {
       };
       this.notify();
       // Persist refined order so the next cold start benefits.
-      if (out.status.outcome === 'applied') this.saveResultsToCache();
+      // Not after a dismiss invalidated the cache meanwhile — that would re-cache the dismissed game.
+      if (opts.persist === 'if-applied' && out.status.outcome === 'applied' && this.cacheEpoch === cacheEpochAtStart) {
+        this.saveResultsToCache();
+      }
     } catch (e) {
-      console.warn('[RecoStore] Cached-shelf Oracle rerank skipped:', e);
-      if (genAtStart !== this.computeGeneration) return;
+      console.warn('[RecoStore] Oracle rerank skipped:', e);
+      if (!isCurrent()) return;
       this.state = { ...this.state, oracleRerankStatus: rerankStatus('error') };
       this.notify();
     }
   }
 
-  /** Apply Ollama /api/rerank to shelf game order when available (after worker completes). */
-  private async finishWorkerResult(msg: RecoWorkerResult, runId: number) {
-    let shelves = msg.shelves;
-    let oracleRerankStatus: RerankStatus = rerankStatus('none');
-    try {
-      const out = await this.runOracleRerankPass(msg.tasteProfile, msg.shelves, { showProgress: true });
-      shelves = out.shelves;
-      oracleRerankStatus = out.status;
-    } catch (e) {
-      console.warn('[RecoStore] Oracle rerank skipped:', e);
-      oracleRerankStatus = rerankStatus('error');
-    }
-
+  /**
+   * Publish the worker's shelves immediately, then refine their order with
+   * the Oracle rerank in the background (bounded by ORACLE_RERANK_BUDGET_MS).
+   * Rerank used to run here with status still 'computing' and no timeout,
+   * which is what kept Oracle parked at 92% for minutes.
+   */
+  private finishWorkerResult(msg: RecoWorkerResult, runId: number) {
     if (runId !== this.computeGeneration) return;
 
     this.state = {
@@ -2053,18 +2231,22 @@ export class RecoStore {
       status: 'done',
       progress: { stage: 'Complete', percent: 100 },
       tasteProfile: msg.tasteProfile,
-      shelves,
+      shelves: msg.shelves,
       computeTimeMs: msg.computeTimeMs,
       lastComputed: Date.now(),
-      oracleRerankStatus,
+      oracleRerankStatus: rerankStatus('none'),
     };
     this.notify();
     this.saveResultsToCache();
+
+    if (msg.tasteProfile && msg.shelves.length > 0) {
+      void this.rerankShelvesInBackground(runId, msg.tasteProfile, msg.shelves, { persist: 'if-applied' });
+    }
   }
 
-  private runWorker(input: RecoWorkerInput) {
+  private runWorker(input: RecoWorkerInput, runId: number) {
     this.killWorker();
-    const runId = ++this.computeGeneration;
+    if (runId !== this.computeGeneration) return;
 
     try {
       this.worker = new Worker(
@@ -2075,6 +2257,7 @@ export class RecoStore {
       this.resetWorkerTimeout();
 
       this.worker.onmessage = (e: MessageEvent<RecoWorkerMessage>) => {
+        if (runId !== this.computeGeneration) return;
         const msg = e.data;
 
         if (msg.type === 'progress') {
@@ -2105,11 +2288,12 @@ export class RecoStore {
           if (this.workerTimeout) { clearTimeout(this.workerTimeout); this.workerTimeout = null; }
           this.worker?.terminate();
           this.worker = null;
-          void this.finishWorkerResult(msg, runId);
+          this.finishWorkerResult(msg, runId);
         }
       };
 
       this.worker.onerror = (err) => {
+        if (runId !== this.computeGeneration) return;
         console.error('[RecoStore] Worker error:', err);
         if (this.workerTimeout) { clearTimeout(this.workerTimeout); this.workerTimeout = null; }
         this.state = {
@@ -2148,23 +2332,71 @@ export class RecoStore {
   }
 
   /**
+   * Supersede whatever compute is in flight: bump the generation (every await
+   * in compute / worker callbacks / background rerank re-checks it) and abort
+   * its pre-worker steps so they stop waiting on Ollama / IPC.
+   */
+  private abortInFlightCompute() {
+    this.computeGeneration++;
+    this.computeAbort?.abort();
+    this.computeAbort = null;
+  }
+
+  private cancelScheduledRefresh() {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+  }
+
+  /**
    * Drop persisted Oracle result cache without kicking a full recompute.
    * Used after dismiss so a 15‑min restore cannot resurrect muted franchise siblings.
    */
   invalidateCacheOnly() {
+    this.cacheEpoch++; // a background rerank still in flight must not re-save the old shelves
     this.clearResultsCache();
   }
 
   /**
+   * Coalesce bursts of invalidations (library notifies, several thumbs-ups in
+   * a row) into one `refresh()` after a quiet period.
+   */
+  scheduleRefresh(delayMs: number = LIBRARY_REFRESH_DEBOUNCE_MS) {
+    this.cancelScheduledRefresh();
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      this.refresh();
+    }, delayMs);
+  }
+
+  /**
    * Force a recompute, even if results already exist.
-   * Kills any running worker, resets state to idle, and re-runs the full
-   * pipeline (embedding reload + compute). Safe to call at any time.
+   * Aborts any in-flight compute (pre-worker steps, worker and background
+   * rerank), resets status to idle and re-runs the full pipeline (embedding
+   * reload + compute). Safe to call at any time.
+   *
+   * Stale-while-revalidate: the previous shelves / taste profile stay in state
+   * while the next compute runs, so the UI keeps showing them instead of
+   * blanking to a skeleton on every library change.
    */
   refresh() {
+    this.cancelScheduledRefresh();
+    this.abortInFlightCompute();
     this.killWorker();
     this.clearResultsCache();
-    const nextGen = this.state.invalidationGeneration + 1;
-    this.state = { ...INITIAL_STATE, invalidationGeneration: nextGen };
+    const prev = this.state;
+    this.state = {
+      ...INITIAL_STATE,
+      tasteProfile: prev.tasteProfile,
+      shelves: prev.shelves,
+      computeTimeMs: prev.computeTimeMs,
+      lastComputed: prev.lastComputed,
+      libraryCount: prev.libraryCount,
+      candidateCount: prev.candidateCount,
+      oracleRerankStatus: prev.oracleRerankStatus,
+      invalidationGeneration: prev.invalidationGeneration + 1,
+    };
     this.notify();
     // Don't call compute() directly — let the OracleView useEffect
     // re-trigger it so embeddings are reloaded too.
@@ -2176,6 +2408,8 @@ export class RecoStore {
 
   /** Reset to initial state without computing. */
   reset() {
+    this.cancelScheduledRefresh();
+    this.abortInFlightCompute();
     this.killWorker();
     this.state = { ...INITIAL_STATE };
     this.notify();
@@ -2188,8 +2422,9 @@ export const recoStore = new RecoStore();
 // ── Invalidate Oracle reco when library/custom data used by reco changes ──
 // v1.0.41 audit: subscribe via libraryStore.subscribe (the non-hours channel),
 // NOT libraryStore.subscribeHours — 15s session ticks must not full-recompute.
-// Signature now includes coarse hours buckets + dismiss fingerprint so a later
-// cache restore still fails when engagement or mutes changed.
+// Signature includes log-scale hours buckets + dismiss fingerprint so a later
+// cache restore still fails when engagement or mutes changed. Library notify
+// bursts (Steam sync, bulk edits) coalesce over LIBRARY_REFRESH_DEBOUNCE_MS.
 
 let oracleLibrarySnapBaseline: string | null = null;
 let oracleLibraryInvalidateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2207,7 +2442,7 @@ function scheduleOracleInvalidateOnLibraryChange() {
     if (snap === oracleLibrarySnapBaseline) return;
     oracleLibrarySnapBaseline = snap;
     recoStore.refresh();
-  }, 400);
+  }, LIBRARY_REFRESH_DEBOUNCE_MS);
 }
 
 if (typeof window !== 'undefined') {

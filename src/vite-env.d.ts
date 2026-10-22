@@ -234,6 +234,12 @@ type StoreBatchOp =
 
 interface StoreAPI {
   get: <T = unknown>(namespace: string, key: string) => Promise<StoreGetResult<T>>;
+  /**
+   * Bulk point lookup (v1.0.73) — one round trip for up to 10k keys. `values[i]` is `null` when
+   * `keys[i]` is missing. Prefer over fanning out `get` calls (see `storeGetMany` in services).
+   * Optional: absent in older preloads and some test mocks — fall back to `get`.
+   */
+  getMany?: <T = unknown>(namespace: string, keys: string[]) => Promise<{ values?: Array<T | null>; error?: string }>;
   getAll: <T = unknown>(namespace: string) => Promise<StoreGetAllResult<T>>;
   /** Paginated chunk read for large namespaces (catalog: 155k, epic-catalog: 40k). */
   getChunk: <T = unknown>(

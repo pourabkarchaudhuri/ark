@@ -89,6 +89,13 @@ function oracleRerankBadge(status: RerankStatus): { label: string; title: string
   if (outcome === 'empty_results') {
     return { label: 'No rerank scores', title: 'Rerank returned no scores; shelves use the worker order', tone: 'warn' };
   }
+  if (outcome === 'skipped_timeout') {
+    return {
+      label: 'Rerank timed out',
+      title: 'The reranker did not answer within its time budget; shelves use the worker order',
+      tone: 'info',
+    };
+  }
   // Soft skips (disabled / blend 0 / no client / empty pool) stay quiet.
   return null;
 }
@@ -118,6 +125,9 @@ import { useDraggableScroll } from '@/hooks/useDraggableScroll';
 // ─── Background catalog embedding pipeline (persists across navigation) ──────
 
 let _pipelineStarted = false;
+
+/** How long an Oracle compute waits on the Ollama availability / setup probe. */
+const OLLAMA_PROBE_TIMEOUT_MS = 5_000;
 
 function startCatalogEmbeddingPipeline() {
   if (_pipelineStarted) return;
@@ -892,9 +902,11 @@ const WhyPanelBody = memo(function WhyPanelBody({
   const onThumbUp = useCallback(() => {
     recoHistoryStore.recordThumbs(game.gameId, 1, game.title);
     setThumbs(1);
-    // Invalidate + refresh so positive profile re-ranks shelves; keep drawer open.
+    // Invalidate + (debounced) refresh so positive profile re-ranks shelves;
+    // keep drawer open. Several ups in a row coalesce into one recompute, and
+    // current shelves stay visible while it runs.
     recoStore.invalidateCacheOnly();
-    recoStore.refresh();
+    recoStore.scheduleRefresh();
   }, [game.gameId, game.title]);
 
   const onThumbDown = useCallback(() => {
@@ -1844,8 +1856,15 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
         if (cachedCount > 0) setEmbeddingStatus('ready');
 
         recoStore.compute(
-          async (games) => {
-            const available = await embeddingService.isAvailable();
+          async (games, signal) => {
+            // isAvailable() runs Ollama setup, which may pull the embedding
+            // model for up to 10 min. Don't hold Oracle on it: if it hasn't
+            // answered quickly, treat embeddings as unavailable for this
+            // compute (setup keeps going in the background for next time).
+            const available = await Promise.race([
+              embeddingService.isAvailable().catch(() => false),
+              new Promise<false>((resolve) => setTimeout(() => resolve(false), OLLAMA_PROBE_TIMEOUT_MS)),
+            ]);
             if (!available) {
               if (cachedCount === 0) setEmbeddingStatus('unavailable');
               return 0;
@@ -1855,7 +1874,7 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
             setEmbeddingProgress({ completed: 0, total: 0 });
             const generated = await embeddingService.generateMissing(games, (completed, total) => {
               setEmbeddingProgress({ completed, total });
-            });
+            }, { signal });
             setEmbeddingProgress(null);
             setEmbeddingStatus((generated > 0 || cachedCount > 0) ? 'ready' : 'unavailable');
             return generated;
@@ -1873,7 +1892,10 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
   const handleRefresh = useCallback(() => {
     hasTriggered.current = false;
     embeddingService.resetLibraryStatus();
-    _pipelineStarted = false;
+    // Do NOT reset `_pipelineStarted` here: while the catalog pipeline is in
+    // flight that let a second Steam pass start during the Epic pass. The
+    // pipeline clears its own guard in `finally`, so a failed run is still
+    // retried the next time the status flips to 'done'.
     recoStore.refresh();
   }, []);
 
@@ -1927,19 +1949,31 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     return () => document.removeEventListener('keydown', onKey);
   }, [rightPanel]);
 
-  // Filter dismissed + hard-neg expanded ids from shelves and apply bandit reordering
-  const filterDismissed = (shelves: RecoShelf[]) =>
-    shelves.map(s => ({
+  // Filter dismissed + hard-neg expanded ids from shelves and apply bandit reordering.
+  // Memoized: reorderShelves is Thompson sampling (random draws), so running it
+  // on every render reshuffled the shelves on each progress tick / hover.
+  const filteredShelves = useMemo(
+    () => state.shelves.map(s => ({
       ...s,
       games: s.games.filter(g => !dismissedIds.has(g.gameId)),
-    })).filter(s => s.games.length > 0);
-
-  const filteredShelves = filterDismissed(state.shelves);
+    })).filter(s => s.games.length > 0),
+    [state.shelves, dismissedIds],
+  );
   const heroShelf = filteredShelves.find(s => s.type === 'hero');
-  const otherShelves = shelfBanditStore.reorderShelves(
-    filteredShelves.filter(s => s.type !== 'hero'),
+  const otherShelves = useMemo(
+    () => shelfBanditStore.reorderShelves(filteredShelves.filter(s => s.type !== 'hero')),
+    // lastComputed: re-sample once per new result, not per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filteredShelves, state.lastComputed],
   );
   const oracleRerankBadgeInfo = oracleRerankBadge(state.oracleRerankStatus);
+
+  // Stale-while-revalidate: refresh() keeps the previous shelves in state while
+  // the next compute runs, so keep rendering them (with a small progress chip)
+  // instead of blanking to the full-screen loader on every library change.
+  const hasShelves = state.shelves.length > 0;
+  const showResults = state.status === 'done' || (hasShelves && state.status !== 'error');
+  const isRevalidating = showResults && state.status !== 'done';
 
   const explainingId = rightPanel?.kind === 'why' ? rightPanel.gameId : null;
 
@@ -1952,8 +1986,9 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     <div className="relative h-[calc(100vh-10rem)] overflow-hidden" data-tour="oracle-view-root">
       <div className="h-full overflow-y-auto overflow-x-hidden scrollbar-hide">
       <AnimatePresence mode="wait" initial={!alreadyDone.current}>
-        {/* Computing state — skeleton background + detailed progress overlay */}
-        {state.status === 'computing' && (
+        {/* Computing state — skeleton background + detailed progress overlay
+            (first compute only; recomputes keep the previous shelves on screen) */}
+        {state.status === 'computing' && !hasShelves && (
           <motion.div
             key="computing"
             initial={{ opacity: 0 }}
@@ -2032,8 +2067,8 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
           </motion.div>
         )}
 
-        {/* Results */}
-        {state.status === 'done' && (
+        {/* Results (also shown, stale, while a recompute runs) */}
+        {showResults && (
           <motion.div
             key="results"
             initial={{ opacity: 0 }}
@@ -2056,6 +2091,15 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                         : `${state.computeTimeMs}ms`
                   }`}
                 </span>
+                {isRevalidating && (
+                  <span
+                    className="flex items-center gap-1 text-[9px] text-fuchsia-400/60"
+                    title={state.progress.stage || 'Recomputing recommendations'}
+                  >
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Updating{state.progress.percent > 0 ? ` ${Math.round(state.progress.percent)}%` : '...'}
+                  </span>
+                )}
                 {embeddingStatus === 'ready' && (
                   <span className="flex items-center gap-1 text-xs text-emerald-400/50">
                     <Brain className="w-4 h-4" />
@@ -2154,7 +2198,7 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
         )}
 
         {/* Idle — brief transitional state before useEffect triggers compute */}
-        {state.status === 'idle' && (
+        {state.status === 'idle' && !hasShelves && (
           <motion.div
             key="idle"
             initial={{ opacity: 0 }}
@@ -2168,7 +2212,7 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
       </div>
 
       {/* Right-hand drawer — Taste DNA or a per-game explanation, never both */}
-      {state.status === 'done' && (
+      {showResults && (
         <>
           {/* Toggle tab — vertical bookmark on right edge */}
           {state.tasteProfile && state.tasteProfile.genres.length >= 3 && (

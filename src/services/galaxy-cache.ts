@@ -586,13 +586,21 @@ export const GALAXY_STEP_LABELS = [
   'Building galaxy map',
 ];
 
-let _buildGeneration = 0;
+type GalaxyBuildResult = { nodes: GraphNode[]; allGenres: string[]; projectionMethod: string };
 
+/**
+ * Build galaxy nodes from the current embeddings.
+ *
+ * Builds used to cancel each other: every call bumped a generation counter
+ * and any older in-flight build bailed out with 0 nodes. The background
+ * precompute and the Embedding Space view routinely overlapped, so one of
+ * them got an empty galaxy and immediately scheduled a retry, which could
+ * cancel the other again. Callers now share a single in-flight build via
+ * `buildAndCacheGalaxy` instead, so no build ever cancels another.
+ */
 export async function buildGalaxyData(
   onStep?: GalaxyStepReporter,
-): Promise<{ nodes: GraphNode[]; allGenres: string[]; projectionMethod: string }> {
-  const myGen = ++_buildGeneration;
-  const cancelled = () => _buildGeneration !== myGen;
+): Promise<GalaxyBuildResult> {
   const report = onStep ?? (() => {});
 
   report(0, 'running');
@@ -606,9 +614,9 @@ export async function buildGalaxyData(
   embResult = null;
   const n = ids.length;
   console.log(`[Galaxy Cache] Loaded ${n.toLocaleString()} vectors → ${projDim}D (${(data.byteLength / 1048576).toFixed(1)} MB)`);
-  if (n === 0 || cancelled()) {
-    report(0, 'done', cancelled() ? 'cancelled' : '0 vectors');
-    return { nodes: [], allGenres: [], projectionMethod: cancelled() ? 'cancelled' : 'none' };
+  if (n === 0) {
+    report(0, 'done', '0 vectors');
+    return { nodes: [], allGenres: [], projectionMethod: 'none' };
   }
   report(0, 'done', `${n.toLocaleString()} vectors (projected to ${projDim}D)`);
 
@@ -661,7 +669,6 @@ export async function buildGalaxyData(
   } catch { /* ML not available — non-fatal */ }
 
   report(1, 'done', `${libraryIds.size} library + ${catalogMetaMap.size.toLocaleString()} catalog`);
-  if (cancelled()) return { nodes: [], allGenres: [], projectionMethod: 'cancelled' };
   await new Promise(r => setTimeout(r, 30));
 
   report(2, 'running');
@@ -938,12 +945,38 @@ export async function loadCachedGalaxyIfFresh(): Promise<{ nodes: GraphNode[]; a
   return { nodes: cached.nodes, allGenres: cached.allGenres, projectionMethod: cached.projectionMethod ?? 'PCA' };
 }
 
+/** The one in-flight build, shared by every caller (see buildGalaxyData). */
+let _sharedBuild: { promise: Promise<GalaxyBuildResult>; reporters: Set<GalaxyStepReporter> } | null = null;
+
 /**
- * Build fresh galaxy data and persist to cache.
+ * Build fresh galaxy data and persist to cache. Concurrent callers (the
+ * background precompute and the Embedding Space view) share one build; a
+ * caller that joins late receives the step reports from that point on.
  */
-export async function buildAndCacheGalaxy(
+export function buildAndCacheGalaxy(
   onStep?: GalaxyStepReporter,
-): Promise<{ nodes: GraphNode[]; allGenres: string[]; projectionMethod: string }> {
+): Promise<GalaxyBuildResult> {
+  if (_sharedBuild) {
+    if (onStep) _sharedBuild.reporters.add(onStep);
+    return _sharedBuild.promise;
+  }
+  const reporters = new Set<GalaxyStepReporter>();
+  if (onStep) reporters.add(onStep);
+  const fanOut: GalaxyStepReporter = (stepIndex, status, detail) => {
+    for (const fn of reporters) {
+      try { fn(stepIndex, status, detail); } catch { /* a reporter must not break the build */ }
+    }
+  };
+  const promise = _buildAndCacheGalaxyOnce(fanOut).finally(() => {
+    if (_sharedBuild?.promise === promise) _sharedBuild = null;
+  });
+  _sharedBuild = { promise, reporters };
+  return promise;
+}
+
+async function _buildAndCacheGalaxyOnce(
+  onStep: GalaxyStepReporter,
+): Promise<GalaxyBuildResult> {
   const result = await buildGalaxyData(onStep);
   if (result.nodes.length > 0) {
     const embCount = await getPooledEmbeddingCount();
@@ -1111,6 +1144,7 @@ async function _runBackgroundPrecompute(): Promise<void> {
       _setBuildStage('idle');
       _scheduleRetryWhenEmbeddingsAppear();
     } else {
+      _retryFailures = 0;
       _setBuildStage('done', result.nodes.length);
     }
   } catch (err) {
@@ -1124,21 +1158,31 @@ async function _runBackgroundPrecompute(): Promise<void> {
 }
 
 let _retryUnsub: (() => void) | null = null;
+/** Consecutive deferred/failed background builds — drives the retry backoff. */
+let _retryFailures = 0;
+const RETRY_BASE_MS = 5_000;
+const RETRY_MAX_MS = 10 * 60_000;
 
 /**
  * Subscribe to embedding service changes and auto-retry the galaxy build
- * once embeddings become available.
+ * once embeddings become available. Each consecutive empty / failed build
+ * doubles the delay (5 s → 10 min cap): embedding-service notifies on every
+ * progress tick, so without a backoff an empty build re-fired almost
+ * immediately, over and over.
  */
 function _scheduleRetryWhenEmbeddingsAppear(): void {
   if (_retryUnsub) return;
+  const delay = Math.min(RETRY_BASE_MS * 2 ** _retryFailures, RETRY_MAX_MS);
+  _retryFailures++;
   _retryUnsub = embeddingService.subscribe(() => {
     if (embeddingService.loadedCount > 0 || embeddingService.isCatalogRunning) {
       _retryUnsub?.();
       _retryUnsub = null;
       if (!_bgScheduled && !_bgBuildPromise) {
-        console.log('[Galaxy Cache] Embeddings detected — scheduling galaxy build');
-        scheduleBackgroundPrecompute(5_000);
+        console.log(`[Galaxy Cache] Embeddings detected — scheduling galaxy build in ${Math.round(delay / 1000)}s`);
+        scheduleBackgroundPrecompute(delay);
       }
     }
   });
 }
+

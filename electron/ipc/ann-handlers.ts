@@ -30,9 +30,9 @@ export function register(): void {
     }
   });
 
-  ipcMain.handle('ann:save', async () => {
+  ipcMain.handle('ann:save', async (_event: any, opts?: { force?: boolean }) => {
     try {
-      return saveIndex();
+      return saveIndex({ force: opts?.force === true });
     } catch (err) {
       logger.error('[ANN IPC] save error:', err);
       return false;
@@ -41,7 +41,7 @@ export function register(): void {
 
   ipcMain.handle('ann:addVectors', async (_event: any, entries: Array<{ id: string; vector: number[] }>) => {
     try {
-      return addVectors(entries);
+      return await addVectors(entries);
     } catch (err) {
       logger.error('[ANN IPC] addVectors error:', err);
       return 0;

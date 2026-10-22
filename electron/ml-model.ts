@@ -73,6 +73,13 @@ let gameProfiles: Map<string, GameProfile> = new Map();
 let tagMapping: string[] = [];
 let loaded = false;
 let loadingPromise: Promise<boolean> | null = null;
+/**
+ * Session failure latch. A failed load (missing onnxruntime, missing data
+ * files, broken ONNX) is deterministic, but every Oracle compute used to retry
+ * it — re-reading and JSON-parsing the 11.8 MB game_profiles.json
+ * synchronously on the main thread each time. Fail once, stay failed until restart.
+ */
+let loadFailedThisSession = false;
 
 function getDataDir(): string {
   return path.join(app.getPath('userData'), 'ml-data');
@@ -146,8 +153,12 @@ function ensureDataFiles(): boolean {
 
 export function loadModel(): Promise<boolean> {
   if (loaded) return Promise.resolve(true);
+  if (loadFailedThisSession) return Promise.resolve(false);
   if (loadingPromise) return loadingPromise;
-  loadingPromise = _doLoadModel();
+  loadingPromise = _doLoadModel().then((ok) => {
+    if (!ok) loadFailedThisSession = true;
+    return ok;
+  });
   return loadingPromise;
 }
 
