@@ -128,6 +128,28 @@ interface IndexMeta {
   gameIds: string[];
   vectorCount: number;
   builtAt: number;
+  /**
+   * Layout generation of the vectors this file was built from (src/services/embedding-layout.ts
+   * EMBEDDING_LAYOUT_GENERATION — mirrored below; a unit test pins the two together). Files written
+   * before this field existed have none and are read as generation 1.
+   */
+  layoutGeneration?: number;
+  /** Ollama embedding model tag the vectors came from (informational — never discards an index). */
+  modelTag?: string;
+}
+
+/**
+ * Mirror of EMBEDDING_LAYOUT_GENERATION (the main process cannot import from src/). A persisted index built
+ * under a different generation holds vectors that are not comparable with new ones, so it is discarded on load
+ * (and the renderer's backfill rebuilds it) instead of being served as "ready".
+ */
+export const ANN_LAYOUT_GENERATION = 1;
+
+let annModelTag = '';
+
+/** Set once at startup from the resolved embedding model tag (ARK_EMBEDDING_MODEL_TAG may override the default). */
+export function setAnnModelTag(tag: string): void {
+  annModelTag = tag || '';
 }
 
 let index: InstanceType<typeof Index> | null = null;
@@ -268,6 +290,17 @@ export function loadIndex(): boolean {
   }
   if (!meta || !Array.isArray(meta.gameIds) || meta.gameIds.length === 0) return false;
 
+  // Stale generation / different model: do not even load the (multi-GB) native index.
+  const metaGeneration = typeof meta.layoutGeneration === 'number' ? meta.layoutGeneration : 1;
+  if (metaGeneration !== ANN_LAYOUT_GENERATION) {
+    logger.warn(`[ANN] Index generation ${metaGeneration} != current ${ANN_LAYOUT_GENERATION} — discarding for rebuild`);
+    deletePersistedIndex();
+    return false;
+  }
+  // modelTag is informational only: a rebuild would come from the SAME cached vectors, so discarding on a tag change
+  // (e.g. 'x' vs 'x:latest') would cost a multi-hour rebuild for nothing. Model changes are the renderer's
+  // migration record's job (it re-embeds), and the generation bump above is what discards an index.
+
   let fresh: any = null;
   try {
     fresh = newNativeIndex();
@@ -344,6 +377,8 @@ function writeIndexNow(): boolean {
       gameIds: idMap,
       vectorCount: reverseMap.size,
       builtAt: Date.now(),
+      layoutGeneration: ANN_LAYOUT_GENERATION,
+      ...(annModelTag ? { modelTag: annModelTag } : {}),
     };
     atomicWriteFileSync(metaPath, JSON.stringify(meta));
 
@@ -562,11 +597,15 @@ export function query(
   return results;
 }
 
-export function getStatus(): { ready: boolean; vectorCount: number; dims: number; partial: boolean } {
+export function getStatus(): {
+  ready: boolean; vectorCount: number; dims: number; partial: boolean; layoutGeneration: number; modelTag: string;
+} {
   return {
     ready: index !== null && reverseMap.size > 0,
     vectorCount: reverseMap.size,
     dims: DIMS,
+    layoutGeneration: ANN_LAYOUT_GENERATION,
+    modelTag: annModelTag,
     // Renderer runs a backfill when this is true (cleared / half-built / never loaded).
     partial: !coherent,
   };
@@ -616,6 +655,7 @@ export function clearIndex(): void {
 export function __resetAnnIndexForTests(
   fake?: { Index: any; MetricKind?: any; ScalarKind?: any; userDataDir?: string },
 ): void {
+  annModelTag = '';
   userDataDirOverride = fake?.userDataDir ?? null;
   if (fake) {
     Index = fake.Index;

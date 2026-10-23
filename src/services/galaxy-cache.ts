@@ -9,6 +9,7 @@
  * a recompute.
  */
 
+import { EMBEDDING_LAYOUT_ID, layoutIdIsCurrent } from '@/services/embedding-layout';
 import {
   loadProjectedEmbeddingsForGraph,
   getPooledEmbeddingCount,
@@ -862,6 +863,8 @@ interface CachedGalaxy {
   /** Pooled embedding count only (never chunk-embeddings). */
   embeddingCount: number;
   embeddingTextVersion?: number;
+  /** EMBEDDING_LAYOUT_ID the layout was projected from (absent on caches saved before layout ids). */
+  embeddingLayout?: string;
   /** Bumped on any successful pooled rewrite — invalidates galaxy after content changes. */
   embeddingContentEpoch?: number;
   timestamp: number;
@@ -931,6 +934,11 @@ export async function loadCachedGalaxyIfFresh(): Promise<{ nodes: GraphNode[]; a
 
   if (cached.embeddingTextVersion !== EMBEDDING_TEXT_VERSION) {
     console.log(`[Galaxy Cache] Stale — embedding text version ${cached.embeddingTextVersion ?? '?'} vs current ${EMBEDDING_TEXT_VERSION}`);
+    return null;
+  }
+
+  if (!layoutIdIsCurrent(cached.embeddingLayout)) {
+    console.log(`[Galaxy Cache] Stale — embedding layout ${cached.embeddingLayout ?? 'legacy'} vs current ${EMBEDDING_LAYOUT_ID}`);
     return null;
   }
 
@@ -1004,6 +1012,7 @@ async function _buildAndCacheGalaxyOnce(
       allGenres: result.allGenres,
       embeddingCount: embCount,
       embeddingTextVersion: EMBEDDING_TEXT_VERSION,
+      embeddingLayout: EMBEDDING_LAYOUT_ID,
       embeddingContentEpoch: epoch,
       timestamp: Date.now(),
       projectionMethod: result.projectionMethod,

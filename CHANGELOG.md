@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.83] - 2026-10-23
+
+Foundation for re-embedding game vectors safely (Release A of the re-embed project). **No ranking change and nothing is re-embedded or rebuilt on update** — existing vectors, hashes, watermarks, the similarity index and caches stay valid; this release fixes the machinery a future re-embed depends on.
+
+### Fixed — the re-embed machinery
+- **One source of truth for embedding versions** (`src/services/embedding-layout.ts`). The whole-text hash prefix used to be a hard-coded literal in `embedding-chunks.ts` that only a console warning compared with the service's own constant, so bumping the model or text version silently changed nothing. Every hash prefix, row stamp and cache key is now derived from one module; with today's version numbers each is byte-identical to what shipped (pinned by tests against the old formulas).
+- **A model change now invalidates chunk vectors.** Chunk hashes had no model component, so a model swap re-used the old model's chunk vectors and only re-pooled them. Bumping the model version now changes the chunk hash.
+- **Rows record the layout they were built under** (`layout` stamp on pooled and chunk rows). Rows written before stamps existed read as the legacy layout, which is the current one, so nothing is treated as stale today; after a future bump older/unstamped rows are re-embedded.
+- **"Rebuild all" really rebuilds.** In chunked mode (the default) the forced pass still re-used every chunk whose text was unchanged, so it re-embedded nothing, and it never touched your library's own vectors. The force now reaches the chunk diff and covers the library.
+- **Rebuild in dependency order and resumable:** library first (it defines your taste vectors), then Steam, then Epic, then the similarity index is rebuilt. Progress is persisted: an interrupted rebuild (quit, Ollama stopped responding) shows "Resume rebuild" and skips every game it already redid — as long as the game's text and the layout are unchanged.
+- **Library first, always.** Background Steam/Epic embedding now pauses at its group boundaries while your library is being embedded instead of racing it for Ollama.
+- **Persisted migration state** (`done` / `pending` / `running` / `declined`) in embedding metadata, reconciled at startup against the current layout stamp and model tag (a record found "running" means the last session quit mid-run). "Later" is remembered per target. Settings shows when a rebuild is recommended or can be resumed. Nothing prompts yet — that comes with the release that changes the vector composition.
+- **The similarity index records its layout generation.** A persisted index from another generation is discarded and rebuilt instead of being served as ready. (The model tag is recorded for diagnostics only: a tag change never throws away an index, because a rebuild would reuse the same cached vectors.)
+- **Derived caches are keyed on the layout** — neighbour-graph signature, galaxy layout, Oracle results — so a future layout bump flips them; today's keys are unchanged, so none is rebuilt.
+
+### Cleanup
+- Removed the dead `settings-panel.tsx` duplicate of the Settings screen (and its test), plus a stale unused helper.
+
+### Hardened after an independent review (before release)
+- Resume skips a row only if it is still current: same text hash and current layout; a run's id is dropped when the layout/model changed since it started.
+- A forced library run waits for every in-flight run instead of joining a non-forced one; the run id is armed only after cancelled passes finish and stamped only by forced writers; an empty library no longer blocks the catalog; a failed migration-state read can no longer overwrite a resumable record; the migration record survives an IDB→LevelDB copy.
+- Splash no longer delays background precompute behind the index load.
+
+### Tests
+- New: golden composition per source (production builders), layout/hash no-op invariants, migration state machine, ordered/persisted/resumable full re-index (orchestration and real passes), upgrade fixture (pre-stamp rows + legacy watermark → zero embeds), ANN generation stamp.
+
 ## [1.0.82] - 2026-10-23
 
 Eighth and last step of the Oracle recommendation-quality plan: the feedback loop and state correctness. **Ranking changes** (engine version 8).

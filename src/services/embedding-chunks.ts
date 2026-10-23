@@ -6,18 +6,28 @@
 import { toCanonicalGenres } from '@/data/canonical-genres';
 import { extractFranchiseBase } from '@/services/franchise';
 import { EMBEDDING_DIM } from '@/services/embedding-quant';
+import {
+  CHUNK_HASH_PREFIX,
+  EMBEDDING_CHUNK_VERSION,
+  EMBEDDING_POOL_VERSION,
+  WHOLE_HASH_PREFIX,
+  isCurrentLayout,
+} from '@/services/embedding-layout';
 
 export type EmbeddingTier = 'lib' | 'cat';
 export type ChunkKind = 'facets' | 'summary' | 'description' | 'similar' | 'notes';
 
-/** Chunk hash version only — do not bump EMBEDDING_TEXT_VERSION for chunk layout. */
-export const EMBEDDING_CHUNK_VERSION = 1;
+/**
+ * Version constants live in embedding-layout.ts (single source of truth) and are re-exported here for
+ * existing importers. Do not bump EMBEDDING_TEXT_VERSION for chunk layout changes — use EMBEDDING_CHUNK_VERSION.
+ */
+export { EMBEDDING_CHUNK_VERSION };
 
-/** Writers set poolVersion=1; legacy omit is compatible with skip. */
-export const CURRENT_POOL_VERSION = 1;
+/** Writers stamp poolVersion; legacy rows without one are compatible with skip. */
+export const CURRENT_POOL_VERSION = EMBEDDING_POOL_VERSION;
 
-/** Must match embedding-service HASH_VERSION_PREFIX (TEXT=10, MODEL=1). */
-export const HASH_VERSION_PREFIX = 't10m1';
+/** Whole-text hash prefix (`t10m1` today) — derived, not a second copy of the literal. */
+export const HASH_VERSION_PREFIX = WHOLE_HASH_PREFIX;
 
 export const CHUNK_WEIGHTS: Record<ChunkKind, number> = {
   facets: 1.0,
@@ -58,8 +68,9 @@ export function hashWholeEmbeddingText(text: string): string {
   return djb2Hash(`${HASH_VERSION_PREFIX}:${text}`);
 }
 
+/** Chunk skip hash: `<chunk version[+model version]>:<text>` — a chunk vector depends only on model + text. */
 export function hashChunkText(text: string): string {
-  return djb2Hash(`c${EMBEDDING_CHUNK_VERSION}:${text}`);
+  return djb2Hash(`${CHUNK_HASH_PREFIX}:${text}`);
 }
 
 export function makeChunkId(
@@ -232,12 +243,15 @@ export function buildGameChunks(
 export function diffChunksAgainstCache(
   desired: ChunkSpec[],
   existingById: Map<string, CachedChunkMeta>,
+  opts?: { force?: boolean },
 ): { toEmbed: ChunkSpec[]; staleIds: string[] } {
   const desiredIds = new Set(desired.map(c => c.chunkId));
   const toEmbed: ChunkSpec[] = [];
   for (const chunk of desired) {
     const prev = existingById.get(chunk.chunkId);
-    if (!prev || prev.textHash !== chunk.textHash) {
+    // `force` re-embeds every desired chunk even when its text is unchanged — this is what makes a forced
+    // re-index actually regenerate vectors (the diff used to re-use them, so "force" re-embedded nothing).
+    if (opts?.force || !prev || prev.textHash !== chunk.textHash) {
       toEmbed.push(chunk);
     }
   }
@@ -274,11 +288,13 @@ export function poolChunkVectors(
 }
 
 export function shouldSkipPooled(
-  existing: { textHash: string; poolVersion?: number } | null | undefined,
+  existing: { textHash: string; poolVersion?: number; layout?: string } | null | undefined,
   wholeHash: string,
 ): boolean {
   if (!existing) return false;
   if (existing.textHash !== wholeHash) return false;
+  // Rows from another layout (older stamp, or unstamped while the layout has moved on) are stale.
+  if (!isCurrentLayout(existing)) return false;
   if (existing.poolVersion === undefined) return true;
   return existing.poolVersion === CURRENT_POOL_VERSION;
 }

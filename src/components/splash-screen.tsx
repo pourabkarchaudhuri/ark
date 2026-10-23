@@ -329,7 +329,9 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     const initTimer = setTimeout(() => {
       systemStatus.init();
       void whenNotSafe(() => {
-        annIndex.load();
+        // Precompute is not held up by the (large, synchronous) index load; the migration state needs the load's status
+        // round-trip (it reports the embedding model tag), so it chains after it.
+        void annIndex.load().then(() => embeddingService.refreshMigrationState()).catch(() => {});
         scheduleBackgroundPrecompute();
       });
       scheduleChunkPreload();

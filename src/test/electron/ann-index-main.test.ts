@@ -22,6 +22,7 @@ vi.mock('../../../electron/settings-store.js', () => ({
 }));
 
 import {
+  ANN_LAYOUT_GENERATION,
   __resetAnnIndexForTests,
   addVectors,
   clearIndex,
@@ -29,7 +30,9 @@ import {
   loadIndex,
   query,
   saveIndex,
+  setAnnModelTag,
 } from '../../../electron/ann-index';
+import { EMBEDDING_LAYOUT_GENERATION } from '@/services/embedding-layout';
 
 const DIMS = 1024;
 
@@ -201,5 +204,83 @@ describe('loadIndex', () => {
     expect(loadIndex()).toBe(false);
     expect(getStatus()).toMatchObject({ ready: false, partial: true });
     expect(fs.existsSync(path.join(dir, 'ann-hnsw-meta.json.corrupt'))).toBe(true);
+  });
+});
+
+
+describe('layout generation + model tag stamp (re-embed foundation)', () => {
+  const metaPath = () => path.join(dir, 'ann-hnsw-meta.json');
+  const indexPath = () => path.join(dir, 'ann-hnsw.usearch');
+
+  async function persistTwo(): Promise<void> {
+    await addVectors([{ id: 'steam-1', vector: unit(1) }, { id: 'steam-2', vector: unit(2) }]);
+    expect(saveIndex({ complete: true })).toBe(true);
+  }
+  function rewriteMeta(fn: (m: Record<string, unknown>) => void): void {
+    const m = JSON.parse(fs.readFileSync(metaPath(), 'utf-8'));
+    fn(m);
+    fs.writeFileSync(metaPath(), JSON.stringify(m));
+  }
+
+  it('the main-process generation mirrors the renderer layout generation (a bump must change both)', () => {
+    expect(ANN_LAYOUT_GENERATION).toBe(EMBEDDING_LAYOUT_GENERATION);
+  });
+
+  it('a saved index records its generation and model tag, and status reports them', async () => {
+    setAnnModelTag('snowflake-arctic-embed2');
+    await persistTwo();
+    const meta = JSON.parse(fs.readFileSync(metaPath(), 'utf-8'));
+    expect(meta.layoutGeneration).toBe(ANN_LAYOUT_GENERATION);
+    expect(meta.modelTag).toBe('snowflake-arctic-embed2');
+    expect(getStatus()).toMatchObject({ layoutGeneration: ANN_LAYOUT_GENERATION, modelTag: 'snowflake-arctic-embed2' });
+  });
+
+  it('refuses to serve an index built under another generation: deleted for rebuild, never loaded', async () => {
+    await persistTwo();
+    rewriteMeta(m => { m.layoutGeneration = ANN_LAYOUT_GENERATION + 1; });
+    __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
+    const created = FakeIndex.created;
+    expect(loadIndex()).toBe(false);
+    expect(FakeIndex.created).toBe(created); // the (multi-GB) native index was not even opened
+    expect(getStatus()).toMatchObject({ ready: false, partial: true });
+    expect(fs.existsSync(indexPath())).toBe(false);
+    expect(fs.existsSync(metaPath())).toBe(false);
+  });
+
+  it('a different model TAG never discards the index (it is informational: a rebuild would reuse the same cached vectors)', async () => {
+    setAnnModelTag('snowflake-arctic-embed2');
+    await persistTwo();
+    __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
+    setAnnModelTag('snowflake-arctic-embed2:latest');
+    expect(loadIndex()).toBe(true);
+    expect(fs.existsSync(indexPath())).toBe(true);
+  });
+
+  it('the model tag does not leak between tests (reset clears it)', () => {
+    setAnnModelTag('leaky');
+    __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
+    expect(getStatus().modelTag).toBe('');
+  });
+
+  it('an index saved before stamps existed loads as generation 1 and is stamped on its next save', async () => {
+    setAnnModelTag('');
+    await persistTwo();
+    rewriteMeta(m => { delete m.layoutGeneration; delete m.modelTag; });
+    __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
+    setAnnModelTag('snowflake-arctic-embed2');
+    expect(loadIndex()).toBe(true);
+    expect(getStatus().ready).toBe(true);
+    await addVectors([{ id: 'steam-3', vector: unit(3) }]);
+    expect(saveIndex({ complete: true, force: true })).toBe(true);
+    const meta = JSON.parse(fs.readFileSync(metaPath(), 'utf-8'));
+    expect(meta).toMatchObject({ layoutGeneration: ANN_LAYOUT_GENERATION, modelTag: 'snowflake-arctic-embed2' });
+  });
+
+  it('an unknown current model tag never discards a tagged index', async () => {
+    setAnnModelTag('snowflake-arctic-embed2');
+    await persistTwo();
+    __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
+    setAnnModelTag('');
+    expect(loadIndex()).toBe(true);
   });
 });

@@ -11,6 +11,7 @@
  *  - Tracks conversion events (click → add → play → rate)
  */
 
+import { EMBEDDING_LAYOUT_ID, layoutIdIsCurrent } from '@/services/embedding-layout';
 import { percentileRanks } from './ml-normalize';
 import type {
   TasteProfile,
@@ -422,6 +423,8 @@ export class RecoStore {
         librarySignature: buildOracleLibrarySignature(),
         pipelineStages: this.resultStages ?? currentOraclePipelineStages(),
         engineVersion: ORACLE_ENGINE_VERSION,
+        // Results computed from vectors of this layout: a layout/generation bump must not serve them.
+        layoutId: EMBEDDING_LAYOUT_ID,
         // The saved order may already be the reranked one. Remember that, so a cache restore does not treat
         // it as the worker's order and rerank it a second time (compounding the blend).
         reranked: this.state.oracleRerankStatus.outcome === 'applied',
@@ -507,6 +510,7 @@ export class RecoStore {
       if (!cache) return null;
       // Results from an older engine (or from before versioning existed) must not be served.
       if (cache.engineVersion !== ORACLE_ENGINE_VERSION) return null;
+      if (!layoutIdIsCurrent(cache.layoutId)) return null;
       if (!cache.lastComputed || Date.now() - cache.lastComputed > RecoStore.RESULT_CACHE_TTL) {
         return null;
       }
@@ -726,20 +730,7 @@ export class RecoStore {
       // catalog pipeline fills them in for next time.
       if (embeddingGenerator) {
         setProgress('Generating semantic embeddings...', 10);
-        const embeddingInput = userGames.map(g => {
-          const lib = libraryStore.getEntry(g.gameId);
-          const meta = lib?.cachedMeta;
-          return {
-            id: g.gameId, title: g.title, genres: g.genres,
-            themes: g.themes, modes: g.gameModes, developer: g.developer,
-            publisher: g.publisher,
-            playerPerspectives: g.perspectives,
-            summary: meta?.summary,
-            description: meta?.longDescription,
-            similarGames: meta?.similarGames,
-            userNotes: lib?.publicReviews || undefined,
-          };
-        });
+        const embeddingInput = this.toEmbeddingInputs(userGames);
 
         await runWithDeadline(
           (s) => embeddingGenerator(embeddingInput, s),
@@ -1329,13 +1320,29 @@ export class RecoStore {
     return candidates;
   }
 
-  /**
-   * Pool hygiene on the assembled candidate list:
-   *  - adult content (unless the user allows it): conservative tags, plus the description classifier when the
-   *    browse row carries description text
-   *  - games with no Windows build (Ark launches/tracks Windows games)
-   *  - edition/store duplicates collapse to the best-reviewed one, and editions of games already owned drop
-   */
+  /** Library games in the shape the embedding service takes (shared by Oracle compute and a forced re-index). */
+  private toEmbeddingInputs(userGames: UserGameSnapshot[]) {
+    return userGames.map(g => {
+      const lib = libraryStore.getEntry(g.gameId);
+      const meta = lib?.cachedMeta;
+      return {
+        id: g.gameId, title: g.title, genres: g.genres,
+        themes: g.themes, modes: g.gameModes, developer: g.developer,
+        publisher: g.publisher,
+        playerPerspectives: g.perspectives,
+        summary: meta?.summary,
+        description: meta?.longDescription,
+        similarGames: meta?.similarGames,
+        userNotes: lib?.publicReviews || undefined,
+      };
+    });
+  }
+
+  /** Current library as embedding inputs (Settings → full re-index). */
+  getLibraryEmbeddingInputs() {
+    return this.toEmbeddingInputs(this.buildUserGameSnapshots());
+  }
+
   /** Shelves (by oracleShelfKey) the user has touched since the last publish: the rerank must not reorder them. */
   private interactedShelves = new Set<string>();
 
@@ -1358,6 +1365,13 @@ export class RecoStore {
     }
   }
 
+  /**
+   * Pool hygiene on the assembled candidate list:
+   *  - adult content (unless the user allows it): conservative tags, plus the description classifier when the
+   *    browse row carries description text
+   *  - games with no Windows build (Ark launches/tracks Windows games)
+   *  - edition/store duplicates collapse to the best-reviewed one, and editions of games already owned drop
+   */
   private applyPoolHygiene(
     candidates: CandidateGame[],
     userGames: UserGameSnapshot[],

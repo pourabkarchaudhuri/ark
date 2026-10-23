@@ -18,9 +18,14 @@ import {
   queryBatch,
   getStatus,
   clearIndex,
+  setAnnModelTag,
 } from '../ann-index.js';
+import { getEmbeddingModelTag } from '../ollama-setup.js';
 
 export function register(): void {
+  // Resolve the embedding model tag once, before any index load: a persisted index built with another model is discarded.
+  try { setAnnModelTag(getEmbeddingModelTag()); } catch { /* tag stays unknown → no model-mismatch guard */ }
+
   ipcMain.handle('ann:load', async () => {
     try {
       return loadIndex();
@@ -64,7 +69,7 @@ export function register(): void {
       return getStatus();
     } catch (err) {
       logger.error('[ANN IPC] status error:', err);
-      return { ready: false, vectorCount: 0, dims: 1024, partial: true };
+      return { ready: false, vectorCount: 0, dims: 1024, partial: true, layoutGeneration: 1, modelTag: '' };
     }
   });
 

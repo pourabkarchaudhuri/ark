@@ -22,8 +22,25 @@ import { toRerankTier, rerankTierLabel, type RerankTier } from '@/services/oracl
 import { quantizeEmbedding, dequantizeEmbedding, EMBEDDING_DIM } from '@/services/embedding-quant';
 import { storeGetMany } from '@/services/store-bulk';
 import {
+  EMBEDDING_LAYOUT_STAMP,
+  EMBEDDING_MODEL_VERSION,
+  isCurrentLayout,
+  EMBEDDING_TEXT_VERSION,
+  watermarkStampIsCurrent,
+} from '@/services/embedding-layout';
+import {
+  MIGRATION_META_KEY,
+  beginMigration,
+  completeMigration,
+  declineMigration as declineMigrationRecord,
+  evaluateMigration,
+  interruptMigration,
+  reindexRecommended as reindexRecommendedFor,
+  setMigrationPhase,
+  type EmbeddingMigrationRecord,
+} from '@/services/embedding-migration';
+import {
   CURRENT_POOL_VERSION,
-  HASH_VERSION_PREFIX as CHUNK_HASH_VERSION_PREFIX,
   buildGameChunks,
   diffChunksAgainstCache,
   gameplayGenres,
@@ -253,6 +270,10 @@ export interface CachedEmbedding {
   format?: 'f32' | 'i8';
   /** Writers set 1; legacy omit = compatible with skip. */
   poolVersion?: number;
+  /** Layout stamp (embedding-layout.ts) this row was produced under; unstamped rows predate stamps. */
+  layout?: string;
+  /** Id of the forced re-index run that rewrote this row — lets an interrupted run resume instead of redoing everything. */
+  reindexRun?: string;
 }
 
 export interface CachedChunk {
@@ -266,6 +287,8 @@ export interface CachedChunk {
   textHash: string;
   weight: number;
   timestamp: number;
+  /** Layout stamp this chunk was produced under; unstamped rows predate stamps. */
+  layout?: string;
 }
 
 // ─── IDB Helpers ───────────────────────────────────────────────────────────────
@@ -795,7 +818,7 @@ async function runEmbeddingsMigration(): Promise<void> {
     // Meta keys: copy whichever of the known keys actually exist. Missing
     // keys (e.g. a fresh install that never ran the rechunk job) are simply
     // skipped — there is nothing to preserve.
-    const metaKeys = ['embeddingContentEpoch', RECHUNK_META_KEY, 'steam-catalog', 'epic-catalog', EMBED_FAILURES_META_KEY];
+    const metaKeys = ['embeddingContentEpoch', RECHUNK_META_KEY, 'steam-catalog', 'epic-catalog', EMBED_FAILURES_META_KEY, MIGRATION_META_KEY];
     const metaOps: Array<{ type: 'put'; namespace: string; key: string; value: unknown }> = [];
     for (const key of metaKeys) {
       const legacy = await idbGetEmbeddingMeta<{ key: string }>(key);
@@ -1089,12 +1112,34 @@ async function getChunksForTierGame(
   });
 }
 
+/**
+ * Id of the forced re-index run in progress (null otherwise). Rows written while it is set are stamped with it,
+ * and a forced pass skips rows already stamped — that is what makes an interrupted run resumable.
+ */
+let _activeReindexRun: string | null = null;
+
+/**
+ * Was this row already rewritten by the active forced run? Besides the run id it must still be CURRENT: same text hash
+ * (the game's text may have changed since the interrupted run) and the current layout (the layout may have moved on).
+ */
+function redoneThisRun(
+  row: { reindexRun?: string; textHash?: string; layout?: string } | null | undefined,
+  wholeHash: string,
+): boolean {
+  return _activeReindexRun !== null
+    && row?.reindexRun === _activeReindexRun
+    && row.textHash === wholeHash
+    && isCurrentLayout(row);
+}
+
 /** Quantized rows for one game's chunk-group + pooled rewrite. */
 function buildGameWriteRows(opts: {
   tier: EmbeddingTier;
   gameId: string;
   wholeHash: string;
   chunks: Array<ChunkSpec & { vector: Float32Array | number[] }>;
+  /** Run id to stamp — passed only by FORCED writers (a normal write that re-used cached chunk vectors is not "redone"). */
+  reindexRun?: string | null;
 }): { pooledF32: Float32Array; pooledRow: CachedEmbedding; chunkRows: CachedChunk[] } {
   const { tier, gameId, wholeHash, chunks } = opts;
   const pooledF32 = poolChunkVectors(
@@ -1110,6 +1155,8 @@ function buildGameWriteRows(opts: {
     timestamp: now,
     format: 'i8',
     poolVersion: CURRENT_POOL_VERSION,
+    layout: EMBEDDING_LAYOUT_STAMP,
+    ...(opts.reindexRun ? { reindexRun: opts.reindexRun } : {}),
   };
 
   const chunkRows: CachedChunk[] = chunks.map((chunk) => {
@@ -1125,6 +1172,7 @@ function buildGameWriteRows(opts: {
       textHash: chunk.textHash,
       weight: chunk.weight,
       timestamp: now,
+      layout: EMBEDDING_LAYOUT_STAMP,
     };
   });
   return { pooledF32, pooledRow, chunkRows };
@@ -1169,6 +1217,7 @@ async function writeGameChunksAndPool(opts: {
   wholeHash: string;
   chunks: Array<ChunkSpec & { vector: Float32Array | number[] }>;
   staleIds: string[];
+  reindexRun?: string | null;
 }): Promise<Float32Array> {
   const { tier, gameId, pooledStore, staleIds } = opts;
   const { pooledF32, pooledRow, chunkRows } = buildGameWriteRows(opts);
@@ -1449,29 +1498,9 @@ async function refreshCachedTimestamps(
 
 // ─── Text Hashing (simple djb2) ────────────────────────────────────────────────
 
-/**
- * Bump when the prompt-construction layout changes (gen text shape, field set, ordering).
- * Pure cache invalidation — does not depend on the embedding model.
- * Phase A lock: do NOT bump for chunking rollout (lazy dual-format).
- */
-export const EMBEDDING_TEXT_VERSION = 10;
+// The version constants live in embedding-layout.ts (one source of truth for every hash, stamp and cache key).
+export { EMBEDDING_TEXT_VERSION, EMBEDDING_MODEL_VERSION };
 
-/**
- * Bump when the embedding model itself changes (Ollama model swap, dimensionality
- * change). Invalidates all cached vectors even if prompt text is unchanged.
- * Phase A lock: do NOT bump for chunking rollout.
- */
-export const EMBEDDING_MODEL_VERSION = 1;
-
-/** Combined version stamp folded into every hash. Must stay `t10m1`. */
-const HASH_VERSION_PREFIX = `t${EMBEDDING_TEXT_VERSION}m${EMBEDDING_MODEL_VERSION}`;
-
-// Dev-time guard: chunk module prefix must match (skip hashes share one alphabet).
-if (HASH_VERSION_PREFIX !== CHUNK_HASH_VERSION_PREFIX) {
-  console.error(
-    `[EmbeddingService] HASH_VERSION_PREFIX mismatch: service=${HASH_VERSION_PREFIX} chunks=${CHUNK_HASH_VERSION_PREFIX}`,
-  );
-}
 
 function hashText(text: string): string {
   return hashWholeEmbeddingText(text);
@@ -1596,7 +1625,7 @@ function hasDecodablePooledVector(entry: CachedEmbedding): boolean {
   return Array.isArray(entry.embedding) && entry.embedding.length === EMBEDDING_DIM;
 }
 
-type CatalogSkipMeta = { textHash: string; poolVersion?: number; timestamp: number };
+type CatalogSkipMeta = { textHash: string; poolVersion?: number; layout?: string; reindexRun?: string; timestamp: number };
 
 /**
  * One scan of the catalog embedding store for everything a catalog pass needs
@@ -1614,7 +1643,7 @@ async function getCatalogSkipIndex(idPrefix: string): Promise<Map<string, Catalo
   const now = Date.now();
   const add = (entry: CachedEmbedding) => {
     if (now - entry.timestamp < CATALOG_TTL && hasDecodablePooledVector(entry)) {
-      map.set(entry.gameId, { textHash: entry.textHash, poolVersion: entry.poolVersion, timestamp: entry.timestamp });
+      map.set(entry.gameId, { textHash: entry.textHash, poolVersion: entry.poolVersion, layout: entry.layout, reindexRun: entry.reindexRun, timestamp: entry.timestamp });
     }
   };
 
@@ -1787,9 +1816,12 @@ async function embedAndPersistChunkedGames(
   tier: EmbeddingTier,
   pooledStore: string,
   jobs: ChunkedGameJob[],
+  opts?: { force?: boolean },
 ): Promise<{ outcomes: Map<string, ChunkedGameOutcome>; requested: number; returned: number }> {
   const outcomes = new Map<string, ChunkedGameOutcome>();
   if (jobs.length === 0) return { outcomes, requested: 0, returned: 0 };
+  // Only forced writers stamp the run id: a normal write may re-use cached chunk vectors and is not "redone".
+  const runStamp = opts?.force ? _activeReindexRun : null;
 
   type Prepared = {
     job: ChunkedGameJob;
@@ -1811,7 +1843,7 @@ async function embedAndPersistChunkedGames(
     const existingMeta = new Map(
       [...existing.entries()].map(([id, row]) => [id, { chunkId: id, textHash: row.textHash }]),
     );
-    const { toEmbed, staleIds } = diffChunksAgainstCache(desired, existingMeta);
+    const { toEmbed, staleIds } = diffChunksAgainstCache(desired, existingMeta, { force: opts?.force === true });
     const vectorsById = new Map<string, Float32Array>();
     for (const [id, row] of existing) {
       const q = coerceInt8Q(row.q);
@@ -1871,7 +1903,7 @@ async function embedAndPersistChunkedGames(
     if (useLevelDB()) {
       const ops: Array<{ type: 'put'; namespace: string; key: string; value: unknown }> = [];
       const built = ready.map((r) => {
-        const rows = buildGameWriteRows({ tier, gameId: r.job.gameId, wholeHash: r.job.wholeHash, chunks: r.chunks });
+        const rows = buildGameWriteRows({ tier, gameId: r.job.gameId, wholeHash: r.job.wholeHash, chunks: r.chunks, reindexRun: runStamp });
         ops.push(...levelGameWriteOps(tier, r.job.gameId, pooledStore, rows));
         return { r, pooled: rows.pooledF32 };
       });
@@ -1894,6 +1926,7 @@ async function embedAndPersistChunkedGames(
             wholeHash: r.job.wholeHash,
             chunks: r.chunks,
             staleIds: r.staleIds,
+            reindexRun: runStamp,
           });
           written.push({ gameId: r.job.gameId, pooled, chunks: r.chunks });
         } catch (err) {
@@ -2024,6 +2057,25 @@ type CatalogSource = 'steam' | 'epic';
 /** How a catalog pass ended — lets Force Re-index tell "done" from "paused". */
 export type CatalogPassOutcome = 'done' | 'skipped' | 'cancelled' | 'tripped' | 'unavailable' | 'error';
 
+/** Library games as generateMissing takes them. */
+export type LibraryEmbedGames = Parameters<EmbeddingService['generateMissing']>[0];
+
+export interface ForceReindexAllResult {
+  /** Library games re-embedded this call. */
+  library: number;
+  steam: number;
+  epic: number;
+  libraryOk: boolean;
+  steamOutcome: CatalogPassOutcome;
+  epicOutcome: CatalogPassOutcome;
+  /** ANN index rebuilt from the refreshed vectors. */
+  ann: boolean;
+  /** Every stage finished — the persisted migration state is now 'done'. */
+  complete: boolean;
+  /** Run id (a resume reuses it). */
+  runId: string;
+}
+
 export interface ForceReindexResult {
   steam: number;
   epic: number;
@@ -2121,6 +2173,16 @@ class EmbeddingService {
         this._pauseDeferred = { promise, resolve };
       }
       await untilSettledOrAborted(this._pauseDeferred.promise, signal);
+    }
+  }
+
+  /**
+   * Library-first ordering: block while a library embedding run is in flight. Called at catalog group boundaries,
+   * so a Steam/Epic pass started earlier simply pauses behind the (short) library run instead of racing it.
+   */
+  private async _awaitLibraryPriority(signal?: AbortSignal): Promise<void> {
+    while (this._libraryPromise && !signal?.aborted) {
+      await untilSettledOrAborted(this._libraryPromise, signal);
     }
   }
 
@@ -2412,6 +2474,8 @@ class EmbeddingService {
    * @returns Number of new embeddings generated
    */
   private _libraryPromise: Promise<number> | null = null;
+  /** How the last library run ended (null: never ran / bailed out before counting) — read by forceReindexAll. */
+  private _lastLibraryRun: { requested: number; generated: number; stoppedEarly: boolean } | null = null;
   async generateMissing(
     games: Array<{
       id: string;
@@ -2428,13 +2492,18 @@ class EmbeddingService {
       similarGames?: Array<{ name: string }>;
     }>,
     onProgress?: (completed: number, total: number) => void,
-    opts?: { signal?: AbortSignal; deadline?: number },
+    opts?: { signal?: AbortSignal; deadline?: number; force?: boolean },
   ): Promise<number> {
     if (this._paused) {
       console.log('[EmbeddingService] Embeddings paused — skipping library generation');
       return 0;
     }
     if (opts?.signal?.aborted) return 0;
+    // A forced run must not silently join a non-forced one already in flight (it would not force anything).
+    // Loop: when the run we waited for settles, a caller waiting on it may already have started the next (non-forced) one.
+    while (opts?.force && this._libraryPromise) {
+      try { await this._libraryPromise; } catch { /* non-fatal */ }
+    }
     if (this._libraryPromise) {
       // Joined an in-flight run started by another caller: our signal can't
       // stop that run, but it can stop us waiting for it.
@@ -2444,6 +2513,7 @@ class EmbeddingService {
       await untilSettledOrAborted(shared.then((n) => { result = n; }), opts.signal);
       return opts.signal.aborted ? 0 : result;
     }
+    this._lastLibraryRun = null;
     this._libraryPromise = this._runGenerateMissing(games, onProgress, opts);
     try { return await this._libraryPromise; } finally { this._libraryPromise = null; }
   }
@@ -2464,13 +2534,16 @@ class EmbeddingService {
       similarGames?: Array<{ name: string }>;
     }>,
     onProgress?: (completed: number, total: number) => void,
-    opts?: { signal?: AbortSignal; deadline?: number },
+    opts?: { signal?: AbortSignal; deadline?: number; force?: boolean },
   ): Promise<number> {
     if (!(await this.isAvailable())) {
       this._setLibraryStatus('unavailable');
       return 0;
     }
-    if (games.length === 0) return 0;
+    if (games.length === 0) {
+      this._lastLibraryRun = { requested: 0, generated: 0, stoppedEarly: false };
+      return 0;
+    }
 
     this._setLibraryStatus('generating');
     this._libraryAbort = new AbortController();
@@ -2498,14 +2571,15 @@ class EmbeddingService {
         const text = buildEmbeddingText(game);
         const hash = hashText(text);
         const existing = cached.get(game.id);
-        // Skip only when pooled payload exists AND whole-hash + poolVersion OK.
-        if (shouldSkipPooled(existing, hash) && readPooledVector(existing)) continue;
+        // Skip only when pooled payload exists AND whole-hash + poolVersion + layout OK (never when forced).
+        if ((opts?.force ? redoneThisRun(existing, hash) : shouldSkipPooled(existing, hash)) && readPooledVector(existing)) continue;
         needsEmbedding.push({ game, text, hash });
       }
 
       // An existing catalog embedding counts as present for games without
       // personal notes — serve it from the live cache instead of re-embedding.
-      const catalogCandidates = needsEmbedding.filter((n) => !n.game.userNotes);
+      // (A forced run re-embeds the library tier itself instead of borrowing catalog vectors.)
+      const catalogCandidates = opts?.force ? [] : needsEmbedding.filter((n) => !n.game.userNotes);
       if (catalogCandidates.length > 0) {
         const catalogVecs = await getCatalogEmbeddingsForIds(new Set(catalogCandidates.map((n) => n.game.id)))
           .catch(() => new Map<string, number[]>());
@@ -2521,6 +2595,7 @@ class EmbeddingService {
       }
 
       if (needsEmbedding.length === 0) {
+        this._lastLibraryRun = { requested: 0, generated: 0, stoppedEarly: false };
         console.log('[EmbeddingService] All embeddings already cached');
         // Backfill ANN if empty / partial (parity with catalog path — cached library + empty ANN → self-only neighbors).
         // Single-flight: joins a running backfill/rebuild instead of starting a second one.
@@ -2570,6 +2645,8 @@ class EmbeddingService {
               textHash: item.hash,
               timestamp: Date.now(),
               format: 'f32',
+              layout: EMBEDDING_LAYOUT_STAMP,
+              ...(opts?.force && _activeReindexRun ? { reindexRun: _activeReindexRun } : {}),
             });
           }
           returned = batchEntries.length;
@@ -2607,7 +2684,7 @@ class EmbeddingService {
               userNotes: item.game.userNotes,
               similarGames: item.game.similarGames,
             },
-          })));
+          })), { force: opts?.force === true });
           requested = res.requested;
           returned = res.returned;
           let wrote = 0;
@@ -2654,6 +2731,7 @@ class EmbeddingService {
       const status = (generated > 0 || this._loadedCount > 0 || stoppedEarly) ? 'ready' as const : 'unavailable' as const;
       this._setLibraryStatus(status);
       this._libraryProgress = { completed: 0, total: 0 };
+      this._lastLibraryRun = { requested: needsEmbedding.length, generated, stoppedEarly };
 
       console.log(`[EmbeddingService] Generated ${generated} new embeddings, total cached: ${embeddingCacheRef.size}`);
       return generated;
@@ -3405,7 +3483,7 @@ class EmbeddingService {
         watermark &&
         lastSyncTimestamp > 0 &&
         lastSyncTimestamp <= watermark.syncTimestamp &&
-        watermark.versionStamp === HASH_VERSION_PREFIX;
+        watermarkStampIsCurrent(watermark.versionStamp);
 
       if (canSkipScan) {
         console.log(`[EmbeddingService] ${label} unchanged since last pass — skipping scan (${storeKey})`);
@@ -3455,9 +3533,10 @@ class EmbeddingService {
             const text = cfg.textOf(entry);
             const hash = hashText(text);
             const existing = skip.get(id);
-            if (!force && shouldSkipPooled(existing, hash)) {
+            // A forced pass redoes everything EXCEPT what this same run already redid (resume after an interruption).
+            if (force ? redoneThisRun(existing, hash) : shouldSkipPooled(existing, hash)) {
               // Same content — just touch the timestamp if it's getting stale.
-              if (first) {
+              if (first && !force) {
                 const ts = existing?.timestamp ?? 0;
                 if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
               }
@@ -3513,7 +3592,7 @@ class EmbeddingService {
           await setEmbeddingMeta<EmbeddingPassWatermark>({
             key: storeKey,
             syncTimestamp: lastSyncTimestamp,
-            versionStamp: HASH_VERSION_PREFIX,
+            versionStamp: EMBEDDING_LAYOUT_STAMP,
             completedAt: Date.now(),
           });
         }
@@ -3571,6 +3650,10 @@ class EmbeddingService {
             await annIndex.waitForLease(signal);
             if (signal.aborted) break windows;
           }
+          // The library (tier 1, minutes) defines the user's taste vectors; the catalog (tier 2, hours) must not
+          // compete with it for Ollama — yield here while a library run is in flight.
+          await this._awaitLibraryPriority(signal);
+          if (signal.aborted) break windows;
 
           const batch = needsEmbedding.slice(i, i + groupSize);
           const gameFailures: Array<{ key: string; hash: string }> = [];
@@ -3590,6 +3673,8 @@ class EmbeddingService {
                   textHash: item.hash,
                   timestamp: Date.now(),
                   format: 'f32',
+              layout: EMBEDDING_LAYOUT_STAMP,
+              ...(force && _activeReindexRun ? { reindexRun: _activeReindexRun } : {}),
                 });
               } else if (transient.has(item.id)) {
                 unresolvedFailures++; // not the game's fault — no strike, but retry before advancing the watermark
@@ -3621,7 +3706,7 @@ class EmbeddingService {
               gameId: item.id,
               wholeHash: item.hash,
               chunkInput: cfg.chunkInputOf(item.entry),
-            })));
+            })), { force });
             requested = res.requested;
             returned = res.returned;
             let wrote = 0;
@@ -3749,7 +3834,7 @@ class EmbeddingService {
         await setEmbeddingMeta<EmbeddingPassWatermark>({
           key: storeKey,
           syncTimestamp: lastSyncTimestamp,
-          versionStamp: HASH_VERSION_PREFIX,
+          versionStamp: EMBEDDING_LAYOUT_STAMP,
           completedAt: Date.now(),
         });
       } else if (writeFailures > 0 || unresolvedFailures > 0) {
@@ -4168,6 +4253,8 @@ class EmbeddingService {
   }): Promise<ForceReindexResult> {
     if (this._forceReindexPromise) return this._forceReindexPromise;
     const run = (async (): Promise<ForceReindexResult> => {
+      // Never cancel a full re-index's passes from under it.
+      if (this._forceReindexAllPromise) { try { await this._forceReindexAllPromise; } catch { /* non-fatal */ } }
       await this.cancelCatalogEmbeddingsAndWait();
 
       const steamSyncTs = await sources.steam.lastSyncTimestamp();
@@ -4200,6 +4287,158 @@ class EmbeddingService {
     this._notify();
     const clear = () => {
       if (this._forceReindexPromise === run) { this._forceReindexPromise = null; this._notify(); }
+    };
+    run.then(clear, clear);
+    return run;
+  }
+
+  // ── Layout migration state + full forced re-index (library → Steam → Epic → ANN) ─────────────────
+
+  private _migration: EmbeddingMigrationRecord | null = null;
+  private _forceReindexAllPromise: Promise<ForceReindexAllResult> | null = null;
+
+  /** Persisted migration state as last read/written this session (null before refreshMigrationState). */
+  get migrationState(): EmbeddingMigrationRecord | null { return this._migration; }
+  /** A re-index is recommended: the data is stale (layout/model changed) or a run was interrupted. */
+  get isReindexRecommended(): boolean { return reindexRecommendedFor(this._migration); }
+  get isForceReindexAllRunning(): boolean { return this._forceReindexAllPromise !== null; }
+
+  private _migrationTarget() {
+    return { stamp: EMBEDDING_LAYOUT_STAMP, modelTag: annIndex.modelTag || undefined, now: Date.now() };
+  }
+
+  private async _persistMigration(rec: EmbeddingMigrationRecord): Promise<void> {
+    this._migration = rec;
+    try { await setEmbeddingMeta<EmbeddingMigrationRecord>(rec); } catch (err) {
+      console.warn('[EmbeddingService] Failed to persist migration state:', err);
+    }
+    this._notify();
+  }
+
+  /**
+   * Read the persisted state and reconcile it with the current layout stamp / model tag (a 'running' record found at
+   * startup means the previous session quit mid-run → 'pending', resumable). First run on a profile → 'done'.
+   */
+  async refreshMigrationState(): Promise<EmbeddingMigrationRecord> {
+    // An in-process run owns its own record.
+    if (this._forceReindexAllPromise && this._migration) return this._migration;
+    let stored: EmbeddingMigrationRecord | null = null;
+    try {
+      stored = await getEmbeddingMeta<EmbeddingMigrationRecord>(MIGRATION_META_KEY);
+    } catch {
+      // A failed read says nothing about the record: never "start over" (and overwrite a pending/resumable one).
+      if (this._migration) return this._migration;
+      return evaluateMigration(null, this._migrationTarget()).record;
+    }
+    // A run may have started while the read was in flight — it owns the record now.
+    if (this._forceReindexAllPromise && this._migration) return this._migration;
+    const { record, changed } = evaluateMigration(stored, this._migrationTarget());
+    this._migration = record;
+    if (changed) await this._persistMigration(record);
+    else this._notify();
+    return record;
+  }
+
+  /** "Later": remember the choice for THIS target; a new layout/model target re-offers it. */
+  async declineMigration(): Promise<EmbeddingMigrationRecord | null> {
+    const rec = await this.refreshMigrationState();
+    if (rec.state !== 'pending') return rec;
+    const next = declineMigrationRecord(rec, this._migrationTarget());
+    await this._persistMigration(next);
+    return next;
+  }
+
+  /**
+   * Full forced re-index, in dependency order: the LIBRARY first (it defines the taste vectors and takes minutes),
+   * then Steam, then Epic, then an ANN rebuild from the refreshed vectors. Unlike forceReindexCatalog this
+   *  - covers the library tier,
+   *  - really re-embeds (the force reaches the chunk diff),
+   *  - persists its progress: a run that is interrupted (quit, breaker trip, Ollama gone) is `pending` and a later
+   *    call with `resume: true` skips every game this run already redid.
+   * Single-flight.
+   */
+  forceReindexAll(args: {
+    libraryGames: () => Promise<LibraryEmbedGames> | LibraryEmbedGames;
+    steam: {
+      iterate: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>;
+      lastSyncTimestamp: () => Promise<number> | number;
+    };
+    epic: {
+      iterate: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>;
+      lastSyncTimestamp: () => Promise<number> | number;
+    };
+    resume?: boolean;
+  }): Promise<ForceReindexAllResult> {
+    if (this._forceReindexAllPromise) return this._forceReindexAllPromise;
+    const run = (async (): Promise<ForceReindexAllResult> => {
+      if (this._forceReindexPromise) { try { await this._forceReindexPromise; } catch { /* non-fatal */ } }
+
+      let rec = await this.refreshMigrationState();
+      rec = beginMigration(rec, this._migrationTarget(), { resume: args.resume === true });
+      await this._persistMigration(rec);
+
+      const result: ForceReindexAllResult = {
+        library: 0, steam: 0, epic: 0, libraryOk: false,
+        steamOutcome: 'skipped', epicOutcome: 'skipped', ann: false, complete: false,
+        runId: rec.runId ?? '',
+      };
+      const phase = async (p: 'library' | 'steam' | 'epic' | 'ann') => {
+        rec = setMigrationPhase(rec, p, Date.now());
+        await this._persistMigration(rec);
+      };
+
+      try {
+        this.cancelLibraryEmbeddings();
+        await this.cancelCatalogEmbeddingsAndWait();
+        // Armed only now: a cancelled pass still unwinding must not stamp its in-flight batch as "redone".
+        _activeReindexRun = rec.runId ?? null;
+
+        // 1. Library first.
+        await phase('library');
+        const games = await args.libraryGames();
+        result.library = await this.generateMissing(games, undefined, { force: true });
+        const lib = this._lastLibraryRun;
+        result.libraryOk = !!lib && !lib.stoppedEarly && lib.generated >= Math.ceil(lib.requested * 0.95);
+        if (!result.libraryOk) return result;
+
+        // 2. Steam (never over a cancelled / tripped library or Steam pass — Epic would only queue behind it).
+        await phase('steam');
+        const steamSyncTs = await args.steam.lastSyncTimestamp();
+        this._lastPassOutcome.steam = 'skipped';
+        result.steam = await this.generateCatalogEmbeddings(args.steam.iterate, {
+          storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs, force: true,
+        });
+        result.steamOutcome = this.lastCatalogPassOutcome('steam');
+        if (result.steamOutcome !== 'done') return result;
+
+        // 3. Epic.
+        await phase('epic');
+        const epicSyncTs = await args.epic.lastSyncTimestamp();
+        this._lastPassOutcome.epic = 'skipped';
+        result.epic = await this.generateEpicCatalogEmbeddings(args.epic.iterate, {
+          storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs, force: true,
+        });
+        result.epicOutcome = this.lastCatalogPassOutcome('epic');
+        if (result.epicOutcome !== 'done') return result;
+
+        // 4. ANN: rebuild from the refreshed vectors (drops stale chunk ids that incremental upserts cannot).
+        await phase('ann');
+        try { await this.rebuildAnnFromCache(); result.ann = true; } catch { result.ann = false; }
+
+        result.complete = result.ann;
+        return result;
+      } finally {
+        _activeReindexRun = null;
+        const final = result.complete
+          ? completeMigration(rec, this._migrationTarget())
+          : interruptMigration(rec, Date.now());
+        await this._persistMigration(final);
+      }
+    })();
+    this._forceReindexAllPromise = run;
+    this._notify();
+    const clear = () => {
+      if (this._forceReindexAllPromise === run) { this._forceReindexAllPromise = null; this._notify(); }
     };
     run.then(clear, clear);
     return run;

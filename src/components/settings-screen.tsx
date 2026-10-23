@@ -4,6 +4,8 @@
  * Tabs: General · AI Models · Guide · Features · About
  */
 
+import { describeReindexAllResult } from '@/services/embedding-migration';
+import { recoStore } from '@/services/reco-store';
 import { memo, useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -27,7 +29,7 @@ import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
-import { embeddingService, type ForceReindexResult, type CatalogPassOutcome } from '@/services/embedding-service';
+import { embeddingService } from '@/services/embedding-service';
 import { buildRechunkJobDeps } from '@/services/rechunk-job-deps';
 import { annIndex } from '@/services/ann-index';
 import { catalogStore } from '@/services/catalog-store';
@@ -39,19 +41,6 @@ import {
   OVERLAY_CYCLE_HOTKEY_LABEL,
   OVERLAY_TOGGLE_HOTKEY_LABEL,
 } from '@/overlay/detail-level';
-
-function describeForceReindexResult(r: ForceReindexResult): string {
-  const total = (r.steam + r.epic).toLocaleString();
-  if (r.complete) return `Done — ${total} games re-read`;
-  const why = (o: CatalogPassOutcome) =>
-    o === 'tripped' ? 'paused because Ollama stopped responding; it resumes automatically'
-      : o === 'unavailable' ? 'skipped because Ollama isn\'t running'
-        : o === 'cancelled' ? 'cancelled'
-          : o === 'error' ? 'failed'
-            : 'not started';
-  const part = r.steamOutcome !== 'done' ? `Steam games ${why(r.steamOutcome)}` : `Epic games ${why(r.epicOutcome)}`;
-  return `Not finished (${total} games so far) — ${part}`;
-}
 
 export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
 
@@ -413,11 +402,14 @@ const AIModelsTab = memo(function AIModelsTab() {
   // Shared, service-level job state: both Settings screens (and both Rebuild
   // buttons) see the same in-flight ANN rebuild / forced re-index.
   const [annJobBusy, setAnnJobBusy] = useState(() => embeddingService.isAnnRebuilding);
-  const [forceReindexBusy, setForceReindexBusy] = useState(() => embeddingService.isForceReindexRunning);
+  const [forceReindexBusy, setForceReindexBusy] = useState(() => embeddingService.isForceReindexRunning || embeddingService.isForceReindexAllRunning);
+  const [migration, setMigration] = useState(() => embeddingService.migrationState);
   useEffect(() => {
+    void embeddingService.refreshMigrationState();
     const sync = () => {
       setAnnJobBusy(embeddingService.isAnnRebuilding);
-      setForceReindexBusy(embeddingService.isForceReindexRunning);
+      setForceReindexBusy(embeddingService.isForceReindexRunning || embeddingService.isForceReindexAllRunning);
+      setMigration(embeddingService.migrationState);
     };
     const unsubEmb = embeddingService.subscribe(sync);
     const unsubAnn = annIndex.subscribe(() => {
@@ -426,6 +418,8 @@ const AIModelsTab = memo(function AIModelsTab() {
     sync();
     return () => { unsubEmb(); unsubAnn(); };
   }, []);
+  // One value drives the button label, the dialog copy and the call (they used to be read at different moments).
+  const reindexResumable = migration?.state === 'pending' && !!migration.runId && migration.reason === 'interrupted';
   const annRebuildBusy = annRebuildStatus === 'building' || annJobBusy;
   const forceReindexRunning = forceReindexStatus === 'running' || forceReindexBusy;
   const [weightSweepMsg, setWeightSweepMsg] = useState<string | null>(null);
@@ -1026,9 +1020,23 @@ const AIModelsTab = memo(function AIModelsTab() {
           <div>
             <p className="text-sm text-white/70">Rebuild game understanding from scratch</p>
             <p className="text-[11px] text-white/30 mt-0.5">
-              Has the AI re-read every Steam and Epic game. Use it if a progress bar gets stuck or matches look
-              wrong. Takes a while. Your library, playtime, and journey are not touched.
+              Has the AI re-read every game — your library first, then Steam and Epic — and rebuilds the similarity
+              index. Use it if a progress bar gets stuck or matches look wrong. Takes a while, and if it is
+              interrupted it can pick up where it left off. Your library, playtime, and journey are not touched.
             </p>
+            {migration?.state === 'pending' && !forceReindexRunning && (
+              <p className="text-[11px] mt-0.5 text-amber-300/70">
+                {migration.reason === 'interrupted'
+                  ? 'A previous rebuild was interrupted — resume it to finish.'
+                  : 'A rebuild is recommended: your game data was built with an older format.'}
+              </p>
+            )}
+            {forceReindexRunning && migration?.phase && (
+              <p className="text-[11px] mt-0.5 text-white/40">
+                Step: {migration.phase === 'library' ? 'your library' : migration.phase === 'steam' ? 'Steam games'
+                  : migration.phase === 'epic' ? 'Epic games' : 'similarity index'}
+              </p>
+            )}
             {forceReindexRunning && forceReindexProgress && (
               <p className="text-[11px] mt-0.5 text-white/40">
                 {forceReindexProgress.completed.toLocaleString()} / {forceReindexProgress.total.toLocaleString()} games
@@ -1056,15 +1064,17 @@ const AIModelsTab = memo(function AIModelsTab() {
             ) : (
               <RotateCcw className="h-3.5 w-3.5" />
             )}
-            <span className="ml-1.5">{forceReindexRunning ? 'Rebuilding…' : 'Rebuild all'}</span>
+            <span className="ml-1.5">{forceReindexRunning ? 'Rebuilding…' : (reindexResumable ? 'Resume rebuild' : 'Rebuild all')}</span>
           </Button>
         </div>
         <ConfirmDialog
           open={forceReindexConfirmOpen}
           onOpenChange={setForceReindexConfirmOpen}
-          title="Rebuild game understanding from scratch?"
-          description="The AI will re-read every Steam and Epic game. This can take a while and keeps Ollama busy until it's done. Your library, playtime, and journey are not affected. Continue?"
-          confirmText="Rebuild"
+          title={reindexResumable ? 'Resume the interrupted rebuild?' : 'Rebuild game understanding from scratch?'}
+          description={reindexResumable
+            ? "The previous rebuild was interrupted. It will continue where it left off — games it already re-read are skipped — then rebuild the similarity index. Your library, playtime, and journey are not affected. Continue?"
+            : "The AI will re-read your library and every Steam and Epic game, then rebuild the similarity index. This can take a while and keeps Ollama busy until it's done; if it is interrupted it can be resumed. Your library, playtime, and journey are not affected. Continue?"}
+          confirmText={reindexResumable ? 'Resume' : 'Rebuild'}
           cancelText="Cancel"
           variant="warning"
           onConfirm={async () => {
@@ -1080,7 +1090,11 @@ const AIModelsTab = memo(function AIModelsTab() {
               // Single service-level operation: cancels background passes + the
               // re-chunk job, waits out any ANN backfill/rebuild, then runs both
               // forced passes. Reports "done" only when BOTH finished.
-              const result = await embeddingService.forceReindexCatalog({
+              // Full re-index in dependency order (library → Steam → Epic → similarity index). A run that was
+              // interrupted earlier resumes: games it already redid are skipped.
+              const result = await embeddingService.forceReindexAll({
+                libraryGames: () => recoStore.getLibraryEmbeddingInputs(),
+                resume: reindexResumable,
                 steam: {
                   iterate: (onBatch) => catalogStore.getAllEntries(onBatch),
                   lastSyncTimestamp: () => catalogStore.getLastSyncTimestamp(),
@@ -1091,10 +1105,10 @@ const AIModelsTab = memo(function AIModelsTab() {
                 },
               });
               setForceReindexStatus(result.complete ? 'done' : 'error');
-              setForceReindexMessage(describeForceReindexResult(result));
+              setForceReindexMessage(describeReindexAllResult(result));
               console.log(
-                `[Settings] Force re-index ${result.complete ? 'complete' : 'incomplete'}: ` +
-                `${result.steam} Steam (${result.steamOutcome}) + ${result.epic} Epic (${result.epicOutcome})`,
+                `[Settings] Full re-index ${result.complete ? 'complete' : 'incomplete'}: ` +
+                `${result.library} library + ${result.steam} Steam (${result.steamOutcome}) + ${result.epic} Epic (${result.epicOutcome}), ann=${result.ann}`,
               );
             } catch (err) {
               setForceReindexStatus('error');

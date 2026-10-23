@@ -200,3 +200,12 @@ The following gaps were fixed and removed from the active list:
 - Bumping `EMBEDDING_CHUNK_VERSION` before a re-embed finishes would label a graph built from old vectors as current (signature is version-based, not content-based).
 - A pre-hydrate merge keeps the local arm/row wholesale for touched ids (a `strong` flag or count only in the persisted row is lost for those ids).
 - The first-library-change baseline logic has no direct unit test (the handler is module-private); covered by the cache-epoch tests and manual reasoning.
+
+## Re-embed foundation gaps (found during Release A review)
+- First-run migration state assumes the stored data is current. Fine while stamps are introduced without a layout change; a later release that bumps the layout should infer the data stamp from existing rows (e.g. a sample with no `layout` → legacy) instead of trusting a missing record.
+- A forced pass reports `done` even when some games failed (write failures / poison-ledger skips); the library accepts 95%. After a future bump 'done' could hide a few stale rows (they self-heal via the per-row layout check). Surface a 'partial' outcome from `_runCatalogPass`.
+- If more than 5% of library games can never embed (empty text / persistent Ollama rejection) a full re-index stays 'interrupted' forever; count permanently skipped games toward the threshold.
+- `forceReindexCatalog` is no longer used by the UI; delete it (or fold into `forceReindexAll`) once its tests are ported.
+- The 'running' record is per-profile, not per-window: a second renderer window calling `refreshMigrationState` would mark a live run interrupted. Add an owner/heartbeat if the overlay window ever imports the embedding service.
+- A downgrade after a future generation bump: an old build ignores `layoutGeneration` and would load a newer index; bump the ANN meta filename together with a generation bump.
+- Old builds compare the pass watermark `versionStamp` to the bare `t10m1`; after a rollback one extra cursor rescan per source occurs (nothing is re-embedded).

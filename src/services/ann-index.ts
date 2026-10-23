@@ -38,7 +38,7 @@ declare global {
       addVectors: (entries: Array<{ id: string; vector: number[] | Float32Array }>) => Promise<AnnAddResult | number>;
       query: (centroid: number[], k: number, excludeId?: string) => Promise<Array<{ id: string; distance: number }>>;
       queryBatch: (entries: Array<{ id: string; vector: number[] | Float32Array }>, k: number) => Promise<Record<string, Array<{ id: string; distance: number }>>>;
-      status: () => Promise<{ ready: boolean; vectorCount: number; dims: number; partial?: boolean }>;
+      status: () => Promise<{ ready: boolean; vectorCount: number; dims: number; partial?: boolean; layoutGeneration?: number; modelTag?: string }>;
       clear: () => Promise<boolean>;
     };
   }
@@ -86,6 +86,12 @@ class AnnIndexService {
   get isPartial(): boolean { return this._partial; }
   /** True when a backfill from cache should run (empty, or partial after a clear / crash mid-rebuild). */
   get needsBackfill(): boolean { return !this._ready || this._partial; }
+  private _modelTag = '';
+  private _layoutGeneration = 1;
+  /** Embedding model tag the main process resolved ('' until the first status round-trip). */
+  get modelTag(): string { return this._modelTag; }
+  /** Layout generation the main process builds/accepts indexes for (older mains: 1). */
+  get layoutGeneration(): number { return this._layoutGeneration; }
   /** True while a clear/backfill job holds the exclusive write lease. */
   get isLeased(): boolean { return this._lease !== null; }
   get leaseOwner(): string | null { return this._lease?.owner ?? null; }
@@ -159,6 +165,8 @@ class AnnIndexService {
       this._vectorCount = s.vectorCount;
       // Older main builds have no `partial` — trust `ready` alone there.
       this._partial = typeof s.partial === 'boolean' ? s.partial : !s.ready;
+      if (typeof s.modelTag === 'string' && s.modelTag) this._modelTag = s.modelTag;
+      if (typeof s.layoutGeneration === 'number') this._layoutGeneration = s.layoutGeneration;
       this._notify();
     } catch { /* ignore */ }
   }

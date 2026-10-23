@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.83': {
+    title: "What's New in Ark 1.0.83",
+    changes: [
+      'Groundwork for a future upgrade to how Ark understands games. Nothing is re-processed and nothing changes in your recommendations now.',
+      '"Rebuild all" in Settings now really rebuilds: your library first, then Steam and Epic, then the similarity index. If it is interrupted you can resume where it left off.',
+      'Library games are always embedded before the big Steam and Epic catalogs.',
+      'The similarity index and cached views now know which version of the game data they were built from, so future upgrades can refresh them safely.',
+    ],
+  },
   '1.0.82': {
     title: "What's New in Ark 1.0.82",
     changes: [
