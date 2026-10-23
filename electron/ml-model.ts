@@ -16,9 +16,22 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './safe-logger.js';
 
-const N_FEATURES = 242;
-const TOP_K_TAGS = 200;
-const N_NUMERIC = 42; // first 42 features are numeric, rest are tags
+import {
+  N_FEATURES,
+  N_NUMERIC,
+  buildFeatureVector,
+  buildUserProfileFromGames,
+  type GameProfile,
+  type ProfileGame,
+  type UserProfile,
+} from './ml-features.js';
+
+export type { UserProfile } from './ml-features.js';
+
+/** Bump when the bundled model/profile artifacts change so installed copies in userData are replaced. */
+export const ML_ARTIFACT_VERSION = 2;
+const ARTIFACT_STAMP_FILE = '.artifact-version';
+const EXPECTED_FOLDS = 8;
 
 interface FeatureSpec {
   feature_names: string[];
@@ -29,36 +42,6 @@ interface FeatureSpec {
   onnx_input_name: string;
   onnx_output_names: string[];
   defaults: Record<string, number>;
-}
-
-interface GameProfile {
-  g_rec_rate: number;
-  g_avg_hours: number;
-  g_std_hours: number;
-  g_n_reviews: number;
-  g_avg_helpful: number;
-  g_pct_high_hours: number;
-  price?: number;
-  discount?: number;
-  win?: boolean;
-  mac?: boolean;
-  linux?: boolean;
-  steam_deck?: boolean;
-  positive_ratio?: number;
-  user_reviews?: number;
-  tags?: number[];
-}
-
-export interface UserProfile {
-  u_rec_rate: number;
-  u_avg_hours: number;
-  u_std_hours: number;
-  u_n_reviews: number;
-  u_avg_helpful: number;
-  u_avg_funny: number;
-  u_pct_high_hours: number;
-  log_products: number;
-  log_user_rev: number;
 }
 
 export interface MLScoreResult {
@@ -108,6 +91,17 @@ function ensureDataFiles(): boolean {
     const sourceDir = getSourceDir();
     const requiredFiles = ['game_profiles.json', 'feature_spec.json', 'tag_mapping.json'];
 
+    // Installed copies from an older app version must be replaced, not kept forever.
+    const stampPath = path.join(dataDir, ARTIFACT_STAMP_FILE);
+    let installedVersion = 0;
+    try { installedVersion = Number(fs.readFileSync(stampPath, 'utf-8').trim()) || 0; } catch { /* no stamp */ }
+    const refresh = installedVersion !== ML_ARTIFACT_VERSION;
+    if (refresh) {
+      for (const file of requiredFiles) fs.rmSync(path.join(dataDir, file), { force: true });
+      fs.rmSync(path.join(dataDir, 'onnx_ensemble'), { recursive: true, force: true });
+      logger.info(`[ML] Refreshing ML artifacts (installed v${installedVersion} -> v${ML_ARTIFACT_VERSION})`);
+    }
+
     for (const file of requiredFiles) {
       const dest = path.join(dataDir, file);
       if (!fs.existsSync(dest)) {
@@ -133,6 +127,17 @@ function ensureDataFiles(): boolean {
         logger.info(`[ML] Copied onnx_ensemble/ to userData`);
       }
     }
+
+    // A partial ensemble is worse than none: reject and re-copy on next load.
+    if (fs.existsSync(ensembleDir)) {
+      const folds = fs.readdirSync(ensembleDir).filter(f => /^fold_\d+\.onnx$/.test(f)).length;
+      if (folds !== EXPECTED_FOLDS) {
+        logger.error(`[ML] Ensemble has ${folds}/${EXPECTED_FOLDS} folds — rejecting`);
+        fs.rmSync(ensembleDir, { recursive: true, force: true });
+        return false;
+      }
+    }
+    fs.writeFileSync(stampPath, String(ML_ARTIFACT_VERSION));
 
     // Single model fallback
     const singleModel = path.join(dataDir, 'model.onnx');
@@ -207,7 +212,7 @@ async function _doLoadModel(): Promise<boolean> {
     // Load ensemble ONNX sessions
     const ensembleDir = path.join(dataDir, 'onnx_ensemble');
     if (fs.existsSync(ensembleDir)) {
-      const foldFiles = fs.readdirSync(ensembleDir).filter(f => f.endsWith('.onnx')).sort();
+      const foldFiles = fs.readdirSync(ensembleDir).filter(f => /^fold_\d+\.onnx$/.test(f)).sort();
       for (const foldFile of foldFiles) {
         const sess = await ort!.InferenceSession.create(
           path.join(ensembleDir, foldFile),
@@ -226,6 +231,17 @@ async function _doLoadModel(): Promise<boolean> {
       logger.info('[ML] Loaded single ONNX model');
     }
 
+    // Probe: every fold must return a float `probabilities` tensor, otherwise scores
+    // silently degrade to label votes. Fail loudly instead.
+    const probName = featureSpec?.onnx_output_names?.[1] ?? 'probabilities';
+    const probeIn = new ort!.Tensor('float32', new Float32Array(N_FEATURES), [1, N_FEATURES]);
+    for (const sess of sessions) {
+      const out = await sess.run({ [featureSpec!.onnx_input_name]: probeIn }, [probName]);
+      if (out[probName]?.type !== 'float32') {
+        throw new Error(`ML model output '${probName}' is not a float tensor (ZipMap not removed?)`);
+      }
+    }
+
     loaded = true;
     return true;
   } catch (err) {
@@ -236,95 +252,10 @@ async function _doLoadModel(): Promise<boolean> {
 }
 
 /**
- * Build a feature vector for a single game given user + game profiles.
- * Features not available at recommendation time (hours, review text)
- * use sensible defaults from the training distribution.
- */
-function buildFeatureVector(
-  userProfile: UserProfile,
-  gp: GameProfile | undefined,
-  defaults: Record<string, number>,
-): Float32Array {
-  const vec = new Float32Array(N_FEATURES);
-
-  const d = defaults;
-  const g = gp || {} as Partial<GameProfile>;
-
-  // Numeric features (indices 0..41) — same order as feature_spec.feature_names
-  vec[0] = d.log_hours;                                                  // log_hours (default)
-  vec[1] = g.price != null ? g.price / 60.0 : d.price_norm;             // price_norm
-  vec[2] = g.discount ?? d.discount;                                     // discount
-  vec[3] = g.win != null ? (g.win ? 1 : 0) : d.win;                     // win
-  vec[4] = g.mac != null ? (g.mac ? 1 : 0) : d.mac;                     // mac
-  vec[5] = g.linux != null ? (g.linux ? 1 : 0) : d.linux;               // linux
-  vec[6] = g.steam_deck != null ? (g.steam_deck ? 1 : 0) : d.steam_deck; // steam_deck
-  vec[7] = d.log_helpful;                                                // log_helpful (default)
-  vec[8] = d.log_funny;                                                  // log_funny (default)
-  vec[9] = userProfile.log_products;                                     // log_products
-  vec[10] = userProfile.log_user_rev;                                    // log_user_rev
-  vec[11] = d.review_year;                                               // review_year (default)
-  vec[12] = d.review_month;                                              // review_month (default)
-  vec[13] = g.positive_ratio != null ? g.positive_ratio / 100.0 : d.positive_ratio_norm;
-  vec[14] = g.user_reviews != null ? Math.log1p(g.user_reviews) : d.log_game_reviews;
-  vec[15] = d.review_age_days;                                           // review_age_days
-  vec[16] = d.game_age_days;                                             // game_age_days
-  vec[17] = d.hours_per_game_age;                                        // hours_per_game_age
-
-  // User profile features
-  vec[18] = userProfile.u_rec_rate;
-  vec[19] = userProfile.u_avg_hours;
-  vec[20] = userProfile.u_std_hours;
-  vec[21] = userProfile.u_n_reviews;
-  vec[22] = userProfile.u_avg_helpful;
-  vec[23] = userProfile.u_avg_funny;
-  vec[24] = userProfile.u_pct_high_hours;
-
-  // Game profile features
-  vec[25] = g.g_rec_rate ?? d.g_rec_rate;
-  vec[26] = g.g_avg_hours ?? d.g_avg_hours;
-  vec[27] = g.g_std_hours ?? d.g_std_hours;
-  vec[28] = g.g_n_reviews ?? d.g_n_reviews;
-  vec[29] = g.g_avg_helpful ?? d.g_avg_helpful;
-  vec[30] = g.g_pct_high_hours ?? d.g_pct_high_hours;
-
-  // Interaction features — use defaults since we don't have actual hours
-  vec[31] = d.hours_vs_user_avg;
-  vec[32] = d.hours_vs_game_avg;
-  vec[33] = d.user_above_game_avg;
-  vec[34] = d.hours_dev_from_game;
-  vec[35] = d.hours_dev_from_user;
-  vec[36] = d.hours_zscore_user;
-  vec[37] = d.hours_zscore_game;
-  vec[38] = d.hours_x_pos_ratio;
-  vec[39] = d.helpful_vs_game;
-
-  // Cross features
-  const uRate = userProfile.u_rec_rate;
-  const gRate = g.g_rec_rate ?? d.g_rec_rate;
-  vec[40] = uRate * gRate;  // u_rec_x_g_rec
-  vec[41] = uRate - gRate;  // u_rec_minus_g_rec
-
-  // Tag features (indices 42..241)
-  if (gp?.tags) {
-    for (const idx of gp.tags) {
-      if (idx >= 0 && idx < TOP_K_TAGS) {
-        vec[N_NUMERIC + idx] = 1.0;
-      }
-    }
-  }
-
-  return vec;
-}
-
-/**
  * Score a batch of games for a given user profile.
- * Returns P(recommended) for each game, averaged across ensemble folds.
- *
- * LightGBM's ONNX export produces two outputs: "label" (tensor) and
- * "probabilities" (sequence<map>). onnxruntime-node cannot deserialize
- * the sequence<map> type, so we request only "label" and average the
- * binary predictions across ensemble folds for a probability estimate.
- * With 8 folds this gives 9 distinct score levels (0/8 … 8/8).
+ * Returns P(recommended) for each game, averaged across the ensemble folds that
+ * succeeded. The shipped folds expose `probabilities` as a float tensor
+ * (scripts/ml/patch-zipmap.py removes the ZipMap node), so scores are continuous.
  */
 /**
  * True when the library has enough Steam-backed evidence to drive the ML user profile.
@@ -378,111 +309,46 @@ export async function scoreGames(
 
   const inputTensor = new ort.Tensor('float32', flatBuffer, [n, N_FEATURES]);
   const inputName = featureSpec.onnx_input_name;
-  const outputNames = featureSpec.onnx_output_names;
-  const labelName = outputNames[0];
-  const probName = outputNames.length > 1 ? outputNames[1] : null;
+  const probName = featureSpec.onnx_output_names[1] ?? 'probabilities';
 
   const probSums = new Float32Array(n);
-  const nSessions = sessions.length;
+  let foldsOk = 0;
 
   for (const sess of sessions) {
-    // Prefer tensor probabilities (available after re-export with zipmap=False);
-    // fall back to label-only to avoid the sequence<map> crash.
     try {
-      if (probName) {
-        const result = await sess.run({ [inputName]: inputTensor }, [probName]);
-        const probOutput = result[probName];
-        if (probOutput?.dims && probOutput.data) {
-          const cols = probOutput.dims[probOutput.dims.length - 1] as number;
-          const data = probOutput.data as Float32Array;
-          for (let i = 0; i < n; i++) {
-            probSums[i] += data[i * cols + (cols - 1)];
-          }
-          continue;
-        }
-      }
-    } catch {
-      // sequence<map> output — fall through to label path
-    }
-
-    try {
-      const result = await sess.run({ [inputName]: inputTensor }, [labelName]);
-      const labelOutput = result[labelName];
-      if (labelOutput?.data) {
-        const data = labelOutput.data;
-        for (let i = 0; i < n; i++) {
-          probSums[i] += Number(data[i]);
-        }
-      }
+      const result = await sess.run({ [inputName]: inputTensor }, [probName]);
+      const probOutput = result[probName];
+      if (!probOutput?.dims || !probOutput.data) throw new Error('no probabilities tensor');
+      const cols = probOutput.dims[probOutput.dims.length - 1] as number;
+      const data = probOutput.data as Float32Array;
+      for (let i = 0; i < n; i++) probSums[i] += data[i * cols + (cols - 1)];
+      foldsOk++;
     } catch (err) {
+      // Never fall back to the int label: averaging 0/1 votes is what produced a 9-level score.
       logger.warn('[ML] Fold scoring failed, skipping:', err);
     }
   }
 
+  if (foldsOk === 0) {
+    logger.error('[ML] No fold produced probabilities — returning no scores');
+    return [];
+  }
+
   return scorable.map((id, i) => ({
     gameId: id,
-    score: probSums[i] / nSessions,
+    score: probSums[i] / foldsOk,
   }));
 }
 
 /**
- * Build an approximate user profile from library data.
- * Maps the user's game library stats to the features the ML model expects.
+ * Build an approximate user profile from library data (see ml-features.ts).
  */
-export function buildUserProfile(
-  games: Array<{
-    gameId: string;
-    hoursPlayed: number;
-    rating: number;
-    status: string;
-  }>,
-): UserProfile {
-  if (games.length === 0) {
-    return {
-      u_rec_rate: featureSpec?.global_rec_rate ?? 0.85,
-      u_avg_hours: 3.0,
-      u_std_hours: 1.5,
-      u_n_reviews: 0,
-      u_avg_helpful: 0,
-      u_avg_funny: 0,
-      u_pct_high_hours: 0.3,
-      log_products: 0,
-      log_user_rev: 0,
-    };
-  }
-
-  const n = games.length;
-  const logHours = games.map(g => Math.log1p(Math.min(g.hoursPlayed || 0, 999.9)));
-  const avgLogH = logHours.reduce((s, h) => s + h, 0) / n;
-  const varH = logHours.reduce((s, h) => s + (h - avgLogH) ** 2, 0) / n;
-
-  // Approximate rec_rate: rating >= 3 or Completed / Playing* (GameStatus casing)
-  const recommended = games.filter(g => {
-    const status = (g.status || '').toLowerCase();
-    return (
-      g.rating >= 3 ||
-      status === 'completed' ||
-      status === 'playing' ||
-      status === 'playing now'
-    );
-  }).length;
-  const smoothM = featureSpec?.smooth_m ?? 10;
-  const globalRate = featureSpec?.global_rec_rate ?? 0.85;
-  const recRate = (recommended + smoothM * globalRate) / (games.length + smoothM);
-
-  const highHours = games.filter(g => g.hoursPlayed > 20).length;
-
-  return {
-    u_rec_rate: recRate,
-    u_avg_hours: avgLogH,
-    u_std_hours: Math.sqrt(varH),
-    u_n_reviews: Math.log1p(games.length),
-    u_avg_helpful: 0, // not available from app data
-    u_avg_funny: 0,
-    u_pct_high_hours: highHours / games.length,
-    log_products: Math.log1p(games.length),
-    log_user_rev: Math.log1p(games.filter(g => g.rating > 0).length),
-  };
+export function buildUserProfile(games: ProfileGame[]): UserProfile {
+  return buildUserProfileFromGames(games, {
+    globalRecRate: featureSpec?.global_rec_rate ?? 0.85,
+    smoothM: featureSpec?.smooth_m ?? 10,
+    defaults: featureSpec?.defaults ?? {},
+  });
 }
 
 export function getGameProfile(steamAppId: string): GameProfile | undefined {

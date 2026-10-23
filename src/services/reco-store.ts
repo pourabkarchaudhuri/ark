@@ -11,6 +11,7 @@
  *  - Tracks conversion events (click → add → play → rate)
  */
 
+import { percentileRanks } from './ml-normalize';
 import type {
   TasteProfile,
   RecoShelf,
@@ -2133,7 +2134,12 @@ export class RecoStore {
         }
       }
 
-      const scored = candidates.filter(c => c.mlScore != null).length;
+      // Rank-normalise within the pool: raw probabilities cluster near the base rate.
+      const withMl = candidates.filter(c => c.mlScore != null);
+      const ranks = percentileRanks(withMl.map(c => c.mlScore as number));
+      withMl.forEach((c, i) => { c.mlScore = ranks[i]; });
+
+      const scored = withMl.length;
       if (scored > 0) _mlScoringAvailable = true;
       console.log(`[RecoStore] ML scoring: ${scored}/${candidates.length} candidates scored`);
     } catch (err) {

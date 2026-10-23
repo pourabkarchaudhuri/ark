@@ -164,3 +164,13 @@ describe('worker pipeline on fixtures', () => {
     expect(result.telemetry!.funnel.scored).toBe(3);
   });
 });
+
+describe('ML layer on the worker', () => {
+  it('candidates without an ML score get the pool median, not zero', async () => {
+    const pool = candidatePool(40).map((c, i) => (i % 2 === 0 ? { ...c, mlScore: 0.2 + (i % 10) * 0.08 } : c));
+    const result = await runWorkerPipeline(baseWorkerInput(multiTasteLibrary(), pool, FIXTURE_NOW));
+    const ml = layer(result, 'mlSignal');
+    // 100% of candidates carry a non-zero ML signal (scored ones directly, the rest imputed).
+    expect(ml.coverage).toBeGreaterThan(0.95);
+  });
+});

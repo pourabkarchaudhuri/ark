@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.77] - 2026-10-23
+
+Third step of the Oracle recommendation-quality plan: the machine-learning layer works again. **Ranking changes** (engine version 3).
+
+### Fixed — ML layer returned 0/1 votes instead of probabilities
+- **The model's probability output was unreadable.** The bundled `fold_*.onnx` ensemble ended in a ZipMap node, so `probabilities` was a sequence of maps that onnxruntime-node cannot fetch. Ark silently fell back to the class label, so every ML score was the average of eight 0/1 votes (nine possible values, mostly 1.0). The ZipMap node is now removed from all eight folds by graph surgery (`scripts/ml/patch-zipmap.py`, no retraining; argmax agreement with the original label is 100% on 2,000 random rows per fold). Measured on 2,000 real game profiles: 902 distinct scores, no value above 2.6% of the pool (was ~9 levels).
+- **No silent degradation.** Loading now probes every fold and fails loudly if `probabilities` is not a float tensor; scoring no longer falls back to label votes, and divides by the folds that actually succeeded. A partial ensemble (not exactly 8 folds) is rejected.
+- **Scores are rank-normalised within the candidate pool.** Raw probabilities sit near the 86% training base rate, so the ML layer used to mostly mean "well reviewed". It is now a within-pool percentile.
+- **Candidates the model cannot score** (Epic, newer than the training data, custom) get the pool median instead of 0.
+- **User profile fed to the model is honest.** Only games you rated or actually played count toward your recommend-rate; Want to Play / On Hold / unrated-unplayed entries are no longer treated as dislikes (a 200-game backlog used to drag the rate toward zero). Hours statistics use played games only, review count reflects evidence rather than library size, and helpful/funny take the trained defaults instead of 0.
+- **Feature rows are consistent:** hours-derived features (deviation, z-score, ratio) now follow from the same typical-hours value the row claims instead of unrelated constants; review year is clamped to the trained range.
+- **App updates replace the ML files.** Installed copies of the model/profile files in your data folder were copied once and never refreshed; they are now version-stamped and replaced on update.
+
+### Tests
+- New: profile/feature unit tests, rank-normalisation, worker median imputation, and a real-ensemble test (skipped when `dataset/` is absent) that fails if ML is dead or saturated.
+
 ## [1.0.76] - 2026-10-23
 
 Second step of the Oracle recommendation-quality plan: the graph and cluster layers now actually work. **Ranking changes** (engine version 2).

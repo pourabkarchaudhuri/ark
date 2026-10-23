@@ -27,6 +27,7 @@
  * and graph traversal.
  */
 
+import { median } from '../services/ml-normalize';
 import type {
   RecoWorkerInput,
   RecoWorkerMessage,
@@ -379,6 +380,9 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   // ML coverage = share of candidates with a real model score.
   const mlCoverage = filteredCandidates.filter(c => c.mlScore != null).length / Math.max(1, filteredCandidates.length);
 
+  // ML-less candidates (Epic, post-2023, custom) get the pool median, not 0, so they are neither punished nor boosted.
+  const mlMedian = median(filteredCandidates.filter(c => c.mlScore != null).map(c => c.mlScore as number));
+
   const hasClusterCentroids = hasPrecomputedClusterScores || clusterCentroids.length >= 2;
   const clusterLabels = clusterCentroids.map(c => c.label);
   const {
@@ -516,7 +520,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     const isOnSale = !!c.price?.discountPercent && c.price.discountPercent > 0;
 
     // ML model signal: only when a real score was attached (no ?? 0.5 under W_ML)
-    const mlSignal = c.mlScore != null ? c.mlScore : 0;
+    const mlSignal = c.mlScore != null ? c.mlScore : mlMedian;
 
     // Layer 14: Graph metrics (PageRank quality propagation + Louvain community affinity)
     let graphPageRankSignal = 0;

@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.77': {
+    title: "What's New in Ark 1.0.77",
+    changes: [
+      "Oracle's machine-learning layer is repaired. It had been quietly reduced to a handful of yes/no votes; it now returns real, fine-grained predictions of how likely you are to enjoy each game.",
+      "Oracle no longer treats games you haven't played or rated as games you dislike when learning your taste.",
+      'Games the model cannot judge (Epic titles, very new releases) are no longer penalised.',
+      'Model files are now refreshed automatically when Ark updates.',
+      'Because rankings changed, Oracle will recalculate once after updating.',
+    ],
+  },
   '1.0.76': {
     title: "What's New in Ark 1.0.76",
     changes: [
