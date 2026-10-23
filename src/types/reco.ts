@@ -365,6 +365,24 @@ export interface RecoWorkerInput {
   userCommunityCounts?: Record<number, number>;
   /** Total number of user library games that had a graph community assignment. */
   userCommunityTotal?: number;
+  /**
+   * Embedding neighbours of the user's strongest library games, inverted to
+   * candidate id → hits (`u` = library game id, `d` = cosine distance).
+   * Computed on the main thread (one ANN batch per library game, not per
+   * candidate) and feeds the graph signal. Omitted when ANN is unavailable.
+   */
+  libraryNeighbors?: Record<string, Array<{ u: string; d: number }>>;
+  /**
+   * Taste clusters detected on the main thread (deterministic). When present
+   * the worker uses these instead of re-detecting, so the cluster ids/labels
+   * match `precomputedClusterScores`.
+   */
+  precomputedClusters?: TasteCluster[];
+  /**
+   * Per-candidate best cosine to any cluster semantic centroid. Candidate
+   * embeddings are stripped before the worker, so this must be precomputed.
+   */
+  precomputedClusterScores?: Record<string, { sim: number; label: string }>;
 }
 
 /** Progress updates from the worker. */

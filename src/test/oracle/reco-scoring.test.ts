@@ -9,10 +9,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  buildGraphUserContext,
   buildTasteProfile,
   classifyEngagementCurve,
-  computeGraphSignal,
   computePopularityAdjustment,
   computeQualitySignal,
   computeRecoTelemetry,
@@ -28,36 +26,6 @@ import {
   makeUser,
   multiTasteLibrary,
 } from './fixtures';
-
-describe('computeGraphSignal — CURRENT BEHAVIOR (fixed in R2)', () => {
-  it('saturates at 1.0 on a single match, so 1 match ties with 8 matches', () => {
-    const loved = makeUser('steam-1', {
-      title: 'Loved Game', hoursPlayed: 40, rating: 5, status: 'Completed',
-      similarGameTitles: ['Target Game'],
-    });
-    const many = Array.from({ length: 8 }, (_, i) =>
-      makeUser(`steam-${10 + i}`, {
-        title: `Loved ${i}`, hoursPlayed: 40, rating: 5, status: 'Completed',
-        similarGameTitles: ['Target Game'],
-      }));
-    const target = makeCandidate('steam-99', { title: 'Target Game' });
-
-    const oneCtx = buildGraphUserContext([loved], FIXTURE_NOW);
-    const one = computeGraphSignal(target, [loved], new Map(), oneCtx);
-    const manyCtx = buildGraphUserContext(many, FIXTURE_NOW);
-    const eight = computeGraphSignal(target, many, new Map(), manyCtx);
-
-    expect(one.score).toBe(1);
-    expect(eight.score).toBe(1);
-  });
-
-  it('returns 0 for a candidate with no similar-title link to the library', () => {
-    const users = multiTasteLibrary();
-    const ctx = buildGraphUserContext(users, FIXTURE_NOW);
-    const c = makeCandidate('steam-99', { title: 'Unrelated', similarGameTitles: [] });
-    expect(computeGraphSignal(c, users, new Map(), ctx).score).toBe(0);
-  });
-});
 
 describe('computeQualitySignal — CURRENT BEHAVIOR (fixed in R5)', () => {
   it('rewards review volume over review ratio: 70%-positive/500k beats 97%-positive/2k', () => {

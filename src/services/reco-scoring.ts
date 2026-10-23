@@ -13,6 +13,7 @@ import type {
   EngagementPattern,
   RecoTelemetry,
   RecoLayerStat,
+  TasteCluster,
 } from '@/types/reco';
 import { toCanonicalGenre, toCanonicalGenres, CANONICAL_GENRES } from '@/data/canonical-genres';
 import {
@@ -429,161 +430,124 @@ export function computeSemanticSimilarity(
   return dot / (Math.sqrt(magA) * Math.sqrt(magB));
 }
 
-// ─── Layer 7: Co-Occurrence Graph + Similar-Games Graph ──────────────────────────
+// ─── Layer 7: Library-similarity graph signal ────────────────────────────────────
+//
+// How strongly is this candidate related to games the user actually engaged
+// with? Three evidence paths, taking the strongest per library game:
+//   1. the library game's own "similar games" list names the candidate (1.0)
+//   2. the candidate's similar-games list names the library game (0.8) / shares a neighbour (0.4)
+//   3. the candidate is one of the library game's nearest embedding neighbours
+//      (computed once per library game on the main thread — see
+//      RecoStore.computeLibraryNeighbors — and passed in as `neighborHits`).
+// Contributions are engagement-weighted and normalised by the weight mass of
+// the user's strongest games, then saturated smoothly, so relating to eight
+// loved games scores clearly higher than relating to one.
 
-export async function buildCoOccurrenceEdges(
-  candidates: CandidateGame[],
-  onProgress?: (fraction: number) => void,
-): Promise<Map<string, Map<string, number>>> {
-  const tagSets = new Map<string, Set<string>>();
-  for (const c of candidates) {
-    const tags = new Set<string>();
-    for (const g of c.genres) {
-      const can = toCanonicalGenre(g);
-      if (can) tags.add(`g:${norm(can)}`);
-    }
-    for (const t of c.themes) tags.add(`t:${norm(t)}`);
-    for (const m of c.gameModes) tags.add(`m:${norm(m)}`);
-    tagSets.set(c.gameId, tags);
-  }
+/** Strip diacritics, ™/®, punctuation and "… Edition" / "Remastered" / "GOTY" suffix noise for title matching. */
+export function normalizeTitleKey(raw: string): string {
+  return (raw || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[\u2122\u00ae\u00a9]/g, '')
+    .replace(/\b(?:game of the year|goty|deluxe|complete|enhanced|ultimate|gold|special|collector'?s|anniversary|standard|definitive|director'?s)\s+(?:edition|cut|version)\b/g, ' ')
+    .replace(/\b(?:remastered|remaster|goty|game of the year)\b/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
 
-  const genreIndex = new Map<string, string[]>();
-  for (const c of candidates) {
-    for (const g of c.genres) {
-      const can = toCanonicalGenre(g);
-      if (!can) continue;
-      const key = norm(can);
-      if (!genreIndex.has(key)) genreIndex.set(key, []);
-      genreIndex.get(key)!.push(c.gameId);
-    }
-  }
+/** A library game's strongest-N weight mass is the "fully related" reference. */
+export const GRAPH_MASS_TOP_N = 8;
+/** Cosine-distance ceiling shared with ANN taste retrieval; hits farther than this carry no signal. */
+export const GRAPH_NEIGHBOR_DISTANCE_CEILING = 0.45;
+/** Saturation steepness: score = 1 - exp(-K * matchedMass / referenceMass). */
+export const GRAPH_SATURATION_K = 3;
+/** Neighbour hits weaker than this (cosine distance near the ceiling) carry no usable signal. */
+export const GRAPH_MIN_HIT_STRENGTH = 0.15;
+/** A candidate only counts toward graph "coverage" (and keeps the weight) at or above this score. */
+export const GRAPH_COVERAGE_MIN_SCORE = 0.05;
 
-  const edges = new Map<string, Map<string, number>>();
-  const MAX_NEIGHBORS = 150;
-  const progressStep = Math.max(1, Math.floor(candidates.length / 10));
-
-  for (let ci = 0; ci < candidates.length; ci++) {
-    const c = candidates[ci];
-    const myTags = tagSets.get(c.gameId)!;
-    // Walk genre buckets lazily and stop at the cap. This used to materialize
-    // the full union of every shared-genre bucket (thousands of ids per
-    // candidate in a 3K pool) before the 150 cap was ever applied. Visiting
-    // order is unchanged — bucket by bucket, first occurrence wins.
-    const visited = new Set<string>();
-
-    let neighborCount = 0;
-    outer:
-    for (const g of c.genres) {
-      const can = toCanonicalGenre(g);
-      if (!can) continue;
-      const ids = genreIndex.get(norm(can));
-      if (!ids) continue;
-      for (const otherId of ids) {
-        if (neighborCount >= MAX_NEIGHBORS) break outer;
-        if (otherId === c.gameId || visited.has(otherId)) continue;
-        visited.add(otherId);
-        const otherTags = tagSets.get(otherId);
-        if (!otherTags) continue;
-
-        let intersection = 0;
-        for (const t of myTags) {
-          if (otherTags.has(t)) intersection++;
-        }
-        if (intersection < 3) continue;
-
-        const union = myTags.size + otherTags.size - intersection;
-        const jaccard = union > 0 ? intersection / union : 0;
-
-        if (!edges.has(c.gameId)) edges.set(c.gameId, new Map());
-        edges.get(c.gameId)!.set(otherId, jaccard);
-        neighborCount++;
-      }
-    }
-
-    if (onProgress && ci % progressStep === 0) {
-      onProgress(ci / candidates.length);
-    }
-    if (ci % 5000 === 0 && ci > 0) await new Promise(r => setTimeout(r, 4));
-  }
-
-  return edges;
+/** One embedding-neighbour hit: library game `u` has this candidate at cosine distance `d`. */
+export interface GraphNeighborHit {
+  u: string;
+  d: number;
 }
 
 /** Pre-computed user-game lookup tables — built once per pipeline run. */
 export interface GraphUserContext {
-  ugSimilarNormSets: Map<string, Set<string>>;
-  ugTitleNorms: Map<string, string>;
+  ugSimilarKeySets: Map<string, Set<string>>;
+  ugTitleKeys: Map<string, string>;
   ugWeights: Map<string, number>;
+  /** Sum of the weights of the user's GRAPH_MASS_TOP_N strongest games (>= epsilon). */
+  massRef: number;
 }
 
 export function buildGraphUserContext(userGames: UserGameSnapshot[], now: number): GraphUserContext {
-  const ugSimilarNormSets = new Map<string, Set<string>>();
-  const ugTitleNorms = new Map<string, string>();
+  const ugSimilarKeySets = new Map<string, Set<string>>();
+  const ugTitleKeys = new Map<string, string>();
   const ugWeights = new Map<string, number>();
 
   for (const ug of userGames) {
-    ugSimilarNormSets.set(ug.gameId, new Set(ug.similarGameTitles.map(norm)));
-    ugTitleNorms.set(ug.gameId, norm(ug.title));
-    ugWeights.set(ug.gameId, computeEngagementScore(ug, now) * getTrajectoryMultiplier(ug));
+    ugSimilarKeySets.set(ug.gameId, new Set(ug.similarGameTitles.map(normalizeTitleKey).filter(k => k !== '')));
+    ugTitleKeys.set(ug.gameId, normalizeTitleKey(ug.title));
+    // Removed games must not set the "fully related" reference mass or contribute evidence.
+    ugWeights.set(ug.gameId, ug.removedAt ? 0 : computeEngagementScore(ug, now) * getTrajectoryMultiplier(ug));
   }
 
-  return { ugSimilarNormSets, ugTitleNorms, ugWeights };
+  const top = [...ugWeights.values()].filter(w => w > 0).sort((a, b) => b - a).slice(0, GRAPH_MASS_TOP_N);
+  const massRef = Math.max(top.reduce((sum, w) => sum + w, 0), 1e-9);
+  return { ugSimilarKeySets, ugTitleKeys, ugWeights, massRef };
 }
 
 export function computeGraphSignal(
   candidate: CandidateGame,
   userGames: UserGameSnapshot[],
-  coOccurrence: Map<string, Map<string, number>>,
+  neighborHits: GraphNeighborHit[] | undefined,
   gCtx: GraphUserContext,
 ): { score: number; similarTo: string[] } {
-  const candidateTitleNorm = norm(candidate.title);
-  const candidateSimilarNorm = new Set(candidate.similarGameTitles.map(norm));
-  let totalSignal = 0;
-  const similarTo: string[] = [];
+  const candidateKey = normalizeTitleKey(candidate.title);
+  const candidateSimilarKeys = new Set(candidate.similarGameTitles.map(normalizeTitleKey).filter(k => k !== ''));
 
-  for (const ug of userGames) {
-    if (similarTo.length >= 3) break; // early termination — enough signal
-
-    const weight = gCtx.ugWeights.get(ug.gameId)!;
-    const ugSimilarNorm = gCtx.ugSimilarNormSets.get(ug.gameId)!;
-
-    if (ugSimilarNorm.has(candidateTitleNorm)) {
-      totalSignal += weight * 1.0;
-      similarTo.push(ug.title);
-      continue;
-    }
-
-    const ugTitleNorm = gCtx.ugTitleNorms.get(ug.gameId)!;
-    if (candidateSimilarNorm.has(ugTitleNorm)) {
-      totalSignal += weight * 0.8;
-      similarTo.push(ug.title);
-      continue;
-    }
-
-    let hop2Found = false;
-    for (const st of ugSimilarNorm) {
-      if (candidateSimilarNorm.has(st)) {
-        totalSignal += weight * 0.4;
-        similarTo.push(ug.title);
-        hop2Found = true;
-        break;
-      }
-    }
-
-    if (!hop2Found) {
-      const candidateEdges = coOccurrence.get(candidate.gameId);
-      if (candidateEdges) {
-        for (const [neighborId, jaccard] of candidateEdges) {
-          if (ugTitleNorm === norm(neighborId) || ugSimilarNorm.has(norm(neighborId))) {
-            totalSignal += weight * jaccard * 0.3;
-            break;
-          }
-        }
-      }
+  const neighborStrength = new Map<string, number>();
+  if (neighborHits) {
+    for (const hit of neighborHits) {
+      const strength = clamp01(1 - hit.d / GRAPH_NEIGHBOR_DISTANCE_CEILING);
+      if (strength < GRAPH_MIN_HIT_STRENGTH) continue;
+      if (strength > (neighborStrength.get(hit.u) ?? 0)) neighborStrength.set(hit.u, strength);
     }
   }
 
-  return { score: clamp01(totalSignal / 3), similarTo: [...new Set(similarTo)].slice(0, 3) };
+  let matchedMass = 0;
+  const contributions: Array<{ title: string; value: number }> = [];
+
+  for (const ug of userGames) {
+    const weight = gCtx.ugWeights.get(ug.gameId) ?? 0;
+    if (weight <= 0) continue;
+
+    let strength = 0;
+    const ugSimilar = gCtx.ugSimilarKeySets.get(ug.gameId)!;
+    const ugTitleKey = gCtx.ugTitleKeys.get(ug.gameId)!;
+    if (candidateKey !== '' && ugSimilar.has(candidateKey)) {
+      strength = 1.0;
+    } else if (ugTitleKey !== '' && candidateSimilarKeys.has(ugTitleKey)) {
+      strength = 0.8;
+    } else {
+      for (const st of ugSimilar) {
+        if (candidateSimilarKeys.has(st)) { strength = 0.4; break; }
+      }
+    }
+    const viaNeighbor = neighborStrength.get(ug.gameId);
+    if (viaNeighbor !== undefined && viaNeighbor > strength) strength = viaNeighbor;
+
+    if (strength > 0) {
+      matchedMass += weight * strength;
+      contributions.push({ title: ug.title, value: weight * strength });
+    }
+  }
+
+  const score = clamp01(1 - Math.exp(-GRAPH_SATURATION_K * (matchedMass / gCtx.massRef)));
+  contributions.sort((a, b) => b.value - a.value);
+  return { score, similarTo: [...new Set(contributions.map(c => c.title))].slice(0, 3) };
 }
 
 // ─── Layer 8: Quality Signal (multi-factor + review sentiment) ──────────────────
@@ -864,6 +828,294 @@ export function mmrRerank(scored: ScoredGame[], lambda: number, limit: number, o
   }
 
   return selected;
+}
+
+// ─── Layer 15: Taste Cluster Detection ──────────────────────────────────────────
+
+/** FNV-1a 32-bit string hash (seed material for deterministic clustering). */
+export function hashString(str: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** Small seeded PRNG (mulberry32) — returns floats in [0, 1). */
+export function seededRandom(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Adaptive K: sqrt(N/2) clamped to [2, 6] — scales with library size without fragmenting small collections. */
+export function adaptiveK(n: number): number {
+  return Math.max(2, Math.min(6, Math.floor(Math.sqrt(n / 2))));
+}
+
+export function detectTasteClusters(
+  userGames: UserGameSnapshot[],
+  now: number,
+  k?: number,
+): TasteCluster[] {
+  const effectiveK = k ?? adaptiveK(userGames.length);
+  if (userGames.length < effectiveK * 2) return [];
+
+  // Deterministic + order-independent: the main thread and the worker must
+  // derive identical clusters from the same library. Sort by id and seed the
+  // k-means init from the ids (it used Math.random(), so clusters, shelves and
+  // labels changed on every run).
+  userGames = [...userGames].sort((x, y) => (x.gameId < y.gameId ? -1 : x.gameId > y.gameId ? 1 : 0));
+  const rand = seededRandom(hashString(userGames.map(g => g.gameId).join('|')));
+
+  type GameVec = { gameId: string; title: string; vec: Map<string, number>; engagement: number };
+  const gameVecs: GameVec[] = userGames.map(g => {
+    const vec = new Map<string, number>();
+    for (const genre of g.genres) {
+      const can = toCanonicalGenre(genre);
+      if (can) vec.set(`g:${norm(can)}`, 1);
+    }
+    for (const theme of g.themes) vec.set(`t:${norm(theme)}`, 1);
+    for (const mode of g.gameModes) vec.set(`m:${norm(mode)}`, 1);
+    return { gameId: g.gameId, title: g.title, vec, engagement: computeEngagementScore(g, now) };
+  });
+
+  const allKeys = new Set<string>();
+  for (const gv of gameVecs) for (const k of gv.vec.keys()) allKeys.add(k);
+  const keyArr = [...allKeys];
+
+  const vectors: number[][] = gameVecs.map(gv =>
+    keyArr.map(k => gv.vec.get(k) || 0),
+  );
+
+  const dim = keyArr.length;
+  if (dim === 0) return [];
+
+  const used = new Set<number>();
+  const centroids: number[][] = [];
+  for (let i = 0; i < effectiveK; i++) {
+    let idx: number;
+    do { idx = Math.floor(rand() * vectors.length); } while (used.has(idx) && used.size < vectors.length);
+    used.add(idx);
+    centroids.push([...vectors[idx]]);
+  }
+
+  const assignments = new Array<number>(vectors.length).fill(0);
+
+  for (let iter = 0; iter < 10; iter++) {
+    for (let i = 0; i < vectors.length; i++) {
+      let bestDist = Infinity;
+      let bestC = 0;
+      for (let c = 0; c < effectiveK; c++) {
+        let dist = 0;
+        for (let d = 0; d < dim; d++) {
+          const diff = vectors[i][d] - centroids[c][d];
+          dist += diff * diff;
+        }
+        if (dist < bestDist) { bestDist = dist; bestC = c; }
+      }
+      assignments[i] = bestC;
+    }
+
+    for (let c = 0; c < effectiveK; c++) {
+      const members = vectors.filter((_, i) => assignments[i] === c);
+      if (members.length === 0) continue;
+      for (let d = 0; d < dim; d++) {
+        centroids[c][d] = members.reduce((s, v) => s + v[d], 0) / members.length;
+      }
+    }
+  }
+
+  const clusters: TasteCluster[] = [];
+  for (let c = 0; c < effectiveK; c++) {
+    const memberGames = userGames.filter((_, i) => assignments[i] === c);
+    if (memberGames.length < 2) continue;
+
+    const profile = buildTasteProfile(memberGames, now);
+    const topGames = [...memberGames]
+      .sort((a, b) => computeEngagementScore(b, now) - computeEngagementScore(a, now))
+      .slice(0, 3)
+      .map(g => g.title);
+
+    const label = profile.topGenre
+      ? profile.topGenre.charAt(0).toUpperCase() + profile.topGenre.slice(1)
+      : `Cluster ${c + 1}`;
+
+    // Compute semantic centroid from member games that have embeddings
+    let semanticCentroid: number[] | undefined;
+    const embeddedMembers = memberGames.filter(g => g.embedding && g.embedding.length > 0);
+    if (embeddedMembers.length >= 2) {
+      const embDim = embeddedMembers[0].embedding!.length;
+      const centroid = new Float64Array(embDim);
+      for (const g of embeddedMembers) {
+        const emb = g.embedding!;
+        for (let d = 0; d < embDim; d++) centroid[d] += emb[d];
+      }
+      const invN = 1 / embeddedMembers.length;
+      for (let d = 0; d < embDim; d++) centroid[d] *= invN;
+      // L2-normalize for cosine comparisons
+      let mag = 0;
+      for (let d = 0; d < embDim; d++) mag += centroid[d] * centroid[d];
+      if (mag > 0) {
+        const invMag = 1 / Math.sqrt(mag);
+        semanticCentroid = new Array(embDim);
+        for (let d = 0; d < embDim; d++) semanticCentroid[d] = centroid[d] * invMag;
+      }
+    }
+
+    clusters.push({
+      id: c,
+      label,
+      profile,
+      gameCount: memberGames.length,
+      topGames,
+      semanticCentroid,
+    });
+  }
+
+  return clusters.sort((a, b) => b.gameCount - a.gameCount);
+}
+
+// ─── Cluster similarity (main thread) ───────────────────────────────────────────
+
+/** A taste cluster's semantic centroid as a typed array (fast inner loop on the main thread). */
+export interface PreparedCluster {
+  label: string;
+  centroid: Float64Array;
+}
+
+export function prepareClusterCentroids(clusters: TasteCluster[]): PreparedCluster[] {
+  const out: PreparedCluster[] = [];
+  for (const cl of clusters) {
+    if (cl.semanticCentroid && cl.semanticCentroid.length > 0) {
+      out.push({ label: cl.label, centroid: Float64Array.from(cl.semanticCentroid) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Best cosine similarity between a candidate embedding and any taste-cluster
+ * semantic centroid. Runs on the main thread because candidate embeddings are
+ * stripped before the worker (25K x 1024 floats would blow the structured
+ * clone budget). Returns null when no centroid matches the dimension or none
+ * is positively similar (a negative cosine would subtract from the score).
+ */
+export function bestPreparedClusterSimilarity(
+  embedding: ArrayLike<number>,
+  prepared: PreparedCluster[],
+): { sim: number; label: string } | null {
+  let magB = 0;
+  for (let d = 0; d < embedding.length; d++) magB += embedding[d] * embedding[d];
+  if (magB === 0) return null;
+  const invMagB = 1 / Math.sqrt(magB);
+  let best: { sim: number; label: string } | null = null;
+  for (const { label, centroid } of prepared) {
+    if (centroid.length !== embedding.length) continue;
+    let dot = 0;
+    for (let d = 0; d < embedding.length; d++) dot += centroid[d] * embedding[d];
+    // Centroids are L2-normalised in detectTasteClusters.
+    const sim = dot * invMagB;
+    if (!best || sim > best.sim) best = { sim, label };
+  }
+  return best && best.sim > 0 ? best : null;
+}
+
+/** Convenience wrapper (tests, one-off use). The hot loop should prepare once and reuse. */
+export function bestClusterSimilarity(
+  embedding: ArrayLike<number>,
+  clusters: TasteCluster[],
+): { sim: number; label: string } | null {
+  return bestPreparedClusterSimilarity(embedding, prepareClusterCentroids(clusters));
+}
+
+// ─── Weight assembly ────────────────────────────────────────────────────────────
+
+/** A graph layer needs this fraction of candidates non-zero before it keeps its full weight. */
+export const GRAPH_FULL_COVERAGE = 0.10;
+
+export interface ScoringWeights {
+  W_SEMANTIC: number;
+  W_CLUSTER_SEM: number;
+  W_CONTENT: number;
+  W_GRAPH: number;
+  W_QUALITY: number;
+  W_POPULARITY: number;
+  W_RECENCY: number;
+  W_DIVERSITY: number;
+  W_TIME: number;
+  W_CURVE: number;
+  W_NEGATIVE: number;
+  W_POSITIVE: number;
+  W_FRANCHISE: number;
+  W_STUDIO: number;
+  W_SEQUENCING: number;
+  W_GRAPH_COMMUNITY: number;
+  W_GRAPH_PAGERANK: number;
+  W_ML: number;
+  W_CONTENT_ML: number;
+  W_QUALITY_ML: number;
+}
+
+/**
+ * The composite-score weight table (v3, 18 layers). Budgets that a layer
+ * cannot use are redistributed rather than wasted:
+ *  - semantic budget (0.12 x embedding coverage) is split 65/35 with the
+ *    cluster layer when cluster scores exist, else all semantic;
+ *  - the uncovered part of that budget (0.12 x (1 - coverage)) goes to content + graph;
+ *  - the graph layer keeps its full weight only when it actually fires for
+ *    >= GRAPH_FULL_COVERAGE of candidates — the shortfall moves to content;
+ *  - unused ML budget goes 60/40 to content / quality.
+ * Content + semantic + cluster + graph always total 0.41.
+ */
+export function assembleWeights(p: {
+  embeddingCoverage: number;
+  hasClusterScores: boolean;
+  hasGraphScores: boolean;
+  mlCoverage: number;
+  /** Share (0–1) of candidates whose graph signal is non-zero. */
+  graphSignalCoverage: number;
+}): ScoringWeights {
+  const semanticBudget = 0.12 * p.embeddingCoverage;
+  const residual = 0.12 * (1 - p.embeddingCoverage);
+
+  const graphBase = 0.14 + residual * 0.42;
+  const graphShare = clamp01(p.graphSignalCoverage / GRAPH_FULL_COVERAGE);
+  const W_GRAPH = graphBase * graphShare;
+  const graphShortfall = graphBase - W_GRAPH;
+
+  const graphBudget = p.hasGraphScores ? 0.06 : 0;
+  const mlBudget = 0.10;
+  const mlResidual = mlBudget * (1 - p.mlCoverage);
+
+  return {
+    W_SEMANTIC: p.hasClusterScores ? semanticBudget * 0.65 : semanticBudget,
+    W_CLUSTER_SEM: p.hasClusterScores ? semanticBudget * 0.35 : 0,
+    W_CONTENT: 0.15 + residual * 0.58 + graphShortfall,
+    W_GRAPH,
+    W_QUALITY: 0.11,
+    W_POPULARITY: 0.06,
+    W_RECENCY: 0.06,
+    W_DIVERSITY: 0.04,
+    W_TIME: 0.03,
+    W_CURVE: 0.03,
+    W_NEGATIVE: 0.06,
+    W_POSITIVE: 0.05,
+    W_FRANCHISE: 0.08,
+    W_STUDIO: 0.05,
+    W_SEQUENCING: 0.04,
+    W_GRAPH_COMMUNITY: graphBudget * 0.60,
+    W_GRAPH_PAGERANK: graphBudget * 0.40,
+    W_ML: mlBudget * p.mlCoverage,
+    W_CONTENT_ML: mlResidual * 0.60,
+    W_QUALITY_ML: mlResidual * 0.40,
+  };
 }
 
 // ─── Diagnostics ───────────────────────────────────────────────────────────────

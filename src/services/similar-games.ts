@@ -467,17 +467,52 @@ export async function getSimilarTitlesForRecoBatch(
   for (const { gameId } of sources) {
     const hits = raw[gameId];
     if (!hits || hits.length === 0) continue;
-    // Same game-level folding as queryAnnNeighborGames.
-    const neighbors = maxSim
-      ? aggregateMaxSimByGameId(hits, { excludeGameId: gameId }).map((r) => ({
-        id: r.gameId,
-        distance: r.distance,
-      }))
-      : hits
-        .filter((r) => !r.id.includes('::') && parseAnnIdToGameId(r.id) !== gameId)
-        .sort((a, b) => a.distance - b.distance);
+    const neighbors = foldAnnHitsToGames(gameId, hits, maxSim);
     const titles = pickSimilarTitles(gameId, neighbors, k);
     if (titles.length > 0) out.set(gameId, titles);
+  }
+  return out;
+}
+
+/** Game-level fold of raw ANN hits (chunk rows -> games), excluding the source game. Same logic as queryAnnNeighborGames. */
+function foldAnnHitsToGames(
+  sourceGameId: string,
+  hits: Array<{ id: string; distance: number }>,
+  maxSim: boolean,
+): Array<{ id: string; distance: number }> {
+  return maxSim
+    ? aggregateMaxSimByGameId(hits, { excludeGameId: sourceGameId }).map((r) => ({
+      id: r.gameId,
+      distance: r.distance,
+    }))
+    : hits
+      .filter((r) => !r.id.includes('::') && parseAnnIdToGameId(r.id) !== sourceGameId)
+      .sort((a, b) => a.distance - b.distance);
+}
+
+/**
+ * Nearest game-level embedding neighbours (id + cosine distance) for many
+ * sources in ONE ANN round trip. Used by Oracle's graph signal: neighbours of
+ * the user's strongest library games, queried per library game rather than per
+ * candidate so only a few hundred vectors cross the IPC boundary.
+ */
+export async function getAnnNeighborsForRecoBatch(
+  sources: Array<{ gameId: string; vector: number[] }>,
+  k: number,
+): Promise<Map<string, Array<{ id: string; distance: number }>>> {
+  const out = new Map<string, Array<{ id: string; distance: number }>>();
+  if (!annIndex.isReady || sources.length === 0) return out;
+
+  const maxSim = await isChunkAnnMaxSimEnabled();
+  const overFetch = Math.max(annNeighborOverFetch(k, maxSim), k + 24);
+  const raw = await annIndex.queryBatch(
+    sources.map((s) => ({ id: s.gameId, vector: s.vector })),
+    overFetch,
+  );
+  for (const { gameId } of sources) {
+    const hits = raw[gameId];
+    if (!hits || hits.length === 0) continue;
+    out.set(gameId, foldAnnHitsToGames(gameId, hits, maxSim).slice(0, k));
   }
   return out;
 }

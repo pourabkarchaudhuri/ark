@@ -61,13 +61,11 @@ import {
   CURVE_MULTIPLIERS,
   classifyEngagementCurve,
   _engagementCache,
-  computeEngagementScore,
   buildTasteProfile,
   buildNegativeProfile,
   DenseFeatureSpace,
   fastCosineProfileVsCandidate,
   computeSemanticSimilarity,
-  buildCoOccurrenceEdges,
   buildGraphUserContext,
   computeGraphSignal,
   computeQualitySignal,
@@ -79,135 +77,15 @@ import {
   computeSequencingBoost,
   mmrRerank,
   computeRecoTelemetry,
+  detectTasteClusters,
+  assembleWeights,
+  GRAPH_COVERAGE_MIN_SCORE,
 } from '@/services/reco-scoring';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
 function progress(stage: string, percent: number) {
   self.postMessage({ type: 'progress', stage, percent } satisfies RecoWorkerMessage);
-}
-
-// ─── Layer 15: Taste Cluster Detection ──────────────────────────────────────────
-
-/** Adaptive K: sqrt(N/2) clamped to [2, 6] — scales with library size without fragmenting small collections. */
-function adaptiveK(n: number): number {
-  return Math.max(2, Math.min(6, Math.floor(Math.sqrt(n / 2))));
-}
-
-function detectTasteClusters(
-  userGames: UserGameSnapshot[],
-  now: number,
-  k?: number,
-): TasteCluster[] {
-  const effectiveK = k ?? adaptiveK(userGames.length);
-  if (userGames.length < effectiveK * 2) return [];
-
-  type GameVec = { gameId: string; title: string; vec: Map<string, number>; engagement: number };
-  const gameVecs: GameVec[] = userGames.map(g => {
-    const vec = new Map<string, number>();
-    for (const genre of g.genres) {
-      const can = toCanonicalGenre(genre);
-      if (can) vec.set(`g:${norm(can)}`, 1);
-    }
-    for (const theme of g.themes) vec.set(`t:${norm(theme)}`, 1);
-    for (const mode of g.gameModes) vec.set(`m:${norm(mode)}`, 1);
-    return { gameId: g.gameId, title: g.title, vec, engagement: computeEngagementScore(g, now) };
-  });
-
-  const allKeys = new Set<string>();
-  for (const gv of gameVecs) for (const k of gv.vec.keys()) allKeys.add(k);
-  const keyArr = [...allKeys];
-
-  const vectors: number[][] = gameVecs.map(gv =>
-    keyArr.map(k => gv.vec.get(k) || 0),
-  );
-
-  const dim = keyArr.length;
-  if (dim === 0) return [];
-
-  const used = new Set<number>();
-  const centroids: number[][] = [];
-  for (let i = 0; i < effectiveK; i++) {
-    let idx: number;
-    do { idx = Math.floor(Math.random() * vectors.length); } while (used.has(idx) && used.size < vectors.length);
-    used.add(idx);
-    centroids.push([...vectors[idx]]);
-  }
-
-  const assignments = new Array<number>(vectors.length).fill(0);
-
-  for (let iter = 0; iter < 10; iter++) {
-    for (let i = 0; i < vectors.length; i++) {
-      let bestDist = Infinity;
-      let bestC = 0;
-      for (let c = 0; c < effectiveK; c++) {
-        let dist = 0;
-        for (let d = 0; d < dim; d++) {
-          const diff = vectors[i][d] - centroids[c][d];
-          dist += diff * diff;
-        }
-        if (dist < bestDist) { bestDist = dist; bestC = c; }
-      }
-      assignments[i] = bestC;
-    }
-
-    for (let c = 0; c < effectiveK; c++) {
-      const members = vectors.filter((_, i) => assignments[i] === c);
-      if (members.length === 0) continue;
-      for (let d = 0; d < dim; d++) {
-        centroids[c][d] = members.reduce((s, v) => s + v[d], 0) / members.length;
-      }
-    }
-  }
-
-  const clusters: TasteCluster[] = [];
-  for (let c = 0; c < effectiveK; c++) {
-    const memberGames = userGames.filter((_, i) => assignments[i] === c);
-    if (memberGames.length < 2) continue;
-
-    const profile = buildTasteProfile(memberGames, now);
-    const topGames = [...memberGames]
-      .sort((a, b) => computeEngagementScore(b, now) - computeEngagementScore(a, now))
-      .slice(0, 3)
-      .map(g => g.title);
-
-    const label = profile.topGenre
-      ? profile.topGenre.charAt(0).toUpperCase() + profile.topGenre.slice(1)
-      : `Cluster ${c + 1}`;
-
-    // Compute semantic centroid from member games that have embeddings
-    let semanticCentroid: number[] | undefined;
-    const embeddedMembers = memberGames.filter(g => g.embedding && g.embedding.length > 0);
-    if (embeddedMembers.length >= 2) {
-      const embDim = embeddedMembers[0].embedding!.length;
-      const centroid = new Float64Array(embDim);
-      for (const g of embeddedMembers) {
-        const emb = g.embedding!;
-        for (let d = 0; d < embDim; d++) centroid[d] += emb[d];
-      }
-      const invN = 1 / embeddedMembers.length;
-      for (let d = 0; d < embDim; d++) centroid[d] *= invN;
-      // L2-normalize for cosine comparisons
-      let mag = 0;
-      for (let d = 0; d < embDim; d++) mag += centroid[d] * centroid[d];
-      if (mag > 0) {
-        const invMag = 1 / Math.sqrt(mag);
-        semanticCentroid = new Array(embDim);
-        for (let d = 0; d < embDim; d++) semanticCentroid[d] = centroid[d] * invMag;
-      }
-    }
-
-    clusters.push({
-      id: c,
-      label,
-      profile,
-      gameCount: memberGames.length,
-      topGames,
-      semanticCentroid,
-    });
-  }
-
-  return clusters.sort((a, b) => b.gameCount - a.gameCount);
 }
 
 // ─── Layer 16: Explanation Generation ───────────────────────────────────────────
@@ -237,8 +115,14 @@ function generateExplanation(
     parts.push('close to games you love in embedding space');
   }
 
-  // Cluster centroid match — game resonates with a specific taste niche
-  if (scored.layerScores.clusterSemanticSim > 0.25 && scored.reasons.bestClusterLabel) {
+  // Cluster centroid match — game resonates with a specific taste niche. Only claim a
+  // niche when the cluster fits clearly better than the overall taste (embedding cosines
+  // sit in a compressed band, so an absolute threshold alone would flag nearly everything).
+  if (
+    scored.layerScores.clusterSemanticSim > 0.4
+    && scored.layerScores.clusterSemanticSim - scored.layerScores.semanticSimilarity >= 0.05
+    && scored.reasons.bestClusterLabel
+  ) {
     parts.push(`fits your ${scored.reasons.bestClusterLabel} taste`);
   }
 
@@ -393,11 +277,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const { vec: negVecDense, mag: negMag } = featureSpace.mapToDense(negativeProfile.vec);
   const { vec: posVecDense, mag: posMag } = featureSpace.mapToDense(positiveProfile.vec);
 
-  // ── 5. Build co-occurrence graph ──
-  progress('Building similarity graph...', 18);
-  const coOccurrence = await buildCoOccurrenceEdges(filteredCandidates, (f) => {
-    progress('Building similarity graph...', 18 + Math.floor(f * 4));
-  });
+  progress('Linking your library...', 20);
 
   // ── 6. Use precomputed taste centroid for semantic similarity ──
   const useSemantics = embeddingCoverage > 0;
@@ -433,13 +313,15 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   // ── 8. Early taste cluster detection (needed for cluster centroid scoring) ──
   progress('Detecting taste clusters...', 24);
-  const clusters = detectTasteClusters(userGames, now);
+  const clusters = input.precomputedClusters ?? detectTasteClusters(userGames, now);
   tasteProfile.clusters = clusters;
+  const precomputedClusterScores = input.precomputedClusterScores ?? {};
+  const hasPrecomputedClusterScores = clusters.length >= 2 && Object.keys(precomputedClusterScores).length > 0;
 
-  // Pre-extract cluster semantic centroids for per-candidate scoring.
-  // When precomputed semantic scores are provided, candidate embeddings are
-  // stripped so cluster centroid scoring is skipped — its weight budget
-  // is redistributed to the main semantic layer via hasClusterCentroids=false.
+  // Cluster semantic scoring. Candidate embeddings are stripped before the worker,
+  // so the main thread precomputes per-candidate cluster scores (precomputedClusterScores).
+  // The in-worker centroid path below is only the fallback for callers that still
+  // send raw candidate embeddings.
   const clusterCentroids: Array<{ centroid: Float64Array; label: string }> = [];
   if (useSemantics && !hasPrecomputedScores) {
     for (const cl of clusters) {
@@ -482,42 +364,34 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const currentYear = new Date(now).getFullYear();
   const logMaxPlayerCount = Math.log(maxPlayerCount + 1);
 
-  // v3 dynamic weight table — 18 layers (proportional semantic scaling)
-  // Cluster semantic signal draws from the semantic budget, rewarding
-  // candidates that match any niche taste cluster (not just the global centroid).
-  const hasClusterCentroids = clusterCentroids.length >= 2;
-  const clusterLabels = clusterCentroids.map(c => c.label);
-  const semanticBudget = 0.12 * embeddingCoverage;
-  const W_SEMANTIC     = hasClusterCentroids ? semanticBudget * 0.65 : semanticBudget;
-  const W_CLUSTER_SEM  = hasClusterCentroids ? semanticBudget * 0.35 : 0;
-  const residual       = 0.12 * (1 - embeddingCoverage);
-  const W_CONTENT      = 0.15 + residual * 0.58;
-  const W_GRAPH        = 0.14 + residual * 0.42;
-  const W_QUALITY      = 0.11;
-  const W_POPULARITY   = 0.06;
-  const W_RECENCY      = 0.06;
-  const W_DIVERSITY    = 0.04;
-  const W_TIME         = 0.03;
-  const W_CURVE        = 0.03;
-  const W_NEGATIVE     = 0.06;
-  const W_POSITIVE     = 0.05;
-  const W_FRANCHISE    = 0.08;
-  const W_STUDIO       = 0.05;
-  const W_SEQUENCING   = 0.04;
-  // Graph metrics — only active when gameGraphStore has built the persisted neighbor graph.
-  // Split a 0.06 budget: 60% community affinity (sharper signal), 40% PageRank quality propagation.
-  const graphBudget    = hasGraphScores ? 0.06 : 0;
-  const W_GRAPH_COMMUNITY = graphBudget * 0.60;
-  const W_GRAPH_PAGERANK  = graphBudget * 0.40;
+  // Graph signal pre-pass: coverage decides how much weight the layer keeps
+  // (assembleWeights moves the shortfall to content similarity).
+  const libraryNeighbors = input.libraryNeighbors ?? {};
+  const graphByCandidate = new Map<string, { score: number; similarTo: string[] }>();
+  let graphNonZero = 0;
+  for (const c of filteredCandidates) {
+    const g = computeGraphSignal(c, userGames, libraryNeighbors[c.gameId], graphCtx);
+    graphByCandidate.set(c.gameId, g);
+    if (g.score >= GRAPH_COVERAGE_MIN_SCORE) graphNonZero++;
+  }
+  const graphSignalCoverage = filteredCandidates.length > 0 ? graphNonZero / filteredCandidates.length : 0;
 
-  // ML model weight — proportional to coverage. Unused budget goes to content + quality.
+  // ML coverage = share of candidates with a real model score.
   const mlCoverage = filteredCandidates.filter(c => c.mlScore != null).length / Math.max(1, filteredCandidates.length);
-  const mlBudget       = 0.10;
-  const W_ML           = mlBudget * mlCoverage;
-  const mlResidual     = mlBudget * (1 - mlCoverage);
-  // Redistribute: 60% to content, 40% to quality when ML unavailable
-  const W_CONTENT_ML   = mlResidual * 0.60;
-  const W_QUALITY_ML   = mlResidual * 0.40;
+
+  const hasClusterCentroids = hasPrecomputedClusterScores || clusterCentroids.length >= 2;
+  const clusterLabels = clusterCentroids.map(c => c.label);
+  const {
+    W_SEMANTIC, W_CLUSTER_SEM, W_CONTENT, W_GRAPH, W_QUALITY, W_POPULARITY, W_RECENCY,
+    W_DIVERSITY, W_TIME, W_CURVE, W_NEGATIVE, W_POSITIVE, W_FRANCHISE, W_STUDIO,
+    W_SEQUENCING, W_GRAPH_COMMUNITY, W_GRAPH_PAGERANK, W_ML, W_CONTENT_ML, W_QUALITY_ML,
+  } = assembleWeights({
+    embeddingCoverage,
+    hasClusterScores: hasClusterCentroids,
+    hasGraphScores,
+    mlCoverage,
+    graphSignalCoverage,
+  });
 
   const maxGenreWeight = tasteProfile.genres[0]?.weight ?? 1;
   const scored: ScoredGame[] = [];
@@ -542,19 +416,26 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     // the budget is redistributed to the main semantic layer via hasClusterCentroids.
     let clusterSemanticSim = 0;
     let bestClusterIdx = -1;
-    if (W_CLUSTER_SEM > 0 && c.embedding && c.embedding.length > 0) {
-      for (let ci = 0; ci < clusterCentroids.length; ci++) {
-        const sim = computeSemanticSimilarity(clusterCentroids[ci].centroid, c.embedding);
-        if (sim > clusterSemanticSim) {
-          clusterSemanticSim = sim;
-          bestClusterIdx = ci;
+    let bestClusterLabel: string | undefined;
+    if (W_CLUSTER_SEM > 0) {
+      const pre = precomputedClusterScores[c.gameId];
+      if (pre) {
+        clusterSemanticSim = pre.sim;
+        bestClusterLabel = pre.label;
+      } else if (c.embedding && c.embedding.length > 0) {
+        for (let ci = 0; ci < clusterCentroids.length; ci++) {
+          const sim = computeSemanticSimilarity(clusterCentroids[ci].centroid, c.embedding);
+          if (sim > clusterSemanticSim) {
+            clusterSemanticSim = sim;
+            bestClusterIdx = ci;
+          }
         }
+        bestClusterLabel = bestClusterIdx >= 0 ? clusterLabels[bestClusterIdx] : undefined;
       }
     }
-    const bestClusterLabel = bestClusterIdx >= 0 ? clusterLabels[bestClusterIdx] : undefined;
 
     // Layer 7: Graph traversal (uses pre-built context — no per-candidate Set allocations)
-    const graph = computeGraphSignal(c, userGames, coOccurrence, graphCtx);
+    const graph = graphByCandidate.get(c.gameId)!;
     const graphSignal = graph.score;
 
     // Layer 8: Quality signal (with review sentiment)

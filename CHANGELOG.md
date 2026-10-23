@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.76] - 2026-10-23
+
+Second step of the Oracle recommendation-quality plan: the graph and cluster layers now actually work. **Ranking changes** (engine version 2).
+
+### Fixed — Oracle recommendation layers that were dead, saturated or unreachable
+- **Graph signal no longer saturates.** It divided by a constant 3 while per-game weights span ~0.1–15, so a single related library game already scored 1.0 — one match tied with eight. It is now engagement-weighted and normalised by the weight mass of your 8 strongest games, with smooth saturation, so relating to eight loved games clearly outscores relating to one.
+- **Graph signal now reaches (almost) every candidate.** Before, the "candidate is similar to a library game" evidence only existed for the ~80 candidates that were hydrated with similar-game titles (out of ~3,000). New evidence path: the embedding-nearest neighbours of your strongest library games (one ANN batch over ≤40 library vectors, not one query per candidate), inverted to candidate → hits and weighted by distance. The library's own "similar games" lists still count.
+- **Smarter title matching:** diacritics, ™/®, punctuation and "… Edition" / "Remastered" / "GOTY" suffixes no longer break matches ("The Witcher® 3: Wild Hunt – Game of the Year Edition" now matches "The Witcher 3: Wild Hunt").
+- **"Similar to X" explanations pick the strongest related games** instead of the first three found in library order.
+- **Deleted the dead co-occurrence graph.** Its edge check compared game ids to titles and could never match, yet it cost an O(N×150) pass and a progress stage on every run.
+- **Cluster-semantic layer is live.** It was unreachable in production (the worker only built cluster centroids when candidates still carried embeddings, which are always stripped before the worker), so multi-taste libraries were scored against one blurred average and its weight was silently zero. The main thread now detects taste clusters and computes each candidate's best cluster similarity before the embeddings are stripped.
+- **Taste clusters are deterministic.** k-means used `Math.random()`, so cluster shelves and labels changed on every run and the main thread and worker could not agree. Input is now sorted and the init is seeded from the game ids.
+- **"Fits your X taste" is no longer shown for everything.** With the layer live, an absolute threshold would have flagged nearly every embedded candidate; it now requires the cluster to fit clearly better (≥0.05) than your overall taste.
+- **Weights follow reality.** If the graph signal fires for under 10% of candidates its weight scales down and the shortfall moves to content similarity (content + semantic + cluster + graph always total 0.41). The weight table is now one pure, tested function (`assembleWeights`).
+
+### Hardened after an independent review of this change (before release)
+- Weak embedding-neighbour hits (cosine distance within ~15% of the 0.45 ceiling) no longer count: they inflated graph "coverage" (so the layer kept full weight on almost no real signal) and produced "similar to X" for a game 0.44 away. Coverage now also requires a graph score of at least 0.05.
+- Title keys keep Unicode letters/digits. Japanese, Chinese, Korean and Cyrillic titles (and punctuation-only titles) previously all normalised to the empty string and falsely matched each other; empty keys are now never compared.
+- Library-neighbour retrieval is deeper (100 neighbours for each of the 32 strongest library games, was 60 for 40), because only hits that land inside the ~3,000-candidate pool are usable; sources are ranked by the same weights the graph signal uses, and removed library games set no reference mass and contribute no evidence.
+- Cluster similarity is never negative (it would have subtracted from the composite score), uses typed-array centroids, and the per-candidate loop yields to the UI thread every 2,000 candidates.
+
+### Under the hood
+- Oracle engine version 2 (cached results from engine 1 are discarded).
+- The real worker pipeline is now testable end to end (`src/test/oracle/pipeline-harness.ts`) — runs scoring, MMR, explanations, shelves and telemetry on fixture libraries. New tests cover the graph layer, cluster layer, weight invariants and the main-thread neighbour/cluster plumbing; the R1 characterization test for the graph-saturation defect was replaced by tests of the fix.
+- Test gate: full suite green under `vitest --isolate`.
+
 ## [1.0.75] - 2026-10-23
 
 First step of the Oracle recommendation-quality plan. **No ranking changes in this release** — it adds the measuring tools and outcome logging that every later fix depends on.

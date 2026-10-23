@@ -25,7 +25,15 @@ import type {
 import type { GameSession, StatusChangeEntry } from '@/types/game';
 import { ORACLE_ENGINE_VERSION } from '@/services/oracle-engine-version';
 import { oracleEventLog } from '@/services/oracle-event-log';
-import { TELEMETRY_LAYERS } from '@/services/reco-scoring';
+import {
+  TELEMETRY_LAYERS,
+  GRAPH_NEIGHBOR_DISTANCE_CEILING,
+  _engagementCache,
+  bestPreparedClusterSimilarity,
+  buildGraphUserContext,
+  detectTasteClusters,
+  prepareClusterCentroids,
+} from '@/services/reco-scoring';
 import { libraryStore } from './library-store';
 import { customGameStore } from './custom-game-store';
 import { journeyStore } from './journey-store';
@@ -55,7 +63,7 @@ import {
 } from '@/services/linked-ids';
 import { expandHardNegativeIds } from '@/services/hard-negative';
 import { keepAnnNeighborsUnderCeiling } from '@/services/ann-retrieve';
-import { getSimilarTitlesForRecoBatch } from '@/services/similar-games';
+import { getSimilarTitlesForRecoBatch, getAnnNeighborsForRecoBatch } from '@/services/similar-games';
 import { canonicalFranchiseBase } from '@/services/franchise';
 import {
   djb2Fingerprint,
@@ -95,6 +103,10 @@ const CATALOG_ENRICH_TIMEOUT_MS = 20_000;
 const EMBEDDING_GEN_TIMEOUT_MS = 90_000;
 const ML_SCORING_TIMEOUT_MS = 30_000;
 const GRAPH_SCORES_TIMEOUT_MS = 15_000;
+/** Embedding neighbours of the user's strongest library games (graph signal). */
+const LIBRARY_NEIGHBORS_TIMEOUT_MS = 8_000;
+const LIBRARY_NEIGHBOR_SOURCES = 32;
+const LIBRARY_NEIGHBOR_K = 100;
 /**
  * Background Oracle rerank budget for the fast tiers (native cross-encoder,
  * cosine) — shelves are already published by then. The Qwen3 tiers get a
@@ -717,18 +729,41 @@ export class RecoStore {
         ? candidatesWithEmbeddings / candidates.length
         : 0;
 
+      // 3.55. Taste clusters (deterministic) — the main thread owns them so per-candidate
+      // cluster similarity can be computed here, before candidate embeddings are stripped.
+      const scoringNow = Date.now();
+      _engagementCache.clear();
+      const precomputedClusters = detectTasteClusters(userGames, scoringNow);
+      const preparedClusters = prepareClusterCentroids(precomputedClusters);
+      const clusterScoringEnabled = preparedClusters.length >= 2;
+
+      // 3.58. Embedding neighbours of the user's strongest library games (graph signal).
+      const libraryNeighbors = await runWithDeadline(
+        () => this.computeLibraryNeighbors(userGames, new Set(candidates.map(c => c.gameId)), scoringNow),
+        budget(LIBRARY_NEIGHBORS_TIMEOUT_MS), undefined, signal, 'Library neighbours',
+      );
+      if (isStale()) return;
+
       // 3.6. Precompute per-candidate semantic similarity & strip candidate embeddings.
       // The taste centroid cosine is the expensive part; we compute it here to avoid
       // sending ~25K × 1024-dim embedding arrays through structured clone.
       let precomputedSemanticScores: Record<string, number> | undefined;
+      let precomputedClusterScores: Record<string, { sim: number; label: string }> | undefined;
       if (tasteCentroid) {
         const scores: Record<string, number> = {};
+        const clusterScores: Record<string, { sim: number; label: string }> = {};
         const dim = tasteCentroid.length;
         let centroidMag = 0;
         for (let i = 0; i < dim; i++) centroidMag += tasteCentroid[i] * tasteCentroid[i];
         centroidMag = Math.sqrt(centroidMag);
 
+        let processed = 0;
         for (const c of candidates) {
+          // Yield periodically: this loop (plus cluster scoring) is synchronous work over ~25K x 1024 floats.
+          if (++processed % 2000 === 0) {
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            if (isStale()) return;
+          }
           if (c.embedding && c.embedding.length === dim) {
             let dot = 0, magB = 0;
             for (let i = 0; i < dim; i++) {
@@ -738,10 +773,15 @@ export class RecoStore {
             scores[c.gameId] = centroidMag > 0 && magB > 0
               ? dot / (centroidMag * Math.sqrt(magB))
               : 0;
+            if (clusterScoringEnabled) {
+              const best = bestPreparedClusterSimilarity(c.embedding, preparedClusters);
+              if (best) clusterScores[c.gameId] = best;
+            }
           }
           delete c.embedding;
         }
         precomputedSemanticScores = scores;
+        if (clusterScoringEnabled) precomputedClusterScores = clusterScores;
       } else {
         for (const c of candidates) delete c.embedding;
       }
@@ -785,7 +825,7 @@ export class RecoStore {
       const input: RecoWorkerInput = {
         userGames,
         candidates,
-        now: Date.now(),
+        now: scoringNow,
         currentHour: new Date().getHours(),
         embeddingCoverage,
         dismissedGameIds,
@@ -793,6 +833,9 @@ export class RecoStore {
         thumbsUpIds,
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
         precomputedSemanticScores,
+        precomputedClusters: clusterScoringEnabled ? precomputedClusters : undefined,
+        precomputedClusterScores,
+        libraryNeighbors,
         graphScores: graphScoresMap,
         graphMaxPageRank,
         userCommunityCounts,
@@ -810,6 +853,46 @@ export class RecoStore {
       };
       this.notify();
     }
+  }
+
+  /**
+   * Nearest embedding neighbours of the user's strongest library games,
+   * inverted to candidate id -> hits. One ANN batch over a few dozen library
+   * vectors (instead of one query per candidate) keeps the IPC payload small.
+   * Returns undefined when ANN isn't ready or the library has no vectors.
+   */
+  private async computeLibraryNeighbors(
+    userGames: UserGameSnapshot[],
+    candidateIds: Set<string>,
+    now: number = Date.now(),
+  ): Promise<Record<string, Array<{ u: string; d: number }>> | undefined> {
+    if (!annIndex.isReady) return undefined;
+    // Rank sources by the SAME weights the graph signal uses, so the games that set
+    // the "fully related" reference mass are the ones whose neighbours we fetch.
+    const weights = buildGraphUserContext(userGames, now).ugWeights;
+    const sources = userGames
+      .filter(ug => !ug.removedAt && ug.embedding && ug.embedding.length > 0 && (weights.get(ug.gameId) ?? 0) > 0)
+      .map(ug => ({ gameId: ug.gameId, vector: ug.embedding!, weight: weights.get(ug.gameId) ?? 0 }))
+      .sort((a, b) => b.weight - a.weight)
+      .slice(0, LIBRARY_NEIGHBOR_SOURCES);
+    if (sources.length === 0) return undefined;
+
+    const neighbors = await getAnnNeighborsForRecoBatch(
+      sources.map(({ gameId, vector }) => ({ gameId, vector })),
+      LIBRARY_NEIGHBOR_K,
+    );
+    const out: Record<string, Array<{ u: string; d: number }>> = {};
+    let hits = 0;
+    for (const [libraryId, list] of neighbors) {
+      for (const n of list) {
+        if (n.distance > GRAPH_NEIGHBOR_DISTANCE_CEILING) continue;
+        if (!candidateIds.has(n.id)) continue;
+        (out[n.id] ??= []).push({ u: libraryId, d: n.distance });
+        hits++;
+      }
+    }
+    console.log(`[RecoStore] Library neighbours: ${sources.length} sources -> ${hits} hits on ${Object.keys(out).length} candidates`);
+    return out;
   }
 
   private buildUserGameSnapshots(): UserGameSnapshot[] {

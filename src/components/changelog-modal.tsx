@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.76': {
+    title: "What's New in Ark 1.0.76",
+    changes: [
+      'Oracle recommendations are smarter: two parts of the engine that were effectively switched off now work. Games that sit close to the games you love are now recognised even when no "similar games" list links them, and relating to several of your favourites now counts for more than relating to just one.',
+      'If your library has more than one taste (say cozy farming plus soulslikes), Oracle now scores games against each of your tastes instead of one blurred average.',
+      'Game names are matched more reliably (editions, ™/®, accents and remasters no longer cause misses), and "similar to…" explanations now name your strongest matches.',
+      'Your taste groups no longer reshuffle every time recommendations refresh.',
+      'Because rankings changed, Oracle will recalculate once after updating.',
+    ],
+  },
   '1.0.75': {
     title: "What's New in Ark 1.0.75",
     changes: [
