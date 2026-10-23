@@ -11,6 +11,19 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.74': {
+    title: "What's New in Ark 1.0.74",
+    changes: [
+      'Ark Wrapped is back and better: smoother, correct stats for the whole year, proper saved images, and it now greets you with a banner and a notification from mid-December through the New Year.',
+      'Steam catalog sync no longer sits at 100%: you can see when it is retrying rate-limited batches, it stops after a short time, and the next sync picks up only the games it missed.',
+      'Fixed: Force Re-index could crash Ark, and rebuilding the similarity index while embeddings were running made the loader jump around. These jobs now take turns safely.',
+      'Embedding Space: a new loading screen with a real percentage, no more giant pink glow in Approach view, more relevant neighbours, and searching for a far-away game now flies you there properly.',
+      'The reranker now shows when it ran and how many games it moved (Oracle, Embedding Space and System Status).',
+      'Library status changes show instantly, playtime is tracked from launch (no need to click "Enter Ark"), and games you just set to Playing are no longer flipped to On Hold.',
+      'Settings: a batch-size slider with a live graphics-memory meter, and much plainer names for the AI options.',
+      'Safer data: one unreadable item can no longer roll your library back, and Ark starts in safe mode after repeated crashes.',
+    ],
+  },
   '1.0.73': {
     title: "What's New in Ark 1.0.73",
     changes: [

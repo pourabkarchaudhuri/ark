@@ -2,9 +2,18 @@ import type { GraphNode, NeighborInfo } from '@/services/galaxy-cache';
 import type { LassoPoint } from '@/services/lasso-geometry';
 import type { Zone } from '../engine/zoom';
 import type { NodeDetailData } from '../data/detail';
+import type { RerankHint } from '../data/neighbors';
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'waiting';
-export interface LoadingStep { label: string; base: string; status: StepStatus }
+export interface LoadingStep {
+  label: string;
+  base: string;
+  status: StepStatus;
+  /** Raw detail from the build (counts) — the loader turns it into plain language. */
+  detail?: string;
+  /** Progress within the step, 0–1, when measurable. */
+  fraction?: number;
+}
 
 export type ScannerMode = 'observer' | 'probe';
 export type CardPhase = 'idle' | 'leaving' | 'hidden' | 'entering';
@@ -17,6 +26,8 @@ export interface ViewState {
   neighbors: NeighborInfo[];
   /** Set when neighbours came from the 3D spatial fallback (distances are world units, not cosine). */
   neighborStatus: 'ann_rebuilding' | 'spatial_fallback' | null;
+  /** What the Ollama rerank did for the selected star's neighbours (tier + positions moved, or why it was skipped). */
+  rerankHint: RerankHint | null;
   focusedNbIdx: number;
   connectionCount: number;
   nodeCount: number;
@@ -68,6 +79,7 @@ export const INITIAL_STATE: ViewState = {
   selectedNode: null,
   neighbors: [],
   neighborStatus: null,
+  rerankHint: null,
   focusedNbIdx: -1,
   connectionCount: 0,
   nodeCount: 0,

@@ -46,6 +46,13 @@ export interface CatalogSyncState {
   batchesTotal: number;
   /** Whether a sync is currently in progress. */
   inProgress: boolean;
+  /**
+   * App ids from batches still missing after the last (incomplete) run. The next sync
+   * fetches only these instead of re-running all ~780 batches. (v1.0.74)
+   */
+  pendingAppIds?: number[];
+  /** When the last run (complete or not) finished — throttles retries of an incomplete run. */
+  lastAttemptTimestamp?: number;
 }
 
 /** Raw response shape from IStoreBrowseService/GetItems/v1. */

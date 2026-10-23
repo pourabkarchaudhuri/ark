@@ -7,9 +7,11 @@ import { useSessionTracker } from '@/hooks/useSessionTracker';
  * the Dashboard, so navigating to a game-details page unmounted it and dropped
  * the `session:ended` listener — whole play sessions were never recorded.
  *
- * Mounting the tracker once via this provider (above the route-level
- * <ErrorBoundary key={location}>) guarantees sessions are recorded regardless
- * of which view the user is on. Consumers read live state from context.
+ * Mounting the tracker once via this provider guarantees sessions are
+ * recorded regardless of which view the user is on. Consumers read live state
+ * from context. The provider is mounted at the app ROOT (App.tsx), outside the
+ * splash "Enter Ark" gate: with a hidden auto-launch nobody clicks Enter, and
+ * a renderer crash reloads into the splash — both used to stop tracking.
  */
 type SessionTrackerValue = ReturnType<typeof useSessionTracker>;
 

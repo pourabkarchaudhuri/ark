@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
-import { libraryStore } from '@/services/library-store';
+import { libraryStore, type LibraryEntryWithStatusStamp } from '@/services/library-store';
+import { statusHistoryStore } from '@/services/status-history-store';
 
 /**
  * useAutoOnHold (v1.0.42)
@@ -10,8 +11,14 @@ import { libraryStore } from '@/services/library-store';
  * Rules:
  *   - Only "Playing" is touched. "Completed", "Playing Now", "Want to Play",
  *     and existing "On Hold" entries are left alone.
- *   - Staleness is measured from `lastPlayedAt` when present; otherwise
- *     `addedAt` is used as the fallback anchor.
+ *   - Staleness is measured from the MOST RECENT of: `lastPlayedAt`, the
+ *     entry's `statusChangedAt` stamp, the latest status-history transition
+ *     into Playing / Playing Now, and `addedAt`. (Previously it was
+ *     `lastPlayedAt ?? addedAt`, so a game the user had just switched to
+ *     "Playing" — whose last play was months ago — was flipped straight back
+ *     to On Hold on the next sweep.)
+ *   - Waits for the library + status-history stores to hydrate, and skips
+ *     the sweep entirely when the library is read-only.
  *   - `lastPlayedAt` is NEVER overwritten — the real last-play date is
  *     preserved. Only `status` and `autoTransitionedAt` are updated.
  *   - Gated by the `autoOnHoldTransition` setting (defaults ON, per the user's
@@ -57,6 +64,8 @@ async function isAutoOnHoldTransitionEnabled(): Promise<boolean> {
   }
 }
 
+const PLAYING_STATUSES = ['Playing', 'Playing Now'] as const;
+
 /** Coerce an entry's `addedAt` (which may be a Date OR an ISO string after rehydration). */
 function toMs(value: unknown): number | null {
   if (value instanceof Date) return value.getTime();
@@ -75,15 +84,27 @@ export async function runAutoOnHoldSweep(now: number = Date.now()): Promise<void
     const enabled = await isAutoOnHoldTransitionEnabled();
     if (!enabled) return;
 
-    for (const entry of libraryStore.getAllEntries()) {
+    // Never judge staleness against a half-hydrated view: the status history
+    // (our record of "user set this to Playing on <date>") loads async.
+    await Promise.all([
+      libraryStore.ready.catch(() => undefined),
+      statusHistoryStore.ready().catch(() => undefined),
+    ]);
+    if (libraryStore.isReadOnly()) return;
+
+    for (const entry of libraryStore.getAllEntries() as LibraryEntryWithStatusStamp[]) {
       // Only "Playing" transitions to On Hold. Completed, Want to Play,
       // Playing Now (live), and existing On Hold are all skipped.
       if (entry.status !== 'Playing') continue;
 
-      const lastMs = toMs(entry.lastPlayedAt);
-      const addedMs = toMs(entry.addedAt);
-      const referenceMs = lastMs ?? addedMs;
-      if (referenceMs === null) continue;
+      const candidates = [
+        toMs(entry.lastPlayedAt),
+        toMs(entry.statusChangedAt),
+        statusHistoryStore.getLatestTransitionInto(entry.gameId, PLAYING_STATUSES),
+        toMs(entry.addedAt),
+      ].filter((v): v is number => v !== null && Number.isFinite(v));
+      if (candidates.length === 0) continue;
+      const referenceMs = Math.max(...candidates);
 
       const elapsed = now - referenceMs;
       if (elapsed < ON_HOLD_THRESHOLD_MS) continue;

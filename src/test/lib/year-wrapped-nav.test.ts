@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   canGoNext,
   canGoPrev,
+  clampSlide,
+  resolveKeyNavAction,
   resolveSwipeNavAction,
   resolveTapNavAction,
 } from '@/lib/year-wrapped-nav';
@@ -45,5 +47,28 @@ describe('year-wrapped-nav', () => {
     expect(resolveSwipeNavAction(200, 220, 1, TOTAL)).toBe('none'); // tiny move
     expect(resolveSwipeNavAction(300, 200, 0, TOTAL)).toBe('next');
     expect(resolveSwipeNavAction(200, 300, 0, TOTAL)).toBe('none');
+  });
+
+  it('maps keys to actions', () => {
+    expect(resolveKeyNavAction('ArrowRight')).toBe('next');
+    expect(resolveKeyNavAction('ArrowLeft')).toBe('prev');
+    expect(resolveKeyNavAction('Escape')).toBe('close');
+    expect(resolveKeyNavAction(' ')).toBe('toggle-autoplay');
+    expect(resolveKeyNavAction('Home')).toBe('first');
+    expect(resolveKeyNavAction('End')).toBe('last');
+    expect(resolveKeyNavAction('a')).toBe('none');
+  });
+
+  it('clamps slide indices', () => {
+    expect(clampSlide(-3, TOTAL)).toBe(0);
+    expect(clampSlide(99, TOTAL)).toBe(TOTAL - 1);
+    expect(clampSlide(4, TOTAL)).toBe(4);
+    expect(clampSlide(2, 0)).toBe(0);
+    expect(clampSlide(NaN, TOTAL)).toBe(0);
+  });
+
+  it('handles empty decks without navigating', () => {
+    expect(resolveTapNavAction(900, 0, 1000, 0, 0)).toBe('none');
+    expect(canGoNext(0, 0)).toBe(false);
   });
 });

@@ -73,9 +73,13 @@ vi.mock('./galaxy-cache', () => ({
   subscribeGalaxy: vi.fn(() => () => {}),
 }));
 
+const lastRerankRun = vi.fn(() => null as unknown);
 vi.mock('./oracle-rerank', () => ({
-  RERANK_TIER_LABELS: { none: 'None', cosine: 'Cosine' },
+  RERANK_TIER_LABELS: { none: 'None', cosine: 'Cosine', qwen_graded: 'Qwen3 graded' },
   initRerankProgressListener: vi.fn(),
+  // "Last rerank" row (system-status reads the renderer-side run store).
+  getLastRerankRun: () => lastRerankRun(),
+  subscribeRerankRuns: vi.fn(() => () => {}),
 }));
 
 import { systemStatus } from './system-status';
@@ -144,5 +148,34 @@ describe('SystemStatus — Catalog Embeddings widget while blocked behind catalo
     const snap = systemStatus.getSnapshot();
 
     expect(snap.catalogEmbeddings.detail).not.toBe('Waiting for Steam Catalog sync…');
+  });
+});
+
+describe('SystemStatus — Last rerank row', () => {
+  it('is null before any rerank ran', () => {
+    lastRerankRun.mockReturnValue(null);
+    expect(systemStatus.getSnapshot().lastRerank).toBeNull();
+  });
+
+  it('shows source, tier, positions moved and scored count for an applied run', () => {
+    lastRerankRun.mockReturnValue({
+      source: 'oracle', outcome: 'applied', tier: 'qwen_graded', at: 1_000, elapsedMs: 7_200,
+      scored: 40, requested: 40, moved: 31, meanAbsDelta: 3.4, scoreMin: 0.02, scoreMax: 0.97, truncated: false,
+    });
+    const row = systemStatus.getSnapshot().lastRerank!;
+    expect(row.stage).toBe('done');
+    expect(row.detail).toBe('Oracle · Qwen3 graded · 31 moved · 40/40 scored');
+    expect(row.elapsedMs).toBe(7_200);
+    expect(row.at).toBe(1_000);
+  });
+
+  it('says why when the run did not apply', () => {
+    lastRerankRun.mockReturnValue({
+      source: 'neighbors', outcome: 'skipped_timeout', tier: null, at: 2_000, elapsedMs: 8_000,
+      scored: 0, requested: 24, moved: null, meanAbsDelta: null, scoreMin: null, scoreMax: null, truncated: false,
+    });
+    const row = systemStatus.getSnapshot().lastRerank!;
+    expect(row.stage).toBe('idle');
+    expect(row.detail).toBe('Neighbors · timed out');
   });
 });

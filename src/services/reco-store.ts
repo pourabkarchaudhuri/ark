@@ -34,8 +34,15 @@ import { annIndex } from './ann-index';
 import { bm25Index } from './bm25-index';
 import { embeddingService } from './embedding-service';
 import { gameGraphStore } from './game-graph-store';
-import { buildLexicalTasteQuery, rerankStatus } from '@/services/oracle-rerank';
-import type { RerankStatus } from '@/services/oracle-rerank';
+import {
+  buildLexicalTasteQuery,
+  getRerankBridge,
+  lookupRerankTier,
+  rerankPlan,
+  rerankStatus,
+  ORACLE_RERANK_DEFAULT_BUDGET_MS,
+} from '@/services/oracle-rerank';
+import type { RerankPlan, RerankStatus } from '@/services/oracle-rerank';
 import { computeEngagementWeight, countEvidenceLibrary } from '@/services/engagement-weight';
 import {
   buildLinkedExclusionIds,
@@ -84,8 +91,12 @@ const CATALOG_ENRICH_TIMEOUT_MS = 20_000;
 const EMBEDDING_GEN_TIMEOUT_MS = 90_000;
 const ML_SCORING_TIMEOUT_MS = 30_000;
 const GRAPH_SCORES_TIMEOUT_MS = 15_000;
-/** Background Oracle rerank budget — shelves are already published by then. */
-export const ORACLE_RERANK_BUDGET_MS = 15_000;
+/**
+ * Background Oracle rerank budget for the fast tiers (native cross-encoder,
+ * cosine) — shelves are already published by then. The Qwen3 tiers get a
+ * longer budget and a smaller pool; see `rerankPlan` in oracle-rerank.ts.
+ */
+export const ORACLE_RERANK_BUDGET_MS = ORACLE_RERANK_DEFAULT_BUDGET_MS;
 /** Library / thumbs-up changes coalesce into one recompute after this quiet period. */
 export const LIBRARY_REFRESH_DEBOUNCE_MS = 3_000;
 
@@ -2138,10 +2149,7 @@ export class RecoStore {
    * Shared settings + applyOracleRerankShelves path.
    * Used after worker completion and after localStorage cache restore.
    */
-  private async runOracleRerankPass(
-    tasteProfile: TasteProfile,
-    shelves: RecoShelf[],
-  ): Promise<{ shelves: RecoShelf[]; status: RerankStatus }> {
+  private async prepareOracleRerank(): Promise<{ skip: RerankStatus } | { blend: number; plan: RerankPlan }> {
     let settings: {
       oracleRerankEnabled?: boolean;
       oracleRerankBlend?: number;
@@ -2155,21 +2163,43 @@ export class RecoStore {
         ? Math.min(1, Math.max(0, settings.oracleRerankBlend))
         : 1;
 
-    if (!(typeof window !== 'undefined' && window.ollama?.rerank && enabled && blend > 0)) {
-      if (!enabled) return { shelves, status: rerankStatus('skipped_disabled') };
-      if (blend <= 0) return { shelves, status: rerankStatus('skipped_blend_zero') };
-      return { shelves, status: rerankStatus('skipped_no_client') };
+    const bridge = getRerankBridge();
+    if (!(bridge && enabled && blend > 0)) {
+      if (!enabled) return { skip: rerankStatus('skipped_disabled') };
+      if (blend <= 0) return { skip: rerankStatus('skipped_blend_zero') };
+      return { skip: rerankStatus('skipped_no_client') };
     }
+    // Tier-aware budget: a Qwen3 pass costs one generate call per document,
+    // so it gets a smaller pool and a longer deadline (shelves are on screen).
+    const tier = await lookupRerankTier(bridge);
+    return { blend, plan: rerankPlan('oracle', tier) };
+  }
 
+  /**
+   * Shared applyOracleRerankShelves path, bounded by the plan's budget. The
+   * deadline's abort signal is passed through so the main-process loop is
+   * cancelled when the budget runs out. Resolves null on timeout.
+   */
+  private async runOracleRerankPass(
+    tasteProfile: TasteProfile,
+    shelves: RecoShelf[],
+    blend: number,
+    plan: RerankPlan,
+  ): Promise<{ shelves: RecoShelf[]; status: RerankStatus } | null> {
     const { applyOracleRerankShelves } = await import('@/services/oracle-rerank');
-    return applyOracleRerankShelves(tasteProfile, shelves, { enabled: true, blend });
+    return runWithDeadline(
+      (signal) => applyOracleRerankShelves(tasteProfile, shelves, { enabled: true, blend, plan, signal }),
+      plan.budgetMs, null, undefined, 'Oracle rerank',
+    );
   }
 
   /**
    * Refine the published shelf order with the Oracle rerank pass, in the
    * background. Shelves are already on screen (status 'done') when this runs;
    * the main-process rerank cascade can take minutes on CPU, so it gets a
-   * fixed budget and the worker order simply stays when it overruns.
+   * tier-aware budget (`rerankPlan`: 15 s for native / cosine, 60 s and a
+   * 40-game pool for Qwen3) and the worker order simply stays when it overruns.
+   * On overrun the main-process loop is cancelled, not left running.
    *
    * Used after worker completion and after cache restore. The cache-restore
    * path replays only this pass; the heavier retrieval and scoring stages are
@@ -2188,10 +2218,11 @@ export class RecoStore {
       && this.state.status === 'done'
       && this.state.shelves === shelves;
     try {
-      const out = await runWithDeadline(
-        () => this.runOracleRerankPass(tasteProfile, shelves),
-        ORACLE_RERANK_BUDGET_MS, null, undefined, 'Oracle rerank',
-      );
+      const prep = await this.prepareOracleRerank();
+      if (!isCurrent()) return;
+      const out = 'skip' in prep
+        ? { shelves, status: prep.skip }
+        : await this.runOracleRerankPass(tasteProfile, shelves, prep.blend, prep.plan);
       if (!isCurrent()) return;
       if (!out) {
         this.state = { ...this.state, oracleRerankStatus: rerankStatus('skipped_timeout') };

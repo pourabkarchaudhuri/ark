@@ -1,4 +1,5 @@
 import { GameSession, migrateGameId } from '@/types/game';
+import { SerialWriteQueue, readWithRetry, reportStorageReadOnly } from './storage-health';
 
 const STORAGE_KEY = 'ark-session-history';
 const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
@@ -47,13 +48,17 @@ export class SessionStore {
   private readonly _useLevelDB: boolean;
 
   /**
-   * Set of session IDs currently persisted in LevelDB. On every debounced
-   * batch we diff `entries` against this to emit `del` ops for anything
-   * that disappeared (e.g. via a future single-session delete or a
-   * post-import prune). Simplification for v1.0.61: we still batch-put
-   * ALL current sessions every debounce cycle (delta-writes come later).
+   * Session IDs currently persisted in LevelDB. Sessions are immutable once
+   * recorded, so each save only puts ids missing from this set and deletes
+   * ids no longer in `entries` (delta writes — no full rewrite per save).
    */
   private _knownKeys: Set<string> = new Set();
+
+  /** Serializes every LevelDB write (saves + clearNamespace). */
+  private readonly _writeQueue = new SerialWriteQueue('SessionStore');
+
+  /** LevelDB unreadable this session → no writes at all (see storage-health). */
+  private _readOnly = false;
 
   /**
    * Exposed for tests / callers that want to await the async hydration
@@ -96,13 +101,14 @@ export class SessionStore {
    */
   private async initializeFromLevelDB(): Promise<void> {
     try {
-      const res = await window.store!.getAll<GameSession>(LEVEL_NAMESPACE);
-      if (res.error) {
-        console.error('[SessionStore] getAll(session) IPC error:', res.error);
-        this.initializeFromLocalStorage();
+      const outcome = await readWithRetry('SessionStore', () =>
+        window.store!.getAll<GameSession>(LEVEL_NAMESPACE),
+      );
+      if (!outcome.ok) {
+        this.enterReadOnly(outcome.error);
         return;
       }
-      const rows = res.rows ?? [];
+      const rows = outcome.value.rows ?? [];
       if (rows.length > 0) {
         this.hydrateFromRows(rows.map((r) => r.value));
         return;
@@ -114,9 +120,72 @@ export class SessionStore {
         this.notifyListeners();
       }
     } catch (err) {
-      console.error('[SessionStore] Failed to init from LevelDB, falling back:', err);
-      this.initializeFromLocalStorage();
+      this.enterReadOnly(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * LevelDB unreadable after retries. Never fall back to the legacy
+   * localStorage snapshot once migrated (it is frozen at v1.0.61); go
+   * read-only so nothing stale can overwrite LevelDB. Pre-migration users see
+   * their legacy log, read-only too.
+   */
+  private enterReadOnly(error: string): void {
+    this._readOnly = true;
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    let migrated = true;
+    try { migrated = localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes'; } catch { /* assume migrated */ }
+    if (!migrated) {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        const parsed = raw ? (JSON.parse(raw) as StoredSessionData) : null;
+        if (parsed && Array.isArray(parsed.entries)) {
+          const pending = this.entries;
+          this.entries = parsed.entries.map((entry) => ({ ...entry, gameId: migrateGameId(entry as any) }));
+          const ids = new Set(this.entries.map((e) => e.id));
+          for (const e of pending) if (!ids.has(e.id)) this.entries.push(e);
+        }
+      } catch { /* legacy payload unreadable — stay empty */ }
+    }
+    reportStorageReadOnly('session', error);
+    this.notifyListeners();
+  }
+
+  /** True when LevelDB could not be read this session — nothing is persisted. */
+  isReadOnly(): boolean {
+    return this._readOnly;
+  }
+
+  /**
+   * True once this session row is known to be on disk. Main's pending-session queue is
+   * only acked for persisted ids — a failed batch write used to be acked anyway, and a
+   * quit before the next retry lost the session.
+   */
+  isPersisted(id: string): boolean {
+    if (this._readOnly) return false;
+    return this._useLevelDB ? this._knownKeys.has(id) : true;
+  }
+
+  /** Resolves once every queued LevelDB write has settled (tests / shutdown). */
+  whenPersisted(): Promise<void> {
+    return this._writeQueue.idle();
+  }
+
+  /**
+   * Flush any debounced save immediately and resolve once it (and every
+   * earlier queued write) has settled. The session tracker awaits this before
+   * acknowledging a session to the main process.
+   */
+  persistNow(): Promise<void> {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+      this.saveNow();
+    }
+    return this._writeQueue.idle();
   }
 
   /**
@@ -220,11 +289,21 @@ export class SessionStore {
    * Sort chronologically for parity with the legacy stored order.
    */
   private hydrateFromRows(rows: GameSession[]): void {
+    // Keep sessions recorded before hydration finished (e.g. a session:ended
+    // that raced the boot read) — previously they were silently replaced.
+    const preHydration = this.entries;
     this.entries = rows.map((r) => ({ ...r, gameId: migrateGameId(r as any) }));
+    this._knownKeys = new Set(this.entries.map((e) => e.id));
+    let merged = 0;
+    for (const e of preHydration) {
+      if (!e.id || this._knownKeys.has(e.id)) continue;
+      this.entries.push(e);
+      merged++;
+    }
     this.entries.sort(
       (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime(),
     );
-    this._knownKeys = new Set(this.entries.map((e) => e.id));
+    if (merged > 0) this.save();
     this.notifyListeners();
   }
 
@@ -245,15 +324,21 @@ export class SessionStore {
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
+      if (this._useLevelDB && !this._readOnly) {
+        // Unloading — can't wait behind an in-flight batch; send the delta now.
+        void this.saveNowLevelDB();
+        return;
+      }
       this.saveNow();
     }
   }
 
   private saveNow(): void {
+    if (this._readOnly) return;
     if (this._useLevelDB) {
-      // Fire-and-forget; errors are logged. Preserves the current
-      // synchronous callsite contract used by importData().
-      void this.saveNowLevelDB();
+      // Serialized behind any in-flight write (incl. a pending clear()).
+      // Callers stay synchronous (importData) — errors are logged.
+      void this._writeQueue.run(() => this.saveNowLevelDB());
       return;
     }
     this.saveNowLocalStorage();
@@ -273,23 +358,29 @@ export class SessionStore {
   }
 
   private async saveNowLevelDB(): Promise<void> {
+    if (this._readOnly) return;
     try {
       const currentIds = new Set<string>();
       const ops: Array<
         | { type: 'put'; namespace: string; key: string; value: unknown }
         | { type: 'del'; namespace: string; key: string }
       > = [];
+      const putIds: string[] = [];
+      const delIds: string[] = [];
 
       for (const e of this.entries) {
         if (!e.id) continue;
         currentIds.add(e.id);
+        if (this._knownKeys.has(e.id)) continue; // sessions are immutable
         ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: e.id, value: e });
+        putIds.push(e.id);
       }
 
       // Delta-deletes: anything in _knownKeys that's no longer in entries.
       for (const oldKey of this._knownKeys) {
         if (!currentIds.has(oldKey)) {
           ops.push({ type: 'del', namespace: LEVEL_NAMESPACE, key: oldKey });
+          delIds.push(oldKey);
         }
       }
 
@@ -300,7 +391,8 @@ export class SessionStore {
         console.error('[SessionStore] batch save failed:', res.error);
         return;
       }
-      this._knownKeys = currentIds;
+      for (const id of putIds) this._knownKeys.add(id);
+      for (const id of delIds) this._knownKeys.delete(id);
     } catch (err) {
       console.error('[SessionStore] Failed to save (LevelDB):', err);
     }
@@ -320,12 +412,22 @@ export class SessionStore {
   // ------ Core mutations ------
 
   /**
-   * Record a completed play session.
+   * Record a completed play session. Idempotent by `session.id`: the main
+   * process re-delivers un-acknowledged sessions after a renderer crash or
+   * restart, so a replay must never double-count playtime.
+   * Returns `true` when the session was new.
    */
-  record(session: GameSession): void {
+  record(session: GameSession): boolean {
+    if (session.id && this.entries.some((e) => e.id === session.id)) return false;
     this.entries.push(session);
     this.save();
     this.notifyListeners();
+    return true;
+  }
+
+  /** True when a session with this id is already recorded. */
+  has(sessionId: string): boolean {
+    return this.entries.some((e) => e.id === sessionId);
   }
 
   // ------ Queries ------
@@ -539,23 +641,24 @@ export class SessionStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
-    if (this._useLevelDB) {
-      // Fire-and-forget: also nuke the LevelDB namespace so subsequent
-      // hydrates see an empty store. Errors are logged.
-      void (async () => {
-        try {
-          const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
-          if (res.error) console.error('[SessionStore] clearNamespace failed:', res.error);
-        } catch (err) {
-          console.error('[SessionStore] Failed to clear LevelDB namespace:', err);
+    if (this._useLevelDB && !this._readOnly) {
+      // Queued: a following importData() save runs only after the wipe has
+      // completed, so clear can no longer land on top of the imported rows.
+      void this._writeQueue.run(async () => {
+        const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+        if (res.error) {
+          console.error('[SessionStore] clearNamespace failed:', res.error);
+          return; // keep _knownKeys so the next save emits explicit deletes
         }
-      })();
+        this._knownKeys = new Set();
+      });
     }
-    localStorage.removeItem(STORAGE_KEY);
-    // Reset the migration marker so a subsequent clear-then-import cycle
-    // treats the next non-empty localStorage payload as a fresh migration.
-    localStorage.removeItem(MIGRATION_MARKER_KEY);
-    this._knownKeys = new Set();
+    if (!this._readOnly) {
+      localStorage.removeItem(STORAGE_KEY);
+      // Reset the migration marker so a subsequent clear-then-import cycle
+      // treats the next non-empty localStorage payload as a fresh migration.
+      localStorage.removeItem(MIGRATION_MARKER_KEY);
+    }
     this.notifyListeners();
   }
 }

@@ -72,7 +72,8 @@ describe('queryAnnNeighborGames', () => {
     vi.mocked(annIndex.queryWithDistances).mockResolvedValue([...sourceChunks, ...others]);
 
     const ranked = await queryAnnNeighborGames(vec, 64, 'steam-src');
-    expect(ranked.map((r) => r.id)).toEqual(['steam-a', 'steam-b', 'steam-c']);
+    // steam-b's only hit is a summary chunk (weight 0.55 → +0.1125), so pooled steam-c ranks above it
+    expect(ranked.map((r) => r.id)).toEqual(['steam-a', 'steam-c', 'steam-b']);
   });
 
   it('max-sim off: strips :: rows and drops parseAnnIdToGameId === source', async () => {

@@ -95,6 +95,7 @@ export function register(): void {
     embeddingChunkingEnabled?: boolean;
     chunkAnnMaxSimEnabled?: boolean;
     embeddingMrl256Enabled?: boolean;
+    embeddingBatchSize?: number;
   }) => {
     try {
       // Security: validate URL scheme (allow http/https only — do NOT block localhost/private IPs

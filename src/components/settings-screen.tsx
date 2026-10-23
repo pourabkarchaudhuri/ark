@@ -27,17 +27,31 @@ import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
 import { YearWrapped } from '@/components/year-wrapped';
 import { DEFAULT_OLLAMA_RERANK_MODEL } from '@/services/ollama-rerank';
-import { embeddingService } from '@/services/embedding-service';
+import { embeddingService, type ForceReindexResult, type CatalogPassOutcome } from '@/services/embedding-service';
 import { buildRechunkJobDeps } from '@/services/rechunk-job-deps';
 import { annIndex } from '@/services/ann-index';
 import { catalogStore } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { EmbeddingBatchSizeControl } from '@/components/settings/embedding-batch-size';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
 import {
   OVERLAY_CYCLE_HOTKEY_LABEL,
   OVERLAY_TOGGLE_HOTKEY_LABEL,
 } from '@/overlay/detail-level';
+
+function describeForceReindexResult(r: ForceReindexResult): string {
+  const total = (r.steam + r.epic).toLocaleString();
+  if (r.complete) return `Done — ${total} games re-read`;
+  const why = (o: CatalogPassOutcome) =>
+    o === 'tripped' ? 'paused because Ollama stopped responding; it resumes automatically'
+      : o === 'unavailable' ? 'skipped because Ollama isn\'t running'
+        : o === 'cancelled' ? 'cancelled'
+          : o === 'error' ? 'failed'
+            : 'not started';
+  const part = r.steamOutcome !== 'done' ? `Steam games ${why(r.steamOutcome)}` : `Epic games ${why(r.epicOutcome)}`;
+  return `Not finished (${total} games so far) — ${part}`;
+}
 
 export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
 
@@ -60,6 +74,8 @@ declare global {
         embeddingChunkingEnabled: boolean;
         chunkAnnMaxSimEnabled: boolean;
         embeddingMrl256Enabled: boolean;
+        /** 0 = Auto; otherwise clamped to 16–512 by main. */
+        embeddingBatchSize: number;
       }>;
       setOllamaSettings: (settings: {
         enabled?: boolean;
@@ -73,6 +89,7 @@ declare global {
         embeddingChunkingEnabled?: boolean;
         chunkAnnMaxSimEnabled?: boolean;
         embeddingMrl256Enabled?: boolean;
+        embeddingBatchSize?: number;
       }) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
       setAutoLaunch: (enabled: boolean) => Promise<void>;
@@ -381,6 +398,7 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
   const [chunkAnnMaxSimEnabled, setChunkAnnMaxSimEnabled] = useState(true);
   const [embeddingMrl256Enabled, setEmbeddingMrl256Enabled] = useState(false);
+  const [embeddingBatchSize, setEmbeddingBatchSize] = useState(0);
   const [annRebuildStatus, setAnnRebuildStatus] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
   const [annRebuildMessage, setAnnRebuildMessage] = useState<string | null>(null);
   const [annRebuildProgress, setAnnRebuildProgress] = useState<{ done: number; total: number } | null>(null);
@@ -392,6 +410,24 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [forceReindexMessage, setForceReindexMessage] = useState<string | null>(null);
   const [forceReindexProgress, setForceReindexProgress] = useState<{ completed: number; total: number } | null>(null);
   const [forceReindexConfirmOpen, setForceReindexConfirmOpen] = useState(false);
+  // Shared, service-level job state: both Settings screens (and both Rebuild
+  // buttons) see the same in-flight ANN rebuild / forced re-index.
+  const [annJobBusy, setAnnJobBusy] = useState(() => embeddingService.isAnnRebuilding);
+  const [forceReindexBusy, setForceReindexBusy] = useState(() => embeddingService.isForceReindexRunning);
+  useEffect(() => {
+    const sync = () => {
+      setAnnJobBusy(embeddingService.isAnnRebuilding);
+      setForceReindexBusy(embeddingService.isForceReindexRunning);
+    };
+    const unsubEmb = embeddingService.subscribe(sync);
+    const unsubAnn = annIndex.subscribe(() => {
+      if (embeddingService.isAnnRebuilding) setAnnRebuildProgress({ ...annIndex.buildProgress });
+    });
+    sync();
+    return () => { unsubEmb(); unsubAnn(); };
+  }, []);
+  const annRebuildBusy = annRebuildStatus === 'building' || annJobBusy;
+  const forceReindexRunning = forceReindexStatus === 'running' || forceReindexBusy;
   const [weightSweepMsg, setWeightSweepMsg] = useState<string | null>(null);
   const [weightSweepBusy, setWeightSweepBusy] = useState(false);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
@@ -460,6 +496,11 @@ const AIModelsTab = memo(function AIModelsTab() {
         setEmbeddingChunkingEnabled(s.embeddingChunkingEnabled !== false);
         setChunkAnnMaxSimEnabled(s.chunkAnnMaxSimEnabled !== false);
         setEmbeddingMrl256Enabled(s.embeddingMrl256Enabled === true);
+        setEmbeddingBatchSize(
+          typeof s.embeddingBatchSize === 'number' && Number.isFinite(s.embeddingBatchSize) && s.embeddingBatchSize > 0
+            ? s.embeddingBatchSize
+            : 0,
+        );
         setOracleRerankBlend(
           typeof s.oracleRerankBlend === 'number' && Number.isFinite(s.oracleRerankBlend)
             ? Math.min(1, Math.max(0, s.oracleRerankBlend))
@@ -501,6 +542,7 @@ const AIModelsTab = memo(function AIModelsTab() {
           embeddingChunkingEnabled,
           chunkAnnMaxSimEnabled,
           embeddingMrl256Enabled,
+          embeddingBatchSize,
         });
         // A new URL/model may make Ollama reachable — drop any cached "unavailable" verdict now
         embeddingService.clearUnavailableVerdict();
@@ -509,7 +551,7 @@ const AIModelsTab = memo(function AIModelsTab() {
       }
       catch { /* ignore */ }
     }, 800);
-  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled, embeddingMrl256Enabled]);
+  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled, embeddingMrl256Enabled, embeddingBatchSize]);
 
   useEffect(() => {
     if (initialLoadRef.current || !window.settings || !apiKey.trim()) { setSaveStatus('idle'); return; }
@@ -600,7 +642,7 @@ const AIModelsTab = memo(function AIModelsTab() {
   return (
     <div className="space-y-6">
       {/* Chat model — single source of truth for which LLM the app uses */}
-      <SectionHeading icon={Brain}>Chat model</SectionHeading>
+      <SectionHeading icon={Brain}>Which AI to use</SectionHeading>
       <SectionCard>
         <p className="text-xs text-white/35 mb-3">
           {betaFeatures
@@ -621,33 +663,35 @@ const AIModelsTab = memo(function AIModelsTab() {
             </SelectContent>
           </Select>
         ) : (
-          <p className="text-xs text-amber-400/80">Set an Ollama URL below to use local AI. Enable Beta features in General for cloud providers and the chat toolbar button.</p>
+          <p className="text-xs text-amber-400/80">Set an Ollama address below to use local AI. Enable Beta features in General for cloud providers and the chat toolbar button.</p>
         )}
       </SectionCard>
 
-      {/* Ollama */}
-      <SectionHeading icon={Bot}>Ollama (Local AI)</SectionHeading>
+      {/* Local AI (Ollama) */}
+      <SectionHeading icon={Bot}>Local AI (Ollama)</SectionHeading>
       <SectionCard>
         <div>
           <p className="text-sm font-medium text-white/90">Local AI with Ollama</p>
-          <p className="text-xs text-white/35 mt-0.5">Runs on your computer for privacy. Make sure Ollama is running.</p>
+          <p className="text-xs text-white/35 mt-0.5">Runs on your own computer, so nothing leaves your PC. Make sure Ollama is running.</p>
         </div>
         <div>
-          <label className="text-xs text-white/40 mb-1 block">Ollama URL</label>
+          <label className="text-xs text-white/40 mb-1 block">Ollama address</label>
           <Input type="text" value={ollamaUrl} onChange={(e) => setOllamaUrl(e.target.value)} placeholder="http://localhost:11434"
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
+          <p className="text-[11px] text-white/25 mt-1">Leave as is unless you run Ollama on another machine.</p>
         </div>
         <div>
-          <label className="text-xs text-white/40 mb-1 block">Model Name</label>
+          <label className="text-xs text-white/40 mb-1 block">Chat model</label>
           <Input type="text" value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} placeholder="gemma3:12b"
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
+          <p className="text-[11px] text-white/25 mt-1">The AI that chats with you and explains picks. Enter the Ollama model name.</p>
         </div>
         <div>
-          <label className="text-xs text-white/40 mb-1 block">Rerank model (Embedding Space)</label>
+          <label className="text-xs text-white/40 mb-1 block">Reranker model</label>
           <Input type="text" value={ollamaRerankModel} onChange={(e) => setOllamaRerankModel(e.target.value)} placeholder={DEFAULT_OLLAMA_RERANK_MODEL}
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
           <p className="text-[11px] text-white/25 mt-1">
-            Neighbor + Oracle shelf ordering via <code className="text-white/35">/api/rerank</code>. Run{' '}
+            A small helper AI that puts the best matches first. Install it with{' '}
             <code className="text-white/35">ollama pull {DEFAULT_OLLAMA_RERANK_MODEL}</code>
           </p>
           <div className="mt-2 flex items-center gap-2">
@@ -699,26 +743,65 @@ const AIModelsTab = memo(function AIModelsTab() {
             )}
           </div>
         </div>
+        <p className="text-xs text-white/25">Don&apos;t have Ollama? <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Download Ollama</a></p>
+      </SectionCard>
+
+      {/* Smarter ordering (rerank) */}
+      <SectionHeading icon={TrendingUp}>Smarter ordering</SectionHeading>
+      <SectionCard>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-sm text-white/70">Embedding Space neighbor rerank</p>
-            <p className="text-[11px] text-white/30 mt-0.5">Cross-encoder refinement for neighbor lists.</p>
+            <p className="text-sm text-white/70">Smarter similar-game ordering</p>
+            <p className="text-[11px] text-white/30 mt-0.5">
+              Uses the reranker to put the closest matches first in Similar Games and the galaxy map.
+            </p>
+            <p className="text-[10px] text-white/20 mt-0.5">Technical: cross-encoder rerank of Embedding Space neighbors.</p>
           </div>
           <Toggle value={neighborRerankEnabled} onChange={() => setNeighborRerankEnabled(!neighborRerankEnabled)} />
         </div>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-sm text-white/70">Oracle recommendation rerank</p>
-            <p className="text-[11px] text-white/30 mt-0.5">Reorder shelves after the scoring worker.</p>
+            <p className="text-sm text-white/70">Smarter recommendation ordering</p>
+            <p className="text-[11px] text-white/30 mt-0.5">
+              Lets the AI re-sort each Oracle shelf so the best picks for you come first.
+            </p>
           </div>
           <Toggle value={oracleRerankEnabled} onChange={() => setOracleRerankEnabled(!oracleRerankEnabled)} />
         </div>
-        <div className="flex items-center justify-between gap-3">
+        {oracleRerankEnabled && (
           <div>
-            <p className="text-sm text-white/70">Facet chunk embeddings</p>
+            <label className="text-xs text-white/40 mb-1 block">
+              How much the AI re-sorts recommendations ({Math.round(oracleRerankBlend * 100)}%)
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(oracleRerankBlend * 100)}
+              onChange={(e) => setOracleRerankBlend(Number(e.target.value) / 100)}
+              className="w-full accent-fuchsia-500"
+            />
+            <p className="text-[11px] text-white/25 mt-1">0% keeps the original order; 100% lets the AI fully decide.</p>
+          </div>
+        )}
+      </SectionCard>
+
+      {/* Game understanding (embeddings) */}
+      <SectionHeading icon={Layers}>Game understanding</SectionHeading>
+      <SectionCard>
+        <p className="text-xs text-white/35 -mt-1">
+          Ark has the AI read every game&apos;s description to learn what it&apos;s like. That powers Similar Games,
+          the galaxy map, and recommendations.
+        </p>
+        <EmbeddingBatchSizeControl value={embeddingBatchSize} onChange={setEmbeddingBatchSize} />
+        <div className="flex items-center justify-between gap-3 border-t border-white/[0.04] pt-4">
+          <div>
+            <p className="text-sm text-white/70">Detailed game understanding</p>
             <p className="text-[11px] text-white/30 mt-0.5">
-              Re-embed only changed facets (int8). Off = whole-text float writes.
+              Reads each part of a game (story, gameplay, style…) separately, and only re-reads parts that changed.
+              Off = one overall summary per game.
             </p>
+            <p className="text-[10px] text-white/20 mt-0.5">Technical: facet chunk embeddings, int8 storage.</p>
           </div>
           <Toggle
             value={embeddingChunkingEnabled}
@@ -727,10 +810,12 @@ const AIModelsTab = memo(function AIModelsTab() {
         </div>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-sm text-white/70">Chunk ANN max-sim</p>
+            <p className="text-sm text-white/70">Match on any part of a game&apos;s description</p>
             <p className="text-[11px] text-white/30 mt-0.5">
-              Embedding Space + Similar Games use multi-vector max-sim over facet chunks. Off = pooled-only. Oracle/graph stay pooled.
+              Similar Games and the galaxy map count two games as alike when any part lines up, not just the overall
+              summary. Recommendations aren&apos;t affected.
             </p>
+            <p className="text-[10px] text-white/20 mt-0.5">Technical: chunk ANN max-sim.</p>
           </div>
           <Toggle
             value={chunkAnnMaxSimEnabled}
@@ -739,10 +824,12 @@ const AIModelsTab = memo(function AIModelsTab() {
         </div>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-sm text-white/70">MRL-256 ANN vectors</p>
+            <p className="text-sm text-white/70">Compact mode (faster, slightly less precise)</p>
             <p className="text-[11px] text-white/30 mt-0.5">
-              Truncate cached embeddings to 256-d for ANN (faster index). Enabling clears the on-disk index — use Rebuild ANN after.
+              Stores a smaller fingerprint of each game so similarity searches run faster. Changing this clears the
+              similarity index, so rebuild it afterwards.
             </p>
+            <p className="text-[10px] text-white/20 mt-0.5">Technical: MRL-256 truncated ANN vectors.</p>
           </div>
           <Toggle
             value={embeddingMrl256Enabled}
@@ -752,10 +839,11 @@ const AIModelsTab = memo(function AIModelsTab() {
         {betaFeatures && (
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-sm text-white/70">Weight-sweep harness</p>
+              <p className="text-sm text-white/70">Matching tune-up test (advanced)</p>
               <p className="text-[11px] text-white/30 mt-0.5">
-                Synthetic neighbor-quality score over CHUNK_WEIGHTS perturbations. Does not change production weights without a recorded winner + pool version bump.
+                Tries alternative matching weights on a small test set and reports the score. Doesn&apos;t change anything on its own.
               </p>
+              <p className="text-[10px] text-white/20 mt-0.5">Technical: synthetic MRR sweep over CHUNK_WEIGHTS; needs a recorded winner + pool version bump to ship.</p>
               {weightSweepMsg && (
                 <p className="text-[11px] mt-0.5 text-white/40">{weightSweepMsg}</p>
               )}
@@ -808,13 +896,13 @@ const AIModelsTab = memo(function AIModelsTab() {
         )}
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-sm text-white/70">Rebuild ANN index</p>
+            <p className="text-sm text-white/70">Rebuild similarity index</p>
             <p className="text-[11px] text-white/30 mt-0.5">
-              Clear and rebuild neighbors from cached embeddings (no Ollama calls).
+              Re-creates the &quot;similar games&quot; lookup from what Ark already knows. Quick, and doesn&apos;t use the AI.
             </p>
-            {annRebuildStatus === 'building' && annRebuildProgress && (
+            {annRebuildBusy && annRebuildProgress && (
               <p className="text-[11px] mt-0.5 text-white/40">
-                {annRebuildProgress.done} / {annRebuildProgress.total} vectors
+                {annRebuildProgress.done} / {annRebuildProgress.total} games
               </p>
             )}
             {annRebuildMessage && (
@@ -830,7 +918,7 @@ const AIModelsTab = memo(function AIModelsTab() {
             type="button"
             variant="outline"
             size="sm"
-            disabled={annRebuildStatus === 'building'}
+            disabled={annRebuildBusy}
             onClick={async () => {
               setAnnRebuildStatus('building');
               setAnnRebuildMessage(null);
@@ -841,7 +929,7 @@ const AIModelsTab = memo(function AIModelsTab() {
               try {
                 const count = await embeddingService.rebuildAnnFromCache();
                 setAnnRebuildStatus('done');
-                setAnnRebuildMessage(`Rebuilt — ${count} vectors`);
+                setAnnRebuildMessage(`Rebuilt — ${count.toLocaleString()} games indexed`);
                 embeddingService.clearRechunkSuggestRebuildAnn();
                 setRechunkSuggestAnn(false);
                 console.log(`[Settings] ANN rebuild complete: ${count} vectors`);
@@ -857,19 +945,20 @@ const AIModelsTab = memo(function AIModelsTab() {
             }}
             className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
           >
-            {annRebuildStatus === 'building' ? (
+            {annRebuildBusy ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <RefreshCw className="h-3.5 w-3.5" />
             )}
-            <span className="ml-1.5">{annRebuildStatus === 'building' ? 'Rebuilding…' : 'Rebuild'}</span>
+            <span className="ml-1.5">{annRebuildBusy ? 'Rebuilding…' : 'Rebuild'}</span>
           </Button>
         </div>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-sm text-white/70">Re-chunk catalog (idle)</p>
+            <p className="text-sm text-white/70">Refresh detailed game understanding</p>
             <p className="text-[11px] text-white/30 mt-0.5">
-              Library first, then catalog — facet chunks with progress/cancel. Polite during sessions; respects the chunking kill switch.
+              Updates your library first, then the rest of the catalog. Runs gently while you play and can be cancelled.
+              Needs Detailed game understanding turned on.
             </p>
             {rechunkBusy && rechunkProgress.total > 0 && (
               <p className="text-[11px] mt-0.5 text-white/40">
@@ -884,7 +973,7 @@ const AIModelsTab = memo(function AIModelsTab() {
                   : 'text-emerald-400/60',
               )}>
                 {rechunkMessage}
-                {rechunkSuggestAnn ? ' — Rebuild ANN recommended.' : ''}
+                {rechunkSuggestAnn ? ' — Rebuilding the similarity index is recommended.' : ''}
               </p>
             )}
           </div>
@@ -903,7 +992,7 @@ const AIModelsTab = memo(function AIModelsTab() {
               type="button"
               variant="outline"
               size="sm"
-              disabled={!embeddingChunkingEnabled || annRebuildStatus === 'building'}
+              disabled={!embeddingChunkingEnabled || annRebuildBusy || forceReindexRunning}
               onClick={async () => {
                 setRechunkBusy(true);
                 setRechunkMessage(null);
@@ -929,21 +1018,20 @@ const AIModelsTab = memo(function AIModelsTab() {
               className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
             >
               <Layers className="h-3.5 w-3.5" />
-              <span className="ml-1.5">Re-chunk</span>
+              <span className="ml-1.5">Refresh</span>
             </Button>
           )}
         </div>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-sm text-white/70">Force re-index catalog embeddings</p>
+            <p className="text-sm text-white/70">Rebuild game understanding from scratch</p>
             <p className="text-[11px] text-white/30 mt-0.5">
-              Regenerates every Steam and Epic catalog embedding from scratch — use this if a progress bar
-              gets stuck or you suspect corrupted cached vectors. Your library, playtime, and journey data
-              are not touched.
+              Has the AI re-read every Steam and Epic game. Use it if a progress bar gets stuck or matches look
+              wrong. Takes a while. Your library, playtime, and journey are not touched.
             </p>
-            {forceReindexStatus === 'running' && forceReindexProgress && (
+            {forceReindexRunning && forceReindexProgress && (
               <p className="text-[11px] mt-0.5 text-white/40">
-                {forceReindexProgress.completed.toLocaleString()} / {forceReindexProgress.total.toLocaleString()} vectors
+                {forceReindexProgress.completed.toLocaleString()} / {forceReindexProgress.total.toLocaleString()} games
               </p>
             )}
             {forceReindexMessage && (
@@ -959,24 +1047,24 @@ const AIModelsTab = memo(function AIModelsTab() {
             type="button"
             variant="outline"
             size="sm"
-            disabled={forceReindexStatus === 'running'}
+            disabled={forceReindexRunning}
             onClick={() => setForceReindexConfirmOpen(true)}
             className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
           >
-            {forceReindexStatus === 'running' ? (
+            {forceReindexRunning ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <RotateCcw className="h-3.5 w-3.5" />
             )}
-            <span className="ml-1.5">{forceReindexStatus === 'running' ? 'Re-indexing…' : 'Force Re-index'}</span>
+            <span className="ml-1.5">{forceReindexRunning ? 'Rebuilding…' : 'Rebuild all'}</span>
           </Button>
         </div>
         <ConfirmDialog
           open={forceReindexConfirmOpen}
           onOpenChange={setForceReindexConfirmOpen}
-          title="Force Re-index Catalog Embeddings"
-          description="This will re-scan and regenerate every Steam and Epic catalog embedding from scratch. It can take a while and will use Ollama to re-embed the full catalog. Your library, playtime, and journey data are not affected. Continue?"
-          confirmText="Re-index"
+          title="Rebuild game understanding from scratch?"
+          description="The AI will re-read every Steam and Epic game. This can take a while and keeps Ollama busy until it's done. Your library, playtime, and journey are not affected. Continue?"
+          confirmText="Rebuild"
           cancelText="Cancel"
           variant="warning"
           onConfirm={async () => {
@@ -989,26 +1077,25 @@ const AIModelsTab = memo(function AIModelsTab() {
             });
 
             try {
-              // Cancel any in-flight background pass and wait for it to fully
-              // unwind, so it neither races this forced run over the same ANN
-              // index / progress fields nor hands its stale promise back.
-              await embeddingService.cancelCatalogEmbeddingsAndWait();
-
-              const steamSyncTs = await catalogStore.getLastSyncTimestamp();
-              const steamCount = await embeddingService.generateCatalogEmbeddings(
-                (onBatch) => catalogStore.getAllEntries(onBatch),
-                { storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs, force: true },
+              // Single service-level operation: cancels background passes + the
+              // re-chunk job, waits out any ANN backfill/rebuild, then runs both
+              // forced passes. Reports "done" only when BOTH finished.
+              const result = await embeddingService.forceReindexCatalog({
+                steam: {
+                  iterate: (onBatch) => catalogStore.getAllEntries(onBatch),
+                  lastSyncTimestamp: () => catalogStore.getLastSyncTimestamp(),
+                },
+                epic: {
+                  iterate: (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+                  lastSyncTimestamp: () => epicCatalogStore.getLastSyncTimestamp(),
+                },
+              });
+              setForceReindexStatus(result.complete ? 'done' : 'error');
+              setForceReindexMessage(describeForceReindexResult(result));
+              console.log(
+                `[Settings] Force re-index ${result.complete ? 'complete' : 'incomplete'}: ` +
+                `${result.steam} Steam (${result.steamOutcome}) + ${result.epic} Epic (${result.epicOutcome})`,
               );
-
-              const epicSyncTs = await epicCatalogStore.getLastSyncTimestamp();
-              const epicCount = await embeddingService.generateEpicCatalogEmbeddings(
-                (onBatch) => epicCatalogStore.getAllEntries(onBatch),
-                { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs, force: true },
-              );
-
-              setForceReindexStatus('done');
-              setForceReindexMessage(`Re-indexed — ${steamCount + epicCount} vectors regenerated`);
-              console.log(`[Settings] Force re-index complete: ${steamCount} Steam + ${epicCount} Epic`);
             } catch (err) {
               setForceReindexStatus('error');
               const detail = err instanceof Error ? err.message : String(err);
@@ -1020,28 +1107,11 @@ const AIModelsTab = memo(function AIModelsTab() {
             }
           }}
         />
-        {oracleRerankEnabled && (
-          <div>
-            <label className="text-xs text-white/40 mb-1 block">
-              Oracle rerank vs worker order ({Math.round(oracleRerankBlend * 100)}% rerank)
-            </label>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={Math.round(oracleRerankBlend * 100)}
-              onChange={(e) => setOracleRerankBlend(Number(e.target.value) / 100)}
-              className="w-full accent-fuchsia-500"
-            />
-            <p className="text-[11px] text-white/25 mt-1">0% keeps worker order; 100% uses the reranker fully.</p>
-          </div>
-        )}
         <div className="flex items-center gap-2 text-xs">
           {ollamaSaveStatus === 'saving' && <><Loader2 className="h-3 w-3 animate-spin text-white/40" /><span className="text-white/40">Saving...</span></>}
           {ollamaSaveStatus === 'saved' && <><Check className="h-3 w-3 text-emerald-400/60" /><span className="text-white/40">Saved</span></>}
           {ollamaSaveStatus === 'idle' && <span className="text-white/25">Changes save automatically</span>}
         </div>
-        <p className="text-xs text-white/25">Don&apos;t have Ollama? <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Download Ollama</a></p>
       </SectionCard>
 
       {/* Gemini — Beta only */}
@@ -1304,17 +1374,24 @@ const GuideTab = memo(function GuideTab({ onRunGuidedTour }: { onRunGuidedTour?:
 
 // ─── Features Tab ─────────────────────────────────────────────────────────────
 
-interface FeatureBlock { title: string; desc: string; icon: React.ElementType; color: string }
+interface FeatureBlock {
+  title: string;
+  desc: string;
+  /** Optional technical footnote, shown as a small muted line. */
+  tech?: string;
+  icon: React.ElementType;
+  color: string;
+}
 
 const CORE_FEATURES: FeatureBlock[] = [
-  { title: 'Unified Game Catalog', desc: 'Browse thousands of games from Steam and Epic Games Store in one place. Real-time sync pulls trending, top-selling, and new releases with full metadata including descriptions, screenshots, reviews, and pricing.', icon: Gamepad2, color: 'text-sky-400' },
-  { title: 'Smart Library Management', desc: 'Your personal collection with rich tracking — status (Playing, Completed, On Hold, Want to Play), ratings, notes, and play sessions. Collapsible status sections keep everything organized. Import/export as JSON for backups.', icon: Library, color: 'text-emerald-400' },
-  { title: 'AI-Powered Recommendations', desc: 'The Oracle engine combines a machine learning model (LightGBM trained on 41M reviews), vector similarity search (HNSW index on TF-IDF weighted genre embeddings), and optional LLM validation to surface games tailored to your taste.', icon: Brain, color: 'text-fuchsia-400' },
-  { title: '3D Embedding Space', desc: 'Every game is embedded as a vector based on its genres, themes, description, and developer. PCA projects these high-dimensional vectors into a 3D galaxy where similar games cluster as stars. Fly through it, click stars, traverse neighbors.', icon: Map, color: 'text-amber-400' },
-  { title: 'Live News Aggregation', desc: 'Transmissions pulls from 20+ RSS feeds and the Steam News API, deduplicates articles, extracts thumbnails, and presents a unified gaming news stream. Archive favorites, filter by gaming events, and read articles inline.', icon: Newspaper, color: 'text-rose-400' },
-  { title: 'Release Calendar', desc: 'Upcoming releases from Steam and Epic, organized by year, month, week, or day view. Today\'s releases appear first. Filter by store, browse by genre, and never miss a launch.', icon: Calendar, color: 'text-cyan-400' },
-  { title: 'Achievement System', desc: 'Earn medals for gaming milestones — play streaks, genre diversity, collection size, completion rate, and more. A heatmap visualizes your play streak across the year. Progress bars show how close you are to each badge.', icon: Trophy, color: 'text-yellow-400' },
-  { title: 'Event Intelligence', desc: 'Scheduled Broadcasts tracks 24 major gaming events (E3, Gamescom, TGA, etc.) by scraping their official websites for dates, YouTube, and Twitch links. Live countdowns, LIVE badges, and one-click stream access.', icon: Globe, color: 'text-violet-400' },
+  { title: 'Every Store in One Place', desc: 'Browse thousands of Steam and Epic games side by side, with trending, top sellers, and new releases kept up to date — descriptions, screenshots, reviews, and prices included.', icon: Gamepad2, color: 'text-sky-400' },
+  { title: 'Your Game Library', desc: 'Keep track of what you\'re playing, have finished, put on hold, or want to play next. Add ratings and notes, see your play sessions, and back everything up to a file whenever you like.', icon: Library, color: 'text-emerald-400' },
+  { title: 'Personal Recommendations', desc: 'The Oracle learns your taste from what you play and rate, then suggests games you\'ll probably love — each with a short reason why.', tech: 'LightGBM model trained on 41M reviews + HNSW similarity search, with optional AI double-checking.', icon: Brain, color: 'text-fuchsia-400' },
+  { title: 'Galaxy Map', desc: 'Every game is a star, and games that feel alike sit close together. Fly around, click a star, and hop to its neighbors to find hidden gems.', tech: 'Embedding Space: game embeddings projected to 3D with PCA.', icon: Map, color: 'text-amber-400' },
+  { title: 'Gaming News', desc: 'Transmissions gathers news from 20+ gaming sites and Steam into one feed, removes duplicates, and lets you save favorites and read articles without leaving Ark.', icon: Newspaper, color: 'text-rose-400' },
+  { title: 'Release Calendar', desc: 'See upcoming Steam and Epic launches by year, month, week, or day. Today\'s releases show first, and you can filter by store or genre so you never miss a launch.', icon: Calendar, color: 'text-cyan-400' },
+  { title: 'Medals', desc: 'Earn medals for milestones like play streaks, trying new genres, growing your collection, and finishing games. A yearly heatmap shows your streaks, and progress bars show how close you are to the next badge.', icon: Trophy, color: 'text-yellow-400' },
+  { title: 'Gaming Events', desc: 'Scheduled Broadcasts follows 24 big gaming shows (Gamescom, The Game Awards, and more) with dates, countdowns, a LIVE badge, and one-click links to the stream.', icon: Globe, color: 'text-violet-400' },
 ];
 
 const AI_EXPLAINER: { title: string; what: string; icon: React.ElementType }[] = [
@@ -1329,7 +1406,7 @@ const FeaturesTab = memo(function FeaturesTab() {
   return (
     <div className="space-y-8">
       <div>
-        <SectionHeading icon={Layers}>Core Features</SectionHeading>
+        <SectionHeading icon={Layers}>What Ark can do</SectionHeading>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {CORE_FEATURES.map((f) => (
             <div key={f.title} className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4 space-y-2 hover:border-white/[0.1] transition-colors">
@@ -1340,6 +1417,7 @@ const FeaturesTab = memo(function FeaturesTab() {
                 <h4 className="text-sm font-semibold text-white/90">{f.title}</h4>
               </div>
               <p className="text-xs text-white/40 leading-relaxed">{f.desc}</p>
+              {f.tech && <p className="text-[10px] text-white/20 leading-relaxed">{f.tech}</p>}
             </div>
           ))}
         </div>

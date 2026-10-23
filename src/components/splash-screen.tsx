@@ -33,6 +33,7 @@ import { rerankTierLabel, toRerankTier } from '@/services/oracle-rerank';
 import type { RerankSetupProgressEvent } from '@/services/embedding-service';
 import { SplashStatusPanel } from '@/components/system-status-panel';
 import { useDevMode } from '@/hooks/useDevMode';
+import { loadSafeMode } from '@/services/safe-mode';
 
 // Preload Dashboard and Voyage chunks — deferred until after the splash boot
 // animation has started to avoid competing with the main thread during init.
@@ -313,14 +314,24 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     // Rerank progress outlives splash — wire the status panel before deferred init.
     initRerankProgressListener();
 
+    // Crash-loop breaker: when main reports safe mode, skip every heavy
+    // background job below (catalog sync + embedding pipeline, galaxy
+    // precompute, ANN load, idle re-chunk, BM25 rebuild, reco compute) and
+    // just load the user's data. Resolves fast (single IPC, 1.5s cap).
+    const safeModePromise = loadSafeMode();
+    const whenNotSafe = <T,>(fn: () => T | Promise<T>): Promise<T | undefined> =>
+      safeModePromise.then(({ safeMode }) => (safeMode || cancelled ? undefined : fn()));
+
     // Defer heavy init work so the boot animation can paint without contention.
     // IDB reads, IPC calls, and catalog syncs starve setTimeout callbacks
     // when scheduled too early; 1500ms gives the first ~15 boot lines a
     // clear runway on the main thread.
     const initTimer = setTimeout(() => {
       systemStatus.init();
-      annIndex.load();
-      scheduleBackgroundPrecompute();
+      void whenNotSafe(() => {
+        annIndex.load();
+        scheduleBackgroundPrecompute();
+      });
       scheduleChunkPreload();
     }, 1500);
 
@@ -336,15 +347,16 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     // inside computeWithEmbeddings to ensure cached vectors are in memory
     // before the reco engine runs (prevents redundant Ollama calls and
     // ensures tasteCentroid is computed from existing embeddings).
-    const embeddingLoadPromise = embeddingService.loadCachedEmbeddings().then(count => {
-      if (count > 0) console.log(`[Splash] Loaded ${count} cached embeddings`);
-      return count;
+    const embeddingLoadPromise = whenNotSafe(() => embeddingService.loadCachedEmbeddings()).then(count => {
+      if (count && count > 0) console.log(`[Splash] Loaded ${count} cached embeddings`);
+      return count ?? 0;
     }).catch(() => 0);
 
     // Embedding-aware compute: pass callbacks so the reco engine generates
     // missing embeddings (Tier 1 library + Tier 2 catalog enrichment) during
     // its first run. Without these, Layer 6 (semantic similarity) is always 0.
     const computeWithEmbeddings = async () => {
+      if ((await safeModePromise).safeMode) return; // Oracle computes on demand
       await embeddingLoadPromise;
       recoStore.compute(
         async (games, signal) => {
@@ -470,7 +482,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     // Steam catalog sync — runs independently of Ollama availability.
     // Embedding gen below awaits this so they don't fight for IDB.
     // Non-blocking, skips if data is fresh (< 24h).
-    const steamSyncDone = catalogStore.sync().then(() => {
+    const steamSyncDone = whenNotSafe(() => catalogStore.sync()).then(() => {
       const p = catalogStore.syncProgress;
       if (p.gamesStored > 0) {
         console.log(`[Splash] Catalog ready: ${p.gamesStored.toLocaleString()} games`);
@@ -478,7 +490,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     }).catch((err) => { console.warn('[Splash] Catalog sync:', err); });
 
     // Epic catalog sync — runs independently of Ollama availability.
-    const epicSyncDone = epicCatalogStore.sync().then(() => {
+    const epicSyncDone = whenNotSafe(() => epicCatalogStore.sync()).then(() => {
       const p = epicCatalogStore.syncProgress;
       if (p.itemsStored > 0) {
         console.log(`[Splash] Epic catalog ready: ${p.itemsStored.toLocaleString()} games`);
@@ -486,9 +498,9 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     }).catch((err) => { console.warn('[Splash] Epic catalog sync:', err); });
 
     // BM25 lexical index — load/rebuild after catalogs settle (idle; non-blocking).
-    void Promise.all([steamSyncDone, epicSyncDone]).then(() => {
-      bm25Index.scheduleIdleRebuild();
-    });
+    void Promise.all([steamSyncDone, epicSyncDone]).then(() =>
+      whenNotSafe(() => bm25Index.scheduleIdleRebuild()),
+    );
 
     embeddingLoadPromise.then(() => {
       return embeddingService.isAvailable();
@@ -505,6 +517,11 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
 
       if (available) {
         (async () => {
+          // Safe mode: no catalog embedding pipeline / re-chunk this launch.
+          if ((await safeModePromise).safeMode) {
+            console.warn('[Splash] Safe mode — skipping catalog embedding pipeline and idle re-chunk');
+            return;
+          }
           // Wait for Steam catalog sync to finish — sync writes new entries to
           // IDB while embedding gen reads them. Running concurrent risks
           // scanning a partial catalog and re-scanning the rest on next launch.

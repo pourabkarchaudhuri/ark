@@ -79,6 +79,7 @@ import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { useChatAvailability } from '@/hooks/useChatAvailability';
 import { scheduleBackgroundPrecompute, getBuildStage, subscribeGalaxy } from '@/services/galaxy-cache';
+import { loadSafeMode } from '@/services/safe-mode';
 import { embeddingService } from '@/services/embedding-service';
 import { prewarmNews } from '@/services/news-service';
 import { prewarmEvents } from '@/services/event-resolver-service';
@@ -221,7 +222,8 @@ export function Dashboard() {
   const chatAvailability = useChatAvailability();
 
   // Background precompute for Embedding Space galaxy data (runs once, 20s after mount)
-  useEffect(() => { scheduleBackgroundPrecompute(); }, []);
+  // Not in crash-loop safe mode — the galaxy precompute is one of the heavy jobs it defers
+  useEffect(() => { void loadSafeMode().then((s) => { if (!s.safeMode) scheduleBackgroundPrecompute(); }); }, []);
 
   // Prewarm Transmissions data so news + events are cached before the user opens the tab
   useEffect(() => {

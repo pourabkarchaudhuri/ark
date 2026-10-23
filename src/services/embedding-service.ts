@@ -13,7 +13,7 @@
  */
 
 import { setEmbeddingCache } from './reco-store';
-import { annIndex } from './ann-index';
+import { annIndex, type AnnLease } from './ann-index';
 import { toCanonicalGenres } from '@/data/canonical-genres';
 import { extractFranchiseBase } from '@/services/franchise';
 import type { CatalogEntry } from '@/types/catalog';
@@ -1221,6 +1221,34 @@ async function bumpEmbeddingContentEpoch(): Promise<number> {
   return next;
 }
 
+/**
+ * Content-epoch throttle. Every bump invalidates the galaxy cache (and so a
+ * full galaxy rebuild on next view / background precompute); embedding passes
+ * used to bump once per 48-game group — ~3,200 bumps per forced pass. Writers
+ * now mark the content dirty and the epoch is bumped at most once per
+ * EPOCH_BUMP_MIN_INTERVAL_MS during a pass, plus once when the pass ends
+ * (`flushEmbeddingContentEpoch`).
+ */
+const EPOCH_BUMP_MIN_INTERVAL_MS = 5 * 60_000;
+let _epochDirty = false;
+let _epochDirtySince = 0;
+
+async function noteEmbeddingContentChanged(): Promise<void> {
+  const now = Date.now();
+  if (!_epochDirty) { _epochDirty = true; _epochDirtySince = now; }
+  if (now - _epochDirtySince >= EPOCH_BUMP_MIN_INTERVAL_MS) await flushEmbeddingContentEpoch();
+}
+
+/** Bump the epoch once if anything changed since the last bump (end of a pass). */
+export async function flushEmbeddingContentEpoch(): Promise<void> {
+  if (!_epochDirty) return;
+  _epochDirty = false;
+  try { await bumpEmbeddingContentEpoch(); } catch (err) {
+    _epochDirty = true;
+    console.warn('[EmbeddingService] content epoch bump failed:', err);
+  }
+}
+
 export async function getEmbeddingContentEpoch(): Promise<number> {
   if (_epochCache !== null) return _epochCache;
   const row = await getEmbeddingMeta<{ key: string; value: number }>(META_EPOCH_KEY);
@@ -1973,8 +2001,47 @@ const CATALOG_CHUNKED_GAMES_PER_CALL = 48;
 const CATALOG_FLAT_GAMES_PER_CALL = 100;
 /** Progress notifications are coalesced to at most one per this interval. */
 const PROGRESS_NOTIFY_MS = 1000;
+/**
+ * Max catalog entries (with their embedding text) held in memory at once by a
+ * pass. A forced pass used to hold all ~155k {entry,text,hash} objects; it now
+ * works through the catalog in windows of this size, re-scanning from a
+ * position cursor for each window.
+ */
+const CATALOG_PASS_WINDOW = 10_000;
+/** After a forced pass, heavy graph/galaxy rebuilds are deferred this long. */
+const POST_FORCED_PASS_COOLDOWN_MS = 3 * 60_000;
+/** Renderer heap usage above this ratio defers galaxy / graph builds. */
+export const HEAP_PRESSURE_RATIO = 0.6;
+
+/**
+ * Renderer JS heap usage (used / limit), or null where `performance.memory`
+ * is unavailable. Shared memory gate for the galaxy and graph builds.
+ */
+export function rendererHeapUsageRatio(): number | null {
+  try {
+    const mem = (performance as unknown as { memory?: { usedJSHeapSize?: number; jsHeapSizeLimit?: number } }).memory;
+    if (mem && mem.usedJSHeapSize && mem.jsHeapSizeLimit) return mem.usedJSHeapSize / mem.jsHeapSizeLimit;
+  } catch { /* not available */ }
+  return null;
+}
+
+export function isRendererHeapPressureHigh(ratio = HEAP_PRESSURE_RATIO): boolean {
+  const r = rendererHeapUsageRatio();
+  return r !== null && r > ratio;
+}
 
 type CatalogSource = 'steam' | 'epic';
+/** How a catalog pass ended — lets Force Re-index tell "done" from "paused". */
+export type CatalogPassOutcome = 'done' | 'skipped' | 'cancelled' | 'tripped' | 'unavailable' | 'error';
+
+export interface ForceReindexResult {
+  steam: number;
+  epic: number;
+  /** Both forced passes ran to the end. */
+  complete: boolean;
+  steamOutcome: CatalogPassOutcome;
+  epicOutcome: CatalogPassOutcome;
+}
 
 interface CatalogPassState {
   abort: AbortController | null;
@@ -2457,9 +2524,10 @@ class EmbeddingService {
 
       if (needsEmbedding.length === 0) {
         console.log('[EmbeddingService] All embeddings already cached');
-        // Backfill ANN if empty (parity with catalog path — cached library + empty ANN → self-only neighbors)
-        if (!annIndex.isReady) {
-          await this._backfillAnnIndex();
+        // Backfill ANN if empty / partial (parity with catalog path — cached library + empty ANN → self-only neighbors).
+        // Single-flight: joins a running backfill/rebuild instead of starting a second one.
+        if (annIndex.needsBackfill) {
+          await this._ensureAnnBackfill();
         }
         this._setLibraryStatus('ready');
         return 0;
@@ -2480,6 +2548,11 @@ class EmbeddingService {
 
       for (let i = 0; i < needsEmbedding.length; i += BATCH_SIZE) {
         if (shouldStop()) break;
+        // Don't embed into a running ANN rebuild — wait for it at the batch boundary.
+        if (annIndex.isLeased) {
+          await annIndex.waitForLease(callerSignal ?? librarySignal);
+          if (shouldStop()) break;
+        }
 
         const batch = needsEmbedding.slice(i, i + BATCH_SIZE);
         let requested = 0;
@@ -2518,7 +2591,7 @@ class EmbeddingService {
                   .map(e => ({ id: e.gameId, vector: e.embedding! })),
               );
             } catch { /* ANN not ready yet */ }
-            await bumpEmbeddingContentEpoch();
+            await noteEmbeddingContentChanged();
           }
         } else {
           const res = await embedAndPersistChunkedGames('lib', LIBRARY_STORE, batch.map((item) => ({
@@ -2551,7 +2624,7 @@ class EmbeddingService {
               console.warn(`[EmbeddingService] Library chunk write failed for ${item.game.id}: ${outcome.error}`);
             }
           }
-          if (wrote > 0) await bumpEmbeddingContentEpoch();
+          if (wrote > 0) await noteEmbeddingContentChanged();
           setEmbeddingCache(embeddingCacheRef);
         }
 
@@ -2592,6 +2665,7 @@ class EmbeddingService {
       return 0;
     } finally {
       this._libraryAbort = null;
+      await flushEmbeddingContentEpoch();
     }
   }
 
@@ -2674,10 +2748,18 @@ class EmbeddingService {
    */
   async cancelCatalogEmbeddingsAndWait(): Promise<void> {
     this.cancelCatalogEmbeddings();
-    const pending = [this._passes.steam.promise, this._passes.epic.promise].filter(
-      (p): p is Promise<number> => p !== null,
-    );
+    // The re-chunk job writes the same ANN ids / chunk rows — stop it too.
+    this.cancelRechunkJob();
+    const pending: Array<Promise<unknown>> = [
+      this._passes.steam.promise,
+      this._passes.epic.promise,
+      this._rechunkPromise,
+    ].filter((p): p is Promise<number> => p !== null);
     await Promise.allSettled(pending);
+    // A running ANN backfill/rebuild is not cancellable mid-way (a half-built
+    // index must not be left behind) — wait for it so the caller starts clean.
+    const annJob = this._annJobPromise;
+    if (annJob) { try { await annJob; } catch { /* surfaced by its own caller */ } }
   }
 
   /** Cancel an in-flight library embedding run. */
@@ -2823,6 +2905,8 @@ class EmbeddingService {
 
       const yieldPolite = async () => {
         await this._awaitIfPaused(signal);
+        // Pause while an ANN rebuild/backfill holds the write lease.
+        if (annIndex.isLeased) await annIndex.waitForLease(signal);
         // Pause while a game session is active (reuse embedding polite mid-pass).
         for (;;) {
           if (signal.aborted) return;
@@ -2910,7 +2994,7 @@ class EmbeddingService {
               ledger.clear(ledgerKey);
               if (pooled) {
                 item.onPooled?.(pooled);
-                await bumpEmbeddingContentEpoch();
+                await noteEmbeddingContentChanged();
                 await persistWm(advanceRechunkCursor(wm, item.id, 'success'));
                 successesSinceSave++;
                 await maybeSaveAnn();
@@ -3085,8 +3169,8 @@ class EmbeddingService {
         this._rechunkStatus = 'done';
         this._rechunkSuggestRebuildAnn = wm.successCount > 0;
         this._rechunkMessage = wm.successCount > 0
-          ? `Re-chunk complete — ${wm.successCount} games written. Rebuild ANN recommended.`
-          : 'Re-chunk complete — all games already had facet chunks.';
+          ? `Refreshed ${wm.successCount.toLocaleString()} games. Rebuild the similarity index to use them.`
+          : 'All games were already up to date.';
         this._notify();
         return {
           status: 'done',
@@ -3124,6 +3208,7 @@ class EmbeddingService {
         suggestRebuildAnn: false,
       };
     } finally {
+      await flushEmbeddingContentEpoch();
       this._rechunkAbort = null;
       this._rechunkRunning = false;
       this._rechunkPromise = null;
@@ -3172,8 +3257,11 @@ class EmbeddingService {
         shortDescription: entry.shortDescription,
         source: 'steam',
       }),
-      resume: () => this.generateCatalogEmbeddings(catalogIterator, opts),
-    }));
+      // Breaker resume is NEVER forced: a forced pass that tripped used to
+      // restart from zero on every recovery, forever. The resumed pass skips
+      // entries already re-embedded (hash match) and finishes the rest.
+      resume: () => this.generateCatalogEmbeddings(catalogIterator, { ...opts, force: false }),
+    }), { supersede: opts?.force === true });
   }
 
   /**
@@ -3208,9 +3296,9 @@ class EmbeddingService {
           longDescription: entry.longDescription,
           source: 'epic',
         }),
-        resume: () => this.generateEpicCatalogEmbeddings(epicIterator, opts),
+        resume: () => this.generateEpicCatalogEmbeddings(epicIterator, { ...opts, force: false }),
       });
-    });
+    }, { supersede: opts?.force === true });
   }
 
   /**
@@ -3224,9 +3312,15 @@ class EmbeddingService {
   private _startCatalogPass(
     which: CatalogSource,
     runner: (signal: AbortSignal) => Promise<number>,
+    opts?: { supersede?: boolean },
   ): Promise<number> {
     const pass = this._passes[which];
-    if (pass.promise && pass.abort && !pass.abort.signal.aborted) return pass.promise;
+    if (pass.promise && pass.abort && !pass.abort.signal.aborted) {
+      // A forced run must not be absorbed by a live (non-forced) background
+      // run — that is how Force Re-index reported "done" for work it never did.
+      if (!opts?.supersede) return pass.promise;
+      pass.abort.abort();
+    }
 
     const prior = pass.promise;
     const controller = new AbortController();
@@ -3279,22 +3373,28 @@ class EmbeddingService {
     const { which, signal, storeKey, lastSyncTimestamp, force } = cfg;
     const pass = this._passes[which];
     const label = which === 'steam' ? 'Catalog' : 'Epic catalog';
+    /** Build-progress owner token — only this pass may update / finish its reading. */
+    const progressOwner = `catalog:${which}`;
     const setProgress = (p: { completed: number; total: number }) => {
       if (which === 'steam') this._steamCatalogProgress = p;
       else this._epicCatalogProgress = p;
     };
+    const setOutcome = (o: CatalogPassOutcome) => { this._lastPassOutcome[which] = o; };
 
     if (!(await this.isAvailable()) || signal.aborted) {
       // Turned away because the other source's pass tripped the breaker: queue this
       // pass for the recovery resume too, or it would be skipped for the session.
       if (this._breakerOpen && !signal.aborted) this._breakerResume[which] = cfg.resume;
       this._resetProgressIfStale(which);
+      setOutcome(signal.aborted ? 'cancelled' : 'unavailable');
       return 0;
     }
 
     pass.running = true;
+    if (force) this._forcedPassesRunning++;
     this._notify();
 
+    let skipIndex: Awaited<ReturnType<typeof getCatalogSkipIndex>> | null = null;
     try {
       // ─── Watermark short-circuit ──────────────────────────────────────────
       // If the source catalog hasn't been re-synced since our last embedding
@@ -3311,49 +3411,81 @@ class EmbeddingService {
 
       if (canSkipScan) {
         console.log(`[EmbeddingService] ${label} unchanged since last pass — skipping scan (${storeKey})`);
-        if (!annIndex.isReady) {
-          await this._backfillAnnIndex();
+        if (annIndex.needsBackfill) {
+          await this._ensureAnnBackfill();
         }
-        annIndex.finishBuild();
+        annIndex.finishBuild(progressOwner);
         this._resetProgressIfStale(which);
+        setOutcome('skipped');
         return 0;
       }
 
       const chunkingEnabled = await isEmbeddingChunkingEnabled();
-      const skipIndex = await getCatalogSkipIndex(which === 'steam' ? 'steam-' : 'epic-');
+      skipIndex = await getCatalogSkipIndex(which === 'steam' ? 'steam-' : 'epic-');
+      const skip = skipIndex;
       const ledger = await getEmbedFailureLedger();
 
-      const needsEmbedding: Array<{ id: string; text: string; hash: string; entry: E }> = [];
+      type Need = { id: string; text: string; hash: string; entry: E };
       const refreshTimestampIds: string[] = [];
       let scannedTotal = 0;
       let poisonSkipped = 0;
+      let totalNeeds = 0;
+      /** Set when the catalog changed size between window scans (positions may have shifted). */
+      let catalogShifted = false;
       const refreshCutoff = Date.now() - TTL_REFRESH_THRESHOLD_MS;
 
-      await cfg.iterate((batch) => {
-        for (const entry of batch) {
-          const id = cfg.idOf(entry);
-          const text = cfg.textOf(entry);
-          const hash = hashText(text);
-          const existing = skipIndex.get(id);
-          if (!force && shouldSkipPooled(existing, hash)) {
-            // Same content — just touch the timestamp if it's getting stale.
-            const ts = existing?.timestamp ?? 0;
-            if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
-            continue;
+      /**
+       * Scan the catalog from scan position `fromPos`, keeping at most
+       * CATALOG_PASS_WINDOW entries that need embedding (a forced pass used to
+       * hold every catalog entry + its text at once). Returns the window and
+       * the scan position of the first need that did not fit (null = none
+       * left). The first scan also counts every need (progress total) and
+       * collects TTL refreshes; later scans skip everything before `fromPos`
+       * without building its text.
+       */
+      const scanWindow = async (fromPos: number): Promise<{ window: Need[]; nextPos: number | null }> => {
+        const first = fromPos === 0;
+        const window: Need[] = [];
+        let pos = 0;
+        let nextPos: number | null = null;
+        await cfg.iterate((batch) => {
+          for (const entry of batch) {
+            const p = pos++;
+            if (p < fromPos) continue;
+            if (!first && nextPos !== null) continue;
+            const id = cfg.idOf(entry);
+            const text = cfg.textOf(entry);
+            const hash = hashText(text);
+            const existing = skip.get(id);
+            if (!force && shouldSkipPooled(existing, hash)) {
+              // Same content — just touch the timestamp if it's getting stale.
+              if (first) {
+                const ts = existing?.timestamp ?? 0;
+                if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
+              }
+              continue;
+            }
+            if (!force && ledger.isPoisoned(`cat:${id}`, hash)) {
+              if (first) poisonSkipped++;
+              continue;
+            }
+            if (first) totalNeeds++;
+            if (nextPos !== null) continue;
+            if (window.length < CATALOG_PASS_WINDOW) window.push({ id, text, hash, entry });
+            else nextPos = p;
           }
-          if (!force && ledger.isPoisoned(`cat:${id}`, hash)) {
-            poisonSkipped++;
-            continue;
-          }
-          needsEmbedding.push({ id, text, hash, entry });
-        }
-        scannedTotal += batch.length;
-      });
+        });
+        if (first) scannedTotal = pos;
+        else if (pos !== scannedTotal) catalogShifted = true;
+        return { window, nextPos };
+      };
 
-      skipIndex.clear();
+      let { window: needsEmbedding, nextPos } = await scanWindow(0);
+
       if (signal.aborted) {
         console.log(`[EmbeddingService] ${label} embeddings cancelled`);
         this._resetProgressIfStale(which);
+        setOutcome('cancelled');
         return 0;
       }
       if (poisonSkipped > 0) {
@@ -3367,17 +3499,17 @@ class EmbeddingService {
           .catch(() => { /* non-fatal */ });
       }
 
-      if (needsEmbedding.length === 0) {
+      if (totalNeeds === 0) {
         console.log(`[EmbeddingService] All ${scannedTotal} ${label} embeddings already cached`);
         // Reflect the scanned total so the status widget shows "N vectors"
         // instead of a stale/blank {0,0} after a no-op pass.
         setProgress({ completed: scannedTotal, total: scannedTotal });
         this._notify();
-        // Backfill ANN index if it's empty (e.g. first launch after ANN was added, or index file deleted)
-        if (!annIndex.isReady) {
-          await this._backfillAnnIndex();
+        // Backfill ANN index if it's empty / partial (e.g. first launch after ANN was added, or index file deleted)
+        if (annIndex.needsBackfill) {
+          await this._ensureAnnBackfill();
         }
-        annIndex.finishBuild();
+        annIndex.finishBuild(progressOwner);
         // Write watermark — scan was clean, no work needed for current sync state.
         if (lastSyncTimestamp > 0) {
           await setEmbeddingMeta<EmbeddingPassWatermark>({
@@ -3387,14 +3519,22 @@ class EmbeddingService {
             completedAt: Date.now(),
           });
         }
+        setOutcome('done');
         return 0;
       }
 
+      // The ANN index must already hold everything cached before this pass
+      // adds to it — otherwise the end-of-pass save would persist an index
+      // that is missing every vector not touched by this pass.
+      if (annIndex.needsBackfill) {
+        await this._ensureAnnBackfill();
+      }
+
       console.log(
-        `[EmbeddingService] Generating ${needsEmbedding.length} ${label} embeddings ` +
-        `(chunking=${chunkingEnabled ? 'on' : 'off'})...`,
+        `[EmbeddingService] Generating ${totalNeeds} ${label} embeddings ` +
+        `(chunking=${chunkingEnabled ? 'on' : 'off'}${nextPos !== null ? `, windows of ${CATALOG_PASS_WINDOW}` : ''})...`,
       );
-      setProgress({ completed: 0, total: needsEmbedding.length });
+      setProgress({ completed: 0, total: totalNeeds });
       this._notify();
 
       const groupSize = chunkingEnabled ? CATALOG_CHUNKED_GAMES_PER_CALL : CATALOG_FLAT_GAMES_PER_CALL;
@@ -3423,115 +3563,137 @@ class EmbeddingService {
         }
       };
 
-      for (let i = 0; i < needsEmbedding.length; i += groupSize) {
-        await this._awaitIfPaused(signal);
-        if (signal.aborted) break;
-
-        const batch = needsEmbedding.slice(i, i + groupSize);
-        const gameFailures: Array<{ key: string; hash: string }> = [];
-        let requested = 0;
-        let returned = 0;
-
-        if (!chunkingEnabled) {
-          const items = batch.map(b => ({ id: b.id, text: b.text }));
-          const { results, transient } = await generateEmbeddingsReportingTransient(items);
-          requested = items.length;
-          const batchEntries: CachedEmbedding[] = [];
-          for (const item of batch) {
-            if (results[item.id]) {
-              batchEntries.push({
-                gameId: item.id,
-                embedding: results[item.id],
-                textHash: item.hash,
-                timestamp: Date.now(),
-                format: 'f32',
-              });
-            } else if (transient.has(item.id)) {
-              unresolvedFailures++; // not the game's fault — no strike, but retry before advancing the watermark
-            } else {
-              gameFailures.push({ key: `cat:${item.id}`, hash: item.hash });
-            }
+      windows: for (;;) {
+        for (let i = 0; i < needsEmbedding.length; i += groupSize) {
+          await this._awaitIfPaused(signal);
+          if (signal.aborted) break windows;
+          // An ANN rebuild/backfill holds the write lease — pause here at the
+          // group boundary instead of embedding into it.
+          if (annIndex.isLeased) {
+            await annIndex.waitForLease(signal);
+            if (signal.aborted) break windows;
           }
-          returned = batchEntries.length;
-          if (batchEntries.length > 0) {
-            try {
-              await saveCachedEmbeddings(batchEntries, CATALOG_STORE);
-              totalGenerated += batchEntries.length;
-              for (const e of batchEntries) ledger.clear(`cat:${e.gameId}`);
+
+          const batch = needsEmbedding.slice(i, i + groupSize);
+          const gameFailures: Array<{ key: string; hash: string }> = [];
+          let requested = 0;
+          let returned = 0;
+
+          if (!chunkingEnabled) {
+            const items = batch.map(b => ({ id: b.id, text: b.text }));
+            const { results, transient } = await generateEmbeddingsReportingTransient(items);
+            requested = items.length;
+            const batchEntries: CachedEmbedding[] = [];
+            for (const item of batch) {
+              if (results[item.id]) {
+                batchEntries.push({
+                  gameId: item.id,
+                  embedding: results[item.id],
+                  textHash: item.hash,
+                  timestamp: Date.now(),
+                  format: 'f32',
+                });
+              } else if (transient.has(item.id)) {
+                unresolvedFailures++; // not the game's fault — no strike, but retry before advancing the watermark
+              } else {
+                gameFailures.push({ key: `cat:${item.id}`, hash: item.hash });
+              }
+            }
+            returned = batchEntries.length;
+            if (batchEntries.length > 0) {
               try {
-                await annIndex.addVectors(
-                  batchEntries
-                    .filter(e => e.embedding)
-                    .map(e => ({ id: e.gameId, vector: e.embedding! })),
-                );
-              } catch { /* ANN not ready yet — non-fatal */ }
-              await bumpEmbeddingContentEpoch();
-            } catch (err) {
-              writeFailures += batchEntries.length;
-              console.warn(`[EmbeddingService] ${label} float persist failed:`, err);
+                await saveCachedEmbeddings(batchEntries, CATALOG_STORE);
+                totalGenerated += batchEntries.length;
+                for (const e of batchEntries) ledger.clear(`cat:${e.gameId}`);
+                try {
+                  await annIndex.addVectors(
+                    batchEntries
+                      .filter(e => e.embedding)
+                      .map(e => ({ id: e.gameId, vector: e.embedding! })),
+                  );
+                } catch { /* ANN not ready yet — non-fatal */ }
+                await noteEmbeddingContentChanged();
+              } catch (err) {
+                writeFailures += batchEntries.length;
+                console.warn(`[EmbeddingService] ${label} float persist failed:`, err);
+              }
             }
-          }
-        } else {
-          const res = await embedAndPersistChunkedGames('cat', CATALOG_STORE, batch.map((item) => ({
-            gameId: item.id,
-            wholeHash: item.hash,
-            chunkInput: cfg.chunkInputOf(item.entry),
-          })));
-          requested = res.requested;
-          returned = res.returned;
-          let wrote = 0;
-          for (const item of batch) {
-            const outcome = res.outcomes.get(item.id);
-            if (!outcome || outcome.status === 'empty') continue;
-            if (outcome.status === 'ok') {
-              // ANN upsert (pooled + chunks) happens inside embedAndPersistChunkedGames
-              totalGenerated++;
-              wrote++;
-              ledger.clear(`cat:${item.id}`);
-            } else if (outcome.status === 'embed-failed') {
-              if (outcome.transient) unresolvedFailures++; // retry later, no strike
-              else gameFailures.push({ key: `cat:${item.id}`, hash: item.hash });
-            } else {
-              writeFailures++;
-              console.warn(`[EmbeddingService] ${label} chunk write failed for ${item.id}: ${outcome.error}`);
-            }
-          }
-          if (wrote > 0) await bumpEmbeddingContentEpoch();
-        }
-
-        // ── Circuit breaker / poison bookkeeping ──
-        if (requested > 0 && returned === 0) {
-          consecutiveFailedCalls++;
-          failureStreak.push(...gameFailures);
-          // A whole multi-game call can take its full timeout (120 s + 4 s/text) to fail, so
-          // waiting for CIRCUIT_BREAKER_THRESHOLD of them meant ~1.5 h on a hung Ollama. Ask a
-          // one-text probe right away: dead → trip now; alive → the games themselves failed.
-          if (consecutiveFailedCalls >= CIRCUIT_BREAKER_THRESHOLD || !(await this._probeOllamaEmbedding())) {
-            tripped = true;
           } else {
+            const res = await embedAndPersistChunkedGames('cat', CATALOG_STORE, batch.map((item) => ({
+              gameId: item.id,
+              wholeHash: item.hash,
+              chunkInput: cfg.chunkInputOf(item.entry),
+            })));
+            requested = res.requested;
+            returned = res.returned;
+            let wrote = 0;
+            for (const item of batch) {
+              const outcome = res.outcomes.get(item.id);
+              if (!outcome || outcome.status === 'empty') continue;
+              if (outcome.status === 'ok') {
+                // ANN upsert (pooled + chunks) happens inside embedAndPersistChunkedGames
+                totalGenerated++;
+                wrote++;
+                ledger.clear(`cat:${item.id}`);
+              } else if (outcome.status === 'embed-failed') {
+                if (outcome.transient) unresolvedFailures++; // retry later, no strike
+                else gameFailures.push({ key: `cat:${item.id}`, hash: item.hash });
+              } else {
+                writeFailures++;
+                console.warn(`[EmbeddingService] ${label} chunk write failed for ${item.id}: ${outcome.error}`);
+              }
+            }
+            if (wrote > 0) await noteEmbeddingContentChanged();
+          }
+
+          // ── Circuit breaker / poison bookkeeping ──
+          if (requested > 0 && returned === 0) {
+            consecutiveFailedCalls++;
+            failureStreak.push(...gameFailures);
+            // A whole multi-game call can take its full timeout (120 s + 4 s/text) to fail, so
+            // waiting for CIRCUIT_BREAKER_THRESHOLD of them meant ~1.5 h on a hung Ollama. Ask a
+            // one-text probe right away: dead → trip now; alive → the games themselves failed.
+            if (consecutiveFailedCalls >= CIRCUIT_BREAKER_THRESHOLD || !(await this._probeOllamaEmbedding())) {
+              tripped = true;
+            } else {
+              consecutiveFailedCalls = 0;
+              commitFailures(failureStreak);
+              failureStreak = [];
+            }
+          } else if (requested > 0) {
+            // Ollama is answering — failures in this call (and the streak
+            // before it) belong to the games themselves.
             consecutiveFailedCalls = 0;
             commitFailures(failureStreak);
+            commitFailures(gameFailures);
             failureStreak = [];
+          } else {
+            commitFailures(gameFailures);
           }
-        } else if (requested > 0) {
-          // Ollama is answering — failures in this call (and the streak
-          // before it) belong to the games themselves.
-          consecutiveFailedCalls = 0;
-          commitFailures(failureStreak);
-          commitFailures(gameFailures);
-          failureStreak = [];
-        } else {
-          commitFailures(gameFailures);
+
+          completed += batch.length;
+          const total = Math.max(totalNeeds, completed);
+          setProgress({ completed, total });
+          annIndex.setBuildProgress(completed, total, progressOwner);
+          this._notifyProgress();
+
+          if (tripped) break windows;
+          await idleYield(IDLE_DELAY_MS);
         }
 
-        completed += batch.length;
-        setProgress({ completed, total: needsEmbedding.length });
-        annIndex.setBuildProgress(completed, needsEmbedding.length);
-        this._notifyProgress();
-
-        if (tripped) break;
-        await idleYield(IDLE_DELAY_MS);
+        if (nextPos === null) break;
+        // Release this window before reading the next one.
+        needsEmbedding = [];
+        const next = await scanWindow(nextPos);
+        needsEmbedding = next.window;
+        nextPos = next.nextPos;
+        if (needsEmbedding.length === 0 || signal.aborted) break;
       }
+      needsEmbedding = [];
+
+      // Positions shifted between window scans (catalog synced mid-pass):
+      // some entries may have been skipped — don't advance the watermark.
+      if (catalogShifted) unresolvedFailures++;
 
       // A trailing all-failed call (e.g. a re-run where only bad games are
       // left) never sees a later success to prove Ollama is fine. Ask with a
@@ -3549,9 +3711,10 @@ class EmbeddingService {
           'stopping this pass; it resumes automatically once Ollama answers again',
         );
         if (totalGenerated > 0 && annIndex.vectorCount > 0) await annIndex.save();
-        annIndex.finishBuild();
+        annIndex.finishBuild(progressOwner);
         setProgress({ completed: 0, total: 0 });
         this._notify();
+        setOutcome('tripped');
         this._tripCircuitBreaker(which, cfg.resume);
         return totalGenerated;
       }
@@ -3560,21 +3723,23 @@ class EmbeddingService {
         // Cancelled mid-run — don't report a misleading partial vector count
         // once embRunning goes false; fall back to idle so this pass reads as
         // unambiguously retryable rather than "stuck".
-        annIndex.finishBuild();
+        annIndex.finishBuild(progressOwner);
         setProgress({ completed: 0, total: 0 });
         this._notify();
+        setOutcome('cancelled');
         console.log(`[EmbeddingService] ${label} embeddings cancelled`);
         return totalGenerated;
       }
 
       this._notifyProgress(true);
 
-      // Persist the updated ANN index to disk
+      // Persist the updated ANN index to disk. Waits out a running rebuild
+      // (lease) and is refused by main while the index is still partial.
       if (totalGenerated > 0 && annIndex.vectorCount > 0) {
-        await annIndex.save({ force: true }); // on disk before the watermark below
-        console.log(`[EmbeddingService] ANN index saved (${label}): ${annIndex.vectorCount} vectors`);
+        const saved = await annIndex.save({ force: true }); // on disk before the watermark below
+        if (saved) console.log(`[EmbeddingService] ANN index saved (${label}): ${annIndex.vectorCount} vectors`);
       }
-      annIndex.finishBuild();
+      annIndex.finishBuild(progressOwner);
 
       // Games that failed only inside all-null calls at the very end are
       // ambiguous (Ollama vs game) — retry them next time, don't count them.
@@ -3596,6 +3761,7 @@ class EmbeddingService {
         );
       }
 
+      setOutcome('done');
       console.log(`[EmbeddingService] ${label} embeddings done: ${totalGenerated} generated`);
       return totalGenerated;
     } catch (err) {
@@ -3605,9 +3771,18 @@ class EmbeddingService {
       // Never leave a partial completed<total reading once embRunning flips
       // false — this is the exit path a bug used to leave permanently wedged.
       setProgress({ completed: 0, total: 0 });
-      annIndex.finishBuild();
+      annIndex.finishBuild(progressOwner);
+      setOutcome(signal.aborted ? 'cancelled' : 'error');
       return 0;
     } finally {
+      skipIndex?.clear();
+      skipIndex = null;
+      if (force) {
+        this._forcedPassesRunning = Math.max(0, this._forcedPassesRunning - 1);
+        this._lastForcedPassEndedAt = Date.now();
+      }
+      // One content-epoch bump per pass (not per group) — see noteEmbeddingContentChanged.
+      await flushEmbeddingContentEpoch();
       pass.running = false;
       this._notify();
     }
@@ -3621,11 +3796,12 @@ class EmbeddingService {
    * transactions go inactive after a turn of the event loop (TransactionInactiveError).
    * Collect decoded rows with sync continue (paged by key), then flush outside the tx.
    */
-  private async _backfillAnnIndex(): Promise<void> {
+  private async _backfillAnnIndexUnderLease(lease: AnnLease): Promise<number> {
     await migrateEmbeddingsFromIdbIfNeeded();
     if (useLevelDB()) {
-      return this._backfillAnnIndexLevel();
+      return this._backfillAnnIndexLevel(lease);
     }
+    const owner = lease.owner;
     const db = await getDB();
     const now = Date.now();
     const seen = new Set<string>();
@@ -3658,7 +3834,7 @@ class EmbeddingService {
       countStore(CHUNK_STORE),
     ]);
     const progressTotal = Math.max(1, libCount + catCount + chunkCount);
-    annIndex.setBuildProgress(0, progressTotal);
+    annIndex.setBuildProgress(0, progressTotal, owner);
     let pooledSent = 0;
     let chunkSent = 0;
 
@@ -3718,11 +3894,11 @@ class EmbeddingService {
     ): Promise<void> => {
       // addVectors is IPC — only called outside IDB transactions.
       for (const chunk of partitionEmbeddingRowsForAnnBackfill(rows, ANN_BACKFILL_FLUSH_BATCH)) {
-        await annIndex.addVectors(chunk);
+        await annIndex.addVectors(chunk, { lease });
         sent += chunk.length;
         if (kind === 'pooled') pooledSent += chunk.length;
         else chunkSent += chunk.length;
-        annIndex.setBuildProgress(sent, progressTotal);
+        annIndex.setBuildProgress(sent, Math.max(progressTotal, sent + 1), owner);
         await yieldToEventLoop();
       }
     };
@@ -3752,21 +3928,10 @@ class EmbeddingService {
       // contain `::`), streamed page by page instead of all at once.
       await streamChunkVectorsForAnn((rows) => flushRows(rows, 'chunk'));
 
-      annIndex.setBuildProgress(sent, Math.max(sent, 1));
-
-      if (sent > 0) {
-        const saved = await annIndex.save({ force: true }); // end of backfill
-        // Only hard-fail when ANN IPC exists but save refused — absent ANN is soft-degrade.
-        if (!saved && typeof window !== 'undefined' && window.ann) {
-          throw new Error('ANN index save failed after backfill');
-        }
-        console.log(
-          `[EmbeddingService] ANN index backfilled: ${sent} vectors ` +
-            `(${pooledSent} pooled + ${chunkSent} chunks) from cache`,
-        );
-      }
+      await this._completeBackfill(lease, sent, pooledSent, chunkSent);
+      return sent;
     } finally {
-      annIndex.finishBuild();
+      annIndex.finishBuild(owner);
     }
   }
 
@@ -3781,7 +3946,8 @@ class EmbeddingService {
    * pooled counts come from the cached key index, and chunk rows — about
    * three per game — are estimated, with the total grown if exceeded.
    */
-  private async _backfillAnnIndexLevel(): Promise<void> {
+  private async _backfillAnnIndexLevel(lease: AnnLease): Promise<number> {
+    const owner = lease.owner;
     const now = Date.now();
     const seen = new Set<string>();
     let sent = 0;
@@ -3797,7 +3963,7 @@ class EmbeddingService {
     const pooledCount =
       (await levelPooledCount(LEVEL_LIBRARY_NAMESPACE)) + (await levelPooledCount(LEVEL_CATALOG_NAMESPACE));
     let progressTotal = Math.max(1, pooledCount * 4);
-    annIndex.setBuildProgress(0, progressTotal);
+    annIndex.setBuildProgress(0, progressTotal, owner);
     let pooledSent = 0;
     let chunkSent = 0;
 
@@ -3806,12 +3972,12 @@ class EmbeddingService {
       kind: 'pooled' | 'chunk',
     ): Promise<void> => {
       for (const chunk of partitionEmbeddingRowsForAnnBackfill(rows, ANN_BACKFILL_FLUSH_BATCH)) {
-        await annIndex.addVectors(chunk);
+        await annIndex.addVectors(chunk, { lease });
         sent += chunk.length;
         if (kind === 'pooled') pooledSent += chunk.length;
         else chunkSent += chunk.length;
         if (sent >= progressTotal) progressTotal = sent + ANN_BACKFILL_PAGE_SIZE;
-        annIndex.setBuildProgress(sent, progressTotal);
+        annIndex.setBuildProgress(sent, progressTotal, owner);
         await yieldToEventLoop();
       }
     };
@@ -3845,44 +4011,200 @@ class EmbeddingService {
       // chunk vector first is what ran the renderer out of memory.
       await streamChunkVectorsForAnn((rows) => flushRows(rows, 'chunk'));
 
-      annIndex.setBuildProgress(sent, Math.max(sent, 1));
-
-      if (sent > 0) {
-        const saved = await annIndex.save({ force: true }); // end of backfill
-        if (!saved && typeof window !== 'undefined' && window.ann) {
-          throw new Error('ANN index save failed after backfill');
-        }
-        console.log(
-          `[EmbeddingService] ANN index backfilled: ${sent} vectors ` +
-            `(${pooledSent} pooled + ${chunkSent} chunks) from cache`,
-        );
-      }
+      await this._completeBackfill(lease, sent, pooledSent, chunkSent);
+      return sent;
     } finally {
-      annIndex.finishBuild();
+      annIndex.finishBuild(owner);
     }
   }
 
   /**
-   * Clear the ANN index and rebuild from cached library + catalog pooled vectors.
+   * End of a full backfill (lease held): persist the index and tell main it is
+   * coherent (`complete`). Main refuses every other save while the index is
+   * partial, so this is the only path that can turn a cleared / half-built
+   * index into one that is written to disk.
+   */
+  private async _completeBackfill(lease: AnnLease, sent: number, pooledSent: number, chunkSent: number): Promise<void> {
+    annIndex.setBuildProgress(sent, Math.max(sent, 1), lease.owner);
+    const saved = await annIndex.save({ force: true, complete: true, lease });
+    // Only hard-fail when ANN IPC exists but save refused — absent ANN is soft-degrade.
+    if (sent > 0 && !saved && typeof window !== 'undefined' && window.ann) {
+      throw new Error('ANN index save failed after backfill');
+    }
+    if (sent > 0) {
+      console.log(
+        `[EmbeddingService] ANN index backfilled: ${sent} vectors ` +
+          `(${pooledSent} pooled + ${chunkSent} chunks) from cache`,
+      );
+    }
+  }
+
+  // ── ANN job coordination ────────────────────────────────────────────────
+  // One owner for clear / rebuild / backfill: a single in-flight job (shared
+  // promise) that holds the ANN write lease for its whole duration. Catalog
+  // passes, generateMissing and the re-chunk job wait at their next group
+  // boundary (and their in-flight adds queue in annIndex) until it finishes.
+  private _annJobPromise: Promise<number> | null = null;
+  private _annJobKind: 'backfill' | 'rebuild' | null = null;
+
+  /** True while an ANN backfill or Rebuild is running — disables both Rebuild buttons. */
+  get isAnnRebuilding(): boolean { return this._annJobPromise !== null; }
+  /** 'rebuild' (clear + backfill), 'backfill' (fill an empty/partial index), or null. */
+  get annJobKind(): 'backfill' | 'rebuild' | null { return this._annJobKind; }
+
+  private _startAnnJob(kind: 'backfill' | 'rebuild'): Promise<number> {
+    const run = (async () => {
+      await Promise.resolve();
+      const lease = await annIndex.acquireLease(`ann-${kind}`);
+      try {
+        if (kind === 'rebuild') {
+          annIndex.setBuildProgress(0, 1, lease.owner);
+          await annIndex.clear({ lease });
+        }
+        const sent = await this._backfillAnnIndexUnderLease(lease);
+        await annIndex.refreshStatus();
+        return kind === 'rebuild' ? annIndex.vectorCount : sent;
+      } finally {
+        annIndex.finishBuild(lease.owner);
+        lease.release();
+      }
+    })();
+    this._annJobPromise = run;
+    this._annJobKind = kind;
+    this._notify();
+    const clear = () => {
+      if (this._annJobPromise === run) {
+        this._annJobPromise = null;
+        this._annJobKind = null;
+        this._notify();
+      }
+    };
+    run.then(clear, clear);
+    return run;
+  }
+
+  /**
+   * Populate the ANN index from cache (single-flight). Joins a running
+   * backfill or rebuild instead of starting a concurrent one. Throws on failure.
+   */
+  private _backfillAnnIndex(): Promise<number> {
+    if (this._annJobPromise) return this._annJobPromise;
+    return this._startAnnJob('backfill');
+  }
+
+  /** `_backfillAnnIndex` for passes: a failed backfill is logged, never fails the pass. */
+  private async _ensureAnnBackfill(): Promise<void> {
+    try {
+      await this._backfillAnnIndex();
+    } catch (err) {
+      console.warn('[EmbeddingService] ANN backfill failed:', err);
+    }
+  }
+
+  /**
+   * Clear the ANN index and rebuild from cached library + catalog pooled
+   * vectors. Shared by both Settings buttons: a second click (or the other
+   * screen) joins the running rebuild; a running backfill is waited out first.
    * Returns the vector count reported by the ANN service after backfill.
    * Propagates errors so Settings can surface the failure string.
    */
   async rebuildAnnFromCache(): Promise<number> {
-    await annIndex.clear();
-    annIndex.setBuildProgress(0, 1);
+    while (this._annJobPromise && this._annJobKind !== 'rebuild') {
+      try { await this._annJobPromise; } catch { /* a failed backfill doesn't block the rebuild */ }
+    }
+    const run = this._annJobPromise ?? this._startAnnJob('rebuild');
     try {
-      await this._backfillAnnIndex();
-      await annIndex.refreshStatus();
-      const count = annIndex.vectorCount;
+      const count = await run;
       console.log(`[EmbeddingService] ANN rebuild from cache complete: ${count} vectors`);
       return count;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[EmbeddingService] ANN rebuild from cache failed: ${msg}`, err);
       throw err instanceof Error ? err : new Error(msg);
-    } finally {
-      annIndex.finishBuild();
     }
+  }
+
+  // ── Forced re-index ─────────────────────────────────────────────────────
+  private _lastPassOutcome: Record<CatalogSource, CatalogPassOutcome> = { steam: 'skipped', epic: 'skipped' };
+  private _forcedPassesRunning = 0;
+  private _lastForcedPassEndedAt = 0;
+  private _forceReindexPromise: Promise<ForceReindexResult> | null = null;
+
+  /** How the most recent Steam / Epic catalog pass ended. */
+  lastCatalogPassOutcome(which: CatalogSource): CatalogPassOutcome { return this._lastPassOutcome[which]; }
+
+  get isForceReindexRunning(): boolean { return this._forceReindexPromise !== null; }
+
+  /**
+   * True while a forced pass runs and for POST_FORCED_PASS_COOLDOWN_MS after
+   * one ended — galaxy / graph builds defer instead of rebuilding over a
+   * renderer that just re-wrote the whole catalog.
+   */
+  get isHeavyRebuildCooldown(): boolean {
+    return this.heavyRebuildCooldownRemainingMs > 0;
+  }
+
+  /** ms left in the post-forced-pass cooldown (0 when none). */
+  get heavyRebuildCooldownRemainingMs(): number {
+    if (this._forcedPassesRunning > 0) return POST_FORCED_PASS_COOLDOWN_MS;
+    if (this._lastForcedPassEndedAt === 0) return 0;
+    return Math.max(0, POST_FORCED_PASS_COOLDOWN_MS - (Date.now() - this._lastForcedPassEndedAt));
+  }
+
+  /**
+   * Settings → Force Re-index (single-flight, shared by both Settings screens).
+   * Cancels background passes and the re-chunk job, waits out any ANN
+   * backfill/rebuild, then runs the forced Steam pass and the forced Epic pass.
+   * `complete` is true only when BOTH ran to the end — a pass that tripped the
+   * breaker or was cancelled is reported instead of "done".
+   */
+  forceReindexCatalog(sources: {
+    steam: {
+      iterate: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>;
+      lastSyncTimestamp: () => Promise<number> | number;
+    };
+    epic: {
+      iterate: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>;
+      lastSyncTimestamp: () => Promise<number> | number;
+    };
+  }): Promise<ForceReindexResult> {
+    if (this._forceReindexPromise) return this._forceReindexPromise;
+    const run = (async (): Promise<ForceReindexResult> => {
+      await this.cancelCatalogEmbeddingsAndWait();
+
+      const steamSyncTs = await sources.steam.lastSyncTimestamp();
+      this._lastPassOutcome.steam = 'skipped';
+      const steam = await this.generateCatalogEmbeddings(sources.steam.iterate, {
+        storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs, force: true,
+      });
+      const steamOutcome = this.lastCatalogPassOutcome('steam');
+
+      // Don't start Epic over a cancel / breaker trip — it would only queue.
+      let epic = 0;
+      let epicOutcome: CatalogPassOutcome = 'skipped';
+      if (steamOutcome === 'done') {
+        const epicSyncTs = await sources.epic.lastSyncTimestamp();
+        this._lastPassOutcome.epic = 'skipped';
+        epic = await this.generateEpicCatalogEmbeddings(sources.epic.iterate, {
+          storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs, force: true,
+        });
+        epicOutcome = this.lastCatalogPassOutcome('epic');
+      }
+      return {
+        steam,
+        epic,
+        complete: steamOutcome === 'done' && epicOutcome === 'done',
+        steamOutcome,
+        epicOutcome,
+      };
+    })();
+    this._forceReindexPromise = run;
+    this._notify();
+    const clear = () => {
+      if (this._forceReindexPromise === run) { this._forceReindexPromise = null; this._notify(); }
+    };
+    run.then(clear, clear);
+    return run;
   }
 
   /**
@@ -3956,9 +4278,14 @@ export async function getEmbeddingCount(): Promise<number> {
  * Retrieve a single embedding vector by gameId (checks library store first,
  * then catalog). Returns null if not found. Always dequantized f32 number[].
  */
-export async function getEmbeddingById(gameId: string): Promise<number[] | null> {
+/**
+ * Stored pooled vector for a game (library first, then catalog). The TTLs exist to schedule
+ * re-embedding; `ignoreTtl` returns an older vector anyway — it is still the one in the ANN
+ * index, so neighbour lookups must use it rather than fall back to 3D proximity.
+ */
+export async function getEmbeddingById(gameId: string, opts?: { ignoreTtl?: boolean }): Promise<number[] | null> {
   await migrateEmbeddingsFromIdbIfNeeded();
-  const now = Date.now();
+  const now = opts?.ignoreTtl ? Number.NEGATIVE_INFINITY : Date.now();
 
   if (useLevelDB()) {
     const fromNamespace = async (namespace: string, ttl: number): Promise<number[] | null> => {
@@ -3990,22 +4317,25 @@ export async function getEmbeddingById(gameId: string): Promise<number[] | null>
 
 /**
  * Every pooled embedding (library + catalog), deduped by gameId with library
- * taking priority, decoded to a plain number[] vector. Used by
+ * taking priority, decoded to a Float32Array vector. Used by
  * `game-graph-store.ts` in place of that file's former direct IDB access
  * (which hardcoded the `'embeddings'`/`'catalog-embeddings'` store names and
  * would have silently broken on any storage-backend change).
+ *
+ * Float32Array, not number[]: ~155k × 1024 doubles was ~1.3 GB of renderer
+ * heap for one graph build; f32 halves it and avoids per-element boxing.
  */
-export async function getAllPooledEmbeddingsForGraph(): Promise<Array<{ gameId: string; embedding: number[] }>> {
+export async function getAllPooledEmbeddingsForGraph(): Promise<Array<{ gameId: string; embedding: Float32Array }>> {
   await migrateEmbeddingsFromIdbIfNeeded();
   const seen = new Set<string>();
-  const out: Array<{ gameId: string; embedding: number[] }> = [];
+  const out: Array<{ gameId: string; embedding: Float32Array }> = [];
 
   const collect = (entry: CachedEmbedding) => {
     if (seen.has(entry.gameId)) return;
     const vec = readPooledVector(entry);
     if (!vec) return;
     seen.add(entry.gameId);
-    out.push({ gameId: entry.gameId, embedding: Array.from(vec) });
+    out.push({ gameId: entry.gameId, embedding: vec });
   };
 
   if (useLevelDB()) {

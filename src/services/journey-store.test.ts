@@ -16,6 +16,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { JourneyStore } from './journey-store';
+import { __resetStorageHealthForTests, __setStorageRetryDelaysForTests } from './storage-health';
 import { JourneyEntry } from '@/types/game';
 
 // ---------------------------------------------------------------------------
@@ -133,6 +134,8 @@ function installFakeStore(opts: FakeStoreOpts = {}): {
 
 beforeEach(() => {
   localStorage.clear();
+  __setStorageRetryDelaysForTests([0, 0]);
+  __resetStorageHealthForTests();
   // Ensure a clean gate for each test.
   Object.defineProperty(window, 'store', {
     value: undefined,
@@ -232,7 +235,9 @@ describe('JourneyStore — LevelDB hydration', () => {
     expect(listener).toHaveBeenCalled();
   });
 
-  it('falls back to localStorage when the getAll IPC returns an error', async () => {
+  // Audit item 3: pre-migration the legacy snapshot is still the real data, so
+  // it is shown — but the store is READ-ONLY (no LevelDB writes).
+  it('pre-migration getAll error shows the legacy journey read-only', async () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -241,13 +246,38 @@ describe('JourneyStore — LevelDB hydration', () => {
         lastUpdated: 'x',
       }),
     );
-    installFakeStore({ getAllError: 'rate_limited' });
+    const { calls } = installFakeStore({ getAllError: 'rate_limited' });
 
     const store = new JourneyStore();
     await store.ready;
 
     expect(store.getSize()).toBe(1);
     expect(store.getEntry('steam-9')?.title).toBe('Fallback');
+    expect(store.isReadOnly()).toBe(true);
+    store.syncProgress('steam-9', { status: 'Completed' });
+    await new Promise((r) => setTimeout(r, 350));
+    expect(calls.batch.flat().some((op: any) => op.namespace === 'journey' && op.key === 'steam-9')).toBe(false);
+  });
+
+  it('after the migration marker a getAll error never resurrects the legacy snapshot', async () => {
+    localStorage.setItem(MIGRATION_MARKER, 'yes');
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        entries: [makeEntry({ gameId: 'stale', title: 'Stale v1.0.61' })],
+        lastUpdated: 'x',
+      }),
+    );
+    const { calls } = installFakeStore({ getAllError: 'IO error' });
+
+    const store = new JourneyStore();
+    await store.ready;
+
+    expect(store.has('stale')).toBe(false);
+    expect(store.isReadOnly()).toBe(true);
+    expect(calls.getAll).toBe(3);
+    expect(calls.batch.flat().some((op: any) => op.namespace === 'journey' && op.key === 'stale')).toBe(false);
   });
 });
 

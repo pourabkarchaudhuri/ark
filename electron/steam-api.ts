@@ -21,6 +21,8 @@ const STEAM_CDN_BASE = 'https://cdn.akamai.steamstatic.com/steam/apps';
 // Steam appdetails endpoint rate-limits at ~200 requests per 5 minutes
 const RATE_LIMIT_DELAY = 200; // 200ms between requests (5 requests/second)
 const MAX_CONCURRENT_REQUESTS = 3; // Conservative to avoid 429 bursts
+/** Catalog GetItems batches in flight at once (the sync used to fire 8 unthrottled). */
+const CATALOG_MAX_INFLIGHT = 4;
 
 /**
  * Construct cover image URL for a Steam game
@@ -316,6 +318,11 @@ class SteamAPIClient {
   private cache = new Cache('steam-cache.json');
   /** appdetails circuit: set from a 429 (Retry-After, capped at 5 min; default 60s). */
   private appDetailsPausedUntil = 0;
+  /** Catalog-batch throttle state (see catalogSlot). */
+  private catalogInFlight = 0;
+  private catalogWaiters: Array<() => void> = [];
+  private catalogPausedUntil = 0;
+  private catalog429Streak = 0;
 
   /**
    * Get most played games from Steam Charts
@@ -1284,28 +1291,60 @@ class SteamAPIClient {
       },
     });
     const url = `${STEAM_WEB_API_BASE}/IStoreBrowseService/GetItems/v1/?input_json=${encodeURIComponent(inputJson)}`;
-    // Bounded retry with backoff: 429s (Retry-After honoured, capped) and transient 5xx /
-    // network errors. Previously the first failure dropped the whole 200-game batch.
-    const MAX_ATTEMPTS = 3;
+    // Shared throttle for all catalog batches (see catalogSlot): at most CATALOG_MAX_INFLIGHT
+    // requests, and a 429 pauses EVERY batch once (Retry-After, else an escalating pause)
+    // instead of each worker sleeping and then retrying in lockstep. Two attempts here; the
+    // renderer's retry round / next-sync resume handle what's left.
+    const MAX_ATTEMPTS = 2;
     for (let attempt = 1; ; attempt++) {
+      const release = await this.catalogSlot();
+      let failure: string;
       try {
         const res = await fetchWithTimeout(url, 15000);
         if (res.ok) {
           const data = await res.json() as { response?: { store_items?: any[] } };
+          this.catalog429Streak = 0;
           return data.response?.store_items ?? [];
         }
-        const retryable = res.status === 429 || res.status >= 500;
-        if (!retryable || attempt >= MAX_ATTEMPTS) throw new Error(`IStoreBrowseService ${res.status}`);
-        const retryAfterSec = Number(res.headers.get('retry-after'));
-        const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
-          ? Math.min(retryAfterSec * 1000, 60_000)
-          : 2000 * 2 ** (attempt - 1);
-        await new Promise((r) => setTimeout(r, waitMs));
+        failure = `IStoreBrowseService ${res.status}`;
+        if (res.status === 429) {
+          this.catalog429Streak++;
+          const retryAfterSec = Number(res.headers.get('retry-after'));
+          const pauseMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+            ? Math.min(retryAfterSec * 1000, 60_000)
+            : Math.min(5_000 * 2 ** (this.catalog429Streak - 1), 60_000);
+          this.catalogPausedUntil = Math.max(this.catalogPausedUntil, Date.now() + pauseMs);
+          logger.warn(`[Steam] Catalog batch rate-limited (429, streak ${this.catalog429Streak}) — pausing catalog requests ${Math.round(pauseMs / 1000)}s`);
+        } else if (res.status < 500) {
+          throw new Error(failure); // other 4xx: Steam rejects the request itself — not retryable
+        }
       } catch (err) {
-        if (attempt >= MAX_ATTEMPTS || (err instanceof Error && /IStoreBrowseService 4\d\d/.test(err.message) && !/429/.test(err.message))) throw err;
-        await new Promise((r) => setTimeout(r, 2000 * 2 ** (attempt - 1)));
+        if (err instanceof Error && /IStoreBrowseService 4\d\d/.test(err.message)) throw err;
+        failure = err instanceof Error ? err.message : String(err);
+      } finally {
+        release();
       }
+      if (attempt >= MAX_ATTEMPTS) throw new Error(failure);
+      logger.warn(`[Steam] Catalog batch attempt ${attempt}/${MAX_ATTEMPTS} failed (${failure}) — retrying`);
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
     }
+  }
+
+  /** Concurrency + shared 429 pause for catalog batches. Resolves with a release function. */
+  private async catalogSlot(): Promise<() => void> {
+    while (this.catalogInFlight >= CATALOG_MAX_INFLIGHT) {
+      await new Promise<void>((r) => this.catalogWaiters.push(r));
+    }
+    this.catalogInFlight++;
+    const wait = this.catalogPausedUntil - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.catalogInFlight--;
+      this.catalogWaiters.shift()?.();
+    };
   }
 
   /**

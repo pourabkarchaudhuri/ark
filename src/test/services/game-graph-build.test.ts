@@ -16,15 +16,20 @@ vi.mock('@/services/ann-index', () => ({
   },
 }));
 
+const heap = vi.hoisted(() => ({ high: false }));
+
 vi.mock('@/services/embedding-service', () => ({
-  embeddingService: { isCatalogRunning: false },
+  embeddingService: { isCatalogRunning: false, isAnnRebuilding: false, isHeavyRebuildCooldown: false },
+  // Float32Array rows — the graph build no longer materialises number[] vectors.
   getAllPooledEmbeddingsForGraph: vi.fn(async () => [
-    { gameId: 'steam-a', embedding: [1, 0] },
-    { gameId: 'steam-b', embedding: [0, 1] },
+    { gameId: 'steam-a', embedding: new Float32Array([1, 0]) },
+    { gameId: 'steam-b', embedding: new Float32Array([0, 1]) },
   ]),
+  isRendererHeapPressureHigh: () => heap.high,
 }));
 
 import { GameGraphStore, runGraphMetricsWorker } from '@/services/game-graph-store';
+import { getAllPooledEmbeddingsForGraph } from '@/services/embedding-service';
 
 /** Worker stand-in that accepts the job and never answers. */
 class SilentWorker {
@@ -121,5 +126,20 @@ describe('GameGraphStore.build', () => {
     expect(store.isRebuildThrottled('ann-2')).toBe(true);
     await store.build('ann-2');
     expect(SilentWorker.instances).toHaveLength(1);
+  });
+
+  it('defers (memory gate) instead of reading every vector when the renderer heap is under pressure', async () => {
+    heap.high = true;
+    try {
+      vi.mocked(getAllPooledEmbeddingsForGraph).mockClear();
+      const store = new GameGraphStore({ metricsTimeoutMs: 30 });
+      const ok = await store.build('ann-3');
+      expect(ok).toBe(false);
+      expect(store.state.phase).toBe('error');
+      expect(getAllPooledEmbeddingsForGraph).not.toHaveBeenCalled();
+      expect(SilentWorker.instances).toHaveLength(0);
+    } finally {
+      heap.high = false;
+    }
   });
 });

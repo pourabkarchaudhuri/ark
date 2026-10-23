@@ -190,6 +190,16 @@ function GameCardComponent({
   const [isHovered, setIsHovered] = useState(false);
   const [fallbackAttempt, setFallbackAttempt] = useState(0); // 0 = cover, 1 = header, 2 = capsule
   const [menuOpen, setMenuOpen] = useState(false); // ellipsis button dropdown
+  // Optimistic status: shown the moment the user picks it. The store update is synchronous,
+  // but the card only re-renders after the whole library grid re-filters/sorts (deferred),
+  // which made the badge look like it was waiting on a save. Cleared once props catch up.
+  const [pendingStatus, setPendingStatus] = useState<GameStatus | null>(null);
+  useEffect(() => {
+    if (!pendingStatus) return;
+    if (game.status === pendingStatus) { setPendingStatus(null); return; }
+    const t = setTimeout(() => setPendingStatus(null), 4000); // the change didn't land — show the truth
+    return () => clearTimeout(t);
+  }, [pendingStatus, game.status]);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false); // status badge dropdown
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null); // right-click menu
   const cardRef = useRef<HTMLDivElement>(null);
@@ -598,7 +608,7 @@ function GameCardComponent({
           {/* Status Badge - Clickable dropdown for library games */}
           {inLibrary && (() => {
             // Override displayed status when the game's exe is running
-            const displayStatus: GameStatus = isPlayingNow ? 'Playing Now' : (game.status as GameStatus);
+            const displayStatus: GameStatus = isPlayingNow ? 'Playing Now' : (pendingStatus ?? (game.status as GameStatus));
             return (
             <div onClick={(e) => e.stopPropagation()}>
               <DropdownMenu open={statusMenuOpen} onOpenChange={handleStatusMenuOpenChange}>
@@ -621,10 +631,11 @@ function GameCardComponent({
                       key={status}
                       className={cn(
                         "cursor-pointer text-xs gap-2",
-                        game.status === status && "bg-white/10"
+                        (pendingStatus ?? game.status) === status && "bg-white/10"
                       )}
                       onClick={() => {
-                        if (status !== game.status && onStatusChange) {
+                        if (status !== (pendingStatus ?? game.status) && onStatusChange) {
+                          setPendingStatus(status);
                           onStatusChange(game.id, status);
                         }
                       }}

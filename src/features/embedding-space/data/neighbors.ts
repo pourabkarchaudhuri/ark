@@ -5,13 +5,33 @@
  */
 import type { GraphNode, NeighborInfo } from '@/services/galaxy-cache';
 import { getEmbeddingById, extractFranchiseBase } from '@/services/embedding-service';
+import { isUmbrellaBrand, hasStudioOverlap } from '@/services/franchise';
 import { annIndex } from '@/services/ann-index';
 import { queryAnnNeighborGames, annNeighborOverFetch, isChunkAnnMaxSimEnabled } from '@/services/ann-neighbor-query';
 import { applyOllamaNeighborRerank, NEIGHBOR_HEURISTIC_POOL, type NeighborRerankStatus } from '@/services/ollama-rerank';
 import { rerankTierLabel } from '@/services/oracle-rerank';
 
 export const NEIGHBOR_K = 12;
-const MAX_DISTANCE = 1.5;
+/**
+ * Raw cosine distance a neighbour must be within to be shown (Similar Games uses the
+ * same bar). The old cap was 1.5 on a 0–2 scale — effectively none — so the list was
+ * always padded to 12 with whatever ANN returned, related or not.
+ */
+export const SIMILARITY_FLOOR = 0.45;
+/** When fewer than MIN_SHOWN pass the floor, allow up to this before giving up. */
+const RELAXED_FLOOR = 0.6;
+const MIN_SHOWN = 3;
+/**
+ * Heuristic adjustments (genre, franchise, era…) are capped relative to the raw cosine
+ * distance. Uncapped they reached ±0.25+ while true neighbours span ~0.1–0.4, so metadata
+ * coincidences outranked real similarity.
+ */
+const MAX_ADJ_DOWN = 0.08;
+const MAX_ADJ_UP = 0.15;
+/** Candidates handed to the cross-encoder (was 72 — deep enough to pull in noise). */
+export const NEIGHBOR_RERANK_POOL = 24;
+/** Final order = blend of similarity rank and rerank rank (0 = similarity only, 1 = rerank only). */
+const RERANK_RANK_BLEND = 0.5;
 
 // ─── Genre IDF weights (lower frequency → more discriminating match) ─────────
 const GENRE_FREQ: Record<string, number> = {
@@ -146,9 +166,11 @@ export function rerankNeighbors(
     }
     adj -= 0.06 * themeJaccard;
 
-    // Franchise / series boost (strong — sequels must cluster)
+    // Franchise / series boost (strong — sequels must cluster). Umbrella brands (Star Wars,
+    // LEGO, Warhammer…) span unrelated genres: only count them with a shared studio.
     const nbFranchise = extractFranchiseBase(nd.title);
-    const isFranchise = selFranchise.length >= 3 && nbFranchise === selFranchise;
+    const isFranchise = selFranchise.length >= 3 && nbFranchise === selFranchise
+      && (!isUmbrellaBrand(selFranchise) || hasStudioOverlap(nd, [selectedNode]));
     if (isFranchise) adj -= 0.20;
 
     // Developer + publisher affinity (publisher weaker, avoids double counting)
@@ -185,18 +207,31 @@ export function rerankNeighbors(
     if (isDev) signals++;
     if (signals >= 3) adj -= 0.02 * (signals - 2);
 
-    return { id: r.id, distance: r.distance, node: nd, adj };
+    const delta = Math.min(MAX_ADJ_UP, Math.max(-MAX_ADJ_DOWN, adj - r.distance));
+    return { id: r.id, distance: r.distance, node: nd, adj: r.distance + delta };
   });
 
   scored.sort((a, b) => a.adj - b.adj);
-  const out: NeighborInfo[] = [];
-  for (const s of scored) {
-    if (out.length >= k) break;
-    if (s.distance > MAX_DISTANCE || !s.node) continue;
-    if (s.node.title.startsWith('Unknown Game')) continue;
-    out.push({ id: s.id, distance: s.distance, node: s.node });
-  }
-  return out;
+  const drawable = scored.filter((s) => !!s.node && !s.node.title.startsWith('Unknown Game'));
+  // Show fewer rather than pad with unrelated games; relax only to avoid an empty panel.
+  let kept = drawable.filter((s) => s.distance <= SIMILARITY_FLOOR);
+  if (kept.length < MIN_SHOWN) kept = drawable.filter((s) => s.distance <= RELAXED_FLOOR).slice(0, MIN_SHOWN);
+  return kept.slice(0, k).map((s) => ({ id: s.id, distance: s.distance, node: s.node }));
+}
+
+/**
+ * Blend the cross-encoder order with the similarity order by rank. The rerank used to
+ * replace the order outright (and its `1 - relevance` pseudo-distance replaced the real
+ * one), so a weak or short-text reranker could promote far candidates over true neighbours.
+ * Distances shown are always the raw cosine distances.
+ */
+export function blendRerankOrder(base: NeighborInfo[], reranked: NeighborInfo[], k: number, blend = RERANK_RANK_BLEND): NeighborInfo[] {
+  const rerankRank = new Map(reranked.map((nb, i) => [nb.id, i]));
+  return base
+    .map((nb, i) => ({ nb, score: (1 - blend) * i + blend * (rerankRank.get(nb.id) ?? reranked.length + i) }))
+    .sort((a, b) => a.score - b.score)
+    .slice(0, k)
+    .map((s) => s.nb);
 }
 
 /** 3D spatial nearest neighbours — used when the ANN index is empty/unavailable. */
@@ -220,19 +255,32 @@ export function cosineDistance(a: ArrayLike<number>, b: ArrayLike<number>): numb
 }
 
 export type NeighborStatusChip = 'ann_rebuilding' | 'spatial_fallback' | null;
-export interface RerankHint { label: string; title: string }
+/** `tone` — 'ok' for a real rerank, 'info' for a coarse / skipped one, 'warn' for a failure. */
+export interface RerankHint { label: string; title: string; tone?: 'ok' | 'info' | 'warn' }
 
+/**
+ * Badge for the neighbour dock header. A successful pass is shown too
+ * ("Qwen3 graded · 5 moved") — it used to return null, so a working reranker
+ * was indistinguishable from one that never ran.
+ */
 export function neighborRerankBadge(status: NeighborRerankStatus): RerankHint | null {
   const { outcome, tier } = status;
   if (outcome === 'applied') {
-    if (tier === 'qwen_binary') return { label: 'Binary rerank', title: 'Ollama predates logprobs support, so the reranker could only answer yes/no — ordering is coarse' };
-    if (tier === 'embed_fallback') return { label: 'Cosine rerank', title: 'No cross-encoder available — neighbors were ordered by arctic-embed cosine similarity' };
-    return null;
+    const moved = typeof status.moved === 'number' ? ` · ${status.moved} moved` : '';
+    if (tier === 'qwen_binary') return { label: `Binary rerank${moved}`, title: 'Ollama predates logprobs support, so the reranker could only answer yes/no — ordering is coarse', tone: 'info' };
+    if (tier === 'embed_fallback') return { label: `Cosine rerank${moved}`, title: 'No cross-encoder available — neighbors were ordered by arctic-embed cosine similarity', tone: 'info' };
+    return {
+      label: `Reranked · ${rerankTierLabel(tier)}${moved}`,
+      title: `Neighbors reordered by ${rerankTierLabel(tier)}${typeof status.meanAbsDelta === 'number' && status.moved ? ` — ${status.moved} moved, ${status.meanAbsDelta.toFixed(1)} places on average` : ''}`,
+      tone: 'ok',
+    };
   }
-  if (outcome === 'skipped_disabled') return { label: 'Rerank off', title: 'Neighbor rerank is off in Settings' };
-  if (outcome === 'skipped_no_client') return { label: 'Rerank unavailable', title: 'Ollama rerank not available — connect in Settings' };
-  if (outcome === 'empty_results') return { label: 'No rerank scores', title: 'Rerank returned no scores; using heuristic order' };
-  if (outcome === 'error') return { label: 'Rerank failed', title: `Rerank failed (${rerankTierLabel(tier)}); using heuristic order` };
+  if (outcome === 'skipped_disabled') return { label: 'Rerank off', title: 'Neighbor rerank is off in Settings', tone: 'info' };
+  if (outcome === 'skipped_no_client') return { label: 'Rerank unavailable', title: 'Ollama rerank not available — connect in Settings', tone: 'info' };
+  if (outcome === 'skipped_timeout') return { label: 'Rerank timed out', title: 'The reranker did not answer within its time budget; using heuristic order', tone: 'info' };
+  if (outcome === 'no_signal') return { label: 'Rerank no signal', title: `${rerankTierLabel(tier)} gave every neighbor the same score; using heuristic order`, tone: 'info' };
+  if (outcome === 'empty_results') return { label: 'No rerank scores', title: 'Rerank returned no scores; using heuristic order', tone: 'warn' };
+  if (outcome === 'error') return { label: 'Rerank failed', title: `Rerank failed (${rerankTierLabel(tier)}); using heuristic order`, tone: 'warn' };
   return null;
 }
 
@@ -256,7 +304,7 @@ export interface NeighborResult {
 /** Full neighbour pipeline. Resolves null when the request went stale mid-flight. */
 export async function fetchNeighbors(node: GraphNode, q: NeighborQuery, k = NEIGHBOR_K): Promise<NeighborResult | null> {
   if (q.useMock) return { neighbors: spatialNeighbors(node, q.nodes, k, q.exclude), statusChip: null, rerankHint: null };
-  const vec = await getEmbeddingById(node.id);
+  const vec = await getEmbeddingById(node.id, { ignoreTtl: true });
   if (q.isStale()) return null;
   if (!vec || !annIndex.isReady) {
     return {
@@ -270,14 +318,26 @@ export async function fetchNeighbors(node: GraphNode, q: NeighborQuery, k = NEIG
   const results = await queryAnnNeighborGames(vec, annNeighborOverFetch(k, maxSim), node.id);
   if (q.isStale()) return null;
   const filtered = results.filter(r => r.id !== node.id && !q.exclude?.has(r.id));
-  const pool = rerankNeighbors(node, filtered, q.nodeMap, Math.min(NEIGHBOR_HEURISTIC_POOL, filtered.length));
+  const pool = rerankNeighbors(node, filtered, q.nodeMap, Math.min(NEIGHBOR_RERANK_POOL, NEIGHBOR_HEURISTIC_POOL, filtered.length));
   const rr = await applyOllamaNeighborRerank(node, pool, k, { neighborRerankEnabled: q.neighborRerankEnabled });
   if (q.isStale()) return null;
-  let neighbors = rr.neighbors.filter(nb => !!nb.node);
+  // Coarse rerankers (cosine over short metadata strings, yes/no Qwen) reorder by title
+  // words and generic genres — keep the similarity order rather than let them decide.
+  const coarse = rr.status.outcome === 'applied' && (rr.status.tier === 'embed_fallback' || rr.status.tier === 'qwen_binary');
+  let rerankHint = neighborRerankBadge(rr.status);
+  let neighbors: NeighborInfo[];
+  if (rr.status.outcome !== 'applied') neighbors = pool.slice(0, k);
+  else if (coarse) {
+    neighbors = pool.slice(0, k);
+    rerankHint = { label: 'Similarity order', title: 'Only a coarse reranker is available (no cross-encoder) — neighbors are kept in embedding-similarity order', tone: 'info' };
+  } else neighbors = blendRerankOrder(pool, rr.neighbors, k);
+  neighbors = neighbors.filter(nb => !!nb.node);
   let statusChip: NeighborStatusChip = null;
-  if (neighbors.length === 0 && q.nodes.length > 0) {
+  // Spatial (3D) fallback only when the similarity index gave nothing at all — an empty
+  // list after the similarity floor is a real answer ("nothing close"), not an error.
+  if (neighbors.length === 0 && filtered.length === 0 && q.nodes.length > 0) {
     neighbors = spatialNeighbors(node, q.nodes, k, q.exclude);
     statusChip = 'spatial_fallback';
   }
-  return { neighbors, statusChip, rerankHint: neighborRerankBadge(rr.status) };
+  return { neighbors, statusChip, rerankHint };
 }

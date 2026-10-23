@@ -29,9 +29,17 @@ import {
   EMBEDDING_MODEL_NAME,
 } from '../ollama-setup.js';
 import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
-import { normalizeOllamaRerankRows, type RerankResultRow } from '../ollama-rerank-normalize.js';
+import { getGpuStats } from '../gpu-stats.js';
 import {
+  normalizeOllamaRerankRows,
+  summarizeRerankScores,
+  type RerankResultRow,
+} from '../ollama-rerank-normalize.js';
+import {
+  beginRerankRequest,
+  cancelRerankRequest,
   detectRerankTier,
+  endRerankRequest,
   resetRerankTierCache,
   rerankTierLabel,
   scoreWithQwen3,
@@ -40,14 +48,35 @@ import {
 } from '../rerank-engine.js';
 
 /**
+ * Per-run report attached to every ollama:rerank reply that got as far as a
+ * tier. Lets the renderer show (and log) what actually happened: which tier,
+ * how many documents were scored, how long it took, and whether the scores
+ * carried any signal at all (min == max means the order is meaningless).
+ */
+export interface OllamaRerankRunReport {
+  requestId: string | null;
+  tier: RerankTier;
+  scored: number;
+  requested: number;
+  elapsedMs: number;
+  scoreMin: number | null;
+  scoreMax: number | null;
+  scoreStdev: number | null;
+  /** True when the latency ceiling cut a Qwen3 pass short. */
+  truncated: boolean;
+}
+
+/**
  * Structured IPC result for ollama:rerank.
  *
  * `via` is the tier that actually produced the ordering, so the renderer can be
  * honest about a weaker path instead of showing everything as "reranked".
+ * `report` is additive — existing callers that only read `results` / `via` /
+ * `error` are unaffected.
  */
 export type OllamaRerankIpcResult =
-  | { results: RerankResultRow[]; via: RerankTier }
-  | { error: { code: string; httpStatus?: number; message: string } };
+  | { results: RerankResultRow[]; via: RerankTier; report: OllamaRerankRunReport }
+  | { error: { code: string; httpStatus?: number; message: string }; report?: OllamaRerankRunReport };
 
 function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length === 0 || a.length !== b.length) return 0;
@@ -88,7 +117,7 @@ async function embedCosineRerank(
 
 type NativeRerankOutcome = {
   results: RerankResultRow[] | null;
-  /** 'ok' | 'empty_results' | 'model_missing' | 'endpoint_missing' | 'http_error' | 'network_error' */
+  /** 'ok' | 'empty_results' | 'model_missing' | 'endpoint_missing' | 'http_error' | 'network_error' | 'timeout' | 'cancelled' */
   code: string;
   message: string;
   httpStatus?: number;
@@ -100,12 +129,18 @@ async function rerankViaNativeEndpoint(
   documents: string[],
   topN: number,
   model: string,
+  opts?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<NativeRerankOutcome> {
   const ollama = settingsStore.getOllamaSettings();
   const baseUrl = (ollama.url || 'http://localhost:11434').replace(/\/$/, '');
 
   const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), RERANK_TIMEOUT_MS);
+  let timedOut = false;
+  const t = setTimeout(() => { timedOut = true; ac.abort(); }, opts?.timeoutMs ?? RERANK_TIMEOUT_MS);
+  // Renderer cancel aborts the single request too.
+  const onCancel = () => ac.abort();
+  if (opts?.signal?.aborted) ac.abort();
+  else opts?.signal?.addEventListener('abort', onCancel, { once: true });
   let res: Response;
   try {
     res = await fetch(`${baseUrl}/api/rerank`, {
@@ -122,9 +157,14 @@ async function rerankViaNativeEndpoint(
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    if (opts?.signal?.aborted) return { results: null, code: 'cancelled', message: 'Cancelled by the renderer' };
+    // Our own deadline — the endpoint answered nothing in time (often a cold
+    // model load); that says nothing about whether the tier still works.
+    if (timedOut) return { results: null, code: 'timeout', message: 'Rerank exceeded its time budget' };
     return { results: null, code: 'network_error', message };
   } finally {
     clearTimeout(t);
+    opts?.signal?.removeEventListener('abort', onCancel);
   }
 
   if (!res.ok) {
@@ -314,12 +354,14 @@ export function register(): void {
 
       // Pacing is recomputed PER sub-batch so window blur/focus takes effect
       // immediately. Runner options are session-fixed (see getSessionEmbedOptions).
+      // User override from Settings (0 = Auto). Background mode stays polite regardless.
+      const userBatch = settingsStore.getOllamaSettings().embeddingBatchSize;
       const pickProfile = () => {
         const background = embedState.background;
         const numBatch = getSessionNumBatch();
         if (!onGpu) {
           return {
-            subBatch: background ? EMBED_SUB_BATCH_BG : EMBED_SUB_BATCH_CPU,
+            subBatch: background ? Math.min(EMBED_SUB_BATCH_BG, userBatch || EMBED_SUB_BATCH_BG) : (userBatch || EMBED_SUB_BATCH_CPU),
             inFlight: 1,
             cooldownMs: background ? EMBED_BG_COOLDOWN_MS : 0,
             mode: `${background ? 'CPU-bg' : 'CPU'} (threads=${EMBED_NUM_THREAD_CPU}, num_batch=${numBatch ?? 'default'})`,
@@ -327,17 +369,18 @@ export function register(): void {
         }
         if (background) {
           return {
-            subBatch: EMBED_SUB_BATCH_BG,
+            subBatch: Math.min(EMBED_SUB_BATCH_BG, userBatch || EMBED_SUB_BATCH_BG),
             inFlight: 1, // single in-flight so foreground app gets GPU windows
             cooldownMs: EMBED_BG_COOLDOWN_MS,
             mode: `GPU-bg (subBatch=${EMBED_SUB_BATCH_BG}, num_batch=${numBatch ?? 'default'}, inFlight=1)`,
           };
         }
+        const gpuBatch = userBatch || EMBED_SUB_BATCH_GPU;
         return {
-          subBatch: EMBED_SUB_BATCH_GPU,
+          subBatch: gpuBatch,
           inFlight: EMBED_GPU_INFLIGHT,
           cooldownMs: 0,
-          mode: `GPU (subBatch=${EMBED_SUB_BATCH_GPU}, num_batch=${numBatch ?? 'default'}, inFlight=${EMBED_GPU_INFLIGHT})`,
+          mode: `GPU (subBatch=${gpuBatch}${userBatch ? ' [user]' : ''}, num_batch=${numBatch ?? 'default'}, inFlight=${EMBED_GPU_INFLIGHT})`,
         };
       };
 
@@ -433,6 +476,16 @@ export function register(): void {
    *  3. Runs a real 100-item embed pass with current foreground profile
    *     and times it. Returns embeds/sec + per-text avg ms.
    */
+  // Live VRAM readout for the Settings batch-size slider (polled while the panel is open).
+  ipcMain.handle('ollama:gpuStats', async () => {
+    try {
+      return await getGpuStats();
+    } catch (err) {
+      logger.warn('[Ollama] gpuStats failed:', err);
+      return null;
+    }
+  });
+
   ipcMain.handle('ollama:embedDiagnostic', async () => {
     const result: {
       ollamaUp: boolean;
@@ -563,27 +616,62 @@ export function register(): void {
   /**
    * Tiered rerank for Embedding Space / Oracle ordering.
    *
-   * The tier is chosen once per session by `detectRerankTier()` and the result
+   * The tier comes from `detectRerankTier()` (cached; see isRerankTierDetectionFresh) and the result
    * reports which one actually ran:
    *   native        → POST /api/rerank cross-encoder
    *   qwen_graded   → Qwen3-Reranker, softmax over the yes/no logprobs
    *   qwen_binary   → same model on an Ollama build without logprobs support
    *   embed_fallback→ arctic-embed2 cosine
    *
-   * Returns { results, via } on success or { error: { code, httpStatus?, message } }.
+   * Returns { results, via, report } on success or { error: { code, httpStatus?, message }, report? }.
+   *
+   * Optional payload fields (all backward compatible):
+   *   requestId — registers the run so `ollama:rerankCancel` can stop it
+   *   budgetMs  — wall-clock ceiling for the Qwen3 loop / native request; the
+   *               renderer passes slightly less than its own deadline so a
+   *               truncated pass still comes back in time to be used
    */
   ipcMain.handle('ollama:rerank', async (_event: any, payload: unknown): Promise<OllamaRerankIpcResult> => {
+    const startedAt = Date.now();
+    const rawId = payload && typeof payload === 'object' ? (payload as { requestId?: unknown }).requestId : undefined;
+    const requestId = typeof rawId === 'string' && rawId.length > 0 && rawId.length <= 128 ? rawId : null;
+    const signal = beginRerankRequest(requestId);
+
     const fail = (
       code: string,
       message: string,
       httpStatus?: number,
     ): OllamaRerankIpcResult => ({ error: { code, message, ...(httpStatus !== undefined ? { httpStatus } : {}) } });
 
+    const succeed = (
+      results: RerankResultRow[],
+      via: RerankTier,
+      allScored: RerankResultRow[],
+      requested: number,
+      truncated = false,
+    ): OllamaRerankIpcResult => ({
+      results,
+      via,
+      report: {
+        requestId,
+        tier: via,
+        scored: allScored.length,
+        requested,
+        elapsedMs: Date.now() - startedAt,
+        ...summarizeRerankScores(allScored),
+        truncated,
+      },
+    });
+
     try {
       if (!payload || typeof payload !== 'object') {
         return fail('invalid_payload', 'Rerank payload must be an object');
       }
-      const p = payload as { query?: unknown; documents?: unknown; topN?: unknown };
+      const p = payload as { query?: unknown; documents?: unknown; topN?: unknown; budgetMs?: unknown };
+      const budgetMs =
+        typeof p.budgetMs === 'number' && Number.isFinite(p.budgetMs) && p.budgetMs > 0
+          ? Math.min(Math.max(1_000, Math.floor(p.budgetMs)), RERANK_TIMEOUT_MS)
+          : undefined;
       const query = typeof p.query === 'string' ? p.query.trim() : '';
       const documents = Array.isArray(p.documents) ? p.documents : [];
       if (!query || documents.length === 0) {
@@ -603,20 +691,31 @@ export function register(): void {
           : slice.length;
 
       const tryEmbedFallback = async (reason: string): Promise<OllamaRerankIpcResult> => {
+        if (signal.aborted) return fail('cancelled', 'Cancelled by the renderer');
         logger.log(`[Ollama] rerank falling back to arctic-embed cosine (${reason})`);
-        const results = await embedCosineRerank(q, slice, topN);
-        if (!results?.length) {
+        // Cosine scores every document; keep the full list for the score
+        // summary and hand back the top N.
+        const all = await embedCosineRerank(q, slice, slice.length);
+        if (!all?.length) {
           return fail('embed_fallback_failed', `Reranker unavailable (${reason}); embed cosine fallback also failed`);
         }
-        return { results, via: 'embed_fallback' };
+        return succeed(all.slice(0, topN), 'embed_fallback', all, slice.length);
       };
 
       let detection = await detectRerankTier();
+      if (signal.aborted) return fail('cancelled', 'Cancelled by the renderer');
 
       // ── Tier 1: native cross-encoder ──
       if (detection.tier === 'native') {
-        const native = await rerankViaNativeEndpoint(q, slice, topN, detection.model);
-        if (native.results) return { results: native.results, via: 'native' };
+        // Ask for every row (not top_n) so the report's score spread covers
+        // the whole pool; the reply is trimmed to topN below.
+        const native = await rerankViaNativeEndpoint(q, slice, slice.length, detection.model, {
+          timeoutMs: budgetMs,
+          signal,
+        });
+        if (native.results) return succeed(native.results.slice(0, topN), 'native', native.results, slice.length);
+        if (native.code === 'cancelled') return fail('cancelled', native.message);
+        if (native.code === 'timeout') return fail('timeout', native.message);
         if (native.code === 'empty_results') {
           return fail('empty_results', 'Rerank returned no usable rows');
         }
@@ -638,17 +737,21 @@ export function register(): void {
           // Same politeness contract as embeddings: when the window has been
           // blurred we assume a game has the GPU and pause between documents.
           isBackground: () => embedState.background,
+          ...(budgetMs !== undefined ? { budgetMs } : {}),
+          signal,
         });
         if (scored) {
-          return { results: scored.rows.slice(0, topN), via: scored.tier };
+          return succeed(scored.rows.slice(0, topN), scored.tier, scored.rows, slice.length, scored.truncated);
         }
+        if (signal.aborted) return fail('cancelled', 'Cancelled by the renderer');
         return tryEmbedFallback('qwen_abandoned');
       }
 
       // ── Tier 3: cosine ──
       if (detection.ollamaUp) {
-        // Nothing better is installed — start the Qwen3 download so the next
-        // session gets graded scores. Deduped, retry-capable, non-blocking.
+        // Nothing better is installed — start the Qwen3 download. Deduped,
+        // retry-capable, non-blocking; a successful pull resets the tier cache
+        // (ensureRerankModelPull), so later calls in THIS session use Qwen3.
         void ensureRerankModelPull(getRerankQwenModelTag());
       }
       return tryEmbedFallback(detection.reason);
@@ -656,9 +759,45 @@ export function register(): void {
       const message = error instanceof Error ? error.message : String(error);
       logger.warn('[Ollama] rerank failed:', error);
       // Abort / network — not a 404; do not silent-fallback (keeps failures honest).
-      const code = message.toLowerCase().includes('abort') ? 'timeout' : 'network_error';
+      const code = signal.aborted ? 'cancelled' : message.toLowerCase().includes('abort') ? 'timeout' : 'network_error';
       return fail(code, message);
+    } finally {
+      endRerankRequest(requestId);
     }
+  });
+
+  /**
+   * Renderer gave up on a rerank (its deadline passed or the view moved on).
+   * Stops the Qwen3 loop before its next document and aborts a native request,
+   * so Ollama is not kept busy producing a result nobody will read.
+   */
+  ipcMain.handle('ollama:rerankCancel', async (_event: any, requestId: unknown): Promise<boolean> => {
+    if (typeof requestId !== 'string' || !requestId) return false;
+    return cancelRerankRequest(requestId);
+  });
+
+  /**
+   * Current reranker tier without running a rerank — the renderer sizes its
+   * budget and document pool by tier (Qwen3 costs one generate call per doc).
+   * Uses the cached detection when it is still fresh.
+   */
+  ipcMain.handle('ollama:rerankTier', async () => {
+    try {
+      const d = await detectRerankTier();
+      return { tier: d.tier, label: rerankTierLabel(d.tier), model: d.model, ollamaUp: d.ollamaUp };
+    } catch (error) {
+      logger.warn('[Ollama] rerank tier lookup failed:', error);
+      return null;
+    }
+  });
+
+  /**
+   * One summary line per rerank run, composed by the renderer (it is the only
+   * side that knows how many positions actually moved). Fire-and-forget.
+   */
+  ipcMain.on('ollama:rerankLog', (_event: any, line: unknown) => {
+    if (typeof line !== 'string' || !line.startsWith('[Rerank]')) return;
+    logger.log(line.slice(0, 400).replace(/[\r\n]+/g, ' '));
   });
 
   /**

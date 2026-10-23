@@ -10,6 +10,12 @@
  *   - session:started       { gameId, startTime }
  *   - session:liveUpdate    { gameId, activeMinutes } — every poll tick while running
  *   - session:ended         { gameId, session: GameSession }
+ *
+ * Delivery guarantee: every completed session is kept in a persisted
+ * pending queue (`pending-sessions.json`) until the renderer acknowledges it
+ * via `session:ack`. A renderer crash/reload (or a hidden auto-launch where the
+ * UI never mounted) therefore can no longer drop playtime: the renderer drains
+ * the queue on mount (`session:getRecovered`) and records idempotently by id.
  */
 
 import { exec, type ExecOptions } from 'child_process';
@@ -20,6 +26,7 @@ import { logger } from './safe-logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import { nativeSessionEnumerate } from './native-bridge.js';
+import { atomicWriteFileSync } from './safe-write.js';
 
 /** Async exec so process snapshots never block Electron's main/input pump. */
 const execAsync = promisify(exec);
@@ -290,9 +297,13 @@ let overlayWindowRef: BrowserWindowType | null = null;
 let overlayVisibilityCallback: ((shouldShow: boolean) => void) | null = null;
 let lastOverlayShouldShow = false;
 
-// Sessions recovered from a previous run that crashed/was force-killed before it
-// could finalize them. Buffered here until the renderer drains them on mount.
-let recoveredSessions: CompletedSession[] = [];
+// Completed sessions not yet acknowledged by the renderer (id -> session).
+// Includes sessions recovered from a crashed previous run. Persisted to
+// `pending-sessions.json` on every change; entries leave only on `session:ack`.
+const pendingSessions: Map<string, CompletedSession> = new Map();
+/** Hard cap so a renderer that never acks can't grow the file forever. */
+const MAX_PENDING_SESSIONS = 1000;
+let pendingLoaded = false;
 
 // ---------------------------------------------------------------------------
 // Crash-recovery persistence
@@ -309,6 +320,8 @@ interface PersistedSession {
   startTime: string;
   idleAccumulatedMs: number;
   lastSeenMs: number;
+  /** Optional for files written by older builds. */
+  activeInputMs?: number;
 }
 
 function getPersistPath(): string | null {
@@ -317,6 +330,92 @@ function getPersistPath(): string | null {
   } catch {
     return null;
   }
+}
+
+function getPendingPath(): string | null {
+  try {
+    return path.join(app.getPath('userData'), 'pending-sessions.json');
+  } catch {
+    return null;
+  }
+}
+
+function persistPendingSessions(): void {
+  const file = getPendingPath();
+  if (!file) return;
+  try {
+    if (pendingSessions.size === 0) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+      return;
+    }
+    atomicWriteFileSync(file, JSON.stringify(Array.from(pendingSessions.values())));
+  } catch (err) {
+    logger.error('[SessionTracker] Failed to persist pending sessions:', err);
+  }
+}
+
+function isCompletedSession(v: unknown): v is CompletedSession {
+  if (!v || typeof v !== 'object') return false;
+  const s = v as Record<string, unknown>;
+  return typeof s.id === 'string' && typeof s.gameId === 'string'
+    && typeof s.startTime === 'string' && typeof s.endTime === 'string'
+    && typeof s.durationMinutes === 'number' && Number.isFinite(s.durationMinutes);
+}
+
+function loadPendingSessions(): void {
+  if (pendingLoaded) return;
+  pendingLoaded = true;
+  const file = getPendingPath();
+  if (!file) return;
+  try {
+    if (!fs.existsSync(file)) return;
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (!Array.isArray(parsed)) return;
+    for (const item of parsed) {
+      if (isCompletedSession(item)) pendingSessions.set(item.id, item);
+    }
+    if (pendingSessions.size > 0) {
+      logger.log(`[SessionTracker] ${pendingSessions.size} completed session(s) awaiting renderer ack`);
+    }
+  } catch (err) {
+    logger.error('[SessionTracker] Failed to load pending sessions:', err);
+  }
+}
+
+function addPending(completed: CompletedSession): void {
+  pendingSessions.set(completed.id, completed);
+  while (pendingSessions.size > MAX_PENDING_SESSIONS) {
+    const oldest = pendingSessions.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    pendingSessions.delete(oldest);
+    logger.warn(`[SessionTracker] Pending-session cap reached — dropped ${oldest}`);
+  }
+  persistPendingSessions();
+}
+
+/**
+ * Queue a completed session for guaranteed delivery and push it to the
+ * renderer. It stays queued (and on disk) until the renderer acks it.
+ */
+function finalizeCompleted(completed: CompletedSession): void {
+  addPending(completed);
+  sendToRenderer('session:statusChange', { gameId: completed.gameId, status: 'Playing' });
+  sendToRenderer('session:ended', { gameId: completed.gameId, session: completed });
+}
+
+function buildCompleted(gameId: string, session: ActiveSession, endMs: number): CompletedSession {
+  const rawDurationMs = endMs - session.startTime.getTime();
+  const activeDurationMs = Math.max(0, rawDurationMs - session.idleAccumulatedMs);
+  return {
+    id: uuidv4(),
+    gameId,
+    executablePath: session.executablePath,
+    startTime: session.startTime.toISOString(),
+    endTime: new Date(endMs).toISOString(),
+    durationMinutes: Math.round(activeDurationMs / 60_000 * 100) / 100,
+    idleMinutes: Math.round(session.idleAccumulatedMs / 60_000 * 100) / 100,
+    activeInputMinutes: Math.round(session.activeInputMs / 60_000 * 100) / 100,
+  };
 }
 
 function persistActiveSessions(): void {
@@ -333,22 +432,27 @@ function persistActiveSessions(): void {
       startTime: s.startTime.toISOString(),
       idleAccumulatedMs: s.idleAccumulatedMs,
       lastSeenMs: s.lastSeenMs,
+      activeInputMs: s.activeInputMs,
     }));
-    fs.writeFileSync(file, JSON.stringify(data), 'utf-8');
+    atomicWriteFileSync(file, JSON.stringify(data));
   } catch (err) {
     logger.error('[SessionTracker] Failed to persist active sessions:', err);
   }
 }
 
 function recoverPersistedSessions(): void {
+  loadPendingSessions();
   const file = getPersistPath();
   if (!file) return;
   try {
     if (!fs.existsSync(file)) return;
     const raw = fs.readFileSync(file, 'utf-8');
     const parsed: unknown = JSON.parse(raw);
-    fs.unlinkSync(file); // consume once
-    if (!Array.isArray(parsed)) return;
+    if (!Array.isArray(parsed)) {
+      fs.unlinkSync(file);
+      return;
+    }
+    const recovered: CompletedSession[] = [];
 
     for (const item of parsed as PersistedSession[]) {
       if (!item || typeof item.gameId !== 'string' || typeof item.startTime !== 'string') continue;
@@ -357,7 +461,10 @@ function recoverPersistedSessions(): void {
       if (!Number.isFinite(startMs) || endMs <= startMs) continue;
       const idleMs = Number.isFinite(item.idleAccumulatedMs) ? Math.max(0, item.idleAccumulatedMs) : 0;
       const activeMs = Math.max(0, endMs - startMs - idleMs);
-      recoveredSessions.push({
+      const activeInputMs = typeof item.activeInputMs === 'number' && Number.isFinite(item.activeInputMs)
+        ? Math.max(0, item.activeInputMs)
+        : undefined;
+      recovered.push({
         id: uuidv4(),
         gameId: item.gameId,
         executablePath: item.executablePath ?? '',
@@ -365,10 +472,18 @@ function recoverPersistedSessions(): void {
         endTime: new Date(endMs).toISOString(),
         durationMinutes: Math.round((activeMs / 60_000) * 100) / 100,
         idleMinutes: Math.round((idleMs / 60_000) * 100) / 100,
+        ...(activeInputMs !== undefined
+          ? { activeInputMinutes: Math.round((activeInputMs / 60_000) * 100) / 100 }
+          : {}),
       });
     }
-    if (recoveredSessions.length > 0) {
-      logger.log(`[SessionTracker] Recovered ${recoveredSessions.length} unfinalized session(s) from previous run`);
+    // Write the pending queue BEFORE consuming the snapshot so a crash in
+    // between can never lose the recovered sessions.
+    for (const c of recovered) pendingSessions.set(c.id, c);
+    if (recovered.length > 0) persistPendingSessions();
+    fs.unlinkSync(file); // consume once
+    if (recovered.length > 0) {
+      logger.log(`[SessionTracker] Recovered ${recovered.length} unfinalized session(s) from previous run`);
     }
   } catch (err) {
     logger.error('[SessionTracker] Failed to recover persisted sessions:', err);
@@ -482,25 +597,11 @@ async function pollTick(): Promise<void> {
 
       // End the session at the LAST time we actually saw it running, so the
       // missed-poll window is not counted as playtime.
-      const endMs = existingSession.lastSeenMs;
-      const rawDurationMs = endMs - existingSession.startTime.getTime();
-      const activeDurationMs = Math.max(0, rawDurationMs - existingSession.idleAccumulatedMs);
-
-      const completed: CompletedSession = {
-        id: uuidv4(),
-        gameId: game.gameId,
-        executablePath: game.executablePath,
-        startTime: existingSession.startTime.toISOString(),
-        endTime: new Date(endMs).toISOString(),
-        durationMinutes: Math.round(activeDurationMs / 60_000 * 100) / 100,
-        idleMinutes: Math.round(existingSession.idleAccumulatedMs / 60_000 * 100) / 100,
-        activeInputMinutes: Math.round(existingSession.activeInputMs / 60_000 * 100) / 100,
-      };
+      const completed = buildCompleted(game.gameId, existingSession, existingSession.lastSeenMs);
 
       activeSessions.delete(game.gameId);
 
-      sendToRenderer('session:statusChange', { gameId: game.gameId, status: 'Playing' });
-      sendToRenderer('session:ended', { gameId: game.gameId, session: completed });
+      finalizeCompleted(completed);
 
       logger.log(
         `[SessionTracker] Game ${game.gameId} ended — ` +
@@ -618,6 +719,7 @@ export function registerOverlayWindow(
 
 export function startSessionTracker(mainWindow: BrowserWindowType) {
   mainWindowRef = mainWindow;
+  stopped = false;
 
   // Recover any sessions left unfinalized by a previous crash/force-kill.
   recoverPersistedSessions();
@@ -633,40 +735,49 @@ export function startSessionTracker(mainWindow: BrowserWindowType) {
 }
 
 /**
- * Drain sessions recovered from a previous run. The renderer calls this once on
- * mount and records them, so playtime from a crashed session is not lost.
+ * Every completed session the renderer has not acknowledged yet (live-ended
+ * sessions it may have missed + sessions recovered from a crashed run). NOT
+ * drained: entries leave the queue only via `ackSessions`, so a renderer that
+ * crashes mid-record gets them again on its next mount (recording is
+ * idempotent by id on the renderer side).
  */
-export function drainRecoveredSessions(): CompletedSession[] {
-  const out = recoveredSessions;
-  recoveredSessions = [];
-  return out;
+export function getUnackedSessions(): CompletedSession[] {
+  loadPendingSessions();
+  return Array.from(pendingSessions.values());
 }
+
+/** @deprecated kept for older callers — now non-destructive (see getUnackedSessions). */
+export function drainRecoveredSessions(): CompletedSession[] {
+  return getUnackedSessions();
+}
+
+/** Renderer confirms these sessions are persisted — drop them from the queue. */
+export function ackSessions(ids: unknown): number {
+  if (!Array.isArray(ids)) return 0;
+  let removed = 0;
+  for (const id of ids) {
+    if (typeof id === 'string' && pendingSessions.delete(id)) removed++;
+  }
+  if (removed > 0) persistPendingSessions();
+  return removed;
+}
+
+let stopped = false;
 
 export function stopSessionTracker() {
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  if (stopped) return;
+  stopped = true;
 
-  // Finalize any active sessions
+  // Finalize any active sessions (up to the last time the process was seen —
+  // quitting Ark must not count time the game wasn't confirmed running).
+  const nowMs = Date.now();
   for (const [gameId, session] of activeSessions) {
-    const endTime = new Date();
-    const rawDurationMs = endTime.getTime() - session.startTime.getTime();
-    const activeDurationMs = Math.max(0, rawDurationMs - session.idleAccumulatedMs);
-
-    const completed: CompletedSession = {
-      id: uuidv4(),
-      gameId,
-      executablePath: session.executablePath,
-      startTime: session.startTime.toISOString(),
-      endTime: endTime.toISOString(),
-      durationMinutes: Math.round(activeDurationMs / 60_000 * 100) / 100,
-      idleMinutes: Math.round(session.idleAccumulatedMs / 60_000 * 100) / 100,
-      activeInputMinutes: Math.round(session.activeInputMs / 60_000 * 100) / 100,
-    };
-
-    sendToRenderer('session:statusChange', { gameId, status: 'Playing' });
-    sendToRenderer('session:ended', { gameId, session: completed });
+    const endMs = Math.max(session.startTime.getTime(), Math.min(nowMs, session.lastSeenMs || nowMs));
+    finalizeCompleted(buildCompleted(gameId, session, endMs));
   }
 
   activeSessions.clear();
@@ -687,33 +798,24 @@ export function stopSessionTracker() {
  */
 export function setTrackedGames(games: TrackedGame[]) {
   const newIds = new Set(games.map((g) => g.gameId));
+  let finalizedAny = false;
 
   // Finalize sessions for games that were removed from the tracked list
   for (const [gameId, session] of activeSessions) {
     if (!newIds.has(gameId)) {
-      const endTime = new Date();
-      const rawDurationMs = endTime.getTime() - session.startTime.getTime();
-      const activeDurationMs = Math.max(0, rawDurationMs - session.idleAccumulatedMs);
-
-      const completed: CompletedSession = {
-        id: uuidv4(),
-        gameId,
-        executablePath: session.executablePath,
-        startTime: session.startTime.toISOString(),
-        endTime: endTime.toISOString(),
-        durationMinutes: Math.round(activeDurationMs / 60_000 * 100) / 100,
-        idleMinutes: Math.round(session.idleAccumulatedMs / 60_000 * 100) / 100,
-        activeInputMinutes: Math.round(session.activeInputMs / 60_000 * 100) / 100,
-      };
+      const completed = buildCompleted(gameId, session, Date.now());
 
       activeSessions.delete(gameId);
-      sendToRenderer('session:statusChange', { gameId, status: 'Playing' });
-      sendToRenderer('session:ended', { gameId, session: completed });
+      finalizeCompleted(completed);
+      finalizedAny = true;
       logger.log(`[SessionTracker] Finalized orphaned session for ${gameId}`);
     }
   }
 
   trackedGames = games;
+  // Drop finalized sessions from the crash-recovery snapshot right away so a
+  // crash before the next tick can't recover them a second time.
+  if (finalizedAny) persistActiveSessions();
   // Untracking a game may have finalized its active session above.
   updateOverlayVisibility();
   logger.log(`[SessionTracker] Now tracking ${games.length} game(s)`);

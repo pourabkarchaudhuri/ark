@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { config as loadEnv } from 'dotenv';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { app, BrowserWindow, shell, session, Tray, Menu, nativeImage } = electron;
+const { app, BrowserWindow, shell, session, Tray, Menu, nativeImage, dialog, ipcMain } = electron;
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
 import path from 'path';
@@ -28,22 +28,63 @@ process.title = 'Ark';
 
 // EPIPE error handlers are installed by safe-logger.ts (imported below).
 
-// Log startup errors to a file when packaged (app doesn't show console)
-function logStartupError(err: unknown) {
+/**
+ * True once the main window has reached `ready-to-show` (or a 60s fallback).
+ * Before that, an uncaught exception is a STARTUP failure (dialog + exit);
+ * after it, stray exceptions are logged and the app keeps running — quitting
+ * a tray app silently mid-session used to drop the user's in-progress
+ * session tracking for no reason.
+ */
+let startupComplete = false;
+
+const ERROR_LOG_MAX_BYTES = 1024 * 1024;
+
+/** Append (never overwrite) a timestamped entry; roll the file past 1 MB. */
+function appendErrorLog(fileName: string, kind: string, err: unknown): string {
   const msg = err instanceof Error ? err.message + '\n' + err.stack : String(err);
   try {
     const userData = app?.getPath?.('userData');
-    if (userData) fs.writeFileSync(path.join(userData, 'ark-startup-error.log'), msg, 'utf-8');
+    if (userData) {
+      const file = path.join(userData, fileName);
+      try {
+        if (fs.existsSync(file) && fs.statSync(file).size > ERROR_LOG_MAX_BYTES) {
+          fs.renameSync(file, file + '.old');
+        }
+      } catch { /* rotation is best-effort */ }
+      fs.appendFileSync(file, `[${new Date().toISOString()}] ${kind}: ${msg}\n\n`, 'utf-8');
+    }
   } catch {
     // ignore
   }
+  return msg;
+}
+
+// Log startup errors to a file when packaged (app doesn't show console)
+function logStartupError(err: unknown) {
+  const msg = appendErrorLog('ark-startup-error.log', 'startup', err);
   logger.error('[Ark] Startup error:', msg);
 }
 
 process.on('uncaughtException', (err) => {
+  if (startupComplete) {
+    // Runtime stray exception: record it and keep the app (and its session
+    // tracker / tray) alive.
+    const msg = appendErrorLog('ark-error.log', 'uncaughtException', err);
+    logger.error('[Ark] Uncaught exception (continuing):', msg);
+    return;
+  }
   logStartupError(err);
+  if (!app.isPackaged) return; // dev: keep the process up for debugging
   try {
-    if (app.isPackaged) app.quit();
+    const detail = err instanceof Error ? err.message : String(err);
+    dialog.showErrorBox(
+      'Ark failed to start',
+      `Ark hit an unexpected error while starting and has to close.\n\n${detail}\n\n` +
+        'Details were written to ark-startup-error.log in the Ark data folder.',
+    );
+  } catch { /* dialog unavailable — exit anyway */ }
+  try {
+    app.exit(1);
   } catch {
     process.exit(1);
   }
@@ -93,7 +134,146 @@ import {
 } from './overlay-window.js';
 import { logger } from './safe-logger.js';
 import { setEmbeddingBackgroundMode } from './ipc/ollama-handlers.js';
+import { atomicWriteFileSync } from './safe-write.js';
 let mainWindow: BrowserWindowType | null = null;
+
+// ---------------------------------------------------------------------------
+// Crash-loop breaker (boot health)
+//
+// Persists renderer crashes and abnormal exits across launches in
+// `<userData>/boot-health.json`. If CRASH_LOOP_THRESHOLD of them happen within
+// CRASH_LOOP_WINDOW_MS, the next launch starts in SAFE MODE (the renderer asks
+// via `app:getSafeMode` and skips its heavy startup work). A launch that runs
+// STABLE_RUN_MS without a renderer crash clears the counter; a clean quit
+// clears the "boot in progress" marker so it isn't counted as a crash.
+// ---------------------------------------------------------------------------
+
+interface BootHealthFile {
+  /** Timestamps (ms) of renderer crashes / abnormal exits. */
+  crashes: number[];
+  /** Set while a launch is running; still present on next start ⇒ abnormal exit. */
+  pendingBoot: { startedAt: number; stable?: boolean } | null;
+}
+
+const CRASH_LOOP_WINDOW_MS = 10 * 60_000;
+const CRASH_LOOP_THRESHOLD = 3;
+/** In-session: reload into safe mode once this many crashes are in the window. */
+const IN_SESSION_SAFE_MODE_THRESHOLD = 2;
+const STABLE_RUN_MS = 3 * 60_000;
+
+let bootHealth: BootHealthFile = { crashes: [], pendingBoot: null };
+let bootHealthInitialized = false;
+let lastRendererCrashAt = 0;
+let stableTimer: NodeJS.Timeout | null = null;
+const safeModeState: { safeMode: boolean; reason?: string; recentCrashes: number } = {
+  safeMode: false,
+  recentCrashes: 0,
+};
+
+function bootHealthPath(): string | null {
+  try {
+    return path.join(app.getPath('userData'), 'boot-health.json');
+  } catch {
+    return null;
+  }
+}
+
+function writeBootHealth(): void {
+  if (!app.isPackaged) return; // dev runs never feed the packaged build's crash counter
+  const file = bootHealthPath();
+  if (!file) return;
+  try {
+    atomicWriteFileSync(file, JSON.stringify(bootHealth));
+  } catch (err) {
+    logger.warn('[BootHealth] write failed (non-fatal):', err);
+  }
+}
+
+function recentCrashes(now = Date.now()): number[] {
+  return bootHealth.crashes.filter((t) => Number.isFinite(t) && now - t >= 0 && now - t <= CRASH_LOOP_WINDOW_MS);
+}
+
+function initBootHealth(): void {
+  if (bootHealthInitialized) return;
+  bootHealthInitialized = true;
+  // Dev restarts kill main without a clean quit — three quick rebuilds would otherwise
+  // drop the dev build into safe mode. Crash-loop protection is for packaged builds.
+  if (!app.isPackaged) return;
+  const now = Date.now();
+  try {
+    const file = bootHealthPath();
+    if (file && fs.existsSync(file)) {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<BootHealthFile>;
+      bootHealth = {
+        crashes: Array.isArray(parsed.crashes) ? parsed.crashes.filter((t) => typeof t === 'number') : [],
+        pendingBoot: parsed.pendingBoot && typeof parsed.pendingBoot.startedAt === 'number' ? parsed.pendingBoot : null,
+      };
+    }
+  } catch (err) {
+    logger.warn('[BootHealth] unreadable — starting fresh:', err);
+    bootHealth = { crashes: [], pendingBoot: null };
+  }
+  // Previous launch never quit cleanly and never became stable → it crashed
+  // (or was killed) during startup.
+  if (bootHealth.pendingBoot && !bootHealth.pendingBoot.stable) {
+    bootHealth.crashes.push(bootHealth.pendingBoot.startedAt);
+    logger.warn('[BootHealth] Previous launch exited abnormally during startup');
+  }
+  bootHealth.crashes = recentCrashes(now);
+  bootHealth.pendingBoot = { startedAt: now };
+  const recent = bootHealth.crashes.length;
+  safeModeState.recentCrashes = recent;
+  if (recent >= CRASH_LOOP_THRESHOLD) {
+    safeModeState.safeMode = true;
+    safeModeState.reason = `${recent} crashes in the last ${CRASH_LOOP_WINDOW_MS / 60_000} minutes`;
+    logger.warn(`[BootHealth] Crash loop detected (${recent}) — starting in SAFE MODE`);
+  }
+  writeBootHealth();
+  scheduleStableReset();
+}
+
+/** After STABLE_RUN_MS without a renderer crash, forget past crashes. */
+function scheduleStableReset(): void {
+  if (stableTimer) clearTimeout(stableTimer);
+  stableTimer = setTimeout(() => {
+    stableTimer = null;
+    const sinceCrash = Date.now() - lastRendererCrashAt;
+    if (sinceCrash < STABLE_RUN_MS) {
+      scheduleStableReset();
+      return;
+    }
+    bootHealth.crashes = [];
+    if (bootHealth.pendingBoot) bootHealth.pendingBoot.stable = true;
+    writeBootHealth();
+    logger.log('[BootHealth] Stable run — crash counter reset (next launch starts normally)');
+  }, STABLE_RUN_MS);
+  stableTimer.unref?.();
+}
+
+/** Record a renderer crash; may switch the current run into safe mode. */
+function recordRendererCrash(reason: string): void {
+  const now = Date.now();
+  lastRendererCrashAt = now;
+  bootHealth.crashes.push(now);
+  bootHealth.crashes = recentCrashes(now);
+  if (bootHealth.pendingBoot) bootHealth.pendingBoot.stable = false;
+  const recent = bootHealth.crashes.length;
+  safeModeState.recentCrashes = recent;
+  if (!safeModeState.safeMode && recent >= IN_SESSION_SAFE_MODE_THRESHOLD) {
+    safeModeState.safeMode = true;
+    safeModeState.reason = `renderer crashed ${recent} times recently (${reason})`;
+    logger.warn('[BootHealth] Repeated renderer crashes — reloads will use SAFE MODE');
+  }
+  writeBootHealth();
+  if (bootHealthInitialized) scheduleStableReset();
+}
+
+/** Clean quit — this launch must not count as an abnormal exit. */
+function markCleanExit(): void {
+  if (!bootHealthInitialized) return;
+  bootHealth.pendingBoot = null;
+  writeBootHealth();
+}
 
 // ---------- Data migration: game-tracker → ark ----------
 // When we renamed the package from "game-tracker" to "ark", the userData
@@ -290,6 +470,10 @@ function createWindow() {
   });
 
   // ---- Renderer crash recovery (with circuit breaker) ----
+  // Every crash is also recorded in the persisted boot-health counter: after
+  // repeated crashes the reload (and the next launch) runs in SAFE MODE, so we
+  // don't reload straight back into the same crash. Completed sessions are
+  // safe across the reload — main keeps them queued until the renderer acks.
   const crashTimestamps: number[] = [];
   const CRASH_WINDOW_MS = 30_000;
   const MAX_CRASHES_IN_WINDOW = 3;
@@ -297,6 +481,8 @@ function createWindow() {
   mainWindow.webContents.on('render-process-gone', (_event: any, details: any) => {
     logger.error('[Ark] Renderer process gone:', details.reason, details.exitCode);
     if (details.reason === 'clean-exit') return;
+
+    recordRendererCrash(String(details.reason));
 
     const now = Date.now();
     crashTimestamps.push(now);
@@ -310,7 +496,7 @@ function createWindow() {
       return;
     }
 
-    logger.log('[Ark] Attempting renderer reload…');
+    logger.log(`[Ark] Attempting renderer reload…${safeModeState.safeMode ? ' (safe mode)' : ''}`);
     mainWindow?.webContents.reload();
   });
 
@@ -327,6 +513,7 @@ function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => {
+    startupComplete = true;
     // If launched with --hidden (auto-start), stay hidden in tray
     if (!process.argv.includes('--hidden')) {
       mainWindow?.show();
@@ -772,9 +959,29 @@ app.whenReady().then(async () => {
 
   // Security: deny all permission requests the app doesn't need
   // (camera, microphone, geolocation, notifications, etc.)
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    // Desktop notifications for Ark's own window only (Ark Wrapped season notice) —
+    // embedded web content keeps the deny-all policy.
+    if (permission === 'notifications' && mainWindow && !mainWindow.isDestroyed() && webContents === mainWindow.webContents) {
+      callback(true);
+      return;
+    }
     logger.warn(`[Security] Denied permission request: ${permission}`);
     callback(false);
+  });
+
+  // Crash-loop breaker: count the previous launch if it died during startup
+  // and decide whether this launch runs in safe mode. Only the instance that
+  // owns the single-instance lock gets here (CLI modes returned above).
+  initBootHealth();
+  ipcMain.handle('app:getSafeMode', () => ({ ...safeModeState }));
+  // Bring Ark forward (also from the tray) — e.g. clicking the Ark Wrapped notification.
+  ipcMain.handle('app:showAndFocus', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+    return true;
   });
 
   // Show window as early as possible — don't block on ad blocker
@@ -785,6 +992,9 @@ app.whenReady().then(async () => {
     logStartupError(err);
     app.quit();
   }
+  // Fallback: treat startup as complete even if ready-to-show never fires
+  // (e.g. a hung first paint) so runtime exceptions don't hard-exit.
+  setTimeout(() => { startupComplete = true; }, 60_000).unref?.();
 
   // Initialize ad blocker in the background (non-blocking — runs after window is shown)
   (async () => {
@@ -941,6 +1151,12 @@ app.whenReady().then(async () => {
 // Also flush caches synchronously so no data is lost on shutdown
 app.on('before-quit', () => {
   isQuitting = true;
+  // Finalize in-progress play sessions NOW. app.quit() from the tray skips
+  // window-all-closed (window close is intercepted to hide-to-tray), so
+  // stopSessionTracker used to never run on quit. Finalized sessions land in
+  // the persisted pending queue and are recorded by the renderer (now, or on
+  // the next launch if it's already gone). Idempotent.
+  try { stopSessionTracker(); } catch (e) { logger.error('[Shutdown] Session tracker stop failed:', e); }
   // Tear down the overlay HUD and release its global hotkey.
   try { unregisterOverlayHotkey(); } catch (e) { logger.error('[Shutdown] Overlay hotkey unregister failed:', e); }
   try { destroyOverlay(); } catch (e) { logger.error('[Shutdown] Overlay destroy failed:', e); }
@@ -950,12 +1166,25 @@ app.on('before-quit', () => {
 });
 
 // Flush LevelDB on shutdown. Fires after all windows have closed but before
-// process exit — the async close usually completes in <10 ms because LevelDB
-// keeps a bounded in-memory memtable. Non-fatal if it fails; the DB will
-// self-recover from its WAL on next open.
-app.on('will-quit', () => {
-  getLevelStore().close().catch((err) => {
-    logger.error('[Shutdown] LevelDB close failed:', err);
+// process exit. We hold the quit (preventDefault) until the close — which
+// waits for in-flight writes, including the renderer's beforeunload flush
+// batches — has finished, then exit explicitly. Bounded so quit never hangs;
+// LevelDB self-recovers from its WAL if the cap is ever hit.
+const SHUTDOWN_CLOSE_TIMEOUT_MS = 3_000;
+let shutdownFinalized = false;
+app.on('will-quit', (event: any) => {
+  if (shutdownFinalized) return;
+  shutdownFinalized = true;
+  event.preventDefault();
+  markCleanExit();
+  // One macrotask lets already-dispatched store:* IPC handlers enqueue their
+  // writes before we start closing.
+  const closeDb = new Promise<void>((resolve) => setImmediate(resolve))
+    .then(() => getLevelStore().close())
+    .catch((err) => { logger.error('[Shutdown] LevelDB close failed:', err); });
+  const cap = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_CLOSE_TIMEOUT_MS));
+  void Promise.race([closeDb, cap]).finally(() => {
+    try { app.exit(0); } catch { process.exit(0); }
   });
 });
 

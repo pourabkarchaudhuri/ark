@@ -7,6 +7,7 @@ import {
 import { journeyStore } from '@/services/journey-store';
 import { sessionStore } from '@/services/session-store';
 import { statusHistoryStore } from '@/services/status-history-store';
+import { SerialWriteQueue, readWithRetry, reportStorageReadOnly } from '@/services/storage-health';
 
 const STORAGE_KEY = 'ark-custom-games';
 const STORAGE_VERSION = 2; // v2: id migrated from negative number to "custom-N" string
@@ -59,6 +60,13 @@ export class CustomGameStore {
   private entries: Map<string, CustomGameEntry> = new Map(); // keyed by "custom-N"
   private nextCounter: number = 1; // Start from 1, increment for each new game
   private listeners: Set<() => void> = new Set();
+  /**
+   * Hours-only channel (mirrors LibraryStore.subscribeHours). Session-driven
+   * hours ticks fire ONLY this channel, so they no longer bump `_version`
+   * (Dashboard grid recompute), re-send the tracked-games IPC, or rebuild the
+   * Oracle signature every 15s. General mutations fire both (superset).
+   */
+  private hoursListeners: Set<() => void> = new Set();
   /** Monotonic version counter — see LibraryStore.getVersion() for rationale. */
   private _version = 0;
   private isInitialized = false;
@@ -67,8 +75,18 @@ export class CustomGameStore {
   /** Gate flag captured once at construction — LevelDB path vs. legacy. */
   private readonly _useLevelDB: boolean;
 
-  /** Entry-key set (gameIds) currently persisted in LevelDB for delta-del ops. */
-  private _knownKeys: Set<string> = new Set();
+  /**
+   * id -> exact entry object last written to LevelDB. Every mutation path
+   * replaces the entry object, so saves diff by identity and write only
+   * changed rows (+ deletes for removed ids) instead of every entry per tick.
+   */
+  private _persisted: Map<string, CustomGameEntry> = new Map();
+
+  /** Serializes every LevelDB write (saves + clearNamespace). */
+  private readonly _writeQueue = new SerialWriteQueue('CustomGameStore');
+
+  /** LevelDB unreadable this session → no writes at all (see storage-health). */
+  private _readOnly = false;
 
   /** Last persisted nextCounter; skip meta-write if unchanged. */
   private _lastPersistedCounter: number = 1;
@@ -98,53 +116,74 @@ export class CustomGameStore {
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
+      if (this._useLevelDB && !this._readOnly) {
+        // Unloading — can't wait behind an in-flight batch; send the delta now.
+        void this.saveNowLevelDB();
+        return;
+      }
       this.saveNow();
     }
   }
 
   private saveNow(): void {
+    if (this._readOnly) return;
     if (this._useLevelDB) {
-      void this.saveNowLevelDB();
+      void this._writeQueue.run(() => this.saveNowLevelDB());
       return;
     }
     this.saveToStorage();
   }
 
+  /** True when LevelDB could not be read this session — nothing is persisted. */
+  isReadOnly(): boolean {
+    return this._readOnly;
+  }
+
+  /** Resolves once every queued LevelDB write has settled (tests / shutdown). */
+  whenPersisted(): Promise<void> {
+    return this._writeQueue.idle();
+  }
+
   private async saveNowLevelDB(): Promise<void> {
+    if (this._readOnly) return;
     try {
-      const currentIds = new Set<string>();
       const ops: Array<
         | { type: 'put'; namespace: string; key: string; value: unknown }
         | { type: 'del'; namespace: string; key: string }
       > = [];
+      const written: Array<[string, CustomGameEntry]> = [];
+      const deleted: string[] = [];
 
       for (const [id, entry] of this.entries) {
         if (!id) continue;
-        currentIds.add(id);
+        if (this._persisted.get(id) === entry) continue; // unchanged
         ops.push({
           type: 'put',
           namespace: LEVEL_NAMESPACE,
           key: `${KEY_PREFIX_ENTRY}${id}`,
           value: entry,
         });
+        written.push([id, entry]);
       }
 
-      for (const oldKey of this._knownKeys) {
-        if (!currentIds.has(oldKey)) {
+      for (const oldKey of this._persisted.keys()) {
+        if (!this.entries.has(oldKey)) {
           ops.push({
             type: 'del',
             namespace: LEVEL_NAMESPACE,
             key: `${KEY_PREFIX_ENTRY}${oldKey}`,
           });
+          deleted.push(oldKey);
         }
       }
 
-      if (this.nextCounter !== this._lastPersistedCounter) {
+      const counter = this.nextCounter;
+      if (counter !== this._lastPersistedCounter) {
         ops.push({
           type: 'put',
           namespace: LEVEL_NAMESPACE,
           key: KEY_META_NEXT_COUNTER,
-          value: { nextCounter: this.nextCounter },
+          value: { nextCounter: counter },
         });
       }
 
@@ -155,8 +194,9 @@ export class CustomGameStore {
         console.error('[CustomGameStore] batch save failed:', res.error);
         return;
       }
-      this._knownKeys = currentIds;
-      this._lastPersistedCounter = this.nextCounter;
+      for (const [id, entry] of written) this._persisted.set(id, entry);
+      for (const id of deleted) this._persisted.delete(id);
+      this._lastPersistedCounter = counter;
     } catch (err) {
       console.error('[CustomGameStore] Failed to save (LevelDB):', err);
     }
@@ -203,13 +243,14 @@ export class CustomGameStore {
 
   private async initializeFromLevelDB(): Promise<void> {
     try {
-      const res = await window.store!.getAll<any>(LEVEL_NAMESPACE);
-      if (res.error) {
-        console.error('[CustomGameStore] getAll IPC error:', res.error);
-        this.initializeFromLocalStorage();
+      const outcome = await readWithRetry('CustomGameStore', () =>
+        window.store!.getAll<any>(LEVEL_NAMESPACE),
+      );
+      if (!outcome.ok) {
+        this.enterReadOnly(outcome.error);
         return;
       }
-      const rows = res.rows ?? [];
+      const rows = outcome.value.rows ?? [];
       const entryRows: CustomGameEntry[] = [];
       let storedCounter: number | null = null;
       for (const r of rows) {
@@ -222,7 +263,12 @@ export class CustomGameStore {
       }
       if (entryRows.length > 0) {
         this.ingestEntries(entryRows);
-        this._knownKeys = new Set(this.entries.keys());
+        for (const r of entryRows) {
+          const id = this.migrateId(r.id);
+          const entry = this.entries.get(id);
+          // Rows whose id needed migration are rewritten on the next save.
+          if (entry && id === r.id) this._persisted.set(id, entry);
+        }
         this.nextCounter = storedCounter ?? this.recomputeCounterFromEntries();
         this._lastPersistedCounter = this.nextCounter;
         this.notifyListeners();
@@ -233,9 +279,33 @@ export class CustomGameStore {
         this.notifyListeners();
       }
     } catch (err) {
-      console.error('[CustomGameStore] Failed to init from LevelDB, falling back:', err);
-      this.initializeFromLocalStorage();
+      this.enterReadOnly(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * LevelDB unreadable after retries. Never fall back to the legacy
+   * localStorage snapshot once migrated (frozen at v1.0.61) — go read-only so
+   * nothing stale overwrites LevelDB. Pre-migration users see their legacy
+   * custom games, read-only as well.
+   */
+  private enterReadOnly(error: string): void {
+    this._readOnly = true;
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    let migrated = true;
+    try { migrated = localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes'; } catch { /* assume migrated */ }
+    if (!migrated) {
+      const stored = this.loadFromStorage();
+      if (stored) {
+        this.ingestEntries(stored.entries);
+        this.nextCounter = Math.max(this.nextCounter, this.recomputeCounterFromEntries());
+      }
+    }
+    reportStorageReadOnly('custom-games', error);
+    this.notifyListeners();
   }
 
   private async tryMigrateFromLocalStorage(): Promise<boolean> {
@@ -284,7 +354,7 @@ export class CustomGameStore {
         return false;
       }
 
-      this._knownKeys = new Set(this.entries.keys());
+      for (const [id, entry] of this.entries) this._persisted.set(id, entry);
       this._lastPersistedCounter = this.nextCounter;
       localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
       console.log(
@@ -401,6 +471,21 @@ export class CustomGameStore {
   private notifyListeners() {
     this._version++;
     this.listeners.forEach((listener) => listener());
+    this.hoursListeners.forEach((listener) => listener());
+  }
+
+  /**
+   * Subscribe to hours changes — fires on session-tracker ticks AND on every
+   * general mutation (superset of `subscribe`).
+   */
+  subscribeHours(listener: () => void): () => void {
+    this.hoursListeners.add(listener);
+    return () => this.hoursListeners.delete(listener);
+  }
+
+  /** Fire ONLY the hours channel — used by updateHoursFromSessions. */
+  private notifyHoursListeners() {
+    this.hoursListeners.forEach((listener) => listener());
   }
 
   /** Monotonic counter — bumps on every mutation. */
@@ -579,20 +664,24 @@ export class CustomGameStore {
       return;
     }
 
-    if (existing.hoursBaseline === undefined) {
-      existing.hoursBaseline = Math.max(0, (existing.hoursPlayed ?? 0) - safeSessionHours);
-    }
-    const baseline = existing.hoursBaseline ?? 0;
+    const baseline = existing.hoursBaseline === undefined
+      ? Math.max(0, (existing.hoursPlayed ?? 0) - safeSessionHours)
+      : existing.hoursBaseline;
     const effectiveHours = baseline + safeSessionHours;
     const updated: CustomGameEntry = {
       ...existing,
+      hoursBaseline: baseline,
       hoursPlayed: effectiveHours,
       ...(lastPlayedAt !== undefined ? { lastPlayedAt } : {}),
       updatedAt: new Date(),
     };
     this.entries.set(gameId, updated);
     this.scheduleSave();
-    this.notifyListeners();
+    // Hours-only channel: a 15s session tick must not bump `_version`
+    // (Dashboard grid memo), re-send setTrackedGames over IPC, or invalidate
+    // the Oracle library signature (reco-store subscribes to the general
+    // channel). Mirrors LibraryStore.updateHoursFromSessions.
+    this.notifyHoursListeners();
     journeyStore.syncProgress(gameId, { hoursPlayed: effectiveHours, lastPlayedAt });
   }
 
@@ -659,20 +748,22 @@ export class CustomGameStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
-    if (this._useLevelDB) {
-      void (async () => {
-        try {
-          const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
-          if (res.error) console.error('[CustomGameStore] clearNamespace failed:', res.error);
-        } catch (err) {
-          console.error('[CustomGameStore] Failed to clear LevelDB namespace:', err);
+    if (this._useLevelDB && !this._readOnly) {
+      // Queued so any later save lands strictly after the namespace wipe.
+      void this._writeQueue.run(async () => {
+        const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+        if (res.error) {
+          console.error('[CustomGameStore] clearNamespace failed:', res.error);
+          return; // keep _persisted so the next save emits explicit deletes
         }
-      })();
+        this._persisted = new Map();
+        this._lastPersistedCounter = 1;
+      });
     }
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(MIGRATION_MARKER_KEY);
-    this._knownKeys = new Set();
-    this._lastPersistedCounter = 1;
+    if (!this._readOnly) {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(MIGRATION_MARKER_KEY);
+    }
     this.notifyListeners();
   }
 }

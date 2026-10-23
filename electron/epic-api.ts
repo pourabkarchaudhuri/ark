@@ -517,8 +517,46 @@ class EpicAPIClient {
   private gqlCircuitOpenedAt = 0;
   private readonly GQL_CIRCUIT_RESET_MS = 30 * 60 * 1000; // 30 min
 
-  // Cloudflare clearance state
+  // Cloudflare clearance state. Only a real `cf_clearance` cookie counts —
+  // `__cf_bm` (bot-management) is set on ANY Cloudflare response, so treating
+  // it as clearance defeated the circuit breaker and stopped the solver from
+  // ever re-running. Reset on the next 403 so a later block re-solves.
   private cfInitialized = false;
+
+  /**
+   * Cache keys whose current value came from the REST (promotional-catalog)
+   * fallback while GraphQL was blocked. A successful Cloudflare solve marks
+   * only these stale so they refetch via GraphQL — it no longer wipes the
+   * whole Epic cache (details, search, catalog crawl, addons) every launch.
+   */
+  private restFallbackKeys = new Set<string>();
+
+  /** Last time the hidden-window solver was started (0 = never). */
+  private cfLastAttemptAt = 0;
+  private readonly CF_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
+
+  /** Cache a value produced by the REST fallback path (see restFallbackKeys). */
+  private setRestFallback(key: string, value: unknown, ttl: number): void {
+    this.cache.set(key, value, ttl);
+    this.restFallbackKeys.add(key);
+  }
+
+  /**
+   * Mark every REST-fallback entry stale (TTL 0) so the next read retries
+   * GraphQL, while the stale value still serves as a fallback if it fails.
+   */
+  private invalidateRestFallbackEntries(): number {
+    let n = 0;
+    for (const key of this.restFallbackKeys) {
+      const value = this.cache.get<unknown>(key, true);
+      if (value !== null && value !== undefined) {
+        this.cache.set(key, value, 0);
+        n++;
+      }
+    }
+    this.restFallbackKeys.clear();
+    return n;
+  }
 
   /** Whether Epic GraphQL is currently blocked (circuit open). Use egdata as fallback when true. */
   isEpicBlocked(): boolean {
@@ -543,6 +581,11 @@ class EpicAPIClient {
   async initCloudflare(): Promise<boolean> {
     if (this.cfInitialized) return true;
     if (this.cfInitPromise) return this.cfInitPromise;
+    // Now that a 403 re-arms the solver, bound how often the hidden solver
+    // window may spin up when Cloudflare keeps refusing us.
+    const now = Date.now();
+    if (this.cfLastAttemptAt > 0 && now - this.cfLastAttemptAt < this.CF_RETRY_COOLDOWN_MS) return false;
+    this.cfLastAttemptAt = now;
 
     this.cfInitPromise = this._solveCloudflare();
     return this.cfInitPromise;
@@ -577,16 +620,17 @@ class EpicAPIClient {
           try {
             // Security: scope cookie query to Epic's domain (avoid reading entire cookie jar)
             const cookies = await electronSession.defaultSession.cookies.get({ domain: '.epicgames.com' });
-            const hasCf = cookies.some(
-              c => c.name === 'cf_clearance' || c.name === '__cf_bm',
-            );
+            // Only cf_clearance proves the JS challenge was solved (__cf_bm is
+            // attached to every Cloudflare response, challenge or not).
+            const hasClearance = cookies.some(c => c.name === 'cf_clearance' && !!c.value);
 
-            if (hasCf) {
+            if (hasClearance) {
               this.cfInitialized = true;
               this.gqlCircuitOpen = false;
-              // Invalidate REST-fallback cache so fresh GQL data is fetched
-              this.cache.clear();
-              logger.log('[EpicAPI] Cloudflare clearance obtained — cache cleared, GraphQL should work now');
+              // Only REST-fallback entries are refetched via GraphQL; real
+              // GraphQL data in the cache stays valid.
+              const invalidated = this.invalidateRestFallbackEntries();
+              logger.log(`[EpicAPI] Cloudflare clearance obtained — ${invalidated} REST-fallback cache entr${invalidated === 1 ? 'y' : 'ies'} marked stale, GraphQL should work now`);
               return true;
             }
           } catch {
@@ -697,6 +741,9 @@ class EpicAPIClient {
             if (response.status === 403) {
               this.gqlCircuitOpen = true;
               this.gqlCircuitOpenedAt = Date.now();
+              // Clearance (if any) is evidently no longer valid — allow the
+              // solver to run again instead of instantly re-closing the circuit.
+              this.cfInitialized = false;
               logger.warn('[EpicAPI] Cloudflare 403 — opening circuit breaker (REST fallback will be used)');
             }
             // Log response body for debugging non-403 errors
@@ -826,7 +873,7 @@ class EpicAPIClient {
       ).slice(0, limit);
       if (filtered.length > 0) {
         logger.log(`[EpicAPI] REST fallback found ${filtered.length} results for "${keyword}"`);
-        this.cache.set(cacheKey, filtered, SEARCH_CACHE_TTL);
+        this.setRestFallback(cacheKey, filtered, SEARCH_CACHE_TTL);
         return filtered;
       }
     } catch (restErr) {
@@ -879,7 +926,7 @@ class EpicAPIClient {
       );
       if (match) {
         logger.log(`[EpicAPI] REST fallback: found ${match.title} in promotional catalog`);
-        this.cache.set(cacheKey, match, CACHE_TTL);
+        this.setRestFallback(cacheKey, match, CACHE_TTL);
         return match;
       }
     } catch (restErr) {
@@ -934,7 +981,7 @@ class EpicAPIClient {
         .slice(0, limit);
       if (released.length > 0) {
         logger.log(`[EpicAPI] REST fallback: ${released.length} new releases from promotional catalog`);
-        this.cache.set(cacheKey, released, RELEASES_CACHE_TTL);
+        this.setRestFallback(cacheKey, released, RELEASES_CACHE_TTL);
         return released;
       }
     } catch (restErr) {
@@ -992,7 +1039,7 @@ class EpicAPIClient {
         .slice(0, limit);
       if (upcoming.length > 0) {
         logger.log(`[EpicAPI] REST fallback: ${upcoming.length} coming-soon items from promotional catalog`);
-        this.cache.set(cacheKey, upcoming, RELEASES_CACHE_TTL);
+        this.setRestFallback(cacheKey, upcoming, RELEASES_CACHE_TTL);
         return upcoming;
       }
     } catch (restErr) {
@@ -1239,7 +1286,9 @@ class EpicAPIClient {
         });
       }
 
-      this.cache.set(cacheKey, releases, RELEASES_CACHE_TTL);
+      // Derived from getNewReleases/getComingSoon, which may be REST-backed —
+      // track it so a later Cloudflare solve refreshes it too.
+      this.setRestFallback(cacheKey, releases, RELEASES_CACHE_TTL);
       return releases;
     } catch (error) {
       logger.error('[EpicAPI] GetUpcomingReleases failed:', error);

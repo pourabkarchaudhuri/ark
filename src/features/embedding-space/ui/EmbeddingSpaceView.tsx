@@ -11,6 +11,7 @@ import { EmbeddingSpaceController } from './controller';
 import { INITIAL_STATE, type ViewState } from './state';
 import { EsImg, primaryImage } from './EsImg';
 import { DetailPanel } from './DetailPanel';
+import { GalaxyLoader } from './GalaxyLoader';
 import './embedding-space.css';
 
 // ─── Shared style tokens ─────────────────────────────────────────────────────
@@ -131,12 +132,6 @@ export function EmbeddingSpaceView({ onBack, useMock = false }: { onBack: () => 
         ? (path ? `// PATH ${S.pathIdx + 1}/${pn.length}${isLast ? ' · FINAL' : ''}` : '// STAR VIEW')
         : S.pathActive && S.pathOverview ? '// PATH OVERVIEW' : S.pathActive ? '// PATH VIEW' : '// GAME NODE VIEW';
 
-  // ── Loader ──
-  const steps = S.loadingSteps;
-  const allDone = steps.length > 0 && steps.every(s => s.status === 'done');
-  const activeIdx = steps.findIndex(s => s.status === 'running' || s.status === 'waiting');
-  const pct = allDone ? 100 : steps.length > 0 ? Math.round((steps.filter(s => s.status === 'done').length / steps.length) * 100) : 0;
-  const stepBase = (label: string) => { const sep = label.indexOf(' — '); return sep >= 0 ? label.slice(0, sep) : label; };
 
   const railStyle = (active: boolean, color: string): CSSProperties => ({
     fontSize: 9, letterSpacing: '0.2em', transition: 'color 0.4s', color: active ? color : 'rgba(255,255,255,0.22)',
@@ -309,48 +304,7 @@ export function EmbeddingSpaceView({ onBack, useMock = false }: { onBack: () => 
         )}
 
         {/* Loader */}
-        {S.loading && (
-          <div style={{ position: 'absolute', inset: 0, zIndex: 30, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{ width: 340, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(24px)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: 20 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-                <div style={{ position: 'relative', width: 32, height: 32, flexShrink: 0 }}>
-                  <svg width="32" height="32" viewBox="0 0 32 32" style={{ transform: 'rotate(-90deg)' }}>
-                    <circle cx="16" cy="16" r="13" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={2.5} />
-                    <circle cx="16" cy="16" r="13" fill="none" stroke="url(#es-loader-grad)" strokeWidth={2.5} strokeLinecap="round" strokeDasharray={`${(pct / 100) * 81.7} 81.7`} style={{ transition: 'stroke-dasharray 0.5s' }} />
-                  </svg>
-                  <svg width="32" height="32" viewBox="0 0 32 32" style={{ position: 'absolute', inset: 0, animation: 'es-spin 2s linear infinite' }}>
-                    <defs><linearGradient id="es-loader-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stopColor="#d946ef" /><stop offset="100%" stopColor="#a855f7" /></linearGradient></defs>
-                    <circle cx="16" cy="16" r="13" fill="none" stroke="rgba(217,70,239,0.15)" strokeWidth={2} strokeLinecap="round" strokeDasharray="12 69.7" />
-                  </svg>
-                  <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 8, fontWeight: 700, fontFamily: MONO, color: 'rgba(232,121,249,0.8)' }}>{pct}%</span>
-                </div>
-                <div style={{ minWidth: 0 }}>
-                  <h3 style={{ fontSize: 14, fontWeight: 500, color: 'rgba(255,255,255,0.6)', margin: 0 }}>Initializing Embedding Space</h3>
-                  {activeIdx >= 0 && <p style={{ fontSize: 10, color: 'rgba(232,121,249,0.6)', margin: '2px 0 0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{steps[activeIdx].label}</p>}
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {steps.map((step, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={{ flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      {step.status === 'done' && <IcCheck size={14} stroke="#34d399" />}
-                      {step.status === 'waiting' && <Svg size={14} stroke="rgba(255,255,255,0.3)"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></Svg>}
-                      {(step.status === 'running' || step.status === 'pending') && <IcSpin size={14} stroke={step.status === 'running' ? '#e879f9' : 'rgba(255,255,255,0.1)'} />}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <p style={{ fontSize: 11, lineHeight: 1.25, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', margin: 0, color: step.status === 'done' || step.status === 'waiting' ? 'rgba(255,255,255,0.4)' : step.status === 'running' ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.2)' }}>{stepBase(step.label)}</p>
-                      {step.status === 'running' && (
-                        <div style={{ marginTop: 4, height: 2, background: 'rgba(255,255,255,0.04)', borderRadius: 9999, overflow: 'hidden' }}>
-                          <div style={{ height: '100%', width: '66%', background: 'linear-gradient(to right, rgba(217,70,239,0.4), rgba(168,85,247,0.4))', borderRadius: 9999, animation: 'es-pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' }} />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
+        {S.loading && <GalaxyLoader steps={S.loadingSteps} />}
 
         {/* No embeddings yet */}
         {S.emptyGalaxy && !S.loading && (
@@ -757,6 +711,14 @@ function NeighborsPanel({ ctl, S, sel, nbs }: CtlProps & { sel: GraphNode; nbs: 
         <button onClick={() => ctl.set({ showNeighbors: false, nbSearch: '' })} title="Collapse panel" className="es-hov-ghost" style={{ padding: 4, borderRadius: 6, color: 'rgba(255,255,255,0.25)', cursor: 'pointer' }}><IcRight size={14} /></button>
       </div>
       <SearchField value={S.nbSearch} placeholder="Filter neighbors…" focusClass="es-focus-cyan" onChange={v => ctl.set({ nbSearch: v })} />
+      {S.neighborStatus && (
+        // 3D-nearest stand-ins while the similarity index isn't available — say so plainly
+        <div style={{ margin: '8px 12px 0', padding: '8px 10px', borderRadius: 8, background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.2)', fontSize: 10, lineHeight: 1.4, color: 'rgba(253,230,138,0.85)' }}>
+          {S.neighborStatus === 'ann_rebuilding'
+            ? 'Similarity index is still building — showing games that are merely nearby on the map for now.'
+            : 'Couldn’t look up true neighbors — showing games that are merely nearby on the map.'}
+        </div>
+      )}
       <div style={{ padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)', flexShrink: 0 }}>
         {S.traversalDepth > 0 && (
           <button onClick={() => ctl.traverseBack()} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 9, color: 'rgba(251,191,36,0.6)', marginBottom: 6, cursor: 'pointer', transition: 'color 0.15s' }}>
@@ -919,6 +881,13 @@ function NeighborDock({ ctl, S, nbs, canPickBottom, dockBaseRef, dockLineRef }: 
           {S.neighborStatus && (
             <span title={S.neighborStatus === 'ann_rebuilding' ? 'The similarity index is still building — showing the nearest stars in 3D instead' : 'No similarity neighbours resolved — showing the nearest stars in 3D instead'}
               style={{ fontSize: 9, letterSpacing: '0.2em', color: 'rgba(251,191,36,0.6)', whiteSpace: 'nowrap' }}>{S.neighborStatus === 'ann_rebuilding' ? '· ANN REBUILDING' : '· SPATIAL'}</span>
+          )}
+          {S.rerankHint && !S.neighborStatus && (
+            <span title={S.rerankHint.title} data-testid="es-rerank-hint"
+              style={{
+                fontSize: 9, letterSpacing: '0.2em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0,
+                color: S.rerankHint.tone === 'warn' ? 'rgba(251,191,36,0.6)' : S.rerankHint.tone === 'ok' ? 'rgba(110,231,183,0.6)' : 'rgba(255,255,255,0.35)',
+              }}>{`· ${S.rerankHint.label.toUpperCase()}`}</span>
           )}
         </div>
         <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.75)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, display: 'inline-grid' }}>

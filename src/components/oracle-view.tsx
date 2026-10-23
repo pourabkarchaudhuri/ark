@@ -56,28 +56,37 @@ import { rerankTierLabel, type RerankStatus } from '@/services/oracle-rerank';
 import { shelfBanditStore } from '@/services/shelf-bandit-store';
 
 /**
- * Reranker badge. Hard failures still show, but a pass that succeeded on a
- * weaker tier is now named instead of hidden: 'applied' used to swallow
- * `embed_fallback`, so cosine ordering was presented as a cross-encoder result.
+ * Reranker badge. Every pass that reached the reranker is shown, including a
+ * successful one ("Reranked · Qwen3 graded · 61 moved") — a success used to
+ * return null, so a working reranker looked exactly like one that never ran.
+ * Weaker tiers say why in the tooltip.
  */
 function oracleRerankBadge(status: RerankStatus): { label: string; title: string; tone: 'warn' | 'info' } | null {
   const { outcome, tier } = status;
   if (outcome === 'applied') {
-    if (tier === 'qwen_binary') {
-      return {
-        label: 'Binary rerank',
-        title: 'This Ollama build predates logprobs support, so the reranker could only answer yes/no per game — the ordering is coarser than a graded pass',
-        tone: 'info',
-      };
-    }
-    if (tier === 'embed_fallback') {
-      return {
-        label: 'Cosine rerank',
-        title: 'No cross-encoder was available, so shelves were ordered by arctic-embed cosine similarity rather than a reranker',
-        tone: 'info',
-      };
-    }
-    return null;
+    const moved = typeof status.moved === 'number' ? ` · ${status.moved} moved` : '';
+    const movedDetail = typeof status.moved === 'number'
+      ? status.moved > 0
+        ? ` ${status.moved} games changed position (${(status.meanAbsDelta ?? 0).toFixed(1)} places on average).`
+        : ' The reranker agreed with the worker order — nothing moved.'
+      : '';
+    const why = tier === 'qwen_binary'
+      ? ' This Ollama build predates logprobs support, so the reranker could only answer yes/no per game — the ordering is coarser than a graded pass.'
+      : tier === 'embed_fallback'
+        ? ' No cross-encoder was available, so shelves were ordered by arctic-embed cosine similarity rather than a reranker.'
+        : '';
+    return {
+      label: `Reranked · ${rerankTierLabel(tier)}${moved}`,
+      title: `Shelf order refined by ${rerankTierLabel(tier)}.${movedDetail}${why}`,
+      tone: 'info',
+    };
+  }
+  if (outcome === 'no_signal') {
+    return {
+      label: 'Rerank no signal',
+      title: `${rerankTierLabel(tier)} gave every game the same score, so it carried no ordering; shelves use the worker order`,
+      tone: 'info',
+    };
   }
   if (outcome === 'error') {
     return {
@@ -98,6 +107,20 @@ function oracleRerankBadge(status: RerankStatus): { label: string; title: string
   }
   // Soft skips (disabled / blend 0 / no client / empty pool) stay quiet.
   return null;
+}
+
+/** Stable identity of a shelf across reranks (type alone repeats for "because you loved X" shelves). */
+function oracleShelfKey(s: RecoShelf): string {
+  return `${s.type}\u0000${s.title}\u0000${s.seedGameTitle ?? ''}`;
+}
+
+/** Arrange `shelves` in the order of `keys`; shelves without a key keep their relative order at the end. */
+function orderShelvesByKeys(shelves: RecoShelf[], keys: string[]): RecoShelf[] {
+  const rank = new Map(keys.map((k, i) => [k, i]));
+  return shelves
+    .map((s, i) => ({ s, r: rank.get(oracleShelfKey(s)) ?? keys.length + i }))
+    .sort((a, b) => a.r - b.r)
+    .map(x => x.s);
 }
 import { recoHistoryStore } from '@/services/reco-history-store';
 import { expandHardNegativeIds } from '@/services/hard-negative';
@@ -1960,11 +1983,21 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     [state.shelves, dismissedIds],
   );
   const heroShelf = filteredShelves.find(s => s.type === 'hero');
-  const otherShelves = useMemo(
-    () => shelfBanditStore.reorderShelves(filteredShelves.filter(s => s.type !== 'hero')),
-    // lastComputed: re-sample once per new result, not per render.
+  const nonHeroShelves = useMemo(() => filteredShelves.filter(s => s.type !== 'hero'), [filteredShelves]);
+  // Thompson-sample the shelf ORDER once per new result (lastComputed) or when
+  // the set of shelves changes — not on every new `shelves` identity. The
+  // background rerank replaces `state.shelves` (same shelves, games reordered
+  // within them), and keying on that identity re-sampled the bandit, so the
+  // shelves visibly reshuffled the moment the rerank landed.
+  const shelfKeySig = nonHeroShelves.map(oracleShelfKey).join('\u0001');
+  const banditShelfOrder = useMemo(
+    () => shelfBanditStore.reorderShelves(nonHeroShelves).map(oracleShelfKey),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredShelves, state.lastComputed],
+    [state.lastComputed, shelfKeySig],
+  );
+  const otherShelves = useMemo(
+    () => orderShelvesByKeys(nonHeroShelves, banditShelfOrder),
+    [nonHeroShelves, banditShelfOrder],
   );
   const oracleRerankBadgeInfo = oracleRerankBadge(state.oracleRerankStatus);
 
@@ -2115,7 +2148,15 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                 {catalogSync.stage === 'fetching-metadata' && catalogSync.batchesTotal > 0 && (
                   <span className="flex items-center gap-1 text-[9px] text-cyan-400/40">
                     <Loader2 className="w-3 h-3 animate-spin" />
-                    Syncing catalog {Math.round((catalogSync.batchesCompleted / catalogSync.batchesTotal) * 100)}%
+                    Syncing catalog {Math.round((catalogSync.batchesCompleted / catalogSync.batchesTotal) * 90)}%
+                  </span>
+                )}
+                {(catalogSync.stage === 'retrying' || catalogSync.stage === 'finalizing') && (
+                  <span className="flex items-center gap-1 text-[9px] text-cyan-400/40">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {catalogSync.stage === 'retrying'
+                      ? `Retrying ${catalogSync.retryDone ?? 0}/${catalogSync.retryTotal ?? 0} rate-limited batches`
+                      : 'Saving catalog...'}
                   </span>
                 )}
                 {catalogSync.stage === 'done' && catalogEmbeddingProgress && catalogEmbeddingProgress.total > 0 && (

@@ -30,21 +30,23 @@ export function register(): void {
     }
   });
 
-  ipcMain.handle('ann:save', async (_event: any, opts?: { force?: boolean }) => {
+  ipcMain.handle('ann:save', async (_event: any, opts?: { force?: boolean; complete?: boolean }) => {
     try {
-      return saveIndex({ force: opts?.force === true });
+      return saveIndex({ force: opts?.force === true, complete: opts?.complete === true });
     } catch (err) {
       logger.error('[ANN IPC] save error:', err);
       return false;
     }
   });
 
+  // Returns AddVectorsResult ({ added, replaced, failed, aborted }). The renderer
+  // wrapper (src/services/ann-index.ts) also accepts a bare number from older builds.
   ipcMain.handle('ann:addVectors', async (_event: any, entries: Array<{ id: string; vector: number[] }>) => {
     try {
       return await addVectors(entries);
     } catch (err) {
       logger.error('[ANN IPC] addVectors error:', err);
-      return 0;
+      return { added: 0, replaced: 0, failed: Array.isArray(entries) ? entries.length : 0, aborted: false };
     }
   });
 
@@ -62,7 +64,7 @@ export function register(): void {
       return getStatus();
     } catch (err) {
       logger.error('[ANN IPC] status error:', err);
-      return { ready: false, vectorCount: 0, dims: 1024 };
+      return { ready: false, vectorCount: 0, dims: 1024, partial: true };
     }
   });
 

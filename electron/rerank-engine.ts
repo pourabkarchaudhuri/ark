@@ -11,8 +11,10 @@
  *                        (< 0.12.11), so only a hard yes/no is available
  *   4. `embed_fallback`— arctic-embed2 cosine, handled by the IPC caller
  *
- * Detection is cached per session and invalidated through `resetRerankTierCache()`
- * when Ollama settings change, mirroring `resetGpuModeCache()` in ollama-setup.ts.
+ * Detection is cached and invalidated through `resetRerankTierCache()` when Ollama
+ * settings change or a rerank model pull succeeds. A detection made while Ollama
+ * was down is never reused, and a cosine-only answer expires after
+ * `RERANK_TIER_COSINE_TTL_MS` (see `isRerankTierDetectionFresh`).
  *
  * HTTP here uses `fetch`, matching electron/ipc/ollama-handlers.ts (its only caller)
  * rather than the raw `node:http` style in ollama-setup.ts.
@@ -140,10 +142,22 @@ export function versionAtLeast(version: string | null | undefined, minimum: stri
 
 let _tierCache: RerankTierDetection | null = null;
 let _tierInFlight: Promise<RerankTierDetection> | null = null;
+/** Bumped by every reset, so a probe that started before the reset cannot re-cache a stale answer. */
+let _tierGeneration = 0;
 
-/** Reset cached tier detection — call when Ollama settings change. */
+/**
+ * How long a "cosine only" answer is trusted while Ollama is up. The Qwen3
+ * model can appear without this process noticing (a pull from the CLI, or a
+ * pull that finished in another code path), and a session-long cosine cache
+ * hid that until restart. Re-probing is a fast 404 plus /api/tags.
+ */
+export const RERANK_TIER_COSINE_TTL_MS = 60_000;
+
+/** Reset cached tier detection — call when Ollama settings change or a rerank model was pulled. */
 export function resetRerankTierCache(): void {
   _tierCache = null;
+  _tierInFlight = null;
+  _tierGeneration++;
 }
 
 /** Last detection result without triggering a probe. Null before the first run. */
@@ -152,27 +166,88 @@ export function getCachedRerankTier(): RerankTierDetection | null {
 }
 
 /**
- * Probe the reranker ladder once per session. Concurrent callers share one probe.
- * Pass `{ force: true }` to re-probe after a tier stops working mid-session.
+ * Whether a cached detection may be reused.
+ *
+ * - Ollama was down → never reuse. That answer used to be cached for the whole
+ *   session, so a boot race (Oracle's cache-restore rerank firing before Ollama
+ *   finished starting) pinned the session to cosine.
+ * - Cosine with Ollama up → reuse for `RERANK_TIER_COSINE_TTL_MS`.
+ * - Any real reranker tier → reuse until reset (a failing native tier re-probes itself).
+ */
+export function isRerankTierDetectionFresh(detection: RerankTierDetection, now: number = Date.now()): boolean {
+  if (!detection.ollamaUp) return false;
+  if (detection.tier === 'embed_fallback') return now - detection.detectedAt < RERANK_TIER_COSINE_TTL_MS;
+  return true;
+}
+
+/**
+ * Probe the reranker ladder. Concurrent callers share one probe; the answer is
+ * reused per `isRerankTierDetectionFresh`. Pass `{ force: true }` to re-probe
+ * after a tier stops working mid-session.
  */
 export function detectRerankTier(opts?: { force?: boolean }): Promise<RerankTierDetection> {
-  if (opts?.force) _tierCache = null;
-  if (_tierCache) return Promise.resolve(_tierCache);
+  if (opts?.force) resetRerankTierCache();
+  if (_tierCache && isRerankTierDetectionFresh(_tierCache)) return Promise.resolve(_tierCache);
   if (_tierInFlight) return _tierInFlight;
 
-  const run = runTierDetection()
+  const generation = _tierGeneration;
+  const run: Promise<RerankTierDetection> = runTierDetection()
     .then((detection) => {
-      _tierCache = detection;
+      // A reset while this probe was running (settings change, model pulled)
+      // means the answer may describe the old state — hand it to the callers
+      // that are waiting, but do not cache it.
+      if (generation === _tierGeneration) _tierCache = detection;
       logger.log(
         `[Rerank] Tier: ${detection.tier} (${rerankTierLabel(detection.tier)}) — ${detection.reason}`,
       );
       return detection;
     })
     .finally(() => {
-      _tierInFlight = null;
+      if (_tierInFlight === run) _tierInFlight = null;
     });
   _tierInFlight = run;
   return run;
+}
+
+// ─── Request registry (renderer-driven cancel) ──────────────────────────────
+// The renderer bounds every rerank with its own deadline. Without a cancel the
+// main-process loop kept scoring (up to ~85 s for a 100-doc Qwen pass) after
+// the renderer had already discarded the result, holding Ollama the whole time.
+
+const _activeRequests = new Map<string, AbortController>();
+/** Cancels that arrived before their request registered (IPC ordering is not guaranteed across channels). */
+const _earlyCancels = new Map<string, number>();
+const EARLY_CANCEL_TTL_MS = 30_000;
+
+/** Register a rerank request. The returned signal aborts when `cancelRerankRequest(id)` is called. */
+export function beginRerankRequest(requestId: string | null | undefined): AbortSignal {
+  const ac = new AbortController();
+  if (!requestId) return ac.signal;
+  const now = Date.now();
+  for (const [id, at] of _earlyCancels) if (now - at > EARLY_CANCEL_TTL_MS) _earlyCancels.delete(id);
+  if (_earlyCancels.delete(requestId)) {
+    ac.abort();
+    return ac.signal;
+  }
+  _activeRequests.set(requestId, ac);
+  return ac.signal;
+}
+
+/** Drop a finished request from the registry. */
+export function endRerankRequest(requestId: string | null | undefined): void {
+  if (requestId) _activeRequests.delete(requestId);
+}
+
+/** Abort a running rerank request. Returns true when a running request was found. */
+export function cancelRerankRequest(requestId: string): boolean {
+  const ac = _activeRequests.get(requestId);
+  if (!ac) {
+    _earlyCancels.set(requestId, Date.now());
+    return false;
+  }
+  ac.abort();
+  _activeRequests.delete(requestId);
+  return true;
 }
 
 function probeRow(
@@ -431,6 +506,13 @@ export interface QwenScoreOptions {
   isBackground?: () => boolean;
   /** Task instruction folded into the prompt. */
   instruction?: string;
+  /**
+   * Renderer gave up (see `cancelRerankRequest`). Checked between documents:
+   * the pass stops before the next /api/generate call and returns null. The
+   * call already in flight is allowed to finish — it is one document, and
+   * aborting a cold call would throw away the model load the next pass needs.
+   */
+  signal?: AbortSignal;
 }
 
 export interface QwenScoreResult {
@@ -471,6 +553,12 @@ export async function scoreWithQwen3(
   const rows: RerankResultRow[] = [];
 
   for (let i = 0; i < documents.length; i++) {
+    if (opts.signal?.aborted) {
+      logger.log(
+        `[Rerank] Qwen3 pass cancelled by the renderer after ${rows.length}/${documents.length} docs (${Date.now() - startedAt}ms)`,
+      );
+      return null;
+    }
     if (Date.now() - startedAt > budgetMs) {
       truncated = true;
       break;
@@ -510,6 +598,7 @@ export async function scoreWithQwen3(
     documents.length,
     Math.max(QWEN_MIN_USEFUL_DOCS, Math.ceil(documents.length * QWEN_MIN_USEFUL_FRACTION)),
   );
+  if (opts.signal?.aborted) return null;
   if (rows.length < minUseful) {
     logger.warn(
       `[Rerank] Qwen3 pass abandoned — scored ${rows.length}/${documents.length} in ${elapsedMs}ms (needed ${minUseful})`,
@@ -519,9 +608,13 @@ export async function scoreWithQwen3(
 
   rows.sort((a, b) => b.relevance_score - a.relevance_score);
   const tier: 'qwen_graded' | 'qwen_binary' = graded && sawLogprobs ? 'qwen_graded' : 'qwen_binary';
-  logger.log(
-    `[Rerank] Qwen3 ${tier}: scored ${rows.length}/${documents.length} in ${elapsedMs}ms${truncated ? ' (latency ceiling hit)' : ''}`,
-  );
+  // Successful passes are logged once per run by the renderer (with the
+  // positions-moved count); only the latency ceiling is worth a line here.
+  if (truncated) {
+    logger.log(
+      `[Rerank] Qwen3 ${tier}: latency ceiling hit — scored ${rows.length}/${documents.length} in ${elapsedMs}ms`,
+    );
+  }
   return { rows, tier, scored: rows.length, requested: documents.length, truncated, elapsedMs };
 }
 

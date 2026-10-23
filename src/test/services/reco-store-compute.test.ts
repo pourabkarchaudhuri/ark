@@ -57,6 +57,7 @@ import {
   ORACLE_RERANK_BUDGET_MS,
   LIBRARY_REFRESH_DEBOUNCE_MS,
 } from '@/services/reco-store';
+import { ORACLE_RERANK_QWEN_BUDGET_MS } from '@/services/oracle-rerank';
 import type { CandidateGame, RecoShelf, RecoWorkerResult, TasteProfile, UserGameSnapshot } from '@/types/reco';
 
 function stubUser(gameId: string): UserGameSnapshot {
@@ -290,6 +291,28 @@ describe('RecoStore background rerank', () => {
     expect(rerank).toHaveBeenCalled();
     expect(store.getState().status).toBe('done');
     expect(store.getState().oracleRerankStatus.outcome).toBe('skipped_timeout');
+    expect(store.getState().shelves).toBe(msg.shelves);
+  });
+
+  it('Qwen3 tier gets the longer budget; on overrun the main-process pass is cancelled', async () => {
+    const rerank = vi.fn((_p: { requestId?: string }) => new Promise(() => {}));
+    const rerankCancel = vi.fn(async () => true);
+    win.ollama = { rerank, rerankCancel, rerankTier: async () => ({ tier: 'qwen_graded', ollamaUp: true }) };
+    const { store, anyStore } = makeStore();
+    const gen = ++anyStore.computeGeneration;
+    anyStore.state = { ...anyStore.state, status: 'computing' };
+    const msg = workerResult('worker-order');
+    msg.shelves[0].games = [{ gameId: 'steam-1', title: 'A', genres: [], themes: [] } as any];
+    anyStore.finishWorkerResult(msg, gen);
+
+    // The fast-tier budget passes without a timeout — a CPU Qwen pass is still allowed to finish.
+    await vi.advanceTimersByTimeAsync(ORACLE_RERANK_BUDGET_MS + 100);
+    expect(store.getState().oracleRerankStatus.outcome).toBe('none');
+    expect(rerankCancel).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(ORACLE_RERANK_QWEN_BUDGET_MS);
+    expect(store.getState().oracleRerankStatus.outcome).toBe('skipped_timeout');
+    expect(rerankCancel).toHaveBeenCalledWith(rerank.mock.calls[0][0].requestId);
     expect(store.getState().shelves).toBe(msg.shelves);
   });
 

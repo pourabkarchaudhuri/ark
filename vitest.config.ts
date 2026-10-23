@@ -16,9 +16,14 @@ export default defineConfig({
     pool: 'forks',
     poolOptions: {
       forks: {
-        isolate: false,
+        // Per-file isolation (v1.0.74): with `isolate: false` files shared one jsdom per
+        // worker, and whichever UI file ran after a leaky one rendered an empty body.
+        isolate: true,
       },
     },
+    // Embedding/ANN integration tests re-import the large embedding-service module per
+    // test; under a fully parallel isolated run that alone can approach the 5 s default.
+    testTimeout: 20_000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

@@ -1,4 +1,5 @@
 import { StatusChangeEntry, GameStatus, migrateGameId } from '@/types/game';
+import { SerialWriteQueue, readWithRetry, reportStorageReadOnly } from './storage-health';
 
 // ─── Persistence constants ──────────────────────────────────────────────────
 //
@@ -63,19 +64,58 @@ function getStore(): StoreBridge | null {
   return window.store ?? null;
 }
 
+/** Dedupe key for a status-change row. */
+function entryKey(e: StatusChangeEntry): string {
+  return `${e.gameId}|${e.timestamp}|${e.newStatus}`;
+}
+
+function byTimestamp(a: StatusChangeEntry, b: StatusChangeEntry): number {
+  return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+}
+
+/**
+ * Persistence mode:
+ *  - `local`    no LevelDB bridge (tests / pre-preload) or pre-migration copy
+ *               failed — legacy localStorage is the source of truth.
+ *  - `pending`  bridge present, LevelDB hydrate still in flight. Writes are
+ *               deferred; records made now are merged into the hydrated set.
+ *  - `leveldb`  LevelDB is authoritative.
+ *  - `readonly` LevelDB unreadable after retries — nothing is written (and the
+ *               ignored legacy key is never written either).
+ */
+type PersistMode = 'local' | 'pending' | 'leveldb' | 'readonly';
+
 class StatusHistoryStore {
   private entries: StatusChangeEntry[] = [];
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Flips true once initialize() decides LevelDB is the source of truth. */
-  private _useLevelDb = false;
+  private _mode: PersistMode = 'local';
+  /** Rows recorded/imported while `pending` — merged into the hydrated set. */
+  private _preHydration: StatusChangeEntry[] = [];
+  /** clear() ran while `pending` — the hydrated LevelDB rows must be dropped. */
+  private _clearedBeforeHydrate = false;
+  /** A save was requested while `pending` — flush once hydrated. */
+  private _saveAfterHydrate = false;
+  private readonly _writeQueue = new SerialWriteQueue('StatusHistoryStore');
   /** Resolves once the async initialize() (hydrate + migrate) has run. */
   private _readyPromise: Promise<void>;
 
   constructor() {
-    this.hydrateFromLocalStorage();
-    this._readyPromise = this.initializeAsync();
+    const store = getStore();
+    const migrated = (() => {
+      try {
+        return localStorage.getItem(MIGRATION_FLAG_KEY) === 'yes';
+      } catch {
+        return false;
+      }
+    })();
+    // Legacy localStorage is only read when it is still the source of truth:
+    // no bridge, or the one-shot migration hasn't happened yet. After the
+    // migration flag is stamped the key is frozen (v1.0.61) and ignored.
+    if (!store || !migrated) this.hydrateFromLocalStorage();
+    this._mode = store ? 'pending' : 'local';
+    this._readyPromise = this.initializeAsync(migrated);
     if (typeof window !== 'undefined' && !_statusHistoryBeforeUnloadInstalled) {
       _statusHistoryBeforeUnloadInstalled = true;
       window.addEventListener('beforeunload', () => this.flushSave());
@@ -85,7 +125,7 @@ class StatusHistoryStore {
   /**
    * Synchronous hydrate from localStorage — runs in the constructor so callers
    * that read (`getAll`, `getFirstPlayingTransition`, …) right after import
-   * still see data. LevelDB hydrate happens async and replaces this cache.
+   * still see data on the legacy / pre-migration path.
    */
   private hydrateFromLocalStorage(): void {
     if (this.isInitialized) return;
@@ -124,80 +164,101 @@ class StatusHistoryStore {
 
   /**
    * One-shot LevelDB adoption:
-   *  - If the bridge isn't present (web tests, older builds) stay on
-   *    localStorage entirely.
-   *  - If the migration flag isn't stamped yet, copy the current in-memory
-   *    entries (already hydrated from localStorage) into LevelDB and stamp
-   *    the flag. The original localStorage key is left alone so a rollback
-   *    to a pre-v1.0.61 build keeps the pre-migration snapshot.
-   *  - Otherwise LevelDB is authoritative — hydrate from it and overwrite
-   *    the in-memory cache, then notify listeners so any component that
-   *    rendered off the stale localStorage snapshot re-reads.
+   *  - No bridge (web tests, older builds) → stay on localStorage entirely.
+   *  - Migration flag not stamped → copy the in-memory entries (legacy
+   *    snapshot + anything recorded since) into LevelDB and stamp the flag.
+   *    The original localStorage key is left alone for rollback.
+   *  - Otherwise LevelDB is authoritative: hydrate with retries, MERGE any
+   *    records made before hydration finished (startup auto-On-Hold sweep,
+   *    cross-store sync) instead of replacing them, then notify. If the read
+   *    still fails the store goes read-only (it never silently switches its
+   *    writes to the ignored localStorage key).
    */
-  private async initializeAsync(): Promise<void> {
+  private async initializeAsync(migrated: boolean): Promise<void> {
     const store = getStore();
     if (!store) return; // no bridge → localStorage remains SoT
 
-    const migrated = (() => {
-      try {
-        return localStorage.getItem(MIGRATION_FLAG_KEY) === 'yes';
-      } catch {
-        return false;
-      }
-    })();
-
     if (!migrated) {
-      // First-time migration. `this.entries` already reflects localStorage.
-      try {
-        const payload: StoredStatusHistoryData = {
-          version: STORAGE_VERSION,
-          entries: this.entries,
-          lastUpdated: new Date().toISOString(),
-        };
-        const res = await store.put(LEVEL_NAMESPACE, LEVEL_DATA_KEY, payload);
-        if (res && res.error) {
-          console.error('[StatusHistoryStore] LevelDB migration put failed:', res.error);
-          return;
-        }
-        try { localStorage.setItem(MIGRATION_FLAG_KEY, 'yes'); } catch { /* ignore */ }
-        this._useLevelDb = true;
-        console.log(
-          `[StatusHistoryStore] Migrated ${this.entries.length} entries to LevelDB (${LEVEL_NAMESPACE})`,
-        );
-      } catch (err) {
-        console.error('[StatusHistoryStore] LevelDB migration failed:', err);
+      // First-time migration. `this.entries` already reflects localStorage
+      // plus anything recorded while the copy was pending.
+      const outcome = await readWithRetry('StatusHistoryStore', () =>
+        store.put(LEVEL_NAMESPACE, LEVEL_DATA_KEY, this.buildPayload()),
+      );
+      this._preHydration = [];
+      if (!outcome.ok) {
+        // Pre-migration, localStorage is still the real source of truth (the
+        // flag is not stamped, so the next launch re-reads it) — keep using it.
+        console.error('[StatusHistoryStore] LevelDB migration put failed:', outcome.error);
+        this._mode = 'local';
+        if (this._saveAfterHydrate) this.writeLocalStorageSnapshot();
+        this._saveAfterHydrate = false;
+        return;
+      }
+      try { localStorage.setItem(MIGRATION_FLAG_KEY, 'yes'); } catch { /* ignore */ }
+      this._mode = 'leveldb';
+      console.log(
+        `[StatusHistoryStore] Migrated ${this.entries.length} entries to LevelDB (${LEVEL_NAMESPACE})`,
+      );
+      if (this._saveAfterHydrate) {
+        this._saveAfterHydrate = false;
+        this.saveNow();
       }
       return;
     }
 
     // Already migrated on a previous run — LevelDB is authoritative.
-    try {
-      const res = await store.get<StoredStatusHistoryData>(LEVEL_NAMESPACE, LEVEL_DATA_KEY);
-      if (res && res.error) {
-        console.error('[StatusHistoryStore] LevelDB hydrate failed:', res.error);
-        return;
+    const outcome = await readWithRetry('StatusHistoryStore', () =>
+      store.get<StoredStatusHistoryData>(LEVEL_NAMESPACE, LEVEL_DATA_KEY),
+    );
+    if (!outcome.ok) {
+      this._mode = 'readonly';
+      this._preHydration = [];
+      this._saveAfterHydrate = false;
+      if (this._saveTimer) {
+        clearTimeout(this._saveTimer);
+        this._saveTimer = null;
       }
-      const stored = res?.value ?? null;
-      if (stored && Array.isArray(stored.entries)) {
-        const migratedEntries = stored.entries.map(entry => ({
-          ...entry,
-          gameId: migrateGameId(entry as any),
-        }));
-        this.entries = migratedEntries.filter(isValidStatusEntry);
-      } else {
-        // No LevelDB data yet (flag stamped but row missing) — treat as empty.
-        this.entries = [];
-      }
-      this._useLevelDb = true;
+      reportStorageReadOnly('status-history', outcome.error);
       this.notifyListeners();
-    } catch (err) {
-      console.error('[StatusHistoryStore] LevelDB hydrate failed:', err);
+      return;
     }
+
+    const stored = this._clearedBeforeHydrate ? null : (outcome.value?.value ?? null);
+    let hydrated: StatusChangeEntry[] = [];
+    if (stored && Array.isArray(stored.entries)) {
+      hydrated = stored.entries
+        .map(entry => ({ ...entry, gameId: migrateGameId(entry as any) }))
+        .filter(isValidStatusEntry);
+    }
+    // Merge records made before hydration (deduped).
+    const seen = new Set(hydrated.map(entryKey));
+    let merged = 0;
+    for (const e of this._preHydration) {
+      const k = entryKey(e);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      hydrated.push(e);
+      merged++;
+    }
+    hydrated.sort(byTimestamp);
+    this.entries = hydrated;
+    this._preHydration = [];
+    this._mode = 'leveldb';
+    if (merged > 0 || this._saveAfterHydrate) {
+      this._saveAfterHydrate = false;
+      this.saveNow();
+    }
+    this.notifyListeners();
   }
 
   /** Test / consumer hook — resolves after LevelDB hydrate + migrate. */
   ready(): Promise<void> {
     return this._readyPromise;
+  }
+
+  /** True when LevelDB could not be read this session — nothing is persisted. */
+  isReadOnly(): boolean {
+    return this._mode === 'readonly';
   }
 
   /**
@@ -208,7 +269,7 @@ class StatusHistoryStore {
     if (this._saveTimer) clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
       this._saveTimer = null;
-      void this.saveNow();
+      this.saveNow();
     }, 300);
   }
 
@@ -217,7 +278,13 @@ class StatusHistoryStore {
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
-      void this.saveNow();
+      const store = getStore();
+      if (this._mode === 'leveldb' && store) {
+        // Unloading — don't wait behind an in-flight put; send it now.
+        void store.put(LEVEL_NAMESPACE, LEVEL_DATA_KEY, this.buildPayload()).catch(() => {});
+        return;
+      }
+      this.saveNow();
     }
   }
 
@@ -237,24 +304,32 @@ class StatusHistoryStore {
     }
   }
 
-  private async saveNow(): Promise<void> {
-    const payload = this.buildPayload();
-    const store = getStore();
-
-    if (this._useLevelDb && store) {
-      try {
-        const res = await store.put(LEVEL_NAMESPACE, LEVEL_DATA_KEY, payload);
-        if (res && res.error) {
-          console.error('[StatusHistoryStore] LevelDB put failed:', res.error);
-        }
-      } catch (error) {
-        console.error('[StatusHistoryStore] LevelDB put threw:', error);
+  private saveNow(): void {
+    switch (this._mode) {
+      case 'readonly':
+        return;
+      case 'pending':
+        // Hydration still in flight — writing now would clobber the real
+        // LevelDB row with a partial view. Flush right after hydrate instead.
+        this._saveAfterHydrate = true;
+        return;
+      case 'local':
+        this.writeLocalStorageSnapshot();
+        return;
+      case 'leveldb': {
+        const store = getStore();
+        if (!store) return;
+        void this._writeQueue.run(async () => {
+          // Payload is built when the task runs, so a queued save always
+          // writes the latest state.
+          const res = await store.put(LEVEL_NAMESPACE, LEVEL_DATA_KEY, this.buildPayload());
+          if (res && res.error) {
+            console.error('[StatusHistoryStore] LevelDB put failed:', res.error);
+          }
+        });
+        return;
       }
-      return;
     }
-
-    // Fallback / pre-migration path.
-    this.writeLocalStorageSnapshot(payload);
   }
 
   // ------ Subscriptions ------
@@ -289,6 +364,7 @@ class StatusHistoryStore {
     };
 
     this.entries.push(entry);
+    if (this._mode === 'pending') this._preHydration.push(entry);
     this.save();
     this.notifyListeners();
   }
@@ -331,6 +407,23 @@ class StatusHistoryStore {
    * Used as a fallback for `firstPlayedAt` when no session was recorded but
    * the user did flip the status manually.
    */
+  /**
+   * Latest transition into any of `statuses` for a game (ms since epoch), or
+   * null. Used by the auto On-Hold sweep so a game the user JUST moved to
+   * "Playing" is measured from that moment, not from `addedAt`.
+   */
+  getLatestTransitionInto(gameId: string, statuses: readonly GameStatus[]): number | null {
+    let latest: number | null = null;
+    for (const e of this.entries) {
+      if (e.gameId !== gameId) continue;
+      if (!statuses.includes(e.newStatus)) continue;
+      const ts = new Date(e.timestamp).getTime();
+      if (!Number.isFinite(ts)) continue;
+      if (latest === null || ts > latest) latest = ts;
+    }
+    return latest;
+  }
+
   getFirstPlayingTransition(gameId: string): number | null {
     let earliest: number | null = null;
     for (const e of this.entries) {
@@ -373,6 +466,7 @@ class StatusHistoryStore {
         skipped++;
       } else {
         this.entries.push(incoming);
+        if (this._mode === 'pending') this._preHydration.push(incoming);
         existingKeys.add(key);
         added++;
       }
@@ -380,10 +474,8 @@ class StatusHistoryStore {
 
     if (added > 0) {
       // Sort chronologically after merge
-      this.entries.sort(
-        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-      );
-      void this.saveNow(); // direct save for bulk import
+      this.entries.sort(byTimestamp);
+      this.saveNow(); // direct save for bulk import (queued behind clear())
       this.notifyListeners();
     }
 
@@ -393,17 +485,25 @@ class StatusHistoryStore {
   /** Clear all status history data (mainly for testing / reset). */
   clear() {
     this.entries = [];
+    this._preHydration = [];
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
+    if (this._mode === 'readonly') {
+      this.notifyListeners();
+      return;
+    }
     // Always clear the legacy localStorage snapshot so a rollback doesn't
     // resurrect deleted data.
     try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+    if (this._mode === 'pending') this._clearedBeforeHydrate = true;
     const store = getStore();
-    if (this._useLevelDb && store) {
-      void store.clearNamespace(LEVEL_NAMESPACE).catch((err) => {
-        console.error('[StatusHistoryStore] LevelDB clearNamespace failed:', err);
+    if ((this._mode === 'leveldb' || this._mode === 'pending') && store) {
+      // Queued so a following importData() save lands strictly after the wipe.
+      void this._writeQueue.run(async () => {
+        const res = await store.clearNamespace(LEVEL_NAMESPACE);
+        if (res && res.error) console.error('[StatusHistoryStore] LevelDB clearNamespace failed:', res.error);
       });
     }
     this.notifyListeners();

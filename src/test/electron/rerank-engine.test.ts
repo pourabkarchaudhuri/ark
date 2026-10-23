@@ -25,7 +25,13 @@ vi.mock('../../../electron/safe-logger.js', () => ({
 }));
 
 import {
+  beginRerankRequest,
+  cancelRerankRequest,
   detectRerankTier,
+  endRerankRequest,
+  getCachedRerankTier,
+  isRerankTierDetectionFresh,
+  RERANK_TIER_COSINE_TTL_MS,
   resetRerankTierCache,
   scoreFromBinaryToken,
   scoreFromTopLogprobs,
@@ -183,5 +189,130 @@ describe('scoreWithQwen3', () => {
     expect(result!.scored).toBeGreaterThanOrEqual(8);
     expect(result!.rows.some((r) => r.relevance_score === 1)).toBe(true);
     expect(result!.rows.some((r) => r.relevance_score === 0)).toBe(true);
+  });
+});
+
+describe('detectRerankTier caching', () => {
+  beforeEach(() => {
+    resetRerankTierCache();
+    vi.restoreAllMocks();
+    isOllamaRunning.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetRerankTierCache();
+  });
+
+  it('does not cache a detection made while Ollama was down — the next call re-probes', async () => {
+    // Boot race: the first probe runs before Ollama finished starting.
+    isOllamaRunning.mockResolvedValueOnce({ running: false, version: null });
+    const first = await detectRerankTier();
+    expect(first.ollamaUp).toBe(false);
+    expect(first.tier).toBe('embed_fallback');
+
+    // Ollama is up now and Qwen3 is installed — no force, no reset needed.
+    isOllamaRunning.mockResolvedValue({ running: true, version: '0.12.11' });
+    mockFetch({
+      '/api/rerank': () => new Response('missing', { status: 404 }),
+      '/api/tags': () =>
+        new Response(JSON.stringify({ models: [{ name: 'qwen3-reranker:0.6b' }] }), { status: 200 }),
+    });
+    const second = await detectRerankTier();
+    expect(second.tier).toBe('qwen_graded');
+    expect(isOllamaRunning).toHaveBeenCalledTimes(2);
+
+    // A real tier is cached: a third call does not probe again.
+    await detectRerankTier();
+    expect(isOllamaRunning).toHaveBeenCalledTimes(2);
+  });
+
+  it('expires a cosine-only answer after the TTL so a newly installed model is picked up', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    isOllamaRunning.mockResolvedValue({ running: true, version: '0.12.11' });
+    let tags: string[] = [];
+    mockFetch({
+      '/api/rerank': () => new Response('missing', { status: 404 }),
+      '/api/tags': () => new Response(JSON.stringify({ models: tags.map((name) => ({ name })) }), { status: 200 }),
+    });
+    expect((await detectRerankTier()).tier).toBe('embed_fallback');
+
+    tags = ['qwen3-reranker:0.6b'];
+    // Within the TTL the cached cosine answer is reused.
+    expect((await detectRerankTier()).tier).toBe('embed_fallback');
+    expect(isOllamaRunning).toHaveBeenCalledTimes(1);
+
+    vi.setSystemTime(Date.now() + RERANK_TIER_COSINE_TTL_MS + 1);
+    expect((await detectRerankTier()).tier).toBe('qwen_graded');
+  });
+
+  it('a probe that started before a reset does not re-cache its stale answer', async () => {
+    let releaseHealth: (v: { running: boolean; version: string | null }) => void = () => {};
+    isOllamaRunning.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseHealth = resolve; }),
+    );
+    const stale = detectRerankTier();
+    resetRerankTierCache(); // e.g. a rerank model pull succeeded meanwhile
+    releaseHealth({ running: true, version: '0.12.11' });
+    mockFetch({
+      '/api/rerank': () => new Response('missing', { status: 404 }),
+      '/api/tags': () => new Response(JSON.stringify({ models: [] }), { status: 200 }),
+    });
+    expect((await stale).tier).toBe('embed_fallback');
+    expect(getCachedRerankTier()).toBeNull();
+  });
+
+  it('isRerankTierDetectionFresh: down never, cosine within TTL, real tiers always', () => {
+    const base = { model: '', ollamaVersion: '0.12.11', reason: '', probes: [], detectedAt: 1_000 };
+    expect(isRerankTierDetectionFresh({ ...base, tier: 'embed_fallback', ollamaUp: false }, 1_001)).toBe(false);
+    expect(isRerankTierDetectionFresh({ ...base, tier: 'embed_fallback', ollamaUp: true }, 1_000 + RERANK_TIER_COSINE_TTL_MS - 1)).toBe(true);
+    expect(isRerankTierDetectionFresh({ ...base, tier: 'embed_fallback', ollamaUp: true }, 1_000 + RERANK_TIER_COSINE_TTL_MS + 1)).toBe(false);
+    expect(isRerankTierDetectionFresh({ ...base, tier: 'qwen_graded', ollamaUp: true }, 10 ** 12)).toBe(true);
+  });
+});
+
+describe('rerank request cancel', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('cancel stops the Qwen3 loop before the next document', async () => {
+    const signal = beginRerankRequest('req-1');
+    let calls = 0;
+    mockFetch({
+      '/api/generate': () => {
+        calls += 1;
+        // The renderer gives up while the 3rd document is being scored.
+        if (calls === 3) cancelRerankRequest('req-1');
+        return new Response(JSON.stringify({ response: 'yes' }), { status: 200 });
+      },
+    });
+
+    const docs = Array.from({ length: 50 }, (_, i) => `document ${i}`);
+    const result = await scoreWithQwen3('cozy roguelike', docs, {
+      model: 'qwen3-reranker:0.6b',
+      graded: false,
+      budgetMs: 60_000,
+      signal,
+    });
+    endRerankRequest('req-1');
+
+    expect(result).toBeNull();
+    // The in-flight document finishes; nothing after it is sent.
+    expect(calls).toBe(3);
+  });
+
+  it('a cancel that arrives before the request registers still aborts it', () => {
+    expect(cancelRerankRequest('req-early')).toBe(false);
+    const signal = beginRerankRequest('req-early');
+    expect(signal.aborted).toBe(true);
+    endRerankRequest('req-early');
+  });
+
+  it('cancelling a running request reports true and aborts its signal', () => {
+    const signal = beginRerankRequest('req-2');
+    expect(signal.aborted).toBe(false);
+    expect(cancelRerankRequest('req-2')).toBe(true);
+    expect(signal.aborted).toBe(true);
   });
 });

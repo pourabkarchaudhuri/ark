@@ -122,7 +122,79 @@ describe('CatalogStore.sync', () => {
     await p;
     expect(await store.isFresh()).toBe(false);
     expect(await store.getLastSyncTimestamp()).toBe(0);
-    expect(store.syncProgress.error).toMatch(/2 of 3 batches failed/);
+    // 2 of 3 failed (> 25%) → no retry round; the missing games are recorded for resume
+    expect(store.syncProgress.stage).toBe('done');
+    expect(store.syncProgress.pendingGames).toBe(400);
+    expect(store.syncProgress.error).toMatch(/400 games pending/);
+  });
+
+  it('never reports a silent 100%: retry round has its own stage and counters', async () => {
+    vi.useFakeTimers();
+    installFakeStore();
+    let failedOnce = false;
+    installSteam(async (ids) => {
+      if (ids[0] === 1 && !failedOnce) { failedOnce = true; throw new Error('IStoreBrowseService 429'); }
+      return ids.map(item);
+    });
+    const store = await loadStore();
+    const stages: string[] = [];
+    store.subscribe(() => stages.push(`${store.syncProgress.stage}:${store.syncProgress.retryDone ?? ''}/${store.syncProgress.retryTotal ?? ''}`));
+    const p = store.sync();
+    await vi.runAllTimersAsync();
+    await p;
+    expect(stages).toContain('retrying:0/1');
+    expect(stages).toContain('retrying:1/1');
+    expect(stages).toContain('finalizing:/');
+    expect(stages[stages.length - 1].startsWith('done')).toBe(true);
+  });
+
+  it('resumes only the pending games after an incomplete run (outside the cooldown)', async () => {
+    vi.useFakeTimers();
+    const { db } = installFakeStore();
+    let failing = true;
+    const steam = installSteam(async (ids) => {
+      if (failing && ids[0] !== 1) throw new Error('IStoreBrowseService 429');
+      return ids.map(item);
+    });
+    const store = await loadStore();
+    let p = store.sync();
+    await vi.runAllTimersAsync();
+    await p;
+    expect((db.get('catalog-meta::sync-state') as { pendingAppIds?: number[] }).pendingAppIds).toHaveLength(400);
+
+    // Within the cooldown an automatic sync does nothing
+    await store.sync();
+    expect(steam.getAppList).toHaveBeenCalledTimes(1);
+
+    // After the cooldown it fetches only the 400 pending ids, then stamps fresh
+    failing = false;
+    vi.setSystemTime(Date.now() + 16 * 60 * 1000);
+    const batchCallsBefore = steam.fetchCatalogBatch.mock.calls.length;
+    p = store.sync();
+    await vi.runAllTimersAsync();
+    await p;
+    expect(steam.getAppList).toHaveBeenCalledTimes(1);
+    expect(steam.fetchCatalogBatch.mock.calls.length - batchCallsBefore).toBe(2);
+    expect(await store.isFresh()).toBe(true);
+    expect(await store.getEntryCount()).toBe(600);
+  });
+
+  it('an empty app list (IPC failure) never overwrites a good sync-state', async () => {
+    const { db } = installFakeStore();
+    db.set('catalog-meta::sync-state', { lastSyncTimestamp: 1, totalEntries: 155_000, batchesCompleted: 776, batchesTotal: 776, inProgress: false });
+    const steam = installSteam(async (ids) => ids.map(item));
+    steam.getAppList.mockResolvedValueOnce([]);
+    const store = await loadStore();
+    await store.sync();
+    // The existing catalog stays usable (no red error) and the failed attempt is recorded…
+    expect(store.syncProgress.stage).toBe('done');
+    expect(store.syncProgress.error).toMatch(/Couldn’t reach Steam/);
+    const state = db.get('catalog-meta::sync-state') as { totalEntries: number; lastAttemptTimestamp?: number };
+    expect(state.totalEntries).toBe(155_000);
+    expect(state.lastAttemptTimestamp).toBeGreaterThan(0);
+    // …so the next automatic sync backs off instead of hitting Steam again right away
+    await store.sync();
+    expect(steam.getAppList).toHaveBeenCalledTimes(1);
   });
 
   it('never caches an empty tag list', async () => {

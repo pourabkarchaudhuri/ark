@@ -16,7 +16,7 @@ vi.mock('@/services/ollama-rerank', () => ({ applyOllamaNeighborRerank: vi.fn(),
 vi.mock('@/services/oracle-rerank', () => ({ rerankTierLabel: (t: string) => t }));
 
 import { buildPath, buildMockPath } from '@/features/embedding-space/data/path';
-import { cosineDistance, fetchNeighbors, rerankNeighbors, spatialNeighbors } from '@/features/embedding-space/data/neighbors';
+import { blendRerankOrder, cosineDistance, fetchNeighbors, rerankNeighbors, spatialNeighbors } from '@/features/embedding-space/data/neighbors';
 
 function node(id: string, over: Partial<GraphNode> = {}): GraphNode {
   return {
@@ -102,6 +102,48 @@ describe('Neighbour helpers', () => {
       { id: 'far', distance: 1.8 },    // beyond MAX_DISTANCE
     ], nodeMap, 5);
     expect(out.map(n => n.id)).toEqual(['sib', 'str']);
+  });
+
+  it('shows fewer neighbours rather than padding with distant ones (similarity floor)', () => {
+    const sel = node('sel', { genres: ['RPG'] });
+    const near = node('near', { genres: ['RPG'] });
+    const mid = node('mid', { genres: ['RPG'] });
+    const far1 = node('far1', { genres: ['RPG'] });
+    const far2 = node('far2', { genres: ['RPG'] });
+    const nodeMap = new Map([sel, near, mid, far1, far2].map(n => [n.id, n]));
+    const out = rerankNeighbors(sel, [
+      { id: 'near', distance: 0.12 }, { id: 'mid', distance: 0.3 }, { id: 'far1', distance: 0.5 }, { id: 'far2', distance: 0.9 },
+    ], nodeMap, 12);
+    // floor 0.45 keeps 2 → below MIN_SHOWN (3) → relaxed to 0.6 adds far1, never far2
+    expect(out.map(n => n.id)).toEqual(['near', 'mid', 'far1']);
+  });
+
+  it('caps metadata adjustments so a franchise / genre match cannot leapfrog a much closer game', () => {
+    const sel = node('sel', { title: 'Space Saga', genres: ['RPG'] });
+    const close = node('close', { title: 'Orbit Tactics', genres: ['Strategy'] });
+    const sequel = node('sequel', { title: 'Space Saga 2', genres: ['RPG'] });
+    const nodeMap = new Map([sel, close, sequel].map(n => [n.id, n]));
+    const out = rerankNeighbors(sel, [{ id: 'close', distance: 0.05 }, { id: 'sequel', distance: 0.4 }], nodeMap, 12);
+    expect(out[0].id).toBe('close');
+  });
+
+  it('umbrella brands only get the franchise boost with a shared studio', () => {
+    const sel = node('sel', { title: 'STAR WARS Jedi: Survivor', developer: 'Respawn', publisher: 'EA' });
+    const pinball = node('pin', { title: 'STAR WARS Pinball', developer: 'Zen Studios', publisher: 'Zen Studios' });
+    const other = node('oth', { title: 'Cosmic Blade', developer: 'Indie Co', publisher: 'Indie Co' });
+    const nodeMap = new Map([sel, pinball, other].map(n => [n.id, n]));
+    const out = rerankNeighbors(sel, [{ id: 'pin', distance: 0.3 }, { id: 'oth', distance: 0.28 }], nodeMap, 12);
+    expect(out[0].id).toBe('oth');
+  });
+
+  it('blends rerank order with similarity order instead of replacing it', () => {
+    const mk = (id: string) => ({ id, distance: 0.1, node: node(id) });
+    const base = ['a', 'b', 'c', 'd'].map(mk);
+    const reranked = ['d', 'c', 'b', 'a'].map(mk);
+    // equal blend of two opposite orders → ties broken by stable similarity order
+    expect(blendRerankOrder(base, reranked, 4, 1).map(n => n.id)).toEqual(['d', 'c', 'b', 'a']);
+    expect(blendRerankOrder(base, reranked, 4, 0).map(n => n.id)).toEqual(['a', 'b', 'c', 'd']);
+    expect(blendRerankOrder(base, [mk('c')], 2, 0.5).map(n => n.id)).toEqual(['a', 'c']);
   });
 
   it('falls back to spatial neighbours while the ANN index is unavailable', async () => {

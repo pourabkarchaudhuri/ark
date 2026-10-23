@@ -15,6 +15,8 @@ import {
   getEmbeddingContentEpoch,
   embeddingService,
   EMBEDDING_TEXT_VERSION,
+  rendererHeapUsageRatio,
+  HEAP_PRESSURE_RATIO,
 } from '@/services/embedding-service';
 import { journeyStore } from '@/services/journey-store';
 import { libraryStore } from '@/services/library-store';
@@ -577,6 +579,8 @@ export type GalaxyStepReporter = (
   stepIndex: number,
   status: 'running' | 'done' | 'waiting',
   detail?: string,
+  /** Progress within this step, 0–1, when it can be measured (loader shows a real %). */
+  fraction?: number,
 ) => void;
 
 export const GALAXY_STEP_LABELS = [
@@ -603,10 +607,20 @@ export async function buildGalaxyData(
 ): Promise<GalaxyBuildResult> {
   const report = onStep ?? (() => {});
 
-  report(0, 'running');
+  report(0, 'running', undefined, 0);
+  // The pooled-vector count is cached, so this gives the loader a real denominator.
+  const totalVectors = await getPooledEmbeddingCount().catch(() => 0);
+  let libraryLoaded = 0;
+  let bestFraction = 0;
   let embResult: { ids: string[]; projected: Float32Array; projDim: number } | null =
     await loadProjectedEmbeddingsForGraph((count: number, store: string) => {
-      report(0, 'running', `${count.toLocaleString()} from ${store}`);
+      // Mid-store ticks carry that store's count; the end-of-store calls carry the running
+      // total (ids.length). Library comes first, so catalog ticks add the library total —
+      // except the final catalog call, which already includes it (cap at the running max).
+      if (store === 'library') libraryLoaded = Math.max(libraryLoaded, count);
+      const loaded = store === 'catalog' ? Math.min(libraryLoaded + count, totalVectors || Infinity) : count;
+      if (totalVectors > 0) bestFraction = Math.max(bestFraction, Math.min(0.99, loaded / totalVectors));
+      report(0, 'running', `${Math.min(loaded, totalVectors || loaded).toLocaleString()}`, totalVectors > 0 ? bestFraction : undefined);
     });
   const ids = embResult!.ids;
   const projDim = embResult!.projDim;
@@ -636,7 +650,8 @@ export async function buildGalaxyData(
       const chunk = catalogAppIds.slice(i, i + CHUNK);
       const entries = await catalogStore.getEntries(chunk);
       for (const e of entries) catalogMetaMap.set(e.appid, e);
-      report(1, 'running', `${Math.min(i + CHUNK, catalogAppIds.length).toLocaleString()} / ${catalogAppIds.length.toLocaleString()}`);
+      report(1, 'running', `${Math.min(i + CHUNK, catalogAppIds.length).toLocaleString()} / ${catalogAppIds.length.toLocaleString()}`,
+        0.85 * Math.min(1, (i + CHUNK) / catalogAppIds.length));
     }
   }
   // Fetch Epic catalog metadata for epic-* IDs (title, genres, developer, cover)
@@ -671,15 +686,14 @@ export async function buildGalaxyData(
   report(1, 'done', `${libraryIds.size} library + ${catalogMetaMap.size.toLocaleString()} catalog`);
   await new Promise(r => setTimeout(r, 30));
 
-  report(2, 'running');
-  report(2, 'running', 'initializing...');
+  report(2, 'running', undefined, 0.1);
   await new Promise(r => setTimeout(r, 50));
   console.log(`[Galaxy Cache] Projecting ${n.toLocaleString()} × ${projDim}D → 3D via PCA...`);
   let projectionMethod = 'PCA';
 
   // PCA on 100D pre-projected data: fast (~2-5s), no OOM risk.
   // Try WebGPU first (instant for 100K+ points); fall back to CPU.
-  report(2, 'running', 'Running PCA...');
+  report(2, 'running', undefined, 0.35);
   const centered = centerData(data!, n, projDim);
   data = null;
   let positions: Float32Array | null = null;
@@ -698,11 +712,15 @@ export async function buildGalaxyData(
   report(2, 'done', projectionMethod);
   await new Promise(r => setTimeout(r, 0));
 
-  report(3, 'running');
+  report(3, 'running', undefined, 0);
   const allGenresSet = new Set<string>();
   const nodes: GraphNode[] = [];
 
   for (let i = 0; i < n; i++) {
+    if (i > 0 && i % 8000 === 0) {
+      report(3, 'running', undefined, i / n);
+      await new Promise(r => setTimeout(r, 0)); // let the loader paint
+    }
     const id = ids[i];
     const isLib = libraryIds.has(id);
     const journey = isLib ? journeyStore.getEntry(id) : null;
@@ -962,9 +980,9 @@ export function buildAndCacheGalaxy(
   }
   const reporters = new Set<GalaxyStepReporter>();
   if (onStep) reporters.add(onStep);
-  const fanOut: GalaxyStepReporter = (stepIndex, status, detail) => {
+  const fanOut: GalaxyStepReporter = (stepIndex, status, detail, fraction) => {
     for (const fn of reporters) {
-      try { fn(stepIndex, status, detail); } catch { /* a reporter must not break the build */ }
+      try { fn(stepIndex, status, detail, fraction); } catch { /* a reporter must not break the build */ }
     }
   };
   const promise = _buildAndCacheGalaxyOnce(fanOut).finally(() => {
@@ -1114,22 +1132,36 @@ async function _runBackgroundPrecompute(): Promise<void> {
     return;
   }
 
+  // Right after a Force Re-index (or an ANN rebuild) the renderer has just
+  // churned through the whole catalog — don't stack a full galaxy rebuild on
+  // top of it. Defer until the cooldown has passed.
+  const cooldownMs = embeddingService.heavyRebuildCooldownRemainingMs ?? 0;
+  if (cooldownMs > 0 || embeddingService.isAnnRebuilding) {
+    const delay = Math.max(cooldownMs, 30_000);
+    console.log(`[Galaxy Cache] Heavy embedding/ANN work just ran — deferring galaxy build by ${Math.round(delay / 1000)}s`);
+    _bgScheduled = false;
+    _setBuildStage('scheduled');
+    setTimeout(() => {
+      _bgScheduled = false;
+      scheduleBackgroundPrecompute(0);
+    }, delay);
+    return;
+  }
+
   // Memory-pressure gate: defer if the renderer is already under heavy load.
   // The galaxy build allocates ~300 MB for embedding data + worker projection.
-  // Starting when memory is already high risks an OOM crash.
-  const mem = (performance as any).memory;
-  if (mem && mem.usedJSHeapSize && mem.jsHeapSizeLimit) {
-    const usageRatio = mem.usedJSHeapSize / mem.jsHeapSizeLimit;
-    if (usageRatio > 0.60) {
-      console.log(`[Galaxy Cache] Memory pressure high (${(usageRatio * 100).toFixed(0)}%) — deferring galaxy build by 30s`);
+  // Starting when memory is already high risks an OOM crash. (Shared gate —
+  // the graph build in game-graph-store uses the same ratio.)
+  const usageRatio = rendererHeapUsageRatio();
+  if (usageRatio !== null && usageRatio > HEAP_PRESSURE_RATIO) {
+    console.log(`[Galaxy Cache] Memory pressure high (${(usageRatio * 100).toFixed(0)}%) — deferring galaxy build by 30s`);
+    _bgScheduled = false;
+    _setBuildStage('scheduled');
+    setTimeout(() => {
       _bgScheduled = false;
-      _setBuildStage('scheduled');
-      setTimeout(() => {
-        _bgScheduled = false;
-        scheduleBackgroundPrecompute(0);
-      }, 30_000);
-      return;
-    }
+      scheduleBackgroundPrecompute(0);
+    }, 30_000);
+    return;
   }
 
   console.log('[Galaxy Cache] Background precompute starting...');

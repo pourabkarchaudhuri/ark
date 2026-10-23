@@ -31,7 +31,8 @@ describe('aggregateMaxSimByGameId', () => {
     const ranked = aggregateMaxSimByGameId(hits, { excludeGameId: 'steam-0' });
     expect(ranked.map((r) => r.gameId)).toEqual(['steam-2', 'steam-1', 'steam-3']);
     expect(ranked[0]!.distance).toBeCloseTo(0.1);
-    expect(ranked[1]!.distance).toBeCloseTo(0.2);
+    // summary chunk 0.2 + kind penalty (1 − 0.55) × 0.25 = 0.3125 — still beats pooled 0.35
+    expect(ranked[1]!.distance).toBeCloseTo(0.3125);
   });
 
   it('excludes the query game (pooled or chunk form)', () => {
@@ -61,5 +62,19 @@ describe('aggregateMaxSimByGameId', () => {
       excludeGameId: 'steam-src',
     });
     expect(ranked.map((r) => r.gameId)).toEqual(['steam-a', 'steam-b']);
+  });
+});
+
+describe('chunk-kind weighting (v1.0.74)', () => {
+  it('a description-slice hit counts for less than a facets hit at the same raw distance', async () => {
+    const { aggregateMaxSimByGameId, chunkKindPenalty } = await import('@/services/ann-max-sim');
+    expect(chunkKindPenalty('cat:steam-1::facets#0')).toBe(0);
+    expect(chunkKindPenalty('steam-1')).toBe(0);
+    expect(chunkKindPenalty('cat:steam-2::description#1')).toBeGreaterThan(0.1);
+    const out = aggregateMaxSimByGameId([
+      { id: 'cat:steam-2::description#1', distance: 0.2 },
+      { id: 'cat:steam-1::facets#0', distance: 0.25 },
+    ]);
+    expect(out.map((r) => r.gameId)).toEqual(['steam-1', 'steam-2']);
   });
 });

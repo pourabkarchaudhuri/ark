@@ -8,7 +8,25 @@
  * Pure helpers — no usearch / IDB dependency (unit-testable).
  */
 
+import { CHUNK_WEIGHTS, type ChunkKind } from '@/services/embedding-chunks';
+
 export type AnnDistanceHit = { id: string; distance: number };
+
+/**
+ * Distance penalty for a chunk hit, scaled by how little that chunk kind counts in the
+ * pooled vector (CHUNK_WEIGHTS). Unweighted max-sim let a generic store-description slice
+ * ("full controller support, co-op with friends…") match as strongly as the facets chunk,
+ * so unrelated games ranked as close neighbours. Facets/pooled: no penalty.
+ */
+const CHUNK_KIND_PENALTY = 0.25;
+
+export function chunkKindPenalty(id: string): number {
+  const sep = id.indexOf('::');
+  if (sep < 0) return 0;
+  const kind = id.slice(sep + 2).split('#')[0] as ChunkKind;
+  const w = CHUNK_WEIGHTS[kind];
+  return typeof w === 'number' ? (1 - w) * CHUNK_KIND_PENALTY : 0;
+}
 
 export type MaxSimGameHit = { gameId: string; distance: number };
 
@@ -44,9 +62,10 @@ export function aggregateMaxSimByGameId(
   for (const h of hits) {
     const gameId = parseAnnIdToGameId(h.id);
     if (exclude && gameId === exclude) continue;
+    const d = h.distance + chunkKindPenalty(h.id);
     const prev = best.get(gameId);
-    if (prev === undefined || h.distance < prev) {
-      best.set(gameId, h.distance);
+    if (prev === undefined || d < prev) {
+      best.set(gameId, d);
     }
   }
   return [...best.entries()]

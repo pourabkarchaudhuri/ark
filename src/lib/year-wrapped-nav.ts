@@ -44,3 +44,42 @@ export function resolveSwipeNavAction(
   if (dx < 0) return canGoNext(currentSlide, totalSlides) ? 'next' : 'none';
   return canGoPrev(currentSlide) ? 'prev' : 'none';
 }
+
+export type KeyNavAction = 'next' | 'prev' | 'first' | 'last' | 'close' | 'toggle-autoplay' | 'none';
+
+/**
+ * Map a keyboard key to a Wrapped action.
+ * ←/→ (and PageUp/PageDown, Enter, Backspace) navigate, Home/End jump,
+ * Space / K pause or resume auto-advance, Esc closes.
+ */
+export function resolveKeyNavAction(key: string): KeyNavAction {
+  switch (key) {
+    case 'ArrowRight':
+    case 'PageDown':
+    case 'Enter':
+      return 'next';
+    case 'ArrowLeft':
+    case 'PageUp':
+    case 'Backspace':
+      return 'prev';
+    case 'Home':
+      return 'first';
+    case 'End':
+      return 'last';
+    case 'Escape':
+      return 'close';
+    case ' ':
+    case 'Spacebar':
+    case 'k':
+    case 'K':
+      return 'toggle-autoplay';
+    default:
+      return 'none';
+  }
+}
+
+/** Clamp a requested slide index into range (empty decks clamp to 0). */
+export function clampSlide(index: number, totalSlides: number): number {
+  if (totalSlides <= 0 || !Number.isFinite(index)) return 0;
+  return Math.min(Math.max(Math.trunc(index), 0), totalSlides - 1);
+}

@@ -205,7 +205,8 @@ export const FRONTIER_VERTEX = /* glsl */ `
     vHue = clamp(aIntensity + 0.08 * sin(aPhase * 19.0 + u_time * 0.2), 0.0, 1.0);
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     float size = 70.0 + aIntensity * 180.0;
-    gl_PointSize = size * (400.0 / -mv.z);
+    // Pixel cap: up close / dense regions must stay a soft haze, never a solid blob
+    gl_PointSize = min(size * (400.0 / -mv.z), 42.0);
     gl_Position = projectionMatrix * mv;
   }
 `;
@@ -224,7 +225,7 @@ export const FRONTIER_FRAGMENT = /* glsl */ `
     vec3 magenta = vec3(0.90, 0.30, 0.75);
     vec3 col = mix(cyan, violet, smoothstep(0.0, 0.55, vHue));
     col = mix(col, magenta, smoothstep(0.55, 1.0, vHue));
-    float a = falloff * vIntensity * 0.42;
+    float a = falloff * vIntensity * 0.22;
     gl_FragColor = vec4(col * a, a);
   }
 `;

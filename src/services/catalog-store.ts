@@ -37,7 +37,14 @@ const ENTRIES_STORE = 'entries';
 const META_STORE = 'meta';
 
 const BATCH_SIZE = 200;
-const CONCURRENCY = 8;
+// Matches the main process's catalog throttle (CATALOG_MAX_INFLIGHT); 8 just queued behind it.
+const CONCURRENCY = 4;
+/** Retry round: skipped when more than this share of the first pass failed (offline / blocked). */
+const RETRY_ROUND_MAX_RATIO = 0.25;
+/** Retry round time budget — leftovers carry over to the next sync as `pendingAppIds`. */
+const RETRY_ROUND_BUDGET_MS = 90_000;
+/** After an incomplete run, automatic syncs wait this long before resuming the pending games. */
+const INCOMPLETE_RETRY_COOLDOWN = 15 * 60 * 1000;
 const SYNC_STALE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
@@ -367,10 +374,17 @@ async function setMeta<T>(key: string, value: T): Promise<void> {
 // ─── CatalogStore ───────────────────────────────────────────────────────────────
 
 export type CatalogSyncProgress = {
-  stage: 'idle' | 'migrating' | 'fetching-ids' | 'fetching-tags' | 'fetching-metadata' | 'done' | 'error';
+  stage: 'idle' | 'migrating' | 'fetching-ids' | 'fetching-tags' | 'fetching-metadata' | 'retrying' | 'finalizing' | 'done' | 'error';
   batchesCompleted: number;
   batchesTotal: number;
   gamesStored: number;
+  /** First-pass batches that failed (included in batchesCompleted). */
+  batchesFailed?: number;
+  /** Retry round counters (stage 'retrying'). */
+  retryDone?: number;
+  retryTotal?: number;
+  /** Games still missing after an incomplete run — the next sync resumes just these. */
+  pendingGames?: number;
   error?: string;
 };
 
@@ -573,35 +587,88 @@ export class CatalogStore {
     if (this._syncing) return;
     await this.migrateFromIdbIfNeeded();
 
+    const prevState = await getMeta<CatalogSyncState>('sync-state');
+    const pending = prevState?.pendingAppIds ?? [];
     if (!force) {
       const fresh = await this.isFresh();
-      if (fresh) {
-        const syncState = await getMeta<CatalogSyncState>('sync-state');
-        if (syncState && syncState.totalEntries > 0) {
-          this._syncProgress = {
-            stage: 'done',
-            batchesCompleted: syncState.batchesCompleted ?? 0,
-            batchesTotal: syncState.batchesTotal ?? 0,
-            gamesStored: syncState.totalEntries,
-          };
-          this.notify();
-          return;
-        }
+      if (fresh && prevState && prevState.totalEntries > 0) {
+        this._syncProgress = {
+          stage: 'done',
+          batchesCompleted: prevState.batchesCompleted ?? 0,
+          batchesTotal: prevState.batchesTotal ?? 0,
+          gamesStored: prevState.totalEntries,
+        };
+        this.notify();
+        console.log(`[CatalogStore] Catalog fresh (${prevState.totalEntries} games) — sync skipped`);
+        return;
+      }
+      // An incomplete run just happened: don't hammer Steam again right away (every launch and
+      // every Oracle visit used to start a full 780-batch sync that hit the same rate limits).
+      const sinceAttempt = Date.now() - (prevState?.lastAttemptTimestamp ?? 0);
+      // "Recent attempt that didn't produce a fresh catalog": games pending, or the attempt
+      // came after the last complete sync (e.g. Steam's app list was unreachable).
+      const recentUnfinished = pending.length > 0 || (prevState?.lastAttemptTimestamp ?? 0) > (prevState?.lastSyncTimestamp ?? 0);
+      if (recentUnfinished && prevState && prevState.totalEntries > 0 && sinceAttempt < INCOMPLETE_RETRY_COOLDOWN) {
+        this._syncProgress = {
+          stage: 'done',
+          batchesCompleted: prevState.batchesCompleted ?? 0,
+          batchesTotal: prevState.batchesTotal ?? 0,
+          gamesStored: prevState.totalEntries,
+          pendingGames: pending.length,
+          error: `${pending.length > 0 ? `${pending.length.toLocaleString()} games still pending` : 'Couldn’t reach Steam last time'} — retrying in ${Math.ceil((INCOMPLETE_RETRY_COOLDOWN - sinceAttempt) / 60_000)} min`,
+        };
+        this.notify();
+        console.log(`[CatalogStore] Previous sync unfinished (${pending.length} games pending) — in cooldown, skipped`);
+        return;
       }
     }
 
     this._syncing = true;
     this._syncAbort = new AbortController();
     const signal = this._syncAbort.signal;
+    const startedAt = Date.now();
 
     try {
-      // Step 1: Get all app IDs from main process
-      this._syncProgress = { stage: 'fetching-ids', batchesCompleted: 0, batchesTotal: 0, gamesStored: 0 };
-      this.notify();
+      // Resume: a recent incomplete run only re-fetches what it missed (its pending list came
+      // from the app list fetched by that run). Once that attempt is older than the stale TTL,
+      // a full pass is due again.
+      const lastFull = prevState?.lastSyncTimestamp ?? 0;
+      const lastAttempt = prevState?.lastAttemptTimestamp ?? 0;
+      const resume = !force && pending.length > 0 && (Date.now() - lastAttempt) < SYNC_STALE_TTL;
 
-      const appList: Array<{ appid: number; name: string }> = await window.steam!.getAppList();
-      const appIds = appList.map(a => a.appid);
-      console.log(`[CatalogStore] Got ${appIds.length} app IDs from main process`);
+      let appIds: number[];
+      let alreadyStoredBeforeResume = 0;
+      if (resume) {
+        appIds = pending;
+        console.log(`[CatalogStore] Resuming incomplete sync: ${appIds.length} pending games`);
+        if (useLevelDB()) {
+          const existing = await storeGetMany<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, appIds.map(String)).catch(() => []);
+          alreadyStoredBeforeResume = existing.filter(Boolean).length;
+        }
+      } else {
+        // Step 1: Get all app IDs from main process
+        this._syncProgress = { stage: 'fetching-ids', batchesCompleted: 0, batchesTotal: 0, gamesStored: 0 };
+        this.notify();
+        const appList: Array<{ appid: number; name: string }> = await window.steam!.getAppList();
+        appIds = appList.map(a => a.appid);
+        console.log(`[CatalogStore] Got ${appIds.length} app IDs from main process`);
+        // The IPC answers [] on failure — never let that overwrite a good catalog's sync-state
+        if (appIds.length === 0) {
+          // Keep the existing catalog usable (no red error over a good catalog) and record the
+          // attempt so automatic syncs back off instead of retrying on every Oracle visit.
+          if (prevState && prevState.totalEntries > 0) {
+            await setMeta('sync-state', { ...prevState, lastAttemptTimestamp: Date.now(), pendingAppIds: prevState.pendingAppIds ?? [] });
+            this._syncProgress = {
+              stage: 'done', batchesCompleted: prevState.batchesCompleted, batchesTotal: prevState.batchesTotal,
+              gamesStored: prevState.totalEntries, error: 'Couldn’t reach Steam — using the catalog you already have',
+            };
+            this.notify();
+            console.warn('[CatalogStore] Steam app list unavailable — keeping the existing catalog');
+            return;
+          }
+          throw new Error('Steam app list unavailable — try again later');
+        }
+      }
 
       // Step 2: Fetch & cache tag list
       this._syncProgress = { ...this._syncProgress, stage: 'fetching-tags' };
@@ -615,21 +682,33 @@ export class CatalogStore {
         batches.push(appIds.slice(i, i + BATCH_SIZE));
       }
 
-      this._syncProgress = {
-        stage: 'fetching-metadata',
-        batchesCompleted: 0,
-        batchesTotal: batches.length,
-        gamesStored: 0,
-      };
-      this.notify();
-
-      // Step 4: Fetch metadata with concurrency-limited queue
+      // Progress model: the first pass fills 0–100% of `batchesTotal`; failed batches are
+      // counted separately and a retry round gets its own stage + counters, so the UI never
+      // sits on a silent "100%" while work continues.
       let batchesCompleted = 0;
+      let batchesFailed = 0;
       let totalGamesStored = 0;
       const failed: Array<{ batch: number[]; idx: number }> = [];
       let permanentlyFailed = 0;
+      const publish = (patch: Partial<CatalogSyncProgress>) => {
+        this._syncProgress = {
+          stage: 'fetching-metadata',
+          batchesCompleted,
+          batchesTotal: batches.length,
+          gamesStored: totalGamesStored,
+          batchesFailed,
+          ...patch,
+        };
+        this.notify();
+      };
+      publish({});
 
-      const runQueue = async (items: Array<{ batch: number[]; idx: number }>, concurrency: number, isRetry: boolean) => {
+      const runQueue = async (
+        items: Array<{ batch: number[]; idx: number }>,
+        concurrency: number,
+        onDone: (ok: boolean) => void,
+        deadline = Infinity,
+      ) => {
         // Proper queue: each dequeue is atomic (no shared mutable index)
         const queue = [...items];
         const dequeue = () => queue.shift();
@@ -637,76 +716,104 @@ export class CatalogStore {
         for (let w = 0; w < concurrency; w++) {
           workers.push((async () => {
             let item: ReturnType<typeof dequeue>;
-            while (!signal.aborted && (item = dequeue())) {
+            while (!signal.aborted && Date.now() < deadline && (item = dequeue())) {
               const { batch, idx } = item;
+              let ok = false;
               try {
                 const entries = await fetchBatch(batch, tags);
                 if (entries.length > 0) {
                   await putEntriesBatch(entries);
                   totalGamesStored += entries.length;
                 }
+                ok = true;
               } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
-                console.warn(`[CatalogStore] Batch ${idx} failed${isRetry ? ' on retry' : ''}:`, msg);
+                console.warn(`[CatalogStore] Batch ${idx} failed:`, msg);
                 // A 4xx other than 429 is Steam rejecting the request itself — retrying won't help,
                 // and counting it would keep the catalog "stale" (full re-sync) on every launch.
                 if (/IStoreBrowseService 4(?!29)\d\d/.test(msg)) permanentlyFailed++;
                 else failed.push(item);
               }
-              if (isRetry) continue;
-              batchesCompleted++;
-
-              if (batchesCompleted % 20 === 0 || batchesCompleted === batches.length) {
-                this._syncProgress = {
-                  stage: 'fetching-metadata',
-                  batchesCompleted,
-                  batchesTotal: batches.length,
-                  gamesStored: totalGamesStored,
-                };
-                this.notify();
-              }
+              onDone(ok);
             }
           })());
         }
         await Promise.all(workers);
+        // Anything not dequeued (deadline / abort) is still owed
+        for (const left of queue) failed.push(left);
       };
 
-      await runQueue(batches.map((b, i) => ({ batch: b, idx: i })), CONCURRENCY, false);
-      // One gentler retry round for batches lost to rate limiting / transient errors
-      if (failed.length > 0 && !signal.aborted) {
+      // Step 4: first pass
+      await runQueue(batches.map((b, i) => ({ batch: b, idx: i })), CONCURRENCY, (ok) => {
+        batchesCompleted++;
+        if (!ok) batchesFailed++;
+        if (batchesCompleted % 5 === 0 || batchesCompleted === batches.length) publish({});
+      });
+      console.log(
+        `[CatalogStore] First pass: ${batchesCompleted - batchesFailed}/${batches.length} batches ok, ` +
+        `${failed.length} to retry, ${permanentlyFailed} rejected — ${Math.round((Date.now() - startedAt) / 1000)}s`,
+      );
+
+      // Step 4b: one bounded retry round. Skipped when most of the pass failed (offline /
+      // blocked — retrying now only burns time); leftovers carry over to the next sync.
+      if (failed.length > 0 && !signal.aborted && failed.length <= Math.ceil(batches.length * RETRY_ROUND_MAX_RATIO)) {
         const retry = failed.splice(0);
-        console.log(`[CatalogStore] Retrying ${retry.length} failed batches`);
-        await new Promise((r) => setTimeout(r, 5000));
-        await runQueue(retry, 2, true);
+        let retryDone = 0;
+        publish({ stage: 'retrying', retryDone, retryTotal: retry.length });
+        console.log(`[CatalogStore] Retrying ${retry.length} failed batches (budget ${RETRY_ROUND_BUDGET_MS / 1000}s)`);
+        await runQueue(retry, 2, () => {
+          retryDone++;
+          publish({ stage: 'retrying', retryDone, retryTotal: retry.length });
+        }, Date.now() + RETRY_ROUND_BUDGET_MS);
+        console.log(`[CatalogStore] Retry round: ${retry.length - failed.length}/${retry.length} recovered`);
       }
 
       // Step 5: Save sync state. Only a complete run is stamped fresh — an aborted or
       // heavily rate-limited run used to count as a full sync for 24h (and moved the
       // embedding watermark), leaving the catalog short until the next day.
-      const prev = await getMeta<CatalogSyncState>('sync-state');
+      publish({ stage: 'finalizing' });
       const complete = !signal.aborted && failed.length <= Math.ceil(batches.length * MAX_FAILED_BATCH_RATIO);
-      const syncState: CatalogSyncState = {
-        lastSyncTimestamp: complete ? Date.now() : (prev?.lastSyncTimestamp ?? 0),
+      const stillPending = failed.flatMap((f) => f.batch);
+      const prevTotal = prevState?.totalEntries ?? 0;
+      const finishedAt = Date.now();
+      const totalEntries = resume
+        // Pending games may already be stored from an earlier full sync — only newly added rows count
+        ? prevTotal + Math.max(0, totalGamesStored - alreadyStoredBeforeResume)
         // Rows are keyed overwrites, so a partial run never shrinks what's stored
-        totalEntries: complete ? totalGamesStored : Math.max(totalGamesStored, prev?.totalEntries ?? 0),
-        batchesCompleted,
-        batchesTotal: batches.length,
+        : (complete ? totalGamesStored : Math.max(totalGamesStored, prevTotal));
+      const syncState: CatalogSyncState = {
+        // A resume that clears the backlog completes the earlier full pass
+        lastSyncTimestamp: complete ? finishedAt : lastFull,
+        totalEntries,
+        batchesCompleted: resume ? (prevState?.batchesCompleted ?? 0) : batchesCompleted,
+        batchesTotal: resume ? (prevState?.batchesTotal ?? 0) : batches.length,
         inProgress: false,
+        pendingAppIds: complete ? undefined : stillPending,
+        lastAttemptTimestamp: finishedAt,
       };
       await setMeta('sync-state', syncState);
 
       // A partial run still leaves a usable catalog — downstream (embeddings, Oracle) proceeds;
-      // `error` carries the shortfall and the next sync retries since it isn't stamped fresh.
+      // `error` / `pendingGames` carry the shortfall, and the next sync resumes just those.
       this._syncProgress = {
-        stage: complete || syncState.totalEntries > 0 ? 'done' : 'error',
-        batchesCompleted,
-        batchesTotal: batches.length,
-        gamesStored: totalGamesStored,
-        ...(complete ? {} : { error: signal.aborted ? 'Sync cancelled' : `${failed.length} of ${batches.length} batches failed — will retry next sync` }),
+        stage: complete || totalEntries > 0 ? 'done' : 'error',
+        batchesCompleted: syncState.batchesCompleted,
+        batchesTotal: syncState.batchesTotal,
+        gamesStored: totalEntries,
+        batchesFailed,
+        ...(complete ? {} : {
+          pendingGames: stillPending.length,
+          error: signal.aborted
+            ? 'Sync cancelled'
+            : `${stillPending.length.toLocaleString()} games pending (Steam rate limit) — will retry`,
+        }),
       };
       this.notify();
 
-      console.log(`[CatalogStore] Sync ${complete ? 'complete' : 'incomplete'}: ${totalGamesStored} games in ${batches.length} batches (${failed.length} failed, ${permanentlyFailed} rejected by Steam)`);
+      console.log(
+        `[CatalogStore] Sync ${complete ? 'complete' : 'incomplete'}${resume ? ' (resume)' : ''}: ${totalEntries} games, ` +
+        `${stillPending.length} pending, ${permanentlyFailed} batches rejected by Steam — ${Math.round((Date.now() - startedAt) / 1000)}s`,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[CatalogStore] Sync failed:', msg);

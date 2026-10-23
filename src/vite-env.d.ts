@@ -55,6 +55,10 @@ interface ElectronAPI {
   openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
   /** Fetch HTML from a URL via the main process (bypasses CORS). Domain-restricted. */
   fetchHtml: (url: string) => Promise<string | null>;
+  /** Crash-loop breaker state for this launch (optional: absent in older preloads). */
+  getSafeMode?: () => Promise<{ safeMode: boolean; reason?: string; recentCrashes?: number }>;
+  /** Restore, show and focus the main window — works when Ark is hidden in the tray. */
+  showAndFocus?: () => Promise<boolean>;
 }
 
 // Game Launcher API types (exposed via Electron preload, Phase 4a)
@@ -67,6 +71,8 @@ interface SessionTrackerAPI {
   setTrackedGames: (games: Array<{ gameId: string; executablePath: string }>) => Promise<{ success: boolean }>;
   getActiveSessions: () => Promise<Array<{ gameId: string; startTime: string; elapsedMinutes: number }>>;
   getRecoveredSessions: () => Promise<Array<import('@/types/game').GameSession>>;
+  /** Confirm sessions are recorded so main drops them from its pending queue (optional for older preloads). */
+  ackSessions?: (ids: string[]) => Promise<{ success: boolean; removed?: number }>;
   onStatusChange: (callback: (data: { gameId: string; status: string }) => void) => () => void;
   onSessionStarted: (callback: (data: { gameId: string; startTime: string }) => void) => () => void;
   onLiveUpdate: (callback: (data: { gameId: string; activeMinutes: number }) => void) => () => void;

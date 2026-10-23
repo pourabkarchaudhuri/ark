@@ -67,6 +67,13 @@ function installStore(api: StoreAPI | undefined) {
   Object.defineProperty(window, 'store', { value: api, configurable: true, writable: true });
 }
 
+// Each loadFreshStore() creates a new singleton whose 300ms debounced save can
+// otherwise fire during the NEXT test (rewriting localStorage / window.store).
+// Every instance registers a beforeunload flush, so firing it settles them all.
+afterEach(() => {
+  window.dispatchEvent(new Event('beforeunload'));
+});
+
 describe('StatusHistoryStore — public API on localStorage fallback', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -259,5 +266,105 @@ describe('StatusHistoryStore — LevelDB migration', () => {
     expect(store.getSize()).toBe(0);
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
     expect(api.clearNamespace).toHaveBeenCalledWith(LEVEL_NAMESPACE);
+  });
+});
+
+describe('StatusHistoryStore — hydration safety (audit item 4)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    installStore(undefined);
+  });
+
+  it('merges records made before the async LevelDB hydrate instead of replacing them', async () => {
+    localStorage.setItem(MIGRATION_FLAG_KEY, 'yes');
+    const { state, api } = makeFakeStore();
+    state.rows.set(
+      LEVEL_NAMESPACE,
+      new Map<string, unknown>([
+        [
+          LEVEL_DATA_KEY,
+          {
+            version: 2,
+            entries: [
+              { gameId: 'steam-42', title: 'Persisted', previousStatus: null, newStatus: 'Playing', timestamp: '2026-03-01T00:00:00Z' },
+            ],
+            lastUpdated: '2026-03-01T00:00:00Z',
+          },
+        ],
+      ]),
+    );
+    // Slow hydrate read so the record below lands while it is in flight.
+    const realGet = api.get;
+    (api as any).get = vi.fn(async (ns: string, key: string) => {
+      await new Promise((r) => setTimeout(r, 30));
+      return realGet(ns, key);
+    });
+    installStore(api);
+
+    const store = await loadFreshStore();
+    // e.g. the startup auto-On-Hold sweep / cross-store sync
+    store.record('merge-probe-early', 'Early', 'Playing', 'On Hold');
+    await store.ready();
+
+    const ids = store.getAll().map((e) => e.gameId).sort();
+    expect(ids).toEqual(['merge-probe-early', 'steam-42']);
+    // The merged set is persisted back to LevelDB (not to localStorage).
+    // (Inspect our own put calls — vitest's isolate:false lets other files'
+    // store instances write to whatever window.store is current.)
+    await new Promise((r) => setTimeout(r, 20));
+    const mergedPut = (api.put as any).mock.calls.some(([, , payload]: any[]) => {
+      const gids = (payload?.entries ?? []).map((e: any) => e.gameId);
+      return gids.includes('merge-probe-early') && gids.includes('steam-42');
+    });
+    expect(mergedPut).toBe(true);
+    expect(localStorage.getItem(STORAGE_KEY) ?? '').not.toContain('merge-probe-early');
+    // Let the record()'s debounced save settle so it can't leak into the next test.
+    await new Promise((r) => setTimeout(r, 350));
+  });
+
+  it('ignores the frozen legacy localStorage snapshot once migrated', async () => {
+    localStorage.setItem(MIGRATION_FLAG_KEY, 'yes');
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        entries: [{ gameId: 'stale', title: 'Stale', previousStatus: null, newStatus: 'Playing', timestamp: '2025-01-01T00:00:00Z' }],
+        lastUpdated: '',
+      }),
+    );
+    const { api } = makeFakeStore();
+    installStore(api);
+    const store = await loadFreshStore();
+    expect(store.getForGame('stale')).toHaveLength(0);
+    await store.ready();
+    expect(store.getForGame('stale')).toHaveLength(0);
+  });
+
+  it('a failed hydrate retries, then goes read-only instead of silently writing localStorage', async () => {
+    localStorage.setItem(MIGRATION_FLAG_KEY, 'yes');
+    const { api } = makeFakeStore();
+    (api as any).get = vi.fn(async () => ({ error: 'IO error' }));
+    installStore(api);
+
+    vi.resetModules();
+    const health = await import('@/services/storage-health');
+    health.__setStorageRetryDelaysForTests([0, 0]);
+    const mod = await import('@/services/status-history-store');
+    const store = mod.statusHistoryStore;
+    await store.ready();
+
+    expect((api as any).get).toHaveBeenCalledTimes(3);
+    expect(store.isReadOnly()).toBe(true);
+    expect(health.getStorageHealth().failures.map((f) => f.store)).toContain('status-history');
+
+    store.record('readonly-probe', 'A', null, 'Playing');
+    await new Promise((r) => setTimeout(r, 350));
+    const wroteProbe = (api.put as any).mock.calls.some(([, , payload]: any[]) =>
+      (payload?.entries ?? []).some((e: any) => e.gameId === 'readonly-probe'));
+    expect(wroteProbe).toBe(false);
+    expect(localStorage.getItem(STORAGE_KEY) ?? '').not.toContain('readonly-probe');
   });
 });

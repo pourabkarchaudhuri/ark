@@ -1,6 +1,6 @@
 {
   "name": "ark",
-  "version": "1.0.73",
+  "version": "1.0.74",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -15,7 +15,7 @@
     "electron:compile": "tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs",
     "electron:dev": "npm run electron:compile && concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "electron:build": "vite build && electron-builder",
-    "test": "vitest --no-isolate",
+    "test": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
     "test:e2e": "playwright test",

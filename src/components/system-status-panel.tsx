@@ -13,7 +13,7 @@ import {
   Pause,
   Play,
 } from 'lucide-react';
-import { systemStatus, type SyncStatus, type SystemStatusSnapshot, type StorageMetric } from '@/services/system-status';
+import { systemStatus, type SyncStatus, type SystemStatusSnapshot, type StorageMetric, type LastRerankStatus } from '@/services/system-status';
 import { TooltipCard } from '@/components/ui/tooltip-card';
 import { embeddingService } from '@/services/embedding-service';
 import { useDevMode } from '@/hooks/useDevMode';
@@ -135,6 +135,35 @@ function SyncRow({ sync }: { sync: SyncStatus }) {
   );
 }
 
+// ─── Last Rerank Row ────────────────────────────────────────────────────────────
+
+function formatAgo(at: number): string {
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.round(m / 60)}h ago`;
+}
+
+/** What the reranker did on its latest run — answers "is the reranker even working?". */
+function LastRerankRow({ last }: { last: LastRerankStatus }) {
+  return (
+    <div className="space-y-0.5" data-testid="last-rerank-row">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <StatusDot stage={last.stage} />
+          <span className={`text-[10px] font-medium truncate ${stageColor(last.stage)}`}>Last Rerank</span>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0 min-w-[3.5rem] justify-end">
+          <span className="text-[9px] text-white/25 tabular-nums text-right">{formatAgo(last.at)}</span>
+          <span className="text-[9px] text-white/25 tabular-nums text-right">{formatDuration(last.elapsedMs)}</span>
+        </div>
+      </div>
+      <p className="text-[9px] text-white/25 truncate pl-[18px]" title={last.detail}>{last.detail}</p>
+    </div>
+  );
+}
+
 // ─── Storage Row ────────────────────────────────────────────────────────────────
 
 function StorageRow({ metric }: { metric: StorageMetric }) {
@@ -193,6 +222,7 @@ function StatusPanelContent({ snap, compact }: { snap: SystemStatusSnapshot; com
         <SyncRow sync={snap.galaxyBuild} />
         <SyncRow sync={snap.ollamaSetup} />
         <SyncRow sync={snap.rerankSetup} />
+        {snap.lastRerank && <LastRerankRow last={snap.lastRerank} />}
       </div>
 
       {/* Embedding Model */}

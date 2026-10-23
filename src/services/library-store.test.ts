@@ -5,6 +5,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { LibraryStore } from './library-store';
 import { LibraryGameEntry } from '@/types/game';
+import {
+  __resetStorageHealthForTests,
+  __setStorageRetryDelaysForTests,
+  getStorageHealth,
+} from './storage-health';
 
 const STORAGE_KEY = 'ark-library-data';
 const MIGRATION_MARKER = 'ark-library-data-migrated-v1';
@@ -87,6 +92,8 @@ function installFakeStore(opts: FakeStoreOpts = {}) {
 
 beforeEach(() => {
   localStorage.clear();
+  __setStorageRetryDelaysForTests([0, 0]);
+  __resetStorageHealthForTests();
   Object.defineProperty(window, 'store', {
     value: undefined,
     writable: true,
@@ -138,7 +145,11 @@ describe('LibraryStore — LevelDB hydration', () => {
     expect(store.getEntry('epic-abc')?.status).toBe('Completed');
   });
 
-  it('falls back to localStorage on getAll IPC error', async () => {
+  // Reliability audit item 3: a failed read used to fall back to the legacy
+  // localStorage snapshot AND keep writing to LevelDB. Pre-migration (marker
+  // absent) the legacy data is still the user's real data, so it is shown —
+  // but read-only: nothing may be written back.
+  it('pre-migration getAll failure shows legacy data READ-ONLY (retries, no writes)', async () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -147,10 +158,72 @@ describe('LibraryStore — LevelDB hydration', () => {
         lastUpdated: 'x',
       }),
     );
-    installFakeStore({ getAllError: 'rate_limited' });
+    const { calls } = installFakeStore({ getAllError: 'rate_limited' });
     const store = new LibraryStore();
     await store.ready;
     expect(store.isInLibrary('steam-9')).toBe(true);
+    expect(store.isReadOnly()).toBe(true);
+    expect(calls.getAll).toBe(3); // 1 attempt + 2 retries
+    store.updateEntry('steam-9', { rating: 4 });
+    await new Promise((r) => setTimeout(r, 350));
+    // (Filter by key: vitest runs files with isolate:false, so a stray timer
+    // from another file's store instance may hit this fake.)
+    expect(calls.batch.flat().some((op: any) => op.namespace === 'library' && op.key === 'steam-9')).toBe(false);
+    expect(getStorageHealth().readOnly).toBe(true);
+  });
+
+  it('after the migration marker, a failed read NEVER falls back to the legacy snapshot', async () => {
+    localStorage.setItem(MIGRATION_MARKER, 'yes');
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 5,
+        entries: [makeEntry({ gameId: 'stale-from-v1.0.61', status: 'Want to Play' })],
+        lastUpdated: 'x',
+      }),
+    );
+    const { calls, db } = installFakeStore({
+      seed: [makeEntry({ gameId: 'real-row', status: 'Completed' })],
+      getAllError: 'IO error: corrupt',
+    });
+    const store = new LibraryStore();
+    await store.ready;
+
+    // Stale legacy rows are NOT presented…
+    expect(store.isInLibrary('stale-from-v1.0.61')).toBe(false);
+    expect(store.isReadOnly()).toBe(true);
+    expect(getStorageHealth().failures.map((f) => f.store)).toContain('library');
+
+    // …and nothing is written, so LevelDB keeps the real data.
+    store.addToLibrary({
+      gameId: 'new-1',
+      status: 'Playing',
+      priority: 'Medium',
+      publicReviews: '',
+      recommendationSource: '',
+    });
+    store.clear();
+    await new Promise((r) => setTimeout(r, 350));
+    expect(calls.batch.flat().some((op: any) => op.namespace === 'library' && op.key === 'new-1')).toBe(false);
+    expect(db.has('library::real-row')).toBe(true);
+    // Legacy keys are left untouched in read-only mode.
+    expect(localStorage.getItem(MIGRATION_MARKER)).toBe('yes');
+  });
+
+  it('recovers when a retry succeeds (transient read error)', async () => {
+    const { db } = installFakeStore({ seed: [makeEntry({ gameId: 'steam-5' })] });
+    const fake = (window as any).store;
+    const realGetAll = fake.getAll;
+    let failures = 1;
+    fake.getAll = async (ns: string) => {
+      if (failures-- > 0) return { error: 'busy' };
+      return realGetAll(ns);
+    };
+    const store = new LibraryStore();
+    await store.ready;
+    expect(store.isReadOnly()).toBe(false);
+    expect(store.isInLibrary('steam-5')).toBe(true);
+    expect(db.size).toBe(1);
   });
 
   it('migrates Dropped→On Hold on hydrate and re-persists', async () => {

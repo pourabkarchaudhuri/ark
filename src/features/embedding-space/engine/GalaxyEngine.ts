@@ -50,6 +50,15 @@ const NAMED_STAR_RADIUS = 2.4;
 const STAR_COUNT = 12000;
 const BG_FRAME_INTERVAL = 500;
 const HALO_CAPACITY = 64;
+/** PPR-percentile band lit by the frontier aurora: fade in 0.80→0.88, out 0.95→0.985. */
+const FRONTIER_BAND: readonly [number, number, number, number] = [0.8, 0.88, 0.95, 0.985];
+/** Hard cap on lit frontier points — additive overlap beyond this saturates. */
+const FRONTIER_MAX_LIT = 1500;
+
+function smoothstep(e0: number, e1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
 
 type Vec3Tuple = [number, number, number];
 
@@ -529,11 +538,14 @@ export class GalaxyEngine {
     const mid = new THREE.Vector3().addVectors(startCamPos, endCamPos).multiplyScalar(0.5);
     const back = new THREE.Vector3().subVectors(mid, new THREE.Vector3().addVectors(startTarget, endTarget).multiplyScalar(0.5));
     if (back.lengthSq() < 1e-6) back.set(0, 0, 1);
-    back.normalize().multiplyScalar(Math.min(260, hop * 0.35));
-    const ctrl = mid.add(back).add(new THREE.Vector3(0, Math.min(120, hop * 0.12), 0));
-    // Duration scales with hop length; explicit long durations (descent, overview) are respected
-    const scaled = Math.max(1000, Math.min(2300, 850 + hop * 2.4));
-    const ms = duration >= 2400 && hop > 600 ? duration : scaled;
+    // Long hops pull well back (toward Approach altitude) so crossing the galaxy reads as a
+    // journey — rise out of the field, travel, dive in — instead of skimming at node height.
+    back.normalize().multiplyScalar(Math.min(1500, hop * (hop > 500 ? 0.6 : 0.35)));
+    const ctrl = mid.add(back).add(new THREE.Vector3(0, Math.min(420, hop * 0.15), 0));
+    // Duration scales with hop length (a far search pick used to take the same 2.8 s as a
+    // short hop); explicit long durations (descent, overview) act as a floor.
+    const scaled = Math.max(1000, Math.min(5200, 850 + hop * 2.2));
+    const ms = duration >= 2400 ? Math.max(duration, scaled) : scaled;
     const D = ms / 1000;
     if (this.flyTl) this.flyTl.kill();
     syncGsapClock();
@@ -589,6 +601,9 @@ export class GalaxyEngine {
   }
 
   get isFlying() { return !!this.flyAnim; }
+
+  /** A flight headed to a star (not a zone flight to the origin) — it may arc out of Node range. */
+  get isStarFlight() { return !!this.flyAnim && this.flyAnim.endTarget.length() > 1; }
 
   // ─── Node exit fade ────────────────────────────────────────────────────────
   beginNodeExit() { this.nodeFadeTarget = 0; }
@@ -831,31 +846,48 @@ export class GalaxyEngine {
     const prAttr = geo.getAttribute('aPRBoost') as THREE.BufferAttribute;
     const frontierIntensityAttr = this.frontierPoints.geometry.getAttribute('aIntensity') as THREE.BufferAttribute;
 
-    let maxPR = 1e-9, maxPPR = 1e-9, hasPPR = false;
+    let maxPR = 1e-9, hasPPR = false;
     for (const k of Object.keys(scores)) {
       const gs = scores[k];
       if (gs.pageRank > maxPR) maxPR = gs.pageRank;
-      if (gs.personalizedPageRank > 0) { hasPPR = true; if (gs.personalizedPageRank > maxPPR) maxPPR = gs.personalizedPageRank; }
+      if (gs.personalizedPageRank > 0) hasPPR = true;
     }
     const prCap = maxPR * 0.85;
-    const pprCap = maxPPR * 0.85;
     const communityArr = communityAttr.array as Float32Array;
     const prArr = prAttr.array as Float32Array;
     const frontierArr = frontierIntensityAttr.array as Float32Array;
     const tmp = new Float32Array(3);
     let matchCount = 0;
+    const pprRows: Array<{ i: number; ppr: number }> = [];
+    frontierArr.fill(0);
     for (let i = 0; i < this.nodes.length; i++) {
       const node = this.nodes[i];
       const gs = scores[node.id];
-      if (!gs) { frontierArr[i] = 0; continue; }
+      if (!gs) continue;
       matchCount++;
       communityHueToRGB(gs.community, tmp, 0);
       communityArr[i * 3] = tmp[0]; communityArr[i * 3 + 1] = tmp[1]; communityArr[i * 3 + 2] = tmp[2];
       prArr[i] = Math.min(1, gs.pageRank / prCap);
-      const pprNorm = hasPPR ? Math.min(1, gs.personalizedPageRank / pprCap) : 0.5;
-      const baseFrontier = 1 - pprNorm;
-      const stretchBoost = 0.5 + (node.luminance ?? 0.5) * 0.5;
-      frontierArr[i] = Math.pow(baseFrontier, 1.8) * stretchBoost;
+      if (!node.isLibrary) pprRows.push({ i, ppr: gs.personalizedPageRank });
+    }
+    // Frontier = the band just beyond your taste, not "everything you haven't touched".
+    // The prototype used `(1 - ppr)^1.8` over mock PPR that had a broad floor; real PPR is
+    // concentrated around the library, so that formula lit almost every star at full
+    // strength and the additive layer saturated into one giant magenta ball in Approach.
+    // Rank by PPR percentile, light a soft band (≈80th–97th percentile) and cap the count.
+    if (hasPPR && pprRows.length > 1) {
+      pprRows.sort((a, b) => a.ppr - b.ppr);
+      const last = pprRows.length - 1;
+      const band = (p: number) => smoothstep(FRONTIER_BAND[0], FRONTIER_BAND[1], p) * (1 - smoothstep(FRONTIER_BAND[2], FRONTIER_BAND[3], p));
+      const lit: Array<{ i: number; v: number }> = [];
+      for (let r = 0; r <= last; r++) {
+        const row = pprRows[r];
+        if (row.ppr <= 0) continue;
+        const v = band(r / last);
+        if (v > 0.01) lit.push({ i: row.i, v: v * (0.5 + (this.nodes[row.i].luminance ?? 0.5) * 0.5) });
+      }
+      lit.sort((a, b) => b.v - a.v);
+      for (let k = 0; k < Math.min(FRONTIER_MAX_LIT, lit.length); k++) frontierArr[lit[k].i] = lit[k].v;
     }
     communityAttr.needsUpdate = true;
     prAttr.needsUpdate = true;

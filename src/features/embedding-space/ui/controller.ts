@@ -165,16 +165,20 @@ export class EmbeddingSpaceController {
   }
 
   // ─── Loading ───────────────────────────────────────────────────────────────
-  private setStep(i: number, status: ViewState['loadingSteps'][number]['status'], detail?: string) {
+  private setStep(i: number, status: ViewState['loadingSteps'][number]['status'], detail?: string, fraction?: number) {
     this.set(s => ({
       loadingSteps: s.loadingSteps.map((st, idx) => idx === i
-        ? { label: detail ? `${st.base} — ${detail}` : st.base, base: st.base, status }
+        ? {
+          label: detail ? `${st.base} — ${detail}` : st.base, base: st.base, status, detail,
+          // Keep the last measured fraction while a step runs; done = 1
+          fraction: status === 'done' ? 1 : (fraction ?? (st.status === status ? st.fraction : undefined)),
+        }
         : st),
     }));
   }
 
   private async loadNodes(alive: () => boolean): Promise<{ nodes: GraphNode[]; allGenres: string[] } | null> {
-    const onStep: GalaxyStepReporter = (i, status, detail) => { if (alive()) this.setStep(i, status, detail); };
+    const onStep: GalaxyStepReporter = (i, status, detail, fraction) => { if (alive()) this.setStep(i, status, detail, fraction); };
     const markAll = (status: 'running' | 'done' | 'waiting', detail?: string) => GALAXY_STEP_LABELS.forEach((_, i) => onStep(i, status, detail));
     if (this.useMock) {
       const { generateMockGalaxy } = await import('@/services/mock-galaxy');
@@ -222,7 +226,7 @@ export class EmbeddingSpaceController {
       this.set({ nodeCount: this.nodes.length, allGenres: data.allGenres, activeGenres: new Set() });
       if (this.nodes.length === 0) { this.set({ emptyGalaxy: true, loading: false }); return; }
 
-      this.setStep(renderIdx, 'running');
+      this.setStep(renderIdx, 'running', undefined, 0.1);
       await new Promise(r => setTimeout(r, 0));
       const host = this.refs?.canvasHost;
       if (!alive() || !host) return;
@@ -241,10 +245,10 @@ export class EmbeddingSpaceController {
       engine.approachEl = this.refs!.approach;
       engine.railMarkerEl = this.refs!.railMarker;
       this.set({ rendererBackend: engine.backend });
-      this.setStep(renderIdx, 'running', 'loading galaxy model...');
+      this.setStep(renderIdx, 'running', undefined, 0.35);
       await engine.loadGalaxyModel();
       if (!alive()) return;
-      this.setStep(renderIdx, 'running');
+      this.setStep(renderIdx, 'running', undefined, 0.8);
       await new Promise<void>(resolve => {
         let done = false, warmup = 0;
         const finish = () => { if (!done) { done = true; resolve(); } };
@@ -332,18 +336,31 @@ export class EmbeddingSpaceController {
    * stepping through neighbours would otherwise queue reranks ahead of the next real selection.
    */
   private neighborsFor(node: GraphNode, isStale: () => boolean, exclude?: Set<string>, secondary = false) {
-    return fetchNeighbors(node, {
+    // Primary queries re-read the toggle so a Settings change applies without
+    // remounting the view (it used to be read once at mount).
+    const enabledP = secondary ? Promise.resolve(false) : this.refreshNeighborRerankEnabled();
+    return enabledP.then(enabled => fetchNeighbors(node, {
       nodes: this.nodes, nodeMap: this.nodeMap, useMock: this.useMock,
-      neighborRerankEnabled: this.neighborRerankEnabled && !secondary, exclude, isStale,
-    }, NEIGHBOR_K).then(r => {
-      if (r && !secondary && !isStale()) this.set({ neighborStatus: r.statusChip });
+      neighborRerankEnabled: enabled, exclude, isStale,
+    }, NEIGHBOR_K)).then(r => {
+      if (r && !secondary && !isStale()) this.set({ neighborStatus: r.statusChip, rerankHint: r.rerankHint });
       return r?.neighbors ?? null;
     }).catch((err) => {
       console.warn('[Embedding Space] neighbour query failed, using spatial fallback:', err);
       if (isStale()) return null;
-      if (!secondary) this.set({ neighborStatus: 'spatial_fallback' });
+      if (!secondary) this.set({ neighborStatus: 'spatial_fallback', rerankHint: null });
       return spatialNeighbors(node, this.nodes, NEIGHBOR_K, exclude);
     });
+  }
+
+  /** Current neighbour-rerank toggle; falls back to the last known value when Settings is unreachable. */
+  private async refreshNeighborRerankEnabled(): Promise<boolean> {
+    if (typeof window === 'undefined' || !window.settings?.getOllamaSettings) return this.neighborRerankEnabled;
+    try {
+      const s = await window.settings.getOllamaSettings();
+      this.neighborRerankEnabled = s?.neighborRerankEnabled !== false;
+    } catch { /* keep the last known value */ }
+    return this.neighborRerankEnabled;
   }
 
   /** Cancels a pending zone pull-back's fade-out (a new selection or flight supersedes it). */
@@ -386,7 +403,7 @@ export class EmbeddingSpaceController {
     eng.clearConnections();
     eng.setOrbitRings([]);
     eng.updateVisuals();
-    this.set({ selectedNode: node, neighbors: [], focusedNbIdx: -1, connectionCount: 0, detailOpen: false, detailNodeId: null });
+    this.set({ selectedNode: node, neighbors: [], neighborStatus: null, focusedNbIdx: -1, connectionCount: 0, detailOpen: false, detailNodeId: null, rerankHint: null });
     const isStale = () => tok !== this.selectTok || this.engine?.ui.selectedId !== node.id;
     const nbPromise = this.neighborsFor(node, isStale);
     void nbPromise.then(nbList => {
@@ -414,7 +431,7 @@ export class EmbeddingSpaceController {
     // arrival must not re-select the stop we're deselecting.
     this.selectTok++; this.focusTok++; this.pathHopToken++;
     this.set({
-      selectedNode: null, neighbors: [], neighborStatus: null, focusedNbIdx: -1, connectionCount: 0,
+      selectedNode: null, neighbors: [], neighborStatus: null, rerankHint: null, focusedNbIdx: -1, connectionCount: 0,
       showNeighbors: false, nbSearch: '', traversalDepth: 0, detailOpen: false, detailNodeId: null,
     });
     if (!eng) return;
@@ -702,9 +719,10 @@ export class EmbeddingSpaceController {
     this.set({ viewZone: zone });
     if (zone === 'node') {
       if (!this.state.selectedNode && !this.state.pathActive && !this.state.loading && !this.state.flythroughActive) this.autoSelectNearest();
-    } else if (prev === 'node' && !this.exitingNode) {
+    } else if (prev === 'node' && !this.exitingNode && !this.engine?.isStarFlight) {
       // Only leaving Node clears node state — a fly-in from the Cosmos (e.g. a search
-      // pick) crosses Approach on its way down and must keep its selection.
+      // pick) crosses Approach on its way down and must keep its selection. A long
+      // star-to-star hop arcs up through Approach mid-flight; that's not "leaving" either.
       if (this.state.pathActive) this.clearPath();
       if (this.state.selectedNode) this.clearSelection();
     }

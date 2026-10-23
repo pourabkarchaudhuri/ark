@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { libraryStore } from '@/services/library-store';
 import { gameService } from '@/services/game-service';
-import { embeddingService } from '@/services/embedding-service';
+import { embeddingService, type ForceReindexResult, type CatalogPassOutcome } from '@/services/embedding-service';
 import { buildRechunkJobDeps } from '@/services/rechunk-job-deps';
 import { annIndex } from '@/services/ann-index';
 import { catalogStore } from '@/services/catalog-store';
@@ -48,6 +48,8 @@ declare global {
         embeddingChunkingEnabled: boolean;
         chunkAnnMaxSimEnabled: boolean;
         embeddingMrl256Enabled: boolean;
+        /** 0 = Auto; otherwise clamped to 16–512 by main. */
+        embeddingBatchSize: number;
       }>;
       setOllamaSettings: (settings: {
         enabled?: boolean;
@@ -61,6 +63,7 @@ declare global {
         embeddingChunkingEnabled?: boolean;
         chunkAnnMaxSimEnabled?: boolean;
         embeddingMrl256Enabled?: boolean;
+        embeddingBatchSize?: number;
       }) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
       setAutoLaunch: (enabled: boolean) => Promise<void>;
@@ -78,6 +81,19 @@ declare global {
 interface SettingsPanelProps {
   isOpen: boolean;
   onClose: () => void;
+}
+
+function describeForceReindexResult(r: ForceReindexResult): string {
+  const total = (r.steam + r.epic).toLocaleString();
+  if (r.complete) return `Done — ${total} games re-read`;
+  const why = (o: CatalogPassOutcome) =>
+    o === 'tripped' ? 'paused because Ollama stopped responding; it resumes automatically'
+      : o === 'unavailable' ? 'skipped because Ollama isn\'t running'
+        : o === 'cancelled' ? 'cancelled'
+          : o === 'error' ? 'failed'
+            : 'not started';
+  const part = r.steamOutcome !== 'done' ? `Steam games ${why(r.steamOutcome)}` : `Epic games ${why(r.epicOutcome)}`;
+  return `Not finished (${total} games so far) — ${part}`;
 }
 
 export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
@@ -115,6 +131,24 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [forceReindexMessage, setForceReindexMessage] = useState<string | null>(null);
   const [forceReindexProgress, setForceReindexProgress] = useState<{ completed: number; total: number } | null>(null);
   const [forceReindexConfirmOpen, setForceReindexConfirmOpen] = useState(false);
+  // Shared, service-level job state: both Settings screens (and both Rebuild
+  // buttons) see the same in-flight ANN rebuild / forced re-index.
+  const [annJobBusy, setAnnJobBusy] = useState(() => embeddingService.isAnnRebuilding);
+  const [forceReindexBusy, setForceReindexBusy] = useState(() => embeddingService.isForceReindexRunning);
+  useEffect(() => {
+    const sync = () => {
+      setAnnJobBusy(embeddingService.isAnnRebuilding);
+      setForceReindexBusy(embeddingService.isForceReindexRunning);
+    };
+    const unsubEmb = embeddingService.subscribe(sync);
+    const unsubAnn = annIndex.subscribe(() => {
+      if (embeddingService.isAnnRebuilding) setAnnRebuildProgress({ ...annIndex.buildProgress });
+    });
+    sync();
+    return () => { unsubEmb(); unsubAnn(); };
+  }, []);
+  const annRebuildBusy = annRebuildStatus === 'building' || annJobBusy;
+  const forceReindexRunning = forceReindexStatus === 'running' || forceReindexBusy;
   const [useGeminiInstead, setUseGeminiInstead] = useState(false);
   const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const ollamaDebounceRef = useRef<NodeJS.Timeout | null>(null);
@@ -614,7 +648,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <AnimateIcon hover="pulse"><Bot className="h-3.5 w-3.5 text-white/40" /></AnimateIcon>
-                  <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">AI Assistant (Ollama)</h3>
+                  <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">Local AI (Ollama)</h3>
                   {!geminiBlocksOllama && (
                     <span className="text-[10px] text-white/40 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.06]">Default</span>
                   )}
@@ -627,12 +661,12 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   <div>
                     <p className="text-sm font-medium text-white/90">Local AI with Ollama</p>
                     <p className="text-xs text-white/30 mt-0.5">
-                      Runs on your computer for privacy. Make sure Ollama is running.
+                      Runs on your own computer, so nothing leaves your PC. Make sure Ollama is running.
                     </p>
                   </div>
                   
                   <div>
-                    <label className="text-xs text-white/40 mb-1 block">Ollama URL</label>
+                    <label className="text-xs text-white/40 mb-1 block">Ollama address</label>
                     <Input
                       type="text"
                       value={ollamaUrl}
@@ -644,7 +678,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   </div>
                   
                   <div>
-                    <label className="text-xs text-white/40 mb-1 block">Model Name</label>
+                    <label className="text-xs text-white/40 mb-1 block">Chat model</label>
                     <Input
                       type="text"
                       value={ollamaModel}
@@ -656,7 +690,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   </div>
 
                   <div>
-                    <label className="text-xs text-white/40 mb-1 block">Rerank model (Embedding Space)</label>
+                    <label className="text-xs text-white/40 mb-1 block">Reranker model</label>
                     <Input
                       type="text"
                       value={ollamaRerankModel}
@@ -666,15 +700,15 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       disabled={geminiBlocksOllama}
                     />
                     <p className="text-[11px] text-white/25 mt-1">
-                      Ollama <code className="text-white/40">/api/rerank</code> — run{' '}
+                      A small helper AI that puts the best matches first. Install it with{' '}
                       <code className="text-white/40">ollama pull {DEFAULT_OLLAMA_RERANK_MODEL}</code>
                     </p>
                   </div>
 
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-white/50">Embedding Space neighbor rerank</p>
-                      <p className="text-[11px] text-white/25 mt-0.5">Refine neighbor lists with the cross-encoder model.</p>
+                      <p className="text-xs text-white/50">Smarter similar-game ordering</p>
+                      <p className="text-[11px] text-white/25 mt-0.5">Uses the reranker to put the closest matches first in Similar Games and the galaxy map.</p>
                     </div>
                     <button
                       type="button"
@@ -697,8 +731,8 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
 
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-white/50">Oracle recommendation rerank</p>
-                      <p className="text-[11px] text-white/25 mt-0.5">Reorder shelf games after the worker finishes.</p>
+                      <p className="text-xs text-white/50">Smarter recommendation ordering</p>
+                      <p className="text-[11px] text-white/25 mt-0.5">Lets the AI re-sort each Oracle shelf so the best picks for you come first.</p>
                     </div>
                     <button
                       type="button"
@@ -722,7 +756,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   {oracleRerankEnabled && (
                     <div>
                       <label className="text-xs text-white/40 mb-1 block">
-                        Oracle rerank vs worker order ({Math.round(oracleRerankBlend * 100)}% rerank)
+                        How much the AI re-sorts recommendations ({Math.round(oracleRerankBlend * 100)}%)
                       </label>
                       <input
                         type="range"
@@ -734,16 +768,16 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                         className="w-full accent-fuchsia-500 disabled:opacity-40"
                       />
                       <p className="text-[11px] text-white/25 mt-1">
-                        0% keeps the worker order within each shelf; 100% uses the reranker fully.
+                        0% keeps the original order; 100% lets the AI fully decide.
                       </p>
                     </div>
                   )}
 
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-white/50">Facet chunk embeddings</p>
+                      <p className="text-xs text-white/50">Detailed game understanding</p>
                       <p className="text-[11px] text-white/25 mt-0.5">
-                        Re-embed only changed facets (int8 storage). Off = whole-text float writes.
+                        Reads each part of a game separately and only re-reads parts that changed. Off = one overall summary per game.
                       </p>
                     </div>
                     <button
@@ -767,9 +801,9 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
 
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-white/50">Chunk ANN max-sim</p>
+                      <p className="text-xs text-white/50">Match on any part of a game&apos;s description</p>
                       <p className="text-[11px] text-white/25 mt-0.5">
-                        ES + Similar Games max-sim over chunks. Off = pooled-only. Oracle/graph stay pooled.
+                        Similar Games and the galaxy map count games as alike when any part lines up. Recommendations aren&apos;t affected.
                       </p>
                     </div>
                     <button
@@ -793,9 +827,9 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
 
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-white/50">MRL-256 ANN vectors</p>
+                      <p className="text-xs text-white/50">Compact mode (faster, slightly less precise)</p>
                       <p className="text-[11px] text-white/25 mt-0.5">
-                        Truncate to 256-d for ANN. Toggling clears the index — Rebuild ANN after.
+                        Smaller game fingerprints for faster searches. Changing this clears the similarity index, so rebuild it afterwards.
                       </p>
                     </div>
                     <button
@@ -820,9 +854,9 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                   {betaFeatures && (
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <p className="text-xs text-white/50">Weight-sweep harness</p>
+                        <p className="text-xs text-white/50">Matching tune-up test (advanced)</p>
                         <p className="text-[11px] text-white/25 mt-0.5">
-                          Synthetic MRR over CHUNK_WEIGHTS. Does not auto-ship new weights.
+                          Tries alternative matching weights on a small test set. Doesn&apos;t change anything on its own.
                         </p>
                         {weightSweepMsg && (
                           <p className="text-[11px] mt-0.5 text-white/40">{weightSweepMsg}</p>
@@ -876,13 +910,13 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
 
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-white/50">Rebuild ANN index</p>
+                      <p className="text-xs text-white/50">Rebuild similarity index</p>
                       <p className="text-[11px] text-white/25 mt-0.5">
-                        Clear and rebuild neighbors from cached embeddings (no Ollama calls).
+                        Re-creates the &quot;similar games&quot; lookup from what Ark already knows. Quick, and doesn&apos;t use the AI.
                       </p>
-                      {annRebuildStatus === 'building' && annRebuildProgress && (
+                      {annRebuildBusy && annRebuildProgress && (
                         <p className="text-[11px] mt-0.5 text-white/40">
-                          {annRebuildProgress.done} / {annRebuildProgress.total} vectors
+                          {annRebuildProgress.done} / {annRebuildProgress.total} games
                         </p>
                       )}
                       {annRebuildMessage && (
@@ -898,7 +932,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       type="button"
                       variant="outline"
                       size="sm"
-                      disabled={annRebuildStatus === 'building' || geminiBlocksOllama}
+                      disabled={annRebuildBusy || geminiBlocksOllama}
                       onClick={async () => {
                         setAnnRebuildStatus('building');
                         setAnnRebuildMessage(null);
@@ -909,7 +943,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                         try {
                           const count = await embeddingService.rebuildAnnFromCache();
                           setAnnRebuildStatus('done');
-                          setAnnRebuildMessage(`Rebuilt — ${count} vectors`);
+                          setAnnRebuildMessage(`Rebuilt — ${count.toLocaleString()} games indexed`);
                           embeddingService.clearRechunkSuggestRebuildAnn();
                           setRechunkSuggestAnn(false);
                           console.log(`[Settings] ANN rebuild complete: ${count} vectors`);
@@ -925,20 +959,20 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       }}
                       className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
                     >
-                      {annRebuildStatus === 'building' ? (
+                      {annRebuildBusy ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <RefreshCw className="h-3.5 w-3.5" />
                       )}
-                      <span className="ml-1.5">{annRebuildStatus === 'building' ? 'Rebuilding…' : 'Rebuild'}</span>
+                      <span className="ml-1.5">{annRebuildBusy ? 'Rebuilding…' : 'Rebuild'}</span>
                     </Button>
                   </div>
 
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-white/50">Re-chunk catalog (idle)</p>
+                      <p className="text-xs text-white/50">Refresh detailed game understanding</p>
                       <p className="text-[11px] text-white/25 mt-0.5">
-                        Library first, then catalog — writes facet chunks with progress/cancel. Polite while a session is active.
+                        Updates your library first, then the rest of the catalog. Runs gently while you play and can be cancelled.
                       </p>
                       {rechunkBusy && rechunkProgress.total > 0 && (
                         <p className="text-[11px] mt-0.5 text-white/40">
@@ -953,7 +987,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                             : 'text-emerald-400/60',
                         )}>
                           {rechunkMessage}
-                          {rechunkSuggestAnn ? ' — Rebuild ANN recommended.' : ''}
+                          {rechunkSuggestAnn ? ' — Rebuilding the similarity index is recommended.' : ''}
                         </p>
                       )}
                     </div>
@@ -973,7 +1007,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                           type="button"
                           variant="outline"
                           size="sm"
-                          disabled={geminiBlocksOllama || !embeddingChunkingEnabled || annRebuildStatus === 'building'}
+                          disabled={geminiBlocksOllama || !embeddingChunkingEnabled || annRebuildBusy || forceReindexRunning}
                           onClick={async () => {
                             setRechunkBusy(true);
                             setRechunkMessage(null);
@@ -999,7 +1033,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                           className="border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
                         >
                           <Layers className="h-3.5 w-3.5" />
-                          <span className="ml-1.5">Re-chunk</span>
+                          <span className="ml-1.5">Refresh</span>
                         </Button>
                       )}
                     </div>
@@ -1007,15 +1041,14 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
 
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-white/50">Force re-index catalog embeddings</p>
+                      <p className="text-xs text-white/50">Rebuild game understanding from scratch</p>
                       <p className="text-[11px] text-white/25 mt-0.5">
-                        Regenerates every Steam and Epic catalog embedding from scratch — use this if a
-                        progress bar gets stuck or you suspect corrupted cached vectors. Library, playtime,
-                        and journey data are not touched.
+                        Has the AI re-read every Steam and Epic game. Use it if a progress bar gets stuck or
+                        matches look wrong. Takes a while. Your library, playtime, and journey are not touched.
                       </p>
-                      {forceReindexStatus === 'running' && forceReindexProgress && (
+                      {forceReindexRunning && forceReindexProgress && (
                         <p className="text-[11px] mt-0.5 text-white/40">
-                          {forceReindexProgress.completed.toLocaleString()} / {forceReindexProgress.total.toLocaleString()} vectors
+                          {forceReindexProgress.completed.toLocaleString()} / {forceReindexProgress.total.toLocaleString()} games
                         </p>
                       )}
                       {forceReindexMessage && (
@@ -1031,24 +1064,24 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       type="button"
                       variant="outline"
                       size="sm"
-                      disabled={forceReindexStatus === 'running' || geminiBlocksOllama}
+                      disabled={forceReindexRunning || geminiBlocksOllama}
                       onClick={() => setForceReindexConfirmOpen(true)}
                       className="shrink-0 border-white/[0.08] bg-white/[0.03] text-white/70 hover:bg-white/[0.06]"
                     >
-                      {forceReindexStatus === 'running' ? (
+                      {forceReindexRunning ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <RotateCcw className="h-3.5 w-3.5" />
                       )}
-                      <span className="ml-1.5">{forceReindexStatus === 'running' ? 'Re-indexing…' : 'Force Re-index'}</span>
+                      <span className="ml-1.5">{forceReindexRunning ? 'Rebuilding…' : 'Rebuild all'}</span>
                     </Button>
                   </div>
                   <ConfirmDialog
                     open={forceReindexConfirmOpen}
                     onOpenChange={setForceReindexConfirmOpen}
-                    title="Force Re-index Catalog Embeddings"
-                    description="This will re-scan and regenerate every Steam and Epic catalog embedding from scratch. It can take a while and will use Ollama to re-embed the full catalog. Your library, playtime, and journey data are not affected. Continue?"
-                    confirmText="Re-index"
+                    title="Rebuild game understanding from scratch?"
+                    description="The AI will re-read every Steam and Epic game. This can take a while and keeps Ollama busy until it's done. Your library, playtime, and journey are not affected. Continue?"
+                    confirmText="Rebuild"
                     cancelText="Cancel"
                     variant="warning"
                     onConfirm={async () => {
@@ -1056,28 +1089,30 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                       setForceReindexMessage(null);
                       setForceReindexProgress({ completed: 0, total: 0 });
 
-                      embeddingService.cancelCatalogEmbeddings();
-
                       const unsub = embeddingService.subscribe(() => {
                         setForceReindexProgress({ ...embeddingService.catalogProgress });
                       });
 
                       try {
-                        const steamSyncTs = await catalogStore.getLastSyncTimestamp();
-                        const steamCount = await embeddingService.generateCatalogEmbeddings(
-                          (onBatch) => catalogStore.getAllEntries(onBatch),
-                          { storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs, force: true },
+                        // Single service-level operation: cancels background passes + the
+                        // re-chunk job, waits out any ANN backfill/rebuild, then runs both
+                        // forced passes. Reports "done" only when BOTH finished.
+                        const result = await embeddingService.forceReindexCatalog({
+                          steam: {
+                            iterate: (onBatch) => catalogStore.getAllEntries(onBatch),
+                            lastSyncTimestamp: () => catalogStore.getLastSyncTimestamp(),
+                          },
+                          epic: {
+                            iterate: (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+                            lastSyncTimestamp: () => epicCatalogStore.getLastSyncTimestamp(),
+                          },
+                        });
+                        setForceReindexStatus(result.complete ? 'done' : 'error');
+                        setForceReindexMessage(describeForceReindexResult(result));
+                        console.log(
+                          `[Settings] Force re-index ${result.complete ? 'complete' : 'incomplete'}: ` +
+                          `${result.steam} Steam (${result.steamOutcome}) + ${result.epic} Epic (${result.epicOutcome})`,
                         );
-
-                        const epicSyncTs = await epicCatalogStore.getLastSyncTimestamp();
-                        const epicCount = await embeddingService.generateEpicCatalogEmbeddings(
-                          (onBatch) => epicCatalogStore.getAllEntries(onBatch),
-                          { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs, force: true },
-                        );
-
-                        setForceReindexStatus('done');
-                        setForceReindexMessage(`Re-indexed — ${steamCount + epicCount} vectors regenerated`);
-                        console.log(`[Settings] Force re-index complete: ${steamCount} Steam + ${epicCount} Epic`);
                       } catch (err) {
                         setForceReindexStatus('error');
                         const detail = err instanceof Error ? err.message : String(err);

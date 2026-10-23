@@ -51,6 +51,19 @@ function resolveJourneyTitleForRecord(
 }
 import { statusHistoryStore } from './status-history-store';
 import { sessionStore } from './session-store';
+import {
+  SerialWriteQueue,
+  readWithRetry,
+  reportStorageReadOnly,
+} from './storage-health';
+
+/**
+ * Library entry plus the app-managed `statusChangedAt` stamp (ISO). Set by
+ * `updateEntry` / cross-store propagation whenever `status` actually changes,
+ * so time-based sweeps (auto On-Hold) can tell "just set to Playing" apart
+ * from "stale since addedAt". Optional — older rows don't carry it.
+ */
+export type LibraryEntryWithStatusStamp = LibraryGameEntry & { statusChangedAt?: string };
 
 const STORAGE_KEY = 'ark-library-data';
 const STORAGE_VERSION = 5; // v5: gameId migrated from number to string
@@ -109,10 +122,30 @@ export class LibraryStore {
   private readonly _useLevelDB: boolean;
 
   /**
-   * Set of gameIds currently persisted in LevelDB. Diff against `entries`
-   * on each debounced batch to emit `del` ops for removed entries.
+   * gameId -> the exact entry object last written to LevelDB. Each save diffs
+   * `entries` against it by identity (status/meta mutations replace the entry
+   * object; in-place hours ticks are tracked in `_dirtyIds`), so only changed
+   * rows are written and removed rows are deleted.
+   * A 15s session tick now writes ONE row instead of the whole library.
    */
-  private _knownKeys: Set<string> = new Set();
+  private _persisted: Map<string, LibraryGameEntry> = new Map();
+
+  /**
+   * gameIds mutated IN PLACE since the last save (the 15s hours tick keeps
+   * mutating the existing object so components holding a reference still
+   * read live hours). Written on the next save alongside identity changes.
+   */
+  private _dirtyIds: Set<string> = new Set();
+
+  /** Serializes every LevelDB write (saves + clearNamespace) — audit items 5/10. */
+  private readonly _writeQueue = new SerialWriteQueue('LibraryStore');
+
+  /**
+   * True when the LevelDB read failed even after retries. No writes are issued
+   * (in-memory edits still work for this session) so a partial/empty view can
+   * never overwrite the real data. Surfaced via storage-health for the banner.
+   */
+  private _readOnly = false;
 
   /**
    * Resolves when the async LevelDB hydration finishes. Public reads are safe
@@ -142,35 +175,62 @@ export class LibraryStore {
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
+      if (this._useLevelDB && !this._readOnly) {
+        // Page is unloading — we can't wait behind an in-flight batch, so issue
+        // the diff now (puts are idempotent; IPC preserves send order).
+        void this.saveNowLevelDB();
+        return;
+      }
       this.saveNow();
     }
   }
 
   private saveNow(): void {
+    if (this._readOnly) return;
     if (this._useLevelDB) {
-      void this.saveNowLevelDB();
+      void this._writeQueue.run(() => this.saveNowLevelDB());
       return;
     }
     this.saveToStorage();
   }
 
+  /** True when LevelDB could not be read this session — nothing is persisted. */
+  isReadOnly(): boolean {
+    return this._readOnly;
+  }
+
+  /** Resolves once every queued LevelDB write has settled (tests / shutdown). */
+  whenPersisted(): Promise<void> {
+    return this._writeQueue.idle();
+  }
+
   private async saveNowLevelDB(): Promise<void> {
+    if (this._readOnly) return;
+    // Snapshot + reset: in-place mutations landing while this batch is in
+    // flight re-mark their id for the next save.
+    const dirty = this._dirtyIds;
+    this._dirtyIds = new Set();
     try {
-      const currentIds = new Set<string>();
       const ops: Array<
         | { type: 'put'; namespace: string; key: string; value: unknown }
         | { type: 'del'; namespace: string; key: string }
       > = [];
+      const written: Array<[string, LibraryGameEntry]> = [];
+      const deleted: string[] = [];
 
       for (const [id, entry] of this.entries) {
         if (!id) continue;
-        currentIds.add(id);
-        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: id, value: entry });
+        if (this._persisted.get(id) === entry && !dirty.has(id)) continue; // unchanged
+        // Shallow copy: the payload must reflect THIS moment even if the
+        // entry is mutated in place while the IPC is in flight.
+        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: id, value: { ...entry } });
+        written.push([id, entry]);
       }
 
-      for (const oldKey of this._knownKeys) {
-        if (!currentIds.has(oldKey)) {
+      for (const oldKey of this._persisted.keys()) {
+        if (!this.entries.has(oldKey)) {
           ops.push({ type: 'del', namespace: LEVEL_NAMESPACE, key: oldKey });
+          deleted.push(oldKey);
         }
       }
 
@@ -179,10 +239,15 @@ export class LibraryStore {
       const res = await window.store!.batch(ops);
       if (res.error) {
         console.error('[LibraryStore] batch save failed:', res.error);
+        for (const id of dirty) this._dirtyIds.add(id); // retry next save
         return;
       }
-      this._knownKeys = currentIds;
+      // Record exactly what this batch wrote (not the live map — it may have
+      // changed while the batch was in flight; the next save picks that up).
+      for (const [id, entry] of written) this._persisted.set(id, entry);
+      for (const id of deleted) this._persisted.delete(id);
     } catch (err) {
+      for (const id of dirty) this._dirtyIds.add(id);
       console.error('[LibraryStore] Failed to save (LevelDB):', err);
     }
   }
@@ -213,16 +278,24 @@ export class LibraryStore {
    * Applies gameId migration + Dropped→On Hold + Date coercion.
    * Returns count actually inserted.
    */
-  private ingestEntries(entries: LibraryGameEntry[]): { count: number; migratedStatus: boolean } {
+  private ingestEntries(entries: LibraryGameEntry[]): {
+    count: number;
+    migratedStatus: boolean;
+    /** ids ingested without a shape rewrite (safe to treat as already persisted). */
+    cleanIds: string[];
+  } {
     let migratedStatus = false;
     let count = 0;
+    const cleanIds: string[] = [];
     entries.forEach((entry) => {
       const id = migrateGameId(entry as any);
       if (!id) return;
       let status = entry.status;
+      let rewritten = id !== (entry as any).gameId;
       if ((status as string) === 'Dropped') {
         status = 'On Hold';
         migratedStatus = true;
+        rewritten = true;
       }
       const addedAt = LibraryStore.toValidDate(entry.addedAt, new Date());
       const updatedAt = LibraryStore.toValidDate(entry.updatedAt, addedAt);
@@ -235,24 +308,33 @@ export class LibraryStore {
         addedAt,
         updatedAt,
       });
+      if (!rewritten) cleanIds.push(id);
       count++;
     });
-    return { count, migratedStatus };
+    return { count, migratedStatus, cleanIds };
+  }
+
+  private markPersisted(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const entry = this.entries.get(id);
+      if (entry) this._persisted.set(id, entry);
+    }
   }
 
   private async initializeFromLevelDB(): Promise<void> {
     try {
-      const res = await window.store!.getAll<LibraryGameEntry>(LEVEL_NAMESPACE);
-      if (res.error) {
-        console.error('[LibraryStore] getAll IPC error:', res.error);
-        this.initializeFromLocalStorage();
+      const outcome = await readWithRetry('LibraryStore', () =>
+        window.store!.getAll<LibraryGameEntry>(LEVEL_NAMESPACE),
+      );
+      if (!outcome.ok) {
+        this.enterReadOnly(outcome.error);
         return;
       }
-      const rows = res.rows ?? [];
+      const rows = outcome.value.rows ?? [];
       if (rows.length > 0) {
         const values = rows.map((r) => r.value);
-        const { migratedStatus } = this.ingestEntries(values);
-        this._knownKeys = new Set(this.entries.keys());
+        const { migratedStatus, cleanIds } = this.ingestEntries(values);
+        this.markPersisted(cleanIds);
         if (migratedStatus && this.entries.size > 0) {
           // Persist Dropped→On Hold rewrite
           this.saveNow();
@@ -265,9 +347,32 @@ export class LibraryStore {
         this.notifyListeners();
       }
     } catch (err) {
-      console.error('[LibraryStore] Failed to init from LevelDB, falling back:', err);
-      this.initializeFromLocalStorage();
+      this.enterReadOnly(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * LevelDB could not be read (even after retries). NEVER fall back to the
+   * legacy localStorage snapshot once the migration marker is set — it is
+   * frozen at v1.0.61 and writing it back would roll the library back. Go
+   * read-only instead (no writes this session). Pre-migration users (marker
+   * absent) still see their legacy data, read-only as well.
+   */
+  private enterReadOnly(error: string): void {
+    this._readOnly = true;
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    let migrated = true;
+    try { migrated = localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes'; } catch { /* assume migrated */ }
+    if (!migrated) {
+      const stored = this.loadFromStorage();
+      if (stored && stored.entries.length > 0) this.ingestEntries(stored.entries);
+    }
+    reportStorageReadOnly('library', error);
+    this.invalidateSortedCache();
+    this.notifyListeners();
   }
 
   private async tryMigrateFromLocalStorage(): Promise<boolean> {
@@ -302,7 +407,7 @@ export class LibraryStore {
         return false;
       }
 
-      this._knownKeys = new Set(this.entries.keys());
+      this.markPersisted(this.entries.keys());
       localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
       console.log(
         `[LibraryStore] Migrated ${this.entries.size} entries from localStorage -> LevelDB`,
@@ -483,11 +588,16 @@ export class LibraryStore {
     const shouldPropagate =
       statusChanged && PROPAGATABLE_STATUSES.has(updatedStatus);
 
-    const updated: LibraryGameEntry = {
+    const updated: LibraryEntryWithStatusStamp = {
       ...existing,
       ...input,
       updatedAt: new Date(), // Always app-managed (last save time)
     };
+    if (statusChanged) {
+      // App-managed: lets the auto On-Hold sweep measure staleness from the
+      // moment the user (or a sync) moved the game into its current status.
+      updated.statusChangedAt = new Date().toISOString();
+    }
     if (input.addedAt !== undefined) {
       updated.addedAt = LibraryStore.toValidDate(input.addedAt, existing.addedAt);
     }
@@ -643,11 +753,12 @@ export class LibraryStore {
       if (!targets.has(sibling.status)) continue;
       if (sibling.status === newStatus) continue;
 
-      const mutated: LibraryGameEntry = {
+      const mutated: LibraryEntryWithStatusStamp = {
         ...sibling,
         status: newStatus,
         autoTransitionedAt: nowIso,
         crossStoreSyncedFrom: sourceEntry.gameId,
+        statusChangedAt: nowIso,
         updatedAt: new Date(),
       };
       this.entries.set(sibling.gameId, mutated);
@@ -866,9 +977,12 @@ export class LibraryStore {
     }
     const baseline = existing.hoursBaseline ?? 0;
     const effectiveHours = baseline + safeSessionHours;
+    // Mutated in place on purpose (holders of the entry see live hours); the
+    // dirty mark makes the next save write just this row.
     existing.hoursPlayed = effectiveHours;
     if (lastPlayedAt !== undefined) existing.lastPlayedAt = lastPlayedAt;
     existing.updatedAt = new Date();
+    this._dirtyIds.add(gameId);
     this.invalidateSortedCache();
     this.scheduleSave();
     // Fire the hours-only channel — 15s session ticks must NOT invalidate
@@ -894,19 +1008,23 @@ export class LibraryStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
-    if (this._useLevelDB) {
-      void (async () => {
-        try {
-          const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
-          if (res.error) console.error('[LibraryStore] clearNamespace failed:', res.error);
-        } catch (err) {
-          console.error('[LibraryStore] Failed to clear LevelDB namespace:', err);
+    if (this._useLevelDB && !this._readOnly) {
+      // Queued: any save issued after this (e.g. importData) runs only once
+      // the namespace wipe has completed — the two can no longer interleave.
+      void this._writeQueue.run(async () => {
+        const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+        if (res.error) {
+          console.error('[LibraryStore] clearNamespace failed:', res.error);
+          return; // keep _persisted so the next save emits explicit deletes
         }
-      })();
+        this._persisted = new Map();
+      });
     }
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(MIGRATION_MARKER_KEY);
-    this._knownKeys = new Set();
+    this._dirtyIds.clear();
+    if (!this._readOnly) {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(MIGRATION_MARKER_KEY);
+    }
     this.notifyListeners();
   }
 

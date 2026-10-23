@@ -4,7 +4,23 @@
  */
 
 import type { GraphNode, NeighborInfo } from '@/services/galaxy-cache';
-import { ORACLE_RERANK_POOL, rerankStatus, toRerankTier, type RerankStatus } from '@/services/oracle-rerank';
+import {
+  buildRerankRunRecord,
+  cancelRerankRequest,
+  computeRerankMovement,
+  getRerankBridge,
+  lookupRerankTier,
+  newRerankRequestId,
+  outcomeForRerankError,
+  recordRerankRun,
+  rerankHasNoSignal,
+  rerankPlan,
+  rerankStatus,
+  toRerankTier,
+  type RerankPlan,
+  type RerankRunReport,
+  type RerankStatus,
+} from '@/services/oracle-rerank';
 
 /** Default Ollama library name — keep in sync with `electron/settings-store.ts` `DEFAULT_OLLAMA_RERANK_MODEL`. */
 export const DEFAULT_OLLAMA_RERANK_MODEL = 'dengcao/bge-reranker-v2-m3';
@@ -18,6 +34,15 @@ export const NEIGHBOR_HEURISTIC_POOL = 72;
 // Interactive cost drops to zero on cache hit, and the LRU-style prune below
 // still keeps memory bounded.
 const NEIGHBOR_RERANK_CACHE_TTL_MS = 600_000;
+/**
+ * Failures (error / empty / no signal / timeout) are cached only briefly: long
+ * enough that re-clicking the same star does not re-fire a failing call, short
+ * enough that a reranker that just came up (Ollama started, Qwen3 pulled) is
+ * used on the next visit instead of 10 minutes later.
+ */
+export const NEIGHBOR_RERANK_FAILURE_TTL_MS = 30_000;
+/** The tier lookup is normally a cached answer; never let a slow probe eat the neighbour budget. */
+const NEIGHBOR_TIER_LOOKUP_TIMEOUT_MS = 1_500;
 const neighborRerankCache = new Map<string, { neighbors: NeighborInfo[]; status: NeighborRerankStatus; expires: number }>();
 
 function pruneNeighborRerankCache(now: number = Date.now()) {
@@ -31,12 +56,18 @@ function neighborCacheKey(anchorId: string, neighborIds: string[], finalK: numbe
   return `${anchorId}|${finalK}|${sig}`;
 }
 
+/** Test hook. */
+export function __clearNeighborRerankCacheForTests(): void {
+  neighborRerankCache.clear();
+}
+
 export function graphNodeToNeighborQueryText(n: GraphNode): string {
   const g = n.genres?.length ? `Genres: ${n.genres.join(', ')}` : '';
   const t = (n.themes?.length ?? 0) ? `Themes: ${(n.themes ?? []).join(', ')}` : '';
   const dev = n.developer ? `Developer: ${n.developer}` : '';
-  const pub = n.publisher ? `Publisher: ${n.publisher}` : '';
-  return [n.title, g, t, dev, pub].filter(Boolean).join(' | ');
+  // Publisher is left out on purpose (as in the embedding text): shared publishers made
+  // unrelated games look like matches to the reranker.
+  return [n.title, g, t, dev].filter(Boolean).join(' | ');
 }
 
 /**
@@ -49,11 +80,18 @@ export function graphNodeToNeighborQueryText(n: GraphNode): string {
  */
 export type NeighborRerankStatus = RerankStatus;
 
+/**
+ * Rerank the heuristic neighbour list, bounded by `NEIGHBOR_RERANK_BUDGET_MS`
+ * (the user is waiting on the links). When the reranker does not answer in
+ * time the heuristic order is returned with a 'skipped_timeout' status and the
+ * main-process pass is cancelled. On the Qwen3 tiers only the top of the
+ * heuristic order is scored (one generate call per document).
+ */
 export async function applyOllamaNeighborRerank(
   anchor: GraphNode,
   neighbors: NeighborInfo[],
   finalK: number,
-  opts?: { neighborRerankEnabled?: boolean },
+  opts?: { neighborRerankEnabled?: boolean; plan?: RerankPlan },
 ): Promise<{ neighbors: NeighborInfo[]; status: RerankStatus }> {
   const enabled = opts?.neighborRerankEnabled !== false;
 
@@ -66,12 +104,14 @@ export async function applyOllamaNeighborRerank(
     return { neighbors: baseSlice, status: rerankStatus('skipped_disabled') };
   }
 
-  // The rerank IPC scores at most 100 documents (RERANK_MAX_DOCS in
-  // electron/ipc/ollama-handlers.ts); building more only wastes the payload.
-  const trimmed = neighbors.slice(0, Math.min(neighbors.length, ORACLE_RERANK_POOL));
-  if (typeof window === 'undefined' || !window.ollama?.rerank) {
+  const bridge = getRerankBridge();
+  if (!bridge) {
     return { neighbors: baseSlice, status: rerankStatus('skipped_no_client') };
   }
+
+  const plan = opts?.plan ?? rerankPlan('neighbors', await lookupRerankTier(bridge, NEIGHBOR_TIER_LOOKUP_TIMEOUT_MS));
+  // Never fewer documents than links shown; never more than the plan allows.
+  const trimmed = neighbors.slice(0, Math.min(neighbors.length, Math.max(finalK, plan.maxDocs)));
 
   const nbIds = trimmed.map((n) => n.id);
   const cacheKey = neighborCacheKey(anchor.id, nbIds, finalK);
@@ -82,21 +122,59 @@ export async function applyOllamaNeighborRerank(
     return { neighbors: hit.neighbors, status: hit.status };
   }
 
+  const remember = (out: NeighborInfo[], status: RerankStatus) => {
+    const ttl = status.outcome === 'applied' ? NEIGHBOR_RERANK_CACHE_TTL_MS : NEIGHBOR_RERANK_FAILURE_TTL_MS;
+    pruneNeighborRerankCache(now);
+    neighborRerankCache.set(cacheKey, { neighbors: out, status, expires: Date.now() + ttl });
+  };
+
   const query = graphNodeToNeighborQueryText(anchor);
   const documents = trimmed.map((nb) => {
     if (!nb.node) return `Game ${nb.id}`;
     return graphNodeToNeighborQueryText(nb.node);
   });
+  const requestId = newRerankRequestId('neighbors');
+  const startedAt = Date.now();
+  const record = (
+    status: RerankStatus,
+    extra?: { report?: RerankRunReport; results?: ReadonlyArray<{ relevance_score: number }>; movement?: ReturnType<typeof computeRerankMovement> },
+  ) => {
+    recordRerankRun(buildRerankRunRecord({
+      source: 'neighbors', outcome: status.outcome, tier: status.tier, startedAt, requested: trimmed.length,
+      report: extra?.report, results: extra?.results, movement: extra?.movement,
+    }), bridge);
+  };
+
+  type Reply = Awaited<ReturnType<typeof bridge.rerank>>;
+  const TIMED_OUT = Symbol('timeout');
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const res = await window.ollama.rerank({ query, documents, topN: finalK });
+    const res = await Promise.race<Reply | typeof TIMED_OUT>([
+      bridge.rerank({ query, documents, topN: finalK, requestId, budgetMs: plan.mainBudgetMs }),
+      new Promise<typeof TIMED_OUT>((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), plan.budgetMs); }),
+    ]);
+    if (res === TIMED_OUT) {
+      cancelRerankRequest(bridge, requestId);
+      const status = rerankStatus('skipped_timeout');
+      record(status);
+      remember(baseSlice, status);
+      return { neighbors: baseSlice, status };
+    }
     if (!res || 'error' in res || !('results' in res) || !res.results?.length) {
-      const status: RerankStatus = rerankStatus(
-        res && 'error' in res && res.error.code !== 'empty_results' ? 'error' : 'empty_results',
-      );
-      const out = { neighbors: neighbors.slice(0, finalK), status };
-      pruneNeighborRerankCache(now);
-      neighborRerankCache.set(cacheKey, { neighbors: out.neighbors, status, expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
-      return out;
+      const status: RerankStatus = res && 'error' in res
+        ? rerankStatus(outcomeForRerankError(res.error.code), res.report?.tier ?? null)
+        : rerankStatus('empty_results');
+      record(status, { report: res && 'error' in res ? res.report : undefined });
+      remember(baseSlice, status);
+      return { neighbors: baseSlice, status };
+    }
+
+    const tier = toRerankTier(res.via) ?? res.report?.tier ?? null;
+    if (rerankHasNoSignal(res.report, res.results)) {
+      const status = rerankStatus('no_signal', tier);
+      record(status, { report: res.report, results: res.results });
+      remember(baseSlice, status);
+      return { neighbors: baseSlice, status };
     }
 
     const byIdx = new Map<number, NeighborInfo>();
@@ -125,16 +203,22 @@ export async function applyOllamaNeighborRerank(
         }
       }
     }
+    const movement = computeRerankMovement([baseSlice.map((n) => n.id)], [out.map((n) => n.id)]);
     // Applied either way; the tier says whether it was a cross-encoder or cosine.
-    const status: RerankStatus = rerankStatus('applied', toRerankTier(res.via));
-    pruneNeighborRerankCache(now);
-    neighborRerankCache.set(cacheKey, { neighbors: out, status, expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
+    const status: RerankStatus = {
+      ...rerankStatus('applied', tier),
+      moved: movement.moved,
+      meanAbsDelta: movement.meanAbsDelta,
+    };
+    record(status, { report: res.report, results: res.results, movement });
+    remember(out, status);
     return { neighbors: out, status };
   } catch {
     const status = rerankStatus('error');
-    const out = { neighbors: neighbors.slice(0, finalK), status };
-    pruneNeighborRerankCache(now);
-    neighborRerankCache.set(cacheKey, { neighbors: out.neighbors, status, expires: now + NEIGHBOR_RERANK_CACHE_TTL_MS });
-    return out;
+    record(status);
+    remember(baseSlice, status);
+    return { neighbors: baseSlice, status };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }

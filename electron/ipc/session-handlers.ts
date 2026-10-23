@@ -7,7 +7,7 @@ const electron = require('electron');
 const { ipcMain } = electron;
 import path from 'path';
 import { logger } from '../safe-logger.js';
-import { setTrackedGames, getActiveSessions, drainRecoveredSessions } from '../session-tracker.js';
+import { setTrackedGames, getActiveSessions, getUnackedSessions, ackSessions } from '../session-tracker.js';
 
 export function register(): void {
   /**
@@ -38,10 +38,21 @@ export function register(): void {
   });
 
   /**
-   * Drain sessions recovered from a previous run that crashed before finalizing.
-   * The renderer records these so crashed-session playtime is not lost.
+   * Every completed session not yet acknowledged by the renderer: sessions
+   * recovered from a crashed run plus live-ended sessions the renderer may
+   * have missed (crash/reload, hidden auto-launch). Non-destructive — the
+   * renderer records them (idempotent by id) and then calls `session:ack`.
    */
   ipcMain.handle('session:getRecovered', async () => {
-    return drainRecoveredSessions();
+    return getUnackedSessions();
+  });
+
+  /**
+   * Renderer confirms these session ids are persisted in its session store;
+   * main drops them from the pending queue (and pending-sessions.json).
+   */
+  ipcMain.handle('session:ack', async (_event: any, ids: unknown) => {
+    const removed = ackSessions(Array.isArray(ids) ? ids.slice(0, 5000) : []);
+    return { success: true, removed };
   });
 }

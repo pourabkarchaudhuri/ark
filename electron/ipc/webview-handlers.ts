@@ -35,6 +35,21 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
     if (!mainWindow) return { success: false };
     const sb = safeBounds(bounds);
     if (!sb) { logger.warn('[Webview] Invalid bounds for open'); return { success: false }; }
+
+    // Security: only allow http(s) URLs — block javascript:, file:, data:, etc.
+    // Validate BEFORE creating/attaching the view: a rejected URL used to leave
+    // an empty WebContentsView stacked over the app.
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        logger.warn(`[Webview] Blocked URL with disallowed scheme: ${parsed.protocol}`);
+        return { success: false, error: 'URL scheme not allowed' };
+      }
+    } catch {
+      logger.warn(`[Webview] Blocked invalid URL: ${url}`);
+      return { success: false, error: 'Invalid URL' };
+    }
+
     destroyWebContentsView(mainWindow);
 
     activeWebContentsView = new WebContentsView({
@@ -81,18 +96,6 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
       }
       return { action: 'deny' as const };
     });
-
-    // Security: only allow http(s) URLs — block javascript:, file:, data:, etc.
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        logger.warn(`[Webview] Blocked URL with disallowed scheme: ${parsed.protocol}`);
-        return { success: false, error: 'URL scheme not allowed' };
-      }
-    } catch {
-      logger.warn(`[Webview] Blocked invalid URL: ${url}`);
-      return { success: false, error: 'Invalid URL' };
-    }
 
     wc.loadURL(url);
     return { success: true };

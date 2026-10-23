@@ -14,7 +14,7 @@
  */
 
 import { annIndex } from './ann-index';
-import { embeddingService, getAllPooledEmbeddingsForGraph } from './embedding-service';
+import { embeddingService, getAllPooledEmbeddingsForGraph, isRendererHeapPressureHigh } from './embedding-service';
 
 export interface GraphScores {
   pageRank: number;
@@ -81,6 +81,27 @@ const GRAPH_BUILD_FAILURE_COOLDOWN_MS = 2 * 60_000;
 function isCatalogEmbeddingRunning(): boolean {
   try {
     return embeddingService?.isCatalogRunning === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Heavy ANN / embedding work in progress or just finished: an ANN rebuild
+ * (the index is partial — a graph built now would be wrong and persisted
+ * under a new signature), or the cooldown after a Force Re-index.
+ */
+function isHeavyEmbeddingWorkActive(): boolean {
+  try {
+    return embeddingService?.isAnnRebuilding === true || embeddingService?.isHeavyRebuildCooldown === true;
+  } catch {
+    return false;
+  }
+}
+
+function heapPressureHigh(): boolean {
+  try {
+    return typeof isRendererHeapPressureHigh === 'function' && isRendererHeapPressureHigh();
   } catch {
     return false;
   }
@@ -308,7 +329,8 @@ export function copyScoresForPersist(scores: GraphScoreBuffers): GraphScoreBuffe
   };
 }
 
-interface GraphEmbeddingRow { gameId: string; embedding: number[] }
+/** Vectors are Float32Array (1024 × 4 B) — `number[]` doubled the ~155k-vector working set to ~1.3 GB. */
+interface GraphEmbeddingRow { gameId: string; embedding: Float32Array | number[] }
 
 /**
  * Read every cached embedding from both library and catalog pooled stores.
@@ -663,6 +685,8 @@ export class GameGraphStore {
     const last = Math.max(this._meta.builtAt, this._lastBuildStartedAt);
     if (now - last < GRAPH_REBUILD_MIN_INTERVAL_MS) return true;
     if (isCatalogEmbeddingRunning()) return true;
+    // Keep serving the loaded graph while an ANN rebuild runs / right after a forced pass.
+    if (isHeavyEmbeddingWorkActive()) return true;
     return false;
   }
 
@@ -675,11 +699,22 @@ export class GameGraphStore {
       this._failBuild('ANN index not ready');
       return false;
     }
+    if (embeddingService?.isAnnRebuilding === true) {
+      // Partial index — neighbors would be missing; try again after the rebuild.
+      this._failBuild('ANN index rebuilding', { cooldown: true });
+      return false;
+    }
+    // Memory gate (same ratio as the galaxy build): reading every pooled vector
+    // is hundreds of MB — don't start it on an already-loaded renderer.
+    if (heapPressureHigh()) {
+      this._failBuild('Memory pressure high — graph build deferred', { cooldown: true });
+      return false;
+    }
 
     this._state = { phase: 'building', stage: 'Reading embeddings...', percent: 0 };
     this._notify();
 
-    const embeddings = await readAllEmbeddings();
+    let embeddings: GraphEmbeddingRow[] = await readAllEmbeddings();
     if (embeddings.length === 0) {
       this._failBuild('No embeddings cached', { cooldown: true });
       return false;
@@ -694,7 +729,12 @@ export class GameGraphStore {
     const totalBatches = Math.ceil(embeddings.length / QUERY_BATCH_SIZE);
     for (let b = 0; b < totalBatches; b++) {
       const slice = embeddings.slice(b * QUERY_BATCH_SIZE, (b + 1) * QUERY_BATCH_SIZE);
-      const entries = slice.map((e) => ({ id: e.gameId, vector: e.embedding }));
+      // Per-slice conversion keeps the IPC payload a plain number[] without
+      // ever materialising every vector as doubles.
+      const entries = slice.map((e) => ({
+        id: e.gameId,
+        vector: e.embedding instanceof Float32Array ? Array.from(e.embedding) : e.embedding,
+      }));
       const result = await annIndex.queryBatch(entries, NEIGHBORS_K);
 
       for (const [fromId, neighbors] of Object.entries(result)) {
@@ -718,6 +758,9 @@ export class GameGraphStore {
       this._state = { phase: 'building', stage: `ANN queries ${b + 1}/${totalBatches}`, percent };
       this._notify();
     }
+
+    // Vectors are no longer needed — release them before the metrics phase.
+    embeddings = [];
 
     // Pack edges into Float32Array as packed triples
     const edges = new Float32Array(edgeSet.size * 3);

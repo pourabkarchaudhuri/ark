@@ -371,10 +371,23 @@ export function ensureRerankModelPull(
   _rerankPullTarget = model;
   logger.log(`[Ollama Setup] Pulling rerank model: ${model}`);
   const pull = pullModel(model, onProgress)
-    .then((ok) => {
+    .then(async (ok) => {
       if (ok) _rerankPullFailedAt.delete(model);
       else _rerankPullFailedAt.set(model, Date.now());
       logger.log(`[Ollama Setup] Rerank pull ${ok ? 'succeeded' : 'failed'}: ${model}`);
+      if (ok) {
+        // Every successful pull invalidates the tier decision — including the
+        // pull the ollama:rerank handler starts on its own, which used to leave
+        // the session on a cached cosine tier until restart. Dynamic import for
+        // the same cycle reason as settleRerankModelStatus. Awaited so callers
+        // that re-detect right after the pull see the reset already applied.
+        try {
+          const { resetRerankTierCache } = await import('./rerank-engine.js');
+          resetRerankTierCache();
+        } catch (err) {
+          logger.warn('[Ollama Setup] Could not reset rerank tier cache after pull:', err);
+        }
+      }
       return ok;
     })
     .catch((err) => {
@@ -435,6 +448,38 @@ export function getSessionEmbedOptions(): EmbedBatchOptions {
 /** Current num_batch (for diagnostics). */
 export function getSessionNumBatch(): number | undefined {
   return EMBED_NUM_BATCH_LADDER[_numBatchIdx];
+}
+
+/** How many times this session Ollama ran out of memory and num_batch was stepped down. */
+export function getEmbedOomStepDowns(): number {
+  return _numBatchIdx;
+}
+
+/** Last /api/ps reading for the embedding model, refreshed by readEmbedModelVram. */
+export async function readEmbedModelVram(): Promise<{ loaded: boolean; sizeBytes: number; vramBytes: number }> {
+  const settings = settingsStore.getOllamaSettings();
+  const urlObj = new URL(settings.url || 'http://localhost:11434');
+  const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
+  const port = parseInt(urlObj.port) || 11434;
+  return new Promise((resolve) => {
+    const none = { loaded: false, sizeBytes: 0, vramBytes: 0 };
+    const req = http.get({ hostname, port, path: '/api/ps', timeout: 3000 }, (res) => {
+      let data = '';
+      res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data) as { models?: Array<{ name?: string; size?: number; size_vram?: number }> };
+          const model = parsed.models?.find((m) => {
+            const n = (m.name || '').toLowerCase();
+            return n.startsWith(EMBEDDING_MODEL) || n.split(':')[0] === EMBEDDING_MODEL;
+          });
+          resolve(model ? { loaded: true, sizeBytes: model.size ?? 0, vramBytes: model.size_vram ?? 0 } : none);
+        } catch { resolve(none); }
+      });
+    });
+    req.on('error', () => resolve(none));
+    req.on('timeout', () => { req.destroy(); resolve(none); });
+  });
 }
 
 /**

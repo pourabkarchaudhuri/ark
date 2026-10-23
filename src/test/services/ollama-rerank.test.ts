@@ -28,7 +28,7 @@ function minimalNode(over: Partial<GraphNode>): GraphNode {
 }
 
 describe('graphNodeToNeighborQueryText', () => {
-  it('includes title, genres, themes, developer, publisher', () => {
+  it('includes title, genres, themes, developer — not publisher (noise for relevance)', () => {
     const q = graphNodeToNeighborQueryText(
       minimalNode({
         title: 'Hades',
@@ -42,7 +42,7 @@ describe('graphNodeToNeighborQueryText', () => {
     expect(q).toContain('Genres: Action, Roguelike');
     expect(q).toContain('Themes: Mythology');
     expect(q).toContain('Developer: Supergiant Games');
-    expect(q).toContain('Publisher: Supergiant Games');
+    expect(q).not.toContain('Publisher');
   });
 
   it('omits empty sections', () => {

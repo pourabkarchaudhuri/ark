@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('electron', {
   // Proxy fetch — routes HTTP requests through the main process to bypass CORS.
   // Only allowed for whitelisted domains (see main.ts PROXY_FETCH_ALLOWED_DOMAINS).
   fetchHtml: (url) => ipcRenderer.invoke('proxy:fetchHtml', url),
+  // Crash-loop breaker: { safeMode, reason, recentCrashes }
+  getSafeMode: () => ipcRenderer.invoke('app:getSafeMode'),
+  // Restore + show + focus the main window (works when hidden in the tray)
+  showAndFocus: () => ipcRenderer.invoke('app:showAndFocus'),
 });
 
 // Steam CDN base URL for constructing image URLs client-side
@@ -409,6 +413,10 @@ contextBridge.exposeInMainWorld('sessionTracker', {
   getRecoveredSessions: () =>
     ipcRenderer.invoke('session:getRecovered'),
 
+  // Acknowledge recorded sessions so main drops them from its pending queue
+  ackSessions: (ids) =>
+    ipcRenderer.invoke('session:ack', ids),
+
   // Subscribe to live status changes (Playing Now / Playing)
   onStatusChange: (callback) => {
     const handler = (_event, data) => callback(data);
@@ -535,9 +543,22 @@ contextBridge.exposeInMainWorld('ollama', {
     return () => ipcRenderer.removeListener('ollama:rerank-progress', handler);
   },
 
-  // Cross-encoder rerank (POST /api/rerank) for Embedding Space neighbors
+  // Tiered rerank for Oracle shelves and Embedding Space neighbors.
+  // payload: { query, documents, topN?, requestId?, budgetMs? } → { results, via, report } | { error, report? }
   rerank: (payload) =>
     ipcRenderer.invoke('ollama:rerank', payload),
+
+  // Stop a running rerank (by the requestId passed to rerank) once the renderer gave up on it
+  rerankCancel: (requestId) =>
+    ipcRenderer.invoke('ollama:rerankCancel', requestId),
+
+  // Current reranker tier ({ tier, label, model, ollamaUp } | null) — sizes the renderer's budget
+  rerankTier: () =>
+    ipcRenderer.invoke('ollama:rerankTier'),
+
+  // One summary line per rerank run into the main log (fire-and-forget)
+  rerankLog: (line) =>
+    ipcRenderer.send('ollama:rerankLog', String(line ?? '').slice(0, 400)),
 
   // Rich diagnostic probe — tells you exactly why rerank is failing
   rerankDiagnostic: () =>
@@ -547,6 +568,8 @@ contextBridge.exposeInMainWorld('ollama', {
   // Run from dev tools: await window.ollama.embedDiagnostic()
   embedDiagnostic: () =>
     ipcRenderer.invoke('ollama:embedDiagnostic'),
+  gpuStats: () =>
+    ipcRenderer.invoke('ollama:gpuStats'),
 });
 
 // Expose ANN Index API to renderer (HNSW nearest-neighbor search)

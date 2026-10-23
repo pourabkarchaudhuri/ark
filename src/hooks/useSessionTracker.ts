@@ -114,15 +114,44 @@ async function maybeAutoTransitionStatus(rawSession: GameSession): Promise<void>
   }
 }
 
+/** Normalise a raw session's gameId (legacy numeric Steam appIds → "steam-N"). */
+function normalizeSession(raw: GameSession): GameSession {
+  return {
+    ...raw,
+    gameId: typeof raw.gameId === 'number' ? `steam-${raw.gameId}` : String(raw.gameId),
+  };
+}
+
+/**
+ * Resolve once every store the tracker writes into has finished hydrating.
+ * Recording into (or syncing the tracked list from) a half-hydrated store is
+ * how sessions used to get lost: hydration replaced the in-memory cache, and
+ * an empty library sent `setTrackedGames([])`, which made main finalize every
+ * active session as an orphan.
+ */
+function whenTrackerStoresReady(): Promise<void> {
+  return Promise.all([
+    libraryStore.ready.catch(() => undefined),
+    customGameStore.ready.catch(() => undefined),
+    sessionStore.ready.catch(() => undefined),
+  ]).then(() => undefined);
+}
+
 /**
  * useSessionTracker — connects the renderer to the Electron session tracker.
  *
+ * Mounted ONCE at the app root (SessionTrackerProvider in App.tsx), outside
+ * the splash "Enter Ark" gate, so tracking works from launch — including a
+ * hidden `--hidden` auto-start where nobody ever clicks Enter.
+ *
  * Responsibilities:
- * 1. Sends the list of trackable games (those with executablePath) to the main process
- *    — includes both library games AND custom games
- * 2. Listens for live status changes (Playing Now / Playing) and tracks which games are live
- * 3. Records completed sessions to the session store
- * 4. Auto-updates hoursPlayed in library store (or custom game store for "custom-" IDs)
+ * 1. Waits for library / custom-game / session stores to hydrate, then sends
+ *    the list of trackable games (exe path set) to the main process.
+ * 2. Listens for live status changes (Playing Now / Playing).
+ * 3. Records completed sessions (idempotent by id) and ACKs them to main once
+ *    they are persisted. Main keeps every un-acked session queued on disk, so
+ *    a renderer crash/reload re-delivers them via getRecoveredSessions.
+ * 4. Auto-updates hoursPlayed in library store (or custom game store).
  */
 export function useSessionTracker() {
   // v1.0.42 — Compose the Playing → On Hold sweep at the same app-root
@@ -146,20 +175,66 @@ export function useSessionTracker() {
       .filter((g) => g.executablePath)
       .map((g) => ({ gameId: g.id, executablePath: g.executablePath! }));
 
-    window.sessionTracker.setTrackedGames([...libraryTrackable, ...customTrackable]);
+    void window.sessionTracker.setTrackedGames([...libraryTrackable, ...customTrackable]);
   }, []);
 
   useEffect(() => {
-    if (!window.sessionTracker) return;
+    const tracker = window.sessionTracker;
+    if (!tracker) return;
 
-    // Initial sync — send tracked games list to the main process
-    syncTrackedGames();
+    let disposed = false;
+    let storesReady = false;
+    /** session:ended events that arrived before the stores hydrated. */
+    const buffered: GameSession[] = [];
+    const unsubs: Array<() => void> = [];
+
+    // Record a completed session into the store + update hours. Shared by the
+    // live "session ended" event and the main-process pending queue.
+    // Returns true when the session was new (not a replay).
+    const recordCompletedSession = (raw: GameSession): boolean => {
+      const session = normalizeSession(raw);
+      const isNew = sessionStore.record(session);
+      if (!isNew) return false;
+      // Read-only session store = it holds only this run's sessions; deriving hours from it
+      // would overwrite the library's real total with a few minutes. Leave hours alone.
+      if (sessionStore.isReadOnly()) return true;
+      const totalHours = sessionStore.getTotalHours(session.gameId);
+      const lastPlayedAt = session.endTime;
+      if (session.gameId.startsWith('custom-')) {
+        if (customGameStore.getGame(session.gameId)) {
+          customGameStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
+        }
+      } else {
+        libraryStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
+      }
+      return true;
+    };
+
+    // ACK only after the session row is actually persisted. In read-only
+    // storage mode nothing is persisted, so we never ack — main keeps the
+    // sessions queued and the next healthy launch records them.
+    const ackPersisted = (ids: string[]) => {
+      if (ids.length === 0 || typeof tracker.ackSessions !== 'function') return;
+      void sessionStore.persistNow().then(() => {
+        const persisted = ids.filter((id) => sessionStore.isPersisted(id));
+        if (persisted.length === 0) return;
+        return tracker.ackSessions!(persisted);
+      }).catch(() => { /* un-acked sessions are simply re-delivered next mount */ });
+    };
+
+    const handleEnded = (raw: GameSession) => {
+      const isNew = recordCompletedSession(raw);
+      if (raw.id) ackPersisted([raw.id]);
+      // v1.0.41 — opt-in auto Want-to-Play → Playing transition.
+      // Kept fire-and-forget so it can never stall session persistence.
+      if (isNew) void maybeAutoTransitionStatus(raw);
+    };
 
     // Hydrate liveGames with any sessions already running in the main process
-    // (covers app reload / HMR where the main process kept polling but the
+    // (covers app reload / renderer crash where main kept polling but the
     // renderer lost its in-memory state).
-    window.sessionTracker.getActiveSessions().then((active) => {
-      if (!active || active.length === 0) return;
+    tracker.getActiveSessions().then((active) => {
+      if (disposed || !active || active.length === 0) return;
       setLiveGames((prev) => {
         const next = new Set(prev);
         for (const s of active) {
@@ -170,38 +245,8 @@ export function useSessionTracker() {
       });
     }).catch(() => { /* non-critical — fresh start has no sessions */ });
 
-    // Record a completed session into the store + update hours. Shared by both
-    // the live "session ended" event and crash-recovered sessions.
-    const recordCompletedSession = (raw: GameSession) => {
-      const session: GameSession = {
-        ...raw,
-        gameId: typeof raw.gameId === 'number' ? `steam-${raw.gameId}` : String(raw.gameId),
-      };
-      sessionStore.record(session);
-      const totalHours = sessionStore.getTotalHours(session.gameId);
-      const lastPlayedAt = session.endTime;
-      if (session.gameId.startsWith('custom-')) {
-        if (customGameStore.getGame(session.gameId)) {
-          customGameStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
-        }
-      } else {
-        libraryStore.updateHoursFromSessions(session.gameId, totalHours, lastPlayedAt);
-      }
-    };
-
-    // Drain any sessions recovered from a previous crashed/force-killed run so
-    // their playtime is not lost.
-    window.sessionTracker.getRecoveredSessions?.().then((recovered) => {
-      if (!recovered || recovered.length === 0) return;
-      for (const s of recovered) recordCompletedSession(s);
-    }).catch(() => { /* non-critical */ });
-
-    // Re-sync whenever the library or custom games change
-    const unsubLibrary = libraryStore.subscribe(syncTrackedGames);
-    const unsubCustom = customGameStore.subscribe(syncTrackedGames);
-
     // Listen for live status changes
-    const unsubStatus = window.sessionTracker.onStatusChange((data) => {
+    unsubs.push(tracker.onStatusChange((data) => {
       const gameId = typeof data.gameId === 'number' ? `steam-${data.gameId}` : String(data.gameId);
       setLiveGames((prev) => {
         const next = new Set(prev);
@@ -212,10 +257,12 @@ export function useSessionTracker() {
         }
         return next;
       });
-    });
+    }));
 
     // Listen for live playtime updates (every 15s while game is running)
-    const unsubLive = window.sessionTracker.onLiveUpdate((data) => {
+    unsubs.push(tracker.onLiveUpdate((data) => {
+      if (!storesReady) return; // next tick (15s) will carry the running total
+      if (sessionStore.isReadOnly()) return; // see recordCompletedSession
       const gameId = typeof data.gameId === 'number' ? `steam-${data.gameId}` : String(data.gameId);
       const activeMinutes = data.activeMinutes;
       const previousHours = sessionStore.getTotalHours(gameId);
@@ -229,19 +276,48 @@ export function useSessionTracker() {
       } else {
         libraryStore.updateHoursFromSessions(gameId, liveSessionTotal);
       }
+    }));
+
+    // Listen for completed sessions — buffered until the stores are hydrated.
+    unsubs.push(tracker.onSessionEnded((data) => {
+      if (!storesReady) {
+        buffered.push(data.session);
+        return;
+      }
+      handleEnded(data.session);
+    }));
+
+    void whenTrackerStoresReady().then(() => {
+      if (disposed) return;
+      storesReady = true;
+
+      // Initial sync — send the (now hydrated) tracked games list to main.
+      syncTrackedGames();
+      // Re-sync whenever the library or custom games change (general channel
+      // only — hours ticks don't change exe paths).
+      unsubs.push(libraryStore.subscribe(syncTrackedGames));
+      unsubs.push(customGameStore.subscribe(syncTrackedGames));
+
+      // Events that raced hydration.
+      for (const s of buffered.splice(0)) handleEnded(s);
+
+      // Every session main still holds un-acked: crashed-run recoveries plus
+      // live-ended sessions a crashed/reloading renderer never recorded.
+      tracker.getRecoveredSessions?.().then((pending) => {
+        if (disposed || !pending || pending.length === 0) return;
+        const ids: string[] = [];
+        for (const s of pending) {
+          recordCompletedSession(s);
+          if (s.id) ids.push(s.id);
+        }
+        ackPersisted(ids);
+      }).catch(() => { /* non-critical — retried on next mount */ });
     });
 
-    // Listen for completed sessions
-    const unsubEnded = window.sessionTracker.onSessionEnded((data) => {
-      recordCompletedSession(data.session);
-      // v1.0.41 — opt-in auto Want-to-Play → Playing transition.
-      // Kept fire-and-forget so it can never stall session persistence.
-      void maybeAutoTransitionStatus(data.session);
-    });
-
-    cleanupRef.current = [unsubLibrary, unsubCustom, unsubStatus, unsubLive, unsubEnded];
+    cleanupRef.current = unsubs;
 
     return () => {
+      disposed = true;
       // Only detach the listeners this effect registered. Do NOT call the global
       // removeAllListeners() — that wipes every session:* listener for the whole
       // process and previously caused completed sessions to be silently dropped

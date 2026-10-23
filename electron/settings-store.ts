@@ -68,6 +68,11 @@ interface Settings {
     /** 0 = keep worker order within shelves, 1 = full rerank ordering (default 1). */
     oracleRerankBlend?: number;
     /**
+     * Texts per embedding request to Ollama (v1.0.74). 0 / absent = Auto (256 on GPU,
+     * 100 on CPU). Clamped to [EMBED_BATCH_MIN, EMBED_BATCH_MAX].
+     */
+    embeddingBatchSize?: number;
+    /**
      * When true (default), library/catalog embedding rewrites use facet chunks + int8
      * pooled storage. When false, fall back to whole-text float pooled writes.
      * Reads always decode both formats.
@@ -128,6 +133,16 @@ const getEncryptionKey = (): Buffer => {
   const machineId = app.getPath('userData'); // Use userData path as a stable identifier
   return crypto.createHash('sha256').update(machineId).digest();
 };
+
+export const EMBED_BATCH_MIN = 16;
+export const EMBED_BATCH_MAX = 512;
+
+/** 0 = Auto; anything else is rounded and clamped to [EMBED_BATCH_MIN, EMBED_BATCH_MAX]. */
+export function clampEmbeddingBatchSize(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(EMBED_BATCH_MAX, Math.max(EMBED_BATCH_MIN, Math.round(n)));
+}
 
 class SettingsStore {
   private settings: Settings;
@@ -274,6 +289,7 @@ class SettingsStore {
     embeddingChunkingEnabled: boolean;
     chunkAnnMaxSimEnabled: boolean;
     embeddingMrl256Enabled: boolean;
+    embeddingBatchSize: number;
   } {
     const defaults = {
       enabled: true,
@@ -288,6 +304,7 @@ class SettingsStore {
       embeddingChunkingEnabled: true,
       chunkAnnMaxSimEnabled: true,
       embeddingMrl256Enabled: false,
+      embeddingBatchSize: 0,
     };
     const o = this.settings.ollama;
     let blend =
@@ -306,6 +323,7 @@ class SettingsStore {
       embeddingChunkingEnabled: o?.embeddingChunkingEnabled !== false,
       chunkAnnMaxSimEnabled: o?.chunkAnnMaxSimEnabled !== false,
       embeddingMrl256Enabled: o?.embeddingMrl256Enabled === true,
+      embeddingBatchSize: clampEmbeddingBatchSize(o?.embeddingBatchSize),
     };
   }
 
@@ -322,6 +340,7 @@ class SettingsStore {
     embeddingChunkingEnabled?: boolean;
     chunkAnnMaxSimEnabled?: boolean;
     embeddingMrl256Enabled?: boolean;
+    embeddingBatchSize?: number;
   }): void {
     const next = { ...settings };
     if (next.rerankModel !== undefined) {
@@ -336,6 +355,7 @@ class SettingsStore {
       const b = Number(next.oracleRerankBlend);
       next.oracleRerankBlend = Number.isFinite(b) ? Math.min(1, Math.max(0, b)) : 1;
     }
+    if (next.embeddingBatchSize !== undefined) next.embeddingBatchSize = clampEmbeddingBatchSize(next.embeddingBatchSize);
     this.settings.ollama = {
       ...this.settings.ollama,
       ...next,

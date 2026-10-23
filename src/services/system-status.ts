@@ -12,7 +12,7 @@ import { recoStore } from './reco-store';
 import { embeddingService } from './embedding-service';
 import { annIndex } from './ann-index';
 import { getBuildStage, getBuildNodeCount, getBuildStepIndex, getBuildStepDetail, GALAXY_STEP_LABELS, subscribeGalaxy } from './galaxy-cache';
-import { RERANK_TIER_LABELS, type RerankTier } from './oracle-rerank';
+import { RERANK_TIER_LABELS, getLastRerankRun, subscribeRerankRuns, type RerankRunRecord, type RerankTier } from './oracle-rerank';
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
@@ -62,10 +62,50 @@ export interface SystemStatusSnapshot {
   galaxyBuild: SyncStatus;
   ollamaSetup: SyncStatus;
   rerankSetup: SyncStatus;
+  /** Most recent rerank run (Oracle shelves or Embedding Space neighbours); null before the first one. */
+  lastRerank: LastRerankStatus | null;
   embeddingModel: EmbeddingModelStatus | null;
   mlModel: MLModelStatus | null;
   storage: StorageMetric[];
   totalStorageBytes: number;
+}
+
+/** "Last rerank" row — what the reranker actually did on its most recent run. */
+export interface LastRerankStatus {
+  /** 'done' for an applied rerank, 'error' for a failure, 'idle' for a skip / no-signal / timeout. */
+  stage: SyncStatus['stage'];
+  /** e.g. "Oracle · Qwen3 graded · 61 moved · 40/40 scored". */
+  detail: string;
+  /** Date.now() of the run — the panel renders it as "2m ago". */
+  at: number;
+  elapsedMs: number;
+}
+
+function lastRerankStatus(r: RerankRunRecord | null): LastRerankStatus | null {
+  if (!r) return null;
+  const source = r.source === 'oracle' ? 'Oracle' : 'Neighbors';
+  const tier = r.tier ? RERANK_TIER_LABELS[r.tier] : null;
+  const parts = [source];
+  if (r.outcome === 'applied') {
+    if (tier) parts.push(tier);
+    if (r.moved !== null) parts.push(`${r.moved} moved`);
+    parts.push(`${r.scored}/${r.requested} scored${r.truncated ? ' (cut short)' : ''}`);
+  } else {
+    const what: Record<string, string> = {
+      skipped_timeout: 'timed out',
+      no_signal: 'no signal (all scores equal)',
+      empty_results: 'no scores returned',
+      error: 'failed',
+    };
+    parts.push(what[r.outcome] ?? r.outcome);
+    if (tier) parts.push(tier);
+  }
+  return {
+    stage: r.outcome === 'applied' ? 'done' : r.outcome === 'error' ? 'error' : 'idle',
+    detail: parts.join(' · '),
+    at: r.at,
+    elapsedMs: r.elapsedMs,
+  };
 }
 
 type Listener = () => void;
@@ -390,6 +430,7 @@ class SystemStatus {
   private _embeddingModelCache: EmbeddingModelStatus | null = null;
   private _mlModelCache: MLModelStatus | null = null;
   private _catalogSyncStartTime = 0;
+  private _catalogSyncEndTime = 0;
   private _recoPipelineStartTime = 0;
   private _initialized = false;
   private _storageTimer: ReturnType<typeof setInterval> | null = null;
@@ -434,6 +475,7 @@ class SystemStatus {
     this._initialized = true;
 
     initRerankProgressListener();
+    subscribeRerankRuns(() => this._notify());
 
     catalogStore.subscribe(() => this._notify());
     epicCatalogStore.subscribe(() => this._notify());
@@ -442,11 +484,15 @@ class SystemStatus {
 
     catalogStore.subscribe(() => {
       const p = catalogStore.syncProgress;
-      if (p.stage === 'fetching-ids' && this._catalogSyncStartTime === 0) {
+      const active = p.stage === 'fetching-ids' || p.stage === 'fetching-tags' || p.stage === 'fetching-metadata' || p.stage === 'retrying';
+      // Per-sync timer: restart when a new sync begins, freeze when it ends (it used to keep
+      // counting after 'done' and accumulate across syncs, inflating "how long it took").
+      if (active && (this._catalogSyncStartTime === 0 || this._catalogSyncEndTime !== 0)) {
         this._catalogSyncStartTime = performance.now();
+        this._catalogSyncEndTime = 0;
       }
-      if (p.stage === 'done' || p.stage === 'error' || p.stage === 'idle') {
-        // keep the elapsed time, don't reset
+      if ((p.stage === 'done' || p.stage === 'error') && this._catalogSyncStartTime > 0 && this._catalogSyncEndTime === 0) {
+        this._catalogSyncEndTime = performance.now();
       }
     });
 
@@ -543,7 +589,8 @@ class SystemStatus {
     // Steam Catalog Sync
     const catP = catalogStore.syncProgress;
     const catElapsed = this._catalogSyncStartTime > 0
-      ? performance.now() - this._catalogSyncStartTime : 0;
+      ? (this._catalogSyncEndTime || performance.now()) - this._catalogSyncStartTime : 0;
+    const failedNote = catP.batchesFailed ? ` · ${catP.batchesFailed} failed` : '';
     const steamCatalogSync: SyncStatus = {
       label: 'Steam Catalog',
       stage: catP.stage === 'done' ? 'done'
@@ -552,20 +599,25 @@ class SystemStatus {
       detail: catP.stage === 'migrating' ? `Migrating storage — ${catP.gamesStored.toLocaleString()} copied`
         : catP.stage === 'fetching-ids' ? 'Fetching app list...'
           : catP.stage === 'fetching-tags' ? 'Resolving tags...'
-            : catP.stage === 'fetching-metadata' ? `Batch ${catP.batchesCompleted}/${catP.batchesTotal}`
-              : catP.stage === 'done' ? `${catP.gamesStored.toLocaleString()} games`
-                : catP.stage === 'error' ? (catP.error ?? 'Failed') : '',
+            : catP.stage === 'fetching-metadata' ? `Batch ${catP.batchesCompleted}/${catP.batchesTotal}${failedNote}`
+              : catP.stage === 'retrying' ? `Retrying failed batches ${catP.retryDone ?? 0}/${catP.retryTotal ?? 0} (Steam rate limit)`
+                : catP.stage === 'finalizing' ? 'Saving catalog...'
+                  : catP.stage === 'done' ? `${catP.gamesStored.toLocaleString()} games${catP.pendingGames ? ` · ${catP.pendingGames.toLocaleString()} pending` : ''}`
+                    : catP.stage === 'error' ? (catP.error ?? 'Failed') : '',
       // One-time migration has no known total up front (a full IDB row count
       // would require its own scan) — 15% is a deliberate "clearly in
       // progress, not stalled" indicator rather than a real completion ratio.
+      // The first pass fills 0–90%; the retry round and finalize the last 10% (never a silent 100%).
       percent: catP.stage === 'done' ? 100
         : catP.stage === 'migrating' ? 15
-          : catP.batchesTotal > 0 ? Math.round((catP.batchesCompleted / catP.batchesTotal) * 100)
-            : catP.stage === 'fetching-ids' ? 5
-              : catP.stage === 'fetching-tags' ? 10 : 0,
+          : catP.stage === 'finalizing' ? 99
+            : catP.stage === 'retrying' ? 90 + Math.round(((catP.retryDone ?? 0) / Math.max(1, catP.retryTotal ?? 1)) * 9)
+              : catP.batchesTotal > 0 ? Math.round((catP.batchesCompleted / catP.batchesTotal) * 90)
+                : catP.stage === 'fetching-ids' ? 5
+                  : catP.stage === 'fetching-tags' ? 10 : 0,
       elapsed: catElapsed,
-      itemsDone: catP.batchesCompleted,
-      itemsTotal: catP.batchesTotal,
+      itemsDone: catP.stage === 'retrying' ? (catP.retryDone ?? 0) : catP.batchesCompleted,
+      itemsTotal: catP.stage === 'retrying' ? (catP.retryTotal ?? 0) : catP.batchesTotal,
     };
 
     // Reco Pipeline
@@ -596,7 +648,7 @@ class SystemStatus {
     // that's still in flight, show why this widget is at 0 instead of a bare
     // blank, so a slow one-time migration doesn't read as "stuck".
     const waitingOnCatalogSync = !embRunning && embP.total === 0 &&
-      (catP.stage === 'migrating' || catP.stage === 'fetching-ids' || catP.stage === 'fetching-tags' || catP.stage === 'fetching-metadata');
+      (catP.stage === 'migrating' || catP.stage === 'fetching-ids' || catP.stage === 'fetching-tags' || catP.stage === 'fetching-metadata' || catP.stage === 'retrying' || catP.stage === 'finalizing');
     const catalogEmbeddings: SyncStatus = {
       label: 'Catalog Embeddings',
       stage: embRunning ? 'running' : embP.total > 0 && embP.completed >= embP.total ? 'done' : 'idle',
@@ -744,6 +796,7 @@ class SystemStatus {
       galaxyBuild,
       ollamaSetup: { ..._ollamaSetupStatus },
       rerankSetup: { ..._rerankSetupStatus },
+      lastRerank: lastRerankStatus(getLastRerankRun()),
       embeddingModel: this._embeddingModelCache ? { ...this._embeddingModelCache } : null,
       mlModel: this._mlModelCache ? { ...this._mlModelCache } : null,
       storage: [...this._storageCache],

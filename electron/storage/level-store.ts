@@ -203,18 +203,49 @@ async function getManyImpl<T>(namespace: string, keys: string[]): Promise<Array<
   }
 }
 
+/**
+ * Drain a namespace iterator into `{ key, value }` rows, decoding each row
+ * independently. One corrupt row must not fail the whole namespace read — a
+ * thrown getAll used to push renderer stores onto their stale legacy
+ * localStorage snapshot (and then overwrite LevelDB with it). Corrupt rows are
+ * skipped and logged, same policy as getManyImpl. Exported for tests.
+ */
+export async function collectRowsLenient<T>(
+  namespace: string,
+  iter: AsyncIterable<[string, string]>,
+): Promise<{ rows: Array<{ key: string; value: T }>; corruptKeys: string[] }> {
+  const rows: Array<{ key: string; value: T }> = [];
+  const corruptKeys: string[] = [];
+  for await (const [fullKey, raw] of iter) {
+    const key = decodeKey(namespace, fullKey);
+    let value: T;
+    try {
+      value = JSON.parse(raw) as T;
+    } catch {
+      corruptKeys.push(key);
+      continue;
+    }
+    rows.push({ key, value });
+  }
+  if (corruptKeys.length > 0) {
+    logger.error(
+      `[LevelStore] getAll(${namespace}) skipped ${corruptKeys.length} corrupt row(s):`,
+      corruptKeys.slice(0, 20).join(', '),
+    );
+  }
+  return { rows, corruptKeys };
+}
+
 async function getAllImpl<T>(namespace: string): Promise<Array<{ key: string; value: T }>> {
   validateNamespace(namespace);
   const db = await openDb();
   const gte = `${namespace}${NS_SEP}`;
   const lt = `${namespace}${NS_SEP}${NS_HIGH}`;
-  const results: Array<{ key: string; value: T }> = [];
   try {
     const iter = db.iterator({ gte, lt });
     try {
-      for await (const [fullKey, raw] of iter) {
-        results.push({ key: decodeKey(namespace, fullKey), value: decodeValue<T>(raw) });
-      }
+      const { rows } = await collectRowsLenient<T>(namespace, iter);
+      return rows;
     } finally {
       try {
         await iter.close();
@@ -222,7 +253,6 @@ async function getAllImpl<T>(namespace: string): Promise<Array<{ key: string; va
         /* ignore close errors */
       }
     }
-    return results;
   } catch (err) {
     logger.error(`[LevelStore] getAll(${namespace}) failed:`, err);
     throw err;

@@ -1,6 +1,7 @@
 import { JourneyEntry, GameStatus, migrateGameId } from '@/types/game';
 import { sessionStore } from './session-store';
 import { statusHistoryStore } from './status-history-store';
+import { SerialWriteQueue, readWithRetry, reportStorageReadOnly } from './storage-health';
 
 const STORAGE_KEY = 'ark-journey-history';
 const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
@@ -89,9 +90,26 @@ function sanitizeEntry(entry: JourneyEntry, id: string): JourneyEntry {
 export class JourneyStore {
   private entries: Map<string, JourneyEntry> = new Map(); // keyed by universal gameId string
   private listeners: Set<() => void> = new Set();
+  /**
+   * Hours-only channel (mirrors LibraryStore.subscribeHours). `syncProgress`
+   * calls that only move `hoursPlayed` — the 15s live-session tick — fire
+   * this channel and NOT the general one, so the Dashboard's
+   * useJourneyHistory no longer re-renders the whole page every tick.
+   * General mutations fire both (superset).
+   */
+  private hoursListeners: Set<() => void> = new Set();
   private isInitialized = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
   private _sortedCache: JourneyEntry[] | null = null;
+
+  /** gameIds mutated since the last successful save (delta writes). */
+  private _dirty: Set<string> = new Set();
+
+  /** Serializes every LevelDB write (saves + clearNamespace). */
+  private readonly _writeQueue = new SerialWriteQueue('JourneyStore');
+
+  /** LevelDB unreadable this session → no writes at all (see storage-health). */
+  private _readOnly = false;
 
   /** Gate flag captured once at construction — LevelDB path vs. legacy fallback. */
   private readonly _useLevelDB: boolean;
@@ -146,13 +164,14 @@ export class JourneyStore {
    */
   private async initializeFromLevelDB(): Promise<void> {
     try {
-      const res = await window.store!.getAll<JourneyEntry>(LEVEL_NAMESPACE);
-      if (res.error) {
-        console.error('[JourneyStore] getAll(journey) IPC error:', res.error);
-        this.initializeFromLocalStorage();
+      const outcome = await readWithRetry('JourneyStore', () =>
+        window.store!.getAll<JourneyEntry>(LEVEL_NAMESPACE),
+      );
+      if (!outcome.ok) {
+        this.enterReadOnly(outcome.error);
         return;
       }
-      const rows = res.rows ?? [];
+      const rows = outcome.value.rows ?? [];
       if (rows.length > 0) {
         this.hydrateFromRows(rows.map((r) => r.value));
         return;
@@ -164,9 +183,49 @@ export class JourneyStore {
         this.notifyListeners();
       }
     } catch (err) {
-      console.error('[JourneyStore] Failed to init from LevelDB, falling back:', err);
-      this.initializeFromLocalStorage();
+      this.enterReadOnly(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * LevelDB unreadable after retries. Never fall back to the legacy
+   * localStorage snapshot once migrated (frozen at v1.0.61) — go read-only so
+   * nothing stale overwrites LevelDB. Pre-migration users see their legacy
+   * journey, read-only as well.
+   */
+  private enterReadOnly(error: string): void {
+    this._readOnly = true;
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    let migrated = true;
+    try { migrated = localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes'; } catch { /* assume migrated */ }
+    if (!migrated) {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        const parsed = raw ? (JSON.parse(raw) as StoredJourneyData) : null;
+        if (parsed && Array.isArray(parsed.entries)) {
+          for (const entry of parsed.entries) {
+            const id = migrateGameId(entry as any);
+            if (id && !this.entries.has(id)) this.entries.set(id, sanitizeEntry(entry, id));
+          }
+        }
+      } catch { /* legacy payload unreadable — stay empty */ }
+    }
+    reportStorageReadOnly('journey', error);
+    this.invalidateSortedCache();
+    this.notifyListeners();
+  }
+
+  /** True when LevelDB could not be read this session — nothing is persisted. */
+  isReadOnly(): boolean {
+    return this._readOnly;
+  }
+
+  /** Resolves once every queued LevelDB write has settled (tests / shutdown). */
+  whenPersisted(): Promise<void> {
+    return this._writeQueue.idle();
   }
 
   /**
@@ -291,6 +350,9 @@ export class JourneyStore {
    * either LevelDB or the localStorage migration payload) and notify.
    */
   private hydrateFromRows(rows: JourneyEntry[]): void {
+    // Rows recorded before hydration finished (cross-store sync, backfill)
+    // are kept for games the persisted journey doesn't know about yet.
+    const preHydration = new Map(this.entries);
     this.entries.clear();
     for (const row of rows) {
       const id = migrateGameId(row as any);
@@ -298,8 +360,19 @@ export class JourneyStore {
       this.entries.set(id, sanitizeEntry(row, id));
     }
     this._knownKeys = new Set(this.entries.keys());
+    this._dirty.clear();
+    for (const [id, entry] of preHydration) {
+      if (this.entries.has(id)) continue;
+      this.entries.set(id, entry);
+      this._dirty.add(id);
+    }
+    if (this._dirty.size > 0) this.scheduleSave();
     this.invalidateSortedCache();
     this.notifyListeners();
+  }
+
+  private markDirty(gameId: string): void {
+    if (gameId) this._dirty.add(gameId);
   }
 
   /**
@@ -320,15 +393,21 @@ export class JourneyStore {
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
+      if (this._useLevelDB && !this._readOnly) {
+        // Unloading — can't wait behind an in-flight batch; send the delta now.
+        void this.saveNowLevelDB();
+        return;
+      }
       this.saveNow();
     }
   }
 
   private saveNow(): void {
+    if (this._readOnly) return;
     if (this._useLevelDB) {
-      // Fire-and-forget; errors are logged. Preserves the current synchronous
-      // callsite contract used by importData().
-      void this.saveNowLevelDB();
+      // Serialized behind any in-flight write (incl. a pending clear()).
+      // Callers stay synchronous (importData) — errors are logged.
+      void this._writeQueue.run(() => this.saveNowLevelDB());
       return;
     }
     this.saveNowLocalStorage();
@@ -348,23 +427,33 @@ export class JourneyStore {
   }
 
   private async saveNowLevelDB(): Promise<void> {
+    if (this._readOnly) return;
+    // Snapshot + reset the dirty set up front: mutations that land while the
+    // batch is in flight re-mark their key for the next save.
+    const dirty = this._dirty;
+    this._dirty = new Set();
     try {
-      const currentIds = new Set<string>();
       const ops: Array<
         | { type: 'put'; namespace: string; key: string; value: unknown }
         | { type: 'del'; namespace: string; key: string }
       > = [];
+      const putIds: string[] = [];
+      const delIds: string[] = [];
 
+      // Delta puts: only rows mutated since the last save, plus any row that
+      // was never persisted (belt-and-braces for unmarked additions).
       for (const [gameId, entry] of this.entries.entries()) {
         if (!gameId) continue;
-        currentIds.add(gameId);
-        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: gameId, value: entry });
+        if (!dirty.has(gameId) && this._knownKeys.has(gameId)) continue;
+        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: gameId, value: { ...entry } });
+        putIds.push(gameId);
       }
 
       // Delta-deletes: anything in _knownKeys that's no longer in entries.
       for (const oldKey of this._knownKeys) {
-        if (!currentIds.has(oldKey)) {
+        if (!this.entries.has(oldKey)) {
           ops.push({ type: 'del', namespace: LEVEL_NAMESPACE, key: oldKey });
+          delIds.push(oldKey);
         }
       }
 
@@ -373,10 +462,13 @@ export class JourneyStore {
       const res = await window.store!.batch(ops);
       if (res.error) {
         console.error('[JourneyStore] batch save failed:', res.error);
+        for (const id of dirty) this._dirty.add(id); // retry on next save
         return;
       }
-      this._knownKeys = currentIds;
+      for (const id of putIds) this._knownKeys.add(id);
+      for (const id of delIds) this._knownKeys.delete(id);
     } catch (err) {
+      for (const id of dirty) this._dirty.add(id);
       console.error('[JourneyStore] Failed to save (LevelDB):', err);
     }
   }
@@ -392,8 +484,22 @@ export class JourneyStore {
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * Hours channel — fires on hours-only ticks AND on every general mutation
+   * (superset of `subscribe`). Use for live per-game hours displays.
+   */
+  subscribeHours(listener: () => void): () => void {
+    this.hoursListeners.add(listener);
+    return () => this.hoursListeners.delete(listener);
+  }
+
   private notifyListeners() {
     this.listeners.forEach((fn) => fn());
+    this.hoursListeners.forEach((fn) => fn());
+  }
+
+  private notifyHoursListeners() {
+    this.hoursListeners.forEach((fn) => fn());
   }
 
   // ------ Core mutations ------
@@ -420,6 +526,7 @@ export class JourneyStore {
       addedAt,
       removedAt: undefined, // clear removedAt — the game is (back) in library
     });
+    this.markDirty(entry.gameId);
 
     this.invalidateSortedCache();
     this.scheduleSave();
@@ -447,6 +554,7 @@ export class JourneyStore {
         addedAt,
         removedAt: undefined,
       });
+      this.markDirty(entry.gameId);
       changed = true;
     }
     if (changed) {
@@ -464,6 +572,7 @@ export class JourneyStore {
     if (!existing) return;
 
     existing.removedAt = new Date().toISOString();
+    this.markDirty(gameId);
     this.invalidateSortedCache();
     this.scheduleSave();
     this.notifyListeners();
@@ -476,22 +585,50 @@ export class JourneyStore {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
-    if (fields.status !== undefined) existing.status = fields.status;
-    if (fields.hoursPlayed !== undefined) existing.hoursPlayed = fields.hoursPlayed;
-    if (fields.rating !== undefined) existing.rating = fields.rating;
+    // Track WHAT changed: an hours-only change (the 15s live-session tick)
+    // fires only the hours channel; anything else is a general mutation.
+    let generalChange = false;
+    let hoursChange = false;
+    if (fields.status !== undefined && existing.status !== fields.status) {
+      existing.status = fields.status;
+      generalChange = true;
+    }
+    if (fields.hoursPlayed !== undefined && existing.hoursPlayed !== fields.hoursPlayed) {
+      existing.hoursPlayed = fields.hoursPlayed;
+      hoursChange = true;
+    }
+    if (fields.rating !== undefined && existing.rating !== fields.rating) {
+      existing.rating = fields.rating;
+      generalChange = true;
+    }
     if (fields.firstPlayedAt !== undefined) {
       // Reject garbage strings ("undefined", "") that would poison downstream views.
       const iso = toValidIso(fields.firstPlayedAt);
-      if (iso) existing.firstPlayedAt = iso;
+      if (iso && existing.firstPlayedAt !== iso) {
+        existing.firstPlayedAt = iso;
+        generalChange = true;
+      }
     }
     if (fields.lastPlayedAt !== undefined) {
       const iso = toValidIso(fields.lastPlayedAt);
-      if (iso) existing.lastPlayedAt = iso;
+      if (iso && existing.lastPlayedAt !== iso) {
+        existing.lastPlayedAt = iso;
+        generalChange = true;
+      }
     }
 
-    this.invalidateSortedCache();
+    if (!generalChange && !hoursChange) return; // no-op sync: no save, no notify
+
+    this.markDirty(gameId);
     this.scheduleSave();
-    this.notifyListeners();
+    if (generalChange) {
+      this.invalidateSortedCache();
+      this.notifyListeners();
+    } else {
+      // Sort order (addedAt) is unaffected and rows are mutated in place, so
+      // the cached sorted array stays valid — no general notify.
+      this.notifyHoursListeners();
+    }
   }
 
   /**
@@ -507,6 +644,7 @@ export class JourneyStore {
     if (existing.title === trimmed) return;
 
     existing.title = trimmed;
+    this.markDirty(gameId);
     this.invalidateSortedCache();
     this.scheduleSave();
     this.notifyListeners();
@@ -524,6 +662,7 @@ export class JourneyStore {
     if (existing.title === trimmed) return;
 
     existing.title = trimmed;
+    this.markDirty(gameId);
     this.invalidateSortedCache();
     this.scheduleSave();
     this.notifyListeners();
@@ -606,6 +745,7 @@ export class JourneyStore {
 
       if (!existing) {
         this.entries.set(migratedId, migratedIncoming);
+        this.markDirty(migratedId);
         added++;
       } else {
         // Keep earliest addedAt
@@ -637,6 +777,7 @@ export class JourneyStore {
           existing.releaseDate !== merged.releaseDate;
         if (isDifferent) {
           this.entries.set(migratedId, merged);
+          this.markDirty(migratedId);
           updated++;
         } else {
           skipped++;
@@ -660,6 +801,7 @@ export class JourneyStore {
             : firstPlayingTs !== null
               ? new Date(firstPlayingTs).toISOString()
               : entry.addedAt;
+        this.markDirty(entry.gameId);
         backfilled++;
       }
     }
@@ -694,23 +836,25 @@ export class JourneyStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
-    if (this._useLevelDB) {
-      // Fire-and-forget: also nuke the LevelDB namespace so subsequent
-      // hydrates see an empty store. Errors are logged.
-      void (async () => {
-        try {
-          const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
-          if (res.error) console.error('[JourneyStore] clearNamespace failed:', res.error);
-        } catch (err) {
-          console.error('[JourneyStore] Failed to clear LevelDB namespace:', err);
+    this._dirty.clear();
+    if (this._useLevelDB && !this._readOnly) {
+      // Queued: a following importData() save runs only after the wipe has
+      // completed, so clear can no longer land on top of the imported rows.
+      void this._writeQueue.run(async () => {
+        const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+        if (res.error) {
+          console.error('[JourneyStore] clearNamespace failed:', res.error);
+          return; // keep _knownKeys so the next save emits explicit deletes
         }
-      })();
+        this._knownKeys = new Set();
+      });
     }
-    localStorage.removeItem(STORAGE_KEY);
-    // Reset the migration marker so a subsequent clear-then-import cycle
-    // treats the next non-empty localStorage payload as a fresh migration.
-    localStorage.removeItem(MIGRATION_MARKER_KEY);
-    this._knownKeys = new Set();
+    if (!this._readOnly) {
+      localStorage.removeItem(STORAGE_KEY);
+      // Reset the migration marker so a subsequent clear-then-import cycle
+      // treats the next non-empty localStorage payload as a fresh migration.
+      localStorage.removeItem(MIGRATION_MARKER_KEY);
+    }
     this.notifyListeners();
   }
 }

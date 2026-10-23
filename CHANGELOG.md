@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.74] - 2026-10-23
+
+### Fixed — Steam catalog sync ("stuck at 100%")
+- Failed batches counted as completed, so the bar hit 100% when the first pass ended; the v1.0.73 retry round then ran silently (minutes to tens of minutes under rate limiting), and an incomplete run restarted a full 780-batch sync on every launch / Oracle visit. Now: first pass fills 0–90%, retry round has its own `retrying` stage + counters (90–99%), `finalizing` stage, 90 s retry budget, retry skipped when >25% failed, missing games saved as `pendingAppIds` and resumed (only those) after a 15-minute cooldown.
+- Main-process catalog throttle: 4 in flight, one shared 429 pause (Retry-After) instead of per-batch sleeps; 2 attempts in main; every retry logged. Renderer concurrency 8 → 4.
+- Empty app list (IPC failure) keeps the existing catalog (no red error) and backs off. Elapsed timer freezes on done and resets per sync. Resume counts only newly stored games.
+
+### Fixed — Force Re-index crash / Rebuild ANN conflicts
+- One ANN write lease: Rebuild/backfill own clear+add+save; catalog passes, library generation and re-chunk wait at group boundaries; adds are never dropped or interleaved. Build progress has a single owner (no more loader flip-flop). Backfill and Rebuild are single-flight and shared by both Settings buttons; cancel also stops re-chunk and waits for a backfill.
+- Main no longer stacks native indexes on renderer reloads (`loadIndex` no-op when loaded; old index released + GC on clear/dims change); a partial index is never saved; corrupt index files are quarantined (`*.corrupt`) and rebuilt; `addVectors` loads the saved index before creating an empty one, validates vectors, commits id maps only after a successful add, returns `{added, replaced, failed, aborted}`.
+- Forced pass: breaker resume no longer re-forces (no endless restarts), content epoch bumped at most every 5 min, catalog processed in 10k windows, Settings reports done only when both forced passes finish. Graph/galaxy builds use Float32Array vectors behind a heap gate and pause after a forced pass.
+
+### Fixed — reranker visibility
+- Per-run report (tier, scored, time, score spread, positions moved) logged and shown: Oracle chip, Embedding Space badge, System Status "Last rerank". Tier detection made while Ollama was down is never cached; reset after rerank-model pulls. Request ids + `ollama:rerankCancel`. Tier-aware budgets (Qwen 60 s / top 40 for Oracle; 8 s / 24 candidates for neighbors). Constant scores → `no_signal` (not applied). Native rows sorted by score. Shelves no longer reshuffle when a rerank lands. Failed neighbor reranks cached 30 s, not 10 min.
+
+### Fixed — Embedding Space
+- Approach "giant pink ball": the frontier aurora lit almost every star on real data (prototype relied on a mock-data floor). Now a PPR-percentile band (≈80th–97th), capped at 1,500 points, pixel-size cap and lower alpha.
+- Neighbours: raw-similarity floor (0.45, relaxed to 0.6 for at least 3), heuristic adjustments capped, umbrella-brand franchise boost needs a shared studio, rerank pool 24 with rank blending (coarse rerankers keep similarity order), chunk-kind weighting in max-sim (description/similar chunks count less — also improves Oracle ANN retrieval and Similar Games), publisher dropped from rerank text, stale-but-indexed vectors used for queries, "approximate" banner when falling back to 3D proximity.
+- Search / long hops: arc and duration scale with distance (up to ~5 s, pulls out toward Approach), and crossing Approach mid-flight no longer clears the selection.
+- New loader: weighted overall % with progress inside stages, plain-language messages that wrap, orbit/constellation design.
+
+### Fixed — core reliability
+- Session tracking mounts at the app root (playtime tracked with auto-launch / before "Enter Ark"); finished sessions queued in main (`pending-sessions.json`) until the renderer acks them after they are on disk; replays are idempotent; hours aren't recomputed from a read-only session store.
+- Auto On-Hold measures from the latest of last played / `statusChangedAt` / last switch to Playing.
+- LevelDB `getAll` skips corrupt rows; a failed read retries (~9 s) and then puts that store in read-only mode with a banner — never falls back to the frozen v1.0.61 localStorage copy. status-history merges pre-hydration records. Store writes are serialized and only changed rows are written; hours ticks use hours-only channels (no full Dashboard re-render every 15 s).
+- Epic Cloudflare: only `cf_clearance` counts, reset on 403, solver cooldown, no full Epic cache wipe per launch.
+- Main: stray exceptions after startup are logged (appended, rotated) instead of silently quitting; sessions finalized on quit; LevelDB close awaited (3 s cap); crash-loop breaker → safe mode (packaged builds only) skipping heavy startup work; `app:showAndFocus`; unique temp files in safe-write; webview URL validated first; notifications allowed for Ark's own window.
+
+### Added
+- Settings: embedding batch-size slider (Auto/16–512) with live VRAM meter (`ollama:gpuStats`: nvidia-smi + Ollama model VRAM, OK/Tight/Too high), plain-language names across AI Models and Features.
+- Ark Wrapped rewrite: correct per-year stats (session hours, status history, year-scoped streaks, January → previous year), working confetti and image export, transform/opacity-only animation, responsive slides, keyboard controls; seasonal banner + one desktop notification per season (15 Dec – 2 Jan; force with `localStorage['ark-wrapped-force-season']='1'|'always'`).
+- Library status badge updates instantly (optimistic).
+
+### Under the hood
+- Vitest runs isolated per file (`isolate: true`, 20 s test timeout); the full suite is deterministic again: 1,284 tests passing.
+
 ## [1.0.73] - 2026-10-22
 
 Pipeline hardening for user reports of slowness and "stuck for hours" in ingestion, embeddings and Oracle (three code audits → fixes → independent regression review).

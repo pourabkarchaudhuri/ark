@@ -16,6 +16,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { SessionStore } from './session-store';
+import { __resetStorageHealthForTests, __setStorageRetryDelaysForTests } from './storage-health';
 import { GameSession } from '@/types/game';
 
 // ---------------------------------------------------------------------------
@@ -125,6 +126,8 @@ function installFakeStore(opts: FakeStoreOpts = {}): {
 
 beforeEach(() => {
   localStorage.clear();
+  __setStorageRetryDelaysForTests([0, 0]);
+  __resetStorageHealthForTests();
   // Ensure a clean gate for each test.
   Object.defineProperty(window, 'store', {
     value: undefined,
@@ -206,7 +209,8 @@ describe('SessionStore — LevelDB hydration', () => {
     expect(listener).toHaveBeenCalled();
   });
 
-  it('falls back to localStorage when the getAll IPC returns an error', async () => {
+  // Audit item 3: pre-migration the legacy log is shown, but READ-ONLY.
+  it('pre-migration getAll error shows the legacy log read-only (no writes)', async () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -215,12 +219,36 @@ describe('SessionStore — LevelDB hydration', () => {
         lastUpdated: 'x',
       }),
     );
-    installFakeStore({ getAllError: 'rate_limited' });
+    const { calls } = installFakeStore({ getAllError: 'rate_limited' });
 
     const store = new SessionStore();
     await store.ready;
 
     expect(store.getForGame('steam-9')).toHaveLength(1);
+    expect(store.isReadOnly()).toBe(true);
+    store.record(makeSession({ id: 'd2', gameId: 'steam-9' }));
+    await store.persistNow();
+    expect(calls.batch.length).toBe(0);
+  });
+
+  it('after the migration marker a getAll error never resurrects the legacy log', async () => {
+    localStorage.setItem(MIGRATION_MARKER, 'yes');
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        entries: [makeSession({ id: 'stale', gameId: 'steam-9' })],
+        lastUpdated: 'x',
+      }),
+    );
+    const { calls } = installFakeStore({ getAllError: 'IO error' });
+
+    const store = new SessionStore();
+    await store.ready;
+
+    expect(store.getAll()).toEqual([]);
+    expect(store.isReadOnly()).toBe(true);
+    expect(calls.getAll).toBe(3);
   });
 });
 
