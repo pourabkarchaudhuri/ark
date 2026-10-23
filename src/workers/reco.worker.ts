@@ -241,7 +241,12 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   // ── 3. Build negative / positive taste profiles ──
   progress('Mining negative signals...', 12);
-  const negativeProfile = buildNegativeProfile(userGames, now, thumbsDownCandidates);
+  // Dismissed cards (excluding thumbs-down, which already count) feed the negative profile with decay.
+  const dismissedAt = new Map((input.dismissedMine ?? []).map(d => [d.id, d.at]));
+  const dismissedFeedback = candidates
+    .filter(c => dismissedAt.has(c.gameId) && !thumbsDownSet.has(c.gameId))
+    .map(c => ({ candidate: c, at: dismissedAt.get(c.gameId) ?? 0 }));
+  const negativeProfile = buildNegativeProfile(userGames, now, thumbsDownCandidates, dismissedFeedback);
   const positiveProfile = buildPositiveProfile(userGames, thumbsUpCandidates);
 
   // F8: notes tokens from loved / evidence games

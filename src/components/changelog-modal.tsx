@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.82': {
+    title: "What's New in Ark 1.0.82",
+    changes: [
+      'Your feedback now actually counts: one thumbs-up, thumbs-down or dismissal visibly changes what Oracle suggests next, and dismissed games teach it what to avoid.',
+      'New Undo button after dismissing a recommendation (it also undoes a thumbs-down).',
+      'Oracle learns which shelves you really use: dismissing a game no longer counts as a click, and a shelf only counts as shown when you can actually see it.',
+      'The first change you make to your library in a session now refreshes recommendations right away, and stale results are no longer saved after you dismiss something.',
+      'This completes the Oracle quality overhaul that began in 1.0.75. Because rankings changed, Oracle will recalculate once after updating.',
+    ],
+  },
   '1.0.81': {
     title: "What's New in Ark 1.0.81",
     changes: [

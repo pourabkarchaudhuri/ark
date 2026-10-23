@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.82] - 2026-10-23
+
+Eighth and last step of the Oracle recommendation-quality plan: the feedback loop and state correctness. **Ranking changes** (engine version 8).
+
+### Fixed — feedback actually changes recommendations
+- **Thumbs and dismissals had almost no effect.** The thumbs profile's strength was `count ÷ library size`, so one thumbs-down in a 300-game library scored 0.003. It now depends on how much explicit feedback exists (0.25 for the first item, +0.05 each, capped at 0.6).
+- **Dismissed cards now teach the negative profile** (exact dismissals only, weight 0.8, 30-day half-life) instead of only being hidden.
+- **Mutes fit the signal.** A thumbs-down keeps the full franchise (14 d) / developer (7 d) mutes; a plain dismiss — often just "I already own it" — mutes the franchise for 5 days and the developer for 2. Existing thumbs-down dismissals are recognised as strong.
+- **Undo.** Dismissing shows an "Undo" chip for 8 seconds. Undoing a dismissal also clears a thumbs-down (it used to survive, so an "undone" game stayed excluded and kept feeding the negative profile), including the cross-store twin.
+- **Thumbs rows are no longer evicted** by a flood of plain click history (the 200-row cap now applies to clicks only; thumbs have their own 1,000-row cap).
+
+### Fixed — shelf bandit
+- **Dismissing no longer counts as a click** (the X and Explain buttons sit inside the card and the card-wide click capture rewarded the shelf for them).
+- **Impressions happen when a shelf is actually seen** (≥40% visible), once per shelf per compute, instead of on mount (which re-counted on every remount).
+- **Clicks are idempotent and honest:** the first click on a shelf instance turns *its own* impression into a success; extra clicks add nothing; a click can no longer steal failures recorded by other shelves.
+- **Evidence decays** with a 30-day half-life toward the prior, and below-the-fold shelves carry proportionally less evidence (both successes and failures, so position does not skew click rate).
+
+### Fixed — state correctness
+- **The first library change of a session now refreshes Oracle.** It used to be consumed as "the baseline" and silently ignored.
+- **A compute that finishes after a dismiss / thumbs / library change is not cached** — including by the background rerank, which used to capture the already-bumped epoch and re-save the stale shelves under a signature that validated.
+- **A rerank re-save no longer relabels the pipeline stages** the shelves were actually computed with.
+- **Writes made before the async LevelDB hydrate finishes are no longer lost** (bandit arms and history rows touched in that window are merged over the persisted rows; reads do not count as writes).
+- **The neighbour-graph signature includes the embedding layout versions** (vector count alone let a re-embed that kept the count keep serving a graph built from the old vectors).
+- `Math.min/max(...sessions)` replaced by loops (a heavily played game could overflow the argument limit).
+
+### Hardened after an independent review (before release)
+- Bandit read paths no longer mark arms as "touched" (a pre-hydrate render could overwrite learned evidence), position weighting made symmetric, decay applied when reversing an impression's failure, undo also clears the prefetched twin, and the rerank epoch fix above.
+
+### Not in this release (tracked in docs/known-gaps.md)
+- Atomic single-record persistence of the neighbour graph and dropping the unused PPR/hub/authority compute from the Oracle path; per-instance bandit state surviving a reload.
+
+### Tests
+- New: bandit idempotence/decay/position/hydrate-race, history undo/strong/eviction/hydrate-race, feedback strength and dismissal mining, graph signature, cache-epoch guards (including the rerank path).
+
 ## [1.0.81] - 2026-10-23
 
 Seventh step of the Oracle recommendation-quality plan: the late stages — the AI rerank and the diversity pass. **Ranking changes** (engine version 7).

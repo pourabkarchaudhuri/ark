@@ -1,3 +1,4 @@
+import { annGraphSignature } from '@/services/graph-signature';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const build = vi.fn();
@@ -216,7 +217,7 @@ describe('resolveGraphScores', () => {
     build.mockResolvedValue(true);
 
     await resolveGraphScores([stubUser('steam-1')]);
-    expect(build).toHaveBeenCalledWith('ann-100', expect.anything());
+    expect(build).toHaveBeenCalledWith(annGraphSignature(100), expect.anything());
     graphMeta = null;
   });
 
@@ -271,6 +272,6 @@ describe('resolveGraphScores', () => {
     });
     const result = await resolveGraphScores([stubUser('steam-1')]);
     expect(result.graphScoresMap).toEqual(scores);
-    expect(build).toHaveBeenCalledWith('ann-100', expect.not.objectContaining({ force: true }));
+    expect(build).toHaveBeenCalledWith(annGraphSignature(100), expect.not.objectContaining({ force: true }));
   });
 });

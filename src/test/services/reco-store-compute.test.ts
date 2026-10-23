@@ -272,6 +272,30 @@ describe('RecoStore background rerank', () => {
     win.settings = savedSettings;
   });
 
+  it('a rerank that applies after a mid-compute invalidation does not re-save the stale shelves (R8)', async () => {
+    win.ollama = {
+      rerank: vi.fn(async () => ({
+        results: [{ index: 1, relevance_score: 0.9 }, { index: 0, relevance_score: 0.1 }],
+        via: 'native',
+        report: { requestId: null, tier: 'native', scored: 2, requested: 2, elapsedMs: 1, scoreMin: 0.1, scoreMax: 0.9, scoreStdev: 0.4, truncated: false },
+      })),
+    };
+    const { store, anyStore } = makeStore();
+    const gen = ++anyStore.computeGeneration;
+    anyStore.state = { ...anyStore.state, status: 'computing' };
+    anyStore.computeCacheEpoch = anyStore.cacheEpoch;
+    store.invalidateCacheOnly(); // a dismiss landed while the worker was running
+    const msg = workerResult('stale');
+    msg.shelves[0].games = [
+      { gameId: 'steam-1', title: 'A', score: 0.9, genres: [], themes: [] } as any,
+      { gameId: 'steam-2', title: 'B', score: 0.8, genres: [], themes: [] } as any,
+    ];
+    anyStore.finishWorkerResult(msg, gen);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(store.getState().oracleRerankStatus.outcome).toBe('applied');
+    expect(anyStore.saveResultsToCache).not.toHaveBeenCalled();
+  });
+
   it('publishes "done" with worker order before rerank; a hung rerank times out', async () => {
     const rerank = vi.fn(() => new Promise(() => {})); // main-process cascade never answers
     win.ollama = { rerank };
@@ -324,5 +348,27 @@ describe('RecoStore background rerank', () => {
     store.scheduleRefresh();
     await vi.advanceTimersByTimeAsync(LIBRARY_REFRESH_DEBOUNCE_MS + 10);
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('RecoStore cache epoch (R8)', () => {
+  it('saves the result when nothing invalidated the cache during the compute', () => {
+    const { anyStore } = makeStore();
+    const gen = ++anyStore.computeGeneration;
+    anyStore.state = { ...anyStore.state, status: 'computing' };
+    anyStore.computeCacheEpoch = anyStore.cacheEpoch;
+    anyStore.finishWorkerResult(workerResult('fresh'), gen);
+    expect(anyStore.saveResultsToCache).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a result that a dismiss/thumbs/library change invalidated mid-compute', () => {
+    const { store, anyStore } = makeStore();
+    const gen = ++anyStore.computeGeneration;
+    anyStore.state = { ...anyStore.state, status: 'computing' };
+    anyStore.computeCacheEpoch = anyStore.cacheEpoch;
+    store.invalidateCacheOnly(); // e.g. the user dismissed a game while the worker was running
+    anyStore.finishWorkerResult(workerResult('stale'), gen);
+    expect(store.getState().status).toBe('done'); // still shown…
+    expect(anyStore.saveResultsToCache).not.toHaveBeenCalled(); // …but never cached
   });
 });

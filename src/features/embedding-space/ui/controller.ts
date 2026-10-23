@@ -4,6 +4,7 @@
  * owns the engine, data, timers and every interaction. UI state goes through
  * a synchronous get/set pair so handlers never read stale state.
  */
+import { annGraphSignature } from '@/services/graph-signature';
 import type React from 'react';
 import * as THREE from 'three';
 import { toPng } from 'html-to-image';
@@ -324,7 +325,7 @@ export class EmbeddingSpaceController {
     void (async () => {
       try {
         const status = await window.ann!.status();
-        if (status.ready && status.vectorCount > 0) void gameGraphStore.build(`ann-${status.vectorCount}`).catch(() => {});
+        if (status.ready && status.vectorCount > 0) void gameGraphStore.build(annGraphSignature(status.vectorCount)).catch(() => {});
       } catch { /* ANN unavailable */ }
     })();
   }

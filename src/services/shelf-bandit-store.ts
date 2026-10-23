@@ -47,6 +47,19 @@ interface ArmState {
   beta: number;   // failures + 1
   impressions: number;
   clicks: number;
+  /** Last time the counts were decayed/updated (ms). Missing on arms saved by older versions. */
+  updatedAt?: number;
+}
+
+/** Evidence half-life: tastes and layouts change, so old impressions/clicks fade toward the prior. */
+export const BANDIT_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
+/** Below-the-fold shelves are seen less, so their whole observation (click or not) counts for less: weight = 1 / (1 + k·position). */
+export const BANDIT_POSITION_DECAY = 0.1;
+const MAX_TRACKED_INSTANCES = 500;
+
+/** Impression weight for a shelf at 0-based `position` on the page. */
+export function impressionWeight(position: number): number {
+  return 1 / (1 + BANDIT_POSITION_DECAY * Math.max(0, position));
 }
 
 const DEFAULT_ARM: ArmState = { alpha: 1, beta: 1, impressions: 0, clicks: 0 };
@@ -69,6 +82,13 @@ class ShelfBanditStore {
    */
   private _knownKeys: Set<string> = new Set();
 
+  /** Arm keys written before the async LevelDB hydrate finished — merged back over the hydrated rows. */
+  private _touched: Set<string> = new Set();
+  private _hydrated = false;
+
+  /** Per shelf-instance (one shelf in one compute) impression/click state — makes both idempotent. */
+  private instances = new Map<string, { impressed: boolean; clicked: boolean; weight: number; at: number }>();
+
   /**
    * Exposed for tests / callers that want to await the async hydration
    * finishing (LevelDB path only — localStorage path resolves immediately).
@@ -84,7 +104,10 @@ class ShelfBanditStore {
     // render already sees the learned arm state.
     this.hydrateFromLocalStorage();
 
-    this.ready = this._useLevelDB ? this.initializeFromLevelDB() : Promise.resolve();
+    this.ready = this._useLevelDB
+      ? this.initializeFromLevelDB().finally(() => { this._hydrated = true; this._touched.clear(); })
+      : Promise.resolve();
+    if (!this._useLevelDB) this._hydrated = true;
 
     if (typeof window !== 'undefined' && !_shelfBanditBeforeUnloadInstalled) {
       _shelfBanditBeforeUnloadInstalled = true;
@@ -150,6 +173,12 @@ class ShelfBanditStore {
         arms.set(row.key, row.value);
         known.add(row.key);
       }
+    }
+    // Writes made while the async hydrate was in flight must not be lost to it: re-apply the arms touched
+    // since construction on top of the persisted rows.
+    for (const key of this._touched) {
+      const local = this.arms.get(key);
+      if (local) arms.set(key, local);
     }
     this.arms = arms;
     this._knownKeys = known;
@@ -271,11 +300,46 @@ class ShelfBanditStore {
 
   // ── Core arm state ──
 
-  private getArm(shelfType: string): ArmState {
-    if (!this.arms.has(shelfType)) {
-      this.arms.set(shelfType, { ...DEFAULT_ARM });
+  private getArm(shelfType: string, now: number = Date.now()): ArmState {
+    let arm = this.arms.get(shelfType);
+    if (!arm) {
+      arm = { ...DEFAULT_ARM, updatedAt: now };
+      this.arms.set(shelfType, arm);
     }
-    return this.arms.get(shelfType)!;
+    this.decay(arm, now);
+    return arm;
+  }
+
+  /** Fade the evidence in `arm` toward the (1,1) prior with a BANDIT_HALF_LIFE_MS half-life. */
+  private decay(arm: ArmState, now: number) {
+    const last = typeof arm.updatedAt === 'number' ? arm.updatedAt : now;
+    const dt = now - last;
+    if (dt > 0) {
+      const f = Math.pow(0.5, dt / BANDIT_HALF_LIFE_MS);
+      arm.alpha = 1 + (arm.alpha - 1) * f;
+      arm.beta = 1 + (arm.beta - 1) * f;
+      arm.impressions *= f;
+      arm.clicks *= f;
+    }
+    arm.updatedAt = now;
+  }
+
+  /** Writes (not reads) mark an arm as touched, so a pre-hydrate render never overwrites persisted evidence. */
+  private markTouched(shelfType: string) {
+    if (!this._hydrated) this._touched.add(shelfType);
+  }
+
+  private instance(key: string) {
+    let inst = this.instances.get(key);
+    if (!inst) {
+      inst = { impressed: false, clicked: false, weight: 1, at: Date.now() };
+      this.instances.set(key, inst);
+      if (this.instances.size > MAX_TRACKED_INSTANCES) {
+        const first = this.instances.keys().next().value;
+        if (first !== undefined) this.instances.delete(first);
+      }
+    }
+    return inst;
   }
 
   /**
@@ -285,6 +349,7 @@ class ShelfBanditStore {
    */
   recordReward(shelfType: string, reward: 0 | 1) {
     const arm = this.getArm(shelfType);
+    this.markTouched(shelfType);
     arm.impressions++;
     if (reward === 1) {
       arm.alpha += 1;
@@ -295,21 +360,53 @@ class ShelfBanditStore {
     this.save();
   }
 
-  /** Record that a shelf was shown (impression) without a click yet. */
-  recordImpression(shelfType: string) {
-    this.recordReward(shelfType, 0);
+  /**
+   * Record that a shelf was seen. Idempotent per `instanceId` (one shelf in one compute): a remount or a
+   * re-scroll must not add another failure. `position` (0-based shelf position on the page) down-weights
+   * shelves that sit below the fold.
+   */
+  recordImpression(shelfType: string, instanceId?: string, position = 0) {
+    if (!instanceId) { this.recordReward(shelfType, 0); return; }
+    const inst = this.instance(instanceId);
+    if (inst.impressed) return;
+    inst.impressed = true;
+    inst.weight = impressionWeight(position);
+    inst.at = Date.now();
+    const arm = this.getArm(shelfType);
+    this.markTouched(shelfType);
+    arm.impressions += 1;
+    arm.beta += inst.weight;
+    this.save();
   }
 
-  /** Record that a user clicked on a game within a shelf. */
-  recordClick(shelfType: string) {
-    // We need to undo the beta increment from the impression,
-    // and add an alpha increment instead.
+  /**
+   * Record that the user opened a game in a shelf. Idempotent per `instanceId`: the first click turns that
+   * instance's impression (a failure) into a success; further clicks in the same instance add nothing, and
+   * the conversion only ever reverses THIS instance's own failure — never prior failures from other shelves.
+   */
+  recordClick(shelfType: string, instanceId?: string) {
     const arm = this.getArm(shelfType);
-    arm.alpha += 1;
+    this.markTouched(shelfType);
+    if (!instanceId) {
+      // Legacy callers (no instance id): behave as before, but never drive beta below its prior.
+      arm.alpha += 1;
+      arm.clicks += 1;
+      arm.beta = Math.max(1, arm.beta - 1);
+      this.save();
+      return;
+    }
+    const inst = this.instance(instanceId);
+    if (inst.clicked) return;
+    inst.clicked = true;
+    // Position weighting is symmetric (the whole observation is scaled), so below-the-fold shelves carry less
+    // evidence but are not made to look better per click.
+    arm.alpha += inst.weight;
     arm.clicks += 1;
-    // Don't double-count: if we already recorded an impression,
-    // the beta was already incremented. Reverse it.
-    if (arm.beta > 1) arm.beta -= 1;
+    if (inst.impressed) {
+      // The failure recorded at impression time has since decayed; reverse only what is left of it.
+      const left = inst.weight * Math.pow(0.5, Math.max(0, Date.now() - inst.at) / BANDIT_HALF_LIFE_MS);
+      arm.beta = Math.max(1, arm.beta - left);
+    } else { inst.impressed = true; arm.impressions += 1; }
     this.save();
   }
 
@@ -363,13 +460,11 @@ class ShelfBanditStore {
     const rest = shelves.filter(s => s.type !== 'hero');
 
     // Sample from each arm's Beta distribution
-    const scored = rest.map(shelf => ({
-      shelf,
-      sample: this.sampleBeta(
-        this.getArm(shelf.type).alpha,
-        this.getArm(shelf.type).beta,
-      ),
-    }));
+    const now = Date.now();
+    const scored = rest.map(shelf => {
+      const arm = this.getArm(shelf.type, now);
+      return { shelf, sample: this.sampleBeta(arm.alpha, arm.beta) };
+    });
 
     // Sort by sampled value (descending)
     scored.sort((a, b) => b.sample - a.sample);
@@ -401,7 +496,11 @@ class ShelfBanditStore {
    */
   snapshotArms(): Record<string, { alpha: number; beta: number }> {
     const out: Record<string, { alpha: number; beta: number }> = {};
-    for (const [key, arm] of this.arms) out[key] = { alpha: arm.alpha, beta: arm.beta };
+    const now = Date.now();
+    for (const [key, arm] of this.arms) {
+      this.decay(arm, now);
+      out[key] = { alpha: arm.alpha, beta: arm.beta };
+    }
     return out;
   }
 

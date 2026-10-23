@@ -41,8 +41,10 @@ const KEY_PREFIX_HISTORY = 'h:';
 
 /** Soft bound — drop oldest dismissals by `at`. */
 const MAX_DISMISSALS = 500;
-/** Soft bound — drop oldest conversion history by `clickedAt`. */
+/** Soft bound — drop oldest conversion history by `clickedAt` (rows with thumbs feedback are exempt). */
 const MAX_HISTORY = 200;
+/** Thumbs rows are explicit feedback: kept far longer than plain click history. */
+const MAX_THUMBS = 1000;
 
 /** Debounce window for coalescing bursts of writes into a single LevelDB batch. */
 const SAVE_DEBOUNCE_MS = 300;
@@ -89,6 +91,13 @@ class RecoHistoryStore {
    */
   private _knownKeys: Set<string> = new Set();
 
+  /** Ids written before the async LevelDB hydrate finished (merged back over the hydrated rows). */
+  private _touchedD: Set<string> = new Set();
+  private _touchedH: Set<string> = new Set();
+  private _hydrated = false;
+  private touchD(id: string) { if (!this._hydrated) this._touchedD.add(id); }
+  private touchH(id: string) { if (!this._hydrated) this._touchedH.add(id); }
+
   /**
    * Exposed for tests / callers that want to await the async hydration
    * finishing (LevelDB path only — localStorage path resolves immediately).
@@ -106,7 +115,10 @@ class RecoHistoryStore {
     // still see data even in the LevelDB pre-hydrate boot window.
     this.hydrateFromLocalStorage();
 
-    this.ready = this._useLevelDB ? this.initializeFromLevelDB() : Promise.resolve();
+    this.ready = this._useLevelDB
+      ? this.initializeFromLevelDB().finally(() => { this._hydrated = true; this._touchedD.clear(); this._touchedH.clear(); })
+      : Promise.resolve();
+    if (!this._useLevelDB) this._hydrated = true;
 
     if (typeof window !== 'undefined' && !_recoHistoryBeforeUnloadInstalled) {
       _recoHistoryBeforeUnloadInstalled = true;
@@ -145,6 +157,7 @@ class RecoHistoryStore {
                 franchiseBase: m.franchiseBase,
                 developer: m.developer,
                 title: m.title,
+                ...(m.strong ? { strong: true } : {}),
               });
             }
           }
@@ -217,6 +230,7 @@ class RecoHistoryStore {
             franchiseBase: m.franchiseBase,
             developer: m.developer,
             title: m.title,
+            ...(m.strong ? { strong: true } : {}),
           });
         }
       } else if (row.key.startsWith(KEY_PREFIX_HISTORY)) {
@@ -225,6 +239,17 @@ class RecoHistoryStore {
           history.set(e.gameId, e);
         }
       }
+    }
+
+    // Writes made while the async hydrate was in flight must not be lost to it: re-apply the rows touched
+    // since construction (present locally → keep ours; absent locally → it was deleted) over the persisted ones.
+    for (const id of this._touchedD) {
+      const local = this.dismissals.get(id);
+      if (local) dismissals.set(id, local); else dismissals.delete(id);
+    }
+    for (const id of this._touchedH) {
+      const local = this.history.get(id);
+      if (local) history.set(id, local); else history.delete(id);
     }
 
     this.dismissals = dismissals;
@@ -302,13 +327,19 @@ class RecoHistoryStore {
       const drop = sorted.slice(0, sorted.length - MAX_DISMISSALS);
       for (const d of drop) this.dismissals.delete(d.gameId);
     }
-    if (this.history.size > MAX_HISTORY) {
-      const sorted = [...this.history.values()].sort((a, b) => {
-        const tDiff = (a.clickedAt || 0) - (b.clickedAt || 0);
-        return tDiff !== 0 ? tDiff : a.gameId.localeCompare(b.gameId);
-      });
-      const drop = sorted.slice(0, sorted.length - MAX_HISTORY);
-      for (const h of drop) this.history.delete(h.gameId);
+    const byAge = (a: RecoConversion, b: RecoConversion) => {
+      const tDiff = (a.clickedAt || 0) - (b.clickedAt || 0);
+      return tDiff !== 0 ? tDiff : a.gameId.localeCompare(b.gameId);
+    };
+    // Plain click history is capped on its own; rows carrying thumbs feedback are explicit signal and are
+    // never evicted by a flood of clicks.
+    const plain = [...this.history.values()].filter(e => e.thumbs === undefined);
+    if (plain.length > MAX_HISTORY) {
+      for (const h of plain.sort(byAge).slice(0, plain.length - MAX_HISTORY)) this.history.delete(h.gameId);
+    }
+    const thumbed = [...this.history.values()].filter(e => e.thumbs !== undefined);
+    if (thumbed.length > MAX_THUMBS) {
+      for (const h of thumbed.sort(byAge).slice(0, thumbed.length - MAX_THUMBS)) this.history.delete(h.gameId);
     }
   }
 
@@ -398,7 +429,7 @@ class RecoHistoryStore {
    */
   dismiss(
     gameId: string,
-    meta?: { title?: string; developer?: string; franchiseBase?: string },
+    meta?: { title?: string; developer?: string; franchiseBase?: string; strong?: boolean },
   ) {
     const title = meta?.title;
     const franchiseBase =
@@ -411,14 +442,25 @@ class RecoHistoryStore {
       franchiseBase: franchiseBase || prev?.franchiseBase,
       developer: meta?.developer || prev?.developer,
       title: title || prev?.title,
+      ...((meta?.strong || prev?.strong) ? { strong: true } : {}),
     });
+    this.touchD(gameId);
     this.save();
     this.notify();
   }
 
-  /** Un-dismiss a game. */
+  /**
+   * Un-dismiss a game. A thumbs-down is cleared too: it used to survive, so an "undone" dismissal kept being
+   * excluded (thumbs-down ids are hard-excluded) and kept feeding the negative profile.
+   */
   undismiss(gameId: string) {
     this.dismissals.delete(gameId);
+    this.touchD(gameId);
+    const entry = this.history.get(gameId);
+    if (entry && entry.thumbs === -1) {
+      entry.thumbs = undefined;
+      this.touchH(gameId);
+    }
     this.save();
     this.notify();
   }
@@ -435,7 +477,10 @@ class RecoHistoryStore {
 
   /** Rich dismiss metadata for hard-negative expand. */
   getDismissals(): DismissMeta[] {
-    return [...this.dismissals.values()];
+    // Dismissals saved before the `strong` flag existed carry no marker: a thumbs-down row still says so.
+    return [...this.dismissals.values()].map(d => (
+      !d.strong && this.history.get(d.gameId)?.thumbs === -1 ? { ...d, strong: true } : d
+    ));
   }
 
   /** Get count of dismissed games. */
@@ -448,6 +493,7 @@ class RecoHistoryStore {
   /** Record that a user clicked on a recommended game. */
   recordClick(gameId: string, title: string, shelfType: string) {
     if (!this.history.has(gameId)) {
+      this.touchH(gameId);
       this.history.set(gameId, {
         gameId,
         title,
@@ -476,6 +522,7 @@ class RecoHistoryStore {
     if (!entry.addedAt) {
       entry.addedAt = Date.now();
       entry.converted = true;
+      this.touchH(gameId);
       this.save();
       this.notify();
     }
@@ -487,6 +534,7 @@ class RecoHistoryStore {
     if (entry && !entry.playedAt) {
       entry.playedAt = Date.now();
       entry.converted = true;
+      this.touchH(gameId);
       this.save();
     }
   }
@@ -497,6 +545,7 @@ class RecoHistoryStore {
     if (entry) {
       entry.rating = rating;
       entry.converted = true;
+      this.touchH(gameId);
       this.save();
     }
   }
@@ -521,12 +570,15 @@ class RecoHistoryStore {
       this.history.set(gameId, entry);
     }
     entry.thumbs = value;
+    this.touchH(gameId);
     if (value === 1) entry.converted = true;
-    // Thumbs-down closes the loop: dismiss so it won't resurface (with franchise meta)
+    // Thumbs-down closes the loop: dismiss so it won't resurface (with franchise meta). It is an explicit
+    // dislike, so its franchise/developer mutes use the full (strong) windows.
     if (value === -1) {
       this.dismiss(gameId, {
         title: title || entry.title,
         developer: meta?.developer,
+        strong: true,
       });
       return; // dismiss already save+notify
     }
@@ -615,6 +667,7 @@ class RecoHistoryStore {
 
   /** Clear all dismissed games. */
   clearDismissed() {
+    for (const id of this.dismissals.keys()) this.touchD(id);
     this.dismissals.clear();
     this.save();
     this.notify();

@@ -99,8 +99,9 @@ export function classifyEngagementCurve(snap: UserGameSnapshot): EngagementPatte
 
   if (sessionCount < 3) return 'unknown';
 
-  const firstTime = Math.min(...sessionTimestamps);
-  const lastTime = Math.max(...sessionTimestamps);
+  let firstTime = Infinity;
+  let lastTime = -Infinity;
+  for (const t of sessionTimestamps) { if (t < firstTime) firstTime = t; if (t > lastTime) lastTime = t; }
   const spanDays = (lastTime - firstTime) / (1000 * 60 * 60 * 24);
 
   // A short run that ended in completion is a finished game, not a dropped one.
@@ -278,10 +279,34 @@ export function buildTasteProfile(games: UserGameSnapshot[], now: number): Taste
 
 // ─── Layer 3: Negative Signal Mining ────────────────────────────────────────────
 
+/**
+ * Strength of the thumbs/dismiss profile. It used to be `count / librarySize` (capped at 0.5), so one thumbs-up
+ * or thumbs-down in a 300-game library had strength 0.003 — no effect at all. Explicit feedback is sparse by
+ * nature, so strength depends on how much of it there is, not on library size: 0.25 for the first item,
+ * +0.05 for each further one, capped at 0.6.
+ */
+export function feedbackStrength(count: number): number {
+  if (count <= 0) return 0;
+  return Math.min(0.6, 0.25 + 0.05 * (count - 1));
+}
+
+
+/** A plain dismissal is weaker than a thumbs-down (and a 1★ rating): it is "not now", not always "never". */
+export const DISMISS_NEGATIVE_WEIGHT = 0.8;
+/** Dismissals fade: a "not interested" from months ago says little about now. */
+export const DISMISS_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
+
+export interface DismissedFeedback {
+  candidate: CandidateGame;
+  /** When it was dismissed (ms). 0/unknown → treated as old. */
+  at: number;
+}
+
 export function buildNegativeProfile(
   games: UserGameSnapshot[],
-  _now: number,
+  now: number,
   thumbsDownCandidates: CandidateGame[] = [],
+  dismissed: DismissedFeedback[] = [],
 ): { vec: FeatureVector; strength: number } {
   const negativeGames = games.filter(g => computeNegativeWeight(g) > 0);
 
@@ -303,14 +328,27 @@ export function buildNegativeProfile(
     addFeatures(c.genres, c.themes, c.developer, 1.5);
   }
 
-  const negCount = negativeGames.length + thumbsDownCandidates.length;
+  // Dismissed (not thumbs-down) cards: decaying, milder negative signal.
+  let dismissCount = 0;
+  for (const d of dismissed) {
+    const age = Math.max(0, now - (d.at || 0));
+    const w = DISMISS_NEGATIVE_WEIGHT * Math.pow(0.5, age / DISMISS_HALF_LIFE_MS);
+    if (w < 0.05) continue;
+    addFeatures(d.candidate.genres, d.candidate.themes, d.candidate.developer, w);
+    dismissCount++;
+  }
+
+  const negCount = negativeGames.length + thumbsDownCandidates.length + dismissCount;
   if (negCount === 0) return { vec: new Map(), strength: 0 };
 
   const maxVal = Math.max(1, ...vec.values());
   for (const [k, v] of vec) vec.set(k, v / maxVal);
 
-  const denom = Math.max(games.length, 1);
-  return { vec, strength: Math.min(negCount / denom, 0.5) };
+  // Library rejections scale with how much of the library they are; explicit feedback (thumbs-down, dismissals)
+  // is sparse, so its strength follows its own count (see feedbackStrength).
+  const libraryShare = Math.min(negativeGames.length / Math.max(games.length, 1), 0.5);
+  const explicit = feedbackStrength(thumbsDownCandidates.length + dismissCount);
+  return { vec, strength: Math.max(libraryShare, explicit) };
 }
 
 // ─── Layer 4: Status Trajectory Scoring ─────────────────────────────────────────

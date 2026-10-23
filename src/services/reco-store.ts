@@ -368,6 +368,10 @@ export class RecoStore {
   private computeGeneration = 0;
   /** Bumped by invalidateCacheOnly (dismiss) — background work must not re-save older shelves. */
   private cacheEpoch = 0;
+  /** `cacheEpoch` when the running compute started. */
+  private computeCacheEpoch = 0;
+  /** Pipeline stages the CURRENT shelves were computed with (a later rerank re-save must not relabel them). */
+  private resultStages: OraclePipelineStages | null = null;
   /** Aborts the in-flight compute's pre-worker steps on refresh/reset. */
   private computeAbort: AbortController | null = null;
   /** Pending debounced `refresh()` from library / thumbs-up changes. */
@@ -416,7 +420,7 @@ export class RecoStore {
         libraryCount: this.state.libraryCount,
         candidateCount: this.state.candidateCount,
         librarySignature: buildOracleLibrarySignature(),
-        pipelineStages: currentOraclePipelineStages(),
+        pipelineStages: this.resultStages ?? currentOraclePipelineStages(),
         engineVersion: ORACLE_ENGINE_VERSION,
         // The saved order may already be the reranked one. Remember that, so a cache restore does not treat
         // it as the worker's order and rerank it a second time (compounding the blend).
@@ -579,6 +583,11 @@ export class RecoStore {
     // and bails instead of starting a parallel pipeline.
     const gen = ++this.computeGeneration;
     this.interactedShelves.clear();
+    // What this compute (or the cache restore it may become) is based on: the library signature to diff
+    // later changes against (the first change of a session used to be swallowed as "the baseline"), and the
+    // cache epoch (a dismiss/thumbs/library change after this point must keep this result out of the cache).
+    markOracleLibraryBaseline();
+    this.computeCacheEpoch = this.cacheEpoch;
     this.computeAbort?.abort();
     const abort = new AbortController();
     this.computeAbort = abort;
@@ -611,6 +620,9 @@ export class RecoStore {
         console.log(`[RecoStore] Restored cached results (${cached.shelves.length} shelves, computed ${Math.round((Date.now() - (cached.lastComputed || 0)) / 1000)}s ago)`);
         const tasteProfile = (cached.tasteProfile as RecoState['tasteProfile']) ?? null;
         const shelves = cached.shelves as RecoShelf[];
+        this.resultStages = isPipelineStages((cached as { pipelineStages?: unknown }).pipelineStages)
+          ? (cached as { pipelineStages: OraclePipelineStages }).pipelineStages
+          : null;
         this.state = {
           ...this.state,
           status: 'done',
@@ -629,7 +641,7 @@ export class RecoStore {
         // Refine shelf order in the background — unless the cached order already IS the reranked one
         // (idempotence: reranking a reranked order compounds the blend).
         if (tasteProfile && shelves.length > 0 && (cached as { reranked?: boolean }).reranked !== true) {
-          void this.rerankShelvesInBackground(gen, tasteProfile, shelves, { persist: 'if-applied' });
+          void this.rerankShelvesInBackground(gen, tasteProfile, shelves, { persist: 'if-applied', epoch: this.computeCacheEpoch });
         }
         return;
       }
@@ -901,6 +913,10 @@ export class RecoStore {
         embeddingCoverage,
         dismissedGameIds,
         thumbsDownIds,
+        // Exact dismissals only (not twins / franchise mutes), minus thumbs-down which already count.
+        dismissedMine: recoHistoryStore.getDismissals()
+          .filter(d => !thumbsDownIds.includes(d.gameId))
+          .map(d => ({ id: d.gameId, at: d.at })),
         thumbsUpIds,
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
         precomputedSemanticScores,
@@ -914,6 +930,7 @@ export class RecoStore {
         userCommunityTotal,
       };
 
+      this.resultStages = currentOraclePipelineStages();
       this.runWorker(input, gen);
     } catch (err) {
       if (isStale()) return;
@@ -1112,8 +1129,10 @@ export class RecoStore {
   ): EngagementPattern {
     if (sessionCount < 3) return 'unknown';
 
-    const firstTime = Math.min(...timestamps);
-    const lastTime = Math.max(...timestamps);
+    let firstTime = Infinity;
+    let lastTime = -Infinity;
+    // Loop, not Math.min(...): a heavily played game can have enough sessions to overflow the argument limit.
+    for (const t of timestamps) { if (t < firstTime) firstTime = t; if (t > lastTime) lastTime = t; }
     const spanDays = (lastTime - firstTime) / (1000 * 60 * 60 * 24);
 
     if (spanDays <= 3 && sessionCount >= 3) return 'binge-drop';
@@ -2247,9 +2266,11 @@ export class RecoStore {
     genAtStart: number,
     tasteProfile: TasteProfile,
     shelves: RecoShelf[],
-    opts: { persist: 'if-applied' | 'never' },
+    opts: { persist: 'if-applied' | 'never'; epoch?: number },
   ) {
-    const cacheEpochAtStart = this.cacheEpoch;
+    // The epoch the SHELVES were computed under (not "now"): a dismiss during the compute already bumped
+    // cacheEpoch, and a rerank that captured the bumped value would re-save the stale shelves.
+    const cacheEpochAtStart = opts.epoch ?? this.cacheEpoch;
     const isCurrent = () =>
       genAtStart === this.computeGeneration
       && this.state.status === 'done'
@@ -2317,11 +2338,13 @@ export class RecoStore {
       telemetry: msg.telemetry ?? null,
     };
     this.notify();
-    this.saveResultsToCache();
+    // A dismiss / thumbs / library change since this compute started invalidated the cache: saving now would
+    // resurrect the result it just invalidated.
+    if (this.cacheEpoch === this.computeCacheEpoch) this.saveResultsToCache();
     this.logShownRun(runId, msg.shelves);
 
     if (msg.tasteProfile && msg.shelves.length > 0) {
-      void this.rerankShelvesInBackground(runId, msg.tasteProfile, msg.shelves, { persist: 'if-applied' });
+      void this.rerankShelvesInBackground(runId, msg.tasteProfile, msg.shelves, { persist: 'if-applied', epoch: this.computeCacheEpoch });
     }
   }
 
@@ -2541,6 +2564,11 @@ export const recoStore = new RecoStore();
 // bursts (Steam sync, bulk edits) coalesce over LIBRARY_REFRESH_DEBOUNCE_MS.
 
 let oracleLibrarySnapBaseline: string | null = null;
+
+/** Called when a compute starts: later library changes are diffed against this signature. */
+function markOracleLibraryBaseline() {
+  oracleLibrarySnapBaseline = buildOracleLibrarySignature();
+}
 let oracleLibraryInvalidateTimer: ReturnType<typeof setTimeout> | null = null;
 
 function scheduleOracleInvalidateOnLibraryChange() {
@@ -2549,10 +2577,8 @@ function scheduleOracleInvalidateOnLibraryChange() {
   oracleLibraryInvalidateTimer = setTimeout(() => {
     oracleLibraryInvalidateTimer = null;
     const snap = buildOracleLibrarySignature();
-    if (oracleLibrarySnapBaseline === null) {
-      oracleLibrarySnapBaseline = snap;
-      return;
-    }
+    // No compute has run yet: the first compute will read the current library anyway.
+    if (oracleLibrarySnapBaseline === null) return;
     if (snap === oracleLibrarySnapBaseline) return;
     oracleLibrarySnapBaseline = snap;
     recoStore.refresh();

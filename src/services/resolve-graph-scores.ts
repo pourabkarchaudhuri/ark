@@ -10,6 +10,7 @@
  *  4. Cold miss → fire-and-forget build; return undefined this run.
  */
 
+import { annGraphSignature } from '@/services/graph-signature';
 import type { UserGameSnapshot } from '@/types/reco';
 import { annIndex } from '@/services/ann-index';
 import { gameGraphStore } from '@/services/game-graph-store';
@@ -162,7 +163,7 @@ export async function resolveGraphScores(
 
   if (gameGraphStore.isReady) {
     if (annIndex.isReady) {
-      const sig = `ann-${annIndex.vectorCount}`;
+      const sig = annGraphSignature(annIndex.vectorCount);
       // Serving an older graph (restored or throttled earlier): ask again — build() is
       // throttled and non-blocking here, so this just retries once the window passes.
       const loaded = gameGraphStore.meta?.signature;
@@ -182,7 +183,7 @@ export async function resolveGraphScores(
     return { ...EMPTY_PACK };
   }
 
-  const sig = `ann-${annIndex.vectorCount}`;
+  const sig = annGraphSignature(annIndex.vectorCount);
 
   try {
     // In-flight build: single deadline wait (no post-timeout second waitReady).

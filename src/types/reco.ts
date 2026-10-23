@@ -332,6 +332,8 @@ export interface RecoWorkerInput {
   dismissedGameIds: string[];
   /** Thumbs-down ids — mined into the negative taste profile (also dismissed). */
   thumbsDownIds?: string[];
+  /** Exact dismissals (not expanded twins/franchise mutes) with their time — mined into the negative profile with decay. */
+  dismissedMine?: Array<{ id: string; at: number }>;
   /** Thumbs-up ids — mined into the positive taste profile (stay in candidate pool). */
   thumbsUpIds?: string[];
   /** Precomputed taste centroid (768-dim). Undefined if no library embeddings. */

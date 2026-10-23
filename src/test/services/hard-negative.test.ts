@@ -54,11 +54,21 @@ describe('expandHardNegativeIds (F3)', () => {
         at: now - DEVELOPER_MUTE_MS + 60_000,
         developer: 'Playground Games',
         title: 'Forza Motorsport',
+        strong: true,
       }],
       catalog,
       now,
     );
     expect(ids).toContain('steam-99');
     expect(ids).toContain('steam-3');
+  });
+
+  it('a plain dismissal mutes the developer only briefly; a thumbs-down mutes it for the full window', () => {
+    const base = { gameId: 'steam-99', developer: 'Playground Games', title: 'Forza Motorsport' };
+    const age = 4 * 24 * 60 * 60 * 1000; // 4 days: past the soft window, inside the strong one
+    const soft = expandHardNegativeIds([{ ...base, at: now - age }], catalog, now);
+    const strong = expandHardNegativeIds([{ ...base, at: now - age, strong: true }], catalog, now);
+    expect(soft).not.toContain('steam-3');
+    expect(strong).toContain('steam-3');
   });
 });

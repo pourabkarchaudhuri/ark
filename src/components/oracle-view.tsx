@@ -1119,10 +1119,13 @@ const OracleCard = memo(function OracleCard({
   onDismiss,
   onExplain,
   explaining,
+  instanceKey,
 }: {
   game: ScoredGame;
   index: number;
   shelfType?: string;
+  /** Shelf instance (one shelf in one compute) — makes bandit click rewards idempotent. */
+  instanceKey?: string;
   onDismiss?: (gameId: string) => void;
   /** Stable identity from OracleView — this component is memoized. */
   onExplain?: (gameId: string) => void;
@@ -1148,15 +1151,17 @@ const OracleCard = memo(function OracleCard({
     wasExplaining.current = !!explaining;
   }, [explaining]);
 
-  const handleClickCapture = useCallback(() => {
-    // `capture: true` — this fires for any click inside the card (including X / Explain);
-    // dismiss / explain-open are logged separately so analysis can subtract them.
+  const handleClickCapture = useCallback((e: React.MouseEvent) => {
+    // The X (dismiss) and Explain buttons live inside the card, so the card-wide capture saw them too:
+    // dismissing a game used to count as a "click" and reward the shelf it was dismissed from.
+    const target = e.target as HTMLElement | null;
+    if (target?.closest?.('[data-oracle-control]')) return;
     oracleEventLog.record({ type: 'click', gameId: game.gameId, shelfType, data: { capture: true } });
     if (shelfType) {
-      shelfBanditStore.recordClick(shelfType);
+      shelfBanditStore.recordClick(shelfType, instanceKey);
       recoHistoryStore.recordClick(game.gameId, game.title, shelfType);
     }
-  }, [game.gameId, game.title, shelfType]);
+  }, [game.gameId, game.title, shelfType, instanceKey]);
 
   const handleDismiss = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1260,6 +1265,7 @@ const OracleCard = memo(function OracleCard({
         <TooltipCard content="See why the Oracle picked this game for you — match score breakdown, genre overlap, and reasoning.">
           <button
             ref={explainBtnRef}
+            data-oracle-control="explain"
             onClick={toggleExplain}
             aria-expanded={!!explaining}
             aria-controls={ORACLE_RIGHT_PANEL_ID}
@@ -1277,6 +1283,7 @@ const OracleCard = memo(function OracleCard({
         {onDismiss && (
           <TooltipCard content="Dismiss this recommendation — the Oracle won't suggest it again. Helps refine future picks.">
             <button
+              data-oracle-control="dismiss"
               onClick={handleDismiss}
               className="p-1 rounded-full bg-black/60 text-white/40 hover:text-red-400 hover:bg-black/80 transition-all duration-200"
             >
@@ -1297,11 +1304,17 @@ function ShelfCarousel({
   onDismiss,
   onExplain,
   explainingId,
+  instanceKey,
+  shelfPosition,
 }: {
   shelf: RecoShelf;
   onDismiss?: (gameId: string) => void;
   onExplain?: (gameId: string) => void;
   explainingId?: string | null;
+  /** One shelf in one compute (`lastComputed|shelf key`) — makes bandit impressions/clicks idempotent. */
+  instanceKey: string;
+  /** 0-based position on the page (below-the-fold shelves count less). */
+  shelfPosition: number;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -1332,19 +1345,30 @@ function ShelfCarousel({
     el.scrollBy({ left: dir === 'left' ? -400 : 400, behavior: 'smooth' });
   };
 
-  // Record impression when shelf becomes visible
-  const impressionRecorded = useRef(false);
+  // Impression = the shelf was actually scrolled into view (not merely mounted), once per shelf per compute.
+  const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!impressionRecorded.current && shelf.games.length > 0) {
-      impressionRecorded.current = true;
-      shelfBanditStore.recordImpression(shelf.type);
+    const el = rootRef.current;
+    if (!el || shelf.games.length === 0) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      shelfBanditStore.recordImpression(shelf.type, instanceKey, shelfPosition);
+      return;
     }
-  }, [shelf.type, shelf.games.length]);
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some(en => en.isIntersecting && en.intersectionRatio >= 0.4)) {
+        shelfBanditStore.recordImpression(shelf.type, instanceKey, shelfPosition);
+        obs.disconnect();
+      }
+    }, { threshold: [0.4] });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [shelf.type, shelf.games.length, instanceKey, shelfPosition]);
 
   if (shelf.games.length === 0) return null;
 
   return (
     <motion.div
+      ref={rootRef}
       initial={{ opacity: 0, y: 24 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5 }}
@@ -1398,6 +1422,7 @@ function ShelfCarousel({
             onDismiss={onDismiss}
             onExplain={onExplain}
             explaining={explainingId === game.gameId}
+            instanceKey={instanceKey}
           />
         ))}
       </div>
@@ -1950,6 +1975,15 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     recoStore.invalidateCacheOnly();
   }, []);
 
+  // Undo for a dismissal / thumbs-down: a mis-click used to be permanent (the game is hard-excluded and, for a
+  // thumbs-down, kept feeding the negative profile). The chip stays for a few seconds.
+  const [undoDismiss, setUndoDismiss] = useState<{ gameId: string; title: string } | null>(null);
+  useEffect(() => {
+    if (!undoDismiss) return;
+    const t = setTimeout(() => setUndoDismiss(null), 8_000);
+    return () => clearTimeout(t);
+  }, [undoDismiss]);
+
   const handleDismiss = useCallback((gameId: string) => {
     const fromShelf = state.shelves.flatMap(s => s.games).find(g => g.gameId === gameId);
     recoHistoryStore.dismiss(gameId, {
@@ -1957,7 +1991,22 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
       developer: fromShelf?.developer,
     });
     applyLiveHardNegFilter(state.shelves);
+    setUndoDismiss({ gameId, title: fromShelf?.title ?? '' });
   }, [state.shelves, applyLiveHardNegFilter]);
+
+  const handleUndoDismiss = useCallback(() => {
+    if (!undoDismiss) return;
+    recoHistoryStore.undismiss(undoDismiss.gameId); // also clears a thumbs-down
+    const lib = libraryStore.getEntry(undoDismiss.gameId);
+    if (lib?.secondaryGameId) recoHistoryStore.undismiss(lib.secondaryGameId);
+    // The thumbs-down path also dismissed the browse row's cross-store twin.
+    const twin = getPrefetchedGames()?.find(g => g.id === undoDismiss.gameId || g.secondaryId === undoDismiss.gameId)?.secondaryId;
+    if (twin) recoHistoryStore.undismiss(twin);
+    setUndoDismiss(null);
+    applyLiveHardNegFilter(state.shelves);
+    recoStore.invalidateCacheOnly();
+    recoStore.scheduleRefresh();
+  }, [undoDismiss, state.shelves, applyLiveHardNegFilter]);
 
   // Stable across renders — OracleCard is memoized and would otherwise
   // re-render every card on every parent render.
@@ -2039,6 +2088,23 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
 
   return (
     <div className="relative h-[calc(100vh-10rem)] overflow-hidden" data-tour="oracle-view-root">
+      {undoDismiss && (
+        <div
+          role="status"
+          className="absolute bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-3 py-2 rounded-md border border-white/[0.1] bg-black/80 backdrop-blur text-[11px] text-white/70 shadow-lg"
+        >
+          <span className="truncate max-w-[260px]">
+            {undoDismiss.title ? `Dismissed ${undoDismiss.title}` : 'Dismissed'}
+          </span>
+          <button
+            type="button"
+            onClick={handleUndoDismiss}
+            className="font-semibold text-fuchsia-300 hover:text-fuchsia-200 cursor-pointer"
+          >
+            Undo
+          </button>
+        </div>
+      )}
       <div className="h-full overflow-y-auto overflow-x-hidden scrollbar-hide">
       <AnimatePresence mode="wait" initial={!alreadyDone.current}>
         {/* Computing state — skeleton background + detailed progress overlay
@@ -2254,6 +2320,8 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                       onDismiss={handleDismiss}
                       onExplain={handleExplain}
                       explainingId={explainingId}
+                      instanceKey={`${state.lastComputed}|${oracleShelfKey(shelf)}`}
+                      shelfPosition={idx}
                     />
                   </div>
                 ))

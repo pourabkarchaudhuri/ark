@@ -3,11 +3,13 @@
  * Shared by reco.worker (scoring) and unit tests.
  */
 
-import { splitCreditedNames } from '@/services/reco-scoring';
+import { feedbackStrength, splitCreditedNames } from '@/services/reco-scoring';
 import type { CandidateGame, UserGameSnapshot } from '@/types/reco';
 import { toCanonicalGenre } from '@/data/canonical-genres';
 
 export type FeatureVector = Map<string, number>;
+
+export { feedbackStrength };
 
 const norm = (s: string) => s.toLowerCase().trim();
 
@@ -46,6 +48,6 @@ export function buildPositiveProfile(
   const maxVal = Math.max(1, ...vec.values());
   for (const [k, v] of vec) vec.set(k, v / maxVal);
 
-  const denom = Math.max(games.length, 1);
-  return { vec, strength: Math.min(posCount / denom, 0.5) };
+  void games;
+  return { vec, strength: feedbackStrength(posCount) };
 }

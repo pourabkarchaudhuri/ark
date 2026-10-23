@@ -192,3 +192,11 @@ The following gaps were fixed and removed from the active list:
 - MMR sketches are un-centred 128-d count-sketches (cosine noise ≈ ±0.1); centring against the pool mean or 256 dims would sharpen the penalty.
 - Pool-wide `mmrVectors` crosses the worker boundary as boxed arrays (~3,000 × 128 numbers); a transferable Float32Array would cut the clone cost.
 - Neighbor (Embedding Space) rerank still uses the old position blend and does not tier-gate.
+
+## Feedback-loop gaps (found during R8)
+- Neighbour-graph persistence is still several records (restore validates by signature only): make it one versioned record or validate array lengths on restore.
+- The Oracle graph path still computes PageRank/hub/authority that only Galaxy uses; drop from the Oracle path or refresh PPR when the library changes.
+- Bandit shelf-instance state (`instances`) is in memory: after an app restart the same cached compute re-counts impressions; multiple shelves of one type (several "Because you loved…") share one arm and each adds a failure but earn at most one click each.
+- Bumping `EMBEDDING_CHUNK_VERSION` before a re-embed finishes would label a graph built from old vectors as current (signature is version-based, not content-based).
+- A pre-hydrate merge keeps the local arm/row wholesale for touched ids (a `strong` flag or count only in the persisted row is lost for those ids).
+- The first-library-change baseline logic has no direct unit test (the handler is module-private); covered by the cache-epoch tests and manual reasoning.

@@ -12,5 +12,6 @@
  *   6 — v1.0.80 recall: over-fetched ANN/BM25 with exclusion-before-cap, quality floor, working cold-start,
  *       pool hygiene, catalogue shelves from the whole scored pool
  *   7 — v1.0.81 late stages: scoped/blended/tier-gated rerank, embedding-aware MMR
+ *   8 — v1.0.82 feedback loop: stronger/decaying thumbs+dismiss signal, bandit and state-correctness fixes
  */
-export const ORACLE_ENGINE_VERSION = 7;
+export const ORACLE_ENGINE_VERSION = 8;
