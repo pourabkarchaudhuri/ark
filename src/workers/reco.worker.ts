@@ -39,7 +39,7 @@ import type {
   FranchiseCluster,
   RecoTelemetry,
 } from '@/types/reco';
-import { toCanonicalGenre } from '@/data/canonical-genres';
+import { toCanonicalGenre, toCanonicalGenres } from '@/data/canonical-genres';
 import {
   computeFranchiseBoost,
   detectFranchises,
@@ -47,6 +47,8 @@ import {
 } from '@/services/franchise';
 import { matchesDeepInGenre, matchesMoodShelf, isComingSoonForShelf } from '@/services/reco-shelf-rules';
 import {
+  computeEngagementWeight,
+  computeNegativeWeight,
   heroEvidenceSortKey,
   isEvidenceGame,
 } from '@/services/engagement-weight';
@@ -85,6 +87,11 @@ import {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
+// Semantic and cluster layers are per-source percentiles (0..1), so these are rank thresholds.
+const SEMANTIC_EXPLAIN_MIN = 0.5;
+const CLUSTER_EXPLAIN_MIN = 0.8;
+const CLUSTER_EXPLAIN_MARGIN = 0.1;
+
 function progress(stage: string, percent: number) {
   self.postMessage({ type: 'progress', stage, percent } satisfies RecoWorkerMessage);
 }
@@ -109,10 +116,10 @@ function generateExplanation(
   if (
     typeof annDist === 'number'
     && annDist <= ANN_TASTE_MATCH_CEILING
-    && scored.layerScores.semanticSimilarity > 0.15
+    && scored.layerScores.semanticSimilarity > SEMANTIC_EXPLAIN_MIN
   ) {
     parts.push('discovered through your taste profile');
-  } else if (scored.reasons.semanticRetrieved && scored.layerScores.semanticSimilarity > 0.15) {
+  } else if (scored.reasons.semanticRetrieved && scored.layerScores.semanticSimilarity > SEMANTIC_EXPLAIN_MIN) {
     parts.push('close to games you love in embedding space');
   }
 
@@ -120,8 +127,8 @@ function generateExplanation(
   // niche when the cluster fits clearly better than the overall taste (embedding cosines
   // sit in a compressed band, so an absolute threshold alone would flag nearly everything).
   if (
-    scored.layerScores.clusterSemanticSim > 0.4
-    && scored.layerScores.clusterSemanticSim - scored.layerScores.semanticSimilarity >= 0.05
+    scored.layerScores.clusterSemanticSim >= CLUSTER_EXPLAIN_MIN
+    && scored.layerScores.clusterSemanticSim - scored.layerScores.semanticSimilarity >= CLUSTER_EXPLAIN_MARGIN
     && scored.reasons.bestClusterLabel
   ) {
     parts.push(`fits your ${scored.reasons.bestClusterLabel} taste`);
@@ -234,6 +241,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const lovedNotesTokens = new Set<string>();
   for (const ug of userGames) {
     if (!ug.userNotes) continue;
+    if (computeEngagementWeight(ug) <= 0) continue; // notes from rejected games are not 'loved'
     if (!isEvidenceGame(ug) && ug.rating < 4) continue;
     for (const t of noteTokens(ug.userNotes)) lovedNotesTokens.add(t);
   }
@@ -284,6 +292,8 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const useSemantics = embeddingCoverage > 0;
   const hasPrecomputedScores = !!input.precomputedSemanticScores;
   const precomputedScores = input.precomputedSemanticScores ?? {};
+  // Candidates without an embedding (not yet embedded, custom) get the pool median instead of 0.
+  const semanticMedian = hasPrecomputedScores ? median(Object.values(precomputedScores)) : 0;
 
   // Graph metrics from persisted neighbor graph (optional — present when gameGraphStore has built it)
   const graphScores = input.graphScores ?? {};
@@ -318,6 +328,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   tasteProfile.clusters = clusters;
   const precomputedClusterScores = input.precomputedClusterScores ?? {};
   const hasPrecomputedClusterScores = clusters.length >= 2 && Object.keys(precomputedClusterScores).length > 0;
+  const clusterMedian = hasPrecomputedClusterScores ? median(Object.values(precomputedClusterScores).map(v => v.sim)) : 0;
 
   // Cluster semantic scoring. Candidate embeddings are stripped before the worker,
   // so the main thread precomputes per-candidate cluster scores (precomputedClusterScores).
@@ -353,6 +364,12 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   // Pre-compute profile feature sets (normalized for comparison; profile.genres use canonical display names)
   const profileGenresNorm = new Set(tasteProfile.genres.map(g => norm(g.name)));
+  const rejectedGenresNorm = new Set<string>();
+  for (const ug of userGames) {
+    if (computeNegativeWeight(ug) > 0 || computeEngagementWeight(ug) <= 0) {
+      for (const g of toCanonicalGenres(ug.genres || [])) rejectedGenresNorm.add(norm(g));
+    }
+  }
   const profileThemes = new Set(tasteProfile.themes.map(t => t.name));
   const profileModes = new Set(tasteProfile.gameModes.map(m => m.name));
 
@@ -411,7 +428,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     // Layer 6: Semantic similarity (proportional to embedding coverage)
     const semanticSimilarity = useSemantics
       ? (hasPrecomputedScores
-          ? (precomputedScores[c.gameId] ?? 0)
+          ? (precomputedScores[c.gameId] ?? semanticMedian)
           : computeSemanticSimilarity(tasteCentroid, c.embedding))
       : 0;
 
@@ -426,6 +443,9 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
       if (pre) {
         clusterSemanticSim = pre.sim;
         bestClusterLabel = pre.label;
+      } else if (hasPrecomputedClusterScores) {
+        // No embedding for this candidate: neutral (median), not a penalty. No label, so no explanation.
+        clusterSemanticSim = clusterMedian;
       } else if (c.embedding && c.embedding.length > 0) {
         for (let ci = 0; ci < clusterCentroids.length; ci++) {
           const sim = computeSemanticSimilarity(clusterCentroids[ci].centroid, c.embedding);
@@ -516,7 +536,9 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
     const isHiddenGem = (c.metacriticScore ?? 0) >= 80
       && (c.playerCount ?? Infinity) < maxPlayerCount * 0.1;
-    const isStretchPick = cCanonGenres.length > 0 && sharedGenres.length === 0;
+    // A genre only the user rejected is not "intentional variety" — exclude it from Stretch Picks.
+    const isStretchPick = cCanonGenres.length > 0 && sharedGenres.length === 0
+      && !cCanonGenres.some(x => rejectedGenresNorm.has(norm(x)));
     const isOnSale = !!c.price?.discountPercent && c.price.discountPercent > 0;
 
     // ML model signal: only when a real score was attached (no ?? 0.5 under W_ML)

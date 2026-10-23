@@ -26,6 +26,7 @@ import {
   HASH_VERSION_PREFIX as CHUNK_HASH_VERSION_PREFIX,
   buildGameChunks,
   diffChunksAgainstCache,
+  gameplayGenres,
   hashWholeEmbeddingText,
   poolChunkVectors,
   shouldSkipPooled,
@@ -1480,17 +1481,6 @@ function hashText(text: string): string {
 
 // ─── Embedding text builders ────────────────────────────────────────────────
 
-const EMBEDDING_NOISE_GENRES = new Set([
-  'indie', 'free to play', 'early access', 'software', 'utilities',
-  'design & illustration', 'animation & modeling', 'photo editing',
-  'video production', 'web publishing', 'education', 'accounting',
-  'comedy', 'fantasy', 'space',
-]);
-
-function gameplayGenres(genres: string[]): string[] {
-  return genres.filter(g => !EMBEDDING_NOISE_GENRES.has(g.toLowerCase()));
-}
-
 /**
  * Build the embedding text for a library game (Tier 1).
  *
@@ -2167,14 +2157,22 @@ class EmbeddingService {
   ): Float32Array | null {
     if (userEmbeddings.length === 0) return null;
 
-    const dim = userEmbeddings[0].embedding.length;
+    // Modal dimension, not whichever row happens to come first (a stale vector of another
+    // model/dimension would otherwise silently drop everything else).
+    const dimCounts = new Map<number, number>();
+    for (const { embedding, weight } of userEmbeddings) {
+      if (weight > 0 && embedding.length > 0) dimCounts.set(embedding.length, (dimCounts.get(embedding.length) ?? 0) + 1);
+    }
+    let dim = 0;
+    let best = 0;
+    for (const [d, n] of dimCounts) if (n > best || (n === best && d > dim)) { dim = d; best = n; }
     if (dim === 0) return null;
 
     const centroid = new Float32Array(dim);
     let totalWeight = 0;
 
     for (const { embedding, weight } of userEmbeddings) {
-      if (embedding.length !== dim) continue;
+      if (embedding.length !== dim || !(weight > 0)) continue;
       for (let i = 0; i < dim; i++) centroid[i] += embedding[i] * weight;
       totalWeight += weight;
     }

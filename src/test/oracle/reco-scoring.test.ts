@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildTasteProfile,
+  _engagementCache,
   classifyEngagementCurve,
   computePopularityAdjustment,
   computeQualitySignal,
@@ -57,12 +58,12 @@ describe('computePopularityAdjustment — CURRENT BEHAVIOR (fixed in R5)', () =>
   });
 });
 
-describe('buildTasteProfile — CURRENT BEHAVIOR (fixed in R4)', () => {
-  it('lets a hated 1-star 80h game and a removed game raise their genres', () => {
+describe('buildTasteProfile', () => {
+  it('does not let a hated 1-star 80h game or a removed game raise their genres (R4)', () => {
+    _engagementCache.clear();
     const profile = buildTasteProfile(multiTasteLibrary(), FIXTURE_NOW);
     const shooter = profile.genres.find(g => g.name.toLowerCase().includes('shooter'));
-    expect(shooter).toBeDefined();
-    expect(shooter!.weight).toBeGreaterThan(0);
+    expect(shooter?.weight ?? 0).toBe(0);
   });
 
   it('is deterministic for the same input', () => {

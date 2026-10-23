@@ -133,10 +133,15 @@ describe('worker pipeline on fixtures', () => {
       const text = (r: Awaited<ReturnType<typeof runWorkerPipeline>>) =>
         r.shelves.flatMap(s => s.games.map(g => g.reasons.explanation)).join(' | ');
 
-      const generic = await runWorkerPipeline(mk(0.62, 0.62)); // same fit everywhere
+      // Layers are per-source percentiles (0..1): a niche claim needs a top-fifth cluster rank
+      // that clearly beats the overall-taste rank.
+      const generic = await runWorkerPipeline(mk(0.9, 0.9)); // same (high) rank everywhere
       expect(text(generic)).not.toContain('fits your');
 
-      const niche = await runWorkerPipeline(mk(0.75, 0.55)); // cluster clearly better
+      const weak = await runWorkerPipeline(mk(0.5, 0.2)); // better than overall but not a strong fit
+      expect(text(weak)).not.toContain('fits your');
+
+      const niche = await runWorkerPipeline(mk(0.95, 0.55)); // cluster clearly better
       expect(text(niche)).toContain('fits your');
     });
 

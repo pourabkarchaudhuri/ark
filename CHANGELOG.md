@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.78] - 2026-10-23
+
+Fourth step of the Oracle recommendation-quality plan: how Oracle models your taste. **Ranking changes** (engine version 4). No re-indexing needed.
+
+### Fixed — taste modeling
+- **Games you rejected no longer shape your taste.** A game rated 1–2 stars used to *raise* its genres, themes and studio in your profile in proportion to hours played (a hated 80h shooter made Oracle recommend shooters). Removed games, 1–2★ games and games you bounced off (On Hold under 2h) now carry zero positive weight everywhere the engagement weight is used: genre/theme/studio profiles, taste clusters, graph weights, the embedding taste centroid, ANN retrieval seeds, time-of-day and sequencing habits. They also no longer make a studio look "loyal".
+- **Unplayed entries stop counting like played ones.** Never-started, unrated library entries now get a small fixed weight (0.3) instead of the baseline 1, so a 300-game backlog no longer outvotes the dozen games you actually play.
+- **Negative embedding signal.** Oracle builds a "rejected" centroid from your removed / low-rated / abandoned games plus thumbs-downs and dismissals. Candidates that look like those are scored lower in the semantic layer, and library-driven retrieval is aimed away from them.
+- **Semantic scores rank instead of compare raw numbers.** Cosine similarities sit in a narrow band (about 0.3–0.8) and shift with how a game's text vector was composed, which penalised Epic titles relative to Steam. The semantic and taste-cluster layers now score each candidate's percentile within its own source (Steam / Epic / other), so the full 0–1 range is used and neither store is favoured.
+- **Candidates without an embedding get a neutral score** (the pool median) instead of 0.
+- **Centroid robustness:** the taste centroid uses the most common embedding size, not whichever row came first, and ignores non-positive weights.
+- **Explanations match the new scale:** "fits your X taste" now needs a top-fifth cluster rank that clearly beats the overall-taste rank.
+- **One source of truth for the noise-genre list** used when building embedding text (it was duplicated in two files; future embeds only).
+
+### Hardened after an independent review (before release)
+- A game you loved and later removed (completed, 3+★, or 10h+) is **not** treated as a rejection: it keeps half its weight and adds no negative weight. Only thin removals count as rejections.
+- Cold-start gating, genre seeding, the pre-filter's genre/studio/franchise quotas, the lexical (BM25) query and the Steam/Epic catalog loaders no longer count rejected games as evidence or taste (a library of five 2★ completions no longer disables cold-start seeding).
+- Taste clusters are built from non-rejected games only, so rejected genres cannot form their own "taste group".
+- Stretch Picks never come from a genre you only rejected.
+- The negative penalty is relative (only candidates closer to rejected games than to your taste are penalised) and its confidence follows summed negative weight; small sources (under 8 candidates) get a neutral percentile instead of being ranked against the Steam-dominated pool.
+- Library-driven ANN retrieval keeps the plain taste centroid (its distance ceilings are calibrated to it); rejections apply in the semantic layer. Dismissals/thumbs-downs never turn a library game you like into a negative.
+- Re-rating a game now refreshes Oracle (rating is part of the library signature).
+
+### Tests
+- New: signed/negative weight rules, rejected games excluded from taste, percentile-by-source, relative negative penalty, contrast query vector, modal-dimension centroid, removal/evidence/cluster/stretch-pick hardening.
+
 ## [1.0.77] - 2026-10-23
 
 Third step of the Oracle recommendation-quality plan: the machine-learning layer works again. **Ranking changes** (engine version 3).

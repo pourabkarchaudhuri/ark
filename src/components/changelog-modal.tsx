@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.78': {
+    title: "What's New in Ark 1.0.78",
+    changes: [
+      "Oracle now learns from what you reject. Games you rated 1–2 stars, removed, or dropped quickly no longer teach it to recommend more like them — a hated 80-hour game used to do exactly that.",
+      "A huge unplayed backlog no longer drowns out the games you actually play.",
+      "Oracle now steers away from games that resemble things you rejected, including thumbs-downs and dismissals.",
+      "Epic and Steam games are now compared fairly, and games Oracle can't compare yet get a neutral score instead of zero.",
+      'Because rankings changed, Oracle will recalculate once after updating.',
+    ],
+  },
   '1.0.77': {
     title: "What's New in Ark 1.0.77",
     changes: [

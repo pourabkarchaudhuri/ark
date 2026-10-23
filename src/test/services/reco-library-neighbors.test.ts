@@ -167,8 +167,11 @@ describe('compute() dispatches neighbours + clusters to the worker', () => {
     expect(Object.keys(scores).sort()).toEqual(['steam-100', 'steam-101']);
     // Each candidate lands closest to the cluster matching its own taste group.
     expect(scores['steam-100'].label).not.toBe(scores['steam-101'].label);
-    expect(scores['steam-100'].sim).toBeGreaterThan(0.9);
-    expect(scores['steam-101'].sim).toBeGreaterThan(0.9);
+    // Scores are per-source percentiles (R4), so they live in 0..1 rather than raw cosine.
+    for (const id of ['steam-100', 'steam-101']) {
+      expect(scores[id].sim).toBeGreaterThanOrEqual(0);
+      expect(scores[id].sim).toBeLessThanOrEqual(1);
+    }
 
     // Candidate embeddings are stripped before dispatch.
     expect(input.candidates.every(c => c.embedding === undefined)).toBe(true);

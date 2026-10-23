@@ -19,6 +19,7 @@ import { toCanonicalGenre, toCanonicalGenres, CANONICAL_GENRES } from '@/data/ca
 import {
   applyTemporalDecayMultiplier,
   computeEngagementWeight,
+  computeNegativeWeight,
 } from '@/services/engagement-weight';
 import { mmrMaxSim } from '@/services/mmr-diversity';
 
@@ -153,6 +154,9 @@ export function buildFeatureMap(
 
   for (const game of games) {
     const engagement = computeEngagementScore(game, now);
+    // Rejected games (1-2 stars, removed, bounced) are not positive taste: they must not add
+    // weight, game counts, hours or ratings to a feature (that would also inflate "loyal" studios).
+    if (engagement <= 0) continue;
     const features = extractor(game);
     for (const f of features) {
       const key = norm(f);
@@ -246,11 +250,7 @@ export function buildNegativeProfile(
   _now: number,
   thumbsDownCandidates: CandidateGame[] = [],
 ): { vec: FeatureVector; strength: number } {
-  const negativeGames = games.filter(g => {
-    if (g.removedAt) return true;
-    if (g.status === 'On Hold' && g.hoursPlayed < 2) return true;
-    return false;
-  });
+  const negativeGames = games.filter(g => computeNegativeWeight(g) > 0);
 
   const vec: FeatureVector = new Map();
   const addFeatures = (genres: string[], themes: string[], developer: string, weight = 1) => {
@@ -263,7 +263,7 @@ export function buildNegativeProfile(
   };
 
   for (const g of negativeGames) {
-    addFeatures(g.genres, g.themes, g.developer);
+    addFeatures(g.genres, g.themes, g.developer, computeNegativeWeight(g));
   }
   // Thumbs-down cards — strong negative signal from Oracle feedback
   for (const c of thumbsDownCandidates) {
@@ -634,6 +634,7 @@ export function buildTimeOfDayContext(
   let totalSessionsInBucket = 0;
 
   for (const ug of userGames) {
+    if (computeEngagementWeight(ug) <= 0) continue; // sessions of rejected games say nothing about preference
     for (let i = 0; i < ug.sessionTimestamps.length; i++) {
       const sessionHour = new Date(ug.sessionTimestamps[i]).getHours();
       const sessionBucket = sessionHour < 6 ? 'night' : sessionHour < 12 ? 'morning' : sessionHour < 18 ? 'afternoon' : 'evening';
@@ -718,6 +719,7 @@ export function buildSequencingContext(userGames: UserGameSnapshot[]): Sequencin
   const allSessions: { gameId: string; timestamp: number; genres: string[] }[] = [];
 
   for (const ug of userGames) {
+    if (computeEngagementWeight(ug) <= 0) continue;
     const canonNorm = ug.genres.map(g => toCanonicalGenre(g)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c));
     for (const ts of ug.sessionTimestamps) {
       allSessions.push({
@@ -758,7 +760,7 @@ export function buildSequencingContext(userGames: UserGameSnapshot[]): Sequencin
   }
 
   const recentGames = [...userGames]
-    .filter(g => g.lastSessionDate)
+    .filter(g => g.lastSessionDate && computeEngagementWeight(g) > 0)
     .sort((a, b) => new Date(b.lastSessionDate!).getTime() - new Date(a.lastSessionDate!).getTime())
     .slice(0, 3);
 
@@ -864,6 +866,8 @@ export function detectTasteClusters(
   now: number,
   k?: number,
 ): TasteCluster[] {
+  // Rejected games are not a taste group: they would form their own cluster and reward look-alikes.
+  userGames = userGames.filter(g => computeEngagementWeight(g) > 0);
   const effectiveK = k ?? adaptiveK(userGames.length);
   if (userGames.length < effectiveK * 2) return [];
 

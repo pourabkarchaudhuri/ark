@@ -33,14 +33,15 @@ const DESC_WINDOW = 900;
 const SUMMARY_CAP = 1000;
 const NOTES_CAP = 1000;
 
-const EMBEDDING_NOISE_GENRES = new Set([
+/** Single source of truth for genres excluded from embedding text (shared with embedding-service). */
+export const EMBEDDING_NOISE_GENRES = new Set([
   'indie', 'free to play', 'early access', 'software', 'utilities',
   'design & illustration', 'animation & modeling', 'photo editing',
   'video production', 'web publishing', 'education', 'accounting',
   'comedy', 'fantasy', 'space',
 ]);
 
-function gameplayGenres(genres: string[]): string[] {
+export function gameplayGenres(genres: string[]): string[] {
   return genres.filter(g => !EMBEDDING_NOISE_GENRES.has(g.toLowerCase()));
 }
 

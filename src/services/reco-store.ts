@@ -56,7 +56,12 @@ import {
   ORACLE_RERANK_DEFAULT_BUDGET_MS,
 } from '@/services/oracle-rerank';
 import type { RerankPlan, RerankStatus } from '@/services/oracle-rerank';
-import { computeEngagementWeight, countEvidenceLibrary } from '@/services/engagement-weight';
+import { computeEngagementWeight, computeNegativeWeight, countEvidenceLibrary } from '@/services/engagement-weight';
+import {
+  finalSemanticScore,
+  negativeConfidence,
+  percentileBySource,
+} from '@/services/semantic-scoring';
 import {
   buildLinkedExclusionIds,
   expandDismissedWithLinked,
@@ -180,6 +185,12 @@ export function runWithDeadline<T>(
 
 // ─── Embedding cache (populated externally by embedding-service) ────────────
 
+function vecMagnitude(v: ArrayLike<number>): number {
+  let m = 0;
+  for (let i = 0; i < v.length; i++) m += v[i] * v[i];
+  return Math.sqrt(m);
+}
+
 let embeddingCache: Map<string, number[]> = new Map();
 
 /** Called by the embedding service to inject cached vectors. */
@@ -207,7 +218,7 @@ export function buildOracleLibrarySignature(): string {
       const e = libraryStore.getEntry(id);
       const notes = e?.publicReviews ?? '';
       const hours = hoursPlayedBucket(e?.hoursPlayed);
-      return `L:${id}:${e?.status ?? ''}:${e?.priority ?? ''}:${hours}:${djb2Fingerprint(notes)}`;
+      return `L:${id}:${e?.status ?? ''}:${e?.priority ?? ''}:${hours}:${e?.rating ?? 0}:${djb2Fingerprint(notes)}`;
     });
   const customLines = customGameStore
     .getAllGames()
@@ -216,7 +227,7 @@ export function buildOracleLibrarySignature(): string {
     .map((e) => {
       const notes = e.publicReviews ?? '';
       const hours = hoursPlayedBucket(e.hoursPlayed);
-      return `C:${e.id}:${e.status}:${e.priority}:${hours}:${djb2Fingerprint(notes)}`;
+      return `C:${e.id}:${e.status}:${e.priority}:${hours}:${e.rating ?? 0}:${djb2Fingerprint(notes)}`;
     });
   const dismissLine = `D:${fingerprintDismissals(recoHistoryStore.getDismissals())}`;
   const thumbsUpLine = `U:${fingerprintThumbsUp(recoHistoryStore.getThumbsUpIds())}`;
@@ -745,18 +756,28 @@ export class RecoStore {
       );
       if (isStale()) return;
 
+      // 3.59. Negative taste centroid (rejected / low-rated / thumbs-down / dismissed) — pushes
+      // look-alikes of things the user rejected down in the semantic layer.
+      const negativeEmbs = this.collectNegativeEmbeddings(userGames);
+      const negativeCentroid = embeddingService.computeTasteCentroid(negativeEmbs);
+      const negConfidence = negativeCentroid
+        ? negativeConfidence(negativeEmbs.reduce((sum, e) => sum + e.weight, 0))
+        : 0;
+
       // 3.6. Precompute per-candidate semantic similarity & strip candidate embeddings.
       // The taste centroid cosine is the expensive part; we compute it here to avoid
       // sending ~25K × 1024-dim embedding arrays through structured clone.
       let precomputedSemanticScores: Record<string, number> | undefined;
       let precomputedClusterScores: Record<string, { sim: number; label: string }> | undefined;
       if (tasteCentroid) {
-        const scores: Record<string, number> = {};
-        const clusterScores: Record<string, { sim: number; label: string }> = {};
+        // Pass 1 (raw cosines, while candidate embeddings still exist). Pass 2 converts them
+        // to per-source percentiles and applies the negative penalty.
+        const rawTaste = new Map<string, number>();
+        const rawNeg = new Map<string, number>();
+        const rawCluster = new Map<string, { sim: number; label: string }>();
         const dim = tasteCentroid.length;
-        let centroidMag = 0;
-        for (let i = 0; i < dim; i++) centroidMag += tasteCentroid[i] * tasteCentroid[i];
-        centroidMag = Math.sqrt(centroidMag);
+        const centroidMag = vecMagnitude(tasteCentroid);
+        const negMag = negativeCentroid && negativeCentroid.length === dim ? vecMagnitude(negativeCentroid) : 0;
 
         let processed = 0;
         for (const c of candidates) {
@@ -766,23 +787,38 @@ export class RecoStore {
             if (isStale()) return;
           }
           if (c.embedding && c.embedding.length === dim) {
-            let dot = 0, magB = 0;
+            let dot = 0, dotNeg = 0, magB = 0;
             for (let i = 0; i < dim; i++) {
-              dot += tasteCentroid[i] * c.embedding[i];
-              magB += c.embedding[i] * c.embedding[i];
+              const e = c.embedding[i];
+              dot += tasteCentroid[i] * e;
+              magB += e * e;
+              if (negMag > 0) dotNeg += negativeCentroid![i] * e;
             }
-            scores[c.gameId] = centroidMag > 0 && magB > 0
-              ? dot / (centroidMag * Math.sqrt(magB))
-              : 0;
+            const magC = Math.sqrt(magB);
+            rawTaste.set(c.gameId, centroidMag > 0 && magC > 0 ? dot / (centroidMag * magC) : 0);
+            if (negMag > 0) rawNeg.set(c.gameId, magC > 0 ? dotNeg / (negMag * magC) : 0);
             if (clusterScoringEnabled) {
               const best = bestPreparedClusterSimilarity(c.embedding, preparedClusters);
-              if (best) clusterScores[c.gameId] = best;
+              if (best) rawCluster.set(c.gameId, best);
             }
           }
           delete c.embedding;
         }
+
+        const tastePct = percentileBySource(rawTaste);
+        const negPct = rawNeg.size > 0 ? percentileBySource(rawNeg) : null;
+        const scores: Record<string, number> = {};
+        for (const [id, pct] of tastePct) {
+          scores[id] = finalSemanticScore(pct, negPct?.get(id) ?? 0, negConfidence);
+        }
         precomputedSemanticScores = scores;
-        if (clusterScoringEnabled) precomputedClusterScores = clusterScores;
+
+        if (clusterScoringEnabled) {
+          const clusterPct = percentileBySource(new Map([...rawCluster].map(([id, v]) => [id, v.sim])));
+          const clusterScores: Record<string, { sim: number; label: string }> = {};
+          for (const [id, v] of rawCluster) clusterScores[id] = { sim: clusterPct.get(id) ?? 0, label: v.label };
+          precomputedClusterScores = clusterScores;
+        }
       } else {
         for (const c of candidates) delete c.embedding;
       }
@@ -1245,6 +1281,7 @@ export class RecoStore {
     const genreWeights = new Map<string, number>();
     for (const ug of userGames) {
       const w = computeEngagementWeight(ug);
+      if (w <= 0) continue; // never seed from genres the user rejected
       for (const g of ug.genres) {
         const key = g.toLowerCase();
         genreWeights.set(key, (genreWeights.get(key) ?? 0) + w);
@@ -1424,6 +1461,7 @@ export class RecoStore {
     const devSet = new Set<string>();
     const pubSet = new Set<string>();
     for (const ug of userGames) {
+      if (computeEngagementWeight(ug) <= 0) continue;
       for (const g of ug.genres) {
         genreCounts.set(g, (genreCounts.get(g) || 0) + 1);
       }
@@ -1512,6 +1550,7 @@ export class RecoStore {
     const genreSet = new Set<string>();
     const devSet = new Set<string>();
     for (const ug of userGames) {
+      if (computeEngagementWeight(ug) <= 0) continue;
       for (const g of ug.genres) genreSet.add(g.toLowerCase());
       if (ug.developer && ug.rating >= 3.5) devSet.add(ug.developer.toLowerCase());
     }
@@ -1576,6 +1615,38 @@ export class RecoStore {
   }
 
   /**
+   * Embeddings of things the user rejected, weighted by how strongly: library games via
+   * computeNegativeWeight, thumbs-down (1.5) and dismissals (0.5) via the embedding cache.
+   */
+  private collectNegativeEmbeddings(userGames: UserGameSnapshot[]): Array<{ embedding: number[]; weight: number }> {
+    const out: Array<{ embedding: number[]; weight: number }> = [];
+    const taken = new Set<string>();
+    // A library game the user genuinely likes must never become a "negative" via an old dismissal.
+    for (const ug of userGames) if (computeEngagementWeight(ug) > 0) taken.add(ug.gameId);
+    for (const ug of userGames) {
+      const w = computeNegativeWeight(ug);
+      if (w > 0 && ug.embedding && ug.embedding.length > 0) {
+        out.push({ embedding: ug.embedding, weight: w });
+      }
+    }
+    for (const id of recoHistoryStore.getThumbsDownIds()) {
+      const emb = embeddingCache.get(id);
+      if (emb && emb.length > 0 && !taken.has(id)) {
+        out.push({ embedding: emb, weight: 1.5 });
+        taken.add(id);
+      }
+    }
+    for (const d of recoHistoryStore.getDismissals()) {
+      const emb = embeddingCache.get(d.gameId);
+      if (emb && emb.length > 0 && !taken.has(d.gameId)) {
+        out.push({ embedding: emb, weight: 0.5 });
+        taken.add(d.gameId);
+      }
+    }
+    return out;
+  }
+
+  /**
    * Retrieve semantically similar games from the ANN index using a
    * weighted taste centroid derived from the user's library embeddings.
    */
@@ -1592,6 +1663,8 @@ export class RecoStore {
         weight: computeEngagementWeight(ug),
       }));
 
+    // Taste centroid only: ANN distance ceilings (and "Taste Match" explanations) are calibrated
+    // against it. Rejections are applied in the semantic layer instead (see known-gaps: ANN over-fetch).
     const centroid = embeddingService.computeTasteCentroid(userEmbs);
     if (!centroid) return [];
 
@@ -1800,6 +1873,7 @@ export class RecoStore {
 
     for (const ug of userGames) {
       const eng = computeEngagementWeight(ug);
+      if (eng <= 0) continue; // rejected games must not drive the lexical query
       for (const g of ug.genres) {
         const cur = genreCounts.get(g) ?? { weight: 0, hours: 0, ratingSum: 0, n: 0 };
         cur.weight += eng;
@@ -1914,6 +1988,7 @@ export class RecoStore {
 
     for (const ug of userGames) {
       const weight = computeEngagementWeight(ug);
+      if (weight <= 0) continue; // rejected games must not open genre/studio/franchise quotas
       for (const g of ug.genres) {
         const key = g.toLowerCase();
         genreWeights.set(key, (genreWeights.get(key) ?? 0) + weight);

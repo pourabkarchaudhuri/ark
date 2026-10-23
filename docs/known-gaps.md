@@ -174,3 +174,9 @@ The following gaps were fixed and removed from the active list:
 - **#22** Pre-Existing TypeScript Errors — `displayedGames` removed; `isCrossStoreEpic` type error resolved.
 - **#23** `libraryData` Validation in AI Handlers — added array type check and `MAX_LIBRARY_ITEMS` (500) size limit.
 - **#24** `release-calendar.tsx` LazyFadeImage State Reset — moved synchronous `setState` calls from render body into a `useEffect` hook.
+
+## Oracle engine gaps (found during R4, scheduled)
+- ANN taste retrieval uses the plain taste centroid; a contrast vector (away from rejected games) shifts distances against the 0.45 ceiling. Revisit in R6 with over-fetch → filter → taste-cosine re-rank.
+- Persisted graph PPR cache signature is `ann-${vectorCount}`: PPR seeded with old engagement weights is not rebuilt by the engine-version bump alone (R8).
+- Stretch Picks still sort by `contentSimilarity + semanticSimilarity` where semantic includes the negative penalty (R5/R7 shelf rework).
+- Explanations compare cluster vs penalised semantic percentile; use the pre-penalty percentile (R5).
