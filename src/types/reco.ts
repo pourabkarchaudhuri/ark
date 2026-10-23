@@ -374,12 +374,47 @@ export interface RecoWorkerProgress {
   percent: number;
 }
 
+/** Per-layer coverage stats — how much each scoring layer actually contributes. */
+export interface RecoLayerStat {
+  layer: string;
+  /** Share (0–1) of scored candidates where the layer is non-zero. */
+  coverage: number;
+  min: number;
+  median: number;
+  max: number;
+  /** Weight the layer carried in the composite score this run. */
+  weight: number;
+}
+
+/** Diagnostics for one Oracle compute (dev panel + regression tests). */
+export interface RecoTelemetry {
+  layers: RecoLayerStat[];
+  /** How many of the top-20 scores tie (to 1e-6) with a neighbour. */
+  top20Ties: number;
+  /** Distinct score values among the top 20. */
+  top20Distinct: number;
+  funnel: {
+    candidatesIn: number;
+    afterExclusions: number;
+    scored: number;
+    mmrPool: number;
+    mmrSelected: number;
+    shelfGames: number;
+  };
+  embeddingCoverage: number;
+  mlCoverage: number;
+  graphScoresAvailable: boolean;
+  /** Sum of all positive layer weights (nominal max score before clamping). */
+  weightSum: number;
+}
+
 /** Final results from the worker. */
 export interface RecoWorkerResult {
   type: 'result';
   tasteProfile: TasteProfile;
   shelves: RecoShelf[];
   computeTimeMs: number;
+  telemetry?: RecoTelemetry;
 }
 
 /** Error from the worker when the pipeline crashes. */

@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.75': {
+    title: "What's New in Ark 1.0.75",
+    changes: [
+      'Groundwork for much better recommendations. This release does not change what Oracle suggests — it adds the tools needed to improve it safely.',
+      'Developer panel: a new "Oracle Layers" row shows which parts of the recommendation engine are actually contributing for your library, and which are not.',
+      'Ark now keeps a private, local-only log of what Oracle showed you and what you did with it (clicked, dismissed, thumbs, added, played, rated). It never leaves your computer and is capped in size. It lets future updates be judged on real outcomes instead of guesses.',
+      "Ratings and finished play sessions now also feed Oracle's recommendation history, which previously ignored them.",
+    ],
+  },
   '1.0.74': {
     title: "What's New in Ark 1.0.74",
     changes: [

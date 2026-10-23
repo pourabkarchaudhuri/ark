@@ -7,6 +7,8 @@ import {
   migrateGameId,
 } from '@/types/game';
 import { journeyStore } from './journey-store';
+import { oracleEventLog } from './oracle-event-log';
+import { recoHistoryStore } from './reco-history-store';
 import { normalizeTitle } from '@/services/dedup';
 
 // Statuses that cross-store propagation is allowed to write to a sibling.
@@ -612,6 +614,12 @@ export class LibraryStore {
     this.invalidateSortedCache();
     this.scheduleSave();
     this.notifyListeners();
+
+    // Outcome logging for Oracle evaluation — a rating is the strongest label we get.
+    if (input.rating !== undefined && input.rating !== existing.rating) {
+      oracleEventLog.record({ type: 'rating', gameId, data: { rating: input.rating, previous: existing.rating } });
+      if (input.rating > 0) recoHistoryStore.recordRating(gameId, input.rating);
+    }
 
     const hasJourney = journeyStore.has(gameId);
     const addedAtIso = (updated.addedAt instanceof Date ? updated.addedAt : new Date(updated.addedAt)).toISOString();

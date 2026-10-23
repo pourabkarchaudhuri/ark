@@ -17,11 +17,15 @@ import type {
   RecoWorkerInput,
   RecoWorkerMessage,
   RecoWorkerResult,
+  RecoTelemetry,
   UserGameSnapshot,
   CandidateGame,
   EngagementPattern,
 } from '@/types/reco';
 import type { GameSession, StatusChangeEntry } from '@/types/game';
+import { ORACLE_ENGINE_VERSION } from '@/services/oracle-engine-version';
+import { oracleEventLog } from '@/services/oracle-event-log';
+import { TELEMETRY_LAYERS } from '@/services/reco-scoring';
 import { libraryStore } from './library-store';
 import { customGameStore } from './custom-game-store';
 import { journeyStore } from './journey-store';
@@ -257,6 +261,10 @@ function isPipelineStages(value: unknown): value is OraclePipelineStages {
   );
 }
 
+/** Per-shelf bounds for the `shown-run` outcome-log row (keeps each row a few KB). */
+const SHOWN_LOG_PER_SHELF = 8;
+const SHOWN_LOG_LAYERS_PER_SHELF = 3;
+
 // ─── State ─────────────────────────────────────────────────────────────────────
 
 interface RecoState {
@@ -275,6 +283,8 @@ interface RecoState {
   oracleRerankStatus: RerankStatus;
   /** Bumps when library-derived Oracle results are invalidated (UI resets pipeline). */
   invalidationGeneration: number;
+  /** Per-layer coverage diagnostics from the latest worker run (dev panel); null before the first run / on cache restore. */
+  telemetry: RecoTelemetry | null;
 }
 
 const INITIAL_STATE: RecoState = {
@@ -289,6 +299,7 @@ const INITIAL_STATE: RecoState = {
   candidateCount: 0,
   oracleRerankStatus: rerankStatus('none'),
   invalidationGeneration: 0,
+  telemetry: null,
 };
 
 // ─── Store ─────────────────────────────────────────────────────────────────────
@@ -364,6 +375,7 @@ export class RecoStore {
         candidateCount: this.state.candidateCount,
         librarySignature: buildOracleLibrarySignature(),
         pipelineStages: currentOraclePipelineStages(),
+        engineVersion: ORACLE_ENGINE_VERSION,
       };
       if (this._useLevelDB) {
         // Fire-and-forget — same contract as the localStorage path (errors ignored).
@@ -443,6 +455,8 @@ export class RecoStore {
         if (raw) cache = JSON.parse(raw);
       }
       if (!cache) return null;
+      // Results from an older engine (or from before versioning existed) must not be served.
+      if (cache.engineVersion !== ORACLE_ENGINE_VERSION) return null;
       if (!cache.lastComputed || Date.now() - cache.lastComputed > RecoStore.RESULT_CACHE_TTL) {
         return null;
       }
@@ -2266,12 +2280,47 @@ export class RecoStore {
       computeTimeMs: msg.computeTimeMs,
       lastComputed: Date.now(),
       oracleRerankStatus: rerankStatus('none'),
+      telemetry: msg.telemetry ?? null,
     };
     this.notify();
     this.saveResultsToCache();
+    this.logShownRun(runId, msg.shelves);
 
     if (msg.tasteProfile && msg.shelves.length > 0) {
       void this.rerankShelvesInBackground(runId, msg.tasteProfile, msg.shelves, { persist: 'if-applied' });
+    }
+  }
+
+  /**
+   * Record what this compute put on screen (one compact row per run) so
+   * outcomes can later be evaluated against exposure. `layers` follows
+   * TELEMETRY_LAYERS order. Diagnostic only — never throws.
+   */
+  private logShownRun(runId: number, shelves: RecoShelf[]) {
+    try {
+      // Bounded: only the first SHOWN_LOG_PER_SHELF games per shelf (what's visible without
+      // scrolling far), with the full layer breakdown for the first SHOWN_LOG_LAYERS_PER_SHELF.
+      const items: Array<{ id: string; shelf: string; pos: number; score: number; layers?: number[] }> = [];
+      for (const shelf of shelves) {
+        shelf.games.slice(0, SHOWN_LOG_PER_SHELF).forEach((g, pos) => {
+          const ls = g.layerScores as unknown as Record<string, number>;
+          items.push({
+            id: g.gameId,
+            shelf: shelf.type,
+            pos,
+            score: Math.round(g.score * 10_000) / 10_000,
+            ...(pos < SHOWN_LOG_LAYERS_PER_SHELF
+              ? { layers: TELEMETRY_LAYERS.map(k => Math.round((ls[k] ?? 0) * 1_000) / 1_000) }
+              : {}),
+          });
+        });
+      }
+      oracleEventLog.record({
+        type: 'shown-run',
+        data: { runId, engineVersion: ORACLE_ENGINE_VERSION, layerOrder: TELEMETRY_LAYERS, items },
+      });
+    } catch {
+      /* diagnostic only */
     }
   }
 

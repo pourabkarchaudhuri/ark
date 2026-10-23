@@ -13,7 +13,7 @@ import {
   Pause,
   Play,
 } from 'lucide-react';
-import { systemStatus, type SyncStatus, type SystemStatusSnapshot, type StorageMetric, type LastRerankStatus } from '@/services/system-status';
+import { systemStatus, type SyncStatus, type SystemStatusSnapshot, type StorageMetric, type LastRerankStatus, type OracleLayersStatus } from '@/services/system-status';
 import { TooltipCard } from '@/components/ui/tooltip-card';
 import { embeddingService } from '@/services/embedding-service';
 import { useDevMode } from '@/hooks/useDevMode';
@@ -164,6 +164,27 @@ function LastRerankRow({ last }: { last: LastRerankStatus }) {
   );
 }
 
+/** Which Oracle scoring layers actually fire for this library (dead layers in red). */
+function OracleLayersRow({ status }: { status: OracleLayersStatus }) {
+  return (
+    <div className="space-y-0.5" data-testid="oracle-layers-row">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <StatusDot stage={status.stage} />
+        <span className={`text-[10px] font-medium truncate ${stageColor(status.stage)}`}>Oracle Layers</span>
+      </div>
+      <p className="text-[9px] text-white/25 truncate pl-[18px]" title={status.detail}>{status.detail}</p>
+      <div className="pl-[18px] space-y-px">
+        {status.layers.map(l => (
+          <div key={l.layer} className="flex items-center justify-between gap-2">
+            <span className={`text-[8px] truncate ${status.deadLayers.includes(l.layer) ? 'text-red-400/70' : 'text-white/25'}`}>{l.layer}</span>
+            <span className="text-[8px] text-white/20 tabular-nums shrink-0">{l.coveragePct}% · w {l.weight.toFixed(3)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Storage Row ────────────────────────────────────────────────────────────────
 
 function StorageRow({ metric }: { metric: StorageMetric }) {
@@ -223,6 +244,7 @@ function StatusPanelContent({ snap, compact }: { snap: SystemStatusSnapshot; com
         <SyncRow sync={snap.ollamaSetup} />
         <SyncRow sync={snap.rerankSetup} />
         {snap.lastRerank && <LastRerankRow last={snap.lastRerank} />}
+        {snap.oracleLayers && <OracleLayersRow status={snap.oracleLayers} />}
       </div>
 
       {/* Embedding Model */}

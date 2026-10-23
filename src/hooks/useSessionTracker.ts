@@ -3,6 +3,8 @@ import { GameSession } from '@/types/game';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { sessionStore } from '@/services/session-store';
+import { oracleEventLog } from '@/services/oracle-event-log';
+import { recoHistoryStore } from '@/services/reco-history-store';
 import { useAutoOnHold } from '@/hooks/useAutoOnHold';
 
 /** Minimum active minutes for a session to trigger the Want-to-Play → Playing transition. */
@@ -195,6 +197,13 @@ export function useSessionTracker() {
       const session = normalizeSession(raw);
       const isNew = sessionStore.record(session);
       if (!isNew) return false;
+      // Outcome logging for Oracle evaluation: a played session is the main "it was good" signal.
+      recoHistoryStore.recordPlay(session.gameId);
+      oracleEventLog.record({
+        type: 'play',
+        gameId: session.gameId,
+        data: { minutes: session.durationMinutes },
+      });
       // Read-only session store = it holds only this run's sessions; deriving hours from it
       // would overwrite the library's real total with a few minutes. Leave hours alone.
       if (sessionStore.isReadOnly()) return true;

@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.75] - 2026-10-23
+
+First step of the Oracle recommendation-quality plan. **No ranking changes in this release** — it adds the measuring tools and outcome logging that every later fix depends on.
+
+### Added
+- **Oracle Layers diagnostics (dev panel).** A new "Oracle Layers" row in System Status shows, for the latest compute, how many of the 18 scoring layers actually fire: per-layer coverage (% of candidates where it is non-zero) and weight, the count of dead layers (carry weight but are non-zero for <5% of candidates), how many of the top-20 scores tie, and ML / embedding coverage. Worker telemetry (`RecoWorkerResult.telemetry`, `computeRecoTelemetry`) also carries the candidate funnel (in → after exclusions → scored → MMR pool → MMR selected → shelf games).
+- **Oracle outcome log** (`oracle-event-log.ts`, LevelDB namespace `oracle-events`). Append-only, capped at 20k rows, buffered writes, never throws. Records one compact `shown-run` row per compute (game, shelf, position, score; layer breakdown for the first 3 per shelf), plus click / dismiss / thumbs / library-add / explain-open / **play** (session end) / **rating** events and the shelf-bandit's Beta posterior for each sampled shelf order (needed to reconstruct sampling propensities). `recordPlay` and `recordRating` were previously never called anywhere; they are now wired. Local only — nothing leaves the machine.
+- **Engine version in the Oracle result cache** (`oracle-engine-version.ts`). Cached shelves from a different engine version are rejected instead of being served for up to 15 minutes. Every later ranking-changing release bumps it. (One-time effect now: the first launch recomputes instead of restoring an unversioned cache.)
+
+### Under the hood
+- ~850 lines of pure scoring code moved verbatim from `reco.worker.ts` into `src/services/reco-scoring.ts` so it can be unit-tested (the worker had no exports). Verified mechanically: 844 lines identical to v1.0.74 apart from the `export` keyword.
+- Shared test fixtures (`src/test/oracle/fixtures.ts`): builders plus three archetype libraries (backlog-heavy, multi-taste with removed/1-star games, new user).
+- 28 new tests, including characterization tests that pin six audit findings against real code (graph signal saturates at one match; quality favours review volume over ratio; popularity "debias" is still monotonic; a hated 80h game and a removed game still raise their genres; a one-weekend completed 5-star game is labelled binge-drop; MMR collapses to score order when genres repeat). Each is flipped by the release that fixes it.
+- Test gate note: the full suite is green under `vitest --isolate` (1312/1312, twice). Under `--no-isolate` the same four UI test files (button, confirm-dialog, timeline, telemetry-tab) fail on a clean v1.0.74 checkout too — a pre-existing test-order contamination, not caused by this release.
+
 ## [1.0.74] - 2026-10-23
 
 ### Fixed — Steam catalog sync ("stuck at 100%")

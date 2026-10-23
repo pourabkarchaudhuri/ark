@@ -394,6 +394,17 @@ class ShelfBanditStore {
     return stats;
   }
 
+  /**
+   * Beta posterior parameters per arm at this instant. Logged alongside each
+   * sampled shelf order so the sampling propensity can be reconstructed for
+   * offline evaluation.
+   */
+  snapshotArms(): Record<string, { alpha: number; beta: number }> {
+    const out: Record<string, { alpha: number; beta: number }> = {};
+    for (const [key, arm] of this.arms) out[key] = { alpha: arm.alpha, beta: arm.beta };
+    return out;
+  }
+
   /** Reset all learning data. */
   reset() {
     this.arms.clear();

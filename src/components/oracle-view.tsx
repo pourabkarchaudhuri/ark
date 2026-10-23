@@ -135,6 +135,7 @@ import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { bm25Index } from '@/services/bm25-index';
 import { libraryStore } from '@/services/library-store';
+import { oracleEventLog } from '@/services/oracle-event-log';
 import { journeyStore } from '@/services/journey-store';
 import { getPrefetchedGames, setNavigatingGame } from '@/services/prefetch-store';
 import { GameCard } from '@/components/game-card';
@@ -924,6 +925,7 @@ const WhyPanelBody = memo(function WhyPanelBody({
 
   const onThumbUp = useCallback(() => {
     recoHistoryStore.recordThumbs(game.gameId, 1, game.title);
+    oracleEventLog.record({ type: 'thumbs', gameId: game.gameId, data: { value: 1 } });
     setThumbs(1);
     // Invalidate + (debounced) refresh so positive profile re-ranks shelves;
     // keep drawer open. Several ups in a row coalesce into one recompute, and
@@ -937,6 +939,7 @@ const WhyPanelBody = memo(function WhyPanelBody({
     recoHistoryStore.recordThumbs(game.gameId, -1, game.title, '', {
       developer: game.developer,
     });
+    oracleEventLog.record({ type: 'thumbs', gameId: game.gameId, data: { value: -1 } });
     const lib = libraryStore.getEntry(game.gameId);
     if (lib?.secondaryGameId) {
       recoHistoryStore.dismiss(lib.secondaryGameId, {
@@ -1140,6 +1143,9 @@ const OracleCard = memo(function OracleCard({
   }, [explaining]);
 
   const handleClickCapture = useCallback(() => {
+    // `capture: true` — this fires for any click inside the card (including X / Explain);
+    // dismiss / explain-open are logged separately so analysis can subtract them.
+    oracleEventLog.record({ type: 'click', gameId: game.gameId, shelfType, data: { capture: true } });
     if (shelfType) {
       shelfBanditStore.recordClick(shelfType);
       recoHistoryStore.recordClick(game.gameId, game.title, shelfType);
@@ -1148,8 +1154,9 @@ const OracleCard = memo(function OracleCard({
 
   const handleDismiss = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    oracleEventLog.record({ type: 'dismiss', gameId: game.gameId, shelfType });
     onDismiss?.(game.gameId);
-  }, [game.gameId, onDismiss]);
+  }, [game.gameId, onDismiss, shelfType]);
 
   const handleAddToLibrary = useCallback((gameId: string) => {
     if (libraryStore.isInLibrary(gameId)) return;
@@ -1180,12 +1187,14 @@ const OracleCard = memo(function OracleCard({
     });
     if (shelfType) recoHistoryStore.recordClick(gameId, game.title, shelfType);
     recoHistoryStore.recordLibraryAdd(gameId, game.title, shelfType || 'oracle');
+    oracleEventLog.record({ type: 'library-add', gameId, shelfType });
   }, [gameObj, game.themes, game.gameModes, game.title, shelfType]);
 
   const toggleExplain = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    oracleEventLog.record({ type: 'explain-open', gameId: game.gameId, shelfType });
     onExplain?.(game.gameId);
-  }, [onExplain, game.gameId]);
+  }, [onExplain, game.gameId, shelfType]);
 
   const matchPct = Math.min(100, Math.round(game.score * 100));
   const hasDiscount = game.reasons.isOnSale && game.price?.discountPercent;
@@ -1991,7 +2000,14 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
   // shelves visibly reshuffled the moment the rerank landed.
   const shelfKeySig = nonHeroShelves.map(oracleShelfKey).join('\u0001');
   const banditShelfOrder = useMemo(
-    () => shelfBanditStore.reorderShelves(nonHeroShelves).map(oracleShelfKey),
+    () => {
+      const order = shelfBanditStore.reorderShelves(nonHeroShelves).map(oracleShelfKey);
+      oracleEventLog.record({
+        type: 'shelf-order',
+        data: { order, arms: shelfBanditStore.snapshotArms() },
+      });
+      return order;
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state.lastComputed, shelfKeySig],
   );

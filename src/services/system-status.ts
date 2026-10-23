@@ -12,6 +12,7 @@ import { recoStore } from './reco-store';
 import { embeddingService } from './embedding-service';
 import { annIndex } from './ann-index';
 import { getBuildStage, getBuildNodeCount, getBuildStepIndex, getBuildStepDetail, GALAXY_STEP_LABELS, subscribeGalaxy } from './galaxy-cache';
+import type { RecoTelemetry } from '@/types/reco';
 import { RERANK_TIER_LABELS, getLastRerankRun, subscribeRerankRuns, type RerankRunRecord, type RerankTier } from './oracle-rerank';
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
@@ -64,6 +65,8 @@ export interface SystemStatusSnapshot {
   rerankSetup: SyncStatus;
   /** Most recent rerank run (Oracle shelves or Embedding Space neighbours); null before the first one. */
   lastRerank: LastRerankStatus | null;
+  /** Latest Oracle run's per-layer coverage (dev diagnostics); null before the first run. */
+  oracleLayers: OracleLayersStatus | null;
   embeddingModel: EmbeddingModelStatus | null;
   mlModel: MLModelStatus | null;
   storage: StorageMetric[];
@@ -79,6 +82,36 @@ export interface LastRerankStatus {
   /** Date.now() of the run — the panel renders it as "2m ago". */
   at: number;
   elapsedMs: number;
+}
+
+/** "Oracle layers" row — which scoring layers actually contribute for this library. */
+export interface OracleLayersStatus {
+  stage: SyncStatus['stage'];
+  detail: string;
+  layers: Array<{ layer: string; coveragePct: number; weight: number }>;
+  /** Layers that carry weight but are non-zero for <5% of candidates. */
+  deadLayers: string[];
+}
+
+export function oracleLayersStatus(t: RecoTelemetry | null): OracleLayersStatus | null {
+  if (!t) return null;
+  const layers = t.layers
+    .filter(l => l.weight > 0)
+    .map(l => ({ layer: l.layer, coveragePct: Math.round(l.coverage * 100), weight: l.weight }))
+    .sort((a, b) => b.weight - a.weight);
+  const deadLayers = layers.filter(l => l.weight > 0.001 && l.coveragePct < 5).map(l => l.layer);
+  const parts = [
+    `${deadLayers.length} dead layer${deadLayers.length === 1 ? '' : 's'}`,
+    `top-20 ties ${t.top20Ties}`,
+    `ML ${Math.round(t.mlCoverage * 100)}%`,
+    `emb ${Math.round(t.embeddingCoverage * 100)}%`,
+  ];
+  return {
+    stage: deadLayers.length > 0 ? 'error' : 'done',
+    detail: parts.join(' · '),
+    layers,
+    deadLayers,
+  };
 }
 
 function lastRerankStatus(r: RerankRunRecord | null): LastRerankStatus | null {
@@ -797,6 +830,7 @@ class SystemStatus {
       ollamaSetup: { ..._ollamaSetupStatus },
       rerankSetup: { ..._rerankSetupStatus },
       lastRerank: lastRerankStatus(getLastRerankRun()),
+      oracleLayers: oracleLayersStatus(recoStore.getState().telemetry),
       embeddingModel: this._embeddingModelCache ? { ...this._embeddingModelCache } : null,
       mlModel: this._mlModelCache ? { ...this._mlModelCache } : null,
       storage: [...this._storageCache],
