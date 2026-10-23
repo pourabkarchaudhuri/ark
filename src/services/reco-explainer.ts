@@ -7,7 +7,7 @@
  *   3. Optional blast-radius evidence chips from the ANN neighbor graph.
  */
 
-import type { ScoredGame, LayerBreakdown } from '@/types/reco';
+import type { ScoredGame, LayerBreakdown, RecoTelemetry } from '@/types/reco';
 import { gameGraphStore } from '@/services/game-graph-store';
 import { findGameById } from '@/services/prefetch-store';
 import { libraryStore } from '@/services/library-store';
@@ -21,6 +21,8 @@ export interface BlastRadiusChip {
 }
 
 const COMMUNITY_AFFINITY_FLOOR = 0.05;
+/** Semantic layer is a per-source percentile (0..1): "strong" means clearly above the median. */
+const SEMANTIC_STRONG = 0.6;
 
 const LAYER_LABELS: Record<string, string> = {
   contentSimilarity: 'Genre & Theme Match',
@@ -45,8 +47,9 @@ const LAYER_LABELS: Record<string, string> = {
 };
 
 /**
- * Approximate worker layer weights for honest contribution breakdown.
- * Dynamic ML/graph budgets are folded into typical mid values.
+ * Fallback layer weights, used only when the run's real weights are unavailable (old cached results).
+ * The worker's actual weights vary per run (embedding/ML/graph coverage) and ride along in
+ * telemetry; pass them to normalizeLayerScores via weightsFromTelemetry.
  */
 const LAYER_WEIGHTS: Record<string, number> = {
   contentSimilarity: 0.22,
@@ -70,14 +73,24 @@ const LAYER_WEIGHTS: Record<string, number> = {
   trajectoryMultiplier: 0,
 };
 
-/** Prefer worker `reasons.explanation`; fall back to layer-derived lines. */
+/** Per-layer weights of a run, from its telemetry (undefined when the run predates telemetry). */
+export function weightsFromTelemetry(telemetry: RecoTelemetry | null | undefined): Record<string, number> | undefined {
+  if (!telemetry?.layers?.length) return undefined;
+  const out: Record<string, number> = {};
+  for (const l of telemetry.layers) out[l.layer] = l.weight;
+  return out;
+}
+
+/** Calibrated "N% match" for display (falls back to the raw score for results cached before calibration). */
+export function matchPercent(game: Pick<ScoredGame, 'matchPct' | 'score'>): number {
+  const pct = game.matchPct ?? Math.round(game.score * 100);
+  return Math.min(100, Math.max(0, pct));
+}
+
+/** Prefer worker `reasons.explanation` (one prose sentence); fall back to layer-derived lines. */
 export function explanationLines(game: ScoredGame): string[] {
   const fromReasons = game.reasons?.explanation?.trim();
-  if (fromReasons) {
-    // Worker emits a single prose sentence; also accept "; "-joined parts
-    if (fromReasons.includes('; ')) return fromReasons.split('; ').map(s => s.trim()).filter(Boolean);
-    return [fromReasons];
-  }
+  if (fromReasons) return [fromReasons];
   if (game.explanation?.length) return game.explanation;
   return generateExplanation(game);
 }
@@ -94,7 +107,7 @@ export function explanationLines(game: ScoredGame): string[] {
 export function explanationHeadline(game: ScoredGame): string {
   const r = game.reasons;
   const ls = game.layerScores;
-  const pct = Math.min(100, Math.max(0, Math.round(game.score * 100)));
+  const pct = matchPercent(game);
 
   if (r.similarTo.length > 0) {
     return `A ${pct}% match, mostly because it plays like ${r.similarTo.slice(0, 2).join(' and ')}.`;
@@ -114,7 +127,7 @@ export function explanationHeadline(game: ScoredGame): string {
   if (r.isHiddenGem) {
     return `A ${pct}% match — critically strong but almost nobody is talking about it.`;
   }
-  if (ls.semanticSimilarity > 0.1) {
+  if (ls.semanticSimilarity > SEMANTIC_STRONG) {
     return `A ${pct}% match on how closely it reads like the games in your library.`;
   }
   if (r.isStretchPick) {
@@ -123,11 +136,12 @@ export function explanationHeadline(game: ScoredGame): string {
   return `A ${pct}% match against your overall profile.`;
 }
 
-export function normalizeLayerScores(game: ScoredGame): LayerBreakdown[] {
+export function normalizeLayerScores(game: ScoredGame, weights?: Record<string, number>): LayerBreakdown[] {
   const entries = Object.entries(game.layerScores)
     .filter(([, v]) => v !== undefined && v !== 0)
     .map(([key, rawScore]) => {
-      const weight = LAYER_WEIGHTS[key] ?? 0.05;
+      // Real per-run weight when known (a layer with weight 0 contributed nothing and is not credited).
+      const weight = weights ? (weights[key] ?? 0) : (LAYER_WEIGHTS[key] ?? 0.05);
       const weighted = Math.abs(rawScore as number) * weight;
       return {
         name: LAYER_LABELS[key] || key,
@@ -242,7 +256,7 @@ export function generateExplanation(game: ScoredGame): string[] {
   if (r.similarTo.length > 0) {
     lines.push(`Similar to ${r.similarTo.slice(0, 2).join(' & ')}`);
   }
-  if (ls.semanticSimilarity > 0.1) {
+  if (ls.semanticSimilarity > SEMANTIC_STRONG) {
     lines.push('High semantic similarity to games you love');
   }
   if (r.isHiddenGem) {

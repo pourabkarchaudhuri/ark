@@ -8,5 +8,6 @@
  *   3 — v1.0.77 ML layer repaired (continuous probabilities, rank-normalised, evidence-based user profile)
  *   4 — v1.0.78 taste modeling (rejections excluded from positive taste, negative embedding signal,
  *       per-source percentile semantics, median imputation)
+ *   5 — v1.0.79 scoring-math cleanup (Wilson quality, true popularity debias, lift-based habits, weights total 1)
  */
-export const ORACLE_ENGINE_VERSION = 4;
+export const ORACLE_ENGINE_VERSION = 5;

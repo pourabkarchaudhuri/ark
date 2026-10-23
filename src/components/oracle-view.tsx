@@ -126,6 +126,8 @@ import { recoHistoryStore } from '@/services/reco-history-store';
 import { expandHardNegativeIds } from '@/services/hard-negative';
 import {
   normalizeLayerScores,
+  weightsFromTelemetry,
+  matchPercent,
   explanationLines,
   explanationHeadline,
   buildBlastRadiusEvidence,
@@ -862,7 +864,7 @@ const WhyPanelBody = memo(function WhyPanelBody({
   onDismissed?: (gameId: string) => void;
   onClose: () => void;
 }) {
-  const breakdown = useMemo(() => normalizeLayerScores(game), [game]);
+  const breakdown = useMemo(() => normalizeLayerScores(game, weightsFromTelemetry(recoStore.getState().telemetry)), [game]);
   const reasons = useMemo(() => explanationLines(game), [game]);
   const headline = useMemo(() => explanationHeadline(game), [game]);
   const { coverUrl, headerImage } = useMemo(() => getScoredGameImages(game), [game]);
@@ -871,7 +873,7 @@ const WhyPanelBody = memo(function WhyPanelBody({
   const [openBreakdown, setOpenBreakdown] = useState(true);
   const [selectedEvidence, setSelectedEvidence] = useState<string | null>(null);
 
-  const matchPct = Math.min(100, Math.round(game.score * 100));
+  const matchPct = matchPercent(game);
 
   const evidence = useMemo(() => {
     const items: Array<{ key: string; label: string; detail: string; tone: 'neutral' | 'genre' | 'theme' }> = [];
@@ -1196,7 +1198,7 @@ const OracleCard = memo(function OracleCard({
     onExplain?.(game.gameId);
   }, [onExplain, game.gameId, shelfType]);
 
-  const matchPct = Math.min(100, Math.round(game.score * 100));
+  const matchPct = matchPercent(game);
   const hasDiscount = game.reasons.isOnSale && game.price?.discountPercent;
   const hasMC = game.reasons.metacriticScore && game.reasons.metacriticScore >= 80;
 
@@ -1404,7 +1406,7 @@ function ShelfCarousel({
 function HeroCard({ game, onNavigate }: { game: ScoredGame; onNavigate: (gameId: string) => void }) {
   const { coverUrl, headerImage } = getScoredGameImages(game);
   const img = useFallbackImage(game.gameId, game.title, coverUrl, headerImage);
-  const pct = Math.min(100, Math.round(game.score * 100));
+  const pct = matchPercent(game);
   const [displayPct, setDisplayPct] = useState(0);
 
   // Animate match percentage counter

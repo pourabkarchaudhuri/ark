@@ -26,18 +26,32 @@ import { mmrMaxSim } from '@/services/mmr-diversity';
 /** ANN cosine-distance ceiling for Taste Match pill (mirrors reco-store). */
 export const ANN_TASTE_MATCH_CEILING = 0.45;
 
-/** Tokenize notes / titles for light lexical overlap (F8). */
+/** Words that carry no taste signal in notes/titles. */
+const NOTE_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'this', 'that', 'was', 'were', 'are', 'but', 'not', 'you', 'your', 'its',
+  'game', 'games', 'play', 'played', 'playing', 'edition', 'remastered', 'definitive', 'deluxe', 'complete',
+  'from', 'have', 'has', 'had', 'very', 'really', 'just', 'about', 'than', 'then', 'into', 'out', 'all',
+]);
+
+/** Tokenize notes / titles for light lexical overlap (F8), minus stopwords. */
 export function noteTokens(text: string): Set<string> {
   return new Set(
     text
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, ' ')
       .split(/\s+/)
-      .filter(t => t.length >= 3),
+      .filter(t => t.length >= 3 && !NOTE_STOPWORDS.has(t)),
   );
 }
 
-/** Notes overlap bonus capped at 0.05 of score (F8). */
+/** Largest additive contribution of the notes-overlap bonus (F8). */
+export const NOTES_BONUS_MAX = 0.03;
+
+/**
+ * Notes overlap bonus: the share of the candidate's own tokens that appear in the user's
+ * loved-game notes, scaled to NOTES_BONUS_MAX. Normalised by the candidate (not by the size of
+ * the user's notes, which made the bonus vanish for anyone who writes a lot).
+ */
 export function computeNotesThemeBonus(
   candidate: CandidateGame,
   lovedNotesTokens: Set<string>,
@@ -49,8 +63,7 @@ export function computeNotesThemeBonus(
   for (const t of hay) {
     if (lovedNotesTokens.has(t)) hit++;
   }
-  if (hit === 0) return 0;
-  return Math.min(0.05, (hit / Math.max(lovedNotesTokens.size, 1)) * 0.05);
+  return NOTES_BONUS_MAX * (hit / hay.size);
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -89,7 +102,8 @@ export function classifyEngagementCurve(snap: UserGameSnapshot): EngagementPatte
   const lastTime = Math.max(...sessionTimestamps);
   const spanDays = (lastTime - firstTime) / (1000 * 60 * 60 * 24);
 
-  if (spanDays <= 3 && sessionCount >= 3) return 'binge-drop';
+  // A short run that ended in completion is a finished game, not a dropped one.
+  if (spanDays <= 3 && sessionCount >= 3) return snap.status === 'Completed' ? 'unknown' : 'binge-drop';
 
   const isSpread = spanDays >= 14;
 
@@ -196,6 +210,27 @@ export function getReleaseBucket(dateStr: string): string {
   return 'pre-2000';
 }
 
+const LEGAL_SUFFIX = /(?:\s+|^)(?:inc|llc|ltd|co|corp|corporation|company|gmbh|ag|sa|bv|pty|limited)\.?$/i;
+const PLACEHOLDER_NAMES = new Set(['unknown', 'unknown developer', 'unknown publisher', 'n/a', 'none', 'tbd', 'various']);
+
+/**
+ * Lower-cased individual names from a credit line ("A, B / C; D", "A & B"). Trailing legal suffixes
+ * ("Foo, Inc." / "Capcom Co., Ltd.") are not separate studios and are stripped; placeholders are dropped.
+ */
+export function splitCreditedNames(credit: string | undefined | null): string[] {
+  if (!credit) return [];
+  const out: string[] = [];
+  for (const raw of credit.split(/\s*[,;/]\s*|\s+&\s+|\s+\+\s+/)) {
+    let name = raw.toLowerCase().trim();
+    // Repeatedly strip suffixes so "capcom co" (from "Capcom Co., Ltd.") reduces to "capcom".
+    for (let i = 0; i < 3 && LEGAL_SUFFIX.test(name); i++) name = name.replace(LEGAL_SUFFIX, '').trim();
+    name = name.replace(/[.\s]+$/, '');
+    if (!name || PLACEHOLDER_NAMES.has(name)) continue;
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
 export function buildTasteProfile(games: UserGameSnapshot[], now: number): TasteProfile {
   const genresRaw = buildFeatureMap(games, now, g => toCanonicalGenres(g.genres || []));
   const genres = genresRaw.map(g => ({
@@ -205,8 +240,8 @@ export function buildTasteProfile(games: UserGameSnapshot[], now: number): Taste
   const themes = buildFeatureMap(games, now, g => g.themes);
   const gameModes = buildFeatureMap(games, now, g => g.gameModes);
   const perspectives = buildFeatureMap(games, now, g => g.perspectives);
-  const developers = buildFeatureMap(games, now, g => [g.developer].filter(Boolean));
-  const publishers = buildFeatureMap(games, now, g => [g.publisher].filter(Boolean));
+  const developers = buildFeatureMap(games, now, g => splitCreditedNames(g.developer));
+  const publishers = buildFeatureMap(games, now, g => splitCreditedNames(g.publisher));
   const eras = buildFeatureMap(games, now, g => g.releaseDate ? [getReleaseBucket(g.releaseDate)] : []);
 
   const totalHours = games.reduce((s, g) => s + g.hoursPlayed, 0);
@@ -215,14 +250,11 @@ export function buildTasteProfile(games: UserGameSnapshot[], now: number): Taste
     ? ratedGames.reduce((s, g) => s + g.rating, 0) / ratedGames.length
     : 0;
 
-  // Detect loyal developers: ≥2 games, avg rating ≥3.5 or ≥20 hours
-  const loyalDevelopers = developers
-    .filter(d => d.gameCount >= 2 && (d.avgRating >= 3.5 || d.totalHours >= 20))
-    .map(d => d.name);
-
-  const loyalPublishers = publishers
-    .filter(p => p.gameCount >= 2 && (p.avgRating >= 3.5 || p.totalHours >= 20))
-    .map(p => p.name);
+  // Loyal studio: at least two games they actually played (10h+ in total) AND, when rated, liked.
+  const isLoyal = (f: { gameCount: number; totalHours: number; avgRating: number }) =>
+    f.gameCount >= 2 && f.totalHours >= 10 && (f.avgRating === 0 || f.avgRating >= 3.5);
+  const loyalDevelopers = developers.filter(isLoyal).map(d => d.name);
+  const loyalPublishers = publishers.filter(isLoyal).map(p => p.name);
 
   return {
     genres,
@@ -259,7 +291,7 @@ export function buildNegativeProfile(
       if (can) vec.set(`g:${norm(can)}`, (vec.get(`g:${norm(can)}`) || 0) + weight);
     }
     for (const theme of themes) vec.set(`t:${norm(theme)}`, (vec.get(`t:${norm(theme)}`) || 0) + weight);
-    if (developer) vec.set(`d:${norm(developer)}`, (vec.get(`d:${norm(developer)}`) || 0) + weight);
+    for (const d of splitCreditedNames(developer)) vec.set(`d:${d}`, (vec.get(`d:${d}`) || 0) + weight);
   };
 
   for (const g of negativeGames) {
@@ -377,8 +409,8 @@ export class DenseFeatureSpace {
     for (const t of c.themes) push(this.dict.get(`t:${norm(t)}`));
     for (const m of c.gameModes) push(this.dict.get(`m:${norm(m)}`));
     for (const p of c.perspectives) push(this.dict.get(`p:${norm(p)}`));
-    if (c.developer) push(this.dict.get(`d:${norm(c.developer)}`));
-    if (c.publisher) push(this.dict.get(`pub:${norm(c.publisher)}`));
+    for (const d of splitCreditedNames(c.developer)) push(this.dict.get(`d:${d}`));
+    for (const p of splitCreditedNames(c.publisher)) push(this.dict.get(`pub:${p}`));
     const indices = [...seen];
     return { indices, mag: Math.sqrt(indices.length) };
   }
@@ -397,15 +429,28 @@ export class DenseFeatureSpace {
   }
 }
 
-/** Cosine similarity between a dense profile vector and a binary candidate (index-based). */
+/** Minimum matched-feature count in the cosine denominator (stops a 1-tag candidate scoring as a perfect match). */
+export const COSINE_MIN_MATCHED_FEATURES = 3;
+
+/**
+ * Cosine between a dense profile vector and a binary candidate, over the features the profile
+ * actually weights. Candidate features the profile has no opinion on neither help nor hurt, so
+ * metadata completeness is not rewarded or penalised. `_candidateMag` is kept for call-site
+ * compatibility.
+ */
 export function fastCosineProfileVsCandidate(
   profileVec: Float32Array, profileMag: number,
-  candidateIndices: number[], candidateMag: number,
+  candidateIndices: number[], _candidateMag: number,
 ): number {
-  if (candidateIndices.length === 0 || profileMag === 0 || candidateMag === 0) return 0;
+  if (candidateIndices.length === 0 || profileMag === 0) return 0;
   let dot = 0;
-  for (let i = 0; i < candidateIndices.length; i++) dot += profileVec[candidateIndices[i]];
-  return dot / (profileMag * candidateMag);
+  let matched = 0;
+  for (let i = 0; i < candidateIndices.length; i++) {
+    const w = profileVec[candidateIndices[i]];
+    if (w > 0) { dot += w; matched++; }
+  }
+  if (matched === 0) return 0;
+  return dot / (profileMag * Math.sqrt(Math.max(matched, COSINE_MIN_MATCHED_FEATURES)));
 }
 
 
@@ -550,70 +595,95 @@ export function computeGraphSignal(
   return { score, similarTo: [...new Set(contributions.map(c => c.title))].slice(0, 3) };
 }
 
-// ─── Layer 8: Quality Signal (multi-factor + review sentiment) ──────────────────
+// ─── Layer 8: Quality Signal (multi-factor + small-sample-safe review sentiment) ─
 
-export function computeQualitySignal(
-  c: CandidateGame,
-  maxRecommendations: number,
-  maxReviewVolume: number,
-): number {
-  // Metacritic component
-  const metacriticComponent = c.metacriticScore
-    ? clamp01((c.metacriticScore - 50) / 50)
-    : 0.3;
+/** Quality of a candidate with no usable stats: below any present-but-low score. */
+export const QUALITY_UNKNOWN = 0.05;
+/** Stable normaliser for the "recommendations" count (not the current pool's maximum). */
+const RECO_LOG_CEIL = Math.log(1_000_001);
+/** One-sided ~90% confidence for the Wilson lower bound. */
+const WILSON_Z = 1.2816;
 
-  // User recommendations component
-  const recoComponent = c.recommendations && maxRecommendations > 0
-    ? clamp01(Math.log(c.recommendations + 1) / Math.log(maxRecommendations + 1))
-    : 0.3;
-
-  // Review sentiment component — positivity ratio weighted by volume
-  const hasReviewData = c.reviewPositivity !== undefined && c.reviewVolume !== undefined && c.reviewVolume > 0;
-  let reviewComponent = 0;
-  if (hasReviewData) {
-    const positivity = clamp01(c.reviewPositivity!);
-    const volumeNorm = maxReviewVolume > 0
-      ? clamp01(Math.log(c.reviewVolume! + 1) / Math.log(maxReviewVolume + 1))
-      : 0.3;
-    reviewComponent = positivity * 0.7 + volumeNorm * 0.3;
-  }
-
-  // Achievement depth component
-  const achievementComponent = c.achievements
-    ? clamp01(c.achievements / 100)
-    : 0.3;
-
-  // Maintenance signal
-  const releaseYear = new Date(c.releaseDate).getFullYear();
-  const currentYear = new Date().getFullYear();
-  const yearsOld = currentYear - releaseYear;
-  const maintenanceComponent = isNaN(yearsOld) ? 0.3 : clamp01(1 - yearsOld / 15);
-
-  // Dynamic weights: redistribute review weight to metacritic + reco when absent
-  if (hasReviewData) {
-    return (
-      metacriticComponent * 0.30 +
-      recoComponent * 0.20 +
-      reviewComponent * 0.20 +
-      achievementComponent * 0.15 +
-      maintenanceComponent * 0.15
-    );
-  }
-
-  // No review data: shift that 20% to metacritic (10%) and recommendations (10%)
-  return (
-    metacriticComponent * 0.40 +
-    recoComponent * 0.30 +
-    achievementComponent * 0.15 +
-    maintenanceComponent * 0.15
-  );
+/** Wilson lower bound of a positive ratio `p` observed over `n` reviews. */
+export function wilsonLowerBound(p: number, n: number): number {
+  if (!(n > 0)) return 0;
+  const pp = clamp01(p);
+  const z2 = WILSON_Z * WILSON_Z;
+  const denom = 1 + z2 / n;
+  const centre = pp + z2 / (2 * n);
+  const margin = WILSON_Z * Math.sqrt((pp * (1 - pp) + z2 / (4 * n)) / n);
+  return clamp01((centre - margin) / denom);
 }
 
-// ─── Layer 9: Popularity Debiasing ─────────────────────────────────────────────
+/**
+ * Quality from the evidence that exists, weighted-averaged over the components that are present
+ * (a missing stat is unknown, not a free 0.3). Review sentiment uses the Wilson lower bound, so a
+ * 3-of-3 positive game cannot beat a 900-of-1000 one and positivity outweighs raw volume.
+ * Depends only on the candidate itself — no pool maxima, no wall-clock; recency is its own layer.
+ */
+export function computeQualitySignal(c: CandidateGame): number {
+  let sum = 0;
+  let weight = 0;
+  const add = (value: number, w: number) => { sum += value * w; weight += w; };
 
-export function computePopularityAdjustment(playerCount: number | null, maxPlayerCount: number): number {
-  if (!playerCount || playerCount <= 0 || maxPlayerCount <= 0) return 1.0;
-  return 1.0 - (Math.log(playerCount + 1) / Math.log(maxPlayerCount + 1)) * 0.25;
+  if (c.metacriticScore && c.metacriticScore > 0) add(clamp01((c.metacriticScore - 50) / 50), 0.30);
+  if (c.recommendations && c.recommendations > 0) add(clamp01(Math.log(c.recommendations + 1) / RECO_LOG_CEIL), 0.15);
+  if (c.reviewPositivity !== undefined && c.reviewVolume !== undefined && c.reviewVolume > 0) {
+    add(wilsonLowerBound(c.reviewPositivity, c.reviewVolume), 0.35);
+  }
+  // Achievement count says little about quality: small, capped contribution.
+  if (c.achievements && c.achievements > 0) add(clamp01(c.achievements / 100), 0.05);
+
+  return weight > 0 ? clamp01(sum / weight) : QUALITY_UNKNOWN;
+}
+
+// ─── Layer 9: Popularity debiasing ─────────────────────────────────────────────
+
+/**
+ * A real debias: the less crowded a game is, the higher the signal (blockbusters are already
+ * served by the quality layer). Unknown player count is neutral (0.5).
+ */
+export function computePopularitySignal(playerCount: number | null | undefined, maxPlayerCount: number): number {
+  if (!playerCount || !(playerCount > 0) || !(maxPlayerCount > 0)) return 0.5;
+  const raw = clamp01(Math.log(playerCount + 1) / Math.log(maxPlayerCount + 1));
+  return clamp01(1 - 0.7 * raw);
+}
+
+/** Value at quantile `q` (0..1) of an ascending-sorted array; NaN when empty. */
+export function quantileSorted(sorted: number[], q: number): number {
+  if (sorted.length === 0) return Number.NaN;
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(q * (sorted.length - 1))))];
+}
+
+// ─── Recency ───────────────────────────────────────────────────────────────────
+
+/**
+ * Newer is better over a 10-year window. Uses UTC years against the pipeline's `now` (so a
+ * "2026-01-01" release is not read as 2025 west of UTC). Unreleased and unparseable dates are
+ * neutral (0.3) — a future year must never clamp to the maximum boost.
+ */
+export function computeRecencyBoost(releaseDate: string | undefined, nowMs: number): number {
+  const t = releaseDate ? Date.parse(releaseDate) : Number.NaN;
+  if (Number.isNaN(t) || t > nowMs) return 0.3;
+  const diff = new Date(nowMs).getUTCFullYear() - new Date(t).getUTCFullYear();
+  return clamp01(1 - diff / 10);
+}
+
+// ─── Diversity ─────────────────────────────────────────────────────────────────
+
+/** Bonus for genres the user engages with least; 0 (not the maximum) when no genre is recognised. */
+export function computeDiversityBonus(
+  candidateCanonGenres: string[],
+  tasteGenres: Array<{ name: string; weight: number }>,
+  maxGenreWeight: number,
+): number {
+  if (candidateCanonGenres.length === 0 || !(maxGenreWeight > 0)) return 0;
+  const sum = candidateCanonGenres.reduce((acc, g) => {
+    const found = tasteGenres.find(fg => norm(fg.name) === norm(g));
+    return acc + (found ? found.weight : 0);
+  }, 0);
+  const avg = sum / candidateCanonGenres.length;
+  return clamp01(1 - avg / maxGenreWeight) * 0.5;
 }
 
 // ─── Layer 10: Time-of-Day Contextual Boost ────────────────────────────────────
@@ -623,39 +693,61 @@ export interface TimeOfDayContext {
   hasSufficientData: boolean;
 }
 
-/** Build time-of-day genre affinity ONCE per pipeline run (not per candidate). */
+/** Sessions needed in the current time bucket before claiming a time-of-day habit. */
+export const TOD_MIN_BUCKET_SESSIONS = 8;
+/** Sessions of one genre in the bucket before it can carry a time-of-day boost. */
+const TOD_MIN_GENRE_SESSIONS = 3;
+const TOD_SMOOTH_K = 3;
+/** Lift over the user's overall genre mix at which the boost saturates is 1 + this. */
+const TOD_LIFT_SPAN = 1.5;
+
+function hourBucket(hour: number): 'night' | 'morning' | 'afternoon' | 'evening' {
+  return hour < 6 ? 'night' : hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening';
+}
+
+/**
+ * Time-of-day genre affinity, built ONCE per pipeline run: how much more a genre is played in
+ * the current bucket than across the day (lift over the user's own baseline, so a genre they
+ * simply play most of the time is not "a night habit").
+ */
 export function buildTimeOfDayContext(
   userGames: UserGameSnapshot[],
   currentHour: number,
 ): TimeOfDayContext {
-  const bucket = currentHour < 6 ? 'night' : currentHour < 12 ? 'morning' : currentHour < 18 ? 'afternoon' : 'evening';
+  const bucket = hourBucket(currentHour);
 
-  const affinity = new Map<string, number>();
-  let totalSessionsInBucket = 0;
+  const inBucket = new Map<string, number>();
+  const overall = new Map<string, number>();
+  let bucketTotal = 0;
+  let overallTotal = 0;
 
   for (const ug of userGames) {
     if (computeEngagementWeight(ug) <= 0) continue; // sessions of rejected games say nothing about preference
-    for (let i = 0; i < ug.sessionTimestamps.length; i++) {
-      const sessionHour = new Date(ug.sessionTimestamps[i]).getHours();
-      const sessionBucket = sessionHour < 6 ? 'night' : sessionHour < 12 ? 'morning' : sessionHour < 18 ? 'afternoon' : 'evening';
-
-      if (sessionBucket === bucket) {
-        totalSessionsInBucket++;
-        for (const g of ug.genres) {
-          const can = toCanonicalGenre(g);
-          if (can) {
-            const key = norm(can);
-            affinity.set(key, (affinity.get(key) || 0) + 1);
-          }
-        }
+    const genres = [...new Set(ug.genres.map(g => toCanonicalGenre(g)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c)))];
+    if (genres.length === 0) continue;
+    for (const ts of ug.sessionTimestamps) {
+      const inThisBucket = hourBucket(new Date(ts).getHours()) === bucket;
+      overallTotal++;
+      if (inThisBucket) bucketTotal++;
+      for (const key of genres) {
+        overall.set(key, (overall.get(key) ?? 0) + 1);
+        if (inThisBucket) inBucket.set(key, (inBucket.get(key) ?? 0) + 1);
       }
     }
   }
 
-  if (totalSessionsInBucket < 3) return { affinity: new Map(), hasSufficientData: false };
+  if (bucketTotal < TOD_MIN_BUCKET_SESSIONS) return { affinity: new Map(), hasSufficientData: false };
 
-  for (const [k, v] of affinity) {
-    affinity.set(k, v / totalSessionsInBucket);
+  const affinity = new Map<string, number>();
+  for (const [key, count] of inBucket) {
+    if (count < TOD_MIN_GENRE_SESSIONS) continue;
+    const overallShare = (overall.get(key) ?? 0) / overallTotal;
+    if (overallShare <= 0) continue;
+    // Add-k smoothing toward the overall share: a genre seen once or twice cannot saturate the lift.
+    const bucketShare = (count + TOD_SMOOTH_K * overallShare) / (bucketTotal + TOD_SMOOTH_K);
+    const lift = bucketShare / overallShare;
+    const boost = clamp01((lift - 1) / TOD_LIFT_SPAN);
+    if (boost > 0) affinity.set(key, boost);
   }
 
   return { affinity, hasSufficientData: true };
@@ -687,21 +779,13 @@ export function computeStudioLoyaltyBoost(
   loyalDevelopers: string[],
   profile: TasteProfile,
 ): number {
-  const candDev = norm(candidate.developer);
-  const candPub = norm(candidate.publisher);
+  // Roles are not interchangeable: a loyal developer is matched against developers only,
+  // a loyal publisher against publishers only. Co-credits are split first.
+  const candDevs = splitCreditedNames(candidate.developer);
+  const candPubs = splitCreditedNames(candidate.publisher);
 
-  for (const dev of loyalDevelopers) {
-    if (candDev === dev || candPub === dev) {
-      return 0.35;
-    }
-  }
-
-  for (const pub of profile.loyalPublishers) {
-    if (candPub === pub || candDev === pub) {
-      return 0.25;
-    }
-  }
-
+  if (loyalDevelopers.some(dev => candDevs.includes(dev))) return 0.35;
+  if (profile.loyalPublishers.some(pub => candPubs.includes(pub))) return 0.25;
   return 0;
 }
 
@@ -710,9 +794,17 @@ export function computeStudioLoyaltyBoost(
 export interface SequencingContext {
   transitions: Map<string, Map<string, number>>;
   transitionTotals: Map<string, number>;
+  /** Share of all sessions in which each genre appears (the baseline transitions are compared to). */
+  genreBaseline: Map<string, number>;
   recentGameGenres: string[][];
   hasSufficientData: boolean;
 }
+
+/** Sessions needed before claiming a cross-game sequencing habit. */
+export const SEQUENCING_MIN_SESSIONS = 8;
+/** Transitions out of a genre needed before it can predict the next one. */
+export const SEQUENCING_MIN_TRANSITIONS = 4;
+const SEQUENCING_SMOOTH_K = 3;
 
 /** Build session sequencing context ONCE per pipeline run (not per candidate). */
 export function buildSequencingContext(userGames: UserGameSnapshot[]): SequencingContext {
@@ -730,11 +822,19 @@ export function buildSequencingContext(userGames: UserGameSnapshot[]): Sequencin
     }
   }
 
-  if (allSessions.length < 4) {
-    return { transitions: new Map(), transitionTotals: new Map(), recentGameGenres: [], hasSufficientData: false };
+  if (allSessions.length < SEQUENCING_MIN_SESSIONS) {
+    return { transitions: new Map(), transitionTotals: new Map(), genreBaseline: new Map(), recentGameGenres: [], hasSufficientData: false };
   }
 
   allSessions.sort((a, b) => a.timestamp - b.timestamp);
+
+  // Baseline = share of genre *mentions* (same unit as the next-genre shares below, which sum to 1).
+  const genreBaseline = new Map<string, number>();
+  let mentions = 0;
+  for (const sess of allSessions) {
+    for (const g of new Set(sess.genres)) { genreBaseline.set(g, (genreBaseline.get(g) ?? 0) + 1); mentions++; }
+  }
+  for (const [g, n] of genreBaseline) genreBaseline.set(g, n / Math.max(1, mentions));
 
   const transitions = new Map<string, Map<string, number>>();
   for (let i = 0; i < allSessions.length - 1; i++) {
@@ -767,6 +867,7 @@ export function buildSequencingContext(userGames: UserGameSnapshot[]): Sequencin
   return {
     transitions,
     transitionTotals,
+    genreBaseline,
     recentGameGenres: recentGames.map(g => g.genres.map(x => toCanonicalGenre(x)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c))),
     hasSufficientData: recentGames.length > 0,
   };
@@ -784,17 +885,22 @@ export function computeSequencingBoost(candidate: CandidateGame, ctx: Sequencing
       const trans = ctx.transitions.get(fromGenre);
       if (!trans) continue;
       const totalTrans = ctx.transitionTotals.get(fromGenre) || 0;
-      if (totalTrans === 0) continue;
+      if (totalTrans < SEQUENCING_MIN_TRANSITIONS) continue;
 
       for (const candidateGenre of candidateGenresNorm) {
         const count = trans.get(candidateGenre) || 0;
-        totalAffinity += count / totalTrans;
+        // Lift over how often the candidate genre is played anyway: following RPG with Puzzle
+        // means little when Puzzle is half of everything the user plays.
+        const baseline = Math.max(ctx.genreBaseline.get(candidateGenre) ?? 0, 0.05);
+        // Add-k smoothing toward "no lift" so a handful of transitions cannot saturate the signal.
+        const lift = (count + SEQUENCING_SMOOTH_K * baseline) / (totalTrans + SEQUENCING_SMOOTH_K) / baseline;
+        totalAffinity += clamp01((lift - 1) / 2);
         affinityCount++;
       }
     }
   }
 
-  return affinityCount > 0 ? clamp01((totalAffinity / affinityCount) * 2) : 0;
+  return affinityCount > 0 ? clamp01(totalAffinity / affinityCount) : 0;
 }
 
 // ─── Layer 14: MMR Diversity Re-Ranking ─────────────────────────────────────────
@@ -1078,6 +1184,9 @@ export interface ScoringWeights {
  *  - unused ML budget goes 60/40 to content / quality.
  * Content + semantic + cluster + graph always total 0.41.
  */
+/** Defined total of the positive layer weights. */
+export const WEIGHT_TOTAL = 1;
+
 export function assembleWeights(p: {
   embeddingCoverage: number;
   hasClusterScores: boolean;
@@ -1098,7 +1207,7 @@ export function assembleWeights(p: {
   const mlBudget = 0.10;
   const mlResidual = mlBudget * (1 - p.mlCoverage);
 
-  return {
+  const raw: ScoringWeights = {
     W_SEMANTIC: p.hasClusterScores ? semanticBudget * 0.65 : semanticBudget,
     W_CLUSTER_SEM: p.hasClusterScores ? semanticBudget * 0.35 : 0,
     W_CONTENT: 0.15 + residual * 0.58 + graphShortfall,
@@ -1120,6 +1229,22 @@ export function assembleWeights(p: {
     W_CONTENT_ML: mlResidual * 0.60,
     W_QUALITY_ML: mlResidual * 0.40,
   };
+
+  // Normalise so the positive layers sum to exactly WEIGHT_TOTAL (the negative layer scales with
+  // them): a defined total makes scores comparable across runs and stops the raw sum (>1) from
+  // clamping strong candidates to the same 1.0.
+  let positive = 0;
+  for (const [k, v] of Object.entries(raw)) if (k !== 'W_NEGATIVE') positive += v;
+  const scale = positive > 0 ? WEIGHT_TOTAL / positive : 1;
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw)) out[k] = v * scale;
+  return out as unknown as ScoringWeights;
+}
+
+/** Map a raw score onto 0–100 across the pool's [lo, hi] range (raw scores sit in a narrow low band). */
+export function calibrateMatchPercent(score: number, lo: number, hi: number): number {
+  if (!(hi > lo)) return Math.round(clamp01(score) * 100);
+  return Math.round(clamp01((score - lo) / (hi - lo)) * 100);
 }
 
 // ─── Diagnostics ───────────────────────────────────────────────────────────────

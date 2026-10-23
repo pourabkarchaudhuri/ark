@@ -12,7 +12,7 @@ import {
   buildTasteProfile,
   _engagementCache,
   classifyEngagementCurve,
-  computePopularityAdjustment,
+  computePopularitySignal,
   computeQualitySignal,
   computeRecoTelemetry,
   mmrRerank,
@@ -28,31 +28,29 @@ import {
   multiTasteLibrary,
 } from './fixtures';
 
-describe('computeQualitySignal — CURRENT BEHAVIOR (fixed in R5)', () => {
-  it('rewards review volume over review ratio: 70%-positive/500k beats 97%-positive/2k', () => {
+describe('computeQualitySignal', () => {
+  it('positivity outweighs volume: 97%-positive/2k beats 70%-positive/500k (R5)', () => {
     const popular = makeCandidate('a', { reviewPositivity: 0.7, reviewVolume: 500_000, recommendations: 400_000 });
     const niche = makeCandidate('b', { reviewPositivity: 0.97, reviewVolume: 2_000, recommendations: 1_500 });
-    const q = (c: ReturnType<typeof makeCandidate>) => computeQualitySignal(c, 500_000, 500_000);
-    expect(q(popular)).toBeGreaterThan(q(niche));
+    expect(computeQualitySignal(niche)).toBeGreaterThan(computeQualitySignal(popular));
   });
 
   it('stays within [0, 1]', () => {
     for (const c of candidatePool(40)) {
-      const q = computeQualitySignal(c, 100_000, 200_000);
+      const q = computeQualitySignal(c);
       expect(q).toBeGreaterThanOrEqual(0);
       expect(q).toBeLessThanOrEqual(1);
     }
   });
 });
 
-describe('computePopularityAdjustment — CURRENT BEHAVIOR (fixed in R5)', () => {
-  it('"debias" still increases with popularity: raw * adj is monotonic', () => {
+describe('computePopularitySignal', () => {
+  it('debiases: the signal decreases monotonically with popularity (R5)', () => {
     const max = 1_000_000;
-    let prev = -1;
+    let prev = Infinity;
     for (const players of [10, 1_000, 50_000, 500_000, 1_000_000]) {
-      const raw = Math.log(players + 1) / Math.log(max + 1);
-      const signal = raw * computePopularityAdjustment(players, max);
-      expect(signal).toBeGreaterThan(prev);
+      const signal = computePopularitySignal(players, max);
+      expect(signal).toBeLessThan(prev);
       prev = signal;
     }
   });
@@ -73,15 +71,15 @@ describe('buildTasteProfile', () => {
   });
 });
 
-describe('classifyEngagementCurve — CURRENT BEHAVIOR (fixed in R5)', () => {
-  it('labels a one-weekend completed 5-star game as binge-drop', () => {
+describe('classifyEngagementCurve', () => {
+  it('does not label a one-weekend completed 5-star game as binge-drop (R5)', () => {
     const t0 = FIXTURE_NOW - 10 * 86_400_000;
     const g = makeUser('x', {
       status: 'Completed', rating: 5, hoursPlayed: 20, sessionCount: 5,
       sessionTimestamps: [t0, t0 + 3_600_000, t0 + 7_200_000, t0 + 86_400_000, t0 + 90_000_000],
       sessionDurations: [180, 200, 220, 240, 260],
     });
-    expect(classifyEngagementCurve(g)).toBe('binge-drop');
+    expect(classifyEngagementCurve(g)).not.toBe('binge-drop');
   });
 });
 

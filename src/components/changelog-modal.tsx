@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.79': {
+    title: "What's New in Ark 1.0.79",
+    changes: [
+      'Oracle scores games more sensibly: a game with a handful of perfect reviews no longer beats one with thousands of great ones, missing information is treated as unknown rather than average, and popularity is now genuinely discounted instead of rewarded.',
+      'Studio, time-of-day and play-order habits now need real evidence, and are measured against what you do anyway.',
+      'Franchises you rated poorly now count against a game instead of for it, and "Because you loved…" only uses games you actually liked.',
+      'The match percentage now spreads across a realistic range, and the "why" breakdown shows what really drove each pick.',
+      'Because rankings changed, Oracle will recalculate once after updating.',
+    ],
+  },
   '1.0.78': {
     title: "What's New in Ark 1.0.78",
     changes: [

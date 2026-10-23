@@ -117,6 +117,8 @@ export interface MatchReasons {
 
 /** A scored recommendation candidate. */
 export interface ScoredGame {
+  /** Pool-calibrated display percentage (raw `score` sits in a narrow band; this spreads it over 1–99). */
+  matchPct?: number;
   gameId: string;
   title: string;
   coverUrl?: string;
@@ -412,6 +414,8 @@ export interface RecoTelemetry {
   /** Distinct score values among the top 20. */
   top20Distinct: number;
   funnel: {
+    /** Candidates whose composite score was non-finite (guarded and reported, not silently lost). */
+    nonFinite?: number;
     candidatesIn: number;
     afterExclusions: number;
     scored: number;

@@ -213,6 +213,7 @@ export function isFutureReleaseDate(releaseDate: string, nowMs: number = Date.no
 }
 
 type MutableCluster = {
+  playedIds: Set<string>;
   entries: Map<string, {
     gameId: string;
     title: string;
@@ -243,6 +244,7 @@ export function detectFranchises(
     publisher: string,
     rating: number,
     hours: number,
+    played: boolean,
   ) => {
     const baseName = canonicalFranchiseBase(title);
     if (!baseName || baseName.length < 3) return;
@@ -253,6 +255,7 @@ export function detectFranchises(
         developers: new Map(),
         userRatings: [],
         userHours: 0,
+        playedIds: new Set(),
       });
     }
 
@@ -281,6 +284,7 @@ export function detectFranchises(
     if (isUser) {
       if (rating > 0) cluster.userRatings.push(rating);
       cluster.userHours += hours;
+      if (played) cluster.playedIds.add(gameId);
     }
   };
 
@@ -294,13 +298,15 @@ export function detectFranchises(
       ug.publisher,
       ug.rating,
       ug.hoursPlayed,
+      // "Following" a franchise means actually engaging with an entry, not merely owning it.
+      ug.hoursPlayed >= 0.5 || ug.rating > 0 || ug.status === 'Completed',
     );
   }
 
   const franchiseProgressStep = Math.max(1, Math.floor(candidates.length / 5));
   for (let fi = 0; fi < candidates.length; fi++) {
     const c = candidates[fi];
-    addToMap(c.gameId, c.title, c.releaseDate, false, c.developer, c.publisher, 0, 0);
+    addToMap(c.gameId, c.title, c.releaseDate, false, c.developer, c.publisher, 0, 0, false);
     if (onProgress && fi % franchiseProgressStep === 0) {
       onProgress(fi / candidates.length);
     }
@@ -354,7 +360,7 @@ export function detectFranchises(
       }
     }
 
-    const userPlayedIds = entries.filter(e => e.isUserOwned).map(e => e.gameId);
+    const userPlayedIds = entries.filter(e => e.isUserOwned && data.playedIds.has(e.gameId)).map(e => e.gameId);
     const avgRating = data.userRatings.length > 0
       ? data.userRatings.reduce((s, r) => s + r, 0) / data.userRatings.length
       : 0;
@@ -376,6 +382,9 @@ export function detectFranchises(
 
   return franchises.sort((a, b) => b.userTotalHours - a.userTotalHours);
 }
+
+/** Boost magnitude (negative) for a franchise the user rated below 3. */
+export const FRANCHISE_DISLIKE_PENALTY = 0.4;
 
 /** Compute franchise boost for a single candidate. */
 export function computeFranchiseBoost(
@@ -412,9 +421,16 @@ export function computeFranchiseBoost(
     const userPlayed = franchise.userPlayedIds.length;
     const totalEntries = franchise.entries.length;
 
+    // Owning an entry you never touched is not following the franchise.
+    if (userPlayed === 0) continue;
+
+    // A franchise the user rated poorly is a negative signal, not a (halved) boost.
+    if (franchise.userAvgRating > 0 && franchise.userAvgRating < 3) {
+      return { boost: -FRANCHISE_DISLIKE_PENALTY, isFranchiseEntry: false };
+    }
+
     const ratingMult = franchise.userAvgRating >= 4 ? 1.5
       : franchise.userAvgRating >= 3 ? 1.0
-      : franchise.userAvgRating > 0 ? 0.5
       : franchise.userTotalHours >= 10 ? 1.2
       : 1.0;
 

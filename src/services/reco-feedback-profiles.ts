@@ -3,6 +3,7 @@
  * Shared by reco.worker (scoring) and unit tests.
  */
 
+import { splitCreditedNames } from '@/services/reco-scoring';
 import type { CandidateGame, UserGameSnapshot } from '@/types/reco';
 import { toCanonicalGenre } from '@/data/canonical-genres';
 
@@ -22,7 +23,7 @@ function addFeatures(
     if (can) vec.set(`g:${norm(can)}`, (vec.get(`g:${norm(can)}`) || 0) + weight);
   }
   for (const theme of themes) vec.set(`t:${norm(theme)}`, (vec.get(`t:${norm(theme)}`) || 0) + weight);
-  if (developer) vec.set(`d:${norm(developer)}`, (vec.get(`d:${norm(developer)}`) || 0) + weight);
+  for (const d of splitCreditedNames(developer)) vec.set(`d:${d}`, (vec.get(`d:${d}`) || 0) + weight);
 }
 
 /**

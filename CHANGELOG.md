@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.79] - 2026-10-23
+
+Fifth step of the Oracle recommendation-quality plan: the scoring math itself, and honest explanations. **Ranking changes** (engine version 5).
+
+### Fixed — scoring math
+- **Quality is small-sample-safe and evidence-based.** Review sentiment uses the Wilson lower bound (a 3-of-3 positive game no longer beats a 900-of-1000 one) and positivity now outweighs raw review volume (a 70%-positive / 500k-review game used to beat a 97%-positive / 2k-review one). Missing stats are *unknown*, not a free 0.3: the signal averages only the components that exist, and a game with no stats scores below one with present-but-low stats. It no longer depends on the current pool's maximum or on the calendar year (maintenance was a hidden second recency term).
+- **Popularity is a real debias.** The old `raw × (1 − 0.25·raw)` still increased with popularity. The signal now decreases as a game gets more crowded (blockbusters are already served by quality); unknown player count is neutral (0.5). "Hidden gem" now means well-reviewed *and* in the least-played quarter of the pool, not "under 10% of the single biggest game".
+- **Recency:** unreleased/future titles are neutral instead of the maximum boost; years are read in UTC against the run's `now` (a "2026-01-01" release no longer reads as 2025 west of UTC).
+- **Diversity bonus is 0 (not the maximum) for a game with no recognised genre.**
+- **Content similarity ignores metadata completeness.** Features the profile has no opinion on neither help nor hurt, and a single matching tag is no longer a perfect match (denominator floor of three matched features).
+- **Notes bonus** is normalised by the candidate's own tokens, ignores stopwords and is capped at 0.03.
+- **Studio loyalty is stricter and role-aware:** at least two games, 10h+ in total, and (when rated) liked; co-credits ("A, B / C") are split; a loyal developer matches developers only and a loyal publisher publishers only.
+- **Time-of-day and sequencing use lift over your own baseline** with larger minimum samples (8 sessions): a genre you simply play most of the time is no longer "a night habit", and following RPG with Puzzle means little when Puzzle is half of everything you play.
+- **Engagement curve:** a short run that ended in completion is no longer labelled "binge-drop".
+- **Franchise:** owning an entry you never played no longer counts as following the franchise, and a franchise you rated below 3 stars is now a negative signal instead of a halved boost.
+- **Weights have a defined total.** All positive layer weights are normalised to sum to exactly 1, so scores are comparable across runs and strong candidates stop clamping to the same 1.0.
+- **NaN guard:** a non-finite ML score is treated as missing (pool median); any non-finite composite is counted in telemetry (`funnel.nonFinite`) rather than silently vanishing.
+
+### Fixed — honest explanations
+- **"N% match" is calibrated.** Raw scores sit in a narrow low band; the displayed percentage is now the candidate's position between the pool's 5th percentile and best score (1–99).
+- **The "Why" breakdown credits layers by the weights the run actually used** (from telemetry) instead of a static table, and a layer that carried zero weight is not credited.
+- **"Because you loved X" is seeded by a game you actually liked** (a hated 80-hour game no longer qualifies) and tries your top five seeds instead of betting on one title that must survive a 3-item truncated link list.
+- Explanation text containing "; " is no longer split into fragments.
+
+### Hardened after an independent review (before release)
+- The binge-drop fix now actually reaches production (the store's older classifier labelled completed weekend games and that label stuck; the worker now always classifies with the shared function).
+- Co-credited developers/publishers are split consistently everywhere (content similarity, negative/positive profiles, Backlog Advisor), legal suffixes ("Inc.", "Co., Ltd.") are not separate studios, and placeholders ("Unknown Developer") are ignored.
+- "Complete the Series" skips franchises you rated poorly or never played.
+- Sequencing and time-of-day lifts are in consistent units, smoothed, and need a minimum number of observations per genre/transition.
+- The Coming Soon shelf floor is pool-relative (above-median) because absolute scores shifted; match percentage uses the 98th percentile (not the maximum) as the top of its range; hidden gems use a strict percentile cut.
+
+### Tests
+- New: quality/Wilson, popularity, recency, diversity, notes, studio, time-of-day and sequencing lift, curve, franchise, calibration, weights total, explainer weights, pipeline behaviours (an acclaimed older game outranks an empty-stat unreleased one).
+
 ## [1.0.78] - 2026-10-23
 
 Fourth step of the Oracle recommendation-quality plan: how Oracle models your taste. **Ranking changes** (engine version 4). No re-indexing needed.

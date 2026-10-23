@@ -57,6 +57,7 @@ import { buildPositiveProfile } from '@/services/reco-feedback-profiles';
 import {
   ANN_TASTE_MATCH_CEILING,
   noteTokens,
+  splitCreditedNames,
   computeNotesThemeBonus,
   norm,
   clamp01,
@@ -64,6 +65,7 @@ import {
   CURVE_MULTIPLIERS,
   classifyEngagementCurve,
   _engagementCache,
+  computeEngagementScore,
   buildTasteProfile,
   buildNegativeProfile,
   DenseFeatureSpace,
@@ -72,7 +74,11 @@ import {
   buildGraphUserContext,
   computeGraphSignal,
   computeQualitySignal,
-  computePopularityAdjustment,
+  computePopularitySignal,
+  computeRecencyBoost,
+  computeDiversityBonus,
+  quantileSorted,
+  calibrateMatchPercent,
   buildTimeOfDayContext,
   computeTimeOfDayBoost,
   computeStudioLoyaltyBoost,
@@ -104,7 +110,7 @@ function generateExplanation(
   profile: TasteProfile,
 ): string {
   const parts: string[] = [];
-  const matchPct = Math.round(scored.score * 100);
+  const matchPct = scored.matchPct ?? Math.round(scored.score * 100);
 
   // Franchise entry callout (top priority)
   if (scored.reasons.isFranchiseEntry && scored.reasons.franchiseOf) {
@@ -226,10 +232,10 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   // ── 2. Classify engagement curves ──
   progress('Analyzing play patterns...', 8);
+  // Always classify here with the shared function: the store's snapshot builder keeps its own older
+  // classifier (which ignored completion) and its label must not stick.
   for (const ug of userGames) {
-    if (!ug.engagementPattern || ug.engagementPattern === 'unknown') {
-      ug.engagementPattern = classifyEngagementCurve(ug);
-    }
+    ug.engagementPattern = classifyEngagementCurve(ug);
   }
 
   // ── 3. Build negative / positive taste profiles ──
@@ -269,7 +275,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     for (const t of c.themes) featureSpace.register(`t:${norm(t)}`);
     for (const m of c.gameModes) featureSpace.register(`m:${norm(m)}`);
     for (const p of c.perspectives) featureSpace.register(`p:${norm(p)}`);
-    if (c.developer) featureSpace.register(`d:${norm(c.developer)}`);
+    for (const d of splitCreditedNames(c.developer)) featureSpace.register(`d:${d}`);
     if (c.publisher) featureSpace.register(`pub:${norm(c.publisher)}`);
   }
 
@@ -279,7 +285,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
       if (can) featureSpace.register(`g:${norm(can)}`);
     }
     for (const t of g.themes) featureSpace.register(`t:${norm(t)}`);
-    if (g.developer) featureSpace.register(`d:${norm(g.developer)}`);
+    for (const d of splitCreditedNames(g.developer)) featureSpace.register(`d:${d}`);
   }
 
   const { vec: profileVecDense, mag: profileMag } = featureSpace.profileToDense(tasteProfile);
@@ -376,11 +382,16 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   // ── Score candidates ──
   progress('Scoring candidates...', 28);
   const maxPlayerCount = Math.max(1, ...filteredCandidates.map(c => c.playerCount ?? 0));
-  const maxRecommendations = Math.max(1, ...filteredCandidates.map(c => c.recommendations ?? 0));
-  const maxReviewVolume = Math.max(1, ...filteredCandidates.map(c => c.reviewVolume ?? 0));
+  // "Hidden gem" = well-reviewed AND in the least-played quarter of the pool (a percentile, not 10% of one outlier's max).
+  const knownPlayerCounts = filteredCandidates
+    .map(c => c.playerCount)
+    .filter((n): n is number => typeof n === 'number' && n > 0)
+    .sort((a, b) => a - b);
+  const hiddenGemPlayerCeiling = knownPlayerCounts.length >= 20
+    ? quantileSorted(knownPlayerCounts, 0.25)
+    : maxPlayerCount * 0.1;
+  let nonFiniteScores = 0;
   const totalCandidates = filteredCandidates.length;
-  const currentYear = new Date(now).getFullYear();
-  const logMaxPlayerCount = Math.log(maxPlayerCount + 1);
 
   // Graph signal pre-pass: coverage decides how much weight the layer keeps
   // (assembleWeights moves the shortfall to content similarity).
@@ -463,30 +474,17 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     const graphSignal = graph.score;
 
     // Layer 8: Quality signal (with review sentiment)
-    const qualitySignal = computeQualitySignal(c, maxRecommendations, maxReviewVolume);
+    const qualitySignal = computeQualitySignal(c);
 
     // Layer 9: Popularity debiasing
-    const popularityRaw = c.playerCount
-      ? clamp01(Math.log(c.playerCount + 1) / logMaxPlayerCount)
-      : 0.3;
-    const popularityAdj = computePopularityAdjustment(c.playerCount, maxPlayerCount);
-    const popularitySignal = popularityRaw * popularityAdj;
+    const popularitySignal = computePopularitySignal(c.playerCount, maxPlayerCount);
 
     // Recency boost
-    const releaseYear = new Date(c.releaseDate).getFullYear();
-    const yearDiff = currentYear - releaseYear;
-    const recencyBoost = isNaN(yearDiff) ? 0.3 : clamp01(1 - yearDiff / 10);
+    const recencyBoost = computeRecencyBoost(c.releaseDate, now);
 
     // Diversity bonus (uses pre-computed profile genre weights; canonical genres)
     const cCanonGenres = c.genres.map(g => toCanonicalGenre(g)).filter(Boolean) as string[];
-    const genreWeightSum = cCanonGenres.reduce((sum, g) => {
-      const found = tasteProfile.genres.find(fg => norm(fg.name) === norm(g));
-      return sum + (found ? found.weight : 0);
-    }, 0);
-    const avgGenreWeight = cCanonGenres.length > 0 ? genreWeightSum / cCanonGenres.length : 0;
-    const diversityBonus = maxGenreWeight > 0
-      ? clamp01(1 - avgGenreWeight / maxGenreWeight) * 0.5
-      : 0;
+    const diversityBonus = computeDiversityBonus(cCanonGenres, tasteProfile.genres, maxGenreWeight);
 
     // Layer 10: Time-of-day contextual boost (uses hoisted context)
     const timeOfDayBoost = computeTimeOfDayBoost(c, todCtx);
@@ -535,14 +533,14 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     const sharedModes = c.gameModes.filter(m => profileModes.has(norm(m)));
 
     const isHiddenGem = (c.metacriticScore ?? 0) >= 80
-      && (c.playerCount ?? Infinity) < maxPlayerCount * 0.1;
+      && (c.playerCount ?? Infinity) < hiddenGemPlayerCeiling;
     // A genre only the user rejected is not "intentional variety" — exclude it from Stretch Picks.
     const isStretchPick = cCanonGenres.length > 0 && sharedGenres.length === 0
       && !cCanonGenres.some(x => rejectedGenresNorm.has(norm(x)));
     const isOnSale = !!c.price?.discountPercent && c.price.discountPercent > 0;
 
     // ML model signal: only when a real score was attached (no ?? 0.5 under W_ML)
-    const mlSignal = c.mlScore != null ? c.mlScore : mlMedian;
+    const mlSignal = c.mlScore != null && Number.isFinite(c.mlScore) ? c.mlScore : mlMedian;
 
     // Layer 14: Graph metrics (PageRank quality propagation + Louvain community affinity)
     let graphPageRankSignal = 0;
@@ -581,7 +579,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
       positiveAffinity * W_POSITIVE -
       negativeSignal * W_NEGATIVE
     );
-    if (!Number.isFinite(score)) continue;
+    if (!Number.isFinite(score)) { nonFiniteScores++; continue; }
 
     scored.push({
       gameId: c.gameId,
@@ -649,6 +647,16 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     if (i % 2000 === 0 && i > 0) await new Promise(r => setTimeout(r, 4));
   }
 
+  // Display calibration: raw scores sit in a narrow low band, so "N% match" is the pool-relative position
+  // between its 5th percentile and its best score (kept within 1–99).
+  if (scored.length > 0) {
+    const sortedScores = scored.map(s => s.score).sort((a, b) => a - b);
+    const lo = quantileSorted(sortedScores, 0.05);
+    // 98th percentile, not the maximum: one outlier must not compress everyone else (and pin the top pick at 99%).
+    const hi = quantileSorted(sortedScores, 0.98);
+    for (const s of scored) s.matchPct = Math.min(99, Math.max(1, calibrateMatchPercent(s.score, lo, hi)));
+  }
+
   // ── 14. Diversity re-ranking (MMR) ──
   progress('Applying diversity filter...', 60);
   // F2: hero/next-obsession prefers evidence-aligned scores
@@ -706,6 +714,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
       mmrPool: mmrPool.length,
       mmrSelected: reranked.length,
       shelfGames: shelves.reduce((n, sh) => n + sh.games.length, 0),
+      nonFinite: nonFiniteScores,
     },
     embeddingCoverage,
     mlCoverage,
@@ -746,7 +755,9 @@ function buildShelvesFromScored(
 
   // "Complete the Series" — franchise entries the user hasn't played
   for (const franchise of franchises.slice(0, 3)) {
-    if (franchise.userAvgRating < 3 && franchise.userTotalHours < 10) continue;
+    // Skip franchises the user rated poorly (they are a negative signal) or never actually played.
+    if (franchise.userAvgRating > 0 && franchise.userAvgRating < 3) continue;
+    if (franchise.userPlayedIds.length === 0) continue;
 
     const missingEntries = franchise.entries
       .filter(e => !e.isUserOwned)
@@ -764,24 +775,27 @@ function buildShelvesFromScored(
     }
   }
 
-  // "Because you loved X"
-  const bestUserGame = [...userGames]
-    .filter(g => g.rating >= 4 || g.hoursPlayed >= 20)
-    .sort((a, b) => (b.rating * 10 + b.hoursPlayed) - (a.rating * 10 + a.hoursPlayed))[0];
+  // "Because you loved X": the seed must be a game the user actually liked (a hated 80h game is not
+  // "loved"), and — since each pick's similarTo keeps only its 3 strongest links — we try the user's
+  // top few seeds and use the first one that has enough picks, instead of betting on a single title.
+  const seedCandidates = [...userGames]
+    .filter(g => computeEngagementWeight(g) > 0 && (g.rating >= 4 || g.hoursPlayed >= 20))
+    .sort((a, b) => computeEngagementScore(b, nowMs) - computeEngagementScore(a, nowMs))
+    .slice(0, 5);
 
-  if (bestUserGame) {
+  for (const seed of seedCandidates) {
     const becauseGames = reranked
-      .filter(s => !usedGameIds.has(s.gameId) && s.reasons.similarTo.some(t => norm(t) === norm(bestUserGame.title)))
+      .filter(s => !usedGameIds.has(s.gameId) && s.reasons.similarTo.some(t => norm(t) === norm(seed.title)))
       .slice(0, 12);
-
     if (becauseGames.length >= 2) {
       shelves.push({
         type: 'because-you-loved',
-        title: `Because you loved ${bestUserGame.title}`,
-        seedGameTitle: bestUserGame.title,
+        title: `Because you loved ${seed.title}`,
+        seedGameTitle: seed.title,
         games: becauseGames,
       });
       addToUsed(becauseGames);
+      break;
     }
   }
 
@@ -963,13 +977,17 @@ function buildShelvesFromScored(
     addToUsed(upcomingSequels);
   }
 
-  // Coming Soon For You — empty date ≠ upcoming; honor comingSoon flag
+  // Coming Soon For You — empty date ≠ upcoming; honor comingSoon flag. The floor is pool-relative
+  // (above-median) because the absolute score scale shifts whenever the weights or signals do.
+  const comingSoonFloor = allScored.length > 0
+    ? quantileSorted(allScored.map(s => s.score).sort((a, b) => a - b), 0.5)
+    : 0;
   const comingSoon = allScored
     .filter(s => {
       if (usedGameIds.has(s.gameId)) return false;
       return isComingSoonForShelf(s.releaseDate, s.reasons.comingSoon, nowMs);
     })
-    .filter(s => s.score > 0.15)
+    .filter(s => s.score >= comingSoonFloor)
     .sort((a, b) => b.score - a.score)
     .slice(0, 12);
 
@@ -1093,8 +1111,10 @@ function buildShelvesFromScored(
       ).length;
       const genreOverlap = g.genres.length > 0 ? clamp01(genreOverlapCount / g.genres.length) : 0;
       const themeOverlap = g.themes.length > 0 ? clamp01(themeOverlapCount / g.themes.length) : 0;
-      const devMatch = profile.loyalDevelopers.some(d => d.toLowerCase() === g.developer.toLowerCase()) ? 1 : 0;
-      const pubMatch = profile.loyalPublishers.some(p => p.toLowerCase() === g.publisher.toLowerCase()) ? 0.5 : 0;
+      const gDevs = splitCreditedNames(g.developer);
+      const gPubs = splitCreditedNames(g.publisher);
+      const devMatch = profile.loyalDevelopers.some(d => gDevs.includes(d)) ? 1 : 0;
+      const pubMatch = profile.loyalPublishers.some(p => gPubs.includes(p)) ? 0.5 : 0;
       const ratingBoost = g.rating > 0 ? g.rating / 5 : 0;
 
       const semanticSim = computeSemanticSimilarity(tasteCentroid, g.embedding);

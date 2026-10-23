@@ -19,6 +19,7 @@ import {
   computeGraphSignal,
   detectTasteClusters,
   normalizeTitleKey,
+  WEIGHT_TOTAL,
 } from '@/services/reco-scoring';
 import type { TasteCluster } from '@/types/reco';
 import { FIXTURE_NOW, makeCandidate, makeUser, multiTasteLibrary } from './fixtures';
@@ -225,16 +226,30 @@ describe('bestClusterSimilarity', () => {
 });
 
 describe('assembleWeights', () => {
-  const sum = (w: ReturnType<typeof assembleWeights>) =>
-    w.W_CONTENT + w.W_SEMANTIC + w.W_CLUSTER_SEM + w.W_GRAPH;
+  type W = ReturnType<typeof assembleWeights>;
+  const positive = (w: W) => Object.entries(w).reduce((s, [k, v]) => (k === 'W_NEGATIVE' ? s : s + v), 0);
+  // Weights are normalised to a defined total (R5), so the 0.41 "similarity budget" is a share of it.
+  const sum = (w: W) => (w.W_CONTENT + w.W_SEMANTIC + w.W_CLUSTER_SEM + w.W_GRAPH) / positive(w);
   const base = { embeddingCoverage: 0.6, hasClusterScores: true, hasGraphScores: false, mlCoverage: 0.5, graphSignalCoverage: 0.5 };
 
-  it('keeps content + semantic + cluster + graph at 0.41 for any coverage', () => {
+  it('positive weights always total exactly WEIGHT_TOTAL', () => {
+    for (const embeddingCoverage of [0, 0.3, 1]) {
+      for (const mlCoverage of [0, 0.5, 1]) {
+        for (const hasGraphScores of [true, false]) {
+          const w = assembleWeights({ ...base, embeddingCoverage, mlCoverage, hasGraphScores });
+          expect(positive(w)).toBeCloseTo(WEIGHT_TOTAL, 10);
+        }
+      }
+    }
+  });
+
+  it('keeps content + semantic + cluster + graph a constant share for any coverage', () => {
+    const reference = sum(assembleWeights(base));
     for (const embeddingCoverage of [0, 0.3, 0.6, 1]) {
       for (const graphSignalCoverage of [0, 0.02, 0.1, 0.5, 1]) {
         for (const hasClusterScores of [true, false]) {
           const w = assembleWeights({ ...base, embeddingCoverage, graphSignalCoverage, hasClusterScores });
-          expect(sum(w)).toBeCloseTo(0.41, 10);
+          expect(sum(w)).toBeCloseTo(reference, 10);
         }
       }
     }
@@ -245,7 +260,7 @@ describe('assembleWeights', () => {
     const dead = assembleWeights({ ...base, graphSignalCoverage: 0 });
     expect(dead.W_GRAPH).toBe(0);
     expect(dead.W_CONTENT).toBeGreaterThan(live.W_CONTENT);
-    expect(live.W_GRAPH).toBeGreaterThan(0.14);
+    expect(live.W_GRAPH).toBeGreaterThan(0.12);
   });
 
   it('scales the graph weight with coverage below the full-coverage threshold', () => {
@@ -264,13 +279,16 @@ describe('assembleWeights', () => {
 
   it('splits unused ML budget 60/40 to content and quality, and total ML budget stays 0.10', () => {
     const w = assembleWeights({ ...base, mlCoverage: 0.25 });
-    expect(w.W_ML + w.W_CONTENT_ML + w.W_QUALITY_ML).toBeCloseTo(0.10, 10);
+    const full = assembleWeights({ ...base, mlCoverage: 1 });
+    // Total ML budget (scored share + residual folded into content/quality) is independent of coverage.
+    expect(w.W_ML + w.W_CONTENT_ML + w.W_QUALITY_ML).toBeCloseTo(full.W_ML, 10);
     expect(w.W_CONTENT_ML / w.W_QUALITY_ML).toBeCloseTo(1.5, 10);
   });
 
   it('only gives the graph-metrics layers weight when graph scores are available', () => {
     expect(assembleWeights({ ...base, hasGraphScores: false }).W_GRAPH_COMMUNITY).toBe(0);
     const on = assembleWeights({ ...base, hasGraphScores: true });
-    expect(on.W_GRAPH_COMMUNITY + on.W_GRAPH_PAGERANK).toBeCloseTo(0.06, 10);
+    expect(on.W_GRAPH_COMMUNITY + on.W_GRAPH_PAGERANK).toBeGreaterThan(0.04);
+    expect(on.W_GRAPH_COMMUNITY / on.W_GRAPH_PAGERANK).toBeCloseTo(1.5, 10);
   });
 });
