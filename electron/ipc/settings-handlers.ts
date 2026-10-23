@@ -77,7 +77,7 @@ export function register(): void {
         rerankQwenModel: DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
         neighborRerankEnabled: true,
         oracleRerankEnabled: true,
-        oracleRerankBlend: 1,
+        oracleRerankBlend: 0.6,
       };
     }
   });

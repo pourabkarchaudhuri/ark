@@ -186,3 +186,9 @@ The following gaps were fixed and removed from the active list:
 - `normalizeTitleKey` collapses same-named distinct games (e.g. Prey 2006/2017, Mafia/Mafia Definitive Edition); owning one hides the other.
 - Catalogue-style shelf cards (Deals/Trending/…) have no per-card prose explanation; they use the layer-derived fallback.
 - ANN query still uses a single taste centroid; multi-taste libraries could query per cluster centroid (Stage 7).
+
+## Late-stage gaps (found during R7, scheduled)
+- A restored `reranked: true` cache ignores later changes to the rerank blend/enabled settings until the next recompute (15-min TTL).
+- MMR sketches are un-centred 128-d count-sketches (cosine noise ≈ ±0.1); centring against the pool mean or 256 dims would sharpen the penalty.
+- Pool-wide `mmrVectors` crosses the worker boundary as boxed arrays (~3,000 × 128 numbers); a transferable Float32Array would cut the clone cost.
+- Neighbor (Embedding Space) rerank still uses the old position blend and does not tier-gate.

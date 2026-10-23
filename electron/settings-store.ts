@@ -165,7 +165,7 @@ class SettingsStore {
         rerankQwenModel: DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
         neighborRerankEnabled: true,
         oracleRerankEnabled: true,
-        oracleRerankBlend: 1,
+        oracleRerankBlend: 0.6,
         embeddingChunkingEnabled: true,
         chunkAnnMaxSimEnabled: true,
         embeddingMrl256Enabled: false,
@@ -300,7 +300,7 @@ class SettingsStore {
       rerankQwenModel: DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
       neighborRerankEnabled: true,
       oracleRerankEnabled: true,
-      oracleRerankBlend: 1,
+      oracleRerankBlend: 0.6,
       embeddingChunkingEnabled: true,
       chunkAnnMaxSimEnabled: true,
       embeddingMrl256Enabled: false,
@@ -353,7 +353,7 @@ class SettingsStore {
     }
     if (next.oracleRerankBlend !== undefined) {
       const b = Number(next.oracleRerankBlend);
-      next.oracleRerankBlend = Number.isFinite(b) ? Math.min(1, Math.max(0, b)) : 1;
+      next.oracleRerankBlend = Number.isFinite(b) ? Math.min(1, Math.max(0, b)) : 0.6;
     }
     if (next.embeddingBatchSize !== undefined) next.embeddingBatchSize = clampEmbeddingBatchSize(next.embeddingBatchSize);
     this.settings.ollama = {

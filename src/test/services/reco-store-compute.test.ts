@@ -122,7 +122,7 @@ const profile: TasteProfile = {
 };
 
 function shelvesNamed(title: string): RecoShelf[] {
-  return [{ type: 'hero', title, subtitle: '', games: [] } as unknown as RecoShelf];
+  return [{ type: 'deep-in-genre', title, subtitle: '', games: [] } as unknown as RecoShelf];
 }
 
 function workerResult(title: string): RecoWorkerResult {

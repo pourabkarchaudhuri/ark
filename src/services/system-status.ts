@@ -127,6 +127,7 @@ function lastRerankStatus(r: RerankRunRecord | null): LastRerankStatus | null {
     const what: Record<string, string> = {
       skipped_timeout: 'timed out',
       no_signal: 'no signal (all scores equal)',
+      skipped_degraded_tier: 'skipped (cosine-only tier adds no signal)',
       empty_results: 'no scores returned',
       error: 'failed',
     };

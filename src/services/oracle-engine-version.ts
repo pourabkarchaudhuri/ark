@@ -11,5 +11,6 @@
  *   5 — v1.0.79 scoring-math cleanup (Wilson quality, true popularity debias, lift-based habits, weights total 1)
  *   6 — v1.0.80 recall: over-fetched ANN/BM25 with exclusion-before-cap, quality floor, working cold-start,
  *       pool hygiene, catalogue shelves from the whole scored pool
+ *   7 — v1.0.81 late stages: scoped/blended/tier-gated rerank, embedding-aware MMR
  */
-export const ORACLE_ENGINE_VERSION = 6;
+export const ORACLE_ENGINE_VERSION = 7;

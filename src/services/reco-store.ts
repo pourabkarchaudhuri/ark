@@ -49,6 +49,8 @@ import { bm25Index } from './bm25-index';
 import { embeddingService } from './embedding-service';
 import { gameGraphStore } from './game-graph-store';
 import {
+  effectiveRerankBlend,
+  DEFAULT_ORACLE_RERANK_BLEND,
   buildLexicalTasteQuery,
   getRerankBridge,
   lookupRerankTier,
@@ -81,6 +83,8 @@ import {
   selectColdStartSeedIds,
 } from '@/services/reco-prefilter';
 import { isAllowAdultContent } from '@/hooks/useAllowAdultContent';
+import { sketchEmbedding } from '@/services/mmr-embedding';
+import { oracleShelfKey } from '@/services/oracle-shelf-key';
 import { isAdultContentByDescription } from '@/services/adult-content-filter';
 import { getSimilarTitlesForRecoBatch, getAnnNeighborsForRecoBatch } from '@/services/similar-games';
 import {
@@ -414,6 +418,10 @@ export class RecoStore {
         librarySignature: buildOracleLibrarySignature(),
         pipelineStages: currentOraclePipelineStages(),
         engineVersion: ORACLE_ENGINE_VERSION,
+        // The saved order may already be the reranked one. Remember that, so a cache restore does not treat
+        // it as the worker's order and rerank it a second time (compounding the blend).
+        reranked: this.state.oracleRerankStatus.outcome === 'applied',
+        oracleRerankStatus: this.state.oracleRerankStatus,
       };
       if (this._useLevelDB) {
         // Fire-and-forget — same contract as the localStorage path (errors ignored).
@@ -570,6 +578,7 @@ export class RecoStore {
     // (splash + OracleView mount, or a refresh mid-gather) sees 'computing'
     // and bails instead of starting a parallel pipeline.
     const gen = ++this.computeGeneration;
+    this.interactedShelves.clear();
     this.computeAbort?.abort();
     const abort = new AbortController();
     this.computeAbort = abort;
@@ -612,12 +621,14 @@ export class RecoStore {
           lastComputed: (cached.lastComputed as number) ?? Date.now(),
           libraryCount: (cached.libraryCount as number) ?? 0,
           candidateCount: (cached.candidateCount as number) ?? 0,
-          oracleRerankStatus: rerankStatus('none'),
+          oracleRerankStatus: (cached as { reranked?: boolean }).reranked === true && (cached as { oracleRerankStatus?: RerankStatus }).oracleRerankStatus
+            ? (cached as { oracleRerankStatus: RerankStatus }).oracleRerankStatus
+            : rerankStatus('none'),
         };
         this.notify();
-        // Cache restore used to skip rerank entirely. When Oracle rerank is still
-        // enabled, refine shelf order in the background (cross-encoder or embed fallback).
-        if (tasteProfile && shelves.length > 0) {
+        // Refine shelf order in the background — unless the cached order already IS the reranked one
+        // (idempotence: reranking a reranked order compounds the blend).
+        if (tasteProfile && shelves.length > 0 && (cached as { reranked?: boolean }).reranked !== true) {
           void this.rerankShelvesInBackground(gen, tasteProfile, shelves, { persist: 'if-applied' });
         }
         return;
@@ -784,6 +795,7 @@ export class RecoStore {
       // The taste centroid cosine is the expensive part; we compute it here to avoid
       // sending ~25K × 1024-dim embedding arrays through structured clone.
       let precomputedSemanticScores: Record<string, number> | undefined;
+      let mmrVectors: Record<string, number[]> | undefined;
       let precomputedClusterScores: Record<string, { sim: number; label: string }> | undefined;
       if (tasteCentroid) {
         // Pass 1 (raw cosines, while candidate embeddings still exist). Pass 2 converts them
@@ -792,6 +804,7 @@ export class RecoStore {
         const rawNeg = new Map<string, number>();
         const rawCluster = new Map<string, { sim: number; label: string }>();
         const dim = tasteCentroid.length;
+        mmrVectors = {};
         const centroidMag = vecMagnitude(tasteCentroid);
         const negMag = negativeCentroid && negativeCentroid.length === dim ? vecMagnitude(negativeCentroid) : 0;
 
@@ -812,6 +825,8 @@ export class RecoStore {
             }
             const magC = Math.sqrt(magB);
             rawTaste.set(c.gameId, centroidMag > 0 && magC > 0 ? dot / (centroidMag * magC) : 0);
+            const sketch = sketchEmbedding(c.embedding);
+            if (sketch) mmrVectors![c.gameId] = Array.from(sketch);
             if (negMag > 0) rawNeg.set(c.gameId, magC > 0 ? dotNeg / (negMag * magC) : 0);
             if (clusterScoringEnabled) {
               const best = bestPreparedClusterSimilarity(c.embedding, preparedClusters);
@@ -889,6 +904,7 @@ export class RecoStore {
         thumbsUpIds,
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
         precomputedSemanticScores,
+        mmrVectors,
         precomputedClusters: clusterScoringEnabled ? precomputedClusters : undefined,
         precomputedClusterScores,
         libraryNeighbors,
@@ -1301,6 +1317,14 @@ export class RecoStore {
    *  - games with no Windows build (Ark launches/tracks Windows games)
    *  - edition/store duplicates collapse to the best-reviewed one, and editions of games already owned drop
    */
+  /** Shelves (by oracleShelfKey) the user has touched since the last publish: the rerank must not reorder them. */
+  private interactedShelves = new Set<string>();
+
+  /** Called by the UI when the user interacts with a shelf. */
+  markShelfInteracted(shelfKey: string): void {
+    this.interactedShelves.add(shelfKey);
+  }
+
   /** Browse rows of the latest pool build (kept for the adult-description check). */
   private lastBrowseRows: Record<string, any>[] = [];
 
@@ -2164,7 +2188,7 @@ export class RecoStore {
     const blend =
       typeof settings?.oracleRerankBlend === 'number' && Number.isFinite(settings.oracleRerankBlend)
         ? Math.min(1, Math.max(0, settings.oracleRerankBlend))
-        : 1;
+        : DEFAULT_ORACLE_RERANK_BLEND;
 
     const bridge = getRerankBridge();
     if (!(bridge && enabled && blend > 0)) {
@@ -2175,6 +2199,9 @@ export class RecoStore {
     // Tier-aware budget: a Qwen3 pass costs one generate call per document,
     // so it gets a smaller pool and a longer deadline (shelves are on screen).
     const tier = await lookupRerankTier(bridge);
+    // A tier that can only repeat the worker's own embedding similarity is not worth the call (it used to be
+    // paid for — up to 100 documents embedded — and then discarded, on every start).
+    if (effectiveRerankBlend(tier, blend) === null) return { skip: rerankStatus('skipped_degraded_tier', tier) };
     return { blend, plan: rerankPlan('oracle', tier) };
   }
 
@@ -2191,7 +2218,14 @@ export class RecoStore {
   ): Promise<{ shelves: RecoShelf[]; status: RerankStatus } | null> {
     const { applyOracleRerankShelves } = await import('@/services/oracle-rerank');
     return runWithDeadline(
-      (signal) => applyOracleRerankShelves(tasteProfile, shelves, { enabled: true, blend, plan, signal }),
+      (signal) => applyOracleRerankShelves(tasteProfile, shelves, {
+        enabled: true,
+        blend,
+        plan,
+        signal,
+        // Concrete anchors for the cross-encoder: the user's most-engaged games per taste cluster.
+        queryExtras: { lovedTitles: (tasteProfile.clusters ?? []).flatMap(c => c.topGames ?? []).filter(Boolean) },
+      }),
       plan.budgetMs, null, undefined, 'Oracle rerank',
     );
   }
@@ -2232,15 +2266,25 @@ export class RecoStore {
         this.notify();
         return;
       }
+      // Shelves the user has already started using keep their on-screen order (no games jumping under the cursor).
+      let frozen = 0;
+      const applied = this.interactedShelves.size === 0
+        ? out.shelves
+        : out.shelves.map((sh, i) => {
+          if (!this.interactedShelves.has(oracleShelfKey(sh))) return sh;
+          frozen++;
+          return shelves[i] ?? sh;
+        });
       this.state = {
         ...this.state,
-        shelves: out.shelves,
+        shelves: applied,
         oracleRerankStatus: out.status,
       };
       this.notify();
       // Persist refined order so the next cold start benefits.
       // Not after a dismiss invalidated the cache meanwhile — that would re-cache the dismissed game.
-      if (opts.persist === 'if-applied' && out.status.outcome === 'applied' && this.cacheEpoch === cacheEpochAtStart) {
+      // A partly frozen result is not "the reranked order": do not persist it as such.
+      if (opts.persist === 'if-applied' && out.status.outcome === 'applied' && frozen === 0 && this.cacheEpoch === cacheEpochAtStart) {
         this.saveResultsToCache();
       }
     } catch (e) {
@@ -2260,6 +2304,7 @@ export class RecoStore {
   private finishWorkerResult(msg: RecoWorkerResult, runId: number) {
     if (runId !== this.computeGeneration) return;
 
+    this.interactedShelves.clear();
     this.state = {
       ...this.state,
       status: 'done',

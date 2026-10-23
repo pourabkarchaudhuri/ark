@@ -35,11 +35,15 @@ describe('buildTasteQueryText', () => {
     p.themes = [{ name: 'Fantasy', weight: 1, gameCount: 0, totalHours: 0, avgRating: 4 }];
     p.gameModes = [{ name: 'Single-player', weight: 1, gameCount: 0, totalHours: 0, avgRating: 4 }];
     p.loyalDevelopers = ['FromSoftware'];
-    const q = buildTasteQueryText(p);
+    const q = buildTasteQueryText(p, { lovedTitles: ['Elden Ring', 'Hades'] });
     expect(q).toContain('RPG');
     expect(q).toContain('Fantasy');
     expect(q).toContain('FromSoftware');
-    expect(q).toContain('Single-player');
+    // Loved titles anchor the query; the dead "Modes" clause and the repeated top-genre line are gone (R7).
+    expect(q).toContain('Elden Ring');
+    expect(q).not.toContain('Single-player');
+    expect(q).not.toContain('Top genre');
+    expect(q.match(/RPG/g)?.length).toBe(1);
   });
 });
 

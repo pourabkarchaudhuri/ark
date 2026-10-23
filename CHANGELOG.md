@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.81] - 2026-10-23
+
+Seventh step of the Oracle recommendation-quality plan: the late stages — the AI rerank and the diversity pass. **Ranking changes** (engine version 7).
+
+### Fixed — rerank
+- **Rerank only touches shelves whose order is taste order** (Because you loved…, Deep in…, From studios you love). Stretch Picks (deliberately far-from-taste-first), Trending (popularity), Critics' Choice (Metacritic), Deals (discount), Hidden Gems, Free, New Releases, mood shelves, Complete the Series and the user's own Backlog/Unfinished shelves keep the engine's order — a taste-query reranker silently undid those intents.
+- **Real blend, not a position average.** The final order is `blend × rerank score + (1 − blend) × shelf position`, with the rerank scores normalised within the shelf; games the reranker never scored are neutral and keep their relative position (they used to be pushed behind everything it scored). The shelf-position term means a flat reranker can no longer undo the diversity order the shelf was built in. The default blend is now 60%, and even a saved 100% is capped at 85%.
+- **Weak tiers can no longer reorder your shelves.** A cosine fallback only repeats the embedding similarity the engine already used, so it is skipped *before* the expensive call (and reported as "Rerank skipped"); a yes/no (Qwen binary) pass may only nudge (blend capped at 30%).
+- **Honest status:** a rerank that saw only part of the eligible games is flagged as truncated; the System Status row labels the new skip.
+- **Better query and documents.** The query lists genre/theme affinities strongest-first, adds the games you love as anchors and drops the dead "Modes" clause and repeated top-genre line; each document now carries release year, modes and "similar to" links.
+- **No double rerank on cache restore.** The saved order records that it is already reranked (with its tier/status), so restoring it no longer reranks a reranked order or loses the badge.
+- **Nothing moves under your cursor.** A shelf you have clicked, dragged or focused keeps its on-screen order when the background rerank lands (and that partial result is not cached as "reranked").
+
+### Fixed — diversity (MMR)
+- **Similarity is embedding-based** (a 128-dimension sketch of each candidate's vector, computed before embeddings are stripped for the worker), lifted to 1 for the same franchise and 0.8 for the same developer, instead of genre-Jaccard that treated every RPG as identical. Games without a sketch fall back to a damped genre similarity.
+- **The hero pick is no longer overridden.** MMR used to re-sort by raw score, discarding the evidence-aligned hero ordering; it now takes the caller's relevance key.
+- **Relevance is normalised (2nd–98th percentile) against the similarity penalty,** so the penalty no longer dominates on raw scores that sit in a narrow band; per-game canonical sets are computed once and max-similarity is incremental (O(pool × limit)); `limit ≤ 0` returns nothing and a non-finite score can never win the hero slot.
+
+### Tests
+- New: rerank scope, blend maths (incl. the diversity-order regression), tier gating, truncation, query/document content, MMR embedding similarity/relevance key/limits, sketch quality.
+
 ## [1.0.80] - 2026-10-23
 
 Sixth step of the Oracle recommendation-quality plan: recall — getting the right candidates into the pool and onto the right shelves. **Ranking changes** (engine version 6).

@@ -670,8 +670,13 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   // Unreleased titles are for the dedicated Coming Soon / Upcoming Sequels shelves (built from allScored),
   // not the main shelves — a game you cannot play yet is not a top pick.
   const mmrPool = scored.filter(sg => !isComingSoonForShelf(sg.releaseDate, sg.reasons.comingSoon, now)).slice(0, MMR_POOL_SIZE);
+  // Relevance = the evidence-aligned hero key (so the hero pick is not overridden by a plain score sort);
+  // similarity = embedding-sketch cosine (genre-Jaccard where a game has no sketch), franchise and developer.
   const reranked = mmrRerank(mmrPool, 0.7, 80, (f) => {
     progress('Applying diversity filter...', 60 + Math.floor(f * 8));
+  }, {
+    relevance: g => heroEvidenceSortKey(g.score, 0.5 * g.layerScores.contentSimilarity + 0.5 * g.layerScores.semanticSimilarity),
+    vectors: input.mmrVectors,
   });
 
   // (Clusters already detected at step 8 for centroid scoring)

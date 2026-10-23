@@ -342,6 +342,8 @@ export interface RecoWorkerInput {
    * payload to avoid expensive structured-clone serialization.
    */
   precomputedSemanticScores?: Record<string, number>;
+  /** Unit-length embedding sketches (128-d) per candidate for MMR diversity — full vectors are stripped before the worker. */
+  mmrVectors?: Record<string, number[]>;
   /**
    * Per-game graph metrics from the persisted neighbor graph.
    * When present, the worker can apply PageRank propagation, community-affinity, and

@@ -77,7 +77,7 @@ function oracleRerankBadge(status: RerankStatus): { label: string; title: string
         : '';
     return {
       label: `Reranked · ${rerankTierLabel(tier)}${moved}`,
-      title: `Shelf order refined by ${rerankTierLabel(tier)}.${movedDetail}${why}`,
+      title: `Shelf order refined by ${rerankTierLabel(tier)}, blended with the worker score (taste-ordered shelves only).${movedDetail}${why}${status.truncated ? ' Only part of the eligible games were scored; the rest keep their worker position.' : ''}`,
       tone: 'info',
     };
   }
@@ -85,6 +85,13 @@ function oracleRerankBadge(status: RerankStatus): { label: string; title: string
     return {
       label: 'Rerank no signal',
       title: `${rerankTierLabel(tier)} gave every game the same score, so it carried no ordering; shelves use the worker order`,
+      tone: 'info',
+    };
+  }
+  if (outcome === 'skipped_degraded_tier') {
+    return {
+      label: `Rerank skipped · ${rerankTierLabel(tier)}`,
+      title: 'No cross-encoder was available, so the reranker could only repeat the embedding similarity the worker already used; shelves keep the worker order',
       tone: 'info',
     };
   }
@@ -109,10 +116,6 @@ function oracleRerankBadge(status: RerankStatus): { label: string; title: string
   return null;
 }
 
-/** Stable identity of a shelf across reranks (type alone repeats for "because you loved X" shelves). */
-function oracleShelfKey(s: RecoShelf): string {
-  return `${s.type}\u0000${s.title}\u0000${s.seedGameTitle ?? ''}`;
-}
 
 /** Arrange `shelves` in the order of `keys`; shelves without a key keep their relative order at the end. */
 function orderShelvesByKeys(shelves: RecoShelf[], keys: string[]): RecoShelf[] {
@@ -137,6 +140,7 @@ import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { bm25Index } from '@/services/bm25-index';
 import { libraryStore } from '@/services/library-store';
+import { oracleShelfKey } from '@/services/oracle-shelf-key';
 import { oracleEventLog } from '@/services/oracle-event-log';
 import { journeyStore } from '@/services/journey-store';
 import { getPrefetchedGames, setNavigatingGame } from '@/services/prefetch-store';
@@ -2237,13 +2241,21 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
             <div>
               {otherShelves.length > 0 ? (
                 otherShelves.map((shelf, idx) => (
-                  <ShelfCarousel
+                  // display:contents wrapper: a click/drag/focus marks the shelf as "being used", so the background
+                  // rerank never reorders games the user is interacting with.
+                  <div
                     key={`${shelf.type}-${shelf.seedGameTitle || ''}-${idx}`}
-                    shelf={shelf}
-                    onDismiss={handleDismiss}
-                    onExplain={handleExplain}
-                    explainingId={explainingId}
-                  />
+                    style={{ display: 'contents' }}
+                    onPointerDownCapture={() => recoStore.markShelfInteracted(oracleShelfKey(shelf))}
+                    onFocusCapture={() => recoStore.markShelfInteracted(oracleShelfKey(shelf))}
+                  >
+                    <ShelfCarousel
+                      shelf={shelf}
+                      onDismiss={handleDismiss}
+                      onExplain={handleExplain}
+                      explainingId={explainingId}
+                    />
+                  </div>
                 ))
               ) : (
                 <ColdStart

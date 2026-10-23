@@ -114,7 +114,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
   const [ollamaRerankModel, setOllamaRerankModel] = useState(DEFAULT_OLLAMA_RERANK_MODEL);
   const [neighborRerankEnabled, setNeighborRerankEnabled] = useState(true);
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
-  const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
+  const [oracleRerankBlend, setOracleRerankBlend] = useState(0.6);
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
   const [chunkAnnMaxSimEnabled, setChunkAnnMaxSimEnabled] = useState(true);
   const [embeddingMrl256Enabled, setEmbeddingMrl256Enabled] = useState(false);
@@ -213,7 +213,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
         setOracleRerankBlend(
           typeof ollamaSettings.oracleRerankBlend === 'number' && Number.isFinite(ollamaSettings.oracleRerankBlend)
             ? Math.min(1, Math.max(0, ollamaSettings.oracleRerankBlend))
-            : 1,
+            : 0.6,
         );
         setUseGeminiInstead(ollamaSettings.useGeminiInstead ?? false);
         
@@ -768,7 +768,7 @@ export const SettingsPanel = memo(function SettingsPanel({ isOpen, onClose }: Se
                         className="w-full accent-fuchsia-500 disabled:opacity-40"
                       />
                       <p className="text-[11px] text-white/25 mt-1">
-                        0% keeps the original order; 100% lets the AI fully decide.
+                        0% keeps the engine order; higher values let the AI re-sort the taste-ordered shelves more (it is always blended with the engine order, never in full).
                       </p>
                     </div>
                   )}

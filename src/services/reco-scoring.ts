@@ -21,7 +21,8 @@ import {
   computeEngagementWeight,
   computeNegativeWeight,
 } from '@/services/engagement-weight';
-import { mmrMaxSim } from '@/services/mmr-diversity';
+import { dotUnit, embeddingSimilarityToUnit } from '@/services/mmr-embedding';
+import { canonicalFranchiseBase } from '@/services/franchise';
 
 /** ANN cosine-distance ceiling for Taste Match pill (mirrors reco-store). */
 export const ANN_TASTE_MATCH_CEILING = 0.45;
@@ -905,34 +906,106 @@ export function computeSequencingBoost(candidate: CandidateGame, ctx: Sequencing
 
 // ─── Layer 14: MMR Diversity Re-Ranking ─────────────────────────────────────────
 
-export function mmrRerank(scored: ScoredGame[], lambda: number, limit: number, onProgress?: (fraction: number) => void): ScoredGame[] {
+/** Scale of genre-Jaccard similarity relative to the rescaled embedding cosine. */
+const MMR_JACCARD_SCALE = 0.6;
+
+export interface MmrOptions {
+  /**
+   * Relevance of a game. Defaults to `score`. The worker passes the evidence-aligned hero key so the
+   * first pick (the hero) is not overridden by a plain score re-sort.
+   */
+  relevance?: (g: ScoredGame) => number;
+  /** Unit-length embedding sketches by gameId (see mmr-embedding.ts). Missing → genre-Jaccard similarity. */
+  vectors?: Record<string, ArrayLike<number>>;
+}
+
+/**
+ * Maximal Marginal Relevance with incremental max-similarity (O(pool × limit)).
+ *   mmr = λ·relevance − (1−λ)·maxSim(candidate, selected)
+ * Relevance is min-max normalised over the pool so it is on the same 0–1 scale as the similarity
+ * (raw scores sit in a narrow low band and the penalty used to dominate). Similarity is the embedding
+ * cosine (rescaled so "unrelated" ≈ 0) when both games have a sketch, else genre-Jaccard, and is
+ * lifted to 1 for the same franchise and 0.8 for the same developer. Per-game canonical sets are
+ * computed once, not per pair.
+ */
+export function mmrRerank(
+  scored: ScoredGame[],
+  lambda: number,
+  limit: number,
+  onProgress?: (fraction: number) => void,
+  opts: MmrOptions = {},
+): ScoredGame[] {
+  if (limit <= 0 || scored.length === 0) return [];
   if (scored.length <= 1) return scored.slice(0, limit);
 
-  const selected: ScoredGame[] = [];
-  const remaining = [...scored];
+  const rel = opts.relevance ?? ((g: ScoredGame) => g.score);
+  const n = scored.length;
+  // Non-finite relevance counts as the pool minimum (it must never win the hero pick).
+  const finiteVals = scored.map(rel).filter(Number.isFinite).sort((a, b) => a - b);
+  const floorVal = finiteVals.length > 0 ? finiteVals[0] : 0;
+  const relRaw = scored.map(g => { const v = rel(g); return Number.isFinite(v) ? v : floorVal; });
+  // 2nd–98th percentile clamp: one outlier must not compress everyone else (and hand the similarity penalty control).
+  const lo = finiteVals.length > 0 ? finiteVals[Math.floor(0.02 * (finiteVals.length - 1))] : 0;
+  const hi = finiteVals.length > 0 ? finiteVals[Math.ceil(0.98 * (finiteVals.length - 1))] : 0;
+  const span = hi - lo;
+  const relNorm = relRaw.map(v => (span > 1e-12 ? Math.min(1, Math.max(0, (v - lo) / span)) : 1));
 
-  remaining.sort((a, b) => b.score - a.score);
-  selected.push(remaining.shift()!);
+  const genreSets = scored.map(g => new Set(
+    g.genres.map(x => toCanonicalGenre(x)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c)),
+  ));
+  const bases = scored.map(g => canonicalFranchiseBase(g.title));
+  const devs = scored.map(g => norm(g.developer));
+  const vecs = scored.map(g => opts.vectors?.[g.gameId]);
+
+  const sim = (i: number, j: number): number => {
+    let s0: number;
+    const vi = vecs[i];
+    const vj = vecs[j];
+    if (vi && vj) {
+      s0 = embeddingSimilarityToUnit(dotUnit(vi, vj));
+    } else {
+      let inter = 0;
+      for (const g of genreSets[i]) if (genreSets[j].has(g)) inter++;
+      const union = genreSets[i].size + genreSets[j].size - inter;
+      // Jaccard sits on a coarser, higher scale than the rescaled embedding cosine; damp it so games without
+      // a sketch are not penalised harder than embedded ones.
+      s0 = union > 0 ? (inter / union) * MMR_JACCARD_SCALE : 0;
+    }
+    if (bases[i] && bases[i] === bases[j]) s0 = 1;
+    else if (devs[i] && devs[i] === devs[j]) s0 = Math.max(s0, 0.8);
+    return s0;
+  };
+
   const negLambda = 1 - lambda;
+  const maxSim = new Float64Array(n); // vs the selected set (0 while empty)
+  const taken = new Uint8Array(n);
+  const selected: ScoredGame[] = [];
 
-  while (selected.length < limit && remaining.length > 0) {
-    let bestIdx = 0;
+  // Hero: the most relevant game (by the caller's relevance key).
+  let first = 0;
+  for (let i = 1; i < n; i++) if (relRaw[i] > relRaw[first]) first = i;
+  const take = (idx: number) => {
+    taken[idx] = 1;
+    selected.push(scored[idx]);
+    for (let i = 0; i < n; i++) {
+      if (taken[i]) continue;
+      const s0 = sim(i, idx);
+      if (s0 > maxSim[i]) maxSim[i] = s0;
+    }
+  };
+  take(first);
+
+  while (selected.length < limit && selected.length < n) {
+    let bestIdx = -1;
     let bestMMR = -Infinity;
-
-    for (let i = 0; i < remaining.length; i++) {
-      const candidate = remaining[i];
-      const maxSim = mmrMaxSim(candidate, selected);
-      const mmrScore = lambda * candidate.score - negLambda * maxSim;
-      if (mmrScore > bestMMR) {
-        bestMMR = mmrScore;
-        bestIdx = i;
-      }
+    for (let i = 0; i < n; i++) {
+      if (taken[i]) continue;
+      const m = lambda * relNorm[i] - negLambda * maxSim[i];
+      if (m > bestMMR) { bestMMR = m; bestIdx = i; }
     }
-
-    selected.push(remaining.splice(bestIdx, 1)[0]);
-    if (onProgress && selected.length % 10 === 0) {
-      onProgress(selected.length / limit);
-    }
+    if (bestIdx < 0) break;
+    take(bestIdx);
+    if (onProgress && selected.length % 10 === 0) onProgress(selected.length / limit);
   }
 
   return selected;

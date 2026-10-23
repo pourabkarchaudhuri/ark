@@ -12,6 +12,26 @@ import type { TasteProfile, RecoShelf, ScoredGame } from '@/types/reco';
 export const ORACLE_RERANK_POOL = 100;
 
 /**
+ * Shelves whose order is taste order (the hero shelf is a single game, so there is nothing to reorder). Everything else keeps the worker's order: Stretch Picks are
+ * deliberately far-from-taste-first, Trending is popularity, Critics' Choice is Metacritic, Deals is
+ * discount, Hidden Gems/Free/New Releases are catalogue picks, mood/cluster shelves have their own
+ * seed, Complete the Series is release order, and Backlog/Unfinished are the user's own games. A
+ * taste-query reranker would silently undo those intents.
+ */
+export const RERANKABLE_SHELF_TYPES: ReadonlySet<string> = new Set([
+  'because-you-loved',
+  'deep-in-genre',
+  'from-studios-you-love',
+]);
+
+/** Default share of the final order that comes from the reranker (the rest is the worker's score). */
+export const DEFAULT_ORACLE_RERANK_BLEND = 0.6;
+/** A yes/no (qwen_binary) pass is coarse: it may only nudge. */
+export const QWEN_BINARY_MAX_BLEND = 0.3;
+/** Even at "100%" the worker's own score keeps some say: a cross-encoder reads a taste summary, not the whole profile. */
+export const ORACLE_RERANK_MAX_BLEND = 0.85;
+
+/**
  * Which reranker tier produced an ordering.
  * Mirrors `RerankTier` in electron/rerank-engine.ts — keep the two in sync.
  */
@@ -34,6 +54,11 @@ export type RerankOutcome =
    * it is not applied and not reported as a successful rerank.
    */
   | 'no_signal'
+  /**
+   * The tier that ran is too weak to reorder shelves (cosine fallback): its order is the embedding
+   * cosine the worker already used, so applying it would only re-sort by a worse copy of the signal.
+   */
+  | 'skipped_degraded_tier'
   | 'error';
 
 /**
@@ -54,6 +79,8 @@ export interface RerankStatus {
   moved?: number;
   /** Mean |Δposition| over the moved entries. */
   meanAbsDelta?: number;
+  /** True when the rerank saw only part of the eligible games (pool/budget cap) — reported, not hidden. */
+  truncated?: boolean;
 }
 
 export const RERANK_TIER_LABELS: Record<RerankTier, string> = {
@@ -76,6 +103,17 @@ export function rerankStatus(outcome: RerankOutcome, tier: RerankTier | null = n
  * path — a hard yes/no instead of graded scores, or embedding cosine instead
  * of a cross-encoder. The UI labels these rather than hiding them.
  */
+/**
+ * How a reranker tier may be used for Oracle shelves: embed_fallback is never applied (no new signal),
+ * qwen_binary is capped to a small blend, the rest use the requested blend.
+ */
+export function effectiveRerankBlend(tier: RerankTier | null, requested: number): number | null {
+  if (tier === 'embed_fallback') return null;
+  const capped = Math.min(requested, ORACLE_RERANK_MAX_BLEND);
+  if (tier === 'qwen_binary') return Math.min(capped, QWEN_BINARY_MAX_BLEND);
+  return capped;
+}
+
 export function isDegradedRerankTier(tier: RerankTier | null): boolean {
   return tier === 'qwen_binary' || tier === 'embed_fallback';
 }
@@ -419,25 +457,34 @@ export function outcomeForRerankError(code: string): RerankOutcome {
   return 'error';
 }
 
-export function buildTasteQueryText(profile: TasteProfile): string {
+export interface TasteQueryExtras {
+  /** Titles the user loved (most engaged first) — concrete anchors beat abstract genre lists. */
+  lovedTitles?: string[];
+}
+
+/**
+ * Taste query for the cross-encoder. Genre/theme affinities are listed strongest-first (so the top
+ * genre is implied by position, not repeated), and loved titles anchor the query. Names are the same
+ * canonical forms the documents use. No "modes" clause: documents describe modes per game, a taste-level
+ * modes list only added noise.
+ */
+export function buildTasteQueryText(profile: TasteProfile, extras?: TasteQueryExtras): string {
   const gTop = profile.genres
-    .slice(0, 12)
     .filter((x) => x.weight > 0)
+    .slice(0, 12)
     .map((x) => x.name)
     .join(', ');
   const tTop = profile.themes
-    .slice(0, 10)
     .filter((x) => x.weight > 0)
+    .slice(0, 10)
     .map((x) => x.name)
     .join(', ');
-  const modes = profile.gameModes.slice(0, 8).map((x) => x.name).join(', ');
+  const loved = (extras?.lovedTitles ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 6);
   const parts = [
     'Recommend games for this player.',
-    profile.topGenre ? `Top genre: ${profile.topGenre}.` : '',
-    profile.topTheme ? `Top theme: ${profile.topTheme}.` : '',
-    gTop ? `Genre affinities: ${gTop}.` : '',
-    tTop ? `Theme affinities: ${tTop}.` : '',
-    modes ? `Modes: ${modes}.` : '',
+    loved.length ? `They love: ${loved.join(', ')}.` : '',
+    gTop ? `Genre affinities (strongest first): ${gTop}.` : '',
+    tTop ? `Theme affinities (strongest first): ${tTop}.` : '',
     profile.loyalDevelopers?.length
       ? `Likes developers: ${profile.loyalDevelopers.slice(0, 6).join(', ')}.`
       : '',
@@ -486,46 +533,68 @@ export function buildLexicalTasteQuery(
 }
 
 export function scoredGameToRerankDoc(g: ScoredGame): string {
+  const year = /^\d{4}/.exec(g.releaseDate ?? '')?.[0];
+  const similar = (g.reasons?.similarTo ?? []).filter(Boolean).slice(0, 3);
   return [
     g.title,
     g.genres?.length ? `Genres: ${g.genres.join(', ')}` : '',
     g.themes?.length ? `Themes: ${g.themes.join(', ')}` : '',
+    g.gameModes?.length ? `Modes: ${g.gameModes.join(', ')}` : '',
+    year ? `Released: ${year}` : '',
+    similar.length ? `Similar to: ${similar.join(', ')}` : '',
     g.developer ? `Developer: ${g.developer}` : '',
-    g.publisher ? `Publisher: ${g.publisher}` : '',
   ]
     .filter(Boolean)
     .join(' | ');
 }
 
-function sortShelfWithBlend(
+/**
+ * Re-order one shelf: `blend·rerank + (1−blend)·worker`, both on 0–1. The worker term is the game's
+ * POSITION in the shelf (1 at the top, 0 at the bottom), not its raw score: shelves are built in MMR order
+ * (diverse picks interleaved), and a score-based term would quietly re-sort them by score and put franchise
+ * siblings back next to each other. The rerank term is min-max normalised over the games the reranker scored;
+ * games it did not see get a neutral 0.5 (no rerank information), so they keep their relative worker position
+ * instead of being flung to either end. Ties keep the worker order.
+ */
+export function blendShelfOrder(
   games: ScoredGame[],
-  rank: Map<string, number>,
+  rerankScore: ReadonlyMap<string, number>,
   blend: number,
-  maxRankOrdinal: number,
 ): ScoredGame[] {
-  if (games.length <= 1) return [...games];
-  const origOrder = new Map(games.map((g, i) => [g.gameId, i]));
-  const denomO = Math.max(1, games.length - 1);
-  // Synthetic rank denominator covers reranked range AND fallback tail for unranked games.
-  const denomR = Math.max(1, maxRankOrdinal + games.length);
+  const n = games.length;
+  if (n <= 1) return [...games];
+  const pos = new Map(games.map((g, i) => [g.gameId, i]));
+  const ws = (g: ScoredGame) => 1 - (pos.get(g.gameId) ?? 0) / (n - 1);
+
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const g of games) {
+    const v = rerankScore.get(g.gameId);
+    if (v === undefined) continue;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  const span = hi - lo;
+  const rs = (g: ScoredGame) => {
+    const v = rerankScore.get(g.gameId);
+    if (v === undefined) return 0.5;
+    return span > 1e-12 ? (v - lo) / span : 0.5;
+  };
+
   return [...games].sort((a, b) => {
-    const oa = origOrder.get(a.gameId) ?? 0;
-    const ob = origOrder.get(b.gameId) ?? 0;
-    // Fallback for games not in rerank pool: slot AFTER reranked games, preserving worker order.
-    // This avoids the historical rank=1_000_000 cliff that flung unreranked games to the bottom.
-    const ra = (rank.get(a.gameId) ?? maxRankOrdinal + 1 + oa) / denomR;
-    const rb = (rank.get(b.gameId) ?? maxRankOrdinal + 1 + ob) / denomR;
-    const ca = blend * ra + (1 - blend) * (oa / denomO);
-    const cb = blend * rb + (1 - blend) * (ob / denomO);
-    return ca - cb;
+    const ca = blend * rs(a) + (1 - blend) * ws(a);
+    const cb = blend * rs(b) + (1 - blend) * ws(b);
+    return cb - ca || (pos.get(a.gameId) ?? 0) - (pos.get(b.gameId) ?? 0);
   });
 }
 
 export type OracleRerankOptions = {
   /** When false, skip rerank entirely (default true). */
   enabled?: boolean;
-  /** 0 = worker order within shelves, 1 = pure rerank order (default 1). */
+  /** 0 = worker order within shelves, 1 = pure rerank order (default DEFAULT_ORACLE_RERANK_BLEND). */
   blend?: number;
+  /** Anchors for the taste query (e.g. loved titles). */
+  queryExtras?: TasteQueryExtras;
   /**
    * Aborted when the caller's deadline passes. The main-process loop is then
    * cancelled through `ollama:rerankCancel` and the run is recorded as a timeout.
@@ -551,7 +620,7 @@ export async function applyOracleRerankShelves(
   const blend =
     typeof opts?.blend === 'number' && Number.isFinite(opts.blend)
       ? Math.min(1, Math.max(0, opts.blend))
-      : 1;
+      : DEFAULT_ORACLE_RERANK_BLEND;
   if (blend <= 0) return { shelves, status: rerankStatus('skipped_blend_zero') };
 
   const bridge = getRerankBridge();
@@ -569,10 +638,14 @@ export async function applyOracleRerankShelves(
   const seen = new Set<string>();
   const pool: ScoredGame[] = [];
   const cursors = shelves.map(() => 0);
+  const eligible = shelves.map(sh => RERANKABLE_SHELF_TYPES.has(sh.type));
+  const eligibleGames = new Set<string>();
+  shelves.forEach((sh, i) => { if (eligible[i]) for (const g of sh.games) eligibleGames.add(g.gameId); });
   let progressed = true;
   while (pool.length < poolLimit && progressed) {
     progressed = false;
     for (let i = 0; i < shelves.length; i++) {
+      if (!eligible[i]) continue;
       const games = shelves[i].games;
       while (cursors[i] < games.length) {
         const g = games[cursors[i]++];
@@ -587,7 +660,7 @@ export async function applyOracleRerankShelves(
   }
   if (pool.length === 0) return { shelves, status: rerankStatus('skipped_empty_pool') };
 
-  const query = buildTasteQueryText(profile);
+  const query = buildTasteQueryText(profile, opts?.queryExtras);
   const documents = pool.map(scoredGameToRerankDoc);
   const requestId = newRerankRequestId('oracle');
   const startedAt = Date.now();
@@ -641,18 +714,22 @@ export async function applyOracleRerankShelves(
       return finish(rerankStatus('no_signal', tier), shelves, { report: res.report, results: res.results });
     }
 
-    const rank = new Map<string, number>();
-    res.results.forEach((r, ord) => {
+    // Tier gating: a cosine fallback is a worse copy of a signal the worker already used, so it is
+    // never applied; a yes/no pass may only nudge.
+    const effBlend = effectiveRerankBlend(tier, blend);
+    if (effBlend === null || effBlend <= 0) {
+      return finish(rerankStatus('skipped_degraded_tier', tier), shelves, { report: res.report, results: res.results });
+    }
+
+    const scores = new Map<string, number>();
+    for (const r of res.results) {
       const g = pool[r.index];
-      if (g && !rank.has(g.gameId)) rank.set(g.gameId, ord);
-    });
+      if (g && Number.isFinite(r.relevance_score) && !scores.has(g.gameId)) scores.set(g.gameId, r.relevance_score);
+    }
 
-    const maxRankOrdinal = Math.max(...rank.values(), 0);
-
-    const out = shelves.map((sh) => ({
-      ...sh,
-      games: sortShelfWithBlend(sh.games, rank, blend, maxRankOrdinal),
-    }));
+    const out = shelves.map((sh, i) => (eligible[i]
+      ? { ...sh, games: blendShelfOrder(sh.games, scores, effBlend) }
+      : sh));
     const movement = computeRerankMovement(
       shelves.map((sh) => sh.games.map((g) => g.gameId)),
       out.map((sh) => sh.games.map((g) => g.gameId)),
@@ -664,6 +741,8 @@ export async function applyOracleRerankShelves(
       ...rerankStatus('applied', tier),
       moved: movement.moved,
       meanAbsDelta: movement.meanAbsDelta,
+      // Reported, not hidden: part of the eligible games never reached the reranker.
+      truncated: (res.report?.truncated ?? false) || scores.size < eligibleGames.size,
     };
     return finish(status, out, { report: res.report, results: res.results, movement });
   } catch {

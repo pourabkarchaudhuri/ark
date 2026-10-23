@@ -44,7 +44,7 @@ function game(id: string): ScoredGame {
   return { gameId: id, title: id, genres: [], themes: [], developer: '', publisher: '' } as unknown as ScoredGame;
 }
 function shelf(title: string, ids: string[]): RecoShelf {
-  return { type: 'top_picks', title, games: ids.map(game) } as unknown as RecoShelf;
+  return { type: 'deep-in-genre', title, games: ids.map(game) } as unknown as RecoShelf;
 }
 
 describe('computeRerankMovement', () => {

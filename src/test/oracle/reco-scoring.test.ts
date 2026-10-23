@@ -91,7 +91,7 @@ describe('mmrRerank', () => {
     expect(out[0].gameId).toBe('g1');
   });
 
-  it('CURRENT BEHAVIOR (fixed in R7): with identical genres the penalty is constant and order equals score order', () => {
+  it('with identical genres and no embeddings the penalty is constant, so order equals score order (R7: embeddings are what separate near-duplicates)', () => {
     const scored = [0.9, 0.8, 0.7, 0.6, 0.5].map((s, i) => makeScored(`g${i}`, s, { genres: ['RPG'] }));
     const out = mmrRerank(scored, 0.7, 5);
     expect(out.map(g => g.gameId)).toEqual(['g0', 'g1', 'g2', 'g3', 'g4']);

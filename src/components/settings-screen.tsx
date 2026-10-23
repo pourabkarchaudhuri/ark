@@ -394,7 +394,7 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [ollamaRerankModel, setOllamaRerankModel] = useState(DEFAULT_OLLAMA_RERANK_MODEL);
   const [neighborRerankEnabled, setNeighborRerankEnabled] = useState(true);
   const [oracleRerankEnabled, setOracleRerankEnabled] = useState(true);
-  const [oracleRerankBlend, setOracleRerankBlend] = useState(1);
+  const [oracleRerankBlend, setOracleRerankBlend] = useState(0.6);
   const [embeddingChunkingEnabled, setEmbeddingChunkingEnabled] = useState(true);
   const [chunkAnnMaxSimEnabled, setChunkAnnMaxSimEnabled] = useState(true);
   const [embeddingMrl256Enabled, setEmbeddingMrl256Enabled] = useState(false);
@@ -504,7 +504,7 @@ const AIModelsTab = memo(function AIModelsTab() {
         setOracleRerankBlend(
           typeof s.oracleRerankBlend === 'number' && Number.isFinite(s.oracleRerankBlend)
             ? Math.min(1, Math.max(0, s.oracleRerankBlend))
-            : 1,
+            : 0.6,
         );
         setPreferredChatProviderState(preferred);
         initialLoadRef.current = false;
@@ -781,7 +781,7 @@ const AIModelsTab = memo(function AIModelsTab() {
               onChange={(e) => setOracleRerankBlend(Number(e.target.value) / 100)}
               className="w-full accent-fuchsia-500"
             />
-            <p className="text-[11px] text-white/25 mt-1">0% keeps the original order; 100% lets the AI fully decide.</p>
+            <p className="text-[11px] text-white/25 mt-1">0% keeps the engine order; higher values let the AI re-sort the taste-ordered shelves more (it is always blended with the engine order, never in full).</p>
           </div>
         )}
       </SectionCard>

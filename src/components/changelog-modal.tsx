@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.81': {
+    title: "What's New in Ark 1.0.81",
+    changes: [
+      'The AI re-sort now only touches the shelves that are meant to be ordered by your taste. Trending, Critics\' Choice, Deals and Stretch Picks keep their own ordering.',
+      'The re-sort is blended with the engine\'s order instead of replacing it, weak re-sorting methods no longer reorder your shelves, and shelves you are using stay put.',
+      'Recommendations are more varied: similar-feeling games are spread out using what the games are actually like, not just their genre.',
+      'Because rankings changed, Oracle will recalculate once after updating.',
+    ],
+  },
   '1.0.80': {
     title: "What's New in Ark 1.0.80",
     changes: [
