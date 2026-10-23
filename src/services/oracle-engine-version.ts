@@ -9,5 +9,7 @@
  *   4 — v1.0.78 taste modeling (rejections excluded from positive taste, negative embedding signal,
  *       per-source percentile semantics, median imputation)
  *   5 — v1.0.79 scoring-math cleanup (Wilson quality, true popularity debias, lift-based habits, weights total 1)
+ *   6 — v1.0.80 recall: over-fetched ANN/BM25 with exclusion-before-cap, quality floor, working cold-start,
+ *       pool hygiene, catalogue shelves from the whole scored pool
  */
-export const ORACLE_ENGINE_VERSION = 5;
+export const ORACLE_ENGINE_VERSION = 6;

@@ -180,3 +180,9 @@ The following gaps were fixed and removed from the active list:
 - Persisted graph PPR cache signature is `ann-${vectorCount}`: PPR seeded with old engagement weights is not rebuilt by the engine-version bump alone (R8).
 - Stretch Picks still sort by `contentSimilarity + semanticSimilarity` where semantic includes the negative penalty (R5/R7 shelf rework).
 - Explanations compare cluster vs penalised semantic percentile; use the pre-penalty percentile (R5).
+
+## Recall gaps (found during R6, scheduled)
+- Steam/Epic catalog loaders still choose genres by raw count and `rating >= 3.5` for loyal studios; they are not yet driven by the signed taste profile.
+- `normalizeTitleKey` collapses same-named distinct games (e.g. Prey 2006/2017, Mafia/Mafia Definitive Edition); owning one hides the other.
+- Catalogue-style shelf cards (Deals/Trending/…) have no per-card prose explanation; they use the layer-derived fallback.
+- ANN query still uses a single taste centroid; multi-taste libraries could query per cluster centroid (Stage 7).

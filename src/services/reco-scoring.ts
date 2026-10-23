@@ -592,7 +592,7 @@ export function computeGraphSignal(
 
   const score = clamp01(1 - Math.exp(-GRAPH_SATURATION_K * (matchedMass / gCtx.massRef)));
   contributions.sort((a, b) => b.value - a.value);
-  return { score, similarTo: [...new Set(contributions.map(c => c.title))].slice(0, 3) };
+  return { score, similarTo: [...new Set(contributions.map(c => c.title).filter(Boolean))].slice(0, 3) };
 }
 
 // ─── Layer 8: Quality Signal (multi-factor + small-sample-safe review sentiment) ─

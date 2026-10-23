@@ -33,6 +33,7 @@ import {
   bestPreparedClusterSimilarity,
   buildGraphUserContext,
   detectTasteClusters,
+  normalizeTitleKey,
   prepareClusterCentroids,
 } from '@/services/reco-scoring';
 import { libraryStore } from './library-store';
@@ -68,9 +69,20 @@ import {
   isLinkedExcluded,
 } from '@/services/linked-ids';
 import { expandHardNegativeIds } from '@/services/hard-negative';
-import { keepAnnNeighborsUnderCeiling } from '@/services/ann-retrieve';
+import { selectAnnCandidates } from '@/services/ann-retrieve';
+import {
+  dedupeCandidatesByTitle,
+  expandTwinIds,
+  hasAdultHintTags,
+  isLikelyAdultByTags,
+  isWindowsPlayable,
+  passesRetrievalQualityFloor,
+  preFilterCandidates as preFilterPool,
+  selectColdStartSeedIds,
+} from '@/services/reco-prefilter';
+import { isAllowAdultContent } from '@/hooks/useAllowAdultContent';
+import { isAdultContentByDescription } from '@/services/adult-content-filter';
 import { getSimilarTitlesForRecoBatch, getAnnNeighborsForRecoBatch } from '@/services/similar-games';
-import { canonicalFranchiseBase } from '@/services/franchise';
 import {
   djb2Fingerprint,
   fingerprintDismissals,
@@ -84,7 +96,8 @@ import type { EpicCatalogEntry } from '@/services/epic-catalog-store';
 /** ANN cosine-distance ceiling for Oracle taste retrieval (Cos metric). */
 const ANN_DISTANCE_CEILING = 0.45;
 const ANN_MAX_KEEP = 500;
-const ANN_QUERY_K = 2_000;
+// Over-fetch: each game can occupy several chunk rows, and the library's own games sit closest to the centroid.
+const ANN_QUERY_K = 6_000;
 const QUOTA_COLD = 300;
 const SURVIVOR_HYDRATE_CAP = 80;
 
@@ -231,7 +244,8 @@ export function buildOracleLibrarySignature(): string {
     });
   const dismissLine = `D:${fingerprintDismissals(recoHistoryStore.getDismissals())}`;
   const thumbsUpLine = `U:${fingerprintThumbsUp(recoHistoryStore.getThumbsUpIds())}`;
-  return [...libLines, ...customLines, dismissLine, thumbsUpLine].join('\n');
+  const adultLine = `A:${isAllowAdultContent() ? 1 : 0}`;
+  return [...libLines, ...customLines, dismissLine, thumbsUpLine, adultLine].join('\n');
 }
 
 // ─── Cached-result pipeline signature ──────────────────────────────────────────
@@ -627,7 +641,9 @@ export class RecoStore {
         budget(CANDIDATE_POOL_TIMEOUT_MS), poolSink, signal, 'Candidate pool',
       );
       if (isStale()) return;
-      const candidates = poolSink.slice();
+      // Pool hygiene runs HERE (not inside buildCandidatePool) so it also applies when the pool deadline fired
+      // and we are using whatever the sources had gathered by then.
+      const candidates = this.hygienePool(poolSink.slice(), userGames);
 
       // Store counts for the UI (before pre-filter, so the user sees the real pool size)
       this.state = {
@@ -640,7 +656,7 @@ export class RecoStore {
       // 2.1. Pre-filter candidates with shelf-aware quotas (25K → ~3K)
       setProgress('Pre-filtering candidates...', 6);
       const poolSizeBefore = candidates.length;
-      const filtered = this.preFilterCandidates(candidates, userGames);
+      const filtered = preFilterPool(candidates, userGames, { now: Date.now(), coldQuota: QUOTA_COLD });
       // preFilterCandidates returns the SAME array when the pool is already
       // ≤ MAX_POOL — clearing it in place would then wipe every candidate.
       if (filtered !== candidates) {
@@ -840,9 +856,12 @@ export class RecoStore {
         hardNegCatalog,
         Date.now(),
       );
-      const dismissedGameIds = expandDismissedWithLinked(
-        [...new Set([...hardNegExpanded, ...thumbsDownIds])],
-        linkedEntries,
+      const dismissedGameIds = expandTwinIds(
+        expandDismissedWithLinked(
+          [...new Set([...hardNegExpanded, ...thumbsDownIds])],
+          linkedEntries,
+        ),
+        candidates,
       );
 
       // 4.5. Graph metrics — prefer restore / single wait; cold build is non-blocking.
@@ -1037,7 +1056,8 @@ export class RecoStore {
       snapshotIds.add(libEntry.gameId);
       snapshots.push({
         gameId: libEntry.gameId,
-        title: meta?.title ?? `Game ${libEntry.gameId}`,
+        // No `Game <id>` placeholder: it pollutes franchise bases, lexical queries and 'Because you loved' titles.
+        title: meta?.title ?? '',
         genres: meta?.genre ?? [],
         themes: meta?.themes ?? [],
         gameModes: meta?.gameModes ?? [],
@@ -1143,6 +1163,7 @@ export class RecoStore {
       console.warn('[RecoStore] Failed to read browse cache for candidates:', err);
     }
 
+    this.lastBrowseRows = rawGames;
     for (const g of rawGames) {
       const id = String(g.id ?? '');
       const secId = g.secondaryId ? String(g.secondaryId) : '';
@@ -1155,6 +1176,7 @@ export class RecoStore {
 
       candidates.push({
         gameId: id,
+        ...(secId ? { secondaryGameId: secId } : {}),
         title: g.title || '',
         coverUrl: g.coverUrl,
         headerImage: g.headerImage,
@@ -1255,9 +1277,15 @@ export class RecoStore {
     // ── Source 5: Cold-start — Top Sellers ∩ top genres when evidence < 5 (F9) ──
     let coldCount = 0;
     try {
-      const cold = this.seedColdStartCandidates(userGames, rawGames, userGameIds, seenIds);
-      candidates.push(...cold);
-      coldCount = cold.length;
+      if (countEvidenceLibrary(userGames) < 5) {
+        // The seeds are browse rows, which are already candidates (and already in seenIds), so flag them
+        // in place. The old path re-added them behind the seen-set check, so it never seeded anything.
+        const seedIds = new Set(selectColdStartSeedIds(userGames, rawGames, QUOTA_COLD));
+        for (const c of candidates) {
+          if (seedIds.has(c.gameId)) { c.coldStartSeeded = true; coldCount++; }
+        }
+        if (coldCount > 0) console.log(`[RecoStore] Cold-start flagged ${coldCount} Top Sellers ∩ genre`);
+      }
     } catch (err) {
       console.warn('[RecoStore] Cold-start seed failed (non-fatal):', err);
     }
@@ -1267,85 +1295,51 @@ export class RecoStore {
   }
 
   /**
-   * F9: when evidence library is thin, seed Top Sellers ∩ user's top genres.
-   * Pure sync over already-loaded browse cache rows (category trending / high reviews).
+   * Pool hygiene on the assembled candidate list:
+   *  - adult content (unless the user allows it): conservative tags, plus the description classifier when the
+   *    browse row carries description text
+   *  - games with no Windows build (Ark launches/tracks Windows games)
+   *  - edition/store duplicates collapse to the best-reviewed one, and editions of games already owned drop
    */
-  private seedColdStartCandidates(
+  /** Browse rows of the latest pool build (kept for the adult-description check). */
+  private lastBrowseRows: Record<string, any>[] = [];
+
+  private hygienePool(pool: CandidateGame[], userGames: UserGameSnapshot[]): CandidateGame[] {
+    try {
+      const out = this.applyPoolHygiene(pool, userGames, this.lastBrowseRows);
+      if (out.length !== pool.length) console.log(`[RecoStore] Pool hygiene: ${pool.length} → ${out.length}`);
+      return out;
+    } catch (err) {
+      console.warn('[RecoStore] Pool hygiene failed (non-fatal):', err);
+      return pool;
+    }
+  }
+
+  private applyPoolHygiene(
+    candidates: CandidateGame[],
     userGames: UserGameSnapshot[],
     rawGames: Record<string, any>[],
-    userGameIds: Set<string>,
-    seenIds: Set<string>,
   ): CandidateGame[] {
-    if (countEvidenceLibrary(userGames) >= 5) return [];
+    const allowAdult = isAllowAdultContent();
+    const rowById = new Map<string, Record<string, any>>();
+    if (!allowAdult) for (const g of rawGames) if (g?.id) rowById.set(String(g.id), g);
 
-    const genreWeights = new Map<string, number>();
-    for (const ug of userGames) {
-      const w = computeEngagementWeight(ug);
-      if (w <= 0) continue; // never seed from genres the user rejected
-      for (const g of ug.genres) {
-        const key = g.toLowerCase();
-        genreWeights.set(key, (genreWeights.get(key) ?? 0) + w);
+    const kept = candidates.filter(c => {
+      if (!isWindowsPlayable(c.platforms)) return false;
+      if (!allowAdult) {
+        if (isLikelyAdultByTags(c)) return false;
+        // Ambiguous mature tags only trigger the (cached, localStorage-writing) description classifier.
+        const row = hasAdultHintTags(c) ? rowById.get(c.gameId) : undefined;
+        if (row && (row.summary || row.longDescription)
+          && isAdultContentByDescription({ id: c.gameId, title: c.title, summary: row.summary, longDescription: row.longDescription })) {
+          return false;
+        }
       }
-    }
-    const topGenres = [...genreWeights.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([g]) => g);
-    // Empty genre set → admit any top-seller (brand-new library)
-    const genreSet = new Set(topGenres);
+      return true;
+    });
 
-    const scored = rawGames
-      .map(g => {
-        const id = String(g.id ?? '');
-        const genres: string[] = Array.isArray(g.genre) ? g.genre : [];
-        const reviews = typeof g.totalReviews === 'number' ? g.totalReviews
-          : typeof g.reviewVolume === 'number' ? g.reviewVolume
-          : typeof g.recommendations === 'number' ? g.recommendations
-          : 0;
-        const category = String(g.category ?? g.browseCategory ?? '').toLowerCase();
-        const isTopSeller = category.includes('trend') || category.includes('top') || reviews >= 5000;
-        const genreHit = genreSet.size === 0
-          || genres.some(x => genreSet.has(String(x).toLowerCase()));
-        return { g, id, reviews, isTopSeller, genreHit };
-      })
-      .filter(r => r.id && r.isTopSeller && r.genreHit)
-      .sort((a, b) => b.reviews - a.reviews);
-
-    const results: CandidateGame[] = [];
-    for (const { g, id } of scored) {
-      if (results.length >= QUOTA_COLD) break;
-      const secId = g.secondaryId ? String(g.secondaryId) : '';
-      if (isLinkedExcluded(id, secId || undefined, userGameIds)) continue;
-      if (isLinkedExcluded(id, secId || undefined, seenIds)) continue;
-      seenIds.add(id);
-      if (secId) seenIds.add(secId);
-      const embedding = embeddingCache.get(id);
-      results.push({
-        gameId: id,
-        title: g.title || '',
-        coverUrl: g.coverUrl,
-        headerImage: g.headerImage,
-        developer: g.developer || '',
-        publisher: g.publisher || '',
-        genres: Array.isArray(g.genre) ? g.genre : [],
-        themes: Array.isArray(g.themes) ? g.themes : [],
-        gameModes: Array.isArray(g.gameModes) ? g.gameModes : [],
-        perspectives: Array.isArray(g.playerPerspectives) ? g.playerPerspectives : [],
-        platforms: Array.isArray(g.platform) ? g.platform : [],
-        metacriticScore: typeof g.metacriticScore === 'number' ? g.metacriticScore : null,
-        playerCount: typeof g.playerCount === 'number' ? g.playerCount : null,
-        releaseDate: g.releaseDate || '',
-        similarGameTitles: Array.isArray(g.similarGames)
-          ? g.similarGames.map((sg: any) => sg.name || '').filter(Boolean)
-          : [],
-        coldStartSeeded: true,
-        ...(embedding ? { embedding } : {}),
-      });
-    }
-    if (results.length > 0) {
-      console.log(`[RecoStore] Cold-start seeded ${results.length} Top Sellers ∩ genre`);
-    }
-    return results;
+    const owned = new Set(userGames.map(g => normalizeTitleKey(g.title)).filter(Boolean));
+    return dedupeCandidatesByTitle(kept, owned);
   }
 
   /**
@@ -1669,15 +1663,19 @@ export class RecoStore {
     if (!centroid) return [];
 
     const neighbors = await annIndex.queryWithDistances(centroid, ANN_QUERY_K);
-    // Hard ceiling only — no soft fallback to far neighbors when under-ceiling is empty
-    const kept = keepAnnNeighborsUnderCeiling(neighbors, ANN_DISTANCE_CEILING, ANN_MAX_KEEP);
+    // Aggregate chunk rows → drop library/linked/seen → hard ceiling → cap (in that order; capping first let the
+    // user's own games and chunk duplicates burn the slots). No soft fallback to far neighbours.
+    const kept = selectAnnCandidates(neighbors, {
+      ceiling: ANN_DISTANCE_CEILING,
+      maxKeep: ANN_MAX_KEEP,
+      isExcluded: id => isLinkedExcluded(id, undefined, userGameIds) || isLinkedExcluded(id, undefined, seenIds),
+    });
     const distanceById = new Map(kept.map(n => [n.id, n.distance]));
 
     const newSteamAppIds: number[] = [];
     const newEpicIds: string[] = [];
     const newIdSet = new Set<string>();
     for (const { id } of kept) {
-      if (isLinkedExcluded(id, undefined, userGameIds) || isLinkedExcluded(id, undefined, seenIds)) continue;
       if (id.startsWith('steam-')) {
         const appid = parseInt(id.slice(6), 10);
         if (!isNaN(appid)) {
@@ -1753,8 +1751,10 @@ export class RecoStore {
       }
     }
 
-    console.log(`[RecoStore] ANN retrieval: ${neighbors.length} queried → ${kept.length} kept (ceiling ${ANN_DISTANCE_CEILING} / top ${ANN_MAX_KEEP}) → ${results.length} loaded`);
-    return results;
+    const now = Date.now();
+    const floored = results.filter(c => passesRetrievalQualityFloor(c, now));
+    console.log(`[RecoStore] ANN retrieval: ${neighbors.length} queried → ${kept.length} kept (ceiling ${ANN_DISTANCE_CEILING} / top ${ANN_MAX_KEEP}) → ${results.length} loaded → ${floored.length} after quality floor`);
+    return floored;
   }
 
   /**
@@ -1780,13 +1780,15 @@ export class RecoStore {
     if (!lexicalQuery) return [];
 
     const TOP_K = 500;
-    const hits = bm25Index.search(lexicalQuery, TOP_K);
+    // Over-fetch, THEN exclude library/seen, THEN cap: the library's own games match their own taste query best.
+    const hits = bm25Index.search(lexicalQuery, TOP_K * 3);
     if (hits.length === 0) return [];
 
     const newSteamAppIds: number[] = [];
     const newEpicIds: string[] = [];
     const newIdSet = new Set<string>();
     for (const { id } of hits) {
+      if (newIdSet.size >= TOP_K) break;
       if (isLinkedExcluded(id, undefined, userGameIds) || isLinkedExcluded(id, undefined, seenIds)) continue;
       if (id.startsWith('steam-')) {
         const appid = parseInt(id.slice(6), 10);
@@ -1860,7 +1862,8 @@ export class RecoStore {
     console.log(
       `[RecoStore] BM25 retrieval: query="${lexicalQuery.slice(0, 80)}…" → ${hits.length} hits → ${results.length} new candidates`,
     );
-    return results;
+    const nowBm = Date.now();
+    return results.filter(c => passesRetrievalQualityFloor(c, nowBm));
   }
 
   /** Lightweight taste profile + loved titles for BM25 (pre-worker). */
@@ -1897,7 +1900,7 @@ export class RecoStore {
         pubCounts.set(ug.publisher, (pubCounts.get(ug.publisher) || 0) + 1);
       }
       if (ug.rating >= 4 || ug.status === 'Completed' || ug.hoursPlayed >= 20) {
-        lovedTitles.push(ug.title);
+        if (ug.title) lovedTitles.push(ug.title);
       }
     }
 
@@ -1959,184 +1962,6 @@ export class RecoStore {
     };
 
     return buildLexicalTasteQuery(profile, { lovedTitles });
-  }
-
-  /**
-   * Pre-filter candidates using shelf-aware quotas so the expensive worker
-   * pipeline only processes ~3K games instead of 25K+.
-   *
-   * Quotas ensure every shelf type can still populate:
-   *  - Genre overlap (main shelves, deep-in-genre, mood, trending)
-   *  - Franchise name match (complete-the-series, upcoming-sequels)
-   *  - Studio match (from-studios-you-love)
-   *  - High metacritic (hidden-gems, critics-choice)
-   *  - Zero-genre-overlap + good reviews (stretch-picks)
-   *  - Random wildcard (catches combinatorial edge cases)
-   */
-  private preFilterCandidates(
-    candidates: CandidateGame[],
-    userGames: UserGameSnapshot[],
-  ): CandidateGame[] {
-    const MAX_POOL = 3000;
-    if (candidates.length <= MAX_POOL) return candidates;
-
-    // Build user profile signals for scoring
-    const genreWeights = new Map<string, number>();
-    const devSet = new Set<string>();
-    const pubSet = new Set<string>();
-    const franchiseBases = new Set<string>();
-
-    for (const ug of userGames) {
-      const weight = computeEngagementWeight(ug);
-      if (weight <= 0) continue; // rejected games must not open genre/studio/franchise quotas
-      for (const g of ug.genres) {
-        const key = g.toLowerCase();
-        genreWeights.set(key, (genreWeights.get(key) ?? 0) + weight);
-      }
-      if (ug.developer) devSet.add(ug.developer.toLowerCase());
-      if (ug.publisher) pubSet.add(ug.publisher.toLowerCase());
-      const base = canonicalFranchiseBase(ug.title);
-      if (base) franchiseBases.add(base);
-    }
-
-    // Score every candidate cheaply
-    const scored: Array<{
-      candidate: CandidateGame;
-      genreScore: number;
-      isFranchise: boolean;
-      isStudio: boolean;
-      metacritic: number;
-      isStretchCandidate: boolean;
-    }> = [];
-
-    for (const c of candidates) {
-      let genreScore = 0;
-      let hasGenreOverlap = false;
-      for (const g of c.genres) {
-        const w = genreWeights.get(g.toLowerCase());
-        if (w !== undefined) {
-          genreScore += w;
-          hasGenreOverlap = true;
-        }
-      }
-      if (c.genres.length > 0) genreScore /= c.genres.length;
-
-      const isFranchise = franchiseBases.has(canonicalFranchiseBase(c.title));
-      const isStudio = (c.developer ? devSet.has(c.developer.toLowerCase()) : false) ||
-                       (c.publisher ? pubSet.has(c.publisher.toLowerCase()) : false);
-      const metacritic = c.metacriticScore ?? 0;
-      const isStretchCandidate = !hasGenreOverlap &&
-        (c.reviewPositivity ?? 0) >= 0.7 &&
-        (c.reviewVolume ?? 0) >= 50;
-
-      scored.push({ candidate: c, genreScore, isFranchise, isStudio, metacritic, isStretchCandidate });
-    }
-
-    // Fill quotas
-    const selected = new Set<CandidateGame>();
-    const QUOTA_SEMANTIC    = 500;
-    const QUOTA_LEXICAL     = 400;
-    const QUOTA_COLD_KEEP   = QUOTA_COLD;
-    const QUOTA_GENRE       = 2000;
-    const QUOTA_FRANCHISE   = 300;
-    const QUOTA_STUDIO      = 200;
-    const QUOTA_METACRITIC  = 200;
-    const QUOTA_STRETCH     = 300;
-    const QUOTA_WILDCARD    = 200;
-
-    // 0. ANN-retrieved candidates — these were found specifically because they're
-    // semantically similar to the user's taste. They may have zero genre overlap
-    // and would be dropped by all other quotas. Preserve them unconditionally.
-    for (const s of scored) {
-      if (selected.size >= QUOTA_SEMANTIC) break;
-      if (s.candidate.semanticRetrieved && !selected.has(s.candidate)) {
-        selected.add(s.candidate);
-      }
-    }
-
-    // 0b. BM25 lexical hits — title/tag exactness ANN can miss. Keep a dedicated
-    // quota so popular-flood / genre fill does not starve them.
-    let lexicalCount = 0;
-    for (const s of scored) {
-      if (lexicalCount >= QUOTA_LEXICAL) break;
-      if (s.candidate.lexicalRetrieved && !selected.has(s.candidate)) {
-        selected.add(s.candidate);
-        lexicalCount++;
-      }
-    }
-
-    // 0c. Cold-start Top Sellers ∩ genre seeds (F9)
-    let coldCount = 0;
-    for (const s of scored) {
-      if (coldCount >= QUOTA_COLD_KEEP) break;
-      if (s.candidate.coldStartSeeded && !selected.has(s.candidate)) {
-        selected.add(s.candidate);
-        coldCount++;
-      }
-    }
-
-    // 1. Genre overlap — top N by engagement-weighted genre score
-    scored.sort((a, b) => b.genreScore - a.genreScore);
-    let count = 0;
-    for (const s of scored) {
-      if (count >= QUOTA_GENRE) break;
-      if (s.genreScore > 0 && !selected.has(s.candidate)) {
-        selected.add(s.candidate);
-        count++;
-      }
-    }
-
-    // 2. Franchise name match
-    count = 0;
-    for (const s of scored) {
-      if (count >= QUOTA_FRANCHISE) break;
-      if (s.isFranchise && !selected.has(s.candidate)) {
-        selected.add(s.candidate);
-        count++;
-      }
-    }
-
-    // 3. Studio match
-    count = 0;
-    for (const s of scored) {
-      if (count >= QUOTA_STUDIO) break;
-      if (s.isStudio && !selected.has(s.candidate)) {
-        selected.add(s.candidate);
-        count++;
-      }
-    }
-
-    // 4. High metacritic (genre-agnostic — feeds hidden gems + critics' choice)
-    scored.sort((a, b) => b.metacritic - a.metacritic);
-    count = 0;
-    for (const s of scored) {
-      if (count >= QUOTA_METACRITIC) break;
-      if (s.metacritic >= 75 && !selected.has(s.candidate)) {
-        selected.add(s.candidate);
-        count++;
-      }
-    }
-
-    // 5. Stretch picks — zero genre overlap but well-reviewed
-    count = 0;
-    for (const s of scored) {
-      if (count >= QUOTA_STRETCH) break;
-      if (s.isStretchCandidate && !selected.has(s.candidate)) {
-        selected.add(s.candidate);
-        count++;
-      }
-    }
-
-    // 6. Random wildcard via partial Fisher-Yates shuffle (O(K) not O(K*N))
-    const remaining = scored.filter(s => !selected.has(s.candidate));
-    const wildcardCount = Math.min(QUOTA_WILDCARD, remaining.length);
-    for (let i = 0; i < wildcardCount; i++) {
-      const j = i + Math.floor(Math.random() * (remaining.length - i));
-      [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
-      selected.add(remaining[i].candidate);
-    }
-
-    return [...selected];
   }
 
   /**

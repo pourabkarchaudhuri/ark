@@ -11,6 +11,17 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.80': {
+    title: "What's New in Ark 1.0.80",
+    changes: [
+      'Oracle finds more of the right games: its similarity search no longer wastes slots on games you already own, and its keyword search does the same.',
+      'New-user suggestions now actually kick in for small libraries (the feature existed but never matched anything).',
+      'Duplicate editions and Steam/Epic copies of the same game are collapsed, games without a Windows build are skipped, and adult content is filtered unless you allow it.',
+      'Hidden Gems, Deals, Free, Critics\' Choice, New Releases and Trending now draw from everything Oracle scored — not just its top picks — with a limit on how many games share a studio.',
+      'Games that have not released yet only show up in the Coming Soon shelves.',
+      'Because rankings changed, Oracle will recalculate once after updating.',
+    ],
+  },
   '1.0.79': {
     title: "What's New in Ark 1.0.79",
     changes: [

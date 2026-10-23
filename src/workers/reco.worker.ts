@@ -41,6 +41,7 @@ import type {
 } from '@/types/reco';
 import { toCanonicalGenre, toCanonicalGenres } from '@/data/canonical-genres';
 import {
+  canonicalFranchiseBase,
   computeFranchiseBoost,
   detectFranchises,
   isFutureReleaseDate,
@@ -666,7 +667,9 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     return heroEvidenceSortKey(b.score, alignB) - heroEvidenceSortKey(a.score, alignA);
   });
   const MMR_POOL_SIZE = 500;
-  const mmrPool = scored.slice(0, MMR_POOL_SIZE);
+  // Unreleased titles are for the dedicated Coming Soon / Upcoming Sequels shelves (built from allScored),
+  // not the main shelves — a game you cannot play yet is not a top pick.
+  const mmrPool = scored.filter(sg => !isComingSoonForShelf(sg.releaseDate, sg.reasons.comingSoon, now)).slice(0, MMR_POOL_SIZE);
   const reranked = mmrRerank(mmrPool, 0.7, 80, (f) => {
     progress('Applying diversity filter...', 60 + Math.floor(f * 8));
   });
@@ -738,6 +741,10 @@ function buildShelvesFromScored(
 ): RecoShelf[] {
   const shelves: RecoShelf[] = [];
   const usedGameIds = new Set<string>();
+  // Pool-relative relevance floor (above-median): absolute score thresholds drift whenever weights/signals change.
+  const poolRelevanceFloor = allScored.length > 0
+    ? quantileSorted(allScored.map(sg => sg.score).sort((a, b) => a - b), 0.5)
+    : 0;
 
   const addToUsed = (games: ScoredGame[]) => {
     for (const g of games) usedGameIds.add(g.gameId);
@@ -779,7 +786,7 @@ function buildShelvesFromScored(
   // "loved"), and — since each pick's similarTo keeps only its 3 strongest links — we try the user's
   // top few seeds and use the first one that has enough picks, instead of betting on a single title.
   const seedCandidates = [...userGames]
-    .filter(g => computeEngagementWeight(g) > 0 && (g.rating >= 4 || g.hoursPlayed >= 20))
+    .filter(g => g.title && computeEngagementWeight(g) > 0 && (g.rating >= 4 || g.hoursPlayed >= 20))
     .sort((a, b) => computeEngagementScore(b, nowMs) - computeEngagementScore(a, nowMs))
     .slice(0, 5);
 
@@ -851,15 +858,40 @@ function buildShelvesFromScored(
       shelves.push({
         type: 'for-your-mood',
         title: `For your ${cluster.label} side`,
-        subtitle: `Based on ${cluster.topGames.slice(0, 2).join(' & ')}`,
+        subtitle: cluster.topGames.filter(Boolean).length > 0 ? `Based on ${cluster.topGames.filter(Boolean).slice(0, 2).join(' & ')}` : undefined,
         games: clusterGames,
       });
       addToUsed(clusterGames);
     }
   }
 
+  // Catalogue-style shelves (Hidden Gems, Deals, Free, Critics' Choice, New Releases, Trending) are built from
+  // the WHOLE scored pool, not the ~80 MMR survivors (which are chosen for taste, so a hidden gem or a deal had
+  // to be a top-80 taste pick to appear at all). They keep a relevance floor (above-median score) so they stay
+  // "for you", and are de-duplicated per shelf (≤2 per developer, 1 per franchise).
+  const poolByScore = allScored
+    .filter(s => !isComingSoonForShelf(s.releaseDate, s.reasons.comingSoon, nowMs) && s.score >= poolRelevanceFloor)
+    .sort((a, b) => b.score - a.score);
+  const pickDiverse = (list: ScoredGame[], limit: number): ScoredGame[] => {
+    const perDev = new Map<string, number>();
+    const franchises = new Set<string>();
+    const out: ScoredGame[] = [];
+    for (const g of list) {
+      if (out.length >= limit) break;
+      if (usedGameIds.has(g.gameId)) continue;
+      const dev = splitCreditedNames(g.developer)[0] ?? '';
+      const base = canonicalFranchiseBase(g.title);
+      if (dev && (perDev.get(dev) ?? 0) >= 2) continue;
+      if (base && franchises.has(base)) continue;
+      if (dev) perDev.set(dev, (perDev.get(dev) ?? 0) + 1);
+      if (base) franchises.add(base);
+      out.push(g);
+    }
+    return out;
+  };
+
   // Hidden Gems
-  const hiddenGems = reranked.filter(s => !usedGameIds.has(s.gameId) && s.reasons.isHiddenGem).slice(0, 12);
+  const hiddenGems = pickDiverse(poolByScore.filter(s => s.reasons.isHiddenGem), 12);
   if (hiddenGems.length >= 2) {
     shelves.push({
       type: 'hidden-gems',
@@ -871,10 +903,12 @@ function buildShelvesFromScored(
   }
 
   // Deals For You — games on sale matching user taste
-  const deals = reranked
-    .filter(s => !usedGameIds.has(s.gameId) && s.reasons.isOnSale && s.price?.discountPercent && s.price.discountPercent >= 20)
-    .sort((a, b) => (b.price?.discountPercent ?? 0) - (a.price?.discountPercent ?? 0))
-    .slice(0, 12);
+  const deals = pickDiverse(
+    poolByScore
+      .filter(s => s.reasons.isOnSale && s.price?.discountPercent && s.price.discountPercent >= 20)
+      .sort((a, b) => (b.price?.discountPercent ?? 0) - (a.price?.discountPercent ?? 0)),
+    12,
+  );
 
   if (deals.length >= 2) {
     shelves.push({
@@ -887,9 +921,7 @@ function buildShelvesFromScored(
   }
 
   // Free For You — free games matching user taste
-  const freeGames = reranked
-    .filter(s => !usedGameIds.has(s.gameId) && s.price?.isFree)
-    .slice(0, 12);
+  const freeGames = pickDiverse(poolByScore.filter(s => s.price?.isFree), 12);
 
   if (freeGames.length >= 2) {
     shelves.push({
@@ -902,10 +934,12 @@ function buildShelvesFromScored(
   }
 
   // Critics' Choice
-  const criticsChoice = reranked
-    .filter(s => !usedGameIds.has(s.gameId) && (s.metacriticScore ?? 0) >= 85)
-    .sort((a, b) => (b.metacriticScore ?? 0) - (a.metacriticScore ?? 0))
-    .slice(0, 12);
+  const criticsChoice = pickDiverse(
+    poolByScore
+      .filter(s => (s.metacriticScore ?? 0) >= 85)
+      .sort((a, b) => (b.metacriticScore ?? 0) - (a.metacriticScore ?? 0) || b.score - a.score),
+    12,
+  );
 
   if (criticsChoice.length >= 2) {
     shelves.push({
@@ -938,14 +972,14 @@ function buildShelvesFromScored(
   }
 
   // New Releases For You
-  const sixtyDaysAgo = Date.now() - 60 * 24 * 60 * 60 * 1000;
-  const newReleases = reranked
-    .filter(s => {
-      if (usedGameIds.has(s.gameId)) return false;
+  const sixtyDaysAgo = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const newReleases = pickDiverse(
+    poolByScore.filter(s => {
       const rd = new Date(s.releaseDate).getTime();
-      return !isNaN(rd) && rd > sixtyDaysAgo && rd <= Date.now();
-    })
-    .slice(0, 12);
+      return !isNaN(rd) && rd > sixtyDaysAgo && rd <= nowMs;
+    }),
+    12,
+  );
 
   if (newReleases.length >= 2) {
     shelves.push({
@@ -977,11 +1011,8 @@ function buildShelvesFromScored(
     addToUsed(upcomingSequels);
   }
 
-  // Coming Soon For You — empty date ≠ upcoming; honor comingSoon flag. The floor is pool-relative
-  // (above-median) because the absolute score scale shifts whenever the weights or signals do.
-  const comingSoonFloor = allScored.length > 0
-    ? quantileSorted(allScored.map(s => s.score).sort((a, b) => a - b), 0.5)
-    : 0;
+  // Coming Soon For You — empty date ≠ upcoming; honor comingSoon flag. Same pool-relative floor.
+  const comingSoonFloor = poolRelevanceFloor;
   const comingSoon = allScored
     .filter(s => {
       if (usedGameIds.has(s.gameId)) return false;
@@ -1002,10 +1033,12 @@ function buildShelvesFromScored(
   }
 
   // Trending Now
-  const trending = reranked
-    .filter(s => !usedGameIds.has(s.gameId) && (s.playerCount ?? 0) > 0)
-    .sort((a, b) => (b.playerCount ?? 0) - (a.playerCount ?? 0))
-    .slice(0, 12);
+  const trending = pickDiverse(
+    poolByScore
+      .filter(s => (s.playerCount ?? 0) > 0)
+      .sort((a, b) => (b.playerCount ?? 0) - (a.playerCount ?? 0)),
+    12,
+  );
 
   if (trending.length >= 2) {
     shelves.push({
@@ -1018,7 +1051,7 @@ function buildShelvesFromScored(
   }
 
   // "Finish and Try"
-  const onHoldGames = userGames.filter(g => g.status === 'On Hold');
+  const onHoldGames = userGames.filter(g => g.status === 'On Hold' && g.title);
   if (onHoldGames.length > 0) {
     const topOnHold = onHoldGames.sort((a, b) => b.hoursPlayed - a.hoursPlayed)[0];
     const topOnHoldCanonNorm = new Set(topOnHold.genres.map(g => toCanonicalGenre(g)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c)));
@@ -1042,7 +1075,7 @@ function buildShelvesFromScored(
 
   // Unfinished Business
   const unfinished = userGames
-    .filter(g => g.status === 'Playing' || g.status === 'On Hold' || g.status === 'Playing Now')
+    .filter(g => g.title && (g.status === 'Playing' || g.status === 'On Hold' || g.status === 'Playing Now'))
     .sort((a, b) => {
       const aTime = a.lastSessionDate ? new Date(a.lastSessionDate).getTime() : new Date(a.addedAt).getTime();
       const bTime = b.lastSessionDate ? new Date(b.lastSessionDate).getTime() : new Date(b.addedAt).getTime();

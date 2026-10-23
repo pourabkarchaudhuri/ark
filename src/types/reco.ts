@@ -276,6 +276,8 @@ export interface UserGameSnapshot {
 /** Candidate game to score (from cache / API browse results). */
 export interface CandidateGame {
   gameId: string;
+  /** Cross-store twin id (browse-cache secondaryId) — dismissals apply to both. */
+  secondaryGameId?: string;
   title: string;
   coverUrl?: string;
   headerImage?: string;

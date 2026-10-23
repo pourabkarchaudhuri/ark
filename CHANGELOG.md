@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.80] - 2026-10-23
+
+Sixth step of the Oracle recommendation-quality plan: recall — getting the right candidates into the pool and onto the right shelves. **Ranking changes** (engine version 6).
+
+### Fixed — candidate pool
+- **ANN retrieval stops wasting its slots.** The 500-candidate cap was applied *before* removing the user's own library games and linked twins, and facet "chunk" rows (`lib:`/`cat:` ids) were silently discarded, so a library-heavy user got far fewer than 500. It now over-fetches (6,000 rows), aggregates chunk rows to their game, drops library/linked/seen games, applies the 0.45 distance ceiling and only then caps.
+- **BM25 does the same:** over-fetch 3×, exclude, then cap (a user's own games match their own taste query best and used to eat the slots).
+- **ANN/BM25 hits get the same quality floor as the Steam catalog** (released games need 10+ reviews and ≥50% positive; unreleased titles and entries with no review data pass).
+- **Cold start actually seeds.** The old seeding re-added browse rows that Source 1 had already added to the seen-set, so it matched nothing and `coldStartSeeded` was never set. Seeds are now flagged in place on the existing browse candidates.
+- **Pre-filter quotas are fairer and deterministic:** genres match canonically on both sides, the genre score is the mean of the genres that *match* (extra genres no longer dilute it), untagged candidates get their own best-reviewed-first quota, Stretch Picks are chosen best-reviewed first, the studio quota follows *loyal* studios only, and the wildcard sample is seeded from the pool instead of `Math.random`.
+- **Pool hygiene:** adult content is filtered (unambiguous tags always; ambiguous mature tags such as "Sexual Content" only when the description classifier agrees, so mainstream mature games like The Witcher 3 stay), games with no Windows build are dropped, editions/stores of the same game collapse to the best-reviewed copy (the winner keeps a link to its twin and the retrieval flags of its duplicates), and editions of games you already own are dropped. Hygiene runs even when the pool deadline fired.
+- **Dismissals and thumbs-downs reach cross-store twins** (via the browse row's secondary id and the dedupe link).
+- **No more `Game <id>` placeholder titles** polluting franchise bases, lexical queries and "Because you loved" for library entries without metadata.
+
+### Fixed — shelves
+- **Hidden Gems, Deals, Free, Critics' Choice, New Releases and Trending are built from the whole scored pool,** not only the ~80 MMR survivors (which are picked for taste, so a deal or a hidden gem had to be a top-80 taste pick to appear). They keep an above-median relevance floor so they stay "for you", and each shelf allows at most two games per developer and one per franchise.
+- **Unreleased games stay out of the main shelves**; they appear only in Coming Soon / Upcoming Sequels.
+
+### Hardened after an independent review (before release)
+- Pool hygiene now also runs when the candidate-pool deadline fires (previously the adult filter etc. were skipped in that case).
+- Library entries without a title no longer leak blank names into "similar to…", cluster subtitles or Unfinished Business cards.
+- Ambiguous mature tags no longer drop mainstream mature games; the description classifier runs only for tag-hinted candidates (it writes to localStorage per uncached call).
+
+### Tests
+- New: ANN selection order, quality floor, cold-start seeds, adult/Windows/dedupe/twin helpers, pre-filter quotas and determinism, per-developer shelf cap, unreleased games kept out of main shelves.
+
 ## [1.0.79] - 2026-10-23
 
 Fifth step of the Oracle recommendation-quality plan: the scoring math itself, and honest explanations. **Ranking changes** (engine version 5).
