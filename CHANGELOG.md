@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.91] - 2026-10-29
+
+### Fixed — Upcoming shows Steam properly
+- **Why Epic outnumbered Steam:** Steam's upcoming list came only from the Steam store front's short "Coming soon" and "New releases" carousels (a few dozen games), while Epic's came from two 200-game catalog searches; the shared 300-entry "Coming soon" cap also filled up with whichever store was listed first.
+- **Steam now comes from the synced Steam catalog too:** recent releases (this month and last) with at least 20 reviews, up to 300, and future-dated releases nearest-first, up to 400. It loads in the background after the page opens, so the calendar is never slower. Without a synced catalog the calendar works as before.
+- **Each store gets its own 300-entry "Coming soon" allowance.**
+- **Same game on both stores = one entry with both badges; two different games with the same name stay separate** (they used to be merged into one).
+- **Titles written in non-Latin scripts (Chinese, Japanese, Korean, Cyrillic…) no longer disappear** from the calendar (their merge key used to be empty).
+- The console logs how many releases each store contributed.
+
 ## [1.0.90] - 2026-10-29
 
 ### Added — gg.deals prices

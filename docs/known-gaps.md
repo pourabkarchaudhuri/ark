@@ -232,3 +232,8 @@ The following gaps were fixed and removed from the active list:
 - Only Steam app ids are looked up; Epic-only games (no Steam twin) show no gg.deals price.
 - Region list is a conservative guess; an unsupported region returns "unavailable" rather than prices.
 - Deals For You keeps one game per franchise base; games whose titles share a first word can crowd each other out (existing behaviour, more visible with gg.deals data).
+
+## Upcoming gaps (found during 1.0.91)
+- Whether Steam's IStoreBrowseService/GetItems returns planned release dates for unreleased apps could not be checked from this network (store.steampowered.com is blocked); if it does not, future Steam entries still come only from the store-front carousels. Recent releases are unaffected.
+- Steam "Q1 2027" / "To be announced" strings still go to the Coming Soon sidebar rather than a month.
+- Future-dated catalog entries have no popularity signal (no reviews yet), so the 400 nearest are shown regardless of interest.

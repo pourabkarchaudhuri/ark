@@ -11,6 +11,14 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.91': {
+    title: "What's New in Ark 1.0.91",
+    changes: [
+      'Upcoming now shows far more Steam releases (recent hits and future launches from the Steam catalog), not just Epic.',
+      'Games on both stores show once with both badges; different games with the same name are no longer merged.',
+      'Games with non-Latin titles no longer disappear from the calendar.',
+    ],
+  },
   '1.0.90': {
     title: "What's New in Ark 1.0.90",
     changes: [

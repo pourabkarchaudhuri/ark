@@ -833,6 +833,54 @@ export class CatalogStore {
    * the full 155k-row scan never blocks IPC on a single-shot payload. IDB path
    * keeps the cursor semantics identical to pre-v1.0.65.
    */
+  /**
+   * Steam releases for the Upcoming calendar, from the synced catalog (one pass over the entries).
+   * Dated releases from `fromMs` up to now need `minRecentReviews` reviews (Steam ships ~1,500 games a
+   * month; this keeps the ones people actually play), future-dated ones are kept nearest-first. Both
+   * groups are capped. Returns [] when the catalog has not been synced.
+   */
+  async queryUpcoming(opts: {
+    fromMs: number;
+    toMs: number;
+    nowMs?: number;
+    minRecentReviews?: number;
+    maxRecent?: number;
+    maxFuture?: number;
+  }): Promise<CatalogEntry[]> {
+    const { fromMs, toMs, nowMs = Date.now(), minRecentReviews = 20, maxRecent = 300, maxFuture = 400 } = opts;
+    await this.migrateFromIdbIfNeeded();
+    const recent: CatalogEntry[] = [];
+    const future: CatalogEntry[] = [];
+    const admit = (entry: CatalogEntry) => {
+      const ms = (entry.releaseDate || 0) * 1000;
+      if (!ms || ms < fromMs || ms > toMs) return;
+      if (ms > nowMs) future.push(entry);
+      else if ((entry.reviewCount ?? 0) >= minRecentReviews) recent.push(entry);
+    };
+    if (useLevelDB()) {
+      await levelStreamAllEntries(admit);
+    } else {
+      const db = await getDB();
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction(ENTRIES_STORE, 'readonly');
+        const req = tx.objectStore(ENTRIES_STORE).openCursor();
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) {
+            resolve();
+            return;
+          }
+          admit(cursor.value as CatalogEntry);
+          cursor.continue();
+        };
+        req.onerror = () => resolve();
+      });
+    }
+    recent.sort((a, b) => b.reviewCount - a.reviewCount);
+    future.sort((a, b) => a.releaseDate - b.releaseDate);
+    return [...recent.slice(0, maxRecent), ...future.slice(0, maxFuture)];
+  }
+
   async queryForCandidates(opts: {
     topGenres: string[];
     loyalDevelopers: string[];

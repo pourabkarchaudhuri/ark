@@ -304,3 +304,29 @@ describe('CatalogStore — sync-state persistence', () => {
     expect(await store.isFresh()).toBe(false);
   });
 });
+
+describe('CatalogStore — queryUpcoming (release calendar)', () => {
+  it('keeps reviewed recent releases and nearest future releases, capped', async () => {
+    const now = Date.UTC(2026, 9, 15);
+    const sec = (ms: number) => Math.floor(ms / 1000);
+    const day = 86_400_000;
+    const seedEntries = [
+      makeEntry({ appid: 1, name: 'Recent-Popular', releaseDate: sec(now - 10 * day), reviewCount: 500 }),
+      makeEntry({ appid: 2, name: 'Recent-Unreviewed', releaseDate: sec(now - 5 * day), reviewCount: 2 }),
+      makeEntry({ appid: 3, name: 'Next-Week', releaseDate: sec(now + 7 * day), reviewCount: 0 }),
+      makeEntry({ appid: 4, name: 'Next-Year', releaseDate: sec(now + 300 * day), reviewCount: 0 }),
+      makeEntry({ appid: 5, name: 'Too-Old', releaseDate: sec(now - 90 * day), reviewCount: 9000 }),
+      makeEntry({ appid: 6, name: 'No-Date', releaseDate: 0, reviewCount: 9000 }),
+    ];
+    installFakeStore({
+      seedEntries,
+      seedMeta: { 'sync-state': { lastSyncTimestamp: Date.now(), totalEntries: seedEntries.length, batchesCompleted: 1, batchesTotal: 1, inProgress: false } },
+    });
+    localStorage.setItem(MIGRATION_MARKER, 'yes');
+
+    const store = new CatalogStore();
+    const out = await store.queryUpcoming({ fromMs: now - 45 * day, toMs: now + 5 * 365 * day, nowMs: now, maxFuture: 1 });
+    expect(out.map((e) => e.name)).toEqual(['Recent-Popular', 'Next-Week']);
+  });
+});
+

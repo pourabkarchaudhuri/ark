@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
-import { ReleaseCalendar } from '@/components/release-calendar';
+import { ReleaseCalendar, mergeAcrossStores, releaseNameKey } from '@/components/release-calendar';
 import { ToastProvider } from '@/components/ui/toast';
 import { Game } from '@/types/game';
 
@@ -476,3 +476,22 @@ describe('ReleaseCalendar', () => {
     expect(matches.length).toBeLessThanOrEqual(2);
   });
 });
+
+describe('release name merging', () => {
+  const row = (name: string, store: string) => ({ r: { name, store }, stores: new Set([store]) });
+
+  it('merges the same game across stores, keeps same-name games on one store apart', () => {
+    const out = mergeAcrossStores([row('Test Game', 'steam'), row('TEST GAME!', 'epic'), row('Test Game', 'steam')]);
+    expect(out).toHaveLength(2);
+    expect([...out[0].stores].sort()).toEqual(['epic', 'steam']);
+    expect([...out[1].stores]).toEqual(['steam']);
+  });
+
+  it('keeps non-Latin titles (they used to collapse to an empty key and vanish)', () => {
+    expect(releaseNameKey('原神')).toBe('原神');
+    expect(releaseNameKey('Ведьмак 3')).toBe('ведьмак3');
+    const out = mergeAcrossStores([row('原神', 'epic'), row('崩坏：星穹铁道', 'epic')]);
+    expect(out).toHaveLength(2);
+  });
+});
+

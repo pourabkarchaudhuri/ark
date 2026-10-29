@@ -1,23 +1,15 @@
-# Ark v1.0.90 — Best prices from gg.deals
+# Ark v1.0.91 — A fuller Upcoming calendar
 
-## New
+## Fixed
 
-- **See the best price for any Steam game**, from gg.deals, on game cards and game pages — marked **lowest ever** when it's at its all-time low.
-- **Oracle "Deals For You"** now shows games at their lowest-ever price first.
-- **Ask the AI assistant** whether a game is on sale.
-
-## How to turn it on
-
-1. Get a free API key at **gg.deals/api**.
-2. In Ark, open **Settings → Prices (gg.deals)**, paste the key and press **Save**.
-
-Your key is stored encrypted on your computer and only sent to gg.deals. Prices from key resellers are hidden unless you switch them on, and are always shown separately from official stores.
-
-Recommendations are recalculated once after you update.
+- **Steam releases fill the calendar now.** Steam's upcoming list used to be just the handful of games on the Steam store front, so Epic looked bigger. Ark now adds recent hits and upcoming launches from the Steam catalog it already keeps.
+- **One entry per game:** a game on both Steam and Epic shows once with both badges, and different games that happen to share a name are no longer merged.
+- **Non-Latin titles** (Chinese, Japanese, Korean, Cyrillic and more) no longer vanish from the calendar.
 
 If the in-app update fails, download the installer directly:
-https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.90/Ark-Setup-1.0.90.exe
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.91/Ark-Setup-1.0.91.exe
 
 ---
 
-**Tests:** 1684 tests (148 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
+**Tests:** 1687 tests (148 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
+**No ranking change.**

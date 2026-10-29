@@ -320,9 +320,78 @@ function ordinalSuffix(day: number): string {
   }
 }
 
+// ─── Steam catalog releases ─────────────────────────────────────────────────
+
+let catalogUpcomingCache: { at: number; list: UpcomingRelease[] } | null = null;
+const CATALOG_UPCOMING_TTL_MS = 30 * 60 * 1000;
+
+/** Recent + upcoming Steam releases from the synced catalog, as calendar rows ([] if not synced). */
+async function loadCatalogUpcoming(): Promise<UpcomingRelease[]> {
+  if (catalogUpcomingCache && Date.now() - catalogUpcomingCache.at < CATALOG_UPCOMING_TTL_MS) return catalogUpcomingCache.list;
+  try {
+    const { catalogStore } = await import('@/services/catalog-store');
+    const now = new Date();
+    const entries = await catalogStore.queryUpcoming({
+      fromMs: getCalendarWindowStart(now).getTime(),
+      toMs: now.getTime() + MAX_REASONABLE_MS,
+      nowMs: now.getTime(),
+    });
+    const list: UpcomingRelease[] = entries.map((e) => {
+      const ts = e.releaseDate * 1000;
+      return {
+        id: e.appid,
+        name: e.name,
+        image: getSteamHeaderUrl(e.appid),
+        releaseDate: new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        comingSoon: ts > now.getTime(),
+        genres: e.genres ?? [],
+        platforms: { windows: e.windows, mac: e.mac, linux: e.linux },
+        store: 'steam',
+      };
+    });
+    catalogUpcomingCache = { at: Date.now(), list };
+    return list;
+  } catch (err) {
+    console.warn('[ReleaseCalendar] Steam catalog releases unavailable:', err);
+    return [];
+  }
+}
+
 // ─── Layout constants ───────────────────────────────────────────────────────
 
+/** Undated "Coming Soon" entries kept from the prefetch, per store (Epic's list must not crowd out Steam's). */
 const COMING_SOON_CAP = 300;
+
+/** Name key for merging the same game across stores. Unicode-aware: non-Latin titles keep their letters. */
+export function releaseNameKey(name: string): string {
+  return name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+/**
+ * Merge releases that are the same game on different stores (same name, different store); two
+ * different games with the same name on the same store stay separate. Exported for tests.
+ */
+export function mergeAcrossStores<T extends { name: string; store?: string }>(
+  rows: Array<{ r: T; stores: Set<string> }>,
+): Array<{ r: T; stores: Set<string> }> {
+  const byName = new Map<string, Array<{ r: T; stores: Set<string> }>>();
+  const out: Array<{ r: T; stores: Set<string> }> = [];
+  for (const row of rows) {
+    const key = releaseNameKey(row.r.name);
+    if (!key) continue;
+    const group = byName.get(key) ?? [];
+    const partner = group.find(g => ![...row.stores].some(st => g.stores.has(st)));
+    if (partner) {
+      row.stores.forEach(st => partner.stores.add(st));
+      continue;
+    }
+    const fresh = { r: row.r, stores: new Set(row.stores) };
+    group.push(fresh);
+    byName.set(key, group);
+    out.push(fresh);
+  }
+  return out;
+}
 const INITIAL_CARD_COUNT = 30;
 
 const VIEW_TOGGLE_OPTIONS: { id: CalendarView; icon: typeof Grid3X3; label: string }[] = [
@@ -1487,7 +1556,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     const windowStartMs = getCalendarWindowStart(new Date(now)).getTime();
     const futureCutoff = now + MAX_REASONABLE_MS;
     const results: UpcomingRelease[] = [];
-    let comingSoonCount = 0;
+    const comingSoonCount = { steam: 0, epic: 0 };
 
     for (let i = 0, len = prefetched.length; i < len; i++) {
       const game = prefetched[i];
@@ -1521,9 +1590,9 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       const epicSlug = game.epicSlug;
 
       if (game.comingSoon && game.releaseDate === 'Coming Soon') {
-        if (comingSoonCount < COMING_SOON_CAP) {
+        if (comingSoonCount[store] < COMING_SOON_CAP) {
           results.push({ id: game.id, name: game.title, image, headerImage, screenshots, epicNamespace, epicOfferId, epicSlug, releaseDate: 'Coming Soon', comingSoon: true, genres, platforms, store });
-          comingSoonCount++;
+          comingSoonCount[store]++;
         }
         continue;
       }
@@ -1536,6 +1605,8 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     }
     return results.length > 0 ? results : null;
   }, []);
+
+  const catalogUpcomingRef = useRef<UpcomingRelease[]>([]);
 
   const fetchReleases = useCallback(async () => {
     setLoading(true);
@@ -1582,6 +1653,10 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
         });
       }
 
+      // Steam's dedicated upcoming list is only the store front's short "coming soon" carousel, so add
+      // recent and upcoming releases from the synced Steam catalog (loaded in the background).
+      for (const r of catalogUpcomingRef.current) allReleases.push(r);
+
       if (allReleases.length === 0 && !isPrefetchReady() && !window.steam?.getUpcomingReleases && !window.epic?.getUpcomingReleases) {
         setError('Store APIs not available');
         setLoading(false);
@@ -1601,22 +1676,17 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       }
       const byIdList = Array.from(byId.values());
 
-      // Phase 2: Dedup by normalized name (merge cross-store: same name = one row, combined stores)
-      const seenByName = new Map<string, { r: UpcomingRelease; stores: Set<string> }>();
-      for (const { r, stores } of byIdList) {
-        const nameKey = r.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!nameKey) continue;
-        if (seenByName.has(nameKey)) {
-          stores.forEach((s) => seenByName.get(nameKey)!.stores.add(s));
-        } else {
-          seenByName.set(nameKey, { r, stores: new Set(stores) });
-        }
+      // Phase 2: merge the same game across stores (same name on Steam and Epic = one row, both badges).
+      const dedupArr = mergeAcrossStores(byIdList);
+      const perStore = { steam: 0, epic: 0 };
+      for (const { stores } of dedupArr) {
+        if (stores.has('steam')) perStore.steam++;
+        if (stores.has('epic')) perStore.epic++;
       }
-
-      const dedupArr = Array.from(seenByName.entries());
+      console.log(`[ReleaseCalendar] ${dedupArr.length} releases (Steam ${perStore.steam}, Epic ${perStore.epic})`);
       const parsed: ParsedRelease[] = new Array(dedupArr.length);
       for (let i = 0; i < dedupArr.length; i++) {
-        const [_, { r, stores }] = dedupArr[i];
+        const { r, stores } = dedupArr[i];
         parsed[i] = {
           ...r,
           parsedDate: parseReleaseDate(r.releaseDate),
@@ -1637,6 +1707,17 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     fetchReleases();
     const interval = setInterval(fetchReleases, 30 * 60 * 1000);
     return () => clearInterval(interval);
+  }, [fetchReleases]);
+
+  // Steam catalog releases arrive after the first paint (a full catalog pass), then merge in.
+  useEffect(() => {
+    let cancelled = false;
+    loadCatalogUpcoming().then((list) => {
+      if (cancelled || list.length === 0) return;
+      catalogUpcomingRef.current = list;
+      void fetchReleases();
+    });
+    return () => { cancelled = true; };
   }, [fetchReleases]);
 
   // ── Navigation ────────────────────────────────────────────────────────────
