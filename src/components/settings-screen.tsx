@@ -15,7 +15,7 @@ import {
   Library, Compass, Globe, Newspaper, Calendar, Gamepad2,
   Zap, Search, Star, Trophy, Map, MessageCircle, Shield,
   Layers, Wand2, TrendingUp, Heart, Package, HelpCircle, Play, CheckCircle2, RotateCcw, Rocket,
-  RefreshCw, MonitorPlay,
+  RefreshCw, MonitorPlay, Tag,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -31,6 +31,7 @@ import {
   setAutoStatusTransitionEnabled,
 } from '@/lib/auto-status-settings';
 import { isHltbEnabled, setHltbEnabled } from '@/hooks/useHltbTimes';
+import { GG_REGIONS, getGgRegion, getShowKeyshops, ggDealsService } from '@/services/ggdeals-service';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
@@ -364,6 +365,8 @@ const GeneralTab = memo(function GeneralTab() {
             </div>
           </div>
         </SectionCard>
+
+        <GgDealsSection />
 
         <SectionHeading icon={Database}>Library Data</SectionHeading>
         <SectionCard>
@@ -1527,6 +1530,113 @@ const KEY_PACKAGES: { name: string; desc: string; url: string }[] = [
   { name: 'Lucide', desc: 'Beautiful icon set', url: 'https://lucide.dev/' },
   { name: 'Vitest + Playwright', desc: 'Unit & E2E testing', url: 'https://vitest.dev/' },
 ];
+
+// ─── gg.deals prices ────────────────────────────────────────────────────────
+
+const GgDealsSection = memo(function GgDealsSection() {
+  const bridge = typeof window !== 'undefined' ? window.ggdeals : undefined;
+  const [hasKey, setHasKey] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [status, setStatus] = useState<{ tone: 'ok' | 'error' | 'info'; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [region, setRegion] = useState(getGgRegion);
+  const [keyshops, setKeyshops] = useState(getShowKeyshops);
+
+  useEffect(() => {
+    bridge?.hasKey().then(setHasKey).catch(() => setHasKey(false));
+  }, [bridge]);
+
+  if (!bridge) return null;
+
+  const save = async () => {
+    setBusy(true);
+    const res = await bridge.setKey(draft.trim()).catch(() => ({ success: false, error: 'Could not save the key.' }));
+    if (!res.success) {
+      setStatus({ tone: 'error', text: res.error ?? 'Could not save the key.' });
+      setBusy(false);
+      return;
+    }
+    setDraft('');
+    setHasKey(true);
+    ggDealsService.settingsChanged();
+    const test = await bridge.testKey().catch(() => ({ ok: false, error: 'unavailable' as const }));
+    setStatus(test.ok
+      ? { tone: 'ok', text: 'Key saved and working.' }
+      : { tone: 'error', text: test.error === 'invalid-key' ? 'Key saved, but gg.deals rejected it. Check it and save again.' : 'Key saved. gg.deals could not be reached to check it right now.' });
+    setBusy(false);
+  };
+
+  const test = async () => {
+    setBusy(true);
+    const res = await bridge.testKey().catch(() => ({ ok: false, error: 'unavailable' as const }));
+    setStatus(res.ok
+      ? { tone: 'ok', text: 'The key works.' }
+      : { tone: res.error === 'wait' ? 'info' : 'error', text: res.error === 'wait' ? 'Please wait a few seconds before testing again.' : res.error === 'invalid-key' ? 'gg.deals rejected this key.' : 'gg.deals could not be reached.' });
+    setBusy(false);
+  };
+
+  const remove = async () => {
+    await bridge.clearKey().catch(() => undefined);
+    setHasKey(false);
+    setStatus({ tone: 'info', text: 'Key removed. Prices are hidden.' });
+    ggDealsService.settingsChanged();
+  };
+
+  return (
+    <>
+      <SectionHeading icon={Tag}>Prices (gg.deals)</SectionHeading>
+      <SectionCard>
+        <div>
+          <p className="text-sm font-medium text-white/90">gg.deals API key</p>
+          <p className="text-xs text-white/35 mt-0.5">
+            Shows current best prices and all-time lows from gg.deals on game pages, cards and the Oracle Deals shelf.
+            Get a free key at gg.deals/api. The key is stored encrypted on this computer and only sent to gg.deals.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Input
+            type="password"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={hasKey ? 'A key is saved — paste a new one to replace it' : 'Paste your gg.deals API key'}
+            className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]"
+            disabled={busy}
+          />
+          <Button size="sm" onClick={save} disabled={busy || draft.trim().length < 8} className="h-9">Save</Button>
+          {hasKey && <Button size="sm" variant="ghost" onClick={test} disabled={busy} className="h-9">Test</Button>}
+          {hasKey && <Button size="sm" variant="ghost" onClick={remove} disabled={busy} className="h-9 text-red-400/80">Remove</Button>}
+        </div>
+        {status && (
+          <p className={cn('text-xs', status.tone === 'ok' ? 'text-emerald-400/80' : status.tone === 'error' ? 'text-red-400/80' : 'text-white/50')}>
+            {status.text}
+          </p>
+        )}
+        <div className="border-t border-white/[0.04] pt-4 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-white/70">Price region</p>
+            <p className="text-[11px] text-white/30 mt-0.5">Prices are shown in this region's currency.</p>
+          </div>
+          <select
+            value={region}
+            onChange={(e) => { setRegion(e.target.value); ggDealsService.setRegion(e.target.value); }}
+            className="bg-white/[0.03] border border-white/[0.08] rounded-md text-xs text-white/80 px-2 py-1.5"
+          >
+            {GG_REGIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+          </select>
+        </div>
+        <div className="border-t border-white/[0.04] pt-4 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-white/70">Show key reseller prices</p>
+            <p className="text-[11px] text-white/30 mt-0.5">
+              Key resellers (grey-market shops) are often cheaper but are not official stores. Shown separately when on.
+            </p>
+          </div>
+          <Toggle value={keyshops} onChange={() => { const v = !keyshops; setKeyshops(v); ggDealsService.setShowKeyshops(v); }} />
+        </div>
+      </SectionCard>
+    </>
+  );
+});
 
 type UpdateCheckState = 'idle' | 'checking' | 'latest' | 'available' | 'error';
 

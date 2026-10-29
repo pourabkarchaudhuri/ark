@@ -226,3 +226,9 @@ The following gaps were fixed and removed from the active list:
 - Matching uses title + release year only (search results carry no Steam appid). Very short or generic titles may not match.
 - The planned `useExternalGameMeta` refactor (one hook for Metacritic + HowLongToBeat + prices on the details page) was not done; HowLongToBeat has its own hook.
 - `vite-node` network requests are very slow on this machine; the live smoke test runs the compiled client with plain Node instead.
+
+## gg.deals gaps (found during 1.0.90)
+- The gg.deals API documentation/terms pages are behind a bot check this network could not pass (not attempted to bypass); rate limits and attribution wording are inferred. Review gg.deals/api and adjust `electron/ggdeals-api.ts` constants if needed.
+- Only Steam app ids are looked up; Epic-only games (no Steam twin) show no gg.deals price.
+- Region list is a conservative guess; an unsupported region returns "unavailable" rather than prices.
+- Deals For You keeps one game per franchise base; games whose titles share a first word can crowd each other out (existing behaviour, more visible with gg.deals data).

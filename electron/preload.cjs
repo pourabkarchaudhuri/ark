@@ -236,6 +236,15 @@ contextBridge.exposeInMainWorld('hltb', {
   getTimes: (query) => ipcRenderer.invoke('hltb:getTimes', query),
 });
 
+// Expose gg.deals prices to renderer (the API key can be set/tested/removed, never read)
+contextBridge.exposeInMainWorld('ggdeals', {
+  hasKey: () => ipcRenderer.invoke('ggdeals:hasKey'),
+  setKey: (key) => ipcRenderer.invoke('ggdeals:setKey', key),
+  clearKey: () => ipcRenderer.invoke('ggdeals:clearKey'),
+  testKey: () => ipcRenderer.invoke('ggdeals:testKey'),
+  getPrices: (steamAppIds, region) => ipcRenderer.invoke('ggdeals:getPrices', steamAppIds, region),
+});
+
 // Expose AI Chat API to renderer
 contextBridge.exposeInMainWorld('aiChat', {
   // Send a message to the AI

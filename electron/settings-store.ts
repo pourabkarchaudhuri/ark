@@ -6,7 +6,7 @@
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { app } = electron;
+const { app, safeStorage } = electron;
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -19,6 +19,8 @@ interface Settings {
   version: number;
   apiKeys: {
     googleAI?: string; // Encrypted
+    /** gg.deals API key: OS-encrypted ("ss:" + safeStorage) when available, else the local cipher. */
+    ggDeals?: string;
   };
   preferences: {
     autoLaunch: boolean; // Launch app on system startup (default: true)
@@ -273,6 +275,53 @@ class SettingsStore {
 
   hasGoogleAIKey(): boolean {
     return !!this.settings.apiKeys.googleAI;
+  }
+
+  // Secrets that never leave the main process: Windows/OS encryption (safeStorage) when available,
+  // else the local cipher above. The "ss:" prefix says which one was used.
+  private encryptSecret(value: string): string {
+    try {
+      if (safeStorage?.isEncryptionAvailable?.()) {
+        return 'ss:' + safeStorage.encryptString(value).toString('base64');
+      }
+    } catch {
+      /* fall back */
+    }
+    return this.encrypt(value);
+  }
+
+  private decryptSecret(stored: string): string {
+    if (stored.startsWith('ss:')) return safeStorage.decryptString(Buffer.from(stored.slice(3), 'base64'));
+    return this.decrypt(stored);
+  }
+
+  /** Main process only — there is deliberately no IPC getter for this key. */
+  getGgDealsKey(): string | null {
+    const stored = this.settings.apiKeys.ggDeals;
+    if (!stored) return null;
+    try {
+      return this.decryptSecret(stored);
+    } catch (error) {
+      // e.g. settings copied from another PC: ask the user to enter the key again.
+      logger.error('[SettingsStore] Could not decrypt the gg.deals key; it needs to be entered again:', (error as Error).message);
+      return null;
+    }
+  }
+
+  setGgDealsKey(key: string): void {
+    this.settings.apiKeys.ggDeals = this.encryptSecret(key);
+    this.saveSettings();
+    logger.log('[SettingsStore] gg.deals key saved');
+  }
+
+  clearGgDealsKey(): void {
+    delete this.settings.apiKeys.ggDeals;
+    this.saveSettings();
+    logger.log('[SettingsStore] gg.deals key removed');
+  }
+
+  hasGgDealsKey(): boolean {
+    return this.getGgDealsKey() !== null;
   }
 
   // Ollama settings

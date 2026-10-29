@@ -15,5 +15,6 @@
  *   8 — v1.0.82 feedback loop: stronger/decaying thumbs+dismiss signal, bandit and state-correctness fixes
  *   9 — v1.0.86 player counts: unknown/implausible counts are null (no longer "obscure" or hidden gems)
  *  10 — v1.0.88 an automatic idle On Hold is not a "bounced off" negative signal
+ *  11 — v1.0.90 Deals For You uses gg.deals all-time lows
  */
-export const ORACLE_ENGINE_VERSION = 10;
+export const ORACLE_ENGINE_VERSION = 11;

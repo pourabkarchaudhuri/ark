@@ -17,6 +17,7 @@
  */
 import { useMemo, useState, useEffect, memo, useCallback } from 'react';
 import { formatPlayerCount } from '@/lib/player-count';
+import { DealBadge } from '@/components/deal-price';
 import { useLocation } from 'wouter';
 import { motion } from 'framer-motion';
 import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, Clapperboard, ClipboardCheck, ScrollText, X, Box, Award } from 'lucide-react';
@@ -233,6 +234,9 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
               >
                 {entry.status}
               </Badge>
+              {entry.status === 'Want to Play' && entry.gameId.startsWith('steam-') && (
+                <DealBadge steamAppId={Number(entry.gameId.slice(6)) || undefined} />
+              )}
               {inLibrary && (
                 <Badge
                   variant="outline"

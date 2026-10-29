@@ -1,5 +1,6 @@
 import { memo, useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { formatPlayingNow } from '@/lib/player-count';
+import { DealBadge } from '@/components/deal-price';
 import { createPortal } from 'react-dom';
 import { useLocation } from 'wouter';
 import { Game, GameStatus } from '@/types/game';
@@ -518,7 +519,7 @@ function GameCardComponent({
               )}
             </div>
             {!compact && (
-              <div className="min-h-[1rem] mt-0.5">
+              <div className="min-h-[1rem] mt-0.5 flex items-center justify-between gap-2">
                 {game.playerCount !== undefined && game.playerCount > 0 ? (
                   <p className="text-xs text-cyan-400">
                     {formatPlayingNow(game.playerCount, game.availableOn && game.availableOn.length > 1 ? ' on Steam' : ' now')}
@@ -526,6 +527,7 @@ function GameCardComponent({
                 ) : (
                   <p className="text-xs">&nbsp;</p>
                 )}
+                <DealBadge steamAppId={game.steamAppId} className="shrink-0" />
               </div>
             )}
           </div>

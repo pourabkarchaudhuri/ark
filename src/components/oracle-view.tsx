@@ -1254,6 +1254,12 @@ const OracleCard = memo(function OracleCard({
             <span className="text-[11px] font-bold text-white tracking-wide">-{game.price!.discountPercent}%</span>
           </div>
         )}
+
+        {game.price?.atHistoricalLow && (
+          <div className="flex items-center gap-1.5 bg-emerald-600/90 backdrop-blur-sm pl-2 pr-2.5 py-[3px] rounded-r-full shadow-lg shadow-emerald-600/25" title="At its all-time low price (gg.deals)">
+            <span className="text-[11px] font-bold text-white tracking-wide">Lowest ever</span>
+          </div>
+        )}
       </div>
 
       {/* Top-right action buttons */}

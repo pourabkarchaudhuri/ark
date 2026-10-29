@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.90] - 2026-10-29
+
+### Added — gg.deals prices
+- **Your own gg.deals API key in Settings → Prices (gg.deals).** Paste it, Save (it is checked straight away), Test or Remove. It is stored encrypted with Windows' own data protection and never leaves Ark's background process: the app screens can set, test and remove it but cannot read it back, it is not used in cache keys, and it is removed from any logged web address.
+- **Best prices everywhere you browse:** game cards (Browse, Library, Upcoming, Oracle) show the current best official price, marked **lowest ever** when it is at its all-time low; Voyage cards show it for games on your wishlist (Want to Play).
+- **Game pages:** a "Best prices" block with official stores now and their all-time low, plus a link to all offers on gg.deals.
+- **Oracle Deals For You** now leads with games at their all-time low (they qualify even with a small store discount), and Oracle cards carry a "Lowest ever" tag. Engine version 11: recommendations are recalculated once.
+- **Ask the AI assistant** "is X on sale?" / "cheapest price for X".
+- **Region** (currency) setting, and **key reseller prices off by default**: turn on "Show key reseller prices" to see grey-market key shops, always shown separately from official stores.
+- Prices are cached for 6 hours, fetched in batches of up to 100 games, one request at a time; if gg.deals rate-limits or errors, lookups pause for 15 minutes. Without a key nothing is requested and nothing is shown.
+- `node scripts/ggdeals-live-smoke.mjs` checks a key against the live API (key from the GG_DEALS_KEY environment variable).
+
 ## [1.0.89] - 2026-10-29
 
 ### Added — HowLongToBeat

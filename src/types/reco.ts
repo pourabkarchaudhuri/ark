@@ -167,6 +167,8 @@ export interface ScoredGame {
     isFree: boolean;
     finalFormatted?: string;
     discountPercent?: number;
+    /** gg.deals: the official price is at (or within 2% of) its all-time low. */
+    atHistoricalLow?: boolean;
   };
 }
 
@@ -306,6 +308,8 @@ export interface CandidateGame {
     isFree: boolean;
     finalFormatted?: string;
     discountPercent?: number;
+    /** gg.deals: the official price is at (or within 2% of) its all-time low. */
+    atHistoricalLow?: boolean;
   };
   /** Embedding vector (optional). */
   embedding?: number[];

@@ -13,6 +13,7 @@
 
 import { EMBEDDING_LAYOUT_ID, layoutIdIsCurrent } from '@/services/embedding-layout';
 import { isAutoHeld } from '@/lib/status-source';
+import { ggDealsService, isAtHistoricalLow } from '@/services/ggdeals-service';
 import { percentileRanks } from './ml-normalize';
 import type {
   TasteProfile,
@@ -127,6 +128,9 @@ const SURVIVOR_STEAM_DETAILS_TIMEOUT_MS = 5_000;
 const CATALOG_ENRICH_TIMEOUT_MS = 20_000;
 const EMBEDDING_GEN_TIMEOUT_MS = 90_000;
 const ML_SCORING_TIMEOUT_MS = 30_000;
+/** gg.deals prices for the Deals shelf (skipped without a key). */
+const GG_DEALS_TIMEOUT_MS = 8_000;
+const GG_DEALS_MAX_IDS = 300;
 const GRAPH_SCORES_TIMEOUT_MS = 15_000;
 /** Embedding neighbours of the user's strongest library games (graph signal). */
 const LIBRARY_NEIGHBORS_TIMEOUT_MS = 8_000;
@@ -750,6 +754,13 @@ export class RecoStore {
       await runWithDeadline(
         (s) => this.applyMLScores(userGames, candidates, s),
         budget(ML_SCORING_TIMEOUT_MS), undefined, signal, 'ML scoring',
+      );
+      if (isStale()) return;
+
+      // 2.95. gg.deals prices → "at its all-time low" for the Deals shelf (no-op without a key).
+      await runWithDeadline(
+        () => this.applyGgDeals(candidates),
+        budget(GG_DEALS_TIMEOUT_MS), undefined, signal, 'gg.deals prices',
       );
       if (isStale()) return;
 
@@ -2028,6 +2039,27 @@ export class RecoStore {
    * Runs inference in the main process (ONNX runtime) and attaches P(recommended)
    * to each candidate for use as a scoring layer in the worker.
    */
+  /**
+   * Mark paid Steam candidates whose official price is at its all-time low (gg.deals). On-sale games
+   * are looked up first; at most GG_DEALS_MAX_IDS per compute.
+   */
+  private async applyGgDeals(candidates: CandidateGame[]): Promise<void> {
+    if (!ggDealsService.available || !(await ggDealsService.hasKey())) return;
+    const paid = candidates.filter(c => c.gameId.startsWith('steam-') && c.price && !c.price.isFree);
+    paid.sort((a, b) => (b.price?.discountPercent ?? 0) - (a.price?.discountPercent ?? 0));
+    const pick = paid.slice(0, GG_DEALS_MAX_IDS);
+    const prices = await ggDealsService.getPrices(pick.map(c => Number(c.gameId.slice(6))).filter(n => n > 0));
+    let atLow = 0;
+    for (const c of pick) {
+      const p = prices.get(Number(c.gameId.slice(6)));
+      if (p && c.price && isAtHistoricalLow(p)) {
+        c.price = { ...c.price, atHistoricalLow: true };
+        atLow++;
+      }
+    }
+    console.log(`[RecoStore] gg.deals: ${prices.size}/${pick.length} priced, ${atLow} at their all-time low`);
+  }
+
   private async applyMLScores(
     userGames: UserGameSnapshot[],
     candidates: CandidateGame[],

@@ -1,16 +1,23 @@
-# Ark v1.0.89 — How long to beat
+# Ark v1.0.90 — Best prices from gg.deals
 
 ## New
 
-- **Game pages show how long a game takes to beat**, from HowLongToBeat: main story, main + extras, and completionist hours. Click the badge to see the game on howlongtobeat.com.
-- **Smart matching:** store edition names and trademark symbols are ignored, and the release year tells remakes and sequels apart. If Ark isn't sure it has the right game, it shows nothing rather than a wrong time.
-- **Ask the AI assistant** "how long is Hades?" and it answers with the same data.
-- **Your choice:** turn it off in Settings → Application. When on, the game's title is sent to howlongtobeat.com; answers are kept for 30 days so the same game isn't looked up again.
+- **See the best price for any Steam game**, from gg.deals, on game cards and game pages — marked **lowest ever** when it's at its all-time low.
+- **Oracle "Deals For You"** now shows games at their lowest-ever price first.
+- **Ask the AI assistant** whether a game is on sale.
+
+## How to turn it on
+
+1. Get a free API key at **gg.deals/api**.
+2. In Ark, open **Settings → Prices (gg.deals)**, paste the key and press **Save**.
+
+Your key is stored encrypted on your computer and only sent to gg.deals. Prices from key resellers are hidden unless you switch them on, and are always shown separately from official stores.
+
+Recommendations are recalculated once after you update.
 
 If the in-app update fails, download the installer directly:
-https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.89/Ark-Setup-1.0.89.exe
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.90/Ark-Setup-1.0.90.exe
 
 ---
 
-**Tests:** 1667 tests (145 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects. Checked live against howlongtobeat.com.
-**No ranking change.**
+**Tests:** 1684 tests (148 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.

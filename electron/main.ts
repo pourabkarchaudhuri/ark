@@ -1030,7 +1030,7 @@ app.whenReady().then(async () => {
     // Block matching network requests via session.webRequest
     // Allow-list: connectivity probes must never be blocked, even if a filter list matches.
     // HowLongToBeat: Ark's own API lookups (electron/hltb-api.ts) use the default session too.
-    const ALLOWED_PROBE_HOSTS = ['connectivitycheck.gstatic.com', 'www.gstatic.com', 'howlongtobeat.com'];
+    const ALLOWED_PROBE_HOSTS = ['connectivitycheck.gstatic.com', 'www.gstatic.com', 'howlongtobeat.com', 'api.gg.deals'];
     session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
         try {
       const { url, resourceType, referrer } = details;

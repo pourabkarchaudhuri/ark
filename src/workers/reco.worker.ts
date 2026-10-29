@@ -916,11 +916,14 @@ function buildShelvesFromScored(
     addToUsed(hiddenGems);
   }
 
-  // Deals For You — games on sale matching user taste
+  // Deals For You — games on sale matching user taste. With gg.deals prices, games at their
+  // all-time low come first (and qualify even when the store discount is small).
   const deals = pickDiverse(
     poolByScore
-      .filter(s => s.reasons.isOnSale && s.price?.discountPercent && s.price.discountPercent >= 20)
-      .sort((a, b) => (b.price?.discountPercent ?? 0) - (a.price?.discountPercent ?? 0)),
+      .filter(s => s.price?.atHistoricalLow || (s.reasons.isOnSale && s.price?.discountPercent && s.price.discountPercent >= 20))
+      .sort((a, b) =>
+        Number(!!b.price?.atHistoricalLow) - Number(!!a.price?.atHistoricalLow)
+        || (b.price?.discountPercent ?? 0) - (a.price?.discountPercent ?? 0)),
     12,
   );
 

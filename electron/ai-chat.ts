@@ -29,6 +29,7 @@ import { z } from 'zod';
 import { steamAPI } from './steam-api.js';
 import { epicAPI } from './epic-api.js';
 import { getHltbClient } from './hltb-api.js';
+import { getGgDealsClient } from './ggdeals-api.js';
 import { fetchMetacriticReviews } from './metacritic-api.js';
 import { chatStore } from './chat-store.js';
 import { settingsStore } from './settings-store.js';
@@ -545,6 +546,39 @@ const getHowLongToBeatTool = tool(
   },
 );
 
+const getGameDealsTool = tool(
+  async ({ appId }: { appId: number }) => {
+    logger.log(`[AI Tool] getGameDeals: ${appId}`);
+    try {
+      const { prices, error } = await (await getGgDealsClient()).getPrices([appId], 'us');
+      const p = prices[appId];
+      if (!p) {
+        return error === 'no-key'
+          ? 'Prices are not set up: the user can add a gg.deals API key in Settings → Prices.'
+          : `No gg.deals price data found for Steam app ${appId}.`;
+      }
+      return JSON.stringify({
+        title: p.title,
+        currency: p.currency,
+        officialStoresNow: p.currentRetail,
+        officialAllTimeLow: p.historicalRetail,
+        keyResellersNow: p.currentKeyshops,
+        keyResellersAllTimeLow: p.historicalKeyshops,
+        source: p.url,
+      });
+    } catch (error) {
+      return `Error fetching prices: ${error}`;
+    }
+  },
+  {
+    name: 'getGameDeals',
+    description: 'Get current best prices and all-time low prices for a Steam game from gg.deals (official stores and key resellers), by Steam App ID. Use for "is X on sale", "cheapest price", "best deal".',
+    schema: z.object({
+      appId: z.number().describe('Steam App ID (from searchSteamGames)'),
+    }),
+  },
+);
+
 const allTools = [
   searchGamesTool,
   getGameDetailsTool,
@@ -557,6 +591,7 @@ const allTools = [
   getSteamReviewsTool,
   getMetacriticReviewsTool,
   getHowLongToBeatTool,
+  getGameDealsTool,
 ];
 
 const toolMap: Record<string, typeof allTools[number]> = {};
@@ -631,6 +666,7 @@ You have access to the following tools:
 - getEpicGameDetails: Full Epic game details by namespace and offerId (from searchEpicGames).
 - getSteamReviews: Steam user reviews by Steam App ID (from searchSteamGames). Use for "what do players think", "Steam reviews", "worth it".
 - getMetacriticReviews: Critic and user scores plus critic reviews by game name. Use for "Metacritic", "critic reviews", "what do critics say".
+- getGameDeals: Current best and all-time low prices (official stores and key resellers) from gg.deals by Steam App ID. Use for "is X on sale", "best price". Say clearly which prices are from key resellers.
 - getHowLongToBeat: How long a game takes to beat (main story / main + extras / completionist hours) by game name. Use for "how long is X", "how long to beat".
 
 **Workflow (follow strictly):**
@@ -907,6 +943,8 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       return getSteamReviewsTool.invoke({ appId: safeInt(args.appId), limit: safeInt(args.limit, 5) });
     case 'getMetacriticReviews':
       return getMetacriticReviewsTool.invoke({ gameName: safeString(args.gameName) });
+    case 'getGameDeals':
+      return getGameDealsTool.invoke({ appId: safeInt(args.appId) });
     case 'getHowLongToBeat':
       return getHowLongToBeatTool.invoke({ gameName: safeString(args.gameName, 200), year: safeInt(args.year) || undefined });
     default:

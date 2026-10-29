@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.90': {
+    title: "What's New in Ark 1.0.90",
+    changes: [
+      'Add your free gg.deals API key in Settings to see best prices and all-time lows on game cards and game pages.',
+      'Oracle "Deals For You" now puts games at their lowest-ever price first.',
+      'Ask the AI assistant whether a game is on sale.',
+      'Key reseller prices are off unless you turn them on.',
+    ],
+  },
   '1.0.89': {
     title: "What's New in Ark 1.0.89",
     changes: [

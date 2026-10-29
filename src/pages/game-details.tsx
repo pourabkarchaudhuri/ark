@@ -27,6 +27,7 @@ import { SiEpicgames, SiSteam } from 'react-icons/si';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { HltbChip } from '@/components/hltb-chip';
+import { DealPriceBlock } from '@/components/deal-price';
 import { releaseYearOf, useHltbTimes } from '@/hooks/useHltbTimes';
 import { GameDialog } from '@/components/game-dialog';
 import { cn, buildGameImageChain } from '@/lib/utils';
@@ -3276,6 +3277,11 @@ const GameDetailsContent = memo(function GameDetailsContent({
                   </>
                   );
               })()}
+
+              {/* Best prices from gg.deals (hidden without a key or Steam app id) */}
+              <DealPriceBlock
+                steamAppId={details.steam_appid || (crossStoreGame?.store === 'steam' ? crossStoreGame.steamAppId : undefined)}
+              />
 
               {/* Play (Phase 4a) — only shown when a tracked executable is set */}
               {gameInLibrary && launchExecutablePath && (
