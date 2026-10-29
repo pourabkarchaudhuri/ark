@@ -28,6 +28,7 @@ import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { steamAPI } from './steam-api.js';
 import { epicAPI } from './epic-api.js';
+import { getHltbClient } from './hltb-api.js';
 import { fetchMetacriticReviews } from './metacritic-api.js';
 import { chatStore } from './chat-store.js';
 import { settingsStore } from './settings-store.js';
@@ -514,6 +515,36 @@ const getMetacriticReviewsTool = tool(
   },
 );
 
+const getHowLongToBeatTool = tool(
+  async ({ gameName, year }: { gameName: string; year?: number }) => {
+    logger.log(`[AI Tool] getHowLongToBeat: "${gameName}"`);
+    try {
+      const client = await getHltbClient();
+      const t = await client.getTimes({ title: safeString(gameName, 200), year: typeof year === 'number' ? year : undefined });
+      if (!t) return `No HowLongToBeat data found for "${gameName}".`;
+      return JSON.stringify({
+        title: t.name,
+        year: t.year,
+        mainStoryHours: t.mainHours,
+        mainPlusExtrasHours: t.mainExtraHours,
+        completionistHours: t.completionistHours,
+        allStylesHours: t.allStylesHours,
+        source: t.url,
+      });
+    } catch (error) {
+      return `Error fetching HowLongToBeat times: ${error}`;
+    }
+  },
+  {
+    name: 'getHowLongToBeat',
+    description: 'Get how long a game takes to beat (main story, main + extras, completionist hours) from HowLongToBeat, by game name. Use for "how long is X", "how long to beat", "is X short".',
+    schema: z.object({
+      gameName: z.string().describe('Game name to look up on HowLongToBeat'),
+      year: z.number().optional().describe('Release year, to tell remakes and sequels apart'),
+    }),
+  },
+);
+
 const allTools = [
   searchGamesTool,
   getGameDetailsTool,
@@ -525,6 +556,7 @@ const allTools = [
   getEpicGameDetailsTool,
   getSteamReviewsTool,
   getMetacriticReviewsTool,
+  getHowLongToBeatTool,
 ];
 
 const toolMap: Record<string, typeof allTools[number]> = {};
@@ -599,6 +631,7 @@ You have access to the following tools:
 - getEpicGameDetails: Full Epic game details by namespace and offerId (from searchEpicGames).
 - getSteamReviews: Steam user reviews by Steam App ID (from searchSteamGames). Use for "what do players think", "Steam reviews", "worth it".
 - getMetacriticReviews: Critic and user scores plus critic reviews by game name. Use for "Metacritic", "critic reviews", "what do critics say".
+- getHowLongToBeat: How long a game takes to beat (main story / main + extras / completionist hours) by game name. Use for "how long is X", "how long to beat".
 
 **Workflow (follow strictly):**
 1. **Add/remove by name**: searchSteamGames → use \`id\` as appId for addGameToLibrary or removeGameFromLibrary. If "add this game" with no context, ask which game.
@@ -874,6 +907,8 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       return getSteamReviewsTool.invoke({ appId: safeInt(args.appId), limit: safeInt(args.limit, 5) });
     case 'getMetacriticReviews':
       return getMetacriticReviewsTool.invoke({ gameName: safeString(args.gameName) });
+    case 'getHowLongToBeat':
+      return getHowLongToBeatTool.invoke({ gameName: safeString(args.gameName, 200), year: safeInt(args.year) || undefined });
     default:
       return `Unknown tool: ${name}`;
   }

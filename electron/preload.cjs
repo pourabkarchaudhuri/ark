@@ -231,6 +231,11 @@ contextBridge.exposeInMainWorld('metacritic', {
     ipcRenderer.invoke('metacritic:clearCache'),
 });
 
+// Expose HowLongToBeat completion times to renderer
+contextBridge.exposeInMainWorld('hltb', {
+  getTimes: (query) => ipcRenderer.invoke('hltb:getTimes', query),
+});
+
 // Expose AI Chat API to renderer
 contextBridge.exposeInMainWorld('aiChat', {
   // Send a message to the AI

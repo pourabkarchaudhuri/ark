@@ -30,6 +30,7 @@ import {
   setAutoOnHoldEnabled,
   setAutoStatusTransitionEnabled,
 } from '@/lib/auto-status-settings';
+import { isHltbEnabled, setHltbEnabled } from '@/hooks/useHltbTimes';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
@@ -165,6 +166,7 @@ const GeneralTab = memo(function GeneralTab() {
   const [devMode, setDevMode] = useDevMode();
   const [autoOnHold, setAutoOnHold] = useState(getAutoOnHoldEnabled);
   const [autoPlaying, setAutoPlaying] = useState(getAutoStatusTransitionEnabled);
+  const [hltbOn, setHltbOn] = useState(isHltbEnabled);
   const [allowAdultContent, setAllowAdultContent] = useAllowAdultContent();
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMessage, setImportMessage] = useState<string | null>(null);
@@ -288,6 +290,17 @@ const GeneralTab = memo(function GeneralTab() {
                 </p>
               </div>
               <Toggle value={autoPlaying} onChange={() => { const v = !autoPlaying; setAutoStatusTransitionEnabled(v); setAutoPlaying(v); }} />
+            </div>
+          </div>
+          <div className="border-t border-white/[0.04] pt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-white/90">HowLongToBeat times</p>
+                <p className="text-xs text-white/35 mt-0.5">
+                  Show how long a game takes to beat on its details page. The game's title is sent to howlongtobeat.com; results are cached for 30 days.
+                </p>
+              </div>
+              <Toggle value={hltbOn} onChange={() => { const v = !hltbOn; setHltbEnabled(v); setHltbOn(v); }} />
             </div>
           </div>
           <div className="border-t border-white/[0.04] pt-4">

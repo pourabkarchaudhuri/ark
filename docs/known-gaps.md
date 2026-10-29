@@ -220,3 +220,9 @@ The following gaps were fixed and removed from the active list:
 - Custom games are not included in `libraryStore.exportData`, but now have status-history rows; an export/import round trip keeps the history rows for games that are not restored.
 - Status-history timestamps are always "now" when recorded; history imported or backfilled from other sources cannot carry its real date yet.
 - Cross-store sync writes a second Started/Completed event for the twin game; the Log shows both cards (one per store entry).
+
+## HowLongToBeat gaps (found during 1.0.89)
+- HowLongToBeat (Ziff Davis) terms of use could not be read from this network (connection reset). Review them; the client is low-volume, cached, honest-UA and has a kill switch, but it uses an unofficial endpoint.
+- Matching uses title + release year only (search results carry no Steam appid). Very short or generic titles may not match.
+- The planned `useExternalGameMeta` refactor (one hook for Metacritic + HowLongToBeat + prices on the details page) was not done; HowLongToBeat has its own hook.
+- `vite-node` network requests are very slow on this machine; the live smoke test runs the compiled client with plain Node instead.

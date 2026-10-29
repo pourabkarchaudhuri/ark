@@ -9,6 +9,7 @@ import { register as registerSteamHandlers } from './steam-handlers.js';
 import { register as registerEpicHandlers } from './epic-handlers.js';
 import { register as registerRssHandlers } from './rss-handlers.js';
 import { register as registerMetacriticHandlers } from './metacritic-handlers.js';
+import { register as registerHltbHandlers } from './hltb-handlers.js';
 import { register as registerProxyHandlers } from './proxy-handlers.js';
 import { register as registerAiHandlers } from './ai-handlers.js';
 import { register as registerSettingsHandlers } from './settings-handlers.js';
@@ -35,6 +36,7 @@ export function registerAllHandlers(getMainWindow: () => BrowserWindowType | nul
   registerCatalogHandlers();
   registerRssHandlers();
   registerMetacriticHandlers();
+  registerHltbHandlers();
   registerProxyHandlers();
   registerAiHandlers();
   registerSettingsHandlers();

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.89] - 2026-10-29
+
+### Added — HowLongToBeat
+- **How long to beat, on every game page.** A badge next to the Metascore shows HowLongToBeat's main-story, main + extras and completionist hours; click it to open the game on howlongtobeat.com. It is hidden when there is no confident match, when you are offline, or when switched off.
+- **Careful matching:** titles are cleaned of trademark marks and store edition suffixes ("Game of the Year Edition", "Deluxe Edition"), and the release year tells same-named games apart (Call of Duty: Modern Warfare 2019 vs 2007 vs II). DLC and mods are never matched; when unsure, nothing is shown rather than a wrong time.
+- **The AI assistant can answer "how long is X?"** with the same data.
+- **Settings → Application → HowLongToBeat times** (on by default). The game's title is sent to howlongtobeat.com.
+
+### How it talks to HowLongToBeat
+- HowLongToBeat has no official API; Ark uses the same two requests the site's own search page makes, and identifies itself honestly as Ark. Lookups happen only when you open a game page, results are cached on disk for 30 days (no-match for a day), requests go one at a time, and any refusal or unexpected answer pauses HowLongToBeat lookups for 30 minutes.
+- Verified live against the site today (Hades, Call of Duty: Modern Warfare, The Witcher 3 GOTY). `node scripts/hltb-live-smoke.mjs` re-checks it after `npx tsc -p tsconfig.node.json`.
+
 ## [1.0.88] - 2026-10-29
 
 ### Changed — automatic On Hold (since v1.0.42)

@@ -26,6 +26,8 @@ import { FaWindows, FaApple, FaLinux, FaSteam } from 'react-icons/fa';
 import { SiEpicgames, SiSteam } from 'react-icons/si';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { HltbChip } from '@/components/hltb-chip';
+import { releaseYearOf, useHltbTimes } from '@/hooks/useHltbTimes';
 import { GameDialog } from '@/components/game-dialog';
 import { cn, buildGameImageChain } from '@/lib/utils';
 import { annIndex } from '@/services/ann-index';
@@ -685,6 +687,8 @@ export function GameDetailsPage() {
   const appId = isSteamGame ? parseInt(gameId!.slice(6), 10) : null;
 
   const [details, setDetails] = useState<SteamAppDetails | null>(null);
+  // HowLongToBeat times for the header badge (lazy, cached in main; null when off/offline/unmatched).
+  const hltb = useHltbTimes(details?.name, releaseYearOf(details?.release_date?.date));
   const [epicGame, setEpicGame] = useState<Game | null>(null);
   // Cross-store metadata from prefetch (e.g., price/link from the "other" store)
   const [crossStoreGame, setCrossStoreGame] = useState<Game | null>(null);
@@ -2000,6 +2004,9 @@ export function GameDetailsPage() {
                 </div>
               )}
               
+              {/* HowLongToBeat (hidden when off, offline or no confident match) */}
+              <HltbChip state={hltb} />
+
               {/* Metascore (from our Metacritic scraper — works for Steam, Epic, and dual-store) */}
               {metacriticReviews && metacriticReviews.score > 0 && (
                 <Badge variant="outline" className={cn("font-bold", metacriticReviews.score >= 75 ? "border-green-500/40 text-green-400" : metacriticReviews.score >= 50 ? "border-yellow-500/40 text-yellow-400" : "border-red-500/40 text-red-400")} title="Metacritic Critic Score">
