@@ -8,6 +8,10 @@
  *
  * Each card manages its own texture loading with a fallback URL chain —
  * no external probing, no Suspense boundaries for images.
+ *
+ * Cards are drawn as game boxes: a glossy case with depth, the cover on the front, a spine cut from the
+ * cover art, and a darker back. The active box keeps a slight angle (and a gentle sway, unless the
+ * system asks for reduced motion) so its depth reads.
  */
 import { useMemo, useRef, useState, useCallback, useEffect, memo } from 'react';
 import * as THREE from 'three';
@@ -50,7 +54,22 @@ const MAX_CARDS_PER_GENRE = 18;
 const WHEEL_RADIUS = 5.25;
 const CARD_W = 0.7;
 const CARD_H = CARD_W * 1.5;
-const CARD_DEPTH = 0.04;
+/** Game-case depth (a real case is ~1/10 of its width). */
+const CARD_DEPTH = 0.1;
+/** The case shell is a little larger than the cover it holds. */
+const CASE_LIP = 0.012;
+/** Share of the cover art (from its left edge) printed on the spine. */
+const SPINE_ART_SHARE = 0.14;
+/** Yaw the active box keeps so its spine and depth stay visible (radians). */
+const ACTIVE_TILT = 0.32;
+
+const prefersReducedMotion = (): boolean => {
+  try {
+    return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+};
 const WHEEL_DAMP = 0.25;
 const CARD_DAMP = 0.15;
 
@@ -236,7 +255,8 @@ function Scene({
 
   return (
     <>
-      <ambientLight intensity={1.2} />
+      <ambientLight intensity={0.95} />
+      <directionalLight position={[-4, 6, 8]} intensity={0.9} />
       <pointLight position={[0, 8, 0]} intensity={1} color="#d946ef" distance={30} decay={2} />
       <Stars radius={30} depth={60} count={1500} factor={3} saturation={0} fade speed={0.5} />
       <ActiveGlow activeEntry={activeEntry} wheelRef={wheelRef} />
@@ -485,11 +505,24 @@ function Card({
   const slabRef = useRef<THREE.Group>(null!);
   const frontMatRef = useRef<THREE.MeshStandardMaterial>(null!);
   const backMatRef = useRef<THREE.MeshStandardMaterial>(null!);
+  const spineMatRef = useRef<THREE.MeshStandardMaterial>(null!);
+  const reducedMotion = useMemo(prefersReducedMotion, []);
   const defaultY = cardRot[1];
   const faceForwardY = defaultY - Math.PI / 2;
   const mounted = useRef(false);
 
   const texture = useFallbackTexture(urls);
+
+  // The spine shows a narrow strip of the cover art (a cloned texture with a cropped UV range).
+  const spineTexture = useMemo(() => {
+    if (!texture) return null;
+    const t = texture.clone();
+    t.repeat.set(SPINE_ART_SHARE, 1);
+    t.offset.set(0, 0);
+    t.needsUpdate = true;
+    return t;
+  }, [texture]);
+  useEffect(() => () => { spineTexture?.dispose(); }, [spineTexture]);
 
   // Track active state transitions for the floating label
   const [showLabel, setShowLabel] = useState(false);
@@ -532,10 +565,15 @@ function Card({
       easing.dampC(frontMatRef.current.color, colorTarget, colorSpeed, delta);
     }
     if (backMatRef.current) {
-      easing.dampC(backMatRef.current.color, colorTarget, colorSpeed, delta);
+      easing.dampC(backMatRef.current.color, isActive ? '#8a8a8a' : '#555555', colorSpeed, delta);
+    }
+    if (spineMatRef.current) {
+      easing.dampC(spineMatRef.current.color, isActive ? '#cfcfcf' : '#7a7a7a', colorSpeed, delta);
     }
 
-    const targetY = isActive ? faceForwardY : defaultY;
+    // The active box stays turned slightly so its spine and depth show, with a slow sway.
+    const sway = isActive && !reducedMotion ? Math.sin(_state.clock.elapsedTime * 0.8) * 0.12 : 0;
+    const targetY = isActive ? faceForwardY + ACTIVE_TILT + sway : defaultY;
     easing.damp(groupRef.current.rotation, 'y', targetY, CARD_DAMP, delta);
   });
 
@@ -544,13 +582,13 @@ function Card({
   return (
     <group ref={groupRef} onClick={onClick}>
       <group ref={slabRef}>
-        {/* Dark slab — always visible */}
+        {/* Game case: glossy plastic shell, a little larger than the cover — always visible */}
         <mesh>
-          <boxGeometry args={[CARD_W, CARD_H, CARD_DEPTH]} />
-          <meshStandardMaterial color="#111" roughness={0.8} metalness={0.2} />
+          <boxGeometry args={[CARD_W + CASE_LIP, CARD_H + CASE_LIP, CARD_DEPTH]} />
+          <meshPhysicalMaterial color="#0d0d14" roughness={0.3} metalness={0.15} clearcoat={1} clearcoatRoughness={0.25} />
         </mesh>
 
-        {/* Front face */}
+        {/* Front cover */}
         {texture && (
           <mesh position={[0, 0, CARD_DEPTH / 2 + 0.002]}>
             <planeGeometry args={[CARD_W, CARD_H]} />
@@ -558,13 +596,21 @@ function Card({
               ref={frontMatRef}
               map={texture}
               transparent
-              roughness={0.6}
-              metalness={0.1}
+              roughness={0.45}
+              metalness={0.05}
             />
           </mesh>
         )}
 
-        {/* Back face */}
+        {/* Spine (left side): a strip of the cover art, slightly shaded */}
+        {spineTexture && (
+          <mesh position={[-(CARD_W + CASE_LIP) / 2 - 0.001, 0, 0]} rotation={[0, -Math.PI / 2, 0]}>
+            <planeGeometry args={[CARD_DEPTH * 0.92, CARD_H]} />
+            <meshStandardMaterial ref={spineMatRef} map={spineTexture} roughness={0.5} metalness={0.05} />
+          </mesh>
+        )}
+
+        {/* Back cover: the art, darker */}
         {texture && (
           <mesh position={[0, 0, -(CARD_DEPTH / 2 + 0.002)]} rotation={[0, Math.PI, 0]}>
             <planeGeometry args={[CARD_W, CARD_H]} />

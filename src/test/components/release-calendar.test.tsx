@@ -183,6 +183,19 @@ describe('ReleaseCalendar', () => {
     });
   });
 
+  it('labels every filter (Store, Platform, View) so the toolbar is self-explanatory', async () => {
+    mockIsPrefetchReady.mockReturnValue(true);
+    mockGetPrefetchedGames.mockReturnValue([makeDatedGame(15, 'Test Game')]);
+    renderCalendar();
+    await waitFor(() => expect(screen.getByText('Store')).toBeInTheDocument());
+    expect(screen.getByText('Platform')).toBeInTheDocument();
+    expect(screen.getByText('View')).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Filters' })).toBeInTheDocument();
+    expect(screen.queryByText('Clear filters')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('My Radar'));
+    expect(screen.getByText('Clear filters')).toBeInTheDocument();
+  });
+
   it('renders month names as section headers in year view', async () => {
     // Feb 15 so the visible window starts Jan 1 and Year feed still lists January (not trimmed).
     vi.setSystemTime(new Date(2026, 1, 15, 12, 0, 0));

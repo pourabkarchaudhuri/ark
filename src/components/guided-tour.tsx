@@ -606,10 +606,12 @@ const journeySteps: Step[] = [
     title: 'Medals & milestones',
   },
   {
-    target: '[data-tour="journey-main"]',
+    // The header, not the whole page: the page is taller than the window, so a tooltip anchored to it
+    // ended up below the fold and the user had to scroll to find the last step.
+    target: '[data-tour="journey-header"]',
     content:
       'Scroll years and months, open cards for details, and follow hours and status. Removed games stay visible with a badge so history is never lost.',
-    placement: 'top',
+    placement: 'bottom',
     title: "Captain's Log & timeline",
   },
 ];

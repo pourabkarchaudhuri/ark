@@ -23,13 +23,17 @@ afterEach(() => {
 });
 
 describe('HowLongToBeat chip', () => {
-  it('shows main / +extras / 100% hours once times arrive', async () => {
+  it('says it is HowLongToBeat and shows main / +extras / 100% hours, with an explaining tooltip', async () => {
     const getTimes = vi.fn().mockResolvedValue(TIMES);
     (window as unknown as { hltb: unknown }).hltb = { getTimes };
     render(<Harness title="Hades" year={2020} />);
-    expect(await screen.findByText('24h main')).toBeInTheDocument();
-    expect(screen.getByText(/49h \+extras/)).toBeInTheDocument();
-    expect(screen.getByText(/95h 100%/)).toBeInTheDocument();
+    expect(await screen.findByText('HowLongToBeat')).toBeInTheDocument();
+    expect(screen.getByText(/Main 24h/)).toBeInTheDocument();
+    expect(screen.getByText(/\+Extras 49h/)).toBeInTheDocument();
+    expect(screen.getByText(/100% 95h/)).toBeInTheDocument();
+    const badge = screen.getByText('HowLongToBeat').closest('[title]')!;
+    expect(badge.getAttribute('title')).toMatch(/Main story: 24h/);
+    expect(badge.getAttribute('role')).not.toBe('link');
     expect(getTimes).toHaveBeenCalledWith({ title: 'Hades', year: 2020 });
   });
 

@@ -747,7 +747,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   return (
     <div className="relative w-full overflow-clip" data-tour="journey-main">
       {/* Header */}
-      <div className="max-w-7xl mx-auto py-10 px-4 md:px-8 lg:px-10">
+      <div className="max-w-7xl mx-auto py-10 px-4 md:px-8 lg:px-10" data-tour="journey-header">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h2 className="text-lg md:text-3xl mb-2 text-white font-bold font-['Orbitron']">

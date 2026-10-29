@@ -493,22 +493,39 @@ function releaseToGame(release: ParsedRelease, inLibrary: boolean): Game {
 type StoreFilter = 'all' | 'steam' | 'epic' | 'both';
 
 const STORE_FILTER_OPTIONS: { id: StoreFilter; label: string; icon?: typeof FaSteam }[] = [
-  { id: 'all', label: 'All' },
+  { id: 'all', label: 'All stores' },
   { id: 'steam', label: 'Steam', icon: FaSteam },
   { id: 'epic', label: 'Epic', icon: SiEpicgames },
-  { id: 'both', label: 'Both' },
+  { id: 'both', label: 'On both' },
 ];
 
 const PLATFORM_OPTIONS: { value: string; label: string }[] = [
-  { value: 'all', label: 'All' },
-  { value: 'windows', label: 'Win' },
+  { value: 'all', label: 'Any OS' },
+  { value: 'windows', label: 'Windows' },
   { value: 'mac', label: 'Mac' },
   { value: 'linux', label: 'Linux' },
 ];
 
-/** Compact trigger height/padding to match original chip row. */
+/** Borderless trigger: the surrounding labelled field draws the frame. */
 const COMPACT_TRIGGER_CLASS =
-  'h-6 min-w-0 px-2 text-[10px] font-medium rounded-md border-white/[0.08] bg-white/[0.04] text-white/80 hover:bg-white/10 hover:text-white [&>svg]:w-3 [&>svg]:h-3';
+  'h-6 min-w-0 px-1.5 text-[11px] font-medium rounded-md border-0 bg-transparent text-white/85 hover:bg-white/10 hover:text-white focus:ring-0 focus:ring-offset-0 [&>svg]:w-3 [&>svg]:h-3 [&>svg]:opacity-60';
+
+/** A labelled filter control: small caps label + the control, highlighted while it filters something. */
+function FilterField({ label, active, children }: { label: string; active: boolean; children: React.ReactNode }) {
+  return (
+    <div
+      className={cn(
+        'flex items-center gap-1 h-8 pl-2.5 pr-1 rounded-lg border transition-colors',
+        active ? 'border-fuchsia-500/40 bg-fuchsia-500/[0.08]' : 'border-white/[0.08] bg-white/[0.03]',
+      )}
+    >
+      <span className={cn('text-[9px] font-semibold uppercase tracking-[0.12em]', active ? 'text-fuchsia-300/80' : 'text-white/35')}>
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
 
 const FilterChips = memo(function FilterChips({
   platformFilter,
@@ -531,7 +548,8 @@ const FilterChips = memo(function FilterChips({
   radarActive: boolean;
   setRadarActive: (v: boolean) => void;
 }) {
-  const hasActiveFilters = storeFilter !== 'all' || platformFilter !== 'all' || genreFilter !== null;
+  const activeCount = Number(storeFilter !== 'all') + Number(platformFilter !== 'all') + Number(genreFilter !== null) + Number(radarActive);
+  const hasActiveFilters = activeCount > 0;
 
   const handleResetFilters = useCallback(() => {
     setStoreFilter('all');
@@ -541,38 +559,25 @@ const FilterChips = memo(function FilterChips({
   }, []);
 
   return (
-    <>
-      {hasActiveFilters && (
-        <>
-          <TooltipCard content="Clear all active genre, platform, and radar filters and return to the default view.">
-            <button
-              onClick={handleResetFilters}
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium text-white/50 hover:text-white/80 hover:bg-white/10 transition-colors"
-              aria-label="Reset all filters"
-            >
-              <AnimateIcon hover="spin"><RotateCcw className="w-3 h-3" /></AnimateIcon>
-              Reset
-            </button>
-          </TooltipCard>
-          <div className="w-px h-4 bg-white/10" />
-        </>
-      )}
-      <button
-        onClick={() => setRadarActive(!radarActive)}
-        className={cn(
-          'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors',
-          radarActive
-            ? 'bg-fuchsia-500/25 text-fuchsia-300 ring-1 ring-fuchsia-500/40'
-            : 'bg-white/[0.04] text-white/40 hover:bg-white/10 hover:text-white/70',
-        )}
-      >
-        <Crosshair className="w-3 h-3" />
-        My Radar
-      </button>
-
-      <div className="w-px h-4 bg-white/10" />
+    <div className="flex items-center gap-1.5 flex-wrap" role="group" aria-label="Filters">
+      <TooltipCard content="Show only games that match your library's taste (your radar).">
+        <button
+          onClick={() => setRadarActive(!radarActive)}
+          aria-pressed={radarActive}
+          className={cn(
+            'flex items-center gap-1.5 h-8 px-2.5 rounded-lg border text-[11px] font-medium transition-colors',
+            radarActive
+              ? 'border-fuchsia-500/40 bg-fuchsia-500/[0.12] text-fuchsia-300'
+              : 'border-white/[0.08] bg-white/[0.03] text-white/55 hover:bg-white/[0.07] hover:text-white/80',
+          )}
+        >
+          <Crosshair className="w-3.5 h-3.5" />
+          My Radar
+        </button>
+      </TooltipCard>
 
       {/* Store filter */}
+      <FilterField label="Store" active={storeFilter !== 'all'}>
       <Select value={storeFilter} onValueChange={(v) => setStoreFilter(v as StoreFilter)}>
         <SelectTrigger
           className={cn(COMPACT_TRIGGER_CLASS, 'w-auto gap-1')}
@@ -595,10 +600,10 @@ const FilterChips = memo(function FilterChips({
           ))}
         </SelectContent>
       </Select>
-
-      <div className="w-px h-4 bg-white/10" />
+      </FilterField>
 
       {/* Platform (OS) filter */}
+      <FilterField label="Platform" active={platformFilter !== 'all'}>
       <Select value={platformFilter} onValueChange={setPlatformFilter}>
         <SelectTrigger
           className={cn(COMPACT_TRIGGER_CLASS, 'w-auto gap-1')}
@@ -635,10 +640,10 @@ const FilterChips = memo(function FilterChips({
           ))}
         </SelectContent>
       </Select>
+      </FilterField>
 
       {topGenres.length > 0 && (
-        <>
-          <div className="w-px h-4 bg-white/10" />
+        <FilterField label="Genre" active={genreFilter !== null}>
           <Combobox
             options={[
               { value: '', label: 'All Genres' },
@@ -653,11 +658,23 @@ const FilterChips = memo(function FilterChips({
             aria-label="Filter by genre"
             compact
           />
-        </>
+        </FilterField>
       )}
 
-      <div className="w-px h-4 bg-white/10" />
-    </>
+      {hasActiveFilters && (
+        <TooltipCard content="Clear the store, platform, genre and radar filters.">
+          <button
+            onClick={handleResetFilters}
+            className="flex items-center gap-1 h-8 px-2.5 rounded-lg text-[11px] font-medium text-white/50 hover:text-white hover:bg-white/10 transition-colors"
+            aria-label="Reset all filters"
+          >
+            <AnimateIcon hover="spin"><RotateCcw className="w-3.5 h-3.5" /></AnimateIcon>
+            Clear filters
+            <span className="ml-0.5 text-[9px] text-fuchsia-300/90 bg-fuchsia-500/15 px-1.5 py-0.5 rounded-full">{activeCount}</span>
+          </button>
+        </TooltipCard>
+      )}
+    </div>
   );
 });
 
@@ -1957,23 +1974,28 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
               setRadarActive={setRadarActive}
             />
           )}
+          {!isInitialLoading && <div className="hidden md:block w-px h-6 bg-white/10 mx-1" aria-hidden />}
           {!isInitialLoading && (
-            <div className="flex items-center rounded-md border border-white/[0.08] overflow-hidden">
-              {VIEW_TOGGLE_OPTIONS.map(({ id, icon: Icon, label }) => (
-                <button
-                  key={id}
-                  onClick={() => { setCalView(id); setWeekOffset(0); }}
-                  className={cn(
-                    'flex items-center gap-1 px-2 py-1 text-[10px] font-medium transition-colors',
-                    calView === id ? 'bg-fuchsia-500/20 text-fuchsia-400' : 'text-white/40 hover:text-white hover:bg-white/[0.06]',
-                  )}
-                  title={label}
-                >
-                  <Icon className="w-3 h-3" />
-                  <span className="hidden sm:inline">{label}</span>
-                </button>
-              ))}
-            </div>
+            <FilterField label="View" active={false}>
+              <div className="flex items-center gap-0.5" role="radiogroup" aria-label="Calendar view">
+                {VIEW_TOGGLE_OPTIONS.map(({ id, icon: Icon, label }) => (
+                  <button
+                    key={id}
+                    role="radio"
+                    aria-checked={calView === id}
+                    onClick={() => { setCalView(id); setWeekOffset(0); }}
+                    className={cn(
+                      'flex items-center gap-1 h-6 px-2 rounded-md text-[11px] font-medium transition-colors',
+                      calView === id ? 'bg-fuchsia-500/20 text-fuchsia-300' : 'text-white/45 hover:text-white hover:bg-white/[0.06]',
+                    )}
+                    title={label}
+                  >
+                    <Icon className="w-3 h-3" />
+                    <span className="hidden sm:inline">{label}</span>
+                  </button>
+                ))}
+              </div>
+            </FilterField>
           )}
 
           {loading && <Loader2 className="w-3.5 h-3.5 text-white/30 animate-spin" />}
@@ -1982,10 +2004,10 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
             <TooltipCard content="Open the Coming Soon sidebar — browse upcoming releases with undated or TBA launch windows.">
               <button
                 onClick={toggleSidebar}
-                className="flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors text-white/40 hover:text-white hover:bg-white/10"
+                className="flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-white/[0.08] bg-white/[0.03] transition-colors text-white/55 hover:text-white hover:bg-white/[0.07]"
               >
                 <PanelRightOpen className="w-3.5 h-3.5" />
-                <span className="text-[10px] font-medium">TBA</span>
+                <span className="text-[11px] font-medium">Coming soon (TBA)</span>
                 {tbdReleases.length > 0 && (
                   <span className="text-[9px] text-fuchsia-400/80 bg-fuchsia-500/15 px-1.5 py-0.5 rounded-full font-medium">{tbdReleases.length}</span>
                 )}

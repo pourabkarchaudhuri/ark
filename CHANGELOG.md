@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.92] - 2026-10-29
+
+### Changed — polish
+- **HowLongToBeat badge says what it is.** It now reads "HowLongToBeat · Main 24h · +Extras 49h · 100% 95h", and its tooltip explains each number (main story, story plus side content, everything). It is information only and no longer opens a web page when clicked.
+- **Upcoming filters are labelled.** Store, Platform, Genre and View each carry a small label, sit in one aligned toolbar, light up while they filter something, and a "Clear filters" button shows how many are active. Option names are clearer ("All stores", "Any OS", "Windows", "On both"), and the TBA button reads "Coming soon (TBA)".
+- **Voyage → Your Ark shows game boxes, not flat cards.** Each game is a 3D case with depth, a glossy shell, a spine cut from the cover art and a darker back; the selected box keeps a slight angle and sways gently so its depth reads (the sway is off when Windows is set to reduce motion). Lighting now shades the sides.
+
+### Fixed
+- **Voyage tutorial:** the last step no longer lands below the bottom of the window (it pointed at the whole page; it now points at the page header).
+
 ## [1.0.91] - 2026-10-29
 
 ### Fixed — Upcoming shows Steam properly

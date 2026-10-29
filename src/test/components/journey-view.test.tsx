@@ -354,6 +354,11 @@ describe('JourneyView', () => {
     getAll.mockReturnValue([]);
   });
 
+  it('gives the tutorial a header anchor that fits on screen', () => {
+    const { container } = render(<JourneyView entries={[createMockEntry()]} loading={false} />);
+    expect(container.querySelector('[data-tour="journey-header"]')).not.toBeNull();
+  });
+
   it('renders Log, Scenes, Audit, and Medals tab buttons', () => {
     const entries = [
       createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' }),

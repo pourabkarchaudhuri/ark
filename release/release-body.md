@@ -1,15 +1,19 @@
-# Ark v1.0.91 — A fuller Upcoming calendar
+# Ark v1.0.92 — Polish
+
+## Changed
+
+- **3D game boxes in Voyage → Your Ark.** Your games now look like real game cases, with depth, a glossy shell and a spine. The selected one turns slightly so you can see it's a box.
+- **Clear Upcoming filters.** Store, Platform, Genre and View are labelled, highlighted while active, and a **Clear filters** button resets them.
+- **HowLongToBeat badge explains itself.** It now says "HowLongToBeat" with Main / +Extras / 100% hours, and hovering explains each number. It no longer opens a web page.
 
 ## Fixed
 
-- **Steam releases fill the calendar now.** Steam's upcoming list used to be just the handful of games on the Steam store front, so Epic looked bigger. Ark now adds recent hits and upcoming launches from the Steam catalog it already keeps.
-- **One entry per game:** a game on both Steam and Epic shows once with both badges, and different games that happen to share a name are no longer merged.
-- **Non-Latin titles** (Chinese, Japanese, Korean, Cyrillic and more) no longer vanish from the calendar.
+- The last step of the Voyage tutorial is now on screen — no scrolling needed.
 
 If the in-app update fails, download the installer directly:
-https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.91/Ark-Setup-1.0.91.exe
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.92/Ark-Setup-1.0.92.exe
 
 ---
 
-**Tests:** 1687 tests (148 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
+**Tests:** 1689 tests (148 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
 **No ranking change.**
