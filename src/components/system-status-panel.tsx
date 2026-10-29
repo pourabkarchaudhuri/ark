@@ -176,7 +176,12 @@ function OracleLayersRow({ status }: { status: OracleLayersStatus }) {
       <div className="pl-[18px] space-y-px">
         {status.layers.map(l => (
           <div key={l.layer} className="flex items-center justify-between gap-2">
-            <span className={`text-[8px] truncate ${status.deadLayers.includes(l.layer) ? 'text-red-400/70' : 'text-white/25'}`}>{l.layer}</span>
+            <span
+              className={`text-[8px] truncate ${status.deadLayers.includes(l.layer) ? 'text-red-400/70' : status.sparseLayers.includes(l.layer) ? 'text-amber-300/50' : 'text-white/25'}`}
+              title={l.note}
+            >
+              {l.layer}{status.sparseLayers.includes(l.layer) ? (l.weight === 0 ? ' · inactive' : ' · sparse') : ''}
+            </span>
             <span className="text-[8px] text-white/20 tabular-nums shrink-0">{l.coveragePct}% · w {l.weight.toFixed(3)}</span>
           </div>
         ))}

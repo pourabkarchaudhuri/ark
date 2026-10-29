@@ -38,6 +38,7 @@ import type {
   TasteCluster,
   FranchiseCluster,
   RecoTelemetry,
+  CandidateGame,
 } from '@/types/reco';
 import { toCanonicalGenre, toCanonicalGenres } from '@/data/canonical-genres';
 import {
@@ -217,8 +218,12 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   // Mine thumbs-down / thumbs-up features before filtering thumbs-down from the pool
   const thumbsDownSet = new Set(thumbsDownIds);
   const thumbsUpSet = new Set(thumbsUpIds);
-  const thumbsDownCandidates = candidates.filter(c => thumbsDownSet.has(c.gameId));
-  const thumbsUpCandidates = candidates.filter(c => thumbsUpSet.has(c.gameId));
+  // Feedback games can be missing from the (pre-filtered) pool; the store passes those separately.
+  const feedbackPool = new Map<string, CandidateGame>();
+  for (const c of input.feedbackCandidates ?? []) feedbackPool.set(c.gameId, c);
+  for (const c of candidates) feedbackPool.set(c.gameId, c);
+  const thumbsDownCandidates = [...feedbackPool.values()].filter(c => thumbsDownSet.has(c.gameId));
+  const thumbsUpCandidates = [...feedbackPool.values()].filter(c => thumbsUpSet.has(c.gameId));
 
   // Filter out dismissed / thumbs-down candidates (thumbs-up stay in the pool)
   const filteredCandidates = candidates.filter(c => !dismissedSet.has(c.gameId));
@@ -243,7 +248,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   progress('Mining negative signals...', 12);
   // Dismissed cards (excluding thumbs-down, which already count) feed the negative profile with decay.
   const dismissedAt = new Map((input.dismissedMine ?? []).map(d => [d.id, d.at]));
-  const dismissedFeedback = candidates
+  const dismissedFeedback = [...feedbackPool.values()]
     .filter(c => dismissedAt.has(c.gameId) && !thumbsDownSet.has(c.gameId))
     .map(c => ({ candidate: c, at: dismissedAt.get(c.gameId) ?? 0 }));
   const negativeProfile = buildNegativeProfile(userGames, now, thumbsDownCandidates, dismissedFeedback);
@@ -433,6 +438,8 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     hasGraphScores,
     mlCoverage,
     graphSignalCoverage,
+    negativeActive: negativeProfile.strength > 0,
+    positiveActive: positiveProfile.strength > 0,
   });
 
   const maxGenreWeight = tasteProfile.genres[0]?.weight ?? 1;
@@ -736,6 +743,27 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     embeddingCoverage,
     mlCoverage,
     graphScoresAvailable: hasGraphScores,
+    graphCoverageAtThreshold: graphSignalCoverage,
+    feedback: {
+      up: thumbsUpIds.length,
+      down: thumbsDownIds.length,
+      dismissed: (input.dismissedMine ?? []).length,
+      usedUp: thumbsUpCandidates.length,
+      usedDown: thumbsDownCandidates.length,
+      usedDismissed: dismissedFeedback.length,
+    },
+    conditional: {
+      negativeSignal: negativeProfile.strength > 0
+        ? { active: true }
+        : { active: false, note: 'no thumbs-down, dismissals or low-rated / removed games yet' },
+      positiveAffinity: positiveProfile.strength > 0
+        ? { active: true }
+        : { active: false, note: 'no thumbs-up yet' },
+      franchiseBoost: { active: true, note: 'fires only for games in franchises you have played' },
+      studioLoyaltyBoost: { active: true, note: 'fires only for studios you keep coming back to' },
+      timeOfDayBoost: { active: true, note: 'needs enough tracked sessions at this time of day' },
+      sequencingBoost: { active: true, note: 'needs enough tracked play sessions in a row' },
+    },
   });
 
   return { tasteProfile, shelves, telemetry };

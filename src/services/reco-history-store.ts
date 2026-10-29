@@ -605,6 +605,18 @@ class RecoHistoryStore {
       .map(e => e.gameId);
   }
 
+  /** How much explicit feedback exists (Oracle dev panel). Dismissals exclude thumbs-downs. */
+  getFeedbackCounts(): { up: number; down: number; dismissed: number } {
+    let up = 0;
+    let down = 0;
+    for (const e of this.history.values()) {
+      if (e.thumbs === 1) up++;
+      else if (e.thumbs === -1) down++;
+    }
+    const dismissed = this.getDismissals().filter(d => !d.strong).length;
+    return { up, down, dismissed };
+  }
+
   /** Get positive feedback ratio (for signal quality measurement). */
   getPositiveFeedbackRate(): number {
     const withThumbs = [...this.history.values()].filter(e => e.thumbs !== undefined);

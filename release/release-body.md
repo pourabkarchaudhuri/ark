@@ -1,19 +1,16 @@
-# Ark v1.0.92 — Polish
-
-## Changed
-
-- **3D game boxes in Voyage → Your Ark.** Your games now look like real game cases, with depth, a glossy shell and a spine. The selected one turns slightly so you can see it's a box.
-- **Clear Upcoming filters.** Store, Platform, Genre and View are labelled, highlighted while active, and a **Clear filters** button resets them.
-- **HowLongToBeat badge explains itself.** It now says "HowLongToBeat" with Main / +Extras / 100% hours, and hovering explains each number. It no longer opens a web page.
+# Ark v1.0.93 — Honest Oracle signals
 
 ## Fixed
 
-- The last step of the Voyage tutorial is now on screen — no scrolling needed.
+- **Recommendations focus on signals that work.** A thumbs-up signal used to take part of the scoring budget even if you'd never pressed thumbs-up. That share now goes to the signals that actually have data.
+- **Your feedback always counts.** Thumbs-up, thumbs-down and dismissed games are used even when they aren't in the current batch of candidates.
+- **Developer panel:** signals that only apply sometimes (franchises, favourite studios, thumbs, time of day) are shown as "sparse" instead of "dead", and a counter shows how much feedback you've given and how much was used.
+
+Recommendations are recalculated once after you update.
 
 If the in-app update fails, download the installer directly:
-https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.92/Ark-Setup-1.0.92.exe
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.93/Ark-Setup-1.0.93.exe
 
 ---
 
-**Tests:** 1689 tests (148 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
-**No ranking change.**
+**Tests:** 1696 tests (149 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.

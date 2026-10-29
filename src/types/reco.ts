@@ -342,6 +342,11 @@ export interface RecoWorkerInput {
   dismissedMine?: Array<{ id: string; at: number }>;
   /** Thumbs-up ids — mined into the positive taste profile (stay in candidate pool). */
   thumbsUpIds?: string[];
+  /**
+   * Thumbs / dismissed games that are NOT in `candidates` (the pre-filter dropped them, or they come
+   * from the catalog). Their genres/themes/developer still feed the feedback profiles.
+   */
+  feedbackCandidates?: CandidateGame[];
   /** Precomputed taste centroid (768-dim). Undefined if no library embeddings. */
   tasteCentroid?: number[];
   /**
@@ -416,6 +421,12 @@ export interface RecoLayerStat {
   max: number;
   /** Weight the layer carried in the composite score this run. */
   weight: number;
+  /** core = should fire for most candidates; conditional = fires only when its input exists. */
+  kind?: 'core' | 'conditional';
+  /** Conditional layers: whether the layer's input exists for this library (e.g. any thumbs-up). */
+  active?: boolean;
+  /** Plain-language reason a conditional layer is sparse or inactive. */
+  note?: string;
 }
 
 /** Diagnostics for one Oracle compute (dev panel + regression tests). */
@@ -440,6 +451,17 @@ export interface RecoTelemetry {
   graphScoresAvailable: boolean;
   /** Sum of all positive layer weights (nominal max score before clamping). */
   weightSum: number;
+  /** Explicit feedback that exists vs. what this run could use (dev panel counter). */
+  feedback?: {
+    up: number;
+    down: number;
+    dismissed: number;
+    usedUp: number;
+    usedDown: number;
+    usedDismissed: number;
+  };
+  /** Share of candidates whose graph signal reaches the weighting threshold (what the weights see). */
+  graphCoverageAtThreshold?: number;
 }
 
 /** Final results from the worker. */

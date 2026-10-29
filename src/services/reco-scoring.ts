@@ -1305,6 +1305,13 @@ export function assembleWeights(p: {
   mlCoverage: number;
   /** Share (0–1) of candidates whose graph signal is non-zero. */
   graphSignalCoverage: number;
+  /**
+   * Whether a negative taste profile exists (thumbs-down, dismissals, or rejected library games).
+   * Without one the layer is 0 for every candidate, so it gets no weight. Default true.
+   */
+  negativeActive?: boolean;
+  /** Whether any thumbs-up feedback exists; without it the layer's budget goes to the others. Default true. */
+  positiveActive?: boolean;
 }): ScoringWeights {
   const semanticBudget = 0.12 * p.embeddingCoverage;
   const residual = 0.12 * (1 - p.embeddingCoverage);
@@ -1329,8 +1336,8 @@ export function assembleWeights(p: {
     W_DIVERSITY: 0.04,
     W_TIME: 0.03,
     W_CURVE: 0.03,
-    W_NEGATIVE: 0.06,
-    W_POSITIVE: 0.05,
+    W_NEGATIVE: p.negativeActive === false ? 0 : 0.06,
+    W_POSITIVE: p.positiveActive === false ? 0 : 0.05,
     W_FRANCHISE: 0.08,
     W_STUDIO: 0.05,
     W_SEQUENCING: 0.04,
@@ -1359,6 +1366,20 @@ export function calibrateMatchPercent(score: number, lo: number, hi: number): nu
 }
 
 // ─── Diagnostics ───────────────────────────────────────────────────────────────
+
+/**
+ * Layers that only fire when their input exists for this library — a franchise you played, a studio you
+ * keep coming back to, thumbs/dismissals, enough tracked sessions. Low coverage is expected for them, so
+ * the dev panel shows them as "sparse" / "inactive" instead of "dead". Every other layer is core.
+ */
+export const CONDITIONAL_LAYERS: ReadonlySet<string> = new Set([
+  'franchiseBoost',
+  'studioLoyaltyBoost',
+  'negativeSignal',
+  'positiveAffinity',
+  'timeOfDayBoost',
+  'sequencingBoost',
+]);
 
 /** Layer keys reported in telemetry, in display order (matches ScoredGame.layerScores). */
 export const TELEMETRY_LAYERS = [
@@ -1395,6 +1416,10 @@ export function computeRecoTelemetry(args: {
   embeddingCoverage: number;
   mlCoverage: number;
   graphScoresAvailable: boolean;
+  /** Conditional layers: whether their input exists, and why not (layer key → state). */
+  conditional?: Record<string, { active: boolean; note?: string }>;
+  feedback?: RecoTelemetry['feedback'];
+  graphCoverageAtThreshold?: number;
 }): RecoTelemetry {
   const { scored, weights, funnel } = args;
   const layers: RecoLayerStat[] = TELEMETRY_LAYERS.map(layer => {
@@ -1403,10 +1428,13 @@ export function computeRecoTelemetry(args: {
     for (const g of scored) {
       const v = (g.layerScores as unknown as Record<string, number>)[layer] ?? 0;
       values.push(v);
-      if (v > 0) nonZero++;
+      // Any contribution counts — a franchise dislike penalty is negative but very much active.
+      if (v !== 0) nonZero++;
     }
     values.sort((a, b) => a - b);
     const n = values.length;
+    const kind: 'core' | 'conditional' = CONDITIONAL_LAYERS.has(layer) ? 'conditional' : 'core';
+    const cond = args.conditional?.[layer];
     return {
       layer,
       coverage: n > 0 ? nonZero / n : 0,
@@ -1414,6 +1442,8 @@ export function computeRecoTelemetry(args: {
       median: n > 0 ? values[Math.floor(n / 2)] : 0,
       max: n > 0 ? values[n - 1] : 0,
       weight: weights[layer] ?? 0,
+      kind,
+      ...(cond ? { active: cond.active, ...(cond.note ? { note: cond.note } : {}) } : {}),
     };
   });
 
@@ -1441,5 +1471,7 @@ export function computeRecoTelemetry(args: {
     mlCoverage: args.mlCoverage,
     graphScoresAvailable: args.graphScoresAvailable,
     weightSum,
+    ...(args.feedback ? { feedback: args.feedback } : {}),
+    ...(args.graphCoverageAtThreshold !== undefined ? { graphCoverageAtThreshold: args.graphCoverageAtThreshold } : {}),
   };
 }

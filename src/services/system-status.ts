@@ -6,6 +6,7 @@
  * Singleton with subscribe/notify — UI components observe without driving.
  */
 
+import { recoHistoryStore } from './reco-history-store';
 import { catalogStore } from './catalog-store';
 import { epicCatalogStore } from './epic-catalog-store';
 import { recoStore } from './reco-store';
@@ -88,29 +89,61 @@ export interface LastRerankStatus {
 export interface OracleLayersStatus {
   stage: SyncStatus['stage'];
   detail: string;
-  layers: Array<{ layer: string; coveragePct: number; weight: number }>;
-  /** Layers that carry weight but are non-zero for <5% of candidates. */
+  layers: Array<{ layer: string; coveragePct: number; weight: number; note?: string }>;
+  /** Core layers that carry weight but are non-zero for <5% of candidates — something is wrong. */
   deadLayers: string[];
+  /** Conditional layers below 5% (expected when their input is rare) or switched off (no input yet). */
+  sparseLayers: string[];
+  /** Explicit feedback line, e.g. "👍 12 (9 used) · 👎 3 · dismissed 5". */
+  feedback: string;
 }
 
-export function oracleLayersStatus(t: RecoTelemetry | null): OracleLayersStatus | null {
-  if (!t) return null;
-  const layers = t.layers
-    .filter(l => l.weight > 0)
-    .map(l => ({ layer: l.layer, coveragePct: Math.round(l.coverage * 100), weight: l.weight }))
+export function feedbackLine(f: { up: number; down: number; dismissed: number }, used?: { up: number; down: number; dismissed: number }): string {
+  const u = (n: number, m?: number) => (m !== undefined && m !== n ? `${n} (${m} used)` : `${n}`);
+  return `👍 ${u(f.up, used?.up)} · 👎 ${u(f.down, used?.down)} · dismissed ${u(f.dismissed, used?.dismissed)}`;
+}
+
+export function oracleLayersStatus(
+  t: RecoTelemetry | null,
+  liveFeedback?: { up: number; down: number; dismissed: number },
+): OracleLayersStatus | null {
+  if (!t) {
+    // Before the first compute: still show how much feedback exists.
+    return liveFeedback
+      ? { stage: 'idle', detail: `not computed yet · ${feedbackLine(liveFeedback)}`, layers: [], deadLayers: [], sparseLayers: [], feedback: feedbackLine(liveFeedback) }
+      : null;
+  }
+  const all = t.layers.map(l => ({
+    layer: l.layer,
+    coveragePct: Math.round(l.coverage * 100),
+    weight: l.weight,
+    conditional: l.kind === 'conditional',
+    inactive: l.active === false,
+    note: l.note,
+  }));
+  const layers = all
+    .filter(l => l.weight > 0 || l.inactive)
     .sort((a, b) => b.weight - a.weight);
-  const deadLayers = layers.filter(l => l.weight > 0.001 && l.coveragePct < 5).map(l => l.layer);
+  const deadLayers = layers.filter(l => !l.conditional && l.weight > 0.001 && l.coveragePct < 5).map(l => l.layer);
+  const sparseLayers = layers.filter(l => l.conditional && (l.inactive || l.coveragePct < 5)).map(l => l.layer);
+  const fb = t.feedback
+    ? feedbackLine(liveFeedback ?? t.feedback, { up: t.feedback.usedUp, down: t.feedback.usedDown, dismissed: t.feedback.usedDismissed })
+    : liveFeedback ? feedbackLine(liveFeedback) : '';
   const parts = [
     `${deadLayers.length} dead layer${deadLayers.length === 1 ? '' : 's'}`,
+    `${sparseLayers.length} sparse`,
     `top-20 ties ${t.top20Ties}`,
     `ML ${Math.round(t.mlCoverage * 100)}%`,
     `emb ${Math.round(t.embeddingCoverage * 100)}%`,
+    ...(fb ? [fb] : []),
   ];
   return {
     stage: deadLayers.length > 0 ? 'error' : 'done',
     detail: parts.join(' · '),
-    layers,
+    layers: layers.map(({ layer, coveragePct, weight, note }) => ({ layer, coveragePct, weight, ...(note ? { note } : {}) })),
     deadLayers,
+    sparseLayers,
+    feedback: fb,
   };
 }
 
@@ -514,6 +547,8 @@ class SystemStatus {
     catalogStore.subscribe(() => this._notify());
     epicCatalogStore.subscribe(() => this._notify());
     recoStore.subscribe(() => this._notify());
+    // Thumbs / dismissals update the Oracle feedback counter live.
+    recoHistoryStore.subscribe(() => this._notify());
     embeddingService.subscribe(() => this._notify());
 
     catalogStore.subscribe(() => {
@@ -831,7 +866,7 @@ class SystemStatus {
       ollamaSetup: { ..._ollamaSetupStatus },
       rerankSetup: { ..._rerankSetupStatus },
       lastRerank: lastRerankStatus(getLastRerankRun()),
-      oracleLayers: oracleLayersStatus(recoStore.getState().telemetry),
+      oracleLayers: oracleLayersStatus(recoStore.getState().telemetry, recoHistoryStore.getFeedbackCounts()),
       embeddingModel: this._embeddingModelCache ? { ...this._embeddingModelCache } : null,
       mlModel: this._mlModelCache ? { ...this._mlModelCache } : null,
       storage: [...this._storageCache],

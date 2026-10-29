@@ -11,6 +11,14 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.93': {
+    title: "What's New in Ark 1.0.93",
+    changes: [
+      'Recommendations no longer waste weight on feedback you have not given yet, so the signals that do work count more.',
+      'Your thumbs-up, thumbs-down and dismissals are always used, even for games outside the current batch.',
+      'Developer panel: layers that only fire sometimes are shown as sparse, not dead, and a feedback counter shows your thumbs.',
+    ],
+  },
   '1.0.92': {
     title: "What's New in Ark 1.0.92",
     changes: [

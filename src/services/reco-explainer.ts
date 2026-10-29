@@ -7,6 +7,7 @@
  *   3. Optional blast-radius evidence chips from the ANN neighbor graph.
  */
 
+import { assembleWeights } from './reco-scoring';
 import type { ScoredGame, LayerBreakdown, RecoTelemetry } from '@/types/reco';
 import { gameGraphStore } from '@/services/game-graph-store';
 import { findGameById } from '@/services/prefetch-store';
@@ -51,27 +52,31 @@ const LAYER_LABELS: Record<string, string> = {
  * The worker's actual weights vary per run (embedding/ML/graph coverage) and ride along in
  * telemetry; pass them to normalizeLayerScores via weightsFromTelemetry.
  */
-const LAYER_WEIGHTS: Record<string, number> = {
-  contentSimilarity: 0.22,
-  semanticSimilarity: 0.18,
-  clusterSemanticSim: 0.06,
-  graphSignal: 0.08,
-  qualitySignal: 0.10,
-  popularitySignal: 0.04,
-  recencyBoost: 0.04,
-  diversityBonus: 0.04,
-  timeOfDayBoost: 0.03,
-  engagementCurveBonus: 0.03,
-  franchiseBoost: 0.08,
-  studioLoyaltyBoost: 0.05,
-  sequencingBoost: 0.04,
-  mlSignal: 0.06,
-  graphPageRankSignal: 0.024,
-  graphCommunityAffinity: 0.036,
-  negativeSignal: 0.06,
-  positiveAffinity: 0.05,
-  trajectoryMultiplier: 0,
-};
+const LAYER_WEIGHTS: Record<string, number> = (() => {
+  // The real weight table at full coverage (not a hand-kept copy that drifts from assembleWeights).
+  const w = assembleWeights({ embeddingCoverage: 1, hasClusterScores: true, hasGraphScores: true, mlCoverage: 1, graphSignalCoverage: 1 });
+  return {
+    contentSimilarity: w.W_CONTENT + w.W_CONTENT_ML,
+    semanticSimilarity: w.W_SEMANTIC,
+    clusterSemanticSim: w.W_CLUSTER_SEM,
+    graphSignal: w.W_GRAPH,
+    qualitySignal: w.W_QUALITY + w.W_QUALITY_ML,
+    popularitySignal: w.W_POPULARITY,
+    recencyBoost: w.W_RECENCY,
+    diversityBonus: w.W_DIVERSITY,
+    timeOfDayBoost: w.W_TIME,
+    engagementCurveBonus: w.W_CURVE,
+    franchiseBoost: w.W_FRANCHISE,
+    studioLoyaltyBoost: w.W_STUDIO,
+    sequencingBoost: w.W_SEQUENCING,
+    mlSignal: w.W_ML,
+    graphPageRankSignal: w.W_GRAPH_PAGERANK,
+    graphCommunityAffinity: w.W_GRAPH_COMMUNITY,
+    negativeSignal: w.W_NEGATIVE,
+    positiveAffinity: w.W_POSITIVE,
+    trajectoryMultiplier: 0,
+  };
+})();
 
 /** Per-layer weights of a run, from its telemetry (undefined when the run predates telemetry). */
 export function weightsFromTelemetry(telemetry: RecoTelemetry | null | undefined): Record<string, number> | undefined {

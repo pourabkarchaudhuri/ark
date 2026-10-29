@@ -434,6 +434,8 @@ export class RecoStore {
         // it as the worker's order and rerank it a second time (compounding the blend).
         reranked: this.state.oracleRerankStatus.outcome === 'applied',
         oracleRerankStatus: this.state.oracleRerankStatus,
+        // The dev panel's layer telemetry describes these results; keep it with them.
+        telemetry: this.state.telemetry,
       };
       if (this._useLevelDB) {
         // Fire-and-forget — same contract as the localStorage path (errors ignored).
@@ -685,6 +687,15 @@ export class RecoStore {
       };
       this.notify();
 
+      // Thumbs / dismissed games that the pre-filter may drop: keep them aside so the worker can still
+      // learn from them (it used to only see feedback for games that survived into the ~3K pool).
+      const feedbackIds = new Set([
+        ...recoHistoryStore.getThumbsUpIds(),
+        ...recoHistoryStore.getThumbsDownIds(),
+        ...recoHistoryStore.getDismissals().map(d => d.gameId),
+      ]);
+      const feedbackPool = candidates.filter(c => feedbackIds.has(c.gameId));
+
       // 2.1. Pre-filter candidates with shelf-aware quotas (25K → ~3K)
       setProgress('Pre-filtering candidates...', 6);
       const poolSizeBefore = candidates.length;
@@ -921,6 +932,7 @@ export class RecoStore {
           .filter(d => !thumbsDownIds.includes(d.gameId))
           .map(d => ({ id: d.gameId, at: d.at })),
         thumbsUpIds,
+        feedbackCandidates: await this.resolveFeedbackCandidates(feedbackIds, feedbackPool, candidates),
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
         precomputedSemanticScores,
         mmrVectors,
@@ -2039,6 +2051,55 @@ export class RecoStore {
    * Runs inference in the main process (ONNX runtime) and attaches P(recommended)
    * to each candidate for use as a scoring layer in the worker.
    */
+  /**
+   * Feedback games the worker cannot find in its pool: those the pre-filter dropped, plus Steam games no
+   * pool source returned (looked up in the catalog). Only the fields the feedback profiles read.
+   */
+  private async resolveFeedbackCandidates(
+    feedbackIds: Set<string>,
+    prePrefilter: CandidateGame[],
+    pool: CandidateGame[],
+  ): Promise<CandidateGame[]> {
+    if (feedbackIds.size === 0) return [];
+    const inPool = new Set(pool.map(c => c.gameId));
+    const out = new Map<string, CandidateGame>();
+    for (const c of prePrefilter) {
+      if (inPool.has(c.gameId)) continue;
+      const { embedding: _drop, ...rest } = c;
+      void _drop;
+      out.set(c.gameId, rest);
+    }
+    const missingSteam = [...feedbackIds]
+      .filter(id => !inPool.has(id) && !out.has(id) && id.startsWith('steam-'))
+      .map(id => Number(id.slice(6)))
+      .filter(n => n > 0);
+    if (missingSteam.length > 0) {
+      try {
+        for (const e of await catalogStore.getEntries(missingSteam)) {
+          const id = `steam-${e.appid}`;
+          out.set(id, {
+            gameId: id,
+            title: e.name,
+            developer: e.developer,
+            publisher: e.publisher,
+            genres: e.genres || [],
+            themes: e.themes || [],
+            gameModes: e.modes || [],
+            perspectives: [],
+            platforms: [],
+            metacriticScore: null,
+            playerCount: null,
+            releaseDate: '',
+            similarGameTitles: [],
+          } as CandidateGame);
+        }
+      } catch {
+        // No catalog: those games simply do not contribute.
+      }
+    }
+    return [...out.values()];
+  }
+
   /**
    * Mark paid Steam candidates whose official price is at its all-time low (gg.deals). On-sale games
    * are looked up first; at most GG_DEALS_MAX_IDS per compute.

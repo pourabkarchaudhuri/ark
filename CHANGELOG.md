@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.93] - 2026-10-29
+
+### Fixed — Oracle "dead layers"
+- **Weight only goes to layers that can fire.** The thumbs-up layer kept 5% of the scoring budget even when you had never given a thumbs-up, diluting every other signal; it now gets no weight until there is feedback, and its share goes to the layers that work (recommendations keep their order on the test libraries; scores rise ~5%). The negative layer likewise switches off when there are no thumbs-downs, dismissals or low-rated/removed games.
+- **"Dead" now means broken.** Layers that by design only fire for some games — franchise, studio loyalty, thumbs-up/down, time of day, play sequencing — are shown as **sparse** or **inactive** (with the reason on hover) instead of dead. Only a core layer below 5% coverage is flagged dead.
+- **Franchise penalties count.** A franchise you rated poorly lowers its games (a negative score); that activity used to be invisible to the coverage numbers.
+- **Your feedback is no longer lost.** Thumbs and dismissals only counted when that game happened to be in the ~3,000 candidates of the current run; now games outside it (and Steam games found only in the catalog) are used too.
+- **Feedback counter on the dev panel:** "👍 12 (9 used) · 👎 3 · dismissed 5", live, and shown even before the first recommendation run.
+- The layer numbers survive a restart (they are saved with the cached recommendations), and "Why this?" explanations use the real weight table.
+- Engine version 12: recommendations are recalculated once.
+
 ## [1.0.92] - 2026-10-29
 
 ### Changed — polish
