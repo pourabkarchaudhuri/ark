@@ -2,6 +2,7 @@ import { JourneyEntry, GameStatus, migrateGameId } from '@/types/game';
 import { sessionStore } from './session-store';
 import { statusHistoryStore } from './status-history-store';
 import { SerialWriteQueue, readWithRetry, reportStorageReadOnly } from './storage-health';
+import { earliestIso } from './first-played';
 
 const STORAGE_KEY = 'ark-journey-history';
 const STORAGE_VERSION = 2; // v2: gameId migrated from number to string
@@ -515,7 +516,8 @@ export class JourneyStore {
     // re-persisted — mirrors the guard we already apply on load.
     const addedAt =
       toValidIso(existing?.addedAt) ?? toValidIso(entry.addedAt) ?? new Date().toISOString();
-    const firstPlayedAt = toValidIso(entry.firstPlayedAt) ?? toValidIso(existing?.firstPlayedAt);
+    // First play is a historical fact: the earliest known value wins, never a later re-record.
+    const firstPlayedAt = earliestIso(toValidIso(entry.firstPlayedAt), toValidIso(existing?.firstPlayedAt));
     const lastPlayedAt = toValidIso(entry.lastPlayedAt) ?? toValidIso(existing?.lastPlayedAt);
 
     this.entries.set(entry.gameId, {
@@ -544,7 +546,7 @@ export class JourneyStore {
       const existing = this.entries.get(entry.gameId);
       const addedAt =
         toValidIso(existing?.addedAt) ?? toValidIso(entry.addedAt) ?? new Date().toISOString();
-      const firstPlayedAt = toValidIso(entry.firstPlayedAt) ?? toValidIso(existing?.firstPlayedAt);
+      const firstPlayedAt = earliestIso(toValidIso(entry.firstPlayedAt), toValidIso(existing?.firstPlayedAt));
       const lastPlayedAt = toValidIso(entry.lastPlayedAt) ?? toValidIso(existing?.lastPlayedAt);
       this.entries.set(entry.gameId, {
         ...existing,
@@ -602,8 +604,8 @@ export class JourneyStore {
       generalChange = true;
     }
     if (fields.firstPlayedAt !== undefined) {
-      // Reject garbage strings ("undefined", "") that would poison downstream views.
-      const iso = toValidIso(fields.firstPlayedAt);
+      // Reject garbage strings ("undefined", "") and implausible dates; keep the earliest value.
+      const iso = earliestIso(toValidIso(fields.firstPlayedAt), toValidIso(existing.firstPlayedAt));
       if (iso && existing.firstPlayedAt !== iso) {
         existing.firstPlayedAt = iso;
         generalChange = true;
@@ -761,6 +763,8 @@ export class JourneyStore {
           ...existing,
           ...migratedIncoming,
           addedAt: keepAddedAt,
+          // Keep the earliest first-play date from either side.
+          firstPlayedAt: earliestIso(existing.firstPlayedAt, migratedIncoming.firstPlayedAt),
           removedAt,
         };
 

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { JourneyView } from '@/components/journey-view';
 import { JourneyEntry } from '@/types/game';
+import { statusHistoryStore } from '@/services/status-history-store';
 
 // Mock wouter
 const mockNavigate = vi.fn();
@@ -332,6 +333,26 @@ describe('JourneyView', () => {
   });
 
   // ── Log / Scenes / Audit / Medals tab toggle tests ──
+
+  it('Log shows status-change markers in the month they happened, and flags estimated dates', () => {
+    const getAll = statusHistoryStore.getAll as ReturnType<typeof vi.fn>;
+    getAll.mockReturnValue([
+      { gameId: 'steam-730', title: 'Counter-Strike 2', previousStatus: 'Want to Play', newStatus: 'Playing', timestamp: '2025-03-15T12:00:00.000Z' },
+      { gameId: 'steam-730', title: 'Counter-Strike 2', previousStatus: 'Playing', newStatus: 'On Hold', timestamp: '2025-03-28T12:00:00.000Z', source: 'auto-hold' },
+    ]);
+    const entries = [
+      createMockEntry(),
+      createMockEntry({ gameId: 'steam-9', title: 'Imported Game', addedAt: '2025-03-10T00:00:00.000Z' }),
+    ];
+    render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
+    expect(screen.getByText(/^Started ·/)).toBeInTheDocument();
+    expect(screen.getByText(/^On Hold ·/)).toBeInTheDocument();
+    expect(screen.getByText('· auto')).toBeInTheDocument();
+    // The imported game has no recorded status changes or sessions.
+    expect(screen.getAllByText('estimated date')).toHaveLength(1);
+    getAll.mockReturnValue([]);
+  });
 
   it('renders Log, Scenes, Audit, and Medals tab buttons', () => {
     const entries = [

@@ -115,7 +115,7 @@ export async function runAutoOnHoldSweep(now: number = Date.now()): Promise<void
       libraryStore.updateEntry(entry.gameId, {
         status: 'On Hold',
         autoTransitionedAt: new Date().toISOString(),
-      });
+      }, { source: 'auto-hold' });
       console.log(
         `[useAutoOnHold] Auto-transitioned ${entry.gameId} to On Hold — no session in ${daysStale} days`,
       );

@@ -298,6 +298,84 @@ const VIEW_PILLS: Array<{
   { id: 'medals', label: 'Medals', icon: Award, tour: 'journey-medals-tab' },
 ];
 
+// ─── Captain's Log status events ────────────────────────────────────────────
+
+type LogEventKind = 'started' | 'resumed' | 'paused' | 'completed';
+
+interface LogEvent {
+  kind: LogEventKind;
+  at: string;
+  /** Made by Ark (idle sweep, play-session promotion, cross-store sync), not by the user. */
+  auto: boolean;
+}
+
+const LOG_EVENT_LABEL: Record<LogEventKind, string> = {
+  started: 'Started',
+  resumed: 'Resumed',
+  paused: 'On Hold',
+  completed: 'Completed',
+};
+
+const LOG_EVENT_CLASS: Record<LogEventKind, string> = {
+  started: 'text-emerald-400/80 border-emerald-500/30',
+  resumed: 'text-sky-400/80 border-sky-500/30',
+  paused: 'text-amber-400/80 border-amber-500/30',
+  completed: 'text-fuchsia-400/80 border-fuchsia-500/30',
+};
+
+/**
+ * Turn the status-change log into per-game timeline events: the first move into Playing is
+ * "Started", later moves into Playing are "Resumed", Playing → On Hold is "On Hold", and any move
+ * into Completed is "Completed". Exported for tests.
+ */
+export function buildLogEvents(history: StatusChangeEntry[]): Map<string, LogEvent[]> {
+  const byGame = new Map<string, LogEvent[]>();
+  const sorted = [...history].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  const started = new Set<string>();
+  for (const row of sorted) {
+    const at = parseJourneyIso(row.timestamp);
+    if (!at) continue;
+    const auto = row.source === 'auto-hold' || row.source === 'auto-promote' || row.source === 'sync';
+    let kind: LogEventKind | null = null;
+    if (row.newStatus === 'Playing' || row.newStatus === 'Playing Now') {
+      if (row.previousStatus === 'Playing' || row.previousStatus === 'Playing Now') continue;
+      kind = started.has(row.gameId) ? 'resumed' : 'started';
+      started.add(row.gameId);
+    } else if (row.newStatus === 'On Hold' && (row.previousStatus === 'Playing' || row.previousStatus === 'Playing Now')) {
+      kind = 'paused';
+    } else if (row.newStatus === 'Completed' && row.previousStatus !== 'Completed') {
+      kind = 'completed';
+    }
+    if (!kind) continue;
+    const list = byGame.get(row.gameId) ?? [];
+    list.push({ kind, at: at.toISOString(), auto });
+    byGame.set(row.gameId, list);
+  }
+  return byGame;
+}
+
+function LogEventMarkers({ events, estimated }: { events: LogEvent[]; estimated: boolean }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 px-1 text-[10px] font-mono">
+      {events.map((ev, i) => (
+        <span
+          key={`${ev.kind}-${ev.at}-${i}`}
+          className={cn('px-1.5 py-0.5 rounded border bg-white/[0.02]', LOG_EVENT_CLASS[ev.kind])}
+          title={new Date(ev.at).toLocaleString()}
+        >
+          {LOG_EVENT_LABEL[ev.kind]} · {new Date(ev.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
+          {ev.auto && <span className="text-white/40"> · auto</span>}
+        </span>
+      ))}
+      {estimated && (
+        <span className="text-white/30" title="No status changes or play sessions recorded for this game; its date comes from when it was added or imported.">
+          estimated date
+        </span>
+      )}
+    </div>
+  );
+}
+
 export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
   const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('ark');
 
@@ -362,7 +440,8 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // for Audit, the live library). Those stores update without changing `entries`,
   // so we keep snapshots in state while one of those tabs is active; subscribing
   // only there avoids re-rendering Ark/Log/Medals on every session tick.
-  const needsStoreSnapshot = viewStyle === 'chronicle' || viewStyle === 'audit';
+  // The Captain's Log also reads status history: it places Started / On Hold / Completed events.
+  const needsStoreSnapshot = viewStyle === 'chronicle' || viewStyle === 'audit' || viewStyle === 'log';
   const needsLibrarySnapshot = viewStyle === 'audit';
 
   const [voyageStoreSnap, setVoyageStoreSnap] = useState<{
@@ -415,8 +494,24 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     });
   }, [entries]);
 
-  // Captain's Log: per-month grouping. An entry appears in a month if firstPlayedAt or lastPlayedAt falls in that month (same game can appear in Jan and March).
-  // Within each month, sort by the date that applies to that month (lastPlayedAt if in month, else firstPlayedAt), desc.
+  // Status-change events per game for the Captain's Log (Started / Resumed / On Hold / Completed).
+  const logStatusHistory = viewStyle === 'log' ? voyageStoreSnap?.statusHistory : undefined;
+  const logSessions = viewStyle === 'log' ? voyageStoreSnap?.sessions : undefined;
+  const logEventsByGame = useMemo(
+    () => buildLogEvents(logStatusHistory ?? []),
+    [logStatusHistory],
+  );
+  // Games with recorded evidence (a status change or a play session): their dates are real.
+  // Everything else was placed from imported/added dates and is labelled "estimated".
+  const gamesWithEvidence = useMemo(() => {
+    const set = new Set<string>(logEventsByGame.keys());
+    for (const sess of logSessions ?? []) set.add(sess.gameId);
+    return set;
+  }, [logEventsByGame, logSessions]);
+
+  // Captain's Log: per-month grouping. An entry appears in a month if firstPlayedAt or lastPlayedAt falls in that month (same game can appear in Jan and March),
+  // and in the month of each status event (Started / Resumed / On Hold / Completed).
+  // Within each month, sort by the latest date that applies to that month, desc.
   const timelineData: TimelineEntry[] = useMemo(() => {
     if (arkAndLogEntries.length === 0) return [];
 
@@ -430,10 +525,27 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
       };
       let placedFromActivity = false;
 
+      if (viewStyle === 'log') {
+        for (const ev of logEventsByGame.get(entry.gameId) ?? []) {
+          const d = new Date(ev.at);
+          const key = `${d.getFullYear()}-${d.getMonth()}`;
+          const cell = monthToEntries.get(key)?.find((x) => x.entry.gameId === entry.gameId);
+          if (cell) {
+            if (new Date(ev.at).getTime() > new Date(cell.sortDate).getTime()) cell.sortDate = ev.at;
+          } else {
+            addToMonth(d.getFullYear(), d.getMonth(), ev.at);
+          }
+          placedFromActivity = true;
+        }
+      }
+
       if (entry.firstPlayedAt) {
         const d = parseJourneyIso(entry.firstPlayedAt);
         if (d) {
-          addToMonth(d.getFullYear(), d.getMonth(), entry.firstPlayedAt);
+          const key = `${d.getFullYear()}-${d.getMonth()}`;
+          if (!monthToEntries.get(key)?.some((x) => x.entry.gameId === entry.gameId)) {
+            addToMonth(d.getFullYear(), d.getMonth(), entry.firstPlayedAt);
+          }
           placedFromActivity = true;
         }
       }
@@ -526,13 +638,21 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
                         </span>
                       </div>
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                        {monthEntries.map((entry) => (
-                          <JourneyGameCard
-                            key={`${entry.gameId}-${year}-${m}`}
-                            entry={entry}
-                            playerCount={playerCounts[entry.gameId]}
-                          />
-                        ))}
+                        {monthEntries.map((entry) => {
+                          const monthEvents = (logEventsByGame.get(entry.gameId) ?? []).filter((ev) => {
+                            const d = new Date(ev.at);
+                            return d.getFullYear() === year && d.getMonth() === m;
+                          });
+                          const estimated = !gamesWithEvidence.has(entry.gameId);
+                          return (
+                            <div key={`${entry.gameId}-${year}-${m}`} className="flex flex-col gap-1">
+                              <JourneyGameCard entry={entry} playerCount={playerCounts[entry.gameId]} />
+                              {(monthEvents.length > 0 || estimated) && (
+                                <LogEventMarkers events={monthEvents} estimated={estimated} />
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   );
@@ -553,7 +673,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         ),
       };
     });
-  }, [arkAndLogEntries, playerCounts, viewStyle]);
+  }, [arkAndLogEntries, playerCounts, viewStyle, logEventsByGame, gamesWithEvidence]);
 
   // Total stats
   const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);

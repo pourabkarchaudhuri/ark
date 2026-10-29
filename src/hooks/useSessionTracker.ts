@@ -109,7 +109,7 @@ async function maybeAutoTransitionStatus(rawSession: GameSession): Promise<void>
     libraryStore.updateEntry(gameId, {
       status: 'Playing',
       autoTransitionedAt: new Date().toISOString(),
-    });
+    }, { source: 'auto-promote' });
   } catch (err) {
     // Never let a status-transition failure disturb session recording.
     console.warn('[useSessionTracker] auto-transition skipped:', err);

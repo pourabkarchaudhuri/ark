@@ -58,6 +58,8 @@ import {
   readWithRetry,
   reportStorageReadOnly,
 } from './storage-health';
+import { firstPlayEvidenceIso, resolveFirstPlayedAt } from './first-played';
+import type { StatusChangeSource } from '@/types/game';
 
 /**
  * Library entry plus the app-managed `statusChangedAt` stamp (ISO). Set by
@@ -575,7 +577,15 @@ export class LibraryStore {
   }
 
   // Update a library entry
-  updateEntry(gameId: string, input: UpdateLibraryEntry): LibraryGameEntry | undefined {
+  /**
+   * @param opts.source who made a status change (recorded on the status-history row). Callers that
+   *   change status automatically pass their source; omitted for ordinary user edits.
+   */
+  updateEntry(
+    gameId: string,
+    input: UpdateLibraryEntry,
+    opts: { source?: StatusChangeSource } = {},
+  ): LibraryGameEntry | undefined {
     const existing = this.entries.get(gameId);
     if (!existing) return undefined;
 
@@ -638,26 +648,16 @@ export class LibraryStore {
         status: updated.status,
         hoursPlayed: updated.hoursPlayed,
         rating: updated.rating,
-        firstPlayedAt: nowIso, // so it appears in this month (when user set Playing)
+        // Earliest real evidence of play; otherwise now (the moment the user set Playing).
+        firstPlayedAt: resolveFirstPlayedAt(gameId, nowIso),
         lastPlayedAt: updated.lastPlayedAt,
         addedAt: addedAtIso,
       });
     } else if (statusChanged && isCompleted && !hasJourney) {
       const meta = updated.cachedMeta ?? existing.cachedMeta;
-      // Prefer the earliest evidence of play we can find so the journey row
-      // has an accurate `firstPlayedAt`, in this order:
-      //   1. first recorded play session (executable actually ran)
-      //   2. first transition into Playing / Playing Now (manual status flip)
-      //   3. lastPlayedAt (best-effort from a data source like Steam)
-      //   4. addedAt (definitely earlier than nowIso)
-      const firstSession = sessionStore.getFirstSessionStart(gameId);
-      const firstPlayingTs = statusHistoryStore.getFirstPlayingTransition(gameId);
-      const firstPlayedAt =
-        firstSession > 0
-          ? new Date(firstSession).toISOString()
-          : firstPlayingTs !== null
-            ? new Date(firstPlayingTs).toISOString()
-            : (updated.lastPlayedAt ?? addedAtIso ?? nowIso);
+      // Earliest real evidence of play (first session or first move into Playing);
+      // otherwise lastPlayedAt (best-effort from a data source like Steam), then addedAt.
+      const firstPlayedAt = resolveFirstPlayedAt(gameId, updated.lastPlayedAt ?? addedAtIso ?? nowIso);
       journeyStore.record({
         gameId,
         title: resolveJourneyTitleForRecord(updated, existing),
@@ -687,12 +687,24 @@ export class LibraryStore {
         addedAt: addedAtIso,
       });
     } else {
+      // The journey row already exists (e.g. it was created as Want to Play). The first move into
+      // Playing must still date it, otherwise the game never gets a "first played" date and the
+      // Captain's Log cannot place it. syncProgress keeps the earliest value.
+      const row = journeyStore.getEntry(gameId);
+      const firstPlayedAt = statusChanged && !row?.firstPlayedAt
+        ? isNowPlaying
+          ? resolveFirstPlayedAt(gameId, nowIso)
+          : isCompleted
+            ? firstPlayEvidenceIso(gameId)
+            : undefined
+        : undefined;
       // Sync progress to journey history
       journeyStore.syncProgress(gameId, {
         status: updated.status,
         hoursPlayed: updated.hoursPlayed,
         rating: updated.rating,
         lastPlayedAt: updated.lastPlayedAt,
+        ...(firstPlayedAt ? { firstPlayedAt } : {}),
       });
     }
 
@@ -700,7 +712,7 @@ export class LibraryStore {
     if (statusChanged) {
       const journeyEntry = journeyStore.getEntry(gameId);
       const title = journeyEntry?.title || `Game ${gameId}`;
-      statusHistoryStore.record(gameId, title, existing.status, updated.status);
+      statusHistoryStore.record(gameId, title, existing.status, updated.status, { source: opts.source });
     }
 
     if (journeyStore.has(gameId)) {
@@ -773,7 +785,7 @@ export class LibraryStore {
       // Record the transition so status history reflects the sync.
       const title = sibling.cachedMeta?.title?.trim() || `Game ${sibling.gameId}`;
       try {
-        statusHistoryStore.record(sibling.gameId, title, sibling.status, newStatus);
+        statusHistoryStore.record(sibling.gameId, title, sibling.status, newStatus, { source: 'sync' });
       } catch {
         // Status history is best-effort — never let its failure block the sync.
       }

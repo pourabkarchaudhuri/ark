@@ -11,6 +11,14 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.87': {
+    title: "What's New in Ark 1.0.87",
+    changes: [
+      "Captain's Log shows when each game was Started, put On Hold, Resumed or Completed, in the right month.",
+      'Games you move from Want to Play to Playing now get a proper "first played" date (and older ones are repaired from your play history).',
+      'Automatic status changes are tagged "auto"; games without any recorded history are marked "estimated date".',
+    ],
+  },
   '1.0.86': {
     title: "What's New in Ark 1.0.86",
     changes: [

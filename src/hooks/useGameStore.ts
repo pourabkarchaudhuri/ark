@@ -27,6 +27,7 @@ import {
   clearCatalogCache,
   sortCatalogAZ,
 } from '@/services/catalog-cache';
+import { firstPlayEvidenceIso, resolveFirstPlayedAt } from '@/services/first-played';
 
 /** Unused — kept for reference. Individual appdetails calls removed in favor of lightweight catalog cards. */
 // const CATALOG_CHUNK_SIZE = 50;
@@ -1717,20 +1718,26 @@ export function ensureArkBackfill() {
   const addedAtIso = (d: Date | string) => (d instanceof Date ? d.toISOString() : String(d));
   const batch: Array<Parameters<typeof journeyStore.record>[0]> = [];
 
-  // v1.0.41: shared helper — real evidence (session or first Playing
-  // transition) beats fall-back timestamps like lastPlayedAt/addedAt.
-  const bestFirstPlayed = (gameId: string, fallback: string): string => {
-    const firstSession = sessionStore.getFirstSessionStart(gameId);
-    if (firstSession > 0) return new Date(firstSession).toISOString();
-    const firstPlayingTs = statusHistoryStore.getFirstPlayingTransition(gameId);
-    if (firstPlayingTs !== null) return new Date(firstPlayingTs).toISOString();
-    return fallback;
-  };
+  // Real evidence (earliest of first session / first Playing transition) beats
+  // fall-back timestamps like lastPlayedAt/addedAt.
+  const bestFirstPlayed = resolveFirstPlayedAt;
+  // Rows that have activity (lastPlayedAt) but never got a first-played date — the
+  // Want to Play → Playing path before v1.0.87. Filled from real evidence only, and
+  // journeyStore.syncProgress keeps the earliest value, so this is safe to repeat.
+  let filledFirstPlayed = 0;
 
   // Library (Steam/Epic)
   for (const lib of libraryStore.getAllEntries()) {
     if (!ARK_STATUSES.includes(lib.status)) continue;
     const existing = journeyStore.getEntry(lib.gameId);
+    if (existing && !existing.firstPlayedAt && existing.lastPlayedAt) {
+      const evidence = firstPlayEvidenceIso(lib.gameId);
+      if (evidence) {
+        journeyStore.syncProgress(lib.gameId, { firstPlayedAt: evidence });
+        filledFirstPlayed++;
+      }
+      continue;
+    }
     const needsActivity = !existing || (!existing.firstPlayedAt && !existing.lastPlayedAt);
     if (!needsActivity) continue;
 
@@ -1756,6 +1763,14 @@ export function ensureArkBackfill() {
   for (const entry of customGameStore.getAllGames()) {
     if (!ARK_STATUSES.includes(entry.status)) continue;
     const existing = journeyStore.getEntry(entry.id);
+    if (existing && !existing.firstPlayedAt && existing.lastPlayedAt) {
+      const evidence = firstPlayEvidenceIso(entry.id);
+      if (evidence) {
+        journeyStore.syncProgress(entry.id, { firstPlayedAt: evidence });
+        filledFirstPlayed++;
+      }
+      continue;
+    }
     const needsActivity = !existing || (!existing.firstPlayedAt && !existing.lastPlayedAt);
     if (!needsActivity) continue;
 
@@ -1779,6 +1794,9 @@ export function ensureArkBackfill() {
 
   if (batch.length > 0) {
     journeyStore.recordBatch(batch);
+  }
+  if (filledFirstPlayed > 0) {
+    console.log(`[ArkBackfill] Filled first-played date from play evidence for ${filledFirstPlayed} game(s)`);
   }
 
   for (const lib of libraryStore.getAllEntries()) {

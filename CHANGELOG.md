@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.87] - 2026-10-29
+
+### Fixed — Voyage timeline dates
+- **Games moved from Want to Play to Playing now get a "first played" date.** When a game was added as Want to Play and later set to Playing, its journey row never got a first-played date, so the Captain's Log could not place it (it only showed up after a play session, or never got the right month). The first move into Playing is now dated: the earliest real evidence of play (first play session or first move into Playing), otherwise the moment you set it.
+- **The earliest first-played date always wins.** Re-recording a game, syncing progress or importing a backup can no longer move its first-played date later; impossible dates (before 2000, or in the future) are ignored.
+- **Existing games are repaired on startup** when they have play activity but no first-played date — filled only from real evidence (sessions or status history), never guessed.
+- Custom games now have status history like Steam/Epic games, and get the same first-played fix.
+
+### Added — Captain's Log
+- **Status events on the timeline:** each month shows when a game was **Started**, put **On Hold**, **Resumed** or **Completed**, and a game appears in every month one of those happened. Changes Ark made automatically (idle On Hold, a play session promoting a game, a status copied from the same game on another store) are tagged "auto".
+- Games with no recorded status changes or play sessions are labelled **estimated date** (their month comes from when they were added or imported).
+- Status changes now record who made them (you, the idle sweep, a play session, or a cross-store sync). Older rows are left as they are.
+
 ## [1.0.86] - 2026-10-29
 
 ### Fixed — player counts

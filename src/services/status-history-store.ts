@@ -1,4 +1,4 @@
-import { StatusChangeEntry, GameStatus, migrateGameId } from '@/types/game';
+import { StatusChangeEntry, StatusChangeSource, GameStatus, migrateGameId } from '@/types/game';
 import { SerialWriteQueue, readWithRetry, reportStorageReadOnly } from './storage-health';
 
 // ─── Persistence constants ──────────────────────────────────────────────────
@@ -347,13 +347,14 @@ class StatusHistoryStore {
 
   /**
    * Record a status change event.
-   * Appends a new entry to the chronological log.
+   * Appends a new entry to the chronological log. `source` says who made the change.
    */
   record(
     gameId: string,
     title: string,
     previousStatus: GameStatus | null,
     newStatus: GameStatus,
+    opts: { source?: StatusChangeSource } = {},
   ): void {
     const entry: StatusChangeEntry = {
       gameId,
@@ -362,6 +363,7 @@ class StatusHistoryStore {
       newStatus,
       timestamp: new Date().toISOString(),
     };
+    if (opts.source) entry.source = opts.source;
 
     this.entries.push(entry);
     if (this._mode === 'pending') this._preHydration.push(entry);
@@ -400,14 +402,6 @@ class StatusHistoryStore {
   }
 
   /**
-   * Find the earliest transition into `Playing` (or `Playing Now`) for a game.
-   * Returns the ISO timestamp as a ms-since-epoch number, or null if no such
-   * transition exists.
-   *
-   * Used as a fallback for `firstPlayedAt` when no session was recorded but
-   * the user did flip the status manually.
-   */
-  /**
    * Latest transition into any of `statuses` for a game (ms since epoch), or
    * null. Used by the auto On-Hold sweep so a game the user JUST moved to
    * "Playing" is measured from that moment, not from `addedAt`.
@@ -424,6 +418,14 @@ class StatusHistoryStore {
     return latest;
   }
 
+  /**
+   * Find the earliest transition into `Playing` (or `Playing Now`) for a game.
+   * Returns the ISO timestamp as a ms-since-epoch number, or null if no such
+   * transition exists.
+   *
+   * Used as a fallback for `firstPlayedAt` when no session was recorded but
+   * the user did flip the status manually.
+   */
   getFirstPlayingTransition(gameId: string): number | null {
     let earliest: number | null = null;
     for (const e of this.entries) {

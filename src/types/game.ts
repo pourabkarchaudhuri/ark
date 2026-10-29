@@ -229,6 +229,14 @@ export interface GameSession {
   activeInputMinutes?: number; // Time (min) user was actively giving input — telemetry v2
 }
 
+/**
+ * Who caused a status change. Absent on rows written before v1.0.87 (treat as unknown, never infer).
+ *   user — the user changed it; auto-hold — the idle sweep moved Playing → On Hold;
+ *   auto-promote — a play session moved it to Playing; sync — copied from the same game on another
+ *   store; undo — the user undid an automatic change.
+ */
+export type StatusChangeSource = 'user' | 'auto-hold' | 'auto-promote' | 'sync' | 'undo';
+
 // Status change log entry — records every status transition for tracking/analytics.
 export interface StatusChangeEntry {
   gameId: string;               // Universal ID (e.g., "steam-730")
@@ -236,6 +244,7 @@ export interface StatusChangeEntry {
   previousStatus: GameStatus | null; // null when game is first added
   newStatus: GameStatus;
   timestamp: string;            // ISO date string
+  source?: StatusChangeSource;
 }
 
 // Journey history entry — a snapshot persisted when a game is added to the library.

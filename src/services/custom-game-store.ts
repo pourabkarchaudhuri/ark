@@ -8,6 +8,7 @@ import { journeyStore } from '@/services/journey-store';
 import { sessionStore } from '@/services/session-store';
 import { statusHistoryStore } from '@/services/status-history-store';
 import { SerialWriteQueue, readWithRetry, reportStorageReadOnly } from '@/services/storage-health';
+import { firstPlayEvidenceIso, resolveFirstPlayedAt } from '@/services/first-played';
 
 const STORAGE_KEY = 'ark-custom-games';
 const STORAGE_VERSION = 2; // v2: id migrated from negative number to "custom-N" string
@@ -33,17 +34,10 @@ const KEY_META_NEXT_COUNTER = 'm:nextCounter';
 let _customGameBeforeUnloadInstalled = false;
 
 /**
- * Compute the most accurate `firstPlayedAt` for a game.
- * Prefers the first recorded play session, then the first Playing/Playing Now
- * transition, then the caller-supplied fallback (typically lastPlayedAt or addedAt).
+ * Compute the most accurate `firstPlayedAt` for a game: the earliest of the first recorded play
+ * session and the first Playing/Playing Now transition, then the caller-supplied fallback.
  */
-function computeFirstPlayedAt(gameId: string, fallback: string): string {
-  const firstSession = sessionStore.getFirstSessionStart(gameId);
-  if (firstSession > 0) return new Date(firstSession).toISOString();
-  const firstPlayingTs = statusHistoryStore.getFirstPlayingTransition(gameId);
-  if (firstPlayingTs !== null) return new Date(firstPlayingTs).toISOString();
-  return fallback;
-}
+const computeFirstPlayedAt = resolveFirstPlayedAt;
 
 interface StoredData {
   version: number;
@@ -518,6 +512,9 @@ export class CustomGameStore {
     this.scheduleSave();
     this.notifyListeners();
 
+    // Status history, like library games (custom games had none before v1.0.87).
+    statusHistoryStore.record(id, entry.title, null, entry.status, { source: 'user' });
+
     // Create journey entry when status is Playing, Playing Now, or Completed (so they appear in Your Ark / Logs)
     const showInArk = entry.status === 'Playing' || entry.status === 'Playing Now' || entry.status === 'Completed';
     if (showInArk) {
@@ -630,12 +627,26 @@ export class CustomGameStore {
         addedAt: addedAtIso,
       });
     } else {
+      // Existing journey row: date the first move into Playing (syncProgress keeps the earliest).
+      const row = journeyStore.getEntry(id);
+      const firstPlayedAt = statusChanged && !row?.firstPlayedAt
+        ? isNowPlaying
+          ? computeFirstPlayedAt(id, nowIso)
+          : updatedStatus === 'Completed'
+            ? firstPlayEvidenceIso(id)
+            : undefined
+        : undefined;
       journeyStore.syncProgress(id, {
         status: updated.status,
         hoursPlayed: updated.hoursPlayed ?? 0,
         rating: updated.rating ?? 0,
         lastPlayedAt: updated.lastPlayedAt,
+        ...(firstPlayedAt ? { firstPlayedAt } : {}),
       });
+    }
+
+    if (statusChanged) {
+      statusHistoryStore.record(id, updated.title, existing.status, updated.status, { source: 'user' });
     }
 
     if (journeyStore.has(id) && input.title !== undefined) {

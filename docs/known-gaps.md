@@ -215,3 +215,8 @@ The following gaps were fixed and removed from the active list:
 - Users on 1.0.83 and older run the old updater and cannot benefit from the 1.0.84 fixes until they reach 1.0.84 (release notes carry a direct installer link).
 - A publish retry after a partial upload can leave a non-`uploaded` asset with the same name; the script then gets a name conflict. Delete such assets before re-uploading.
 - The first 1.0.84 publish attempt left an empty draft release (id 427999529); harmless, delete it from the GitHub releases page.
+
+## Voyage timeline gaps (found during 1.0.87)
+- Custom games are not included in `libraryStore.exportData`, but now have status-history rows; an export/import round trip keeps the history rows for games that are not restored.
+- Status-history timestamps are always "now" when recorded; history imported or backfilled from other sources cannot carry its real date yet.
+- Cross-store sync writes a second Started/Completed event for the twin game; the Log shows both cards (one per store entry).
