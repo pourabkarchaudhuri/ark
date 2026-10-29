@@ -25,6 +25,7 @@ import {
   type ProfileGame,
   type UserProfile,
 } from './ml-features.js';
+import { buildSyntheticProfile, buildTagIndex, type SynthMeta } from './ml-synth.js';
 
 export type { UserProfile } from './ml-features.js';
 
@@ -47,6 +48,8 @@ interface FeatureSpec {
 export interface MLScoreResult {
   gameId: string;
   score: number; // P(recommended) from the model
+  /** Scored from a synthesised profile (catalog metadata, no Kaggle review aggregates). */
+  synthetic?: boolean;
 }
 
 let ort: typeof import('onnxruntime-node') | null = null;
@@ -279,18 +282,33 @@ export function hasRealSteamProfile(
 export async function scoreGames(
   userProfile: UserProfile,
   gameIds: string[],
+  synthMeta: Record<string, SynthMeta> = {},
 ): Promise<MLScoreResult[]> {
   if (!loaded || sessions.length === 0 || !featureSpec || !ort) {
     // Do not invent 0.5 placeholders — caller treats missing scores as unscored
     return [];
   }
 
-  // Only score Steam titles that have a real Kaggle game profile
+  // Steam titles with a real Kaggle game profile; others only when the renderer sent enough catalog
+  // metadata to synthesise one (see ml-synth.ts — scored, but flagged and weighted lower).
   const scorable: string[] = [];
+  const profilesById = new Map<string, GameProfile>();
+  const synthetic = new Set<string>();
+  const tagIndex = synthMeta && Object.keys(synthMeta).length > 0 ? buildTagIndex(tagMapping) : null;
   for (const id of gameIds) {
-    if (!id.startsWith('steam-')) continue;
-    const steamAppId = id.slice(6);
-    if (gameProfiles.has(steamAppId)) scorable.push(id);
+    const real = id.startsWith('steam-') ? gameProfiles.get(id.slice(6)) : undefined;
+    if (real) {
+      scorable.push(id);
+      profilesById.set(id, real);
+      continue;
+    }
+    const meta = synthMeta[id];
+    if (!meta || !tagIndex) continue;
+    const synth = buildSyntheticProfile(meta, tagIndex);
+    if (!synth) continue;
+    scorable.push(id);
+    profilesById.set(id, synth);
+    synthetic.add(id);
   }
 
   const n = scorable.length;
@@ -301,9 +319,7 @@ export async function scoreGames(
   // Build flat feature buffer for all games
   const flatBuffer = new Float32Array(n * N_FEATURES);
   for (let i = 0; i < n; i++) {
-    const steamAppId = scorable[i].slice(6);
-    const gp = gameProfiles.get(steamAppId);
-    const vec = buildFeatureVector(userProfile, gp, defaults);
+    const vec = buildFeatureVector(userProfile, profilesById.get(scorable[i]), defaults);
     flatBuffer.set(vec, i * N_FEATURES);
   }
 
@@ -337,6 +353,7 @@ export async function scoreGames(
   return scorable.map((id, i) => ({
     gameId: id,
     score: probSums[i] / foldsOk,
+    ...(synthetic.has(id) ? { synthetic: true } : {}),
   }));
 }
 

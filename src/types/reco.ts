@@ -313,6 +313,8 @@ export interface CandidateGame {
   };
   /** Embedding vector (optional). */
   embedding?: number[];
+  /** mlScore comes from a synthesised profile (no bundled review aggregates) — weighted lower. */
+  mlSynthetic?: boolean;
   /** True if surfaced via ANN embedding retrieval, not metadata filter. */
   semanticRetrieved?: boolean;
   /** True if surfaced via BM25 lexical retrieval, not metadata filter. */
@@ -468,6 +470,9 @@ export interface RecoTelemetry {
   graphCoverageAtThreshold?: number;
   graphNeighborSource?: 'pool' | 'ann' | 'none';
   embeddingCoverageBySource?: Record<string, number>;
+  /** Shares of candidates with a real / synthesised ML score. */
+  mlCoverageReal?: number;
+  mlCoverageSynth?: number;
 }
 
 /** Final results from the worker. */

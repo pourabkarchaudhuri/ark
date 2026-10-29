@@ -602,7 +602,7 @@ contextBridge.exposeInMainWorld('ann', {
 contextBridge.exposeInMainWorld('ml', {
   load: () => ipcRenderer.invoke('ml:load'),
   status: () => ipcRenderer.invoke('ml:status'),
-  scoreGames: (userProfile, gameIds) => ipcRenderer.invoke('ml:scoreGames', userProfile, gameIds),
+  scoreGames: (userProfile, gameIds, synthMeta) => ipcRenderer.invoke('ml:scoreGames', userProfile, gameIds, synthMeta),
   buildUserProfile: (games) => ipcRenderer.invoke('ml:buildUserProfile', games),
   getGameRecRates: (gameIds) => ipcRenderer.invoke('ml:getGameRecRates', gameIds),
   hasRealSteamProfile: (games) => ipcRenderer.invoke('ml:hasRealSteamProfile', games),

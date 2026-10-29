@@ -180,6 +180,7 @@ interface MLUserProfile {
 interface MLScoreResult {
   gameId: string;
   score: number;
+  synthetic?: boolean;
 }
 
 interface MLModelAPI {
@@ -190,7 +191,15 @@ interface MLModelAPI {
     gameProfileCount: number;
     tagCount: number;
   }>;
-  scoreGames: (userProfile: MLUserProfile, gameIds: string[]) => Promise<MLScoreResult[]>;
+  /** synthMeta: catalog metadata for games without a bundled profile (scored as `synthetic`). */
+  scoreGames: (
+    userProfile: MLUserProfile,
+    gameIds: string[],
+    synthMeta?: Record<string, {
+      positivity?: number; reviews?: number; priceUsd?: number; isFree?: boolean;
+      windows?: boolean; mac?: boolean; linux?: boolean; tags?: string[];
+    }>,
+  ) => Promise<MLScoreResult[]>;
   buildUserProfile: (
     games: Array<{ gameId: string; hoursPlayed: number; rating: number; status: string }>,
   ) => Promise<MLUserProfile | null>;

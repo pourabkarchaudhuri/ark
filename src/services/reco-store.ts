@@ -131,6 +131,8 @@ const EMBEDDING_GEN_TIMEOUT_MS = 90_000;
 const ML_SCORING_TIMEOUT_MS = 30_000;
 /** gg.deals prices for the Deals shelf (skipped without a key). */
 const GG_DEALS_TIMEOUT_MS = 8_000;
+/** Synthesised ML ranks are pulled this far toward the middle (1 = as confident as real scores). */
+const SYNTH_ML_SHRINK = 0.6;
 const GG_DEALS_MAX_IDS = 300;
 const GRAPH_SCORES_TIMEOUT_MS = 15_000;
 /** Embedding neighbours of the user's strongest library games (graph signal). */
@@ -2211,27 +2213,48 @@ export class RecoStore {
         // Deadline passed — stop mutating candidates the pipeline has moved on with.
         if (signal?.aborted) return;
         const batchIds = gameIds.slice(start, start + BATCH_SIZE);
-        const scores = await window.ml.scoreGames(userProfile, batchIds);
+        // Catalog metadata for games without a bundled profile (the main process decides who has one).
+        const synthMeta: Record<string, { positivity?: number; reviews?: number; isFree?: boolean; windows?: boolean; mac?: boolean; linux?: boolean; tags?: string[] }> = {};
+        for (const id of batchIds) {
+          const c = candidates[idToIdx.get(id)!];
+          if (!c || typeof c.reviewPositivity !== 'number') continue;
+          const plats = (c.platforms ?? []).map(p => p.toLowerCase());
+          synthMeta[id] = {
+            positivity: c.reviewPositivity,
+            reviews: c.reviewVolume,
+            isFree: c.price?.isFree,
+            windows: plats.length === 0 || plats.some(p => p.includes('win')),
+            mac: plats.some(p => p.includes('mac')),
+            linux: plats.some(p => p.includes('linux')),
+            tags: [...c.genres, ...c.themes, ...c.gameModes],
+          };
+        }
+        const scores = await window.ml.scoreGames(userProfile, batchIds, synthMeta);
         if (signal?.aborted) return;
 
         for (const result of scores) {
-          // scoreGames only returns real Kaggle-profile titles (no 0.5 placeholders)
           if (result.score == null || !Number.isFinite(result.score)) continue;
           const idx = idToIdx.get(result.gameId);
           if (idx !== undefined) {
             candidates[idx].mlScore = result.score;
+            if (result.synthetic) candidates[idx].mlSynthetic = true;
           }
         }
       }
 
-      // Rank-normalise within the pool: raw probabilities cluster near the base rate.
-      const withMl = candidates.filter(c => c.mlScore != null);
-      const ranks = percentileRanks(withMl.map(c => c.mlScore as number));
-      withMl.forEach((c, i) => { c.mlScore = ranks[i]; });
+      // Rank-normalise within the pool: raw probabilities cluster near the base rate. Real and
+      // synthesised scores are ranked separately (their raw scales differ), and synthesised ranks are
+      // shrunk toward the middle — they order games less reliably (verify-synth: Spearman 0.71–0.92).
+      const real = candidates.filter(c => c.mlScore != null && !c.mlSynthetic);
+      const synth = candidates.filter(c => c.mlScore != null && c.mlSynthetic);
+      const realRanks = percentileRanks(real.map(c => c.mlScore as number));
+      real.forEach((c, i) => { c.mlScore = realRanks[i]; });
+      const synthRanks = percentileRanks(synth.map(c => c.mlScore as number));
+      synth.forEach((c, i) => { c.mlScore = 0.5 + (synthRanks[i] - 0.5) * SYNTH_ML_SHRINK; });
 
-      const scored = withMl.length;
+      const scored = real.length + synth.length;
       if (scored > 0) _mlScoringAvailable = true;
-      console.log(`[RecoStore] ML scoring: ${scored}/${candidates.length} candidates scored`);
+      console.log(`[RecoStore] ML scoring: ${real.length} real + ${synth.length} synthesised / ${candidates.length} candidates`);
     } catch (err) {
       console.warn('[RecoStore] ML scoring failed (non-fatal):', err);
     }

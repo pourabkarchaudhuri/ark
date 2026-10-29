@@ -1471,6 +1471,8 @@ export function computeRecoTelemetry(args: {
   graphCoverageAtThreshold?: number;
   graphNeighborSource?: RecoTelemetry['graphNeighborSource'];
   embeddingCoverageBySource?: Record<string, number>;
+  mlCoverageReal?: number;
+  mlCoverageSynth?: number;
 }): RecoTelemetry {
   const { scored, weights, funnel } = args;
   const layers: RecoLayerStat[] = TELEMETRY_LAYERS.map(layer => {
@@ -1526,5 +1528,6 @@ export function computeRecoTelemetry(args: {
     ...(args.graphCoverageAtThreshold !== undefined ? { graphCoverageAtThreshold: args.graphCoverageAtThreshold } : {}),
     ...(args.graphNeighborSource ? { graphNeighborSource: args.graphNeighborSource } : {}),
     ...(args.embeddingCoverageBySource ? { embeddingCoverageBySource: args.embeddingCoverageBySource } : {}),
+    ...(args.mlCoverageReal !== undefined ? { mlCoverageReal: args.mlCoverageReal, mlCoverageSynth: args.mlCoverageSynth ?? 0 } : {}),
   };
 }

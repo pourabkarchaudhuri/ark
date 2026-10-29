@@ -133,7 +133,9 @@ export function oracleLayersStatus(
     `${deadLayers.length} dead layer${deadLayers.length === 1 ? '' : 's'}`,
     `${sparseLayers.length} sparse`,
     `top-20 ties ${t.top20Ties}`,
-    `ML ${Math.round(t.mlCoverage * 100)}%`,
+    t.mlCoverageReal !== undefined
+      ? `ML ${Math.round(t.mlCoverageReal * 100)}% + ${Math.round((t.mlCoverageSynth ?? 0) * 100)}% synth`
+      : `ML ${Math.round(t.mlCoverage * 100)}%`,
     `emb ${Math.round(t.embeddingCoverage * 100)}%${t.embeddingCoverageBySource
       ? ` (${Object.entries(t.embeddingCoverageBySource).map(([k, v]) => `${k} ${Math.round(v * 100)}%`).join(', ')})`
       : ''}`,

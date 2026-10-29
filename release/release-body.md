@@ -1,15 +1,14 @@
-# Ark v1.0.94 — Smarter "games like yours"
+# Ark v1.0.95 — Recommendations for more games
 
 ## Fixed
 
-- **Recommendations link more games to the ones you love.** The "similar to games in your library" signal used to reach only a few percent of candidates. It now finds similar games directly among the candidates, so it works for far more of them.
-- **Epic games count fully.** Their game descriptions were never used for matching before; now they are.
+- **The recommendation model now scores far more games.** It used to know only Steam games up to 2023. Now it also scores Epic games and newer Steam games from their store details (reviews, price, platforms, genres). Those scores count for a bit less, because there is less to go on.
 
 Recommendations are recalculated once after you update.
 
 If the in-app update fails, download the installer directly:
-https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.94/Ark-Setup-1.0.94.exe
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.95/Ark-Setup-1.0.95.exe
 
 ---
 
-**Tests:** 1701 tests (150 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
+**Tests:** 1707 tests (151 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects. Synthesis gate (`scripts/ml/verify-synth.ts`) passed.

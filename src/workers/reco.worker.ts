@@ -420,8 +420,11 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   }
   const graphSignalCoverage = filteredCandidates.length > 0 ? graphNonZero / filteredCandidates.length : 0;
 
-  // ML coverage = share of candidates with a real model score.
-  const mlCoverage = filteredCandidates.filter(c => c.mlScore != null).length / Math.max(1, filteredCandidates.length);
+  // ML coverage drives W_ML: real model scores count fully, synthesised ones (catalog metadata only) 60%.
+  const mlReal = filteredCandidates.filter(c => c.mlScore != null && !c.mlSynthetic).length;
+  const mlSynth = filteredCandidates.filter(c => c.mlScore != null && c.mlSynthetic).length;
+  const mlDenom = Math.max(1, filteredCandidates.length);
+  const mlCoverage = (mlReal + 0.6 * mlSynth) / mlDenom;
 
   // ML-less candidates (Epic, post-2023, custom) get the pool median, not 0, so they are neither punished nor boosted.
   const mlMedian = median(filteredCandidates.filter(c => c.mlScore != null).map(c => c.mlScore as number));
@@ -745,6 +748,8 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     graphScoresAvailable: hasGraphScores,
     graphCoverageAtThreshold: graphSignalCoverage,
     graphNeighborSource: input.graphNeighborSource,
+    mlCoverageReal: mlReal / mlDenom,
+    mlCoverageSynth: mlSynth / mlDenom,
     embeddingCoverageBySource: input.embeddingCoverageBySource,
     feedback: {
       up: thumbsUpIds.length,

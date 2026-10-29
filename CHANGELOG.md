@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.95] - 2026-10-29
+
+### Fixed — Oracle ML coverage
+- **The ML model can score games it has no data file for.** It only scored Steam games in its bundled 2023 dataset (~37,600 titles), so Epic games and newer or niche Steam games got no ML score (43% coverage in the dev panel). For those, Ark now builds a profile from what the catalog knows — positive-review share, review count, price, platforms and genre/theme tags mapped to the model's vocabulary — and scores it with the same model.
+- **Checked before shipping, and weighted with care.** `scripts/ml/verify-synth.ts` hides the per-game review statistics on 2,979 real profiles, keeps only the tags a store genre list can produce, and compares rankings with the full scores: Spearman 0.71 (light players), 0.86 (medium), 0.92 (heavy). Because the light-player case is only just above the 0.7 bar, synthesised scores are ranked separately from real ones, pulled 40% toward the middle, and count only 60% toward the ML layer's weight. Games with fewer than two recognised tags or no review share are left unscored (tags alone do not predict anything).
+- Dev panel: "ML 43% + 38% synth". IPC input for the scorer is now validated and capped (3,000 ids, typed metadata).
+- Engine version 14: recommendations are recalculated once.
+
 ## [1.0.94] - 2026-10-29
 
 ### Fixed — Oracle graph signal and embedding coverage

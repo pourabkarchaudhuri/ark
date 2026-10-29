@@ -20,6 +20,7 @@ import {
   hasRealSteamProfile,
   type UserProfile,
 } from '../ml-model.js';
+import { parseSynthMeta } from '../ml-synth.js';
 
 export function register(): void {
   ipcMain.handle('ml:load', async () => {
@@ -46,14 +47,17 @@ export function register(): void {
       _event: any,
       userProfile: UserProfile,
       gameIds: string[],
+      synthMeta?: unknown,
     ) => {
       try {
         if (!userProfile || !Array.isArray(gameIds)) return [];
+        // Bounded input: ids are strings, at most 3000 per call; metadata is validated field by field.
+        const ids = gameIds.filter((id): id is string => typeof id === 'string' && id.length <= 80).slice(0, 3000);
         if (!isLoaded()) {
           const ok = await loadModel();
           if (!ok) return [];
         }
-        return await scoreGames(userProfile, gameIds);
+        return await scoreGames(userProfile, ids, parseSynthMeta(synthMeta));
       } catch (err) {
         logger.error('[ML IPC] scoreGames error:', err);
         return [];
