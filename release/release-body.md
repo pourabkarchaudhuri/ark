@@ -1,14 +1,17 @@
-# Ark v1.0.85 — Medals: just the Badge Vault
+# Ark v1.0.86 — Accurate player counts
 
-## Changed
+## Fixed
 
-- **Medals opens straight to your Badge Vault.** The Overview and Play Streaks tabs and the selector above them are gone. Your badges and progress are exactly the same.
-- Removed the code and images only those tabs used, so the app is a little lighter.
+- **No more "1 playing now" on huge games.** Some Steam store pages (recent Call of Duty titles) play through a shared launcher, so Steam reports almost no players for the page itself. Ark now shows the launcher's real count for those, and hides counts that can't be right (a handful of players on a game with hundreds of reviews).
+- **Missing counts stay blank** instead of being treated as zero.
+- **Counts stay fresh:** they refresh every 10 minutes and load for cards further down Browse as you scroll.
+- **Better recommendations:** a missing or wrong player count no longer makes a famous game look like an obscure hidden gem.
+
+Recommendations are recalculated once after you update.
 
 If the in-app update fails, download the installer directly:
-https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.85/Ark-Setup-1.0.85.exe
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.86/Ark-Setup-1.0.86.exe
 
 ---
 
-**Tests:** 1609 tests (138 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
-**No ranking change. No data changes.**
+**Tests:** 1628 tests (140 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.

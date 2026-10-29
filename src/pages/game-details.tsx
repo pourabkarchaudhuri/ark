@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback, memo, lazy, Suspense, type MouseEvent } from 'react';
+import { formatPlayingNow } from '@/lib/player-count';
 import { useRoute, useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
 import DOMPurify from 'dompurify';
@@ -480,18 +481,6 @@ function getScoreColor(score?: number): string {
   return 'text-red-400';
 }
 
-// Format player count with K/M suffixes
-function formatPlayerCount(count: number): string {
-  if (count >= 1_000_000) {
-    const m = count / 1_000_000;
-    return m >= 10 ? `${Math.round(m)}M` : `${m.toFixed(1).replace(/\.0$/, '')}M`;
-  }
-  if (count >= 1_000) {
-    const k = count / 1_000;
-    return k >= 10 ? `${Math.round(k)}K` : `${k.toFixed(1).replace(/\.0$/, '')}K`;
-  }
-  return count.toLocaleString();
-}
 
 // Format Unix timestamp to readable date
 function formatDate(timestamp: number): string {
@@ -2047,7 +2036,7 @@ export function GameDetailsPage() {
               {playerCount !== null && playerCount > 0 && (
                 <Badge variant="outline" className="border-cyan-500/30 text-cyan-400 bg-cyan-500/10" title="Live concurrent players from Steam">
                   <Users className="w-3 h-3 mr-1" />
-                  {formatPlayerCount(playerCount)} playing on Steam
+                  {formatPlayingNow(playerCount, ' on Steam')}
                 </Badge>
               )}
             </div>

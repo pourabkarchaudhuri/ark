@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.86] - 2026-10-29
+
+### Fixed — player counts
+- **No more "1 playing now" on huge games.** Steam reports concurrent players per exact store page, and several Call of Duty pages play through Call of Duty HQ: measured today, Modern Warfare III's page reported 0 players, Black Ops 6's 0 and Warzone's 4, while Call of Duty HQ reported 147,422. Those pages now show the Call of Duty HQ count, and any count under 20 on a game with 500+ Steam reviews is treated as unknown instead of shown.
+- **Failed lookups are "unknown", not "0 players".** Network errors, unknown apps (HTTP 404) and responses without a valid count no longer turn into 0; unknown results are cached for 2 minutes so they are retried.
+- **Counts stay current.** Browse cards refresh their counts every 10 minutes (they used to stick for the whole session) and cards further down the grid get counts as you scroll (up to 400; it used to be the first 100). Library views with more than 200 Steam games get counts for all of them (the request was silently cut at 200).
+- "1 player" instead of "1 playing".
+- One shared formatter for player counts (three copies merged).
+
+### Oracle
+- Unknown or implausible counts no longer make a big game look "obscure" or put it on Hidden Gems.
+- Engine version 9: cached recommendations are recomputed once after updating.
+- New golden test: the top-20 ranking on the three fixture libraries is snapshotted, so any ranking change in later releases is an explicit, reviewed diff.
+- Removed a random fake player count from a browser-only mock path.
+
 ## [1.0.85] - 2026-10-29
 
 ### Changed — Medals

@@ -228,6 +228,8 @@ export function useSteamGames(category: GameCategory = 'trending') {
   const enrichmentMapRef = useRef<Map<string, Partial<Game>>>(new Map());
   // Player counts stored out-of-band to avoid re-mapping 6000+ games
   const playerCountMapRef = useRef<Map<number, number>>(new Map());
+  // When each appid's count was last fetched, so counts refresh instead of sticking for the session.
+  const playerCountFetchedAtRef = useRef<Map<number, number>>(new Map());
   const [enrichmentEpoch, setEnrichmentEpoch] = useState(0);
 
   /**
@@ -771,33 +773,45 @@ export function useSteamGames(category: GameCategory = 'trending') {
   // Counts come from ISteamUserStats/GetNumberOfCurrentPlayers (Steam API).
   // NOTE: Epic Games Store does not expose player count data, so only Steam
   // games (including multi-store games with a Steam ID) receive live counts.
-  // We accumulate all counts first, then apply a single state update to avoid
-  // Player counts: fetch only for the first ~100 visible Steam IDs and store
-  // out-of-band in a ref. A single enrichmentEpoch bump causes the `games`
-  // useMemo to re-merge, re-rendering only the ~40 visible virtual cards.
+  // Counts are fetched for the cards the user has scrolled to (up to 400), refreshed
+  // every 10 minutes, and stored out-of-band in a ref; one enrichmentEpoch bump makes
+  // the `games` useMemo re-merge only the visible virtual cards.
   useEffect(() => {
     if (loading || allGames.length === 0) return;
 
     let cancelled = false;
     const BATCH_SIZE = 20;
+    const MAX_TRACKED = 400; // cards the user has scrolled to, capped
+    const REFRESH_MS = 10 * 60 * 1000;
 
     const fetchLiveCounts = async () => {
-      // Only fetch for the visible/capped range — not all 6000+
+      const now = Date.now();
       const steamIds = allGames
-        .slice(0, Math.min(displayCount, 100))
+        .slice(0, Math.min(displayCount, MAX_TRACKED))
         .map(g => g.steamAppId)
-        .filter((id): id is number => id !== undefined && id !== null);
+        .filter((id): id is number => id !== undefined && id !== null)
+        .filter(id => now - (playerCountFetchedAtRef.current.get(id) ?? 0) >= REFRESH_MS);
 
       if (steamIds.length === 0) return;
+      let changed = false;
 
       for (let i = 0; i < steamIds.length; i += BATCH_SIZE) {
         if (cancelled) return;
         const batch = steamIds.slice(i, i + BATCH_SIZE);
         try {
+          // Only believable counts come back (steamService sanitises); a missing id = unknown.
           const counts = await steamService.getMultiplePlayerCounts(batch);
           if (cancelled) return;
-          for (const [idStr, count] of Object.entries(counts)) {
-            playerCountMapRef.current.set(Number(idStr), count);
+          const fetchedAt = Date.now();
+          for (const id of batch) {
+            playerCountFetchedAtRef.current.set(id, fetchedAt);
+            const count = counts[id];
+            if (count !== undefined) {
+              if (playerCountMapRef.current.get(id) !== count) changed = true;
+              playerCountMapRef.current.set(id, count);
+            } else if (playerCountMapRef.current.delete(id)) {
+              changed = true;
+            }
           }
         } catch {
           // Non-critical — skip this batch
@@ -805,16 +819,18 @@ export function useSteamGames(category: GameCategory = 'trending') {
       }
 
       // Single epoch bump → games useMemo re-merges visible player counts
-      if (!cancelled && playerCountMapRef.current.size > 0) {
+      if (!cancelled && changed) {
         setEnrichmentEpoch(e => e + 1);
       }
     };
 
-    fetchLiveCounts();
-    return () => { cancelled = true; };
-  // Only run once per load, not on every allGames mutation
+    // Debounced so scrolling (displayCount growing) fetches once per pause.
+    const timer = setTimeout(fetchLiveCounts, 400);
+    const refresh = setInterval(fetchLiveCounts, REFRESH_MS);
+    return () => { cancelled = true; clearTimeout(timer); clearInterval(refresh); };
+  // allGames is read through the closure; re-running on every mutation would refetch constantly.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading]);
+  }, [loading, displayCount]);
 
   // Subscribe to library STATUS/COLLECTION changes only — bump enrichment
   // epoch so the `games` useMemo re-merges library status for the visible

@@ -1214,7 +1214,7 @@ export class RecoStore {
         perspectives: Array.isArray(g.playerPerspectives) ? g.playerPerspectives : [],
         platforms: Array.isArray(g.platform) ? g.platform : [],
         metacriticScore: typeof g.metacriticScore === 'number' ? g.metacriticScore : null,
-        playerCount: typeof g.playerCount === 'number' ? g.playerCount : null,
+        playerCount: typeof g.playerCount === 'number' && g.playerCount > 0 ? g.playerCount : null,
         releaseDate: g.releaseDate || '',
         similarGameTitles: Array.isArray(g.similarGames)
           ? g.similarGames.map((sg: any) => sg.name || '').filter(Boolean)

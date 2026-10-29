@@ -1,4 +1,5 @@
 import { memo, useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { formatPlayingNow } from '@/lib/player-count';
 import { createPortal } from 'react-dom';
 import { useLocation } from 'wouter';
 import { Game, GameStatus } from '@/types/game';
@@ -140,22 +141,6 @@ function formatCompact(count: number): string {
   return count.toString();
 }
 
-// Format player count with K/M suffixes for large numbers
-function formatPlayerCount(count: number): string {
-  if (count >= 1_000_000) {
-    const millions = count / 1_000_000;
-    return millions >= 10 
-      ? `${Math.round(millions)}M` 
-      : `${millions.toFixed(1).replace(/\.0$/, '')}M`;
-  }
-  if (count >= 1_000) {
-    const thousands = count / 1_000;
-    return thousands >= 10 
-      ? `${Math.round(thousands)}K` 
-      : `${thousands.toFixed(1).replace(/\.0$/, '')}K`;
-  }
-  return count.toString();
-}
 
 // Manual statuses the user can pick (excludes 'Playing Now' which is system-managed)
 const ALL_STATUSES: GameStatus[] = ['Want to Play', 'Playing', 'Completed', 'On Hold'];
@@ -536,8 +521,7 @@ function GameCardComponent({
               <div className="min-h-[1rem] mt-0.5">
                 {game.playerCount !== undefined && game.playerCount > 0 ? (
                   <p className="text-xs text-cyan-400">
-                    {formatPlayerCount(game.playerCount)} playing
-                    {game.availableOn && game.availableOn.length > 1 ? ' on Steam' : ' now'}
+                    {formatPlayingNow(game.playerCount, game.availableOn && game.availableOn.length > 1 ? ' on Steam' : ' now')}
                   </p>
                 ) : (
                   <p className="text-xs">&nbsp;</p>

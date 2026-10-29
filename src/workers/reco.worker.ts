@@ -387,7 +387,11 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   // ── Score candidates ──
   progress('Scoring candidates...', 28);
-  const maxPlayerCount = Math.max(1, ...filteredCandidates.map(c => c.playerCount ?? 0));
+  // A loop, not Math.max(...spread): the pool can hold tens of thousands of candidates.
+  let maxPlayerCount = 1;
+  for (const c of filteredCandidates) {
+    if (typeof c.playerCount === 'number' && c.playerCount > maxPlayerCount) maxPlayerCount = c.playerCount;
+  }
   // "Hidden gem" = well-reviewed AND in the least-played quarter of the pool (a percentile, not 10% of one outlier's max).
   const knownPlayerCounts = filteredCandidates
     .map(c => c.playerCount)
@@ -539,7 +543,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     const sharedModes = c.gameModes.filter(m => profileModes.has(norm(m)));
 
     const isHiddenGem = (c.metacriticScore ?? 0) >= 80
-      && (c.playerCount ?? Infinity) < hiddenGemPlayerCeiling;
+      && (typeof c.playerCount === 'number' && c.playerCount > 0 ? c.playerCount : Infinity) < hiddenGemPlayerCeiling;
     // A genre only the user rejected is not "intentional variety" — exclude it from Stretch Picks.
     const isStretchPick = cCanonGenres.length > 0 && sharedGenres.length === 0
       && !cCanonGenres.some(x => rejectedGenresNorm.has(norm(x)));

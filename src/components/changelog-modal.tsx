@@ -11,6 +11,14 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.86': {
+    title: "What's New in Ark 1.0.86",
+    changes: [
+      'Player counts fixed: no more "1 playing now" on huge games like Call of Duty. Launcher-based store pages show their real player count.',
+      'Player counts refresh every 10 minutes and appear on cards further down Browse as you scroll.',
+      'Recommendations no longer treat a missing player count as an obscure "hidden gem".',
+    ],
+  },
   '1.0.85': {
     title: "What's New in Ark 1.0.85",
     changes: [

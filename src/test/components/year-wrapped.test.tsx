@@ -1,7 +1,11 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, configure, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WrappedInputs } from '@/components/year-wrapped/stats';
 import type { GameSession, JourneyEntry } from '@/types/game';
+
+// Wrapped mounts a heavy animated overlay; under full-suite load its first render can take longer
+// than the 1s default wait, which made these tests flaky (they pass alone).
+configure({ asyncUtilTimeout: 5000 });
 
 vi.mock('canvas-confetti', () => {
   const fire = Object.assign(vi.fn(() => Promise.resolve()), { reset: vi.fn() });

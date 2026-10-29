@@ -1,0 +1,104 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Oracle golden top-20 > backlog-heavy library 1`] = `
+{
+  "shelves": [
+    "hero",
+    "deep-in-genre",
+    "for-your-mood",
+    "for-your-mood",
+    "stretch-picks",
+    "backlog-advisor",
+  ],
+  "top": [
+    "hero steam-7030 0.427",
+    "deep-in-genre steam-7050 0.397",
+    "deep-in-genre steam-7000 0.391",
+    "deep-in-genre steam-7060 0.373",
+    "deep-in-genre steam-7080 0.369",
+    "deep-in-genre steam-7020 0.367",
+    "deep-in-genre steam-7100 0.361",
+    "deep-in-genre steam-7010 0.359",
+    "deep-in-genre steam-7070 0.358",
+    "deep-in-genre steam-7110 0.343",
+    "deep-in-genre steam-7090 0.341",
+    "deep-in-genre steam-7040 0.291",
+    "for-your-mood steam-7012 0.293",
+    "for-your-mood steam-7112 0.285",
+    "for-your-mood steam-7082 0.281",
+    "for-your-mood steam-7002 0.275",
+    "for-your-mood steam-7022 0.274",
+    "for-your-mood steam-7052 0.270",
+    "for-your-mood steam-7102 0.268",
+    "for-your-mood steam-7072 0.265",
+  ],
+}
+`;
+
+exports[`Oracle golden top-20 > multi-taste library 1`] = `
+{
+  "shelves": [
+    "hero",
+    "deep-in-genre",
+    "for-your-mood",
+    "stretch-picks",
+    "finish-and-try",
+    "unfinished-business",
+  ],
+  "top": [
+    "hero steam-7030 0.352",
+    "deep-in-genre steam-7050 0.321",
+    "deep-in-genre steam-7000 0.316",
+    "deep-in-genre steam-7060 0.298",
+    "deep-in-genre steam-7080 0.294",
+    "deep-in-genre steam-7020 0.291",
+    "deep-in-genre steam-7100 0.286",
+    "deep-in-genre steam-7010 0.284",
+    "deep-in-genre steam-7070 0.282",
+    "deep-in-genre steam-7110 0.268",
+    "deep-in-genre steam-7090 0.266",
+    "deep-in-genre steam-7040 0.216",
+    "for-your-mood steam-7012 0.309",
+    "for-your-mood steam-7112 0.302",
+    "for-your-mood steam-7082 0.297",
+    "for-your-mood steam-7002 0.291",
+    "for-your-mood steam-7022 0.291",
+    "for-your-mood steam-7052 0.286",
+    "for-your-mood steam-7102 0.285",
+    "for-your-mood steam-7072 0.281",
+  ],
+}
+`;
+
+exports[`Oracle golden top-20 > new user 1`] = `
+{
+  "shelves": [
+    "hero",
+    "deep-in-genre",
+    "stretch-picks",
+    "unfinished-business",
+  ],
+  "top": [
+    "hero steam-7030 0.450",
+    "deep-in-genre steam-7050 0.420",
+    "deep-in-genre steam-7000 0.414",
+    "deep-in-genre steam-7060 0.396",
+    "deep-in-genre steam-7080 0.392",
+    "deep-in-genre steam-7020 0.390",
+    "deep-in-genre steam-7100 0.384",
+    "deep-in-genre steam-7010 0.382",
+    "deep-in-genre steam-7070 0.381",
+    "deep-in-genre steam-7110 0.366",
+    "deep-in-genre steam-7090 0.365",
+    "deep-in-genre steam-7040 0.314",
+    "stretch-picks steam-7023 0.226",
+    "stretch-picks steam-7085 0.223",
+    "stretch-picks steam-7048 0.212",
+    "stretch-picks steam-7008 0.204",
+    "stretch-picks steam-7086 0.201",
+    "stretch-picks steam-7066 0.199",
+    "stretch-picks steam-7083 0.197",
+    "stretch-picks steam-7049 0.194",
+  ],
+}
+`;

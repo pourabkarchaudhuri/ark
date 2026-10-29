@@ -13,5 +13,6 @@
  *       pool hygiene, catalogue shelves from the whole scored pool
  *   7 — v1.0.81 late stages: scoped/blended/tier-gated rerank, embedding-aware MMR
  *   8 — v1.0.82 feedback loop: stronger/decaying thumbs+dismiss signal, bandit and state-correctness fixes
+ *   9 — v1.0.86 player counts: unknown/implausible counts are null (no longer "obscure" or hidden gems)
  */
-export const ORACLE_ENGINE_VERSION = 8;
+export const ORACLE_ENGINE_VERSION = 9;

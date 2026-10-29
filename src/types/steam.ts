@@ -246,8 +246,9 @@ declare global {
       // Fetch catalog metadata batch (runs main-process to bypass CORS)
       fetchCatalogBatch: (appIds: number[]) => Promise<any[]>;
       // Player counts
-      getPlayerCount: (appId: number) => Promise<number>;
-      getMultiplePlayerCounts: (appIds: number[]) => Promise<Record<number, number>>;
+      /** null = unknown (error, unknown app, or no valid count from Steam). */
+      getPlayerCount: (appId: number) => Promise<number | null>;
+      getMultiplePlayerCounts: (appIds: number[]) => Promise<Record<number, number | null>>;
       getQueueStatus: () => Promise<QueueStatus>;
       clearCache: () => Promise<void>;
       // Background prefetch for faster navigation

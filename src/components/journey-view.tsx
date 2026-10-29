@@ -16,6 +16,7 @@
  * lib/voyage-derive.ts, so retiring the loser is a single commit.
  */
 import { useMemo, useState, useEffect, memo, useCallback } from 'react';
+import { formatPlayerCount } from '@/lib/player-count';
 import { useLocation } from 'wouter';
 import { motion } from 'framer-motion';
 import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, Clapperboard, ClipboardCheck, ScrollText, X, Box, Award } from 'lucide-react';
@@ -62,18 +63,6 @@ function getJourneyImageChain(entry: { gameId: string; title: string; coverUrl?:
   return buildGameImageChain(entry.gameId, displayTitle, coverUrl, headerImage);
 }
 
-/** Format player count with K/M suffixes */
-function formatPlayerCount(count: number): string {
-  if (count >= 1_000_000) {
-    const m = count / 1_000_000;
-    return m >= 10 ? `${Math.round(m)}M` : `${m.toFixed(1).replace(/\.0$/, '')}M`;
-  }
-  if (count >= 1_000) {
-    const k = count / 1_000;
-    return k >= 10 ? `${Math.round(k)}K` : `${k.toFixed(1).replace(/\.0$/, '')}K`;
-  }
-  return count.toLocaleString();
-}
 
 interface JourneyViewProps {
   entries: JourneyEntry[];

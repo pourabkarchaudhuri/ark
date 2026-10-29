@@ -4,6 +4,7 @@
  */
 
 import { Game, LibraryGameEntry } from '@/types/game';
+import { sanitizePlayerCount } from '@/lib/player-count';
 import { SteamMostPlayedGame, SteamAppDetails, SteamSearchItem, SteamNewsItem, SteamAppListItem, getSteamCoverUrl } from '@/types/steam';
 import { libraryStore } from './library-store';
 
@@ -510,12 +511,29 @@ class SteamService {
     if (!isElectron() || !window.steam?.getMultiplePlayerCounts) {
       return {};
     }
+    // Every screen gets its counts through here, so this is where they are made trustworthy:
+    // unknown/0 counts are dropped and tiny counts on heavily reviewed games are treated as unknown
+    // (launcher-style store pages). Only believable counts are returned; missing = unknown.
+    const IPC_MAX_BATCH = 200;
+    const raw: Record<number, number | null> = {};
     try {
-      return await window.steam.getMultiplePlayerCounts(appIds);
+      for (let i = 0; i < appIds.length; i += IPC_MAX_BATCH) {
+        Object.assign(raw, await window.steam.getMultiplePlayerCounts(appIds.slice(i, i + IPC_MAX_BATCH)));
+      }
     } catch (error) {
       console.warn('[Steam Service] getMultiplePlayerCounts failed:', error);
-      return {};
     }
+    const reviews = await reviewCountsFor(Object.keys(raw).map(Number));
+    const out: Record<number, number> = {};
+    for (const [idStr, count] of Object.entries(raw)) {
+      const id = Number(idStr);
+      const clean = sanitizePlayerCount(count, reviews.get(id));
+      if (clean !== null) out[id] = clean;
+      else if (typeof count === 'number' && count > 0) {
+        console.log(`[Steam Service] Ignoring implausible player count for steam-${id}: ${count} (reviews ${reviews.get(id)})`);
+      }
+    }
+    return out;
   }
 
   /**
@@ -617,7 +635,6 @@ class SteamService {
         releaseDate: new Date(2024, Math.floor(Math.random() * 12), Math.floor(Math.random() * 28) + 1).toISOString(),
         summary: `This is a mock game description for ${data.title}.`,
         coverUrl: getSteamCoverUrl(data.appId), // Use real Steam cover URL
-        playerCount: Math.floor(Math.random() * 500000),
         rank: i + 1,
         status: 'Want to Play',
         priority: 'Medium',
@@ -633,5 +650,22 @@ class SteamService {
 }
 
 // Export singleton
+
+/** Steam review counts for the plausibility check, from the local catalog (empty when unavailable). */
+async function reviewCountsFor(appIds: number[]): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  if (appIds.length === 0) return out;
+  try {
+    const { catalogStore } = await import('./catalog-store');
+    const entries = await catalogStore.getEntries(appIds);
+    for (const e of entries ?? []) {
+      if (e && typeof e.appid === 'number' && typeof e.reviewCount === 'number') out.set(e.appid, e.reviewCount);
+    }
+  } catch {
+    // No catalog (first run, tests, browser mode): only the count itself is checked.
+  }
+  return out;
+}
+
 export const steamService = new SteamService();
 

@@ -313,6 +313,19 @@ function fetchWithTimeout(url: string, timeoutMs: number = 30000): Promise<Respo
 }
 
 // Steam API Client
+
+/**
+ * Store pages whose players Steam counts under another appid. Recent Call of Duty titles launch
+ * through Call of Duty HQ (1938090): GetNumberOfCurrentPlayers for the store page itself returns 0-5
+ * while HQ reports six figures (measured 2026-10-29: 2519060 → 0, 2933620 → 0, 1962663 → 4,
+ * 1938090 → 147,422).
+ */
+export const PLAYER_COUNT_ALIASES: Readonly<Record<number, number>> = {
+  2519060: 1938090, // Call of Duty: Modern Warfare III
+  2933620: 1938090, // Call of Duty: Black Ops 6
+  1962663: 1938090, // Call of Duty: Warzone
+};
+
 class SteamAPIClient {
   private rateLimiter = new RateLimiter();
   private cache = new Cache('steam-cache.json');
@@ -748,45 +761,55 @@ class SteamAPIClient {
 
   /**
    * Get current player count for a single game (public API, no key required).
-   * Uses ISteamUserStats/GetNumberOfCurrentPlayers/v1
+   * Uses ISteamUserStats/GetNumberOfCurrentPlayers/v1.
+   *
+   * Returns null when the count is unknown: HTTP errors (404 for unknown apps), timeouts and
+   * responses without `result: 1`. 0 is only returned when Steam really reports nobody playing.
+   * Store pages that play through a shared launcher are counted under that launcher's appid
+   * (PLAYER_COUNT_ALIASES); Steam reports a handful of players for the store page itself.
    */
-  async getPlayerCount(appId: number): Promise<number> {
-    const cacheKey = `player-count-${appId}`;
+  async getPlayerCount(appId: number): Promise<number | null> {
+    const sourceId = PLAYER_COUNT_ALIASES[appId] ?? appId;
+    const cacheKey = `player-count-${sourceId}`;
     const PLAYER_COUNT_TTL = 5 * 60 * 1000; // 5 minutes
+    const UNKNOWN_TTL = 2 * 60 * 1000;
 
+    // The cache treats a stored null as a miss, so unknown results are cached as -1.
     const cached = this.cache.get<number>(cacheKey);
-    if (cached !== undefined && cached !== null) return cached;
+    if (cached !== undefined && cached !== null) return cached < 0 ? null : cached;
 
     try {
-      const url = `https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=${appId}&format=json`;
+      const url = `https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=${sourceId}&format=json`;
       const result = await this.rateLimiter.execute(async () => {
         const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Player count API error: ${res.status}`);
         return res.json();
-      }, `player-count-${appId}`);
+      }, `player-count-${sourceId}`);
 
-      const count = Number(result?.response?.player_count ?? 0);
-      this.cache.set(cacheKey, count, PLAYER_COUNT_TTL);
+      const raw = result?.response?.player_count;
+      const count = result?.response?.result === 1 && typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+      this.cache.set(cacheKey, count ?? -1, count === null ? UNKNOWN_TTL : PLAYER_COUNT_TTL);
       return count;
     } catch (error) {
-      // Expected for unreleased/new games — silently return 0
+      // Unknown/unreleased apps answer 404; network errors are not "0 players".
       void error;
-      return 0;
+      this.cache.set(cacheKey, -1, UNKNOWN_TTL);
+      return null;
     }
   }
 
   /**
    * Get current player counts for multiple games in parallel.
-   * Returns a Map of appId -> playerCount.
+   * Returns appId -> playerCount (null = unknown).
    */
-  async getMultiplePlayerCounts(appIds: number[]): Promise<Record<number, number>> {
+  async getMultiplePlayerCounts(appIds: number[]): Promise<Record<number, number | null>> {
     const results = await Promise.all(
       appIds.map(async (id) => {
         const count = await this.getPlayerCount(id);
         return [id, count] as const;
       })
     );
-    const map: Record<number, number> = {};
+    const map: Record<number, number | null> = {};
     for (const [id, count] of results) {
       map[id] = count;
     }
