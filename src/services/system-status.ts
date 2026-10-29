@@ -134,7 +134,10 @@ export function oracleLayersStatus(
     `${sparseLayers.length} sparse`,
     `top-20 ties ${t.top20Ties}`,
     `ML ${Math.round(t.mlCoverage * 100)}%`,
-    `emb ${Math.round(t.embeddingCoverage * 100)}%`,
+    `emb ${Math.round(t.embeddingCoverage * 100)}%${t.embeddingCoverageBySource
+      ? ` (${Object.entries(t.embeddingCoverageBySource).map(([k, v]) => `${k} ${Math.round(v * 100)}%`).join(', ')})`
+      : ''}`,
+    ...(t.graphNeighborSource ? [`graph via ${t.graphNeighborSource}`] : []),
     ...(fb ? [fb] : []),
   ];
   return {

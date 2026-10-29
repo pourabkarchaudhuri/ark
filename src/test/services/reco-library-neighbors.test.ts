@@ -67,22 +67,39 @@ beforeEach(() => {
 });
 
 describe('RecoStore.computeLibraryNeighbors', () => {
-  const run = (store: RecoStore, users: UserGameSnapshot[], ids: string[]) =>
-    (store as any).computeLibraryNeighbors(users, new Set(ids)) as Promise<Record<string, Array<{ u: string; d: number }>> | undefined>;
+  type Result = { neighbors: Record<string, Array<{ u: string; d: number }>> | undefined; source: 'pool' | 'ann' | 'none' };
+  const run = (store: RecoStore, users: UserGameSnapshot[], candidates: CandidateGame[]) =>
+    (store as any).computeLibraryNeighbors(users, candidates) as Promise<Result>;
+  const bare = (...ids: string[]) => ids.map(id => makeCandidate(id));
 
-  it('is undefined when ANN is not ready, without querying', async () => {
+  it('reports "none" when no library game has an embedding, without querying', async () => {
+    expect(await run(new RecoStore(), [makeUser('steam-1')], bare('steam-9'))).toEqual({ neighbors: undefined, source: 'none' });
+    expect(neighborsMock).not.toHaveBeenCalled();
+  });
+
+  it('v1.0.94: finds neighbours inside the candidate pool when candidates have vectors (no ANN query)', async () => {
+    const users = [makeUser('steam-1', { embedding: vec(1, 0, 0, 0), hoursPlayed: 50, rating: 5 })];
+    const candidates = [
+      makeCandidate('steam-100', { embedding: vec(0.95, 0.1, 0, 0) }),
+      makeCandidate('steam-200', { embedding: vec(0, 1, 0, 0) }), // too far
+      makeCandidate('steam-300'),                                 // no vector
+    ];
+    const out = await run(new RecoStore(), users, candidates);
+    expect(out.source).toBe('pool');
+    expect(Object.keys(out.neighbors!)).toEqual(['steam-100']);
+    expect(out.neighbors!['steam-100'][0].u).toBe('steam-1');
+    expect(out.neighbors!['steam-100'][0].d).toBeLessThan(GRAPH_NEIGHBOR_DISTANCE_CEILING);
+    expect(neighborsMock).not.toHaveBeenCalled();
+  });
+
+  it('falls back to "none" when no candidate has a vector and the ANN index is not ready', async () => {
     ann.isReady = false;
     const users = [makeUser('steam-1', { embedding: vec(1, 0, 0, 0) })];
-    expect(await run(new RecoStore(), users, ['steam-9'])).toBeUndefined();
+    expect(await run(new RecoStore(), users, bare('steam-9'))).toEqual({ neighbors: undefined, source: 'none' });
     expect(neighborsMock).not.toHaveBeenCalled();
   });
 
-  it('is undefined when no library game has an embedding', async () => {
-    expect(await run(new RecoStore(), [makeUser('steam-1')], ['steam-9'])).toBeUndefined();
-    expect(neighborsMock).not.toHaveBeenCalled();
-  });
-
-  it('inverts library->neighbours into candidate->hits, dropping non-candidates and hits past the ceiling', async () => {
+  it('ANN fallback inverts library->neighbours into candidate->hits, dropping non-candidates and hits past the ceiling', async () => {
     neighborsMock.mockResolvedValue(new Map([
       ['steam-1', [
         { id: 'steam-100', distance: 0.1 },
@@ -95,30 +112,25 @@ describe('RecoStore.computeLibraryNeighbors', () => {
       makeUser('steam-1', { embedding: vec(1, 0, 0, 0), hoursPlayed: 50, rating: 5 }),
       makeUser('steam-2', { embedding: vec(0, 1, 0, 0), hoursPlayed: 10, rating: 4 }),
     ];
-    const out = await run(new RecoStore(), users, ['steam-100', 'steam-200']);
+    const out = await run(new RecoStore(), users, bare('steam-100', 'steam-200'));
     expect(out).toEqual({
-      'steam-100': [{ u: 'steam-1', d: 0.1 }, { u: 'steam-2', d: 0.3 }],
+      neighbors: { 'steam-100': [{ u: 'steam-1', d: 0.1 }, { u: 'steam-2', d: 0.3 }] },
+      source: 'ann',
     });
   });
 
-  it('queries only the strongest library games (by the graph-signal weights), never removed ones, capped at 32', async () => {
+  it('uses only the strongest library games (by the graph-signal weights), never removed ones, capped at 32; ANN asks 100 each', async () => {
     neighborsMock.mockResolvedValue(new Map());
     const users = [
       ...Array.from({ length: 60 }, (_, i) =>
         makeUser(`steam-${i}`, { embedding: vec(1, 0, 0, 0), hoursPlayed: i, rating: 4 })),
       makeUser('steam-removed', { embedding: vec(1, 0, 0, 0), hoursPlayed: 500, rating: 5, removedAt: '2026-01-01' }),
     ];
-    await run(new RecoStore(), users, ['steam-9000']);
+    await run(new RecoStore(), users, bare('steam-9000'));
     const sources = neighborsMock.mock.calls[0][0] as Array<{ gameId: string }>;
     expect(sources).toHaveLength(32);
     expect(sources.some(s => s.gameId === 'steam-removed')).toBe(false);
-    // Strongest (most played) first among the survivors.
     expect(sources[0].gameId).toBe('steam-59');
-  });
-
-  it('asks the ANN for 100 neighbours per source', async () => {
-    neighborsMock.mockResolvedValue(new Map());
-    await run(new RecoStore(), [makeUser('steam-1', { embedding: vec(1, 0, 0, 0) })], ['steam-9']);
     expect(neighborsMock.mock.calls[0][1]).toBe(100);
   });
 });
@@ -158,7 +170,10 @@ describe('compute() dispatches neighbours + clusters to the worker', () => {
     expect(runWorker).toHaveBeenCalledTimes(1);
     const input = runWorker.mock.calls[0][0] as RecoWorkerInput;
 
-    expect(input.libraryNeighbors).toEqual({ 'steam-100': [{ u: 'steam-1', d: 0.1 }] });
+    // v1.0.94: neighbours come from the pool itself (both candidates carry vectors).
+    expect(input.graphNeighborSource).toBe('pool');
+    expect(input.libraryNeighbors!['steam-100'].map(h => h.u)).toContain('steam-1');
+    expect(neighborsMock).not.toHaveBeenCalled();
 
     expect(input.precomputedClusters!.length).toBeGreaterThanOrEqual(2);
     expect(input.precomputedClusters!.every(c => c.semanticCentroid)).toBe(true);

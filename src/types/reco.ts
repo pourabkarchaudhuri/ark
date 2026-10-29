@@ -347,6 +347,10 @@ export interface RecoWorkerInput {
    * from the catalog). Their genres/themes/developer still feed the feedback profiles.
    */
   feedbackCandidates?: CandidateGame[];
+  /** Where the graph layer's library neighbours came from (diagnostics). */
+  graphNeighborSource?: 'pool' | 'ann' | 'none';
+  /** Embedding coverage of the candidate pool per store (diagnostics). */
+  embeddingCoverageBySource?: Record<string, number>;
   /** Precomputed taste centroid (768-dim). Undefined if no library embeddings. */
   tasteCentroid?: number[];
   /**
@@ -462,6 +466,8 @@ export interface RecoTelemetry {
   };
   /** Share of candidates whose graph signal reaches the weighting threshold (what the weights see). */
   graphCoverageAtThreshold?: number;
+  graphNeighborSource?: 'pool' | 'ann' | 'none';
+  embeddingCoverageBySource?: Record<string, number>;
 }
 
 /** Final results from the worker. */

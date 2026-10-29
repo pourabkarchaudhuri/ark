@@ -237,3 +237,8 @@ The following gaps were fixed and removed from the active list:
 - Whether Steam's IStoreBrowseService/GetItems returns planned release dates for unreleased apps could not be checked from this network (store.steampowered.com is blocked); if it does not, future Steam entries still come only from the store-front carousels. Recent releases are unaffected.
 - Steam "Q1 2027" / "To be announced" strings still go to the Coming Soon sidebar rather than a month.
 - Future-dated catalog entries have no popularity signal (no reviews yet), so the 400 nearest are shown regardless of interest.
+
+## Graph / embedding gaps (found during 1.0.94)
+- Candidates without a stored vector (unembedded catalog rows, Ollama off) still get no semantic or pool-neighbour signal; on-demand embedding of survivors (plan part B) was deferred until the new per-store coverage numbers show it is the bottleneck.
+- Graph community / PageRank layers only grow after the background graph rebuild (throttled to every 10 minutes).
+- Pool neighbours use pooled game vectors; the distance ceiling (0.45) was tuned for the index's chunk-based distances and may admit more neighbours than before. Watch the "graph" coverage and golden diffs.

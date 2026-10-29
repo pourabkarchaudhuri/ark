@@ -35,6 +35,7 @@ import {
   _engagementCache,
   bestPreparedClusterSimilarity,
   buildGraphUserContext,
+  computePoolNeighbors,
   detectTasteClusters,
   normalizeTitleKey,
   prepareClusterCentroids,
@@ -722,11 +723,13 @@ export class RecoStore {
       if (catalogEmbeddingEnricher) {
         setProgress('Enriching catalog embeddings...', 9);
         const catalogIds = new Set<string>();
+        // Steam and Epic catalog vectors live in the same store (keys steam-<appid> / epic-<id>).
+        const hasCatalogVector = (id: string) => id.startsWith('steam-') || id.startsWith('epic-');
         for (const c of candidates) {
-          if (!c.embedding && c.gameId.startsWith('steam-')) catalogIds.add(c.gameId);
+          if (!c.embedding && hasCatalogVector(c.gameId)) catalogIds.add(c.gameId);
         }
         for (const ug of userGames) {
-          if (!ug.embedding && ug.gameId.startsWith('steam-')) catalogIds.add(ug.gameId);
+          if (!ug.embedding && hasCatalogVector(ug.gameId)) catalogIds.add(ug.gameId);
         }
         if (catalogIds.size > 0) {
           const enriched = await runWithDeadline(
@@ -793,6 +796,19 @@ export class RecoStore {
       const embeddingCoverage = (tasteCentroid && candidates.length > 0)
         ? candidatesWithEmbeddings / candidates.length
         : 0;
+      // Per store, for the dev panel ("which part of the pool has no vectors?").
+      const embeddingCoverageBySource: Record<string, number> = {};
+      {
+        const totals = new Map<string, [number, number]>();
+        for (const c of candidates) {
+          const src = c.gameId.split('-')[0] || 'other';
+          const t = totals.get(src) ?? [0, 0];
+          t[1]++;
+          if (c.embedding && c.embedding.length > 0) t[0]++;
+          totals.set(src, t);
+        }
+        for (const [src, [withVec, total]] of totals) embeddingCoverageBySource[src] = total > 0 ? withVec / total : 0;
+      }
 
       // 3.55. Taste clusters (deterministic) — the main thread owns them so per-candidate
       // cluster similarity can be computed here, before candidate embeddings are stripped.
@@ -803,11 +819,14 @@ export class RecoStore {
       const clusterScoringEnabled = preparedClusters.length >= 2;
 
       // 3.58. Embedding neighbours of the user's strongest library games (graph signal).
-      const libraryNeighbors = await runWithDeadline(
-        () => this.computeLibraryNeighbors(userGames, new Set(candidates.map(c => c.gameId)), scoringNow),
+      const neighborResult = await runWithDeadline(
+        () => this.computeLibraryNeighbors(userGames, candidates, scoringNow),
         budget(LIBRARY_NEIGHBORS_TIMEOUT_MS), undefined, signal, 'Library neighbours',
       );
       if (isStale()) return;
+      if (!neighborResult) console.log('[RecoStore] Library neighbours: timed out — graph signal uses title matches only');
+      const libraryNeighbors = neighborResult?.neighbors;
+      const graphNeighborSource = neighborResult?.source ?? 'none';
 
       // 3.59. Negative taste centroid (rejected / low-rated / thumbs-down / dismissed) — pushes
       // look-alikes of things the user rejected down in the semantic layer.
@@ -939,6 +958,8 @@ export class RecoStore {
         precomputedClusters: clusterScoringEnabled ? precomputedClusters : undefined,
         precomputedClusterScores,
         libraryNeighbors,
+        graphNeighborSource,
+        embeddingCoverageBySource,
         graphScores: graphScoresMap,
         graphMaxPageRank,
         userCommunityCounts,
@@ -960,17 +981,16 @@ export class RecoStore {
   }
 
   /**
-   * Nearest embedding neighbours of the user's strongest library games,
-   * inverted to candidate id -> hits. One ANN batch over a few dozen library
-   * vectors (instead of one query per candidate) keeps the IPC payload small.
-   * Returns undefined when ANN isn't ready or the library has no vectors.
+   * Nearest embedding neighbours of the user's strongest library games, inverted to candidate id -> hits.
+   * Primary: found inside the candidate pool itself (computePoolNeighbors), while candidate vectors are
+   * still attached. Fallback: one ANN batch over the catalogue when no candidate has a vector.
+   * Every exit is logged so a missing graph signal can be told apart from a weak one.
    */
   private async computeLibraryNeighbors(
     userGames: UserGameSnapshot[],
-    candidateIds: Set<string>,
+    candidates: CandidateGame[],
     now: number = Date.now(),
-  ): Promise<Record<string, Array<{ u: string; d: number }>> | undefined> {
-    if (!annIndex.isReady) return undefined;
+  ): Promise<{ neighbors: Record<string, Array<{ u: string; d: number }>> | undefined; source: 'pool' | 'ann' | 'none' }> {
     // Rank sources by the SAME weights the graph signal uses, so the games that set
     // the "fully related" reference mass are the ones whose neighbours we fetch.
     const weights = buildGraphUserContext(userGames, now).ugWeights;
@@ -979,7 +999,25 @@ export class RecoStore {
       .map(ug => ({ gameId: ug.gameId, vector: ug.embedding!, weight: weights.get(ug.gameId) ?? 0 }))
       .sort((a, b) => b.weight - a.weight)
       .slice(0, LIBRARY_NEIGHBOR_SOURCES);
-    if (sources.length === 0) return undefined;
+    if (sources.length === 0) {
+      console.log('[RecoStore] Library neighbours: no library game has an embedding yet — graph signal uses title matches only');
+      return { neighbors: undefined, source: 'none' };
+    }
+
+    if (candidates.some(c => c.embedding && c.embedding.length > 0)) {
+      const { neighbors, hits } = computePoolNeighbors(sources, candidates, {
+        k: LIBRARY_NEIGHBOR_K,
+        ceiling: GRAPH_NEIGHBOR_DISTANCE_CEILING,
+      });
+      console.log(`[RecoStore] Library neighbours (pool): ${sources.length} sources -> ${hits} hits on ${Object.keys(neighbors).length} candidates`);
+      return { neighbors, source: 'pool' };
+    }
+
+    if (!annIndex.isReady) {
+      console.log('[RecoStore] Library neighbours: no candidate vectors and the similarity index is not ready — title matches only');
+      return { neighbors: undefined, source: 'none' };
+    }
+    const candidateIds = new Set(candidates.map(c => c.gameId));
 
     const neighbors = await getAnnNeighborsForRecoBatch(
       sources.map(({ gameId, vector }) => ({ gameId, vector })),
@@ -995,8 +1033,8 @@ export class RecoStore {
         hits++;
       }
     }
-    console.log(`[RecoStore] Library neighbours: ${sources.length} sources -> ${hits} hits on ${Object.keys(out).length} candidates`);
-    return out;
+    console.log(`[RecoStore] Library neighbours (ANN): ${sources.length} sources -> ${hits} hits on ${Object.keys(out).length} candidates`);
+    return { neighbors: out, source: 'ann' };
   }
 
   private buildUserGameSnapshots(): UserGameSnapshot[] {

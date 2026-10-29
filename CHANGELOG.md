@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.94] - 2026-10-29
+
+### Fixed — Oracle graph signal and embedding coverage
+- **The graph signal reaches the games that are actually similar.** It looked up each library game's nearest neighbours across the whole catalogue (100K+ games) and then kept only the few that happened to be among the ~3,000 candidates of the run, so only ~4% of candidates ever got a graph score. Neighbours are now found inside the candidate pool itself (each of your 32 strongest games keeps its 100 nearest candidates within the same similarity limit), which is also deterministic and no longer depends on the similarity index being ready or answering within 8 seconds. The index lookup remains the fallback when candidates have no vectors.
+- **Every way the graph step can end is logged** (pool, index, no library vectors, index not ready, timed out), and the dev panel shows which path was used ("graph via pool").
+- **Epic candidates get their stored embedding vectors.** The catalog lookup only asked for Steam ids, although Epic vectors are kept in the same store, so Epic games always scored 0 on the semantic layers.
+- **Embedding coverage per store** on the dev panel ("emb 74% (steam 80%, epic 61%)").
+- Engine version 13: recommendations are recalculated once.
+
 ## [1.0.93] - 2026-10-29
 
 ### Fixed — Oracle "dead layers"

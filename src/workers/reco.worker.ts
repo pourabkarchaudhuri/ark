@@ -744,6 +744,8 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     mlCoverage,
     graphScoresAvailable: hasGraphScores,
     graphCoverageAtThreshold: graphSignalCoverage,
+    graphNeighborSource: input.graphNeighborSource,
+    embeddingCoverageBySource: input.embeddingCoverageBySource,
     feedback: {
       up: thumbsUpIds.length,
       down: thumbsDownIds.length,

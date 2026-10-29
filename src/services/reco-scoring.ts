@@ -1359,6 +1359,55 @@ export function assembleWeights(p: {
   return out as unknown as ScoringWeights;
 }
 
+/**
+ * Embedding neighbours of the user's strongest library games, found INSIDE the candidate pool.
+ *
+ * The ANN lookup this replaces fetched each library game's nearest neighbours across the whole
+ * catalogue (100K+ games) and then kept only those that happened to be in the ~3K candidates, so a few
+ * percent of the pool ever got a graph signal. Here each source's `k` nearest candidates (within the
+ * distance ceiling) are taken from the pool itself, so coverage follows real similarity.
+ * Distance is cosine distance (1 - cos), the same scale as the ANN index. Pure and synchronous.
+ */
+export function computePoolNeighbors(
+  sources: ReadonlyArray<{ gameId: string; vector: ArrayLike<number> }>,
+  candidates: ReadonlyArray<{ gameId: string; embedding?: ArrayLike<number> }>,
+  opts: { k: number; ceiling: number },
+): { neighbors: Record<string, Array<{ u: string; d: number }>>; hits: number } {
+  const neighbors: Record<string, Array<{ u: string; d: number }>> = {};
+  if (sources.length === 0) return { neighbors, hits: 0 };
+  const dim = sources[0].vector.length;
+  const pool: Array<{ id: string; v: ArrayLike<number>; norm: number }> = [];
+  for (const c of candidates) {
+    const v = c.embedding;
+    if (!v || v.length !== dim) continue;
+    let n = 0;
+    for (let i = 0; i < dim; i++) n += v[i] * v[i];
+    if (n > 0) pool.push({ id: c.gameId, v, norm: Math.sqrt(n) });
+  }
+  let hits = 0;
+  for (const src of sources) {
+    if (src.vector.length !== dim) continue;
+    let sn = 0;
+    for (let i = 0; i < dim; i++) sn += src.vector[i] * src.vector[i];
+    if (sn <= 0) continue;
+    const srcNorm = Math.sqrt(sn);
+    const near: Array<{ id: string; d: number }> = [];
+    for (const p of pool) {
+      if (p.id === src.gameId) continue;
+      let dot = 0;
+      for (let i = 0; i < dim; i++) dot += src.vector[i] * p.v[i];
+      const d = 1 - dot / (srcNorm * p.norm);
+      if (d <= opts.ceiling) near.push({ id: p.id, d });
+    }
+    near.sort((a, b) => a.d - b.d);
+    for (const n of near.slice(0, opts.k)) {
+      (neighbors[n.id] ??= []).push({ u: src.gameId, d: n.d });
+      hits++;
+    }
+  }
+  return { neighbors, hits };
+}
+
 /** Map a raw score onto 0–100 across the pool's [lo, hi] range (raw scores sit in a narrow low band). */
 export function calibrateMatchPercent(score: number, lo: number, hi: number): number {
   if (!(hi > lo)) return Math.round(clamp01(score) * 100);
@@ -1420,6 +1469,8 @@ export function computeRecoTelemetry(args: {
   conditional?: Record<string, { active: boolean; note?: string }>;
   feedback?: RecoTelemetry['feedback'];
   graphCoverageAtThreshold?: number;
+  graphNeighborSource?: RecoTelemetry['graphNeighborSource'];
+  embeddingCoverageBySource?: Record<string, number>;
 }): RecoTelemetry {
   const { scored, weights, funnel } = args;
   const layers: RecoLayerStat[] = TELEMETRY_LAYERS.map(layer => {
@@ -1473,5 +1524,7 @@ export function computeRecoTelemetry(args: {
     weightSum,
     ...(args.feedback ? { feedback: args.feedback } : {}),
     ...(args.graphCoverageAtThreshold !== undefined ? { graphCoverageAtThreshold: args.graphCoverageAtThreshold } : {}),
+    ...(args.graphNeighborSource ? { graphNeighborSource: args.graphNeighborSource } : {}),
+    ...(args.embeddingCoverageBySource ? { embeddingCoverageBySource: args.embeddingCoverageBySource } : {}),
   };
 }

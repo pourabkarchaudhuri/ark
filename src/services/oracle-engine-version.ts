@@ -17,5 +17,6 @@
  *  10 — v1.0.88 an automatic idle On Hold is not a "bounced off" negative signal
  *  11 — v1.0.90 Deals For You uses gg.deals all-time lows
  *  12 — v1.0.93 no weight for feedback layers without feedback; feedback outside the pool is used
+ *  13 — v1.0.94 graph neighbours found inside the candidate pool; Epic candidates get stored vectors
  */
-export const ORACLE_ENGINE_VERSION = 12;
+export const ORACLE_ENGINE_VERSION = 13;
