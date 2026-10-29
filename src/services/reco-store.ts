@@ -12,6 +12,7 @@
  */
 
 import { EMBEDDING_LAYOUT_ID, layoutIdIsCurrent } from '@/services/embedding-layout';
+import { isAutoHeld } from '@/lib/status-source';
 import { percentileRanks } from './ml-normalize';
 import type {
   TasteProfile,
@@ -1054,6 +1055,7 @@ export class RecoStore {
         avgSessionMinutes,
         lastSessionDate: lastSession?.endTime || null,
         activeToIdleRatio: totalDuration > 0 ? totalDuration / (totalDuration + totalIdle) : 1,
+        autoHeld: (libEntry?.status || entry.status) === 'On Hold' && isAutoHeld(statusHistoryStore.getForGame(entry.gameId)),
         statusTrajectory: trajectory,
         similarGameTitles,
         engagementPattern,

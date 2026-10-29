@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { isBookkeepingStatusChange } from '@/lib/status-source';
 import type { JourneyEntry, StatusChangeEntry, GameSession, LibraryGameEntry } from '@/types/game';
 import { ALL_BADGES } from '@/data/badges';
 import type { BadgeCondition, BadgeProgress, BadgeBranch, TasteDnaAxis, BadgeTier } from '@/data/badge-types';
@@ -153,7 +154,8 @@ function computeDerivedStats(
     sessionCount: sessions.length,
     ratingCount,
     reviewCount,
-    statusChangeCount: statusHistory.length,
+    // Automatic/bookkeeping rows (idle On Hold, cross-store sync, undo) are not the user's activity.
+    statusChangeCount: statusHistory.filter(r => !isBookkeepingStatusChange(r)).length,
     genreSet,
     genreGameCounts,
     genreHours,

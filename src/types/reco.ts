@@ -256,6 +256,8 @@ export interface UserGameSnapshot {
   avgSessionMinutes: number;
   lastSessionDate: string | null;
   activeToIdleRatio: number;
+  /** On Hold because the idle sweep moved it (not a rejection). */
+  autoHeld?: boolean;
   /** Status trajectory (ordered list of status changes). */
   statusTrajectory: GameStatus[];
   /** Similar games from game metadata (pre-resolved titles). */

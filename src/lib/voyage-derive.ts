@@ -18,6 +18,7 @@ import type {
   LibraryGameEntry,
   StatusChangeEntry,
 } from '@/types/game';
+import { isBookkeepingStatusChange } from '@/lib/status-source';
 
 export const MINUTE_MS = 60_000;
 export const HOUR_MS = 3_600_000;
@@ -534,6 +535,8 @@ export function detectStatusChurnGameIds(
 
   const byGame = new Map<string, number[]>();
   for (const e of statusHistory) {
+    // Ark's own changes (idle On Hold, sync, undo) are not the user tidying their records.
+    if (isBookkeepingStatusChange(e)) continue;
     const ms = parseIsoMs(e.timestamp);
     if (ms === null) continue;
     let list = byGame.get(e.gameId);

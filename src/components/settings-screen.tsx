@@ -24,6 +24,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { libraryStore } from '@/services/library-store';
 import { gameService } from '@/services/game-service';
 import { useDevMode } from '@/hooks/useDevMode';
+import {
+  getAutoOnHoldEnabled,
+  getAutoStatusTransitionEnabled,
+  setAutoOnHoldEnabled,
+  setAutoStatusTransitionEnabled,
+} from '@/lib/auto-status-settings';
 import { useBetaFeatures } from '@/hooks/useBetaFeatures';
 import { useAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { APP_VERSION, getLatestChangelog } from '@/components/changelog-modal';
@@ -157,6 +163,8 @@ const GeneralTab = memo(function GeneralTab() {
   const [overlayCycleHotkeyOk, setOverlayCycleHotkeyOk] = useState(true);
   const [betaFeatures, setBetaFeatures] = useBetaFeatures();
   const [devMode, setDevMode] = useDevMode();
+  const [autoOnHold, setAutoOnHold] = useState(getAutoOnHoldEnabled);
+  const [autoPlaying, setAutoPlaying] = useState(getAutoStatusTransitionEnabled);
   const [allowAdultContent, setAllowAdultContent] = useAllowAdultContent();
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMessage, setImportMessage] = useState<string | null>(null);
@@ -259,6 +267,28 @@ const GeneralTab = memo(function GeneralTab() {
               <p className="text-xs text-white/35 mt-0.5">Automatically start Ark when you log in (minimized to system tray)</p>
             </div>
             <Toggle value={autoLaunch} onChange={handleAutoLaunchToggle} />
+          </div>
+          <div className="border-t border-white/[0.04] pt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-white/90">Auto On Hold</p>
+                <p className="text-xs text-white/35 mt-0.5">
+                  Move a game from Playing to On Hold after 4 weeks without play. You get a notice with Undo, and playing it again moves it back to Playing.
+                </p>
+              </div>
+              <Toggle value={autoOnHold} onChange={() => { const v = !autoOnHold; setAutoOnHoldEnabled(v); setAutoOnHold(v); }} />
+            </div>
+          </div>
+          <div className="border-t border-white/[0.04] pt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-white/90">Auto Playing</p>
+                <p className="text-xs text-white/35 mt-0.5">
+                  Move a Want to Play game to Playing after a play session of 10 minutes or more.
+                </p>
+              </div>
+              <Toggle value={autoPlaying} onChange={() => { const v = !autoPlaying; setAutoStatusTransitionEnabled(v); setAutoPlaying(v); }} />
+            </div>
           </div>
           <div className="border-t border-white/[0.04] pt-4">
             <div className="flex items-center justify-between">

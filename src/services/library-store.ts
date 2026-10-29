@@ -1108,6 +1108,13 @@ export class LibraryStore {
         statusHistoryStore.importData(parsed.statusHistory);
       }
 
+      // Imported Playing games get a fresh 4 weeks before the idle sweep may put them On Hold.
+      try {
+        localStorage.setItem('ark:libraryImportedAt', new Date().toISOString());
+      } catch {
+        /* non-critical */
+      }
+
       // Import session history if present
       if (Array.isArray(parsed.sessionHistory)) {
         sessionStore.importData(parsed.sessionHistory);

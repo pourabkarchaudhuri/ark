@@ -5,16 +5,22 @@ import { cn } from '@/lib/utils';
 
 type ToastType = 'success' | 'error' | 'info' | 'warning';
 
+interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface Toast {
   id: string;
   message: string;
   type: ToastType;
   duration?: number;
+  action?: ToastAction;
 }
 
 interface ToastContextType {
   toasts: Toast[];
-  addToast: (message: string, type?: ToastType, duration?: number) => void;
+  addToast: (message: string, type?: ToastType, duration?: number, action?: ToastAction) => void;
   removeToast: (id: string) => void;
   success: (message: string, duration?: number) => void;
   error: (message: string, duration?: number) => void;
@@ -23,6 +29,11 @@ interface ToastContextType {
 }
 
 const ToastContext = createContext<ToastContextType | null>(null);
+
+/** Like useToast, but returns null outside a ToastProvider (for hooks that may mount without one). */
+export function useOptionalToast(): ToastContextType | null {
+  return useContext(ToastContext);
+}
 
 export function useToast() {
   const context = useContext(ToastContext);
@@ -78,9 +89,9 @@ export function ToastProvider({ children }: ToastProviderProps) {
   }, []);
 
   const addToast = useCallback(
-    (message: string, type: ToastType = 'info', duration: number = 3000) => {
+    (message: string, type: ToastType = 'info', duration: number = 3000, action?: ToastAction) => {
       const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      const newToast: Toast = { id, message, type, duration };
+      const newToast: Toast = { id, message, type, duration, action };
 
       setToasts((prev) => [...prev, newToast]);
 
@@ -156,6 +167,17 @@ const ToastItem = forwardRef<HTMLDivElement, ToastItemProps>(({ toast, onRemove 
     >
       <Icon className="h-5 w-5 flex-shrink-0" />
       <span className="flex-1 text-sm font-medium text-foreground">{toast.message}</span>
+      {toast.action && (
+        <button
+          onClick={() => {
+            toast.action!.onClick();
+            onRemove(toast.id);
+          }}
+          className="px-2 py-1 text-xs font-semibold rounded-md bg-white/10 hover:bg-white/20 transition-colors text-foreground"
+        >
+          {toast.action.label}
+        </button>
+      )}
       <button
         onClick={() => onRemove(toast.id)}
         className="p-1 rounded-md hover:bg-white/10 transition-colors"

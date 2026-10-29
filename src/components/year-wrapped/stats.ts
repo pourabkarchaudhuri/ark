@@ -18,6 +18,7 @@
  */
 
 import type { GameSession, JourneyEntry, StatusChangeEntry } from '@/types/game';
+import { isBookkeepingStatusChange } from '@/lib/status-source';
 
 export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export const MONTHS_LONG = [
@@ -226,7 +227,10 @@ export function computeWrappedStats(year: number, input: WrappedInputs, now: Dat
   }
 
   // ── Status changes in the year ──
-  const yearStatusChanges = (input.statusChanges || []).filter((s) => s && inYear(toTime(s.timestamp)));
+  // Automatic/bookkeeping rows (idle On Hold, cross-store sync, undo) are not the user's activity.
+  const yearStatusChanges = (input.statusChanges || []).filter(
+    (s) => s && !isBookkeepingStatusChange(s) && inYear(toTime(s.timestamp)),
+  );
 
   // ── Journey entries touched this year ──
   const addedThisYear = [...journeyById.values()].filter((e) => inYear(toTime(e.addedAt)));

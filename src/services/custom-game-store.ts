@@ -4,6 +4,7 @@ import {
   UpdateCustomGameEntry,
   Game,
 } from '@/types/game';
+import type { StatusChangeSource } from '@/types/game';
 import { journeyStore } from '@/services/journey-store';
 import { sessionStore } from '@/services/session-store';
 import { statusHistoryStore } from '@/services/status-history-store';
@@ -559,7 +560,12 @@ export class CustomGameStore {
   }
 
   // Update a custom game
-  updateGame(id: string, input: UpdateCustomGameEntry): CustomGameEntry | undefined {
+  /** @param opts.source who made a status change (recorded on the status-history row; default user). */
+  updateGame(
+    id: string,
+    input: UpdateCustomGameEntry,
+    opts: { source?: StatusChangeSource } = {},
+  ): CustomGameEntry | undefined {
     if (!this.isCustomGame(id)) return undefined;
 
     const existing = this.entries.get(id);
@@ -646,7 +652,7 @@ export class CustomGameStore {
     }
 
     if (statusChanged) {
-      statusHistoryStore.record(id, updated.title, existing.status, updated.status, { source: 'user' });
+      statusHistoryStore.record(id, updated.title, existing.status, updated.status, { source: opts.source ?? 'user' });
     }
 
     if (journeyStore.has(id) && input.title !== undefined) {

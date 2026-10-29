@@ -5,7 +5,7 @@ import { customGameStore } from '@/services/custom-game-store';
 import { sessionStore } from '@/services/session-store';
 import { oracleEventLog } from '@/services/oracle-event-log';
 import { recoHistoryStore } from '@/services/reco-history-store';
-import { useAutoOnHold } from '@/hooks/useAutoOnHold';
+import { maybeResumeAutoHeld, useAutoOnHold } from '@/hooks/useAutoOnHold';
 
 /** Minimum active minutes for a session to trigger the Want-to-Play → Playing transition. */
 const AUTO_TRANSITION_MIN_MINUTES = 10;
@@ -19,6 +19,13 @@ const AUTO_TRANSITION_LS_KEY = 'ark:autoStatusTransition';
  * back to localStorage, then to `false`. Never throws.
  */
 async function isAutoStatusTransitionEnabled(): Promise<boolean> {
+  // An explicit choice in localStorage (the Settings toggle) wins.
+  try {
+    const raw = window.localStorage?.getItem(AUTO_TRANSITION_LS_KEY);
+    if (raw === 'true' || raw === 'false') return raw === 'true';
+  } catch {
+    /* fall through */
+  }
   try {
     // Future-safe: if/when preload exposes `window.settings.getAutoStatusTransition`,
     // it wins over the localStorage mirror.
@@ -79,11 +86,14 @@ async function maybeAutoTransitionStatus(rawSession: GameSession): Promise<void>
       ? `steam-${rawSession.gameId}`
       : String(rawSession.gameId);
 
-    // Custom games do not live in libraryStore — nothing to transition.
-    if (gameId.startsWith('custom-')) return;
-
     if (!Number.isFinite(rawSession.durationMinutes)) return;
     if (rawSession.durationMinutes < AUTO_TRANSITION_MIN_MINUTES) return;
+
+    // Played again after the idle sweep put it On Hold → back to Playing (library and custom games).
+    if (await maybeResumeAutoHeld(gameId)) return;
+
+    // Custom games do not live in libraryStore — nothing more to transition.
+    if (gameId.startsWith('custom-')) return;
 
     const enabled = await isAutoStatusTransitionEnabled();
     if (!enabled) return;
@@ -159,9 +169,11 @@ export function useSessionTracker() {
   // v1.0.42 — Compose the Playing → On Hold sweep at the same app-root
   // lifecycle. Kept as a hook call (not an effect inside this one) so its own
   // interval is cleaned up independently and unit tests can mount it alone.
-  useAutoOnHold();
+  const liveGamesRef = useRef<ReadonlySet<string>>(new Set());
+  useAutoOnHold(liveGamesRef);
 
   const [liveGames, setLiveGames] = useState<Set<string>>(new Set());
+  liveGamesRef.current = liveGames;
   const cleanupRef = useRef<Array<() => void>>([]);
 
   // Send tracked games list to the main process — stable ref, never changes

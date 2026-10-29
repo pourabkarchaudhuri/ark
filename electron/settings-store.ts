@@ -34,7 +34,7 @@ interface Settings {
     autoStatusTransition?: boolean;
     /**
      * Auto-transition a game from "Playing" → "On Hold" when it has had no session
-     * for 30 days (v1.0.42). Default TRUE — user asked for this explicitly. The
+     * for 4 weeks (v1.0.42; 30 days before v1.0.88). Default TRUE — user asked for this explicitly. The
      * renderer sweeps at app startup and every 60 minutes; when a stale entry is
      * found, `libraryStore.updateEntry` is called with `autoTransitionedAt`
      * stamped. `Completed` entries are never touched.
@@ -451,7 +451,7 @@ class SettingsStore {
     logger.log(`[SettingsStore] Auto status transition set to ${enabled}`);
   }
 
-  // Auto Playing → On Hold transition after 30 days of no play (default: true; v1.0.42).
+  // Auto Playing → On Hold transition after 4 weeks of no play (default: true; v1.0.42, 28 days since v1.0.88).
   getAutoOnHoldTransition(): boolean {
     // Undefined counts as enabled — user explicitly asked for this default.
     return this.settings.preferences?.autoOnHoldTransition !== false;

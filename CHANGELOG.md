@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.88] - 2026-10-29
+
+### Changed — automatic On Hold (since v1.0.42)
+- **4 weeks instead of 30 days.** A game marked Playing with no play for 28 days moves to On Hold.
+- **Play means play:** the clock now also counts the end of your latest recorded play session, and setting a game to Playing still restarts it. A game that is running right now is never moved, and a "Playing Now" status left behind by a crash is treated as Playing.
+- **Custom games are included** (they were never swept before).
+- **You are told, and can undo.** One notice lists the games that moved, with an **Undo** button that puts them back to Playing.
+- **Playing it again brings it back.** When a play session of 10+ minutes ends on a game the sweep put On Hold, it returns to Playing. A game you put On Hold yourself is never touched.
+- **Imports get a fresh start:** after importing a library backup, Playing games get 4 weeks before the sweep looks at them.
+- **New switches in Settings → Application:** "Auto On Hold" (on by default) and "Auto Playing" (moves a Want to Play game to Playing after a 10-minute session; off by default). Before, these could only be changed by hand.
+
+### Fixed — stats stay honest
+- Automatic changes (idle On Hold, a status copied from the same game on another store, Undo) no longer count toward the "status changes" badges, Year Wrapped's status-change total, or the Voyage "tidying up" detector. Older history and badges you already unlocked are unchanged.
+- Recommendations no longer read an automatic On Hold as "you bounced off this game" (engine version 10: recommendations are recalculated once).
+
+### Removed
+- An unused 14-day On Hold suggestion hook.
+
 ## [1.0.87] - 2026-10-29
 
 ### Fixed — Voyage timeline dates

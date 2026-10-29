@@ -11,6 +11,8 @@ export interface EngagementWeightInput {
   removedAt?: string;
   /** active / (active + idle); missing → 1 (no penalty). */
   activeToIdleRatio?: number;
+  /** On Hold because the idle sweep moved it, not because the user put it down. */
+  autoHeld?: boolean;
 }
 
 /** Clamp AFK-inflated hours so idle sessions cannot dominate. */
@@ -89,7 +91,8 @@ export function computeNegativeWeight(game: EngagementWeightInput): number {
   let n = 0;
   if (game.rating > 0 && game.rating < 3) n += game.rating === 1 ? 2 : 1;
   if (isRemovalRejection(game)) n += 1;
-  if (game.status === 'On Hold' && game.hoursPlayed < 2 && game.rating < 3) n += 0.7;
+  // Bouncing off early is the user putting a game down; an automatic idle hold is not.
+  if (game.status === 'On Hold' && !game.autoHeld && game.hoursPlayed < 2 && game.rating < 3) n += 0.7;
   return Math.min(n, NEGATIVE_WEIGHT_CAP);
 }
 
