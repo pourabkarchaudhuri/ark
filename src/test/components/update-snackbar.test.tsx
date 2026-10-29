@@ -183,6 +183,69 @@ describe('UpdateSnackbar', () => {
     expect(screen.getByText('Network error')).toBeInTheDocument();
   });
 
+  it('shows the error code and hint sent by the main process', async () => {
+    render(<UpdateSnackbar />);
+    const onErrorCallback = mockUpdater.onError.mock.calls[0][0];
+    await act(async () => {
+      onErrorCallback({ message: 'net::ERR_CONNECTION_RESET', code: 'ERR_CONNECTION_RESET', kind: 'network-reset', hint: 'The connection was cut mid-download.' });
+    });
+    expect(screen.getByText('ERR_CONNECTION_RESET')).toBeInTheDocument();
+    expect(screen.getByText('The connection was cut mid-download.')).toBeInTheDocument();
+    expect(screen.getByText('Copy link')).toBeInTheDocument();
+  });
+
+  it('a failed download shows that attempt\'s error, not a stale one from before', async () => {
+    mockUpdater.downloadUpdate.mockResolvedValue({ success: false, error: 'second failure', kind: 'network-timeout', hint: 'The download timed out.' });
+    render(<UpdateSnackbar />);
+    const onErrorCallback = mockUpdater.onError.mock.calls[0][0];
+    await act(async () => {
+      onErrorCallback({ message: 'first failure' });
+    });
+    const onUpdateAvailableCallback = mockUpdater.onUpdateAvailable.mock.calls[0][0];
+    await act(async () => {
+      onUpdateAvailableCallback({ version: '2.0.0' });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Download Now'));
+    });
+    expect(screen.getByText('second failure')).toBeInTheDocument();
+    expect(screen.queryByText('first failure')).not.toBeInTheDocument();
+    expect(screen.getByText('The download timed out.')).toBeInTheDocument();
+  });
+
+  it('offers the alternate download and reports a verified installer', async () => {
+    const fallbackDownload = vi.fn().mockResolvedValue({ success: true, launched: true });
+    (window as unknown as { updater: Record<string, unknown> }).updater = { ...mockUpdater, fallbackDownload };
+    render(<UpdateSnackbar />);
+    const onErrorCallback = mockUpdater.onError.mock.calls[0][0];
+    await act(async () => {
+      onErrorCallback({ message: 'reset', kind: 'network-reset' });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Try alternate download'));
+    });
+    expect(fallbackDownload).toHaveBeenCalled();
+    expect(screen.getByText(/downloaded and verified/)).toBeInTheDocument();
+  });
+
+  it('hides the alternate download when the network is blocking it', async () => {
+    (window as unknown as { updater: Record<string, unknown> }).updater = { ...mockUpdater, fallbackDownload: vi.fn() };
+    render(<UpdateSnackbar />);
+    const onErrorCallback = mockUpdater.onError.mock.calls[0][0];
+    await act(async () => {
+      onErrorCallback({ message: 'blocked', kind: 'blocked-by-client' });
+    });
+    expect(screen.queryByText('Try alternate download')).not.toBeInTheDocument();
+    expect(screen.getByText('Download from GitHub')).toBeInTheDocument();
+  });
+
+  it('a check that could not reach GitHub is reported, not shown as "up to date"', async () => {
+    mockUpdater.checkForUpdates.mockResolvedValueOnce({ updateAvailable: false, currentVersion: '1', latestVersion: '1', error: 'x', hint: 'Could not reach github.com.' });
+    render(<UpdateSnackbar />);
+    await waitFor(() => expect(screen.getByText("Couldn't reach GitHub")).toBeInTheDocument());
+    expect(screen.getByText('Could not reach github.com.')).toBeInTheDocument();
+  });
+
   it('does not render when updater API is not available', () => {
     // Remove the updater
     delete (window as unknown as { updater?: typeof mockUpdater }).updater;

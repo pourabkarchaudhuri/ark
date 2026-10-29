@@ -1,26 +1,22 @@
-# Ark v1.0.76 — Oracle's graph and taste-cluster layers now work
+# Ark v1.0.84 — Reliable updates
 
-Two parts of the recommendation engine that were effectively switched off are now live. **This release changes what Oracle recommends**, so it will recalculate once after updating.
+**If the in-app update keeps failing, download the installer directly:**
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.84/Ark-Setup-1.0.84.exe
+Run it over your current install. Your library and settings are kept.
 
 ## Fixed
 
-- **Closeness to your favourites is now recognised.** Before, a game only counted as "related" to your library if a pre-built "similar games" list happened to name it, and that list only existed for roughly 80 of ~3,000 candidates. Oracle now also looks at which games sit closest to your strongest library games in the embedding space, so related games are found even without a list linking them.
-- **Relating to several favourites now beats relating to one.** The old score hit its maximum on a single match, so one related game tied with eight. It is now weighted by how much you played and rated each game, and scales smoothly.
-- **Multi-taste libraries are scored per taste.** If you love cozy farming and soulslikes, candidates are now compared against each of your taste groups instead of one blurred average. This part of the engine was unreachable in production before.
-- **Game names match reliably:** editions, ™/®, accents, remasters and non-Latin titles no longer cause misses or false matches.
-- **"Similar to…" names your strongest matches** instead of the first three found.
-- **Your taste groups no longer reshuffle on every refresh.**
-- **Removed dead work:** an old similarity pass that could never match anything is gone.
+- **Clear update errors.** Instead of "error downloading update", Ark now tells you what happened (connection cut, timeout, blocked by security software or your network, disk full, and so on) and what to try next.
+- **Try alternate download.** If an update download is interrupted, this resumes it where it stopped, checks the installer is genuine, opens it, and closes Ark so it can install.
+- **No more false "up to date".** If GitHub can't be reached, the update check now says so.
+- **No more stuck downloads.** A stalled download is retried automatically, and old error messages don't linger.
 
-## Hardened after an independent review
-Weak neighbour hits, empty/non-Latin title keys, shallow neighbour retrieval, negative similarities and main-thread cost were all found in review and fixed before this release.
+## Changed
 
-## Under the hood
-
-- The real recommendation worker can now be run end to end in tests on fixture libraries, which later releases use to compare results.
-- 50 new tests across the graph layer, cluster layer, weights and the neighbour plumbing.
+- Smaller installer (unused machine-learning files for other platforms removed).
+- API keys in web addresses are hidden from logs.
 
 ---
 
-**Tests:** 1362/1362 passing under `vitest --isolate` (run twice). Typecheck clean on both TypeScript projects.
-**No storage changes.** Oracle engine version is now 2.
+**Tests:** 1609 tests (138 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
+**No ranking change. No data changes.**

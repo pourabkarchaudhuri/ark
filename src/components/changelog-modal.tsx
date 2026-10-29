@@ -11,6 +11,15 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.84': {
+    title: "What's New in Ark 1.0.84",
+    changes: [
+      'Update errors now say what went wrong (connection cut, timeout, blocked by security software, disk full and more) and what to do next.',
+      'New "Try alternate download": resumes an interrupted update, checks it is genuine, then runs the installer.',
+      '"Check for updates" no longer claims you are up to date when GitHub could not be reached.',
+      'Smaller installer download.',
+    ],
+  },
   '1.0.83': {
     title: "What's New in Ark 1.0.83",
     changes: [

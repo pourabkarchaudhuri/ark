@@ -1,6 +1,6 @@
 {
   "name": "ark",
-  "version": "1.0.83",
+  "version": "1.0.84",
   "type": "module",
   "description": "Game Tracker & Recommendations Electron App",
   "author": "Pourab Karchaudhuri, Sanket Aley",
@@ -35,7 +35,8 @@
     "fetch-epic-requirements": "npm run electron:compile && electron . --fetch-epic-requirements",
     "fetch-epic-requirements-node": "node scripts/fetch-epic-requirements-node.mjs",
     "release": "npm run build:app && electron-builder --publish always",
-    "release:draft": "npm run build:app && electron-builder --publish onTagOrDraft",
+    "release:publish": "node scripts/publish-github-release.mjs",
+    "release:verify": "node scripts/verify-release.mjs",
     "release:local": "npm run build:app && electron-builder --publish never",
     "release:prune": "node scripts/prune-release-builds.mjs"
   },
@@ -154,7 +155,10 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "native/ark-native/*.node"
+      "native/ark-native/*.node",
+      "!**/node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+      "!**/node_modules/onnxruntime-node/bin/napi-v6/linux/**",
+      "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
     ],
     "asarUnpack": [
       "**/preload.cjs",

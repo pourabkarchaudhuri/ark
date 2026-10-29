@@ -139,103 +139,57 @@ Or run a successful build on an unrestricted network first, then copy the cache.
 
 ## 6. Create GitHub Release
 
-### Create the release
+Use the script. It is the only supported publish path (the old `release:draft` electron-builder
+publish and the hand-rolled curl steps are gone).
 
-**Important:** Do NOT pass the release body as an inline JSON string — special characters (single quotes, newlines) break `curl`'s JSON parsing. Instead, write the body to a file and use `node` to build a properly escaped JSON payload.
+1. Write the release notes to `release/release-body.md`. Start with a direct installer link
+   (`https://github.com/pourabkarchaudhuri/ark/releases/download/vX.Y.Z/Ark-Setup-X.Y.Z.exe`)
+   for users whose in-app updater keeps failing.
+2. Publish:
 
-**Step 1 — Write the release body as Markdown:**
+   ```bash
+   GITHUB_TOKEN=<pat> npm run release:publish
+   ```
 
-Create/update `release/release-body.md` with the release notes.
+   The script:
+   - checks the three artifacts exist in `release/builds/<version>/` and that `latest.yml` names this version's installer;
+   - creates the release as a **draft** (or reuses an existing draft for the same tag);
+   - uploads `Ark-Setup-X.Y.Z.exe`, `.blockmap` and `latest.yml` (via curl; the token goes in a temp header file, never on the command line);
+   - re-reads the release and checks each asset is `uploaded` with the same size as on disk;
+   - only then publishes it (`draft: false`, `make_latest`).
 
-**Step 2 — Generate the JSON payload:**
-
-```bash
-node -e "
-const fs = require('fs');
-const body = fs.readFileSync('release/release-body.md', 'utf8');
-const payload = JSON.stringify({
-  tag_name: 'v1.0.NEW_VERSION',
-  name: 'v1.0.NEW_VERSION',
-  body: body,
-  draft: false,
-  prerelease: false
-});
-fs.writeFileSync('release/release-payload.json', payload);
-"
-```
-
-**Step 3 — Create the release via the API:**
-
-```bash
-curl -s -X POST \
-  -H "Authorization: token YOUR_PAT" \
-  -H "Content-Type: application/json" \
-  "https://api.github.com/repos/pourabkarchaudhuri/ark/releases" \
-  -d @release/release-payload.json
-```
-
-Note the `id` field from the JSON response — this is the **Release ID** needed for asset uploads.
-
-**Step 4 — Clean up the payload file:**
-
-```bash
-rm release/release-payload.json
-```
-
-### Upload assets
-
-Three files must be uploaded for the auto-updater to work:
-
-```bash
-RELEASE_ID=<from previous step>
-PAT=<your token>
-REPO="pourabkarchaudhuri/ark"
-
-# 1. NSIS installer (~134 MB, takes ~25 seconds)
-curl -X POST \
-  -H "Authorization: token $PAT" \
-  -H "Content-Type: application/octet-stream" \
-  "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=Ark-Setup-1.0.NEW_VERSION.exe" \
-  --data-binary "@release/builds/1.0.NEW_VERSION/Ark-Setup-1.0.NEW_VERSION.exe"
-
-# 2. Blockmap (for delta updates)
-curl -s -X POST \
-  -H "Authorization: token $PAT" \
-  -H "Content-Type: application/octet-stream" \
-  "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=Ark-Setup-1.0.NEW_VERSION.exe.blockmap" \
-  --data-binary "@release/builds/1.0.NEW_VERSION/Ark-Setup-1.0.NEW_VERSION.exe.blockmap"
-
-# 3. latest.yml (auto-updater manifest)
-curl -s -X POST \
-  -H "Authorization: token $PAT" \
-  -H "Content-Type: application/octet-stream" \
-  "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=latest.yml" \
-  --data-binary "@release/builds/1.0.NEW_VERSION/latest.yml"
-```
+   If anything fails the release stays a draft, so no client can see a release without
+   `latest.yml` or with a half-uploaded installer. Fix the problem and run the script again;
+   it resumes with the existing draft and skips assets already uploaded.
 
 ### Verify the release
 
 ```bash
-curl -s -H "Authorization: token $PAT" \
-  "https://api.github.com/repos/pourabkarchaudhuri/ark/releases/latest" \
-  | node -e "
-const d=[];process.stdin.on('data',c=>d.push(c));process.stdin.on('end',()=>{
-  const j=JSON.parse(Buffer.concat(d));
-  console.log('Release:', j.name);
-  console.log('Tag:', j.tag_name);
-  console.log('Published:', j.published_at);
-  console.log('Assets:');
-  j.assets.forEach(a=>console.log('  -',a.name,'('+a.size+' bytes, state:'+a.state+')'));
-})"
+npm run release:verify            # current package.json version
+node scripts/verify-release.mjs 1.0.84 --download   # also stream + hash the published installer
 ```
+
+Checks, by tag (not `/releases/latest`): the release is published; the installer, blockmap and
+`latest.yml` are uploaded; `latest.yml` names this version's installer with the right size; the
+local installer's sha512 matches `latest.yml`; the packaged `.env` contains only allow-listed key
+names; no token file was packaged; only the win32/x64 onnxruntime binaries were packaged.
+`--download` is off by default because some networks reset executable downloads.
 
 ### Required release assets checklist
 
 - [ ] `Ark-Setup-X.Y.Z.exe` — the NSIS installer
-- [ ] `Ark-Setup-X.Y.Z.exe.blockmap` — delta update support
-- [ ] `latest.yml` — auto-updater needs this to detect new versions
+- [ ] `Ark-Setup-X.Y.Z.exe.blockmap` — kept for compatibility (differential download is disabled)
+- [ ] `latest.yml` — the auto-updater reads this to detect new versions
 
-**Note on `latest.yml`:** Only upload if the sha512 hash differs from the previous release (it always will for a new version since the exe changes). No need to recreate it manually — `electron-builder` generates it automatically.
+### Troubleshooting "error downloading update"
+
+- The update toast shows the error code and a hint (connection reset, timeout, blocked, checksum,
+  disk full, file locked). **Try alternate download** resumes an interrupted download, verifies
+  the sha512 from `latest.yml`, opens the installer and closes Ark.
+- If the toast says the download was **blocked**, a firewall/proxy/security tool is stopping the
+  installer. Use **Download from GitHub** (browser) or ask IT to allow GitHub release downloads.
+- Users on 1.0.83 or older have the old updater: point them at the direct installer link in the
+  release notes.
 
 ---
 
@@ -247,6 +201,8 @@ const d=[];process.stdin.on('data',c=>d.push(c));process.stdin.on('end',()=>{
 | Build Step 1 | `npm run clean && npx tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && npx vite build` |
 | Build Step 2 | `ELECTRON_BUILDER_NSIS_DIR="$(pwd)/.nsis-cache/nsis-3.0.4.1" ELECTRON_BUILDER_NSIS_RESOURCES_DIR="$(pwd)/.nsis-cache/nsis-resources-3.4.1" npx electron-builder --win nsis --publish never` |
 | Verify artifacts | `ls -lh release/builds/1.0.NEW_VERSION/` |
+| Publish | `GITHUB_TOKEN=<pat> npm run release:publish` |
+| Verify release | `npm run release:verify` |
 | Prune old builds | `npm run release:prune` (dry run) → `npm run release:prune -- --apply` |
 | Check latest release | `curl -s -H "Authorization: token $PAT" "https://api.github.com/repos/pourabkarchaudhuri/ark/releases/latest"` |
 

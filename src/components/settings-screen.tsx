@@ -1504,6 +1504,11 @@ const AboutTab = memo(function AboutTab() {
     setUpdateError(null);
     try {
       const result = await window.updater.checkForUpdates();
+      if (result.error) {
+        setUpdateError(result.hint ?? "Couldn't reach GitHub.");
+        setUpdateState('error');
+        return;
+      }
       if (result.updateAvailable) {
         setLatestVersion(result.latestVersion);
         setUpdateState('available');
@@ -1521,8 +1526,12 @@ const AboutTab = memo(function AboutTab() {
   const handleDownloadUpdate = useCallback(async () => {
     if (!window.updater) return;
     try {
-      await window.updater.downloadUpdate();
+      const result = await window.updater.downloadUpdate();
       // Post-download install progress is handled by <UpdateSnackbar/>.
+      if (result && !result.success) {
+        setUpdateError(result.hint ?? result.error ?? 'Download failed.');
+        setUpdateState('error');
+      }
     } catch (err) {
       console.error('[Settings] Update download failed:', err);
       setUpdateError('Download failed.');

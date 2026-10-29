@@ -46,6 +46,49 @@ interface FileDialogAPI {
 }
 
 // Electron API types (exposed via Electron preload)
+/** Update failure details sent by the main process (electron/updater-diagnostics.ts). */
+interface UpdateErrorDetail {
+  kind?: string;
+  code?: string;
+  hint?: string;
+  /** Direct installer URL from the release manifest, for "download in browser". */
+  downloadUrl?: string;
+}
+
+interface UpdaterDownloadResult extends UpdateErrorDetail {
+  success: boolean;
+  error?: string;
+  errorName?: string;
+  /** Alternate download only: the verified installer was opened (Ark is about to quit). */
+  launched?: boolean;
+  path?: string;
+}
+
+interface UpdaterAPI {
+  checkForUpdates: () => Promise<{
+    updateAvailable: boolean;
+    currentVersion: string;
+    latestVersion: string;
+    /** Set when neither electron-updater nor the GitHub API could be reached. */
+    error?: string;
+    kind?: string;
+    hint?: string;
+  }>;
+  downloadUpdate: () => Promise<UpdaterDownloadResult | undefined>;
+  /** Resumable, sha512-verified download of the installer (absent in older preloads). */
+  fallbackDownload?: () => Promise<UpdaterDownloadResult>;
+  installUpdate: () => void;
+  getVersion: () => Promise<string>;
+  onChecking: (callback: () => void) => void;
+  onUpdateAvailable: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => void;
+  onUpdateNotAvailable: (callback: (info: { version: string }) => void) => void;
+  onDownloadProgress: (callback: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => void;
+  onUpdateDownloaded: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => void;
+  onError: (callback: (error: { message: string; name?: string } & UpdateErrorDetail) => void) => void;
+  onAutoDownload: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => void;
+  removeAllListeners: () => void;
+}
+
 interface ElectronAPI {
   minimize: () => Promise<void>;
   maximize: () => Promise<void>;
@@ -277,6 +320,7 @@ declare global {
     egdata?: EgdataAPI;
     catalog?: CatalogAPI;
     store?: StoreAPI;
+    updater?: UpdaterAPI;
   }
 }
 

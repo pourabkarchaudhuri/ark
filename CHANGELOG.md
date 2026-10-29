@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.84] - 2026-10-29
+
+Update reliability. Users reported "error downloading update"; release files and checksums were verified correct, and the evidence points to networks or security software cutting the long single-request installer download.
+
+### Fixed — updating
+- **Real error messages.** A failed update now says why (connection reset, timeout, blocked by security software or network, DNS, TLS, HTTP status, checksum, disk full, file locked), with the error code and a next step, instead of a bare "error downloading update".
+- **"Check for updates" no longer says "up to date" when GitHub could not be reached.** The check used to swallow every failure; it now reports it in the update toast and in Settings → About.
+- **Retries are safe.** Three attempts with back-off; a stalled transfer (no progress for 3 minutes) is cancelled and retried instead of leaving the updater stuck in "downloading" forever; the 30-minute background check can no longer slip in between retries; only the final outcome is shown.
+- **Alternate download.** A new "Try alternate download" button resumes an interrupted download where it stopped (standard HTTP range requests), verifies the installer against the release's sha512, opens it and closes Ark so the setup can finish. If the same download is cut at the same point twice, or the request is blocked, it stops and points you to your browser / IT instead of retrying.
+- **Copy link / Download from GitHub** now use the exact installer link.
+- A new download attempt no longer shows the previous attempt's error.
+- Settings → About shows download failures (they were silently ignored).
+
+### Changed
+- **Smaller installer:** unused macOS, Linux and Windows-ARM machine-learning runtime binaries are no longer packaged.
+- Logs never contain API keys or tokens passed in URLs (`?key=…` is redacted).
+- Release process: releases are created as drafts, uploaded, checked, and only then published, so the updater can never see a release without its manifest. New `npm run release:verify` checks a published release (manifest, sizes, checksum, packaged files).
+
+### Tests
+- New: error classification, resumable download against a local server (drops, servers ignoring Range, 416, checksum mismatch, same-offset stop, blocked, abort), alternate-download URL allow-list and verify-before-open, log redaction, update toast error/fallback states.
+
 ## [1.0.83] - 2026-10-23
 
 Foundation for re-embedding game vectors safely (Release A of the re-embed project). **No ranking change and nothing is re-embedded or rebuilt on update** — existing vectors, hashes, watermarks, the similarity index and caches stay valid; this release fixes the machinery a future re-embed depends on.

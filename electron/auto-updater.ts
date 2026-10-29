@@ -1,15 +1,19 @@
 import pkg from 'electron-updater';
 const { autoUpdater } = pkg;
 import type { UpdateInfo, ProgressInfo } from 'electron-updater';
+import runtimePkg from 'builder-util-runtime';
+const { CancellationToken } = runtimePkg;
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
 import type { BrowserWindow as BrowserWindowType } from 'electron';
-const { BrowserWindow, ipcMain, Notification, nativeImage, app: electronApp } = electron;
+const { BrowserWindow, ipcMain, Notification, nativeImage, shell, session, app: electronApp } = electron;
 import * as fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'node:url';
 import { logger } from './safe-logger.js';
+import { classifyUpdateError } from './updater-diagnostics.js';
+import { resolveInstallerUrl, runFallbackDownload } from './updater-fallback.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -21,6 +25,24 @@ let pollingInterval: ReturnType<typeof setInterval> | null = null;
 let isCheckingForUpdate = false;
 let isDownloading = false;
 let updateAlreadyDownloaded = false;
+
+// The newest release manifest we saw (installer url / sha512 / size). The alternate downloader
+// needs it, and electron-updater does not expose it again after a failed download.
+let lastUpdateInfo: UpdateInfo | null = null;
+let isFallbackDownloading = false;
+
+// True while the download IPC runs its retry loop. electron-updater emits 'error' for every failed
+// attempt; those must neither reset isDownloading (the 30-min poll would slip in between retries)
+// nor reach the renderer (only the final outcome is shown).
+let downloadLoopActive = false;
+// >0 while a check whose errors are reported another way is running (background poll: silent;
+// manual check: returned from the IPC call).
+let quietErrorDepth = 0;
+let lastProgressAt = 0;
+
+// A download that makes no progress for this long is cancelled and retried.
+const DOWNLOAD_STALL_MS = 3 * 60 * 1000;
+const DOWNLOAD_MAX_ATTEMPTS = 3;
 
 // Tracks which version we already showed a notification for so we don't
 // spam the user every 30 minutes with the same "update available" toast.
@@ -109,6 +131,7 @@ export function initAutoUpdater(window: BrowserWindowType) {
 
   autoUpdater.on('update-available', (info: UpdateInfo) => {
     logger.log('[AutoUpdater] Update available:', info.version);
+    lastUpdateInfo = info;
     const updatePayload = {
       version: info.version,
       releaseDate: info.releaseDate,
@@ -164,6 +187,7 @@ export function initAutoUpdater(window: BrowserWindowType) {
   autoUpdater.on('download-progress', (progress: ProgressInfo) => {
     logger.log(`[AutoUpdater] Download progress: ${progress.percent.toFixed(1)}%`);
     isDownloading = true;
+    lastProgressAt = Date.now();
     sendToRenderer('updater:download-progress', {
       percent: progress.percent,
       bytesPerSecond: progress.bytesPerSecond,
@@ -223,10 +247,16 @@ export function initAutoUpdater(window: BrowserWindowType) {
       message: error.message,
       stack: error.stack,
     });
+    if (downloadLoopActive || quietErrorDepth > 0) return; // reported by the IPC call that is running
     isDownloading = false;
+    const diag = classifyUpdateError(error);
     sendToRenderer('updater:error', {
       message: error.message || 'Unknown update error',
       name: error.name,
+      kind: diag.kind,
+      code: diag.code,
+      hint: diag.hint,
+      downloadUrl: resolveInstallerUrl(lastUpdateInfo),
     });
   });
 
@@ -280,11 +310,15 @@ async function checkForUpdates() {
   }
   try {
     isCheckingForUpdate = true;
+    quietErrorDepth++;
     logger.log('[AutoUpdater] Initiating update check...');
-    await autoUpdater.checkForUpdates();
+    const result = await autoUpdater.checkForUpdates();
+    if (result?.updateInfo) lastUpdateInfo = result.updateInfo;
   } catch (error) {
+    // Background poll: never interrupt the user; the next manual check reports problems.
     logger.error('[AutoUpdater] Failed to check for updates:', error);
   } finally {
+    quietErrorDepth--;
     isCheckingForUpdate = false;
   }
 }
@@ -383,12 +417,16 @@ function registerIpcHandlers() {
       return { updateAvailable: true, currentVersion, latestVersion: currentVersion };
     }
 
+    let checkError: unknown = null;
+
     // If electron-updater is initialized, use it (handles download flow)
     if (isInitialized) {
       logger.log('[AutoUpdater] Manual update check requested');
       try {
         isCheckingForUpdate = true;
+        quietErrorDepth++;
         const result = await autoUpdater.checkForUpdates();
+        if (result?.updateInfo) lastUpdateInfo = result.updateInfo;
         const latestVersion = result?.updateInfo?.version || currentVersion;
         const updateAvailable = isVersionGreater(latestVersion, currentVersion);
         return {
@@ -397,8 +435,10 @@ function registerIpcHandlers() {
           latestVersion,
         };
       } catch (error) {
+        checkError = error;
         logger.error('[AutoUpdater] electron-updater check failed, falling back to GitHub API:', error);
       } finally {
+        quietErrorDepth--;
         isCheckingForUpdate = false;
       }
     }
@@ -412,7 +452,16 @@ function registerIpcHandlers() {
       return { updateAvailable, currentVersion, latestVersion: release.tag };
     }
 
-    return { updateAvailable: false, currentVersion, latestVersion: currentVersion };
+    // Neither source answered. Say so instead of claiming "you're up to date".
+    const diag = classifyUpdateError(checkError ?? new Error('Could not reach GitHub'));
+    return {
+      updateAvailable: false,
+      currentVersion,
+      latestVersion: currentVersion,
+      error: checkError instanceof Error ? checkError.message : 'Could not reach GitHub',
+      kind: diag.kind,
+      hint: diag.hint,
+    };
   });
 
   // Download the update (guarded against duplicate calls).
@@ -434,30 +483,108 @@ function registerIpcHandlers() {
     }
     logger.log('[AutoUpdater] Download requested');
     isDownloading = true;
-    const MAX_RETRIES = 2;
+    downloadLoopActive = true;
     let lastError: Error | null = null;
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        await autoUpdater.downloadUpdate();
-        return { success: true };
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-        logger.error(`[AutoUpdater] Download attempt ${attempt}/${MAX_RETRIES} failed:`, {
-          name: lastError.name,
-          message: lastError.message,
-          stack: lastError.stack,
-        });
-        if (attempt === MAX_RETRIES) break;
-        // Wait before retry
-        await new Promise(r => setTimeout(r, 3000));
+    try {
+      for (let attempt = 1; attempt <= DOWNLOAD_MAX_ATTEMPTS; attempt++) {
+        const token = new CancellationToken();
+        lastProgressAt = Date.now();
+        // Watchdog: a transfer that stalls (no progress events) is cancelled and retried instead of
+        // leaving isDownloading stuck true, which would make every later check say "update available".
+        const watchdog = setInterval(() => {
+          if (Date.now() - lastProgressAt > DOWNLOAD_STALL_MS) {
+            logger.warn(`[AutoUpdater] Download stalled for ${DOWNLOAD_STALL_MS / 1000}s — cancelling attempt ${attempt}`);
+            token.cancel();
+          }
+        }, 15_000);
+        try {
+          await autoUpdater.downloadUpdate(token);
+          return { success: true };
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          logger.error(`[AutoUpdater] Download attempt ${attempt}/${DOWNLOAD_MAX_ATTEMPTS} failed:`, {
+            name: lastError.name,
+            message: lastError.message,
+            stack: lastError.stack,
+          });
+          if (attempt === DOWNLOAD_MAX_ATTEMPTS) break;
+          await new Promise(r => setTimeout(r, attempt * 4000));
+        } finally {
+          clearInterval(watchdog);
+        }
       }
+    } finally {
+      downloadLoopActive = false;
     }
     isDownloading = false;
+    const diag = classifyUpdateError(lastError);
     return {
       success: false,
       error: lastError?.message || 'Download failed for unknown reason',
       errorName: lastError?.name,
+      kind: diag.kind,
+      code: diag.code,
+      hint: diag.hint,
+      downloadUrl: resolveInstallerUrl(lastUpdateInfo),
     };
+  });
+
+  // Alternate download (no arguments: the installer URL comes only from the release manifest).
+  // Resumable and sha512-verified; the verified installer is opened and Ark quits so the setup
+  // wizard can replace its files.
+  ipcMain.handle('updater:fallback-download', async () => {
+    if (!lastUpdateInfo) {
+      return { success: false, error: 'No update information yet. Check for updates first.' };
+    }
+    if (isFallbackDownloading) {
+      return { success: false, error: 'An alternate download is already running.' };
+    }
+    isFallbackDownloading = true;
+    const info = lastUpdateInfo;
+    try {
+      // A dedicated session: the app's ad-blocker hooks the default session, and electron-updater
+      // uses its own partition too.
+      const ses = session.fromPartition('persist:ark-update');
+      let lastReport = 0;
+      logger.log('[AutoUpdater] Alternate download starting for', info.version);
+      const result = await runFallbackDownload(info, {
+        fetchImpl: (u, init) => ses.fetch(u, init),
+        openPath: (p) => shell.openPath(p),
+        onProgress: ({ transferred, total }) => {
+          const now = Date.now();
+          if (now - lastReport < 250) return;
+          lastReport = now;
+          sendToRenderer('updater:download-progress', {
+            percent: total ? (transferred / total) * 100 : 0,
+            bytesPerSecond: 0,
+            transferred,
+            total,
+          });
+        },
+      });
+      if (!result.launched) {
+        logger.warn('[AutoUpdater] Verified installer saved but could not be opened:', result.openError);
+        shell.showItemInFolder(result.path);
+        return { success: true, launched: false, path: result.path };
+      }
+      logger.log('[AutoUpdater] Verified installer opened; quitting so it can install');
+      setTimeout(() => electronApp.quit(), 2500);
+      return { success: true, launched: true, path: result.path };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      logger.error('[AutoUpdater] Alternate download failed:', { name: err.name, message: err.message });
+      const diag = classifyUpdateError(err);
+      return {
+        success: false,
+        error: err.message,
+        kind: diag.kind,
+        code: diag.code,
+        hint: diag.hint,
+        downloadUrl: resolveInstallerUrl(info),
+      };
+    } finally {
+      isFallbackDownloading = false;
+    }
   });
 
   // Install the update (quit and install)

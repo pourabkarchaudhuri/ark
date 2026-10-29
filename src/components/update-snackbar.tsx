@@ -16,27 +16,16 @@ interface DownloadProgress {
   total: number;
 }
 
+interface UpdateErrorDetail {
+  kind?: string;
+  code?: string;
+  hint?: string;
+  downloadUrl?: string;
+}
+
 type UpdateState = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error';
 
-// Type declaration for the updater API
-declare global {
-  interface Window {
-    updater?: {
-      checkForUpdates: () => Promise<{ updateAvailable: boolean; currentVersion: string; latestVersion: string }>;
-      downloadUpdate: () => Promise<{ success: boolean; error?: string; errorName?: string }>;
-      installUpdate: () => void;
-      getVersion: () => Promise<string>;
-      onChecking: (callback: () => void) => void;
-      onUpdateAvailable: (callback: (info: UpdateInfo) => void) => void;
-      onUpdateNotAvailable: (callback: (info: { version: string }) => void) => void;
-      onDownloadProgress: (callback: (progress: DownloadProgress) => void) => void;
-      onUpdateDownloaded: (callback: (info: UpdateInfo) => void) => void;
-      onError: (callback: (error: { message: string }) => void) => void;
-      onAutoDownload: (callback: (info: UpdateInfo) => void) => void;
-      removeAllListeners: () => void;
-    };
-  }
-}
+const RELEASES_LATEST_URL = 'https://github.com/pourabkarchaudhuri/ark/releases/latest';
 
 export function UpdateSnackbar() {
   const [state, setState] = useState<UpdateState>('idle');
@@ -44,6 +33,10 @@ export function UpdateSnackbar() {
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorDetail, setErrorDetail] = useState<UpdateErrorDetail>({});
+  // Set after the alternate download opened the installer (replaces the "ready" copy).
+  const [fallbackNote, setFallbackNote] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   // Distinguishes the "couldn't reach GitHub on mount check" error from other errors,
   // so we can show a Retry button and auto-dismiss the toast.
   const [isReachabilityError, setIsReachabilityError] = useState(false);
@@ -58,6 +51,13 @@ export function UpdateSnackbar() {
     console.log('[UpdateSnackbar] Performing manual update check...');
     window.updater.checkForUpdates().then(result => {
       console.log('[UpdateSnackbar] Manual check result:', result);
+      if (result.error) {
+        setIsReachabilityError(true);
+        setErrorMessage(result.hint ?? "Couldn't reach GitHub — will try again in 2 min.");
+        setState('error');
+        setDismissed(false);
+        return;
+      }
       if (result.updateAvailable) {
         console.log('[UpdateSnackbar] Update IS available:', result.latestVersion);
         // Manually trigger the available state if IPC events didn't fire
@@ -174,6 +174,7 @@ export function UpdateSnackbar() {
 
     updater.onError((error) => {
       console.error('[UpdateSnackbar] Event: error:', error.message);
+      setErrorDetail({ kind: error.kind, code: error.code, hint: error.hint, downloadUrl: error.downloadUrl });
       setErrorMessage(error.message);
       setState('error');
     });
@@ -183,15 +184,16 @@ export function UpdateSnackbar() {
       console.log('[UpdateSnackbar] Event: auto-download triggered for version:', info.version);
       setUpdateInfo(info);
       setDismissed(false);
+      setErrorMessage(null);
+      setErrorDetail({});
+      setFallbackNote(null);
       setState('downloading');
-      // Automatically start the download. Preserve any specific electron-updater
-      // error that already arrived via the onError event — only overwrite the
-      // message when we don't yet have one.
       window.updater!.downloadUpdate().then((result) => {
-        if (!result.success && result.error) {
+        if (result && !result.success) {
           console.error('[UpdateSnackbar] Auto-download returned error:', result.error);
           setState('error');
-          setErrorMessage((prev) => prev ?? result.error!);
+          setErrorMessage(result.error ?? 'Failed to download update');
+          setErrorDetail({ kind: result.kind, code: result.code, hint: result.hint, downloadUrl: result.downloadUrl });
         }
       }).catch((err) => {
         console.error('[UpdateSnackbar] Auto-download rejected:', err);
@@ -211,16 +213,18 @@ export function UpdateSnackbar() {
     if (!hasUpdater) return;
     // Guard: don't trigger if already downloading or installed
     if (state === 'downloading' || state === 'ready') return;
+    // A new attempt must not keep showing the previous attempt's error.
+    setErrorMessage(null);
+    setErrorDetail({});
+    setFallbackNote(null);
     setState('downloading');
     try {
       const result = await window.updater!.downloadUpdate();
-      if (!result.success && result.error) {
+      if (result && !result.success) {
         console.error('[UpdateSnackbar] Download returned error:', result.error);
         setState('error');
-        // Preserve any specific electron-updater error that already arrived via
-        // onError event (fires BEFORE this promise settles) instead of clobbering
-        // it with the generic "Failed to download update" message.
-        setErrorMessage((prev) => prev ?? result.error!);
+        setErrorMessage(result.error ?? 'Failed to download update');
+        setErrorDetail({ kind: result.kind, code: result.code, hint: result.hint, downloadUrl: result.downloadUrl });
       }
     } catch (error) {
       console.error('[UpdateSnackbar] Download rejected:', error);
@@ -229,8 +233,44 @@ export function UpdateSnackbar() {
     }
   }, [hasUpdater, state]);
 
+  const handleFallbackDownload = useCallback(async () => {
+    const fallback = window.updater?.fallbackDownload;
+    if (!fallback) return;
+    setErrorMessage(null);
+    setFallbackNote(null);
+    setProgress(null);
+    setState('downloading');
+    try {
+      const result = await fallback();
+      if (result.success) {
+        setFallbackNote(
+          result.launched
+            ? 'Installer downloaded and verified. Ark will close so the installer can finish; your data is kept.'
+            : 'Installer downloaded and verified. Its folder was opened: close Ark, then run it.',
+        );
+        setState('ready');
+      } else {
+        setState('error');
+        setErrorMessage(result.error ?? 'Alternate download failed');
+        setErrorDetail({ kind: result.kind, code: result.code, hint: result.hint, downloadUrl: result.downloadUrl });
+      }
+    } catch (err) {
+      setState('error');
+      setErrorMessage(err instanceof Error ? err.message : 'Alternate download failed');
+    }
+  }, []);
+
+  const releasePageUrl = errorDetail.downloadUrl ?? RELEASES_LATEST_URL;
+
+  const handleCopyLink = useCallback(() => {
+    navigator.clipboard?.writeText(releasePageUrl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => undefined);
+  }, [releasePageUrl]);
+
   const handleOpenReleasePage = useCallback(() => {
-    const url = `https://github.com/pourabkarchaudhuri/ark/releases/latest`;
+    const url = releasePageUrl;
     // Prefer the Electron shell IPC, fall back to window.open for dev/web.
     const shell = (window as unknown as { electron?: { openExternal?: (url: string) => unknown } }).electron;
     if (shell?.openExternal) {
@@ -238,7 +278,7 @@ export function UpdateSnackbar() {
     } else if (typeof window !== 'undefined') {
       window.open(url, '_blank', 'noopener,noreferrer');
     }
-  }, []);
+  }, [releasePageUrl]);
 
   const handleInstall = useCallback(() => {
     if (!hasUpdater) return;
@@ -320,17 +360,19 @@ export function UpdateSnackbar() {
               </p>
             </div>
           )}
-          {state === 'ready' && updateInfo && (
+          {state === 'ready' && fallbackNote && <p>{fallbackNote}</p>}
+          {state === 'ready' && !fallbackNote && updateInfo && (
             <p>Version {updateInfo.version} is ready. The app will restart to complete the update.</p>
           )}
           {state === 'error' && isReachabilityError && (
-            <p className="text-white/70">Will try again in 2 min.</p>
+            <p className="text-white/70">{errorMessage ?? 'Will try again in 2 min.'}</p>
           )}
           {state === 'error' && !isReachabilityError && (
             <div className="space-y-1.5">
               <p className="text-red-400">{errorMessage || 'An error occurred while updating.'}</p>
-              <p className="text-xs text-white/50">
-                If this keeps happening, download the installer manually from GitHub and run it — your data will be preserved.
+              {errorDetail.code && <p className="text-[11px] font-mono text-white/40">{errorDetail.code}</p>}
+              <p className="text-xs text-white/60">
+                {errorDetail.hint ?? 'If this keeps happening, download the installer from GitHub and run it. Your data is kept.'}
               </p>
             </div>
           )}
@@ -354,7 +396,15 @@ export function UpdateSnackbar() {
               </button>
             </>
           )}
-          {state === 'ready' && (
+          {state === 'ready' && fallbackNote && (
+            <button
+              onClick={handleDismiss}
+              className="px-3 py-1.5 text-sm font-medium rounded-md bg-green-500 hover:bg-green-600 transition-colors text-white"
+            >
+              OK
+            </button>
+          )}
+          {state === 'ready' && !fallbackNote && (
             <>
               <button
                 onClick={handleDismiss}
@@ -394,6 +444,20 @@ export function UpdateSnackbar() {
               >
                 Dismiss
               </button>
+              <button
+                onClick={handleCopyLink}
+                className="px-3 py-1.5 text-sm font-medium rounded-md hover:bg-white/10 transition-colors text-muted-foreground"
+              >
+                {copied ? 'Copied' : 'Copy link'}
+              </button>
+              {window.updater?.fallbackDownload && errorDetail.kind !== 'disk-full' && errorDetail.kind !== 'blocked-by-client' && (
+                <button
+                  onClick={handleFallbackDownload}
+                  className="px-3 py-1.5 text-sm font-medium rounded-md bg-purple-500 hover:bg-purple-600 transition-colors text-white"
+                >
+                  Try alternate download
+                </button>
+              )}
               <button
                 onClick={handleOpenReleasePage}
                 className="px-3 py-1.5 text-sm font-medium rounded-md bg-blue-500 hover:bg-blue-600 transition-colors text-white"

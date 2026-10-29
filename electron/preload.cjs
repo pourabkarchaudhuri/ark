@@ -339,6 +339,7 @@ contextBridge.exposeInMainWorld('updater', {
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   downloadUpdate: () => ipcRenderer.invoke('updater:download'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
+  fallbackDownload: () => ipcRenderer.invoke('updater:fallback-download'),
   getVersion: () => ipcRenderer.invoke('updater:getVersion'),
   
   onChecking: (callback) => {
