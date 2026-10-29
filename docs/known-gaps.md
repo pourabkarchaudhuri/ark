@@ -209,3 +209,9 @@ The following gaps were fixed and removed from the active list:
 - The 'running' record is per-profile, not per-window: a second renderer window calling `refreshMigrationState` would mark a live run interrupted. Add an owner/heartbeat if the overlay window ever imports the embedding service.
 - A downgrade after a future generation bump: an old build ignores `layoutGeneration` and would load a newer index; bump the ANN meta filename together with a generation bump.
 - Old builds compare the pass watermark `versionStamp` to the bare `t10m1`; after a rollback one extra cursor rescan per source occurs (nothing is re-embedded).
+
+## Updater gaps (found during 1.0.84)
+- `isVersionGreater` (electron/auto-updater.ts) has no unit test: importing the module outside Electron pulls in electron-updater. Move it to a pure module and test it.
+- Users on 1.0.83 and older run the old updater and cannot benefit from the 1.0.84 fixes until they reach 1.0.84 (release notes carry a direct installer link).
+- A publish retry after a partial upload can leave a non-`uploaded` asset with the same name; the script then gets a name conflict. Delete such assets before re-uploading.
+- The first 1.0.84 publish attempt left an empty draft release (id 427999529); harmless, delete it from the GitHub releases page.

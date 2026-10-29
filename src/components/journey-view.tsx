@@ -9,7 +9,7 @@
  *  - "Log" (Captain's Log): vertical timeline grouped by year and month
  *  - "Scenes": detected play episodes as a stream, with silences rendered as content
  *  - "Audit": record-quality rings and a resolution queue
- *  - "Medals": gamified progression with Taste DNA and badge vault (analytics in Overview)
+ *  - "Medals": the badge vault
  *
  * Scenes and Audit are competing replacements for the old OCD Gantt and are
  * deliberately independent of each other — they share only the pure helpers in

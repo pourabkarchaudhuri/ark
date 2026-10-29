@@ -49,6 +49,19 @@ async function api(method, url, json) {
   return { ok: res.ok, status: res.status, data: text ? JSON.parse(text) : null };
 }
 
+// Uploads of the 200+ MB installer can be reset mid-transfer on some networks; retry a few times.
+function uploadAssetWithRetry(releaseId, name, attempts = 4) {
+  for (let i = 1; ; i++) {
+    try {
+      return uploadAsset(releaseId, name);
+    } catch (err) {
+      if (i >= attempts) throw err;
+      console.warn(`Upload of ${name} failed (attempt ${i}/${attempts}): ${String(err.stderr ?? err.message).trim()}; retrying`);
+      execFileSync(process.execPath, ['-e', 'setTimeout(()=>{}, 5000)']);
+    }
+  }
+}
+
 function uploadAsset(releaseId, name) {
   const filePath = path.join(buildDir, name);
   const hdrFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ark-pub-')), 'h.txt');
@@ -80,10 +93,14 @@ async function main() {
     fail('latest.yml does not reference this version\'s installer');
   }
 
-  const existing = await api('GET', `https://api.github.com/repos/${repo}/releases/tags/${tag}`);
-  if (existing.ok && !existing.data.draft) fail(`Release ${tag} is already published`);
+  // The by-tag endpoint never returns drafts, so look through the list for a draft from an
+  // earlier interrupted run and reuse it instead of creating a second one.
+  const list = await api('GET', `https://api.github.com/repos/${repo}/releases?per_page=30`);
+  if (!list.ok) fail(`Could not list releases (${list.status})`);
+  const sameTag = list.data.filter((r) => r.tag_name === tag);
+  if (sameTag.some((r) => !r.draft)) fail(`Release ${tag} is already published`);
 
-  let release = existing.ok ? existing.data : null;
+  let release = sameTag.find((r) => r.draft) ?? null;
   if (!release) {
     const created = await api('POST', `https://api.github.com/repos/${repo}/releases`, {
       tag_name: tag, name: tag, body, draft: true, prerelease: false,
@@ -101,7 +118,7 @@ async function main() {
       console.log('Already uploaded', name);
       continue;
     }
-    const out = uploadAsset(release.id, name);
+    const out = uploadAssetWithRetry(release.id, name);
     if (out.state !== 'uploaded') fail(`Upload failed for ${name}: ${JSON.stringify(out).slice(0, 300)}`);
     console.log('Uploaded', name, out.size);
   }

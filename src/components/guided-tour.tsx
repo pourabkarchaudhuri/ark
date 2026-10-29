@@ -594,14 +594,14 @@ const journeySteps: Step[] = [
   {
     target: '[data-tour="journey-view-styles"]',
     content:
-      '**Your Ark** showcases active play; **Log** is the yearly timeline; **Scenes** replays your play episodes; **Audit** checks how complete and accurate your records are. Open **Medals** for Taste DNA, badge vault, and streak analytics.',
+      '**Your Ark** showcases active play; **Log** is the yearly timeline; **Scenes** replays your play episodes; **Audit** checks how complete and accurate your records are. Open **Medals** for your badge vault.',
     placement: 'bottom',
     title: "Captain's Log & timeline",
   },
   {
     target: '[data-tour="journey-medals-tab"]',
     content:
-      'Medals turns your real play history into progression: badges, heatmaps, and taste insights — separate from the timeline views.',
+      'Medals turns your real play history into badges you unlock — separate from the timeline views.',
     placement: 'bottom',
     title: 'Medals & milestones',
   },

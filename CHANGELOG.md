@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.85] - 2026-10-29
+
+### Changed — Medals
+- **Medals is now just the Badge Vault.** The Overview / Badge Vault / Play Streaks selector is gone, and so are the Overview tiles (commander XP, Taste DNA, charts) and the Play Streaks heatmap. Badges and their progress are unchanged.
+- Removed the code and assets only those views used (overview charts, play-streak heatmap, Taste DNA radar, an unused skill tree, a 5 MB image), and updated the tour and feature descriptions.
+
+### Release tooling
+- The publish script now finds and reuses a draft left by an interrupted run (GitHub's lookup-by-tag does not return drafts) and retries an installer upload the network reset.
+
 ## [1.0.84] - 2026-10-29
 
 Update reliability. Users reported "error downloading update"; release files and checksums were verified correct, and the evidence points to networks or security software cutting the long single-request installer download.

@@ -1253,7 +1253,7 @@ const GUIDE_STEPS: GuideStep[] = [
   { title: 'Explore the Galaxy', description: 'The Embedding Space is a 3D galaxy map where every game is a star. Games that are similar cluster together. Fly through genre regions, discover neighbors, and find hidden gems based on game DNA — not just tags.', icon: Map, color: 'text-amber-400' },
   { title: 'Stay Informed', description: 'Transmissions aggregates gaming news from 20+ sources (Steam, PC Gamer, IGN, etc.). Articles are deduplicated, thumbnails are auto-extracted, and you can archive favorites. The Decode Bay opens articles inline.', icon: Newspaper, color: 'text-rose-400' },
   { title: 'Plan Ahead', description: 'The Upcoming calendar shows upcoming game launches grouped by month, week, or day. Filter by store (Steam/Epic) and see countdowns to releases you\'re watching.', icon: Calendar, color: 'text-cyan-400' },
-  { title: 'Earn Medals', description: 'Track your gaming achievements with the Medals system. Earn badges for milestones like playing streaks, genre diversity, completing games, and building your collection. Your play streak heatmap shows consistency.', icon: Trophy, color: 'text-yellow-400' },
+  { title: 'Earn Medals', description: 'Track your gaming achievements with the Medals system. Earn badges for milestones like playing streaks, genre diversity, completing games, and building your collection.', icon: Trophy, color: 'text-yellow-400' },
 ];
 
 const ALL_TOURS: { id: TourId; label: string; description: string; icon: React.ElementType; color: string; devOnly?: boolean }[] = [
@@ -1404,7 +1404,7 @@ const CORE_FEATURES: FeatureBlock[] = [
   { title: 'Galaxy Map', desc: 'Every game is a star, and games that feel alike sit close together. Fly around, click a star, and hop to its neighbors to find hidden gems.', tech: 'Embedding Space: game embeddings projected to 3D with PCA.', icon: Map, color: 'text-amber-400' },
   { title: 'Gaming News', desc: 'Transmissions gathers news from 20+ gaming sites and Steam into one feed, removes duplicates, and lets you save favorites and read articles without leaving Ark.', icon: Newspaper, color: 'text-rose-400' },
   { title: 'Release Calendar', desc: 'See upcoming Steam and Epic launches by year, month, week, or day. Today\'s releases show first, and you can filter by store or genre so you never miss a launch.', icon: Calendar, color: 'text-cyan-400' },
-  { title: 'Medals', desc: 'Earn medals for milestones like play streaks, trying new genres, growing your collection, and finishing games. A yearly heatmap shows your streaks, and progress bars show how close you are to the next badge.', icon: Trophy, color: 'text-yellow-400' },
+  { title: 'Medals', desc: 'Earn medals for milestones like play streaks, trying new genres, growing your collection, and finishing games. Progress bars show how close you are to the next badge.', icon: Trophy, color: 'text-yellow-400' },
   { title: 'Gaming Events', desc: 'Scheduled Broadcasts follows 24 big gaming shows (Gamescom, The Game Awards, and more) with dates, countdowns, a LIVE badge, and one-click links to the stream.', icon: Globe, color: 'text-violet-400' },
 ];
 
