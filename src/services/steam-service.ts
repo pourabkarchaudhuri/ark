@@ -525,14 +525,14 @@ class SteamService {
     }
     const reviews = await reviewCountsFor(Object.keys(raw).map(Number));
     const out: Record<number, number> = {};
+    const ignored: string[] = [];
     for (const [idStr, count] of Object.entries(raw)) {
       const id = Number(idStr);
       const clean = sanitizePlayerCount(count, reviews.get(id));
       if (clean !== null) out[id] = clean;
-      else if (typeof count === 'number' && count > 0) {
-        console.log(`[Steam Service] Ignoring implausible player count for steam-${id}: ${count} (reviews ${reviews.get(id)})`);
-      }
+      else if (typeof count === 'number' && count > 0) ignored.push(`steam-${id}=${count}`);
     }
+    if (ignored.length > 0) console.log(`[Steam Service] Ignoring implausible player counts: ${ignored.join(', ')}`);
     return out;
   }
 
@@ -651,20 +651,49 @@ class SteamService {
 
 // Export singleton
 
+/**
+ * Review counts already looked up this session (appid → reviews, or -1 when the catalog has none).
+ * Counts are re-fetched every 10 minutes for the same cards, so without this every refresh cloned the
+ * same catalog rows over IPC again. Cleared when the catalog changes (a sync can add review counts).
+ */
+const reviewCountCache = new Map<number, number>();
+let reviewCacheSubscribed = false;
+
 /** Steam review counts for the plausibility check, from the local catalog (empty when unavailable). */
 async function reviewCountsFor(appIds: number[]): Promise<Map<number, number>> {
   const out = new Map<number, number>();
   if (appIds.length === 0) return out;
-  try {
-    const { catalogStore } = await import('./catalog-store');
-    const entries = await catalogStore.getEntries(appIds);
-    for (const e of entries ?? []) {
-      if (e && typeof e.appid === 'number' && typeof e.reviewCount === 'number') out.set(e.appid, e.reviewCount);
+  const missing = appIds.filter(id => !reviewCountCache.has(id));
+  if (missing.length > 0) {
+    try {
+      const { catalogStore } = await import('./catalog-store');
+      if (!reviewCacheSubscribed && typeof catalogStore.subscribe === 'function') {
+        reviewCacheSubscribed = true;
+        catalogStore.subscribe(() => reviewCountCache.clear());
+      }
+      const entries = await catalogStore.getEntries(missing);
+      const found = new Set<number>();
+      for (const e of entries ?? []) {
+        if (e && typeof e.appid === 'number' && typeof e.reviewCount === 'number') {
+          reviewCountCache.set(e.appid, e.reviewCount);
+          found.add(e.appid);
+        }
+      }
+      for (const id of missing) if (!found.has(id)) reviewCountCache.set(id, -1);
+    } catch {
+      // No catalog (first run, tests, browser mode): only the count itself is checked.
     }
-  } catch {
-    // No catalog (first run, tests, browser mode): only the count itself is checked.
+  }
+  for (const id of appIds) {
+    const r = reviewCountCache.get(id);
+    if (r !== undefined && r >= 0) out.set(id, r);
   }
   return out;
+}
+
+/** Test seam: forget cached review counts. */
+export function __resetReviewCountCacheForTests(): void {
+  reviewCountCache.clear();
 }
 
 export const steamService = new SteamService();

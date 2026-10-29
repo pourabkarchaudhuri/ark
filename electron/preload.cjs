@@ -636,6 +636,8 @@ contextBridge.exposeInMainWorld('store', {
   // Paginated chunk read (v1.0.65+) for large namespaces (catalog, epic-catalog).
   // opts = { startAfter?: string, limit: number }
   getChunk: (ns, opts) => ipcRenderer.invoke('store:getChunk', ns, opts),
+  // Upcoming-calendar rows filtered in main (v1.0.96): { rows } with at most ~700 entries.
+  queryUpcoming: (ns, opts) => ipcRenderer.invoke('catalog:queryUpcoming', ns, opts),
   put: (ns, key, value) => ipcRenderer.invoke('store:put', ns, key, value),
   del: (ns, key) => ipcRenderer.invoke('store:del', ns, key),
   batch: (ops) => ipcRenderer.invoke('store:batch', ops),

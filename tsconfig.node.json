@@ -16,6 +16,7 @@
     "vite.config.ts",
     "electron/**/*",
     "src/overlay/detail-level.ts",
+    "src/lib/upcoming-select.ts",
     "package.json"
   ]
 }

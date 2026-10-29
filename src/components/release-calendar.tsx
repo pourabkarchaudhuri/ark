@@ -323,11 +323,21 @@ function ordinalSuffix(day: number): string {
 // ─── Steam catalog releases ─────────────────────────────────────────────────
 
 let catalogUpcomingCache: { at: number; list: UpcomingRelease[] } | null = null;
+let catalogUpcomingInFlight: Promise<UpcomingRelease[]> | null = null;
 const CATALOG_UPCOMING_TTL_MS = 30 * 60 * 1000;
 
+function freshCatalogUpcoming(): UpcomingRelease[] | null {
+  return catalogUpcomingCache && Date.now() - catalogUpcomingCache.at < CATALOG_UPCOMING_TTL_MS ? catalogUpcomingCache.list : null;
+}
+
 /** Recent + upcoming Steam releases from the synced catalog, as calendar rows ([] if not synced). */
-async function loadCatalogUpcoming(): Promise<UpcomingRelease[]> {
-  if (catalogUpcomingCache && Date.now() - catalogUpcomingCache.at < CATALOG_UPCOMING_TTL_MS) return catalogUpcomingCache.list;
+function loadCatalogUpcoming(): Promise<UpcomingRelease[]> {
+  const fresh = freshCatalogUpcoming();
+  if (fresh) return Promise.resolve(fresh);
+  return catalogUpcomingInFlight ??= scanCatalogUpcoming().finally(() => { catalogUpcomingInFlight = null; });
+}
+
+async function scanCatalogUpcoming(): Promise<UpcomingRelease[]> {
   try {
     const { catalogStore } = await import('@/services/catalog-store');
     const now = new Date();
@@ -1623,7 +1633,8 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     return results.length > 0 ? results : null;
   }, []);
 
-  const catalogUpcomingRef = useRef<UpcomingRelease[]>([]);
+  // A cached catalog list is used by the very first build, so the calendar is not built twice.
+  const catalogUpcomingRef = useRef<UpcomingRelease[]>(freshCatalogUpcoming() ?? []);
 
   const fetchReleases = useCallback(async () => {
     setLoading(true);
@@ -1730,7 +1741,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   useEffect(() => {
     let cancelled = false;
     loadCatalogUpcoming().then((list) => {
-      if (cancelled || list.length === 0) return;
+      if (cancelled || list.length === 0 || list === catalogUpcomingRef.current) return;
       catalogUpcomingRef.current = list;
       void fetchReleases();
     });

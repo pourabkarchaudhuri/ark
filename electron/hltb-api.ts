@@ -296,20 +296,23 @@ export class HltbClient {
 // ---------------------------------------------------------------------------
 // Default instance (Electron net stack + disk cache)
 // ---------------------------------------------------------------------------
-let defaultClient: HltbClient | null = null;
+let defaultClient: Promise<HltbClient> | null = null;
 
-export async function getHltbClient(): Promise<HltbClient> {
-  if (defaultClient) return defaultClient;
+/** One client per process (concurrent first calls share the same construction and disk cache). */
+export function getHltbClient(): Promise<HltbClient> {
+  return defaultClient ??= createDefaultClient();
+}
+
+async function createDefaultClient(): Promise<HltbClient> {
   const { PersistentCache } = await import('./persistent-cache.js');
   const cache = new PersistentCache('hltb-cache.json');
   const version = electron?.app?.getVersion?.() ?? '0';
   const netFetch = electron?.net?.fetch as FetchFn | undefined;
-  defaultClient = new HltbClient({
+  return new HltbClient({
     fetch: netFetch ? (u, i) => netFetch(u, i) : (u, i) => fetch(u, i),
     cache,
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     userAgent: `Ark/${version} (+https://github.com/pourabkarchaudhuri/ark)`,
   });
-  return defaultClient;
 }

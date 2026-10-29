@@ -295,26 +295,34 @@ class SettingsStore {
     return this.decrypt(stored);
   }
 
+  /** Decrypted gg.deals key for the stored ciphertext (OS decryption runs once, not per price lookup). */
+  private ggKeyMemo: { stored: string; plain: string | null } | null = null;
+
   /** Main process only — there is deliberately no IPC getter for this key. */
   getGgDealsKey(): string | null {
     const stored = this.settings.apiKeys.ggDeals;
     if (!stored) return null;
+    if (this.ggKeyMemo?.stored === stored) return this.ggKeyMemo.plain;
+    let plain: string | null = null;
     try {
-      return this.decryptSecret(stored);
+      plain = this.decryptSecret(stored);
     } catch (error) {
       // e.g. settings copied from another PC: ask the user to enter the key again.
       logger.error('[SettingsStore] Could not decrypt the gg.deals key; it needs to be entered again:', (error as Error).message);
-      return null;
     }
+    this.ggKeyMemo = { stored, plain };
+    return plain;
   }
 
   setGgDealsKey(key: string): void {
+    this.ggKeyMemo = null;
     this.settings.apiKeys.ggDeals = this.encryptSecret(key);
     this.saveSettings();
     logger.log('[SettingsStore] gg.deals key saved');
   }
 
   clearGgDealsKey(): void {
+    this.ggKeyMemo = null;
     delete this.settings.apiKeys.ggDeals;
     this.saveSettings();
     logger.log('[SettingsStore] gg.deals key removed');

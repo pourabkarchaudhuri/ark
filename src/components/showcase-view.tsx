@@ -63,6 +63,32 @@ const SPINE_ART_SHARE = 0.14;
 /** Yaw the active box keeps so its spine and depth stay visible (radians). */
 const ACTIVE_TILT = 0.32;
 
+// Geometry and the case material are identical for every card: create them once and share them
+// (R3F would otherwise build ~4 geometries + a material per card and dispose/rebuild on every remount).
+const CASE_GEOMETRY = new THREE.BoxGeometry(CARD_W + CASE_LIP, CARD_W * 1.5 + CASE_LIP, CARD_DEPTH);
+const COVER_GEOMETRY = new THREE.PlaneGeometry(CARD_W, CARD_W * 1.5);
+/** Spine plane whose UVs cover only the left strip of the cover art, so it reuses the cover texture. */
+const SPINE_GEOMETRY = (() => {
+  const g = new THREE.PlaneGeometry(CARD_DEPTH * 0.92, CARD_W * 1.5);
+  const uv = g.attributes.uv as THREE.BufferAttribute;
+  for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) * SPINE_ART_SHARE);
+  uv.needsUpdate = true;
+  return g;
+})();
+// Glossy clearcoat only on the selected case; the others use the cheaper standard material.
+const CASE_MATERIAL = new THREE.MeshStandardMaterial({ color: '#0d0d14', roughness: 0.3, metalness: 0.15 });
+const CASE_MATERIAL_ACTIVE = new THREE.MeshPhysicalMaterial({ color: '#0d0d14', roughness: 0.3, metalness: 0.15, clearcoat: 1, clearcoatRoughness: 0.25 });
+
+// Per-frame animation targets, allocated once.
+const COLOR_FRONT_ACTIVE = new THREE.Color('#ffffff');
+const COLOR_FRONT_IDLE = new THREE.Color('#999999');
+const COLOR_BACK_ACTIVE = new THREE.Color('#8a8a8a');
+const COLOR_BACK_IDLE = new THREE.Color('#555555');
+const COLOR_SPINE_ACTIVE = new THREE.Color('#cfcfcf');
+const COLOR_SPINE_IDLE = new THREE.Color('#7a7a7a');
+const ACTIVE_POSITION = new THREE.Vector3(0, 0.5, 0);
+const noRaycast = () => null;
+
 const prefersReducedMotion = (): boolean => {
   try {
     return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
@@ -157,6 +183,9 @@ function useFallbackTexture(urls: string[]): THREE.Texture | null {
   const attemptRef = useRef(0);
   const urlsRef = useRef(urls);
   urlsRef.current = urls;
+
+  // Free the GPU copy of a cover once nothing draws it any more (replaced, or the card unmounted).
+  useEffect(() => () => { texture?.dispose(); }, [texture]);
 
   useEffect(() => {
     let cancelled = false;
@@ -324,27 +353,33 @@ function GenreArc({
   const { entries: genreEntries, from, len } = group;
   const count = genreEntries.length;
 
+  const cards = useMemo(() => genreEntries.map((entry, i) => {
+    const angle = from + (i / count) * len;
+    return {
+      entry,
+      urls: getImageChain(entry),
+      position: [Math.sin(angle) * radius, 0, Math.cos(angle) * radius] as [number, number, number],
+      rotation: [0, Math.PI / 2 + angle, 0] as [number, number, number],
+    };
+  }), [genreEntries, from, len, count, radius]);
+
   return (
     <group>
       <GenreFloorArc from={from} len={len} radius={radius} />
 
       <group>
-      {genreEntries.map((entry, i) => {
-        const angle = from + (i / count) * len;
-        const urls = getImageChain(entry);
+      {cards.map(({ entry, urls, position, rotation }) => {
         if (urls.length === 0) return null;
         return (
           <Card
             key={entry.gameId}
+            gameId={entry.gameId}
             urls={urls}
             isActive={entry.gameId === activeGameId}
             hoursPlayed={entry.hoursPlayed}
-            position={[Math.sin(angle) * radius, 0, Math.cos(angle) * radius]}
-            rotation={[0, Math.PI / 2 + angle, 0]}
-            onClick={(e: any) => {
-              e.stopPropagation?.();
-              onSelect(entry.gameId);
-            }}
+            position={position}
+            rotation={rotation}
+            onSelect={onSelect}
           />
         );
       })}
@@ -386,6 +421,14 @@ function YearMarkers({ flatCards, radius }: { flatCards: FlatCard[]; radius: num
     return { geo, mat };
   }, []);
 
+  // One Line per marker, built when the markers change — not a cloned geometry per marker on every
+  // render (each arrow-key step re-renders the scene).
+  const tickLines = useMemo(
+    () => new Map(markers.map(({ year }) => [year, new THREE.Line(tickLine.geo, tickLine.mat)])),
+    [markers, tickLine],
+  );
+  useEffect(() => () => { tickLine.geo.dispose(); tickLine.mat.dispose(); }, [tickLine]);
+
   return (
     <group>
       {markers.map(({ year, angle }) => {
@@ -394,7 +437,7 @@ function YearMarkers({ flatCards, radius }: { flatCards: FlatCard[]; radius: num
 
         return (
           <group key={year} position={[x, floorY, z]}>
-            <primitive object={new THREE.Line(tickLine.geo.clone(), tickLine.mat)} />
+            <primitive object={tickLines.get(year)!} />
             <Html
               position={[0, 0.45, 0]}
               center
@@ -439,8 +482,11 @@ function GenreFloorArc({ from, len, radius }: { from: number; len: number; radiu
     () => new THREE.LineBasicMaterial({ color: '#d946ef', transparent: true, opacity: 0.25 }),
     [],
   );
+  const line = useMemo(() => new THREE.Line(lineGeometry, lineMaterial), [lineGeometry, lineMaterial]);
+  useEffect(() => () => { lineGeometry.dispose(); }, [lineGeometry]);
+  useEffect(() => () => { lineMaterial.dispose(); }, [lineMaterial]);
 
-  return <primitive ref={lineRef} object={new THREE.Line(lineGeometry, lineMaterial)} />;
+  return <primitive ref={lineRef} object={line} />;
 }
 
 /** Typewriter text effect for the hours stamp on the active card. */
@@ -486,21 +532,29 @@ function TypedHoursStamp({ text }: { text: string }) {
  * When active: flies to the center, faces the camera, brightens, scales up.
  * Otherwise: dimmed at its ring position.
  */
-function Card({
+const Card = memo(function Card({
+  gameId,
   urls,
   isActive,
   hoursPlayed,
   position: cardPos,
   rotation: cardRot,
-  onClick,
+  onSelect,
 }: {
+  gameId: string;
   urls: string[];
   isActive: boolean;
   hoursPlayed: number;
   position: [number, number, number];
   rotation: [number, number, number];
-  onClick: (e: any) => void;
+  onSelect: (gameId: string) => void;
 }) {
+  const onClick = useCallback((e: { stopPropagation?: () => void }) => {
+    e.stopPropagation?.();
+    onSelect(gameId);
+  }, [onSelect, gameId]);
+  const restPosition = useMemo(() => new THREE.Vector3(cardPos[0], cardPos[1], cardPos[2]), [cardPos]);
+  const scaleTarget = useRef(new THREE.Vector3(1, 1, 1));
   const groupRef = useRef<THREE.Group>(null!);
   const slabRef = useRef<THREE.Group>(null!);
   const frontMatRef = useRef<THREE.MeshStandardMaterial>(null!);
@@ -511,18 +565,8 @@ function Card({
   const faceForwardY = defaultY - Math.PI / 2;
   const mounted = useRef(false);
 
+  // The spine reuses the cover texture through SPINE_GEOMETRY's cropped UVs (no second GPU upload).
   const texture = useFallbackTexture(urls);
-
-  // The spine shows a narrow strip of the cover art (a cloned texture with a cropped UV range).
-  const spineTexture = useMemo(() => {
-    if (!texture) return null;
-    const t = texture.clone();
-    t.repeat.set(SPINE_ART_SHARE, 1);
-    t.offset.set(0, 0);
-    t.needsUpdate = true;
-    return t;
-  }, [texture]);
-  useEffect(() => () => { spineTexture?.dispose(); }, [spineTexture]);
 
   // Track active state transitions for the floating label
   const [showLabel, setShowLabel] = useState(false);
@@ -544,31 +588,20 @@ function Card({
       mounted.current = true;
     }
 
-    easing.damp3(
-      groupRef.current.position,
-      (isActive ? [0, 0.5, 0] : cardPos) as unknown as THREE.Vector3,
-      0.2,
-      delta,
-    );
+    easing.damp3(groupRef.current.position, isActive ? ACTIVE_POSITION : restPosition, 0.2, delta);
 
     const f = isActive ? 2.6 : 1;
-    easing.damp3(
-      slabRef.current.scale,
-      [f, f, f] as unknown as THREE.Vector3,
-      CARD_DAMP,
-      delta,
-    );
+    easing.damp3(slabRef.current.scale, scaleTarget.current.set(f, f, f), CARD_DAMP, delta);
 
-    const colorTarget = isActive ? '#ffffff' : '#999999';
     const colorSpeed = isActive ? 0.3 : 0.1;
     if (frontMatRef.current) {
-      easing.dampC(frontMatRef.current.color, colorTarget, colorSpeed, delta);
+      easing.dampC(frontMatRef.current.color, isActive ? COLOR_FRONT_ACTIVE : COLOR_FRONT_IDLE, colorSpeed, delta);
     }
     if (backMatRef.current) {
-      easing.dampC(backMatRef.current.color, isActive ? '#8a8a8a' : '#555555', colorSpeed, delta);
+      easing.dampC(backMatRef.current.color, isActive ? COLOR_BACK_ACTIVE : COLOR_BACK_IDLE, colorSpeed, delta);
     }
     if (spineMatRef.current) {
-      easing.dampC(spineMatRef.current.color, isActive ? '#cfcfcf' : '#7a7a7a', colorSpeed, delta);
+      easing.dampC(spineMatRef.current.color, isActive ? COLOR_SPINE_ACTIVE : COLOR_SPINE_IDLE, colorSpeed, delta);
     }
 
     // The active box stays turned slightly so its spine and depth show, with a slow sway.
@@ -582,16 +615,12 @@ function Card({
   return (
     <group ref={groupRef} onClick={onClick}>
       <group ref={slabRef}>
-        {/* Game case: glossy plastic shell, a little larger than the cover — always visible */}
-        <mesh>
-          <boxGeometry args={[CARD_W + CASE_LIP, CARD_H + CASE_LIP, CARD_DEPTH]} />
-          <meshPhysicalMaterial color="#0d0d14" roughness={0.3} metalness={0.15} clearcoat={1} clearcoatRoughness={0.25} />
-        </mesh>
+        {/* Game case: plastic shell, a little larger than the cover — always visible (glossy when selected) */}
+        <mesh geometry={CASE_GEOMETRY} material={isActive ? CASE_MATERIAL_ACTIVE : CASE_MATERIAL} dispose={null} />
 
         {/* Front cover */}
         {texture && (
-          <mesh position={[0, 0, CARD_DEPTH / 2 + 0.002]}>
-            <planeGeometry args={[CARD_W, CARD_H]} />
+          <mesh position={[0, 0, CARD_DEPTH / 2 + 0.002]} geometry={COVER_GEOMETRY} dispose={null}>
             <meshStandardMaterial
               ref={frontMatRef}
               map={texture}
@@ -602,18 +631,22 @@ function Card({
           </mesh>
         )}
 
-        {/* Spine (left side): a strip of the cover art, slightly shaded */}
-        {spineTexture && (
-          <mesh position={[-(CARD_W + CASE_LIP) / 2 - 0.001, 0, 0]} rotation={[0, -Math.PI / 2, 0]}>
-            <planeGeometry args={[CARD_DEPTH * 0.92, CARD_H]} />
-            <meshStandardMaterial ref={spineMatRef} map={spineTexture} roughness={0.5} metalness={0.05} />
+        {/* Spine (left side): a strip of the cover art, slightly shaded. Not pickable (the case is). */}
+        {texture && (
+          <mesh
+            position={[-(CARD_W + CASE_LIP) / 2 - 0.001, 0, 0]}
+            rotation={[0, -Math.PI / 2, 0]}
+            geometry={SPINE_GEOMETRY}
+            raycast={noRaycast}
+            dispose={null}
+          >
+            <meshStandardMaterial ref={spineMatRef} map={texture} roughness={0.5} metalness={0.05} />
           </mesh>
         )}
 
         {/* Back cover: the art, darker */}
         {texture && (
-          <mesh position={[0, 0, -(CARD_DEPTH / 2 + 0.002)]} rotation={[0, Math.PI, 0]}>
-            <planeGeometry args={[CARD_W, CARD_H]} />
+          <mesh position={[0, 0, -(CARD_DEPTH / 2 + 0.002)]} rotation={[0, Math.PI, 0]} geometry={COVER_GEOMETRY} dispose={null}>
             <meshStandardMaterial
               ref={backMatRef}
               map={texture}
@@ -665,7 +698,7 @@ function Card({
       </group>
     </group>
   );
-}
+});
 
 // ─── Metadata helpers (matching Voyage Log mode) ─────────────────────────────
 

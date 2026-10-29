@@ -242,3 +242,9 @@ The following gaps were fixed and removed from the active list:
 - Candidates without a stored vector (unembedded catalog rows, Ollama off) still get no semantic or pool-neighbour signal; on-demand embedding of survivors (plan part B) was deferred until the new per-store coverage numbers show it is the bottleneck.
 - Graph community / PageRank layers only grow after the background graph rebuild (throttled to every 10 minutes).
 - Pool neighbours use pooled game vectors; the distance ceiling (0.45) was tuned for the index's chunk-based distances and may admit more neighbours than before. Watch the "graph" coverage and golden diffs.
+
+## Performance follow-ups (low impact, from the 1.0.96 audit)
+- `useSteamGames` games useMemo returns a new array whenever any card has merged data, so every enrichment bump re-renders the visible grid; reuse unchanged merged items by comparing their inputs.
+- Catalog vectors enriched for Oracle stay in the session embedding cache as number[] (8 bytes/value); storing them as Float32Array would halve memory with identical maths (cross-cutting change).
+- The dev-panel `oracleLayersStatus` is rebuilt on every system-status snapshot (cheap; could be cached on telemetry identity).
+- Player counts beyond the first 100 Browse games are not fetched (as before 1.0.86); driving the list from the cards actually on screen would need the grid's visible range.

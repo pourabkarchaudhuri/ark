@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { Clock } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import type { HltbState } from '@/hooks/useHltbTimes';
+import { useHltbTimes, type HltbState } from '@/hooks/useHltbTimes';
 
 function fmt(hours: number | null): string | null {
   if (hours === null) return null;
@@ -49,4 +49,9 @@ export const HltbChip = memo(function HltbChip({ state }: { state: HltbState }) 
       {full && <span className="text-violet-300/70">&nbsp;· 100% {full}</span>}
     </Badge>
   );
+});
+
+/** Self-contained badge: owns the lookup state, so the page around it does not re-render for it. */
+export const HltbBadge = memo(function HltbBadge({ title, year }: { title?: string; year?: number }) {
+  return <HltbChip state={useHltbTimes(title, year)} />;
 });

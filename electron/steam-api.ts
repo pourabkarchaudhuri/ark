@@ -328,6 +328,14 @@ export const PLAYER_COUNT_ALIASES: Readonly<Record<number, number>> = {
 
 class SteamAPIClient {
   private rateLimiter = new RateLimiter();
+  /**
+   * Player counts (api.steampowered.com) get their own limiter so a Browse sweep never queues
+   * appdetails / reviews / search (store.steampowered.com) behind it, and their own in-memory cache:
+   * writing hundreds of short-lived counts into the persistent cache rewrote steam-cache.json (which
+   * holds the full app list) on every sweep and evicted real appdetails entries.
+   */
+  private playerCountLimiter = new RateLimiter();
+  private playerCountCache = new Map<number, { v: number | null; until: number }>();
   private cache = new Cache('steam-cache.json');
   /** appdetails circuit: set from a 429 (Retry-After, capped at 5 min; default 60s). */
   private appDetailsPausedUntil = 0;
@@ -770,17 +778,19 @@ class SteamAPIClient {
    */
   async getPlayerCount(appId: number): Promise<number | null> {
     const sourceId = PLAYER_COUNT_ALIASES[appId] ?? appId;
-    const cacheKey = `player-count-${sourceId}`;
     const PLAYER_COUNT_TTL = 5 * 60 * 1000; // 5 minutes
     const UNKNOWN_TTL = 2 * 60 * 1000;
 
-    // The cache treats a stored null as a miss, so unknown results are cached as -1.
-    const cached = this.cache.get<number>(cacheKey);
-    if (cached !== undefined && cached !== null) return cached < 0 ? null : cached;
+    const cached = this.playerCountCache.get(sourceId);
+    if (cached && cached.until > Date.now()) return cached.v;
+    const remember = (v: number | null) => {
+      if (this.playerCountCache.size > 5000) this.playerCountCache.clear(); // bound memory in long sessions
+      this.playerCountCache.set(sourceId, { v, until: Date.now() + (v === null ? UNKNOWN_TTL : PLAYER_COUNT_TTL) });
+    };
 
     try {
       const url = `https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=${sourceId}&format=json`;
-      const result = await this.rateLimiter.execute(async () => {
+      const result = await this.playerCountLimiter.execute(async () => {
         const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Player count API error: ${res.status}`);
         return res.json();
@@ -788,12 +798,12 @@ class SteamAPIClient {
 
       const raw = result?.response?.player_count;
       const count = result?.response?.result === 1 && typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
-      this.cache.set(cacheKey, count ?? -1, count === null ? UNKNOWN_TTL : PLAYER_COUNT_TTL);
+      remember(count);
       return count;
     } catch (error) {
       // Unknown/unreleased apps answer 404; network errors are not "0 players".
       void error;
-      this.cache.set(cacheKey, -1, UNKNOWN_TTL);
+      remember(null);
       return null;
     }
   }

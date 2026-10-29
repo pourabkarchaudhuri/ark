@@ -94,6 +94,25 @@ describe('GgDealsClient', () => {
     expect((await c.getPrices([1], 'us')).prices[1]?.title).toBe('Hades');
   });
 
+  it('overlapping calls for the same games share one fetch', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let calls = 0;
+    const cache = memCache();
+    let now = 1;
+    const c = new GgDealsClient({
+      fetch: async () => { calls++; await gate; return ok({ 1: HADES, 2: HADES }); },
+      cache, getKey: () => KEY, now: () => now, sleep: async (ms) => { now += ms; },
+    });
+    const a = c.getPrices([1, 2], 'us');
+    const b = c.getPrices([2], 'us');
+    release();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(calls).toBe(1);
+    expect(ra.prices[2]?.title).toBe('Hades');
+    expect(rb.prices[2]?.title).toBe('Hades');
+  });
+
   it('asks for nothing without a key', async () => {
     const { c, urls } = setup(() => ok({}), null);
     expect(await c.getPrices([1], 'us')).toEqual({ prices: {}, error: 'no-key' });

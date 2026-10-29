@@ -1408,6 +1408,29 @@ export function computePoolNeighbors(
   return { neighbors, hits };
 }
 
+/**
+ * computePoolNeighbors with the same arithmetic in the same order, but yielding to the event loop
+ * after each source (~5-15 ms of work each) so a full Oracle compute never freezes the window for the
+ * 150-450 ms the one-shot version takes. `shouldStop` lets a superseded compute bail out early.
+ */
+export async function computePoolNeighborsAsync(
+  sources: ReadonlyArray<{ gameId: string; vector: ArrayLike<number> }>,
+  candidates: ReadonlyArray<{ gameId: string; embedding?: ArrayLike<number> }>,
+  opts: { k: number; ceiling: number; shouldStop?: () => boolean },
+): Promise<{ neighbors: Record<string, Array<{ u: string; d: number }>>; hits: number }> {
+  const merged: Record<string, Array<{ u: string; d: number }>> = {};
+  let hits = 0;
+  for (const src of sources) {
+    if (opts.shouldStop?.()) break;
+    // One source at a time through the exact same routine (pool order, ceiling, stable sort, k cap).
+    const part = computePoolNeighbors([src], candidates, opts);
+    for (const [id, list] of Object.entries(part.neighbors)) (merged[id] ??= []).push(...list);
+    hits += part.hits;
+    await new Promise<void>((r) => setTimeout(r, 0));
+  }
+  return { neighbors: merged, hits };
+}
+
 /** Map a raw score onto 0–100 across the pool's [lo, hi] range (raw scores sit in a narrow low band). */
 export function calibrateMatchPercent(score: number, lo: number, hi: number): number {
   if (!(hi > lo)) return Math.round(clamp01(score) * 100);

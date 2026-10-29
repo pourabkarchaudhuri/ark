@@ -134,6 +134,7 @@ class RecoHistoryStore {
   }
 
   private notify() {
+    this.feedbackVersion++;
     this.listeners.forEach(fn => fn());
   }
 
@@ -605,8 +606,18 @@ class RecoHistoryStore {
       .map(e => e.gameId);
   }
 
+  private feedbackCountsCache: { version: number; value: { up: number; down: number; dismissed: number } } | null = null;
+  private feedbackVersion = 0;
+
   /** How much explicit feedback exists (Oracle dev panel). Dismissals exclude thumbs-downs. */
   getFeedbackCounts(): { up: number; down: number; dismissed: number } {
+    if (this.feedbackCountsCache?.version === this.feedbackVersion) return this.feedbackCountsCache.value;
+    const value = this.computeFeedbackCounts();
+    this.feedbackCountsCache = { version: this.feedbackVersion, value };
+    return value;
+  }
+
+  private computeFeedbackCounts(): { up: number; down: number; dismissed: number } {
     let up = 0;
     let down = 0;
     for (const e of this.history.values()) {

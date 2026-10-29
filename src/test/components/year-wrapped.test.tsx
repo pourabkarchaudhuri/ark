@@ -5,7 +5,8 @@ import type { GameSession, JourneyEntry } from '@/types/game';
 
 // Wrapped mounts a heavy animated overlay; under full-suite load its first render can take longer
 // than the 1s default wait, which made these tests flaky (they pass alone).
-configure({ asyncUtilTimeout: 5000 });
+configure({ asyncUtilTimeout: 15000 });
+vi.setConfig({ testTimeout: 30000 });
 
 vi.mock('canvas-confetti', () => {
   const fire = Object.assign(vi.fn(() => Promise.resolve()), { reset: vi.fn() });

@@ -28,6 +28,7 @@ import type {
 } from '@/types/catalog';
 import { classifyTags } from '@/data/steam-tag-map';
 import { storeGetMany } from './store-bulk';
+import { UpcomingSelector } from '@/lib/upcoming-select';
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
 
@@ -849,14 +850,19 @@ export class CatalogStore {
   }): Promise<CatalogEntry[]> {
     const { fromMs, toMs, nowMs = Date.now(), minRecentReviews = 20, maxRecent = 300, maxFuture = 400 } = opts;
     await this.migrateFromIdbIfNeeded();
-    const recent: CatalogEntry[] = [];
-    const future: CatalogEntry[] = [];
-    const admit = (entry: CatalogEntry) => {
-      const ms = (entry.releaseDate || 0) * 1000;
-      if (!ms || ms < fromMs || ms > toMs) return;
-      if (ms > nowMs) future.push(entry);
-      else if ((entry.reviewCount ?? 0) >= minRecentReviews) recent.push(entry);
-    };
+    const selectOpts = { fromMs, toMs, nowMs, minRecentReviews, maxRecent, maxFuture };
+    // LevelDB: filter next to the data in the main process — one IPC returning at most ~700 rows
+    // instead of ~155 chunk round trips cloning the whole catalog into the renderer.
+    if (useLevelDB() && typeof window.store?.queryUpcoming === 'function') {
+      try {
+        const res = await window.store.queryUpcoming<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, selectOpts);
+        if (!res.error && Array.isArray(res.rows)) return res.rows;
+      } catch {
+        /* fall through to the renderer scan */
+      }
+    }
+    const selector = new UpcomingSelector<CatalogEntry>(selectOpts);
+    const admit = (entry: CatalogEntry) => selector.admit(entry);
     if (useLevelDB()) {
       await levelStreamAllEntries(admit);
     } else {
@@ -876,9 +882,7 @@ export class CatalogStore {
         req.onerror = () => resolve();
       });
     }
-    recent.sort((a, b) => b.reviewCount - a.reviewCount);
-    future.sort((a, b) => a.releaseDate - b.releaseDate);
-    return [...recent.slice(0, maxRecent), ...future.slice(0, maxFuture)];
+    return selector.result();
   }
 
   async queryForCandidates(opts: {

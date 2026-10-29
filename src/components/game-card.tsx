@@ -518,8 +518,9 @@ function GameCardComponent({
                 <p className={cn("text-white/40", compact ? "text-[10px]" : "text-xs")}>&nbsp;</p>
               )}
             </div>
+            {/* Fixed height: the price badge arriving later must not resize the card (virtual grid re-measure). */}
             {!compact && (
-              <div className="min-h-[1rem] mt-0.5 flex items-center justify-between gap-2">
+              <div className="h-4 mt-0.5 flex items-center justify-between gap-2 overflow-hidden">
                 {game.playerCount !== undefined && game.playerCount > 0 ? (
                   <p className="text-xs text-cyan-400">
                     {formatPlayingNow(game.playerCount, game.availableOn && game.availableOn.length > 1 ? ' on Steam' : ' now')}

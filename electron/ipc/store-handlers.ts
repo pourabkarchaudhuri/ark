@@ -19,6 +19,7 @@ const electron = require('electron');
 const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
 import { getLevelStore } from '../storage/level-store.js';
+import { UpcomingSelector } from '../../src/lib/upcoming-select.js';
 
 // ---------------------------------------------------------------------------
 // Rate limiting (Gap #25) — per-channel, per-sender token bucket
@@ -153,6 +154,44 @@ export function register(): void {
       return res;
     } catch (err) {
       logger.error('[Store IPC] store:getChunk failed:', err);
+      return toError(err);
+    }
+  });
+
+  /**
+   * Upcoming-calendar rows from a large namespace (the Steam catalog), filtered here next to LevelDB so
+   * the renderer gets at most maxRecent + maxFuture rows in one reply. Yields between chunks so other
+   * IPC keeps being served while the catalog is scanned.
+   */
+  ipcMain.handle('catalog:queryUpcoming', async (event: any, namespace: string, opts: Record<string, unknown>) => {
+    if (!checkRateLimit('store:getChunk', senderIdOf(event))) {
+      return rateLimited('store:getChunk', senderIdOf(event));
+    }
+    try {
+      const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+      if (typeof namespace !== 'string' || !opts || typeof opts !== 'object') return { error: 'bad arguments' };
+      const selector = new UpcomingSelector<{ releaseDate: number; reviewCount: number }>({
+        fromMs: num(opts.fromMs, 0),
+        toMs: num(opts.toMs, 0),
+        nowMs: num(opts.nowMs, Date.now()),
+        minRecentReviews: num(opts.minRecentReviews, 20),
+        maxRecent: Math.min(1000, num(opts.maxRecent, 300)),
+        maxFuture: Math.min(1000, num(opts.maxFuture, 400)),
+      });
+      let startAfter: string | undefined;
+      for (;;) {
+        const res = await store.getChunk(namespace, { startAfter, limit: 2000 });
+        for (const row of res.rows ?? []) {
+          const v = row.value as { releaseDate?: number; reviewCount?: number } | null;
+          if (v && typeof v === 'object') selector.admit(v as { releaseDate: number; reviewCount: number });
+        }
+        if (res.done || !res.nextKey) break;
+        startAfter = res.nextKey;
+        await new Promise<void>((r) => setImmediate(r));
+      }
+      return { rows: selector.result() };
+    } catch (err) {
+      logger.error('[Store IPC] catalog:queryUpcoming failed:', err);
       return toError(err);
     }
   });

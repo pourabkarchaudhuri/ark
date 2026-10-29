@@ -304,6 +304,11 @@ interface StoreAPI {
     namespace: string,
     opts: { startAfter?: string; limit: number },
   ) => Promise<StoreChunkResult<T>>;
+  /** Upcoming-calendar rows filtered in the main process (absent in older preloads). */
+  queryUpcoming?: <T = unknown>(
+    namespace: string,
+    opts: { fromMs: number; toMs: number; nowMs: number; minRecentReviews: number; maxRecent: number; maxFuture: number },
+  ) => Promise<{ rows?: T[]; error?: string }>;
   put: (namespace: string, key: string, value: unknown) => Promise<StoreOkResult>;
   del: (namespace: string, key: string) => Promise<StoreOkResult>;
   batch: (ops: StoreBatchOp[]) => Promise<StoreOkResult>;

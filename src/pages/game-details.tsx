@@ -26,9 +26,9 @@ import { FaWindows, FaApple, FaLinux, FaSteam } from 'react-icons/fa';
 import { SiEpicgames, SiSteam } from 'react-icons/si';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { HltbChip } from '@/components/hltb-chip';
+import { HltbBadge } from '@/components/hltb-chip';
 import { DealPriceBlock } from '@/components/deal-price';
-import { releaseYearOf, useHltbTimes } from '@/hooks/useHltbTimes';
+import { releaseYearOf } from '@/hooks/useHltbTimes';
 import { GameDialog } from '@/components/game-dialog';
 import { cn, buildGameImageChain } from '@/lib/utils';
 import { annIndex } from '@/services/ann-index';
@@ -688,8 +688,6 @@ export function GameDetailsPage() {
   const appId = isSteamGame ? parseInt(gameId!.slice(6), 10) : null;
 
   const [details, setDetails] = useState<SteamAppDetails | null>(null);
-  // HowLongToBeat times for the header badge (lazy, cached in main; null when off/offline/unmatched).
-  const hltb = useHltbTimes(details?.name, releaseYearOf(details?.release_date?.date));
   const [epicGame, setEpicGame] = useState<Game | null>(null);
   // Cross-store metadata from prefetch (e.g., price/link from the "other" store)
   const [crossStoreGame, setCrossStoreGame] = useState<Game | null>(null);
@@ -2006,7 +2004,7 @@ export function GameDetailsPage() {
               )}
               
               {/* HowLongToBeat (hidden when off, offline or no confident match) */}
-              <HltbChip state={hltb} />
+              <HltbBadge title={details.name} year={releaseYearOf(details.release_date?.date)} />
 
               {/* Metascore (from our Metacritic scraper — works for Steam, Epic, and dual-store) */}
               {metacriticReviews && metacriticReviews.score > 0 && (

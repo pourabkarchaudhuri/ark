@@ -106,6 +106,8 @@ export class GgDealsClient {
   private rejectedKey: string | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private lastRequestAt = 0;
+  /** region:appid → the batch fetch that is getting it, so overlapping calls never fetch twice. */
+  private inFlight = new Map<string, Promise<GgDealsPrice | null | GgDealsError>>();
 
   constructor(private deps: Deps) {}
 
@@ -130,17 +132,42 @@ export class GgDealsClient {
     if (key === this.rejectedKey) return { prices, error: 'invalid-key' };
     if (this.deps.now() < this.breakerUntil) return { prices, error: 'unavailable' };
 
-    for (let i = 0; i < missing.length; i += BATCH_SIZE) {
-      const batch = missing.slice(i, i + BATCH_SIZE);
-      const outcome = await this.fetchBatch(batch, key, region);
-      if (typeof outcome === 'string') return { prices, error: outcome };
+    // Ids another call is already fetching: wait for that instead of fetching them again.
+    const joined: Array<[number, Promise<GgDealsPrice | null | GgDealsError>]> = [];
+    const toFetch: number[] = [];
+    for (const id of missing) {
+      const running = this.inFlight.get(this.cacheKey(region, id));
+      if (running) joined.push([id, running]);
+      else toFetch.push(id);
+    }
+
+    let error: GgDealsError | undefined;
+    for (let i = 0; i < toFetch.length; i += BATCH_SIZE) {
+      const batch = toFetch.slice(i, i + BATCH_SIZE);
+      const batchPromise = this.fetchBatch(batch, key, region);
+      for (const id of batch) {
+        const k = this.cacheKey(region, id);
+        const p = batchPromise.then((o) => (typeof o === 'string' ? o : o[id] ?? null));
+        this.inFlight.set(k, p);
+        void p.finally(() => { if (this.inFlight.get(k) === p) this.inFlight.delete(k); });
+      }
+      const outcome = await batchPromise;
+      if (typeof outcome === 'string') {
+        error = outcome;
+        break;
+      }
       for (const id of batch) {
         const p = outcome[id] ?? null;
         prices[id] = p;
         this.deps.cache.set(this.cacheKey(region, id), { p }, PRICE_TTL_MS);
       }
     }
-    return { prices };
+    for (const [id, running] of joined) {
+      const v = await running;
+      if (typeof v === 'string') error ??= v;
+      else prices[id] = v;
+    }
+    return error ? { prices, error } : { prices };
   }
 
   /** Check a key with a single lookup (Counter-Strike 2). */
@@ -211,20 +238,23 @@ export class GgDealsClient {
   }
 }
 
-let defaultClient: GgDealsClient | null = null;
+let defaultClient: Promise<GgDealsClient> | null = null;
 
-export async function getGgDealsClient(): Promise<GgDealsClient> {
-  if (defaultClient) return defaultClient;
+/** One client per process (concurrent first calls share the same construction and disk cache). */
+export function getGgDealsClient(): Promise<GgDealsClient> {
+  return defaultClient ??= createDefaultClient();
+}
+
+async function createDefaultClient(): Promise<GgDealsClient> {
   const { PersistentCache } = await import('./persistent-cache.js');
   const { settingsStore } = await import('./settings-store.js');
   const cache = new PersistentCache('ggdeals-cache.json');
   const netFetch = electron?.net?.fetch as FetchFn | undefined;
-  defaultClient = new GgDealsClient({
+  return new GgDealsClient({
     fetch: netFetch ? (u, i) => netFetch(u, i) : (u, i) => fetch(u, i),
     cache,
     getKey: () => settingsStore.getGgDealsKey(),
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   });
-  return defaultClient;
 }

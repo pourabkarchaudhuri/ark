@@ -35,7 +35,7 @@ import {
   _engagementCache,
   bestPreparedClusterSimilarity,
   buildGraphUserContext,
-  computePoolNeighbors,
+  computePoolNeighborsAsync,
   detectTasteClusters,
   normalizeTitleKey,
   prepareClusterCentroids,
@@ -765,6 +765,13 @@ export class RecoStore {
         for (const c of candidates) c.embedding ??= embeddingCache.get(c.gameId);
       }
 
+      // 2.95 (started early). gg.deals prices → "at its all-time low" for the Deals shelf (no-op without a
+      // key). Runs while the ML step runs: it only writes c.price, ML only writes c.mlScore/mlSynthetic.
+      const ggDealsStep = runWithDeadline(
+        () => this.applyGgDeals(candidates),
+        budget(GG_DEALS_TIMEOUT_MS), undefined, signal, 'gg.deals prices',
+      );
+
       // 2.9. ML model scoring — Kaggle-trained LightGBM
       setProgress('ML model scoring...', 14);
       await runWithDeadline(
@@ -773,11 +780,7 @@ export class RecoStore {
       );
       if (isStale()) return;
 
-      // 2.95. gg.deals prices → "at its all-time low" for the Deals shelf (no-op without a key).
-      await runWithDeadline(
-        () => this.applyGgDeals(candidates),
-        budget(GG_DEALS_TIMEOUT_MS), undefined, signal, 'gg.deals prices',
-      );
+      await ggDealsStep;
       if (isStale()) return;
 
       // 3. Compute taste centroid & embedding coverage
@@ -856,11 +859,15 @@ export class RecoStore {
         const negMag = negativeCentroid && negativeCentroid.length === dim ? vecMagnitude(negativeCentroid) : 0;
 
         let processed = 0;
+        let sliceStart = performance.now();
         for (const c of candidates) {
           // Yield periodically: this loop (plus cluster scoring) is synchronous work over ~25K x 1024 floats.
-          if (++processed % 2000 === 0) {
+          // Yield by elapsed time (~8 ms slices) so this pass never holds the UI thread for long.
+          ++processed;
+          if (performance.now() - sliceStart > 8) {
             await new Promise<void>(resolve => setTimeout(resolve, 0));
             if (isStale()) return;
+            sliceStart = performance.now();
           }
           if (c.embedding && c.embedding.length === dim) {
             let dot = 0, dotNeg = 0, magB = 0;
@@ -939,6 +946,9 @@ export class RecoStore {
       if (isStale()) return;
       const { graphScoresMap, userCommunityCounts, userCommunityTotal, graphMaxPageRank } = graphPack;
 
+      const feedbackCandidates = await this.resolveFeedbackCandidates(feedbackIds, feedbackPool, candidates);
+      if (isStale()) return;
+
       // 5. Dispatch to worker
       const input: RecoWorkerInput = {
         userGames,
@@ -953,7 +963,7 @@ export class RecoStore {
           .filter(d => !thumbsDownIds.includes(d.gameId))
           .map(d => ({ id: d.gameId, at: d.at })),
         thumbsUpIds,
-        feedbackCandidates: await this.resolveFeedbackCandidates(feedbackIds, feedbackPool, candidates),
+        feedbackCandidates,
         tasteCentroid: tasteCentroid ? Array.from(tasteCentroid) : undefined,
         precomputedSemanticScores,
         mmrVectors,
@@ -1007,7 +1017,7 @@ export class RecoStore {
     }
 
     if (candidates.some(c => c.embedding && c.embedding.length > 0)) {
-      const { neighbors, hits } = computePoolNeighbors(sources, candidates, {
+      const { neighbors, hits } = await computePoolNeighborsAsync(sources, candidates, {
         k: LIBRARY_NEIGHBOR_K,
         ceiling: GRAPH_NEIGHBOR_DISTANCE_CEILING,
       });
@@ -1066,6 +1076,8 @@ export class RecoStore {
       const meta = libEntry?.cachedMeta;
       const sessions = sessionsByGame.get(entry.gameId) || [];
       const statusChanges = statusByGame.get(entry.gameId) || [];
+      // Before the in-place sort below: same order getForGame returns, so isAutoHeld answers the same.
+      const autoHeld = (libEntry?.status || entry.status) === 'On Hold' && isAutoHeld(statusChanges);
 
       // Session pattern analysis
       const totalDuration = sessions.reduce((s, ses) => s + ses.durationMinutes, 0);
@@ -1118,7 +1130,7 @@ export class RecoStore {
         avgSessionMinutes,
         lastSessionDate: lastSession?.endTime || null,
         activeToIdleRatio: totalDuration > 0 ? totalDuration / (totalDuration + totalIdle) : 1,
-        autoHeld: (libEntry?.status || entry.status) === 'On Hold' && isAutoHeld(statusHistoryStore.getForGame(entry.gameId)),
+        autoHeld,
         statusTrajectory: trajectory,
         similarGameTitles,
         engagementPattern,
@@ -2552,8 +2564,8 @@ export class RecoStore {
   }
 
   private runWorker(input: RecoWorkerInput, runId: number) {
-    this.killWorker();
     if (runId !== this.computeGeneration) return;
+    this.killWorker();
 
     try {
       this.worker = new Worker(

@@ -164,6 +164,11 @@ export function extractCachedMeta(game: Game): CachedGameMeta {
  * Default view: all games sorted by release date (newest first)
  * 'catalog' category: continuous A–Z browsing via GetAppList + chunked details
  */
+/** Live player counts by Steam appid, shared by every Browse mount (see the player-count effect). */
+const sharedPlayerCounts = new Map<number, number>();
+const sharedPlayerCountFetchedAt = new Map<number, number>();
+let playerCountSweepRunning = false;
+
 export function useSteamGames(category: GameCategory = 'trending') {
   // Minimum games to consider Top Sellers preload "complete" (Steam ~37 + Epic, avoid showing Steam-only 38).
   const TOP_SELLERS_MIN_FULL = 40;
@@ -227,10 +232,11 @@ export function useSteamGames(category: GameCategory = 'trending') {
   // allGames → displayedGames → sortedGames cascade. Only the visible
   // `games` slice merges it at read-time when the epoch bumps.
   const enrichmentMapRef = useRef<Map<string, Partial<Game>>>(new Map());
-  // Player counts stored out-of-band to avoid re-mapping 6000+ games
-  const playerCountMapRef = useRef<Map<number, number>>(new Map());
+  // Player counts stored out-of-band to avoid re-mapping 6000+ games. The maps are module-level so
+  // leaving and re-opening Browse reuses fresh counts instead of re-fetching them all.
+  const playerCountMapRef = useRef<Map<number, number>>(sharedPlayerCounts);
   // When each appid's count was last fetched, so counts refresh instead of sticking for the session.
-  const playerCountFetchedAtRef = useRef<Map<number, number>>(new Map());
+  const playerCountFetchedAtRef = useRef<Map<number, number>>(sharedPlayerCountFetchedAt);
   const [enrichmentEpoch, setEnrichmentEpoch] = useState(0);
 
   /**
@@ -774,18 +780,21 @@ export function useSteamGames(category: GameCategory = 'trending') {
   // Counts come from ISteamUserStats/GetNumberOfCurrentPlayers (Steam API).
   // NOTE: Epic Games Store does not expose player count data, so only Steam
   // games (including multi-store games with a Steam ID) receive live counts.
-  // Counts are fetched for the cards the user has scrolled to (up to 400), refreshed
-  // every 10 minutes, and stored out-of-band in a ref; one enrichmentEpoch bump makes
-  // the `games` useMemo re-merge only the visible virtual cards.
+  // Counts are fetched for the first 100 Steam games of the list (as before v1.0.86 — the
+  // displayCount widening makes "scrolled to" the whole list, and 400 counts per sweep starved the
+  // shared Steam queue), refreshed every 10 minutes while the window is visible, and stored
+  // out-of-band; one enrichmentEpoch bump makes the `games` useMemo re-merge the visible cards.
   useEffect(() => {
     if (loading || allGames.length === 0) return;
 
-    let cancelled = false;
+    let alive = true;
     const BATCH_SIZE = 20;
-    const MAX_TRACKED = 400; // cards the user has scrolled to, capped
+    const MAX_TRACKED = 100;
     const REFRESH_MS = 10 * 60 * 1000;
 
     const fetchLiveCounts = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return; // nobody is looking
+      if (playerCountSweepRunning) return; // one sweep at a time (effect re-runs must not stack them)
       const now = Date.now();
       const steamIds = allGames
         .slice(0, Math.min(displayCount, MAX_TRACKED))
@@ -795,14 +804,14 @@ export function useSteamGames(category: GameCategory = 'trending') {
 
       if (steamIds.length === 0) return;
       let changed = false;
-
+      playerCountSweepRunning = true;
+      try {
       for (let i = 0; i < steamIds.length; i += BATCH_SIZE) {
-        if (cancelled) return;
         const batch = steamIds.slice(i, i + BATCH_SIZE);
         try {
           // Only believable counts come back (steamService sanitises); a missing id = unknown.
+          // A sweep is never abandoned half-way: results land in the shared maps either way.
           const counts = await steamService.getMultiplePlayerCounts(batch);
-          if (cancelled) return;
           const fetchedAt = Date.now();
           for (const id of batch) {
             playerCountFetchedAtRef.current.set(id, fetchedAt);
@@ -818,17 +827,22 @@ export function useSteamGames(category: GameCategory = 'trending') {
           // Non-critical — skip this batch
         }
       }
+      } finally {
+        playerCountSweepRunning = false;
+      }
 
       // Single epoch bump → games useMemo re-merges visible player counts
-      if (!cancelled && changed) {
+      if (alive && changed) {
         setEnrichmentEpoch(e => e + 1);
       }
     };
 
+    // Counts kept from an earlier visit show straight away.
+    if (playerCountMapRef.current.size > 0) setEnrichmentEpoch(e => e + 1);
     // Debounced so scrolling (displayCount growing) fetches once per pause.
     const timer = setTimeout(fetchLiveCounts, 400);
     const refresh = setInterval(fetchLiveCounts, REFRESH_MS);
-    return () => { cancelled = true; clearTimeout(timer); clearInterval(refresh); };
+    return () => { alive = false; clearTimeout(timer); clearInterval(refresh); };
   // allGames is read through the closure; re-running on every mutation would refetch constantly.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, displayCount]);

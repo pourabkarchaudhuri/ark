@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.96] - 2026-10-29
+
+Performance release. A read-only audit of everything shipped in 1.0.84–1.0.95 (five areas, each re-checked by a second reviewer) found what made the app stutter; every fix below keeps results identical.
+
+### Fixed — stutter and slowdowns
+- **Browse scroll jumps:** the price badge made each card ~5px taller when its price arrived (it renders after the card), so the virtual grid re-measured rows and moved the scroll position. The card footer now has a fixed height and the badge fits inside it.
+- **Player counts no longer clog Steam requests:** a Browse sweep asked for 400 counts (back to 100, as before 1.0.86) through the same request queue as game details, reviews and search, delaying each of those by seconds, and repeated every 10 minutes. Counts now use their own queue, are kept across visits to Browse, pause while the window is hidden, and one sweep runs at a time.
+- **No more 155k-row disk rewrites for player counts:** every count was written to the persistent Steam cache, which rewrote steam-cache.json (holding the full app list) on the main process each sweep and pushed real game details out of it. Counts are now kept in memory only.
+- **Oracle no longer freezes the window:** the "games like yours" neighbour search (1.0.94) ran ~100 million multiply-adds in one block (150–450 ms). It now yields to the UI between library games with bit-identical results; the semantic pass yields every ~8 ms instead of every 2,000 games; gg.deals prices load while the ML step runs instead of after it.
+- **Upcoming opens fast:** the Steam catalog was streamed into the window (~155 round trips, ~155k rows) to keep ~700; the filtering now happens in the background process and returns only those rows. The calendar is also no longer built twice per visit, and two visits never scan at once.
+- **Your Ark (3D boxes) is lighter:** shared geometry and case material for all boxes instead of four geometries and a material each; the glossy clearcoat only on the selected box; the spine reuses the cover texture instead of a second GPU copy per box; cover textures are freed when boxes unmount; boxes no longer re-render on every arrow-key step; per-frame allocations removed; and a pre-existing leak of a cloned line per year marker on every step is fixed.
+- **gg.deals:** one key check for a whole screen of cards (was one IPC + one Windows decryption per card), the decrypted key is remembered, overlapping price lookups share one request (in the window and in the background process), lookups made while scrolling are merged into larger batches, failures make cards stop asking for a minute, and price formatters are reused.
+- **Captain's Log:** opens without rendering an empty pass first (no "estimated date" flash), a session ending no longer rebuilds history-based views, history is parsed once per rebuild instead of twice per comparison, date formatters are reused, and the Log timeline is not rebuilt while another Voyage tab is open.
+- **Smaller:** review counts for the player-count check are looked up once per session (not every 20 cards), the HowLongToBeat badge no longer re-renders the whole game page while loading, the dev-panel feedback counter is cached, a superseded Oracle run can no longer stop the current run's worker, and one HowLongToBeat / gg.deals client is created even when the first requests arrive together.
+
+### Tests
+- New: cached review counts, one hasKey per burst, shared in-flight price lookups (window and background), error back-off, async neighbour search identical to the one-shot version, shared Upcoming selection rule, background-process query path. A flaky Year Wrapped test now waits long enough under full-suite load.
+
 ## [1.0.95] - 2026-10-29
 
 ### Fixed — Oracle ML coverage

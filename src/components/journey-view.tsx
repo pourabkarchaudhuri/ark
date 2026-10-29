@@ -334,7 +334,12 @@ const LOG_EVENT_CLASS: Record<LogEventKind, string> = {
  */
 export function buildLogEvents(history: StatusChangeEntry[]): Map<string, LogEvent[]> {
   const byGame = new Map<string, LogEvent[]>();
-  const sorted = [...history].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  // Parse each timestamp once (the comparator used to parse two per comparison); stable sort keeps
+  // the original order for equal times, exactly as before.
+  const sorted = history
+    .map((row) => ({ row, t: new Date(row.timestamp).getTime() }))
+    .sort((a, b) => a.t - b.t)
+    .map((x) => x.row);
   const started = new Set<string>();
   for (const row of sorted) {
     const at = parseJourneyIso(row.timestamp);
@@ -358,6 +363,14 @@ export function buildLogEvents(history: StatusChangeEntry[]): Map<string, LogEve
   return byGame;
 }
 
+const LOG_DAY_FMT = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
+const LOG_FULL_FMT = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+});
+const EMPTY_LOG_EVENTS: Map<string, LogEvent[]> = new Map();
+const EMPTY_ID_SET: Set<string> = new Set();
+const EMPTY_TIMELINE: TimelineEntry[] = [];
+
 function LogEventMarkers({ events, estimated }: { events: LogEvent[]; estimated: boolean }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5 px-1 text-[10px] font-mono">
@@ -365,9 +378,9 @@ function LogEventMarkers({ events, estimated }: { events: LogEvent[]; estimated:
         <span
           key={`${ev.kind}-${ev.at}-${i}`}
           className={cn('px-1.5 py-0.5 rounded border bg-white/[0.02]', LOG_EVENT_CLASS[ev.kind])}
-          title={new Date(ev.at).toLocaleString()}
+          title={LOG_FULL_FMT.format(new Date(ev.at))}
         >
-          {LOG_EVENT_LABEL[ev.kind]} · {new Date(ev.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
+          {LOG_EVENT_LABEL[ev.kind]} · {LOG_DAY_FMT.format(new Date(ev.at))}
           {ev.auto && <span className="text-white/40"> · auto</span>}
         </span>
       ))}
@@ -454,29 +467,39 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     libraryEntries: LibraryGameEntry[];
   } | null>(null);
 
+  // First render of a tab that needs the stores: read them now, so the view does not render once with
+  // no data and then again (the Log used to flash "estimated date" on every card for a frame).
+  const initialStoreSnap = useMemo(
+    () => (needsStoreSnapshot
+      ? {
+          statusHistory: statusHistoryStore.getAll(),
+          sessions: sessionStore.getAll(),
+          libraryEntries: needsLibrarySnapshot ? libraryStore.getAllEntries() : [],
+        }
+      : null),
+    [needsStoreSnapshot, needsLibrarySnapshot],
+  );
+
   useEffect(() => {
     if (!needsStoreSnapshot) {
       setVoyageStoreSnap(null);
       return;
     }
-    // Each array identity changes only when its store notifies, which is what
-    // the consuming views memoize their derivations against.
-    const read = () => ({
-      statusHistory: statusHistoryStore.getAll(),
-      sessions: sessionStore.getAll(),
-      libraryEntries: needsLibrarySnapshot ? libraryStore.getAllEntries() : [],
-    });
-    setVoyageStoreSnap(read());
-    const onStore = () => setVoyageStoreSnap(read());
+    // Each array identity changes only when ITS store notifies (a session ending does not rebuild
+    // anything keyed on the status history), which is what the consuming views memoize against.
+    setVoyageStoreSnap(initialStoreSnap);
     const unsubs = [
-      statusHistoryStore.subscribe(onStore),
-      sessionStore.subscribe(onStore),
+      statusHistoryStore.subscribe(() => setVoyageStoreSnap(s => s && { ...s, statusHistory: statusHistoryStore.getAll() })),
+      sessionStore.subscribe(() => setVoyageStoreSnap(s => s && { ...s, sessions: sessionStore.getAll() })),
     ];
-    if (needsLibrarySnapshot) unsubs.push(libraryStore.subscribe(onStore));
+    if (needsLibrarySnapshot) {
+      unsubs.push(libraryStore.subscribe(() => setVoyageStoreSnap(s => s && { ...s, libraryEntries: libraryStore.getAllEntries() })));
+    }
     return () => {
       for (const unsub of unsubs) unsub();
     };
-  }, [needsStoreSnapshot, needsLibrarySnapshot]);
+  }, [needsStoreSnapshot, needsLibrarySnapshot, initialStoreSnap]);
+  const storeSnap = needsStoreSnapshot ? (voyageStoreSnap ?? initialStoreSnap) : null;
 
   // Ark and Log: entries with firstPlayedAt or lastPlayedAt; sort: Playing first, then by latest activity (lastPlayedAt ?? firstPlayedAt) desc
   const arkAndLogEntries = useMemo(() => {
@@ -499,25 +522,26 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   }, [entries]);
 
   // Status-change events per game for the Captain's Log (Started / Resumed / On Hold / Completed).
-  const logStatusHistory = viewStyle === 'log' ? voyageStoreSnap?.statusHistory : undefined;
-  const logSessions = viewStyle === 'log' ? voyageStoreSnap?.sessions : undefined;
+  const logStatusHistory = viewStyle === 'log' ? storeSnap?.statusHistory : undefined;
+  const logSessions = viewStyle === 'log' ? storeSnap?.sessions : undefined;
   const logEventsByGame = useMemo(
-    () => buildLogEvents(logStatusHistory ?? []),
+    () => (logStatusHistory ? buildLogEvents(logStatusHistory) : EMPTY_LOG_EVENTS),
     [logStatusHistory],
   );
   // Games with recorded evidence (a status change or a play session): their dates are real.
   // Everything else was placed from imported/added dates and is labelled "estimated".
   const gamesWithEvidence = useMemo(() => {
+    if (!logStatusHistory && !logSessions) return EMPTY_ID_SET;
     const set = new Set<string>(logEventsByGame.keys());
     for (const sess of logSessions ?? []) set.add(sess.gameId);
     return set;
-  }, [logEventsByGame, logSessions]);
+  }, [logEventsByGame, logSessions, logStatusHistory]);
 
   // Captain's Log: per-month grouping. An entry appears in a month if firstPlayedAt or lastPlayedAt falls in that month (same game can appear in Jan and March),
   // and in the month of each status event (Started / Resumed / On Hold / Completed).
   // Within each month, sort by the latest date that applies to that month, desc.
   const timelineData: TimelineEntry[] = useMemo(() => {
-    if (arkAndLogEntries.length === 0) return [];
+    if (viewStyle !== 'log' || arkAndLogEntries.length === 0) return EMPTY_TIMELINE;
 
     const monthToEntries = new Map<string, Array<{ entry: JourneyEntry; sortDate: string }>>();
 
@@ -805,18 +829,18 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         <ShowcaseView entries={arkAndLogEntries} />
       ) : viewStyle === 'medals' ? (
         <MedalsView entries={entries} />
-      ) : viewStyle === 'chronicle' && voyageStoreSnap ? (
+      ) : viewStyle === 'chronicle' && storeSnap ? (
         <JourneyScenesView
           journeyEntries={entries}
-          statusHistory={voyageStoreSnap.statusHistory}
-          sessions={voyageStoreSnap.sessions}
+          statusHistory={storeSnap.statusHistory}
+          sessions={storeSnap.sessions}
         />
-      ) : viewStyle === 'audit' && voyageStoreSnap ? (
+      ) : viewStyle === 'audit' && storeSnap ? (
         <JourneyAuditView
           journeyEntries={entries}
-          libraryEntries={voyageStoreSnap.libraryEntries}
-          statusHistory={voyageStoreSnap.statusHistory}
-          sessions={voyageStoreSnap.sessions}
+          libraryEntries={storeSnap.libraryEntries}
+          statusHistory={storeSnap.statusHistory}
+          sessions={storeSnap.sessions}
         />
       ) : viewStyle === 'chronicle' || viewStyle === 'audit' ? null : (
         <Timeline data={timelineData} />

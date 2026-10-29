@@ -57,7 +57,8 @@ export const DealBadge = memo(function DealBadge({ steamAppId, className }: { st
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 text-[10px] font-semibold rounded px-1.5 py-0.5 border',
+        // leading-none + py-px keeps the badge at 14px, inside the card's fixed 16px footer row.
+        'inline-flex items-center gap-1 text-[10px] leading-none font-semibold rounded px-1.5 py-px border',
         low ? 'text-emerald-300 border-emerald-500/40 bg-emerald-500/10' : 'text-white/60 border-white/15 bg-white/[0.04]',
         className,
       )}
