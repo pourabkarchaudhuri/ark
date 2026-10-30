@@ -4,7 +4,8 @@
  * 1. A curated list of phrases/words that imply explicit sexual intent.
  * 2. The "cuss" linguistic library (profane words with sureness ratings) for
  *    word-boundary matching to reinforce the logic.
- * Results are cached in localStorage; cache is invalidated when CACHE_VERSION changes.
+ * Results are cached in memory and persisted to localStorage (debounced); the cache is
+ * invalidated when CACHE_VERSION changes.
  */
 
 import type { Game } from '@/types/game';
@@ -13,7 +14,6 @@ import { cuss } from 'cuss';
 const CACHE_KEY = 'ark-adult-classification-cache';
 const CACHE_VERSION_KEY = 'ark-adult-classification-cache-version';
 const CACHE_VERSION = 2;
-const CACHE_MAX_ENTRIES = 2000;
 
 // Words from cuss with sureness >= 1 (maybe or likely profanity) for word-boundary check.
 // We use only the map; word-boundary matching avoids false positives like "ass" in "classic".
@@ -123,57 +123,76 @@ function isExplicitByDescription(text: string): boolean {
   return false;
 }
 
-let cache: Record<string, boolean> | null = null;
+// 1.0.97: the in-memory Map is the source of truth. It is loaded once per session (one read of
+// the version key and the stored JSON); hits never touch localStorage, and misses mark the cache
+// dirty and schedule one debounced persist instead of re-stringifying it on every miss. The cap
+// covers Browse (~6K), the release calendar and Oracle together, so passes stop evicting each
+// other's verdicts; hits re-insert, so the trim keeps the most recently used entries.
+export const ADULT_CACHE_MAX_ENTRIES = 30_000;
+const PERSIST_DELAY_MS = 2000;
 
-function getCacheVersion(): number {
+let cache: Map<string, boolean> | null = null;
+let dirty = false;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadCache(): Map<string, boolean> {
+  if (cache) return cache;
+  cache = new Map();
   try {
     const v = localStorage.getItem(CACHE_VERSION_KEY);
-    return v ? parseInt(v, 10) : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function loadCache(): Record<string, boolean> {
-  if (cache != null && getCacheVersion() === CACHE_VERSION) return cache;
-  cache = null;
-  try {
-    if (getCacheVersion() !== CACHE_VERSION) {
+    if ((v ? parseInt(v, 10) : 0) !== CACHE_VERSION) {
       localStorage.setItem(CACHE_VERSION_KEY, String(CACHE_VERSION));
       localStorage.setItem(CACHE_KEY, '{}');
-      cache = {};
       return cache;
     }
     const raw = localStorage.getItem(CACHE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Record<string, boolean>;
       if (typeof parsed === 'object' && parsed !== null) {
-        cache = parsed;
-        return cache;
+        for (const [k, val] of Object.entries(parsed)) {
+          if (typeof val === 'boolean') cache.set(k, val);
+        }
       }
     }
   } catch {
     /* ignore */
   }
-  cache = {};
   return cache;
 }
 
-function saveCache() {
-  if (cache == null) return;
+function persistCache(): void {
+  persistTimer = null;
+  if (cache == null || !dirty) return;
+  dirty = false;
   try {
-    const keys = Object.keys(cache);
-    if (keys.length > CACHE_MAX_ENTRIES) {
-      const trimmed: Record<string, boolean> = {};
-      keys.slice(-CACHE_MAX_ENTRIES).forEach((k) => (trimmed[k] = cache![k]!));
-      cache = trimmed;
+    // Map iteration is insertion order (least recently used first): keep the newest entries.
+    const excess = cache.size - ADULT_CACHE_MAX_ENTRIES;
+    if (excess > 0) {
+      let removed = 0;
+      for (const k of cache.keys()) {
+        if (removed >= excess) break;
+        cache.delete(k);
+        removed++;
+      }
     }
-    localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
-    localStorage.setItem(CACHE_VERSION_KEY, String(CACHE_VERSION));
+    const out: Record<string, boolean> = {};
+    for (const [k, val] of cache) out[k] = val;
+    localStorage.setItem(CACHE_KEY, JSON.stringify(out));
   } catch {
     /* quota */
   }
 }
+
+function schedulePersist(): void {
+  dirty = true;
+  if (persistTimer != null) return;
+  persistTimer = setTimeout(persistCache, PERSIST_DELAY_MS);
+}
+
+/** Test seam: the phrase/cuss scan, called through this object so tests can spy on it. */
+export const __adultFilterInternals = {
+  classify: (text: string): boolean => isExplicitByDescription(text),
+};
 
 /**
  * Returns true if the game is classified as sexually explicit (prominent focus)
@@ -185,10 +204,16 @@ export function isAdultContentByDescription(
   const id = game.id;
   if (!id) return false;
   const c = loadCache();
-  if (id in c) return c[id]!;
+  const hit = c.get(id);
+  if (hit !== undefined) {
+    // Re-insert so the persist trim acts as LRU. No localStorage access on a hit.
+    c.delete(id);
+    c.set(id, hit);
+    return hit;
+  }
   const text = getCombinedText(game);
-  const result = isExplicitByDescription(text);
-  c[id] = result;
-  saveCache();
+  const result = __adultFilterInternals.classify(text);
+  c.set(id, result);
+  schedulePersist();
   return result;
 }

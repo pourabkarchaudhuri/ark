@@ -5,6 +5,7 @@
 
 import { Game, LibraryGameEntry } from '@/types/game';
 import { sanitizePlayerCount } from '@/lib/player-count';
+import { titleCollator } from '@/lib/title-collator';
 import { SteamMostPlayedGame, SteamAppDetails, SteamSearchItem, SteamNewsItem, SteamAppListItem, getSteamCoverUrl } from '@/types/steam';
 import { libraryStore } from './library-store';
 
@@ -457,7 +458,7 @@ class SteamService {
         { appid: 1091500, name: 'Cyberpunk 2077' },
         { appid: 292030, name: 'The Witcher 3: Wild Hunt' },
         { appid: 1174180, name: 'Red Dead Redemption 2' },
-      ].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+      ].sort((a, b) => titleCollator.compare(a.name, b.name));
     }
 
     try {

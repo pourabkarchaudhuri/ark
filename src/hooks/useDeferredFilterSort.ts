@@ -27,6 +27,7 @@ import type { MutableRefObject } from 'react';
 import type { Game, GameFilters } from '@/types/game';
 import { scoreGame, buildSingleSearchIndex, type SearchIndexEntry } from '@/services/prefetch-store';
 import { isAdultContentByDescription } from '@/services/adult-content-filter';
+import { titleCollator } from '@/lib/title-collator';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,13 +50,12 @@ export interface FilterSortInput {
   /** When false, games classified as adult (by description) are hidden. Default off. */
   allowAdultContent?: boolean;
   /**
-   * Monotonically-bumped counter reflecting library/custom-game mutations.
-   * Included in the fingerprint so per-game content changes (e.g. status
-   * updates that don't change array length or endpoint IDs) still invalidate
-   * the memo. Without this, the fingerprint was structurally blind to in-place
-   * content edits — the v1.0.60 card-status-selection-broken bug.
+   * Bumped when player counts / catalog enrichment are merged into `currentGames` (same ids,
+   * new objects). NOT part of the fingerprint: a bump only remaps the current Browse output to
+   * the fresh objects (same order, same filter), so live counts and developer/genre show up
+   * without a full recompute. Library invalidation keys on `currentGames` identity instead.
    */
-  libraryVersion?: number;
+  contentVersion?: number;
 }
 
 export interface FilterSortOutput {
@@ -64,6 +64,11 @@ export interface FilterSortOutput {
   dynamicGenres: string[];
   dynamicPlatforms: string[];
   dynamicYears: string[];
+  /**
+   * The view and fingerprint this output was computed for (null until the first compute).
+   * The Dashboard shows the output as is, empty included, only when it belongs to its view.
+   */
+  computedFor: { viewMode: string; fingerprint: string } | null;
 }
 
 const EMPTY_OUTPUT: FilterSortOutput = {
@@ -72,6 +77,7 @@ const EMPTY_OUTPUT: FilterSortOutput = {
   dynamicGenres: [],
   dynamicPlatforms: [],
   dynamicYears: [],
+  computedFor: null,
 };
 
 /** Result of filter + dynamic options only (no sort). Used to yield between phases. */
@@ -131,6 +137,10 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
   let games: Game[];
   let skipBrowseFilters = false;
 
+  // Library: search-matched list before the adult/status/store filters, reused as the base pool
+  // for the dynamic options below (scoring every game twice doubled the search cost).
+  let searchMatched: Game[] = currentGames;
+
   if (viewMode === 'library') {
     let libraryGames = currentGames;
     if (searchQuery.trim()) {
@@ -150,6 +160,7 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
       scored.sort((a, b) => b.score - a.score);
       libraryGames = scored.map(s => s.game);
     }
+    searchMatched = libraryGames;
     games = libraryGames;
   } else if (viewMode === 'browse' && browseSearchPending) {
     games = [];
@@ -235,22 +246,7 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
   let skipDynamic = false;
 
   if (viewMode === 'library') {
-    let lib = currentGames;
-    if (searchQuery.trim()) {
-      const q2 = searchQuery.toLowerCase().trim();
-      const tokens2 = q2.split(/\s+/).filter(Boolean);
-      const useCachedIndex = librarySearchIndex && librarySearchIndex.length === lib.length;
-      lib = lib.filter((g, i) =>
-        scoreGame(
-          useCachedIndex ? librarySearchIndex[i]! : buildSingleSearchIndex(g),
-          tokens2,
-          q2,
-          g,
-          { allowShorthand: false },
-        ) > 0,
-      );
-    }
-    baseGames = lib;
+    baseGames = searchMatched;
   } else if (viewMode === 'browse' && browseSearchPending) {
     baseGames = [];
   } else if (viewMode === 'browse' && isSearching) {
@@ -344,6 +340,13 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
 /**
  * Phase 2: sort displayedGames. Runs after a yield so input/hover can be processed.
  */
+/** Release timestamp for sorting; 0 for missing or unparseable dates ('Coming Soon', 'TBA'). */
+function releaseTsForSort(releaseDate: string | undefined): number {
+  if (!releaseDate) return 0;
+  const t = Date.parse(releaseDate);
+  return Number.isFinite(t) ? t : 0;
+}
+
 function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
   const { filters, sortBy, sortDirection, viewMode, isSearching, liveGameIds } = input;
 
@@ -360,6 +363,18 @@ function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
 
   const indexMap = new Map<string, number>();
   displayedGames.forEach((g, i) => indexMap.set(g.id, i));
+
+  // Release-date sort: browse games carry a precomputed _releaseTs; library and custom games
+  // never do, so derive it from releaseDate (every comparison was 0 before → no-op sort).
+  let tsMap: Map<string, number> | null = null;
+  if (sortBy === 'releaseDate') {
+    tsMap = new Map();
+    for (const g of displayedGames) {
+      const pre = (g as { _releaseTs?: unknown })._releaseTs;
+      const t = typeof pre === 'number' ? pre : releaseTsForSort(g.releaseDate);
+      tsMap.set(g.id, Number.isFinite(t) ? t : 0);
+    }
+  }
 
   const statusPriority = (game: Game) => {
     const isLive = liveGameIds?.has(game.id) ||
@@ -378,7 +393,7 @@ function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
       const bStatus = b.isInLibrary ? statusPriority(b) : 5;
       if (aStatus !== bStatus) return aStatus - bStatus;
       // Within each status section: always alphabetical by title
-      return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
+      return titleCollator.compare(a.title, b.title);
     }
 
     let comparison = 0;
@@ -394,7 +409,7 @@ function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
         break;
       }
       case 'releaseDate':
-        comparison = ((a as any)._releaseTs ?? 0) - ((b as any)._releaseTs ?? 0);
+        comparison = (tsMap!.get(a.id) ?? 0) - (tsMap!.get(b.id) ?? 0);
         break;
       default:
         comparison = (indexMap.get(a.id) ?? 0) - (indexMap.get(b.id) ?? 0);
@@ -410,10 +425,33 @@ function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
   });
 }
 
-function computeAll(input: FilterSortInput): FilterSortOutput {
-  const phase1 = computeFilterAndDynamic(input);
-  const sortedGames = computeSort(phase1.displayedGames, input);
-  return { ...phase1, sortedGames };
+/** Test seam: the two phases, called through this object so tests can count runs. */
+export const __filterSortInternals = { computeFilterAndDynamic, computeSort };
+
+function computeAll(input: FilterSortInput, fingerprint: string): FilterSortOutput {
+  const phase1 = __filterSortInternals.computeFilterAndDynamic(input);
+  const sortedGames = __filterSortInternals.computeSort(phase1.displayedGames, input);
+  return { ...phase1, sortedGames, computedFor: { viewMode: input.viewMode, fingerprint } };
+}
+
+/**
+ * Stable fingerprint to avoid re-scheduling when array references change but the inputs that
+ * decide the result are the same. Enrichment / player-count merges create new objects with the
+ * same ids, so they do not change it (see `contentVersion`). `libRev` counts library-list
+ * rebuilds and is only part of the library view's fingerprint.
+ */
+function computeFingerprint(input: FilterSortInput, libRev: number): string {
+  const liveCount = input.liveGameIds?.size ?? 0;
+  // Include store filter values (not just length) so Steam vs Epic vs Both trigger recompute
+  const storeKey = (input.filters.store || []).slice().sort().join(',');
+  // Only include liveCount when it affects sort (library + status priority). Omitting for browse
+  // prevents player-count updates from re-running the effect and overwriting store order.
+  const livePart = input.viewMode === 'library' ? liveCount : '';
+  const adultPart = input.allowAdultContent === true ? '1' : '0';
+  const pendingPart = input.browseSearchPending ? '1' : '0';
+  // Never for browse: enrichment churn there is handled by the contentVersion remap.
+  const libRevPart = input.viewMode === 'library' ? libRev : '';
+  return `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${pendingPart}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${storeKey}|${input.filters.category}|${input.sortBy}|${input.sortDirection}|${livePart}|${adultPart}|${libRevPart}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -458,13 +496,29 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
     };
   }, []);
 
+  // ── Library invalidation: identity of the library list ─────────────────
+  // useLibraryGames rebuilds the list ~200 ms after a library mutation, so a store version
+  // bumps before the fresh data exists (recompute on stale data, then nothing picks up the
+  // rebuild: the status pill reverted). A new `currentGames` reference in library view is the
+  // signal instead; the counter folds it into the library fingerprint.
+  const prevLibGamesRef = useRef<Game[]>(input.currentGames);
+  const libGamesRevRef = useRef(0);
+  let libGamesChanged = false;
+  if (input.viewMode === 'library' && input.currentGames !== prevLibGamesRef.current) {
+    prevLibGamesRef.current = input.currentGames;
+    libGamesRevRef.current++;
+    libGamesChanged = true;
+  }
+
+  const fingerprint = computeFingerprint(input, libGamesRevRef.current);
+
   // Synchronous fast-path for the very first render so the user sees
   // *something* immediately (the initial batch of ~120 games).
   const [output, setOutput] = useState<FilterSortOutput>(() => {
     // Only compute synchronously if the dataset is small enough (~120 items).
     // Large datasets (6000+) are deferred to the effect.
     if (input.currentGames.length <= 200) {
-      return computeAll(augmentInput(input));
+      return computeAll(augmentInput(input), fingerprint);
     }
     return EMPTY_OUTPUT;
   });
@@ -473,95 +527,72 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
   // This prevents the auto-reset effect from clearing filters before data arrives.
   const hasPopulated = useRef(output.sortedGames.length > 0);
 
-  // ── Sync recompute when data arrives or grows (e.g. empty→n or 38→137) ─
-  // Uses React's "setState during render" pattern to avoid queue conflicts
-  // with the deferred startTransition path. Ensures Top Sellers etc. show the
-  // full list immediately when the hook receives the larger set, not one frame later.
-  //
-  // v1.0.60 fix: also recompute synchronously on library-version bumps for
-  // small library-view datasets. A status pill change doesn't change array
-  // length but does change per-game content — the deferred path would still
-  // eventually catch up, but the pill visually snapped back until then.
+  // ── Sync recomputes (React's "setState during render" pattern) ─────────
+  // Avoids queue conflicts with the deferred startTransition path. Each output records the
+  // fingerprint it was computed for, so the effect below skips work a sync path already did
+  // (no refs are stamped during render).
+  let computedSync = false;
+  const runSync = () => {
+    setOutput(computeAll(augmentInput(input), fingerprint));
+    hasPopulated.current = true;
+    computedSync = true;
+  };
+
+  // Data arrives or grows (e.g. empty→n or 38→137): Top Sellers etc. show the full list
+  // immediately when the hook receives the larger set, not one frame later.
   const prevDataLenRef = useRef(input.currentGames.length);
-  const prevLibVersionRef = useRef(input.libraryVersion ?? 0);
   if (input.currentGames.length !== prevDataLenRef.current) {
     const prevLen = prevDataLenRef.current;
     const nextLen = input.currentGames.length;
     prevDataLenRef.current = nextLen;
     const emptyToPopulated = prevLen === 0 && nextLen > 0;
     const smallDatasetGrew = nextLen <= 200 && nextLen > prevLen;
-    if (emptyToPopulated || smallDatasetGrew) {
-      const fresh = computeAll(augmentInput(input));
-      hasPopulated.current = true;
-      setOutput(fresh);
-    }
-  } else if ((input.libraryVersion ?? 0) !== prevLibVersionRef.current) {
-    // Length unchanged but content changed (status pill flip, priority edit).
-    // Cheap synchronous recompute for small library views; deferred path
-    // handles large browse datasets via the fingerprint-gated effect below.
-    prevLibVersionRef.current = input.libraryVersion ?? 0;
-    if (input.viewMode === 'library' && input.currentGames.length <= 500) {
-      const fresh = computeAll(augmentInput(input));
-      hasPopulated.current = true;
-      setOutput(fresh);
-    }
+    if (emptyToPopulated || smallDatasetGrew) runSync();
   }
-
-  // Stable fingerprint to avoid re-scheduling when array references change
-  // but actual content is identical (e.g. enrichment epoch bumps that don't
-  // change the games slice thanks to prevGamesRef stability upstream).
-  const prevFingerprintRef = useRef('');
-  const liveCount = input.liveGameIds?.size ?? 0;
-  // Include store filter values (not just length) so Steam vs Epic vs Both trigger recompute
-  const storeKey = (input.filters.store || []).slice().sort().join(',');
-  // Only include liveCount when it affects sort (library + status priority). Omitting for browse
-  // prevents player-count updates from re-running the effect and overwriting store order.
-  const livePart = input.viewMode === 'library' ? liveCount : '';
-  const adultPart = input.allowAdultContent === true ? '1' : '0';
-  const pendingPart = input.browseSearchPending ? '1' : '0';
-  // v1.0.60 fix: include libraryVersion so per-game content mutations (status
-  // pill change on a library card) invalidate the memo. The rest of the
-  // fingerprint is structurally blind to in-place edits (length + endpoint IDs
-  // don't change when a game's status flips).
-  const libVersionPart = input.libraryVersion ?? 0;
-  const fingerprint = `${input.currentGames.length}|${input.currentGames[0]?.id ?? ''}|${input.currentGames[input.currentGames.length - 1]?.id ?? ''}|${input.searchResults.length}|${input.isSearching}|${pendingPart}|${input.viewMode}|${input.searchQuery}|${input.filters.genre}|${input.filters.platform}|${input.filters.status}|${input.filters.priority}|${input.filters.releaseYear}|${storeKey}|${input.filters.category}|${input.sortBy}|${input.sortDirection}|${livePart}|${adultPart}|${libVersionPart}`;
+  // Rebuilt library list (status pill flip, priority edit, custom game change): cheap at
+  // library sizes, and done here so the card never shows the old status for a frame.
+  if (!computedSync && libGamesChanged && input.currentGames.length <= 500) runSync();
 
   // ── Inline recompute on viewMode transition ───────────────────────────
   // For small datasets we compute synchronously so the grid paints immediately.
-  // For large datasets we only stamp the fingerprint and let the effect run
-  // (with phased yield) so the main thread stays responsive for hover/input.
-  const prevViewModeRef = useRef(input.viewMode);
-  if (input.viewMode !== prevViewModeRef.current) {
-    prevViewModeRef.current = input.viewMode;
-    if (input.currentGames.length <= 300) {
-      const fresh = computeAll(augmentInput(inputRef.current));
-      hasPopulated.current = true;
-      setOutput(fresh);
-      prevFingerprintRef.current = fingerprint;
-    }
+  // For large datasets the effect runs (with phased yield) so the main thread stays
+  // responsive for hover/input. Previous view is state, not a ref written during render, so an
+  // interrupted transition cannot leave the grid on the previous view's list.
+  const [prevViewMode, setPrevViewMode] = useState(input.viewMode);
+  if (input.viewMode !== prevViewMode) {
+    setPrevViewMode(input.viewMode);
+    if (!computedSync && input.currentGames.length <= 300) runSync();
   }
 
   // Schedule heavy computation after paint; yield between filter and sort
   // so the main thread can process input (e.g. hover) and stay responsive.
+  const prevFingerprintRef = useRef('');
   useEffect(() => {
+    if (output.computedFor?.fingerprint === fingerprint) {
+      prevFingerprintRef.current = fingerprint; // a sync path already computed it
+      return;
+    }
     if (fingerprint === prevFingerprintRef.current) return;
     prevFingerprintRef.current = fingerprint;
 
     const version = ++versionRef.current;
     let raf1 = 0;
     let raf2 = 0;
+    let done = false;
 
     raf1 = requestAnimationFrame(() => {
       if (version !== versionRef.current) return;
-      const phase1 = computeFilterAndDynamic(augmentInput(inputRef.current));
+      const phase1 = __filterSortInternals.computeFilterAndDynamic(augmentInput(inputRef.current));
 
       raf2 = requestAnimationFrame(() => {
         if (version !== versionRef.current) return;
-        const sortedGames = computeSort(phase1.displayedGames, inputRef.current);
+        const sortedGames = __filterSortInternals.computeSort(phase1.displayedGames, inputRef.current);
         if (version === versionRef.current) {
+          done = true;
+          const computedFor = { viewMode: inputRef.current.viewMode, fingerprint };
           startTransition(() => {
             hasPopulated.current = true;
-            setOutput({ ...phase1, sortedGames });
+            setOutput({ ...phase1, sortedGames, computedFor });
           });
         }
       });
@@ -570,9 +601,56 @@ export function useDeferredFilterSort(input: FilterSortInput): FilterSortOutput 
     return () => {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
+      // A run cancelled before it delivered (StrictMode's mount-cleanup-mount, or an input
+      // change) must not leave its fingerprint marked done, or it is never retried.
+      if (!done && prevFingerprintRef.current === fingerprint) prevFingerprintRef.current = '';
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fingerprint]);
+
+  // ── Content remap (Browse) ─────────────────────────────────────────────
+  // Player counts and catalog enrichment arrive as new objects with the same ids, which the
+  // fingerprint deliberately ignores. When only the content changed, swap the fresh objects
+  // into the current output (same order, same filter; re-sorting on enriched fields is an
+  // accepted limitation). Library view and searches are left alone.
+  const prevContentVersionRef = useRef(input.contentVersion);
+  useEffect(() => {
+    if (input.contentVersion === prevContentVersionRef.current) return;
+    prevContentVersionRef.current = input.contentVersion;
+    const cur = inputRef.current;
+    if (cur.viewMode === 'library' || cur.isSearching || cur.browseSearchPending || cur.searchQuery.trim()) return;
+    // A pending recompute for a new fingerprint reads the fresh objects anyway.
+    if (output.computedFor?.fingerprint !== fingerprint) return;
+    const byId = new Map<string, Game>();
+    for (const g of cur.currentGames) byId.set(g.id, g);
+    const remap = (list: Game[]): Game[] | null => {
+      let out: Game[] | null = null;
+      for (let i = 0; i < list.length; i++) {
+        const fresh = byId.get(list[i]!.id);
+        if (fresh && fresh !== list[i]) {
+          if (!out) out = list.slice();
+          out[i] = fresh;
+        }
+      }
+      return out;
+    };
+    // No element identity changed: no state update at all.
+    if (!remap(output.sortedGames) && !remap(output.displayedGames)) return;
+    // An older in-flight deferred compute must not overwrite the remapped objects.
+    ++versionRef.current;
+    setOutput(prev => {
+      if (prev.computedFor?.fingerprint !== fingerprint) return prev;
+      const sortedGames = remap(prev.sortedGames);
+      const displayedGames = remap(prev.displayedGames);
+      if (!sortedGames && !displayedGames) return prev;
+      return {
+        ...prev,
+        sortedGames: sortedGames ?? prev.sortedGames,
+        displayedGames: displayedGames ?? prev.displayedGames,
+      };
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input.contentVersion]);
 
   return output;
 }
