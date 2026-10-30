@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import { logger } from '../safe-logger.js';
+import { isValidExePath } from './exe-path.js';
 
 export function register(getMainWindow: () => BrowserWindowType | null): void {
   /**
@@ -114,25 +115,78 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
   /**
    * Show open file dialog to select a game executable (returns path only, no content)
    */
-  ipcMain.handle('dialog:selectExecutable', async () => {
-    try {
-      const result = await dialog.showOpenDialog(getMainWindow()!, {
-        title: 'Select Game Executable',
-        properties: ['openFile'],
-        filters: [
-          { name: 'Executables', extensions: ['exe', 'lnk', 'bat', 'cmd'] },
-          { name: 'All Files', extensions: ['*'] }
-        ]
-      });
+  ipcMain.handle('dialog:selectExecutable', async () =>
+    selectExecutable((opts) => dialog.showOpenDialog(getMainWindow()!, opts))
+  );
+}
 
-      if (result.canceled || result.filePaths.length === 0) {
-        return { success: false, canceled: true };
-      }
+export const NOT_AN_EXE_ERROR =
+  "Pick the game's .exe (shortcuts and .bat/.cmd files cannot be tracked)";
 
-      return { success: true, filePath: result.filePaths[0] };
-    } catch (error) {
-      logger.error('[Dialog] Error selecting executable:', error);
-      return { success: false, error: String(error) };
+export interface SelectExecutableResult {
+  success: boolean;
+  canceled?: boolean;
+  filePath?: string;
+  error?: string;
+}
+
+type ShowOpenDialogFn = (opts: {
+  title: string;
+  properties: Array<'openFile'>;
+  filters: Array<{ name: string; extensions: string[] }>;
+}) => Promise<{ canceled: boolean; filePaths: string[] }>;
+
+// Test-only injectable seam (see launch-handlers.ts for why vi.mock('electron')
+// can't reach createRequire'd modules).
+const realReadShortcutTarget = (p: string): string | null => {
+  try {
+    return electron.shell.readShortcutLink(p)?.target ?? null;
+  } catch {
+    return null;
+  }
+};
+let _readShortcutTarget: (p: string) => string | null = realReadShortcutTarget;
+
+export function __setDialogDepsForTests(deps?: {
+  readShortcutTarget?: (p: string) => string | null;
+}): void {
+  _readShortcutTarget = deps?.readShortcutTarget ?? realReadShortcutTarget;
+}
+
+/**
+ * Pick a game executable. Only .exe paths are returned — session tracking and
+ * launch reject anything else, so handing back a .bat/.cmd would store a path
+ * that is never tracked. A .lnk is resolved to its target and accepted when
+ * that target is an .exe.
+ */
+export async function selectExecutable(
+  showOpenDialog: ShowOpenDialogFn
+): Promise<SelectExecutableResult> {
+  try {
+    const result = await showOpenDialog({
+      title: 'Select Game Executable',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Executables', extensions: ['exe'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true };
     }
-  });
+
+    let filePath = result.filePaths[0];
+    if (typeof filePath === 'string' && filePath.toLowerCase().endsWith('.lnk')) {
+      filePath = _readShortcutTarget(filePath) ?? filePath;
+    }
+    if (!isValidExePath(filePath)) {
+      return { success: false, error: NOT_AN_EXE_ERROR };
+    }
+
+    return { success: true, filePath };
+  } catch (error) {
+    logger.error('[Dialog] Error selecting executable:', error);
+    return { success: false, error: String(error) };
+  }
 }

@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('electron', {
   },
   // Open URL in default OS browser
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  // Run a Steam game by numeric appId (steam://rungameid, validated in main)
+  launchSteamGame: (appId) => ipcRenderer.invoke('steam:launchGame', appId),
   // Proxy fetch — routes HTTP requests through the main process to bypass CORS.
   // Only allowed for whitelisted domains (see main.ts PROXY_FETCH_ALLOWED_DOMAINS).
   fetchHtml: (url) => ipcRenderer.invoke('proxy:fetchHtml', url),

@@ -61,6 +61,9 @@ export function CustomGameDialog({
         const result = await window.fileDialog.selectExecutable();
         if (result.success && result.filePath) {
           setExecutablePath(result.filePath);
+        } else if (result.error) {
+          // Surfaced in the dialog's error line (e.g. a .bat/.lnk was picked).
+          setError(result.error);
         }
       }
     } catch (err) {

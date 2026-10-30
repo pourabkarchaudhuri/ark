@@ -73,6 +73,7 @@ import { catalogStore } from '@/services/catalog-store';
 import { libraryStore } from '@/services/library-store';
 import { resolveJourneyDisplayTitle } from '@/lib/journey-display-title';
 import { cn } from '@/lib/utils';
+import { useOptionalToast } from '@/components/ui/toast';
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -287,7 +288,7 @@ const BAND_WEIGHT: Record<Band, number> = {
 
 // ─── Findings ────────────────────────────────────────────────────────────────
 
-interface Finding {
+export interface Finding {
   key: string;
   ruleId: RuleId;
   area: AuditArea;
@@ -991,7 +992,7 @@ function RatingPicker({ current, onPick }: { current: number; onPick: (rating: n
 
 // ─── Finding card ────────────────────────────────────────────────────────────
 
-const FindingCard = memo(function FindingCard({
+export const FindingCard = memo(function FindingCard({
   finding,
   rollup,
   onResolve,
@@ -1030,21 +1031,36 @@ const FindingCard = memo(function FindingCard({
     onResolve(finding, 'Records linked');
   }, [finding, onResolve]);
 
+  const toast = useOptionalToast();
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const applyExe = useCallback(async () => {
     const picker = window.fileDialog?.selectExecutable;
     if (!picker) return;
+    setActionError(null);
     const result = await window.fileDialog!.selectExecutable();
     if (result.success && result.filePath) {
       libraryStore.updateEntry(finding.subjectId, { executablePath: result.filePath });
       onResolve(finding, 'Executable path stored');
+    } else if (result.error) {
+      // Finding stays open — nothing usable was stored.
+      setActionError(result.error);
     }
   }, [finding, onResolve]);
 
-  const applyLaunch = useCallback(() => {
+  // steam:// is not on the generic openExternal allowlist; a dedicated,
+  // appId-validated channel launches the game instead.
+  const applyLaunch = useCallback(async () => {
     const appId = steamAppIdOf(finding.subjectId);
     if (appId === null) return;
-    window.electron?.openExternal(`steam://rungameid/${appId}`);
-  }, [finding.subjectId]);
+    const launch = window.electron?.launchSteamGame;
+    const result = launch
+      ? await launch(appId).catch(() => ({ success: false }))
+      : { success: false };
+    if (!result.success) {
+      toast?.error('Steam is not installed or could not be opened');
+    }
+  }, [finding.subjectId, toast]);
 
   return (
     <motion.div
@@ -1105,7 +1121,7 @@ const FindingCard = memo(function FindingCard({
           <>
             <button
               type="button"
-              onClick={applyLaunch}
+              onClick={() => void applyLaunch()}
               className="flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-200 transition-colors hover:bg-emerald-500/20"
             >
               <Play className="h-3 w-3" />
@@ -1137,6 +1153,11 @@ const FindingCard = memo(function FindingCard({
           </button>
         </div>
       </div>
+      {actionError && (
+        <p role="alert" className="mt-1.5 text-[11px] text-red-400">
+          {actionError}
+        </p>
+      )}
     </motion.div>
   );
 });
