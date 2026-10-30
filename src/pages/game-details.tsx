@@ -2003,8 +2003,9 @@ export function GameDetailsPage() {
                 </div>
               )}
               
-              {/* HowLongToBeat (hidden when off, offline or no confident match) */}
-              <HltbBadge title={details.name} year={releaseYearOf(details.release_date?.date)} />
+              {/* HowLongToBeat (hidden when off, offline or no confident match). Custom games show their
+                  added date in release_date, which is not a release year: match on the title alone. */}
+              <HltbBadge title={details.name} year={isCustomGame ? undefined : releaseYearOf(details.release_date?.date)} />
 
               {/* Metascore (from our Metacritic scraper — works for Steam, Epic, and dual-store) */}
               {metacriticReviews && metacriticReviews.score > 0 && (

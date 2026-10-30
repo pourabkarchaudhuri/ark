@@ -23,6 +23,7 @@ import {
 } from './settings-store.js';
 import http from 'http';
 import os from 'os';
+import { StringDecoder } from 'string_decoder';
 // Type-only — the runtime import of rerank-engine.ts is dynamic (see
 // settleRerankModelStatus) because that module imports this one.
 import type { RerankTier } from './rerank-engine.js';
@@ -225,6 +226,21 @@ async function listModels(): Promise<{ baseNames: string[]; fullTags: string[] }
 }
 
 /**
+ * Splits a streamed NDJSON body into complete lines. Bytes go through a UTF-8 StringDecoder, so a
+ * multi-byte character split across two socket chunks is kept intact (status text, error messages).
+ */
+export function createNdjsonLineSplitter(): (chunk: Buffer) => string[] {
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+  return (chunk) => {
+    buffer += decoder.write(chunk);
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    return lines;
+  };
+}
+
+/**
  * Pull a model (streaming progress). Returns true on success.
  */
 async function pullModel(
@@ -260,13 +276,9 @@ async function pullModel(
           return;
         }
 
-        let buffer = '';
+        const splitLines = createNdjsonLineSplitter();
         res.on('data', (chunk: Buffer) => {
-          buffer += chunk.toString();
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
+          for (const line of splitLines(chunk)) {
             if (!line.trim()) continue;
             try {
               const obj = JSON.parse(line) as {

@@ -58,6 +58,28 @@ export function needsWebSearch(message: string): boolean {
 }
 
 /**
+ * Collects a response body as raw bytes and decodes it once at the end, so a multi-byte UTF-8
+ * character split across two socket chunks is not turned into replacement characters.
+ * `push` returns false once the byte limit is exceeded (the caller aborts the request).
+ */
+export function createBodyCollector(maxBytes: number = MAX_RESPONSE_BYTES): {
+  push(chunk: Buffer): boolean;
+  text(): string;
+} {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  return {
+    push(chunk) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) return false;
+      chunks.push(chunk);
+      return true;
+    },
+    text: () => Buffer.concat(chunks).toString('utf8'),
+  };
+}
+
+/**
  * Perform an HTTPS request to the given URL.
  * Handles redirects automatically.
  */
@@ -106,17 +128,13 @@ function fetchUrl(
         return;
       }
 
-      let data = '';
-      let bytes = 0;
+      const body = createBodyCollector(MAX_RESPONSE_BYTES);
       res.on('data', (chunk: Buffer) => {
-        bytes += chunk.length;
-        if (bytes > MAX_RESPONSE_BYTES) {
+        if (!body.push(chunk)) {
           req.destroy(new Error(`Response exceeded ${MAX_RESPONSE_BYTES} bytes limit`));
-          return;
         }
-        data += chunk.toString();
       });
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, data }));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, data: body.text() }));
     });
 
     req.on('error', reject);
@@ -131,50 +149,50 @@ function fetchUrl(
   });
 }
 
+const stripTags = (html: string): string =>
+  html
+    .replace(/<\/?b>/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/** The real destination of a DDG link: the `uddg` target when present, else the raw href. */
+function resultUrl(rawUrl: string): string {
+  const uddgMatch = rawUrl.match(/[?&]uddg=([^&]+)/);
+  if (!uddgMatch) return rawUrl;
+  try {
+    return decodeURIComponent(uddgMatch[1]);
+  } catch {
+    return rawUrl; // malformed %-escape: keep this result rather than failing the whole search
+  }
+}
+
 /**
  * Parse DuckDuckGo HTML Lite response into structured search results.
+ * Each result block runs from its title link to the next one, and its snippet is read only inside
+ * that block, so a result without a snippet never shifts descriptions onto the wrong URLs.
  */
-function parseDDGHtml(html: string): WebSearchResult[] {
+export function parseDDGHtml(html: string): WebSearchResult[] {
   const results: WebSearchResult[] = [];
+  const linkRegex = /<a rel="nofollow" class="result__a" href="([^"]+)">(.*?)<\/a>/gs;
+  const snippetRegex = /<a class="result__snippet"[^>]*>(.*?)<\/a>/s;
 
-  // Extract result links and titles
-  const linkRegex = /<a rel="nofollow" class="result__a" href="([^"]+)">(.*?)<\/a>/g;
-  // Extract snippets
-  const snippetRegex = /<a class="result__snippet"[^>]*>(.*?)<\/a>/gs;
-
-  const links: Array<{ url: string; title: string }> = [];
+  const links: Array<{ rawUrl: string; title: string; start: number; end: number }> = [];
   let match: RegExpExecArray | null;
-
   while ((match = linkRegex.exec(html)) !== null) {
-    const rawUrl = match[1];
-    const title = match[2].replace(/<\/?b>/g, '').trim();
-
-    // DDG Lite URLs are sometimes redirect URLs; decode them
-    let url = rawUrl;
-    const uddgMatch = rawUrl.match(/[?&]uddg=([^&]+)/);
-    if (uddgMatch) {
-      url = decodeURIComponent(uddgMatch[1]);
-    }
-
-    links.push({ url, title });
-  }
-
-  const snippets: string[] = [];
-  while ((match = snippetRegex.exec(html)) !== null) {
-    snippets.push(
-      match[1]
-        .replace(/<\/?b>/g, '')
-        .replace(/<[^>]+>/g, '')
-        .replace(/\s+/g, ' ')
-        .trim()
-    );
+    links.push({ rawUrl: match[1], title: match[2], start: match.index, end: linkRegex.lastIndex });
   }
 
   for (let i = 0; i < links.length; i++) {
+    const link = links[i];
+    // Sponsored results point at DDG's ad redirector, not a real page.
+    if (/duckduckgo\.com\/y\.js/.test(link.rawUrl)) continue;
+    const block = html.slice(link.end, i + 1 < links.length ? links[i + 1].start : html.length);
+    const snippet = snippetRegex.exec(block);
     results.push({
-      title: links[i].title,
-      url: links[i].url,
-      description: snippets[i] || '',
+      title: stripTags(link.title),
+      url: resultUrl(link.rawUrl),
+      description: snippet ? stripTags(snippet[1]) : '',
     });
   }
 
