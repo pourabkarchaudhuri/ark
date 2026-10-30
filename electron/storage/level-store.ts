@@ -70,6 +70,12 @@ export interface LevelStore {
   ): Promise<{ rows: Array<{ key: string; value: T }>; nextKey?: string; done: boolean }>;
   /** Fast "does this namespace have any keys?" check — returns on first hit. */
   has(namespace: string): Promise<boolean>;
+  /**
+   * Row count from a keys-only iterator (1.0.97): values are never read or
+   * JSON-decoded, so counting an embedding namespace (~4 KB of JSON per row)
+   * costs the keys only. `keys: true` also returns them, in key order.
+   */
+  count(namespace: string, opts?: { keys?: boolean }): Promise<{ count: number; keys?: string[] }>;
   clearNamespace(namespace: string): Promise<void>;
   close(): Promise<void>;
 }
@@ -83,6 +89,13 @@ export interface LevelStore {
 // The high-sentinel `￿` gives us a clean upper bound for range scans.
 const NS_SEP = '::';
 const NS_HIGH = '￿';
+
+/**
+ * Max ops per `batch` call (1.0.97). One unbounded IPC payload is encoded and
+ * written in a single main-process step; the preload's `store.batch` splits
+ * larger writes into slices of this size.
+ */
+export const STORE_BATCH_MAX_OPS = 5000;
 
 function validateNamespace(namespace: string): void {
   if (typeof namespace !== 'string' || !namespace) {
@@ -137,6 +150,12 @@ function decodeValue<T>(raw: string): T {
 let dbHandle: any = null;
 let openPromise: Promise<any> | null = null;
 let storeSingleton: LevelStore | null = null;
+
+/** Tests only: inject a fake classic-level handle (null resets). */
+export function __setLevelDbForTests(db: unknown): void {
+  dbHandle = db;
+  openPromise = null;
+}
 
 async function openDb(): Promise<any> {
   if (dbHandle) return dbHandle;
@@ -291,6 +310,9 @@ async function batchImpl(
   >,
 ): Promise<void> {
   if (!Array.isArray(ops) || ops.length === 0) return;
+  if (ops.length > STORE_BATCH_MAX_OPS) {
+    throw new Error(`[LevelStore] batch is capped at ${STORE_BATCH_MAX_OPS} ops per call (got ${ops.length})`);
+  }
   const db = await openDb();
   const encoded = ops.map((op) => {
     validateNamespace(op.namespace);
@@ -391,6 +413,36 @@ async function hasImpl(namespace: string): Promise<boolean> {
   }
 }
 
+async function countImpl(
+  namespace: string,
+  opts?: { keys?: boolean },
+): Promise<{ count: number; keys?: string[] }> {
+  validateNamespace(namespace);
+  const db = await openDb();
+  const gte = `${namespace}${NS_SEP}`;
+  const lt = `${namespace}${NS_SEP}${NS_HIGH}`;
+  // Same keys-only iterator as hasImpl, without the limit.
+  const iter = db.iterator({ gte, lt, values: false });
+  const keys: string[] | undefined = opts?.keys ? [] : undefined;
+  let count = 0;
+  try {
+    for await (const [fullKey] of iter) {
+      count++;
+      keys?.push(decodeKey(namespace, fullKey));
+    }
+    return keys ? { count, keys } : { count };
+  } catch (err) {
+    logger.error(`[LevelStore] count(${namespace}) failed:`, err);
+    throw err;
+  } finally {
+    try {
+      await iter.close();
+    } catch {
+      /* ignore close errors */
+    }
+  }
+}
+
 async function clearNamespaceImpl(namespace: string): Promise<void> {
   validateNamespace(namespace);
   const db = await openDb();
@@ -436,6 +488,7 @@ export function getLevelStore(): LevelStore {
     stream: streamImpl,
     getChunk: getChunkImpl,
     has: hasImpl,
+    count: countImpl,
     clearNamespace: clearNamespaceImpl,
     close: closeImpl,
   };

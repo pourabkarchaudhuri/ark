@@ -16,6 +16,8 @@ import { catalogStore } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { recoStore } from '@/services/reco-store';
 import { annIndex } from '@/services/ann-index';
+import { loadAnnIndexAfterHydrate } from '@/services/ann-boot-load';
+import { libraryStore } from '@/services/library-store';
 import { bm25Index } from '@/services/bm25-index';
 import { scheduleBackgroundPrecompute } from '@/services/galaxy-cache';
 import { ensureArkBackfill } from '@/hooks/useGameStore';
@@ -331,8 +333,11 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
       systemStatus.init();
       void whenNotSafe(() => {
         // Precompute is not held up by the (large, synchronous) index load; the migration state needs the load's status
-        // round-trip (it reports the embedding model tag), so it chains after it.
-        void annIndex.load().then(() => embeddingService.refreshMigrationState()).catch(() => {});
+        // round-trip (it reports the embedding model tag), so it chains after it. The load waits for the library
+        // hydrate and a painted frame: its native part blocks main, and every other startup IPC with it.
+        void loadAnnIndexAfterHydrate({ hydrated: libraryStore.ready, load: () => annIndex.load() })
+          .then(() => embeddingService.refreshMigrationState())
+          .catch(() => {});
         scheduleBackgroundPrecompute();
       });
       scheduleChunkPreload();

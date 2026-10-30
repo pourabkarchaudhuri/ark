@@ -13,6 +13,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { app } = require('electron');
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { logger } from './safe-logger.js';
 
@@ -33,6 +34,12 @@ export type { UserProfile } from './ml-features.js';
 export const ML_ARTIFACT_VERSION = 2;
 const ARTIFACT_STAMP_FILE = '.artifact-version';
 const EXPECTED_FOLDS = 8;
+/**
+ * Rows per fold run. One run over a 2000-row Oracle batch blocked the main
+ * thread for up to ~1.7 s; every fold now runs over slices of this size with
+ * a yield between runs. Rows are scored independently, so scores are unchanged.
+ */
+export const ML_SCORE_SUB_BATCH = 250;
 
 interface FeatureSpec {
   feature_names: string[];
@@ -67,11 +74,38 @@ let loadingPromise: Promise<boolean> | null = null;
  */
 let loadFailedThisSession = false;
 
+/** Tests only: fake onnxruntime, directories, core count and sub-batch size. */
+interface MlModelTestHooks {
+  ort?: unknown;
+  userDataDir?: string;
+  sourceDir?: string;
+  cpuCount?: number;
+  scoreSubBatch?: number;
+}
+let testHooks: MlModelTestHooks = {};
+
+export function __setMlModelTestHooks(hooks: MlModelTestHooks): void {
+  testHooks = { ...hooks };
+}
+
+export function __resetMlModelForTests(): void {
+  testHooks = {};
+  ort = null;
+  sessions = [];
+  featureSpec = null;
+  gameProfiles = new Map();
+  tagMapping = [];
+  loaded = false;
+  loadingPromise = null;
+  loadFailedThisSession = false;
+}
+
 function getDataDir(): string {
-  return path.join(app.getPath('userData'), 'ml-data');
+  return path.join(testHooks.userDataDir ?? app.getPath('userData'), 'ml-data');
 }
 
 function getSourceDir(): string {
+  if (testHooks.sourceDir) return testHooks.sourceDir;
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'ml-data');
   }
@@ -79,12 +113,20 @@ function getSourceDir(): string {
   return path.join(appPath, 'dataset', 'ml');
 }
 
+/** onnxruntime intra-op threads: half the cores, so a fold run never takes every core from main. */
+function intraOpThreads(): number {
+  let cores = testHooks.cpuCount ?? 0;
+  if (!cores) { try { cores = os.cpus().length; } catch { cores = 2; } }
+  return Math.max(1, Math.floor(cores / 2));
+}
+
 /**
  * Copy ML artifacts from source (dev) or bundled resources to userData.
  * In dev mode, reads directly from dataset/ml/. In production, they'd
- * be bundled via electron-builder extraResources.
+ * be bundled via electron-builder extraResources. Copies are asynchronous
+ * (game_profiles.json alone is ~12 MB) so the first load never blocks main.
  */
-function ensureDataFiles(): boolean {
+async function ensureDataFiles(): Promise<boolean> {
   try {
     const dataDir = getDataDir();
     if (!fs.existsSync(dataDir)) {
@@ -97,7 +139,7 @@ function ensureDataFiles(): boolean {
     // Installed copies from an older app version must be replaced, not kept forever.
     const stampPath = path.join(dataDir, ARTIFACT_STAMP_FILE);
     let installedVersion = 0;
-    try { installedVersion = Number(fs.readFileSync(stampPath, 'utf-8').trim()) || 0; } catch { /* no stamp */ }
+    try { installedVersion = Number((await fs.promises.readFile(stampPath, 'utf-8')).trim()) || 0; } catch { /* no stamp */ }
     const refresh = installedVersion !== ML_ARTIFACT_VERSION;
     if (refresh) {
       for (const file of requiredFiles) fs.rmSync(path.join(dataDir, file), { force: true });
@@ -113,7 +155,7 @@ function ensureDataFiles(): boolean {
           logger.error(`[ML] Missing source file: ${src}`);
           return false;
         }
-        fs.copyFileSync(src, dest);
+        await fs.promises.copyFile(src, dest);
         logger.info(`[ML] Copied ${file} to userData`);
       }
     }
@@ -125,7 +167,7 @@ function ensureDataFiles(): boolean {
       if (fs.existsSync(srcEnsemble)) {
         fs.mkdirSync(ensembleDir, { recursive: true });
         for (const f of fs.readdirSync(srcEnsemble)) {
-          fs.copyFileSync(path.join(srcEnsemble, f), path.join(ensembleDir, f));
+          await fs.promises.copyFile(path.join(srcEnsemble, f), path.join(ensembleDir, f));
         }
         logger.info(`[ML] Copied onnx_ensemble/ to userData`);
       }
@@ -147,7 +189,7 @@ function ensureDataFiles(): boolean {
     if (!fs.existsSync(singleModel) && !fs.existsSync(ensembleDir)) {
       const src = path.join(sourceDir, 'model.onnx');
       if (fs.existsSync(src)) {
-        fs.copyFileSync(src, singleModel);
+        await fs.promises.copyFile(src, singleModel);
         logger.info('[ML] Copied model.onnx to userData');
       }
     }
@@ -172,14 +214,14 @@ export function loadModel(): Promise<boolean> {
 
 async function _doLoadModel(): Promise<boolean> {
   try {
-    ort = require('onnxruntime-node');
+    ort = (testHooks.ort ?? require('onnxruntime-node')) as typeof import('onnxruntime-node');
   } catch (err) {
     logger.error('[ML] Failed to load onnxruntime-node:', err);
     loadingPromise = null;
     return false;
   }
 
-  if (!ensureDataFiles()) { loadingPromise = null; return false; }
+  if (!(await ensureDataFiles())) { loadingPromise = null; return false; }
 
   const dataDir = getDataDir();
 
@@ -191,13 +233,14 @@ async function _doLoadModel(): Promise<boolean> {
   loaded = false;
 
   try {
-    const specRaw = fs.readFileSync(path.join(dataDir, 'feature_spec.json'), 'utf-8');
+    // Async reads: only the JSON.parse calls below still run on the main thread.
+    const specRaw = await fs.promises.readFile(path.join(dataDir, 'feature_spec.json'), 'utf-8');
     featureSpec = JSON.parse(specRaw);
 
-    const tagRaw = fs.readFileSync(path.join(dataDir, 'tag_mapping.json'), 'utf-8');
+    const tagRaw = await fs.promises.readFile(path.join(dataDir, 'tag_mapping.json'), 'utf-8');
     tagMapping = JSON.parse(tagRaw);
 
-    const profilesRaw = fs.readFileSync(path.join(dataDir, 'game_profiles.json'), 'utf-8');
+    const profilesRaw = await fs.promises.readFile(path.join(dataDir, 'game_profiles.json'), 'utf-8');
     const profilesObj: Record<string, GameProfile> = JSON.parse(profilesRaw);
     gameProfiles = new Map(Object.entries(profilesObj));
     logger.info(`[ML] Loaded ${gameProfiles.size} game profiles`);
@@ -210,7 +253,8 @@ async function _doLoadModel(): Promise<boolean> {
     // LightGBM's ONNX converter declares label output shape as [1] even
     // though the input has dynamic batch [None, n_features]. onnxruntime
     // logs a noisy warning on every batch inference. Level 3 = errors only.
-    const sessOpts = { executionProviders: ['cpu'], logSeverityLevel: 3 as const };
+    // intraOpNumThreads: onnxruntime's default takes every core, starving main's IPC during a run.
+    const sessOpts = { executionProviders: ['cpu'], logSeverityLevel: 3 as const, intraOpNumThreads: intraOpThreads() };
 
     // Load ensemble ONNX sessions
     const ensembleDir = path.join(dataDir, 'onnx_ensemble');
@@ -315,34 +359,53 @@ export async function scoreGames(
   if (n === 0) return [];
 
   const defaults = featureSpec.defaults;
-
-  // Build flat feature buffer for all games
-  const flatBuffer = new Float32Array(n * N_FEATURES);
-  for (let i = 0; i < n; i++) {
-    const vec = buildFeatureVector(userProfile, profilesById.get(scorable[i]), defaults);
-    flatBuffer.set(vec, i * N_FEATURES);
-  }
-
-  const inputTensor = new ort.Tensor('float32', flatBuffer, [n, N_FEATURES]);
   const inputName = featureSpec.onnx_input_name;
   const probName = featureSpec.onnx_output_names[1] ?? 'probabilities';
+  const subBatch = Math.max(1, testHooks.scoreSubBatch ?? ML_SCORE_SUB_BATCH);
+  const ortRef = ort;
+  const folds = sessions.slice();
 
+  // Per-fold probabilities; null once a fold failed (it is then dropped for every row, as before).
+  const foldProbs: Array<Float32Array | null> = folds.map(() => new Float32Array(n));
+  let runsLeft = Math.ceil(n / subBatch) * folds.length;
+
+  for (let start = 0; start < n; start += subBatch) {
+    const rows = Math.min(subBatch, n - start);
+    const flatBuffer = new Float32Array(rows * N_FEATURES);
+    for (let i = 0; i < rows; i++) {
+      const vec = buildFeatureVector(userProfile, profilesById.get(scorable[start + i]), defaults);
+      flatBuffer.set(vec, i * N_FEATURES);
+    }
+    const inputTensor = new ortRef.Tensor('float32', flatBuffer, [rows, N_FEATURES]);
+
+    for (let f = 0; f < folds.length; f++) {
+      const probs = foldProbs[f];
+      runsLeft--;
+      if (!probs) continue;
+      try {
+        const result = await folds[f].run({ [inputName]: inputTensor }, [probName]);
+        const probOutput = result[probName];
+        if (!probOutput?.dims || !probOutput.data) throw new Error('no probabilities tensor');
+        const cols = probOutput.dims[probOutput.dims.length - 1] as number;
+        const data = probOutput.data as Float32Array;
+        for (let i = 0; i < rows; i++) probs[start + i] = data[i * cols + (cols - 1)];
+      } catch (err) {
+        // Never fall back to the int label: averaging 0/1 votes is what produced a 9-level score.
+        logger.warn('[ML] Fold scoring failed, skipping:', err);
+        foldProbs[f] = null;
+      }
+      // Keep each blocking slice short: IPC, the tray and the overlay run between fold runs.
+      if (runsLeft > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+
+  // Summed in fold order, as the single-run version did.
   const probSums = new Float32Array(n);
   let foldsOk = 0;
-
-  for (const sess of sessions) {
-    try {
-      const result = await sess.run({ [inputName]: inputTensor }, [probName]);
-      const probOutput = result[probName];
-      if (!probOutput?.dims || !probOutput.data) throw new Error('no probabilities tensor');
-      const cols = probOutput.dims[probOutput.dims.length - 1] as number;
-      const data = probOutput.data as Float32Array;
-      for (let i = 0; i < n; i++) probSums[i] += data[i * cols + (cols - 1)];
-      foldsOk++;
-    } catch (err) {
-      // Never fall back to the int label: averaging 0/1 votes is what produced a 9-level score.
-      logger.warn('[ML] Fold scoring failed, skipping:', err);
-    }
+  for (const probs of foldProbs) {
+    if (!probs) continue;
+    for (let i = 0; i < n; i++) probSums[i] += probs[i];
+    foldsOk++;
   }
 
   if (foldsOk === 0) {

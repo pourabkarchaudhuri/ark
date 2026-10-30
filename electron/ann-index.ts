@@ -24,6 +24,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { app } = require('electron');
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { logger } from './safe-logger.js';
 import { atomicWriteFileSync } from './safe-write.js';
@@ -174,6 +175,12 @@ let coherent = false;
 const SAVE_MIN_INTERVAL_MS = 60_000;
 /** Vectors added per slice before yielding the main-process event loop. */
 const ADD_SLICE = 64;
+/**
+ * Query vectors per native batch search before yielding. A 200-vector batch
+ * searched one vector at a time blocked main for 1-2 s per call during
+ * game-graph builds; a slice is now one multi-threaded native call.
+ */
+export const QUERY_SLICE = 32;
 let dirty = false;
 let lastSaveAt = 0;
 let deferredSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -264,16 +271,27 @@ function deletePersistedIndex(): void {
   } catch { /* ignore cleanup errors */ }
 }
 
+let loadInFlight: Promise<boolean> | null = null;
+
 /**
  * Load the persisted index. A no-op (returns current readiness) when an index
  * is already in memory — every renderer reload calls this, and building a
  * second multi-GB copy next to the live one is what ran main out of memory.
+ * Concurrent calls share one load. The id map (tens of MB of JSON) is read
+ * asynchronously; only the native `load()` itself still blocks main.
  */
-export function loadIndex(): boolean {
-  if (!Index) return false;
+export function loadIndex(): Promise<boolean> {
+  if (!Index) return Promise.resolve(false);
   syncAnnDimsFromSettings();
-  if (index) return reverseMap.size > 0;
+  if (index) return Promise.resolve(reverseMap.size > 0);
+  if (!loadInFlight) {
+    loadInFlight = loadIndexFromDisk().finally(() => { loadInFlight = null; });
+  }
+  return loadInFlight;
+}
 
+async function loadIndexFromDisk(): Promise<boolean> {
+  const gen = indexGeneration;
   const indexPath = getIndexPath();
   const metaPath = getMetaPath();
   if (!fs.existsSync(indexPath) || !fs.existsSync(metaPath)) {
@@ -283,11 +301,14 @@ export function loadIndex(): boolean {
 
   let meta: IndexMeta;
   try {
-    meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    meta = JSON.parse(await fs.promises.readFile(metaPath, 'utf-8'));
   } catch (err) {
+    if (gen !== indexGeneration) return false; // cleared while reading — the files are gone on purpose
     quarantinePersistedIndex(`meta unreadable: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
+  // Cleared / dims changed while the id map was being read: the next ann:load starts over.
+  if (gen !== indexGeneration || index) return index ? reverseMap.size > 0 : false;
   if (!meta || !Array.isArray(meta.gameIds) || meta.gameIds.length === 0) return false;
 
   // Stale generation / different model: do not even load the (multi-GB) native index.
@@ -541,7 +562,12 @@ export async function addVectors(
     // A write can reach main before the renderer's ann:load (safe mode skips it entirely).
     // Load the persisted index first — creating an empty one here meant the file was never
     // loaded and the next pass rebuilt hundreds of thousands of vectors from cache.
-    if (!loadIndex() && !index) {
+    const loading = loadIndex();
+    const genAtLoad = indexGeneration;
+    const loaded = await loading;
+    // Cleared while the load was reading the id map: this batch was sent before the clear.
+    if (!index && genAtLoad !== indexGeneration) { result.aborted = true; return result; }
+    if (!loaded && !index) {
       syncAnnDimsFromSettings();
       createIndex(); // implicitly created ⇒ not coherent until a backfill completes
     }
@@ -611,35 +637,81 @@ export function getStatus(): {
   };
 }
 
+let searchThreadsCache = 0;
+
+/** Native threads for a batch search: all cores but one, so main keeps a core for IPC and windows. */
+function batchSearchThreads(): number {
+  if (searchThreadsCache > 0) return searchThreadsCache;
+  try { searchThreadsCache = Math.max(1, os.cpus().length - 1); } catch { searchThreadsCache = 1; }
+  return searchThreadsCache;
+}
+
+interface SearchResultLike {
+  keys: ArrayLike<bigint | number>;
+  distances: ArrayLike<number>;
+  /** Present on BatchMatches (multi-vector query): neighbours found per row. */
+  counts?: ArrayLike<bigint | number>;
+}
+
+/**
+ * Row `r` of a search result. usearch returns BatchMatches (rows of `k` at
+ * `r * k`, `counts[r]` filled) for a multi-vector query and plain Matches
+ * for a single-vector one.
+ */
+function resultRow(result: SearchResultLike, r: number, k: number): { offset: number; count: number } {
+  if (result.counts) return { offset: r * k, count: Math.min(k, Number(result.counts[r]) || 0) };
+  return { offset: 0, count: result.keys.length };
+}
+
 /**
  * Batch query: for each given vector, find K nearest neighbors.
  * Returns results keyed by the provided game IDs.
+ *
+ * Vectors are searched QUERY_SLICE at a time in one multi-threaded native
+ * call, yielding the event loop between slices. EF_SEARCH is unchanged, so the
+ * neighbours equal one search per vector. Returns {} when the index is cleared
+ * or replaced while yielding (results from the old graph would be stale).
  */
-export function queryBatch(
+export async function queryBatch(
   entries: Array<{ id: string; vector: ArrayLike<number> }>,
   k: number,
-): Record<string, Array<{ id: string; distance: number }>> {
-  if (!index || idMap.length === 0 || !Index) return {};
+): Promise<Record<string, Array<{ id: string; distance: number }>>> {
+  if (!index || idMap.length === 0 || !Index || !Array.isArray(entries)) return {};
 
   const effectiveK = Math.min(k + 1, idMap.length);
+  if (!(effectiveK > 0)) return {};
   const results: Record<string, Array<{ id: string; distance: number }>> = {};
 
+  const prepared: Array<{ id: string; vector: Float32Array }> = [];
   for (const entry of entries) {
-    const prepared = prepareAnnVector(entry.vector);
-    if (!prepared) continue;
-    const searchResult = index.search(prepared, effectiveK);
+    const vector = entry ? prepareAnnVector(entry.vector) : null;
+    if (vector) prepared.push({ id: entry.id, vector });
+  }
 
-    const neighbors: Array<{ id: string; distance: number }> = [];
-    for (let i = 0; i < searchResult.keys.length; i++) {
-      const slot = Number(searchResult.keys[i]);
-      if (slot >= 0 && slot < idMap.length && idMap[slot]) {
-        const neighborId = idMap[slot];
-        if (neighborId !== entry.id) {
-          neighbors.push({ id: neighborId, distance: searchResult.distances[i] });
-        }
-      }
+  const gen = indexGeneration;
+  for (let i = 0; i < prepared.length; i += QUERY_SLICE) {
+    if (i > 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (gen !== indexGeneration || !index) return {};
     }
-    results[entry.id] = neighbors;
+    const slice = prepared.slice(i, i + QUERY_SLICE);
+    const matrix = new Float32Array(slice.length * DIMS);
+    for (let r = 0; r < slice.length; r++) matrix.set(slice[r].vector, r * DIMS);
+    const searchResult: SearchResultLike = index.search(matrix, effectiveK, batchSearchThreads());
+
+    for (let r = 0; r < slice.length; r++) {
+      const { offset, count } = resultRow(searchResult, r, effectiveK);
+      const neighbors: Array<{ id: string; distance: number }> = [];
+      for (let j = offset; j < offset + count; j++) {
+        const slot = Number(searchResult.keys[j]);
+        const distance = searchResult.distances[j];
+        // Unfilled entries carry a sentinel key / non-finite distance.
+        if (!(slot >= 0 && slot < idMap.length) || !idMap[slot] || !Number.isFinite(distance)) continue;
+        const neighborId = idMap[slot];
+        if (neighborId !== slice[r].id) neighbors.push({ id: neighborId, distance });
+      }
+      results[slice[r].id] = neighbors;
+    }
   }
 
   return results;
@@ -666,6 +738,7 @@ export function __resetAnnIndexForTests(
   idMap = [];
   reverseMap = new Map();
   indexGeneration++;
+  loadInFlight = null;
   dirty = false;
   coherent = false;
   lastSaveAt = 0;

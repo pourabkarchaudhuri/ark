@@ -136,3 +136,40 @@ export function rechunkProgressPercent(completed: number, total: number): number
   if (total <= 0) return 0;
   return Math.min(100, Math.round((completed / total) * 100));
 }
+
+/**
+ * `annIndex.save()` re-serialises the whole index (hundreds of MB to GB) with a
+ * synchronous native call on the main process. The re-chunk job used to request
+ * it once a minute; periodic saves are now 15 minutes apart. End-of-phase saves
+ * stay forced, and main flushes pending changes on quit — a crash in between
+ * loses only additions the backfill rebuilds from cached vectors.
+ */
+export const RECHUNK_ANN_SAVE_INTERVAL_MS = 15 * 60_000;
+
+export interface RechunkAnnSaver {
+  /** A game's vectors reached the index. */
+  noteSuccess(): void;
+  /** Save when something changed and the interval passed (or `force`, end of phase). Never throws. */
+  maybeSave(force?: boolean): Promise<void>;
+}
+
+export function createRechunkAnnSaver(deps: {
+  save: () => Promise<unknown>;
+  now?: () => number;
+  intervalMs?: number;
+}): RechunkAnnSaver {
+  const now = deps.now ?? Date.now;
+  const intervalMs = deps.intervalMs ?? RECHUNK_ANN_SAVE_INTERVAL_MS;
+  let successesSinceSave = 0;
+  let lastSaveAt = now();
+  return {
+    noteSuccess() { successesSinceSave++; },
+    async maybeSave(force = false) {
+      if (successesSinceSave === 0) return;
+      if (!force && now() - lastSaveAt < intervalMs) return;
+      try { await deps.save(); } catch { /* non-fatal */ }
+      successesSinceSave = 0;
+      lastSaveAt = now();
+    },
+  };
+}

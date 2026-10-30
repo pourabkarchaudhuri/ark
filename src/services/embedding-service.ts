@@ -55,6 +55,7 @@ import {
   advanceRechunkCursor,
   beginRechunkPhase,
   createInitialRechunkWatermark,
+  createRechunkAnnSaver,
   gameNeedsChunkWork,
   gamesAfterCursor,
   nextRechunkPhase,
@@ -427,10 +428,11 @@ function pooledNamespaceFor(storeName: string): string {
 
 // ─── Pooled key index (cheap counts) ────────────────────────────────────────
 //
-// LevelDB has no cheap count and the store API has no keys-only scan, so
-// `getPooledEmbeddingCount` used to page through every VALUE (~4 KB of JSON
-// per vector, ~160k vectors) each time galaxy-cache polled it. Instead the
-// first complete walk of a pooled namespace seeds a Set of its keys, and every
+// LevelDB has no cheap count, so `getPooledEmbeddingCount` used to page
+// through every VALUE (~4 KB of JSON per vector, ~160k vectors) each time
+// galaxy-cache polled it. Instead the first count seeds a Set of the
+// namespace's keys — from the keys-only `store:count` (1.0.97: main never
+// decodes a vector), or a complete value walk on older preloads — and every
 // write through this module adds its keys — this module is the only writer of
 // these namespaces and never deletes pooled rows, so `set.size` stays exact.
 // Writes that land while a seeding walk is still in progress are journaled
@@ -460,12 +462,37 @@ async function levelPooledCount(namespace: string): Promise<number> {
   if (known) return known.size;
   let inFlight = _pooledCountInFlight.get(namespace);
   if (!inFlight) {
-    inFlight = levelStreamPooled(namespace, () => { /* count only */ })
+    const seeding = typeof window.store!.count === 'function'
+      ? levelSeedPooledKeysFromCount(namespace)
+      : levelStreamPooled(namespace, () => { /* count only */ });
+    inFlight = seeding
       .then((n) => _pooledKeyIndex.get(namespace)?.size ?? n)
       .finally(() => { _pooledCountInFlight.delete(namespace); });
     _pooledCountInFlight.set(namespace, inFlight);
   }
   return inFlight;
+}
+
+/** Seed the pooled key index from a keys-only `store:count` (no vector row crosses IPC). */
+async function levelSeedPooledKeysFromCount(namespace: string): Promise<number> {
+  if (_pooledKeyIndex.has(namespace) || _pooledKeyJournal.has(namespace)) {
+    return _pooledKeyIndex.get(namespace)?.size ?? 0;
+  }
+  // Writes landing while the count is in flight are journaled and merged in, as for a value walk.
+  _pooledKeyJournal.set(namespace, new Set());
+  try {
+    const res = await window.store!.count!(namespace, { keys: true });
+    if (res.error || !Array.isArray(res.keys)) {
+      console.error(`[EmbeddingService] count(${namespace}) failed:`, res.error);
+      return 0;
+    }
+    const keys = new Set(res.keys);
+    for (const k of _pooledKeyJournal.get(namespace) ?? []) keys.add(k);
+    _pooledKeyIndex.set(namespace, keys);
+    return keys.size;
+  } finally {
+    _pooledKeyJournal.delete(namespace);
+  }
 }
 
 async function levelGetMeta<T>(key: string): Promise<T | null> {
@@ -2959,11 +2986,9 @@ class EmbeddingService {
       const ledger = await getEmbedFailureLedger();
       const IDLE_DELAY_MS = 200;
       const RETRY_DELAY_MS = 2000;
-      // `annIndex.save()` serialises the whole index on the main process; it
-      // used to run every 25 games. Now at most once a minute + end of phase.
-      const ANN_SAVE_INTERVAL_MS = 60_000;
-      let successesSinceSave = 0;
-      let lastAnnSaveAt = Date.now();
+      // `annIndex.save()` serialises the whole index on the main process: at most
+      // every RECHUNK_ANN_SAVE_INTERVAL_MS (15 min) + forced at the end of each phase.
+      const annSaver = createRechunkAnnSaver({ save: () => annIndex.save() });
       let ollamaStalled = false;
 
       const persistWm = async (next: RechunkWatermark) => {
@@ -2971,13 +2996,7 @@ class EmbeddingService {
         await setEmbeddingMeta(wm);
       };
 
-      const maybeSaveAnn = async (force = false) => {
-        if (successesSinceSave === 0) return;
-        if (!force && Date.now() - lastAnnSaveAt < ANN_SAVE_INTERVAL_MS) return;
-        try { await annIndex.save(); } catch { /* non-fatal */ }
-        successesSinceSave = 0;
-        lastAnnSaveAt = Date.now();
-      };
+      const maybeSaveAnn = (force = false) => annSaver.maybeSave(force);
 
       const yieldPolite = async () => {
         await this._awaitIfPaused(signal);
@@ -3072,7 +3091,7 @@ class EmbeddingService {
                 item.onPooled?.(pooled);
                 await noteEmbeddingContentChanged();
                 await persistWm(advanceRechunkCursor(wm, item.id, 'success'));
-                successesSinceSave++;
+                annSaver.noteSuccess();
                 await maybeSaveAnn();
               } else {
                 await persistWm(advanceRechunkCursor(wm, item.id, 'skipped'));
