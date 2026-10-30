@@ -339,7 +339,8 @@ async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
     wrapSource(steamService.getNewReleases(), 'Steam new releases'),
     wrapSource(steamService.getTopSellers(), 'Steam top sellers'),
     wrapSource(steamService.getComingSoon(), 'Steam coming soon'),
-    wrapSource(epicService.browseCatalog(0), 'Epic full catalog', 180_000),
+    // Matches the main-side crawl budget: the Epic limiter really holds 2 in flight, 300ms apart
+    wrapSource(epicService.browseCatalog(0), 'Epic full catalog', 240_000),
     wrapSource(epicService.getFreeGames(), 'Epic free games'),
   ]);
 

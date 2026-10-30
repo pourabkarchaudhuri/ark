@@ -24,10 +24,12 @@ const MAX_CONCURRENT = 2;
 
 const MAX_QUEUE_SIZE = 500; // Prevent unbounded queue growth
 
-class RateLimiter {
+export class RateLimiter {
   private queue: Array<() => void> = [];
   private active = 0;
   private lastRequestTime = 0;
+  /** The single pending release timer. The cap is checked when it fires, not only when it was armed. */
+  private timer: ReturnType<typeof setTimeout> | null = null;
 
   async acquire(): Promise<void> {
     if (this.queue.length >= MAX_QUEUE_SIZE) {
@@ -45,17 +47,21 @@ class RateLimiter {
   }
 
   private processQueue(): void {
-    if (this.queue.length === 0 || this.active >= MAX_CONCURRENT) return;
+    // One timer at a time: a same-tick burst of acquires used to arm one timer each, all of
+    // which fired together and blew past MAX_CONCURRENT and the request spacing.
+    if (this.timer || this.queue.length === 0 || this.active >= MAX_CONCURRENT) return;
 
     const now = Date.now();
     const waitTime = Math.max(0, RATE_LIMIT_DELAY - (now - this.lastRequestTime));
 
-    setTimeout(() => {
-      if (this.queue.length === 0) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.queue.length === 0 || this.active >= MAX_CONCURRENT) return;
       this.active++;
       this.lastRequestTime = Date.now();
       const resolve = this.queue.shift()!;
       resolve();
+      this.processQueue();
     }, waitTime);
   }
 }
@@ -493,11 +499,35 @@ const SEARCH_CACHE_TTL = 10 * 60 * 1000;   // 10 min for search results
 const RELEASES_CACHE_TTL = 30 * 60 * 1000; // 30 min for release lists
 const FREE_GAMES_CACHE_TTL = 60 * 60 * 1000; // 1 hour for free games
 
+/** Definitive "no reviews / news / content / addons" answers are remembered this long. */
+const MISS_CACHE_TTL = 6 * 60 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Cloudflare solver helpers
+// ---------------------------------------------------------------------------
+
+/** Hard cap on one hidden-window solve. */
+const CF_SOLVE_DEADLINE_MS = 25_000;
+/** After did-finish-load, how long a page without a challenge is given before the window closes. */
+const CF_NO_CHALLENGE_GRACE_MS = 3_000;
+
+/** Whether the solver window is showing a Cloudflare interstitial ("Just a moment..."). */
+function isCloudflareChallengePage(win: { webContents: { getTitle(): string; getURL(): string } }): boolean {
+  try {
+    const title = win.webContents.getTitle() || '';
+    const url = win.webContents.getURL() || '';
+    return /just a moment|attention required|checking your browser/i.test(title) || url.includes('__cf_chl');
+  } catch {
+    // Can't tell — keep waiting for the cookie until the deadline
+    return true;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Epic API Client
 // ---------------------------------------------------------------------------
 
-class EpicAPIClient {
+export class EpicAPIClient {
   private rateLimiter = new RateLimiter();
   private cache = new PersistentCache('epic-cache.json');
 
@@ -522,6 +552,8 @@ class EpicAPIClient {
   // it as clearance defeated the circuit breaker and stopped the solver from
   // ever re-running. Reset on the next 403 so a later block re-solves.
   private cfInitialized = false;
+  /** Set by a 403: the saved cf_clearance (if any) is invalid, so the solver must get a new one. */
+  private cfClearanceRejected = false;
 
   /**
    * Cache keys whose current value came from the REST (promotional-catalog)
@@ -558,6 +590,25 @@ class EpicAPIClient {
     return n;
   }
 
+  /**
+   * Remembered misses (no reviews / news / content / addons). Stored under their own key so a
+   * real value never gets shadowed by a marker of a different shape. Only record a miss when
+   * the answer was definitive — never after a throw, 429 or 5xx.
+   */
+  private missKey(cacheKey: string): string {
+    return cacheKey.replace(/^epic:/, 'epic:miss:');
+  }
+
+  private isKnownMiss(cacheKey: string): boolean {
+    const key = this.missKey(cacheKey);
+    const marker = this.cache.get<{ __miss?: boolean }>(key);
+    return !!marker?.__miss && !this.cache.isStale(key);
+  }
+
+  private recordMiss(cacheKey: string): void {
+    this.cache.set(this.missKey(cacheKey), { __miss: true }, MISS_CACHE_TTL);
+  }
+
   /** Whether Epic GraphQL is currently blocked (circuit open). Use egdata as fallback when true. */
   isEpicBlocked(): boolean {
     return this.gqlCircuitOpen;
@@ -591,10 +642,37 @@ class EpicAPIClient {
     return this.cfInitPromise;
   }
 
+  /** Mark clearance as obtained: close the circuit and refetch REST-fallback entries via GraphQL. */
+  private markCloudflareCleared(source: string): void {
+    this.cfInitialized = true;
+    this.cfClearanceRejected = false;
+    this.gqlCircuitOpen = false;
+    // Only REST-fallback entries are refetched via GraphQL; real
+    // GraphQL data in the cache stays valid.
+    const invalidated = this.invalidateRestFallbackEntries();
+    logger.log(`[EpicAPI] Cloudflare clearance ${source} — ${invalidated} REST-fallback cache entr${invalidated === 1 ? 'y' : 'ies'} marked stale, GraphQL should work now`);
+  }
+
   private async _solveCloudflare(): Promise<boolean> {
     try {
       const { BrowserWindow, session: electronSession } = electron;
       if (!BrowserWindow || !electronSession) return false;
+
+      // A saved cf_clearance cookie needs no hidden window — unless a 403 just proved it
+      // invalid, in which case only a *different* value counts as solved below.
+      let rejectedValue: string | undefined;
+      try {
+        const existing = await electronSession.defaultSession.cookies.get({ url: 'https://store.epicgames.com', name: 'cf_clearance' });
+        const value = existing.find(c => !!c.value)?.value;
+        if (value && !this.cfClearanceRejected) {
+          this.markCloudflareCleared('already saved');
+          this.cfInitPromise = null;
+          return true;
+        }
+        rejectedValue = value;
+      } catch {
+        // Cookie access failed — fall through to the solver window
+      }
 
       logger.log('[EpicAPI] Solving Cloudflare challenge (hidden browser)...');
 
@@ -605,15 +683,20 @@ class EpicAPIClient {
         webPreferences: {
           nodeIntegration: false,
           contextIsolation: true,
+          // Only the challenge script matters — skip images and let Chromium throttle the page
+          images: false,
+          backgroundThrottling: true,
         },
       });
 
       try {
+        let loadedAt = 0;
+        win.webContents.once('did-finish-load', () => { loadedAt = Date.now(); });
         // Navigate to Epic store — Chromium will handle the CF JS challenge
         win.loadURL('https://store.epicgames.com/en-US/').catch((err: any) => { logger.warn('[Epic] Cloudflare loadURL Non-fatal:', err); });
 
         // Poll for cf_clearance cookie (set by CF after challenge solved)
-        const deadline = Date.now() + 25_000; // 25s max
+        const deadline = Date.now() + CF_SOLVE_DEADLINE_MS;
         while (Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 1500));
 
@@ -621,24 +704,27 @@ class EpicAPIClient {
             // Security: scope cookie query to Epic's domain (avoid reading entire cookie jar)
             const cookies = await electronSession.defaultSession.cookies.get({ domain: '.epicgames.com' });
             // Only cf_clearance proves the JS challenge was solved (__cf_bm is
-            // attached to every Cloudflare response, challenge or not).
-            const hasClearance = cookies.some(c => c.name === 'cf_clearance' && !!c.value);
+            // attached to every Cloudflare response, challenge or not). The value
+            // a 403 just rejected doesn't count.
+            const hasClearance = cookies.some(c => c.name === 'cf_clearance' && !!c.value && c.value !== rejectedValue);
 
             if (hasClearance) {
-              this.cfInitialized = true;
-              this.gqlCircuitOpen = false;
-              // Only REST-fallback entries are refetched via GraphQL; real
-              // GraphQL data in the cache stays valid.
-              const invalidated = this.invalidateRestFallbackEntries();
-              logger.log(`[EpicAPI] Cloudflare clearance obtained — ${invalidated} REST-fallback cache entr${invalidated === 1 ? 'y' : 'ies'} marked stale, GraphQL should work now`);
+              this.markCloudflareCleared('obtained');
               return true;
             }
           } catch {
             // Cookie access failed — continue polling
           }
+
+          // The page loaded a few seconds ago and shows no challenge: nothing will set a
+          // cookie, so free the renderer now instead of idling out the full deadline.
+          if (loadedAt > 0 && Date.now() - loadedAt >= CF_NO_CHALLENGE_GRACE_MS && !isCloudflareChallengePage(win)) {
+            logger.log('[EpicAPI] Epic store loaded without a Cloudflare challenge — closing solver window');
+            return false;
+          }
         }
 
-        logger.warn('[EpicAPI] Cloudflare clearance timed out after 25s — REST fallback remains active');
+        logger.warn(`[EpicAPI] Cloudflare clearance timed out after ${CF_SOLVE_DEADLINE_MS / 1000}s — REST fallback remains active`);
         return false;
       } finally {
         try {
@@ -744,6 +830,7 @@ class EpicAPIClient {
               // Clearance (if any) is evidently no longer valid — allow the
               // solver to run again instead of instantly re-closing the circuit.
               this.cfInitialized = false;
+              this.cfClearanceRejected = true;
               logger.warn('[EpicAPI] Cloudflare 403 — opening circuit breaker (REST fallback will be used)');
             }
             // Log response body for debugging non-403 errors
@@ -855,8 +942,6 @@ class EpicAPIClient {
       const rawResults = data.Catalog.searchStore.elements || [];
       const results = filterDummyOffers(rawResults);
       this.cache.set(cacheKey, results, SEARCH_CACHE_TTL);
-
-      if (cached) return cached;
       return results;
     } catch (error) {
       logger.debug('[EpicAPI] GQL search unavailable, using REST fallback');
@@ -1116,6 +1201,7 @@ class EpicAPIClient {
     const cacheKey = `epic:product-content:${slug}`;
     const cached = this.cache.get<any>(cacheKey, true);
     if (cached && !this.cache.isStale(cacheKey)) return cached;
+    if (this.isKnownMiss(cacheKey)) return cached ?? null;
 
     try {
       await this.rateLimiter.acquire();
@@ -1130,6 +1216,8 @@ class EpicAPIClient {
 
         if (!response.ok) {
           logger.debug(`[EpicAPI] Product content ${response.status} for slug "${slug}"`);
+          // Unknown slug is a definitive answer; 429 / 5xx are not
+          if (response.status === 404) this.recordMiss(cacheKey);
           return null;
         }
 
@@ -1314,13 +1402,24 @@ class EpicAPIClient {
   }
 
   private async browseCatalogUncached(totalLimit: number): Promise<EpicCatalogItem[]> {
-    // totalLimit=0 means "fetch everything"
-    const cacheKey = `epic:catalog-browse-full`;
+    // totalLimit=0 means "fetch everything". Only a full crawl is stored under the full key;
+    // a limited one (Top Sellers asks for 99) used to overwrite the whole catalog with ~120 games.
+    const fullKey = `epic:catalog-browse-full`;
+    const cacheKey = totalLimit > 0 ? `epic:catalog-browse:${totalLimit}` : fullKey;
+    const sliceToLimit = (items: EpicCatalogItem[]): EpicCatalogItem[] =>
+      totalLimit > 0 ? items.slice(0, totalLimit) : items;
+    if (totalLimit > 0) {
+      // A fresh full catalog already answers any limited request — slice it here, not over IPC
+      const full = this.cache.get<EpicCatalogItem[]>(fullKey);
+      if (Array.isArray(full) && full.length > 0) return sliceToLimit(full);
+    }
     const cached = this.cache.get<EpicCatalogItem[]>(cacheKey, true);
     if (cached && !this.cache.isStale(cacheKey)) return cached;
 
     const PAGE_SIZE = 40; // Epic GQL max per request
-    const BATCH_SIZE = 8; // Parallel requests per batch to avoid rate limits
+    // Pages per batch. The shared limiter allows 2 in flight anyway; a small batch keeps the
+    // "whole batch empty → stop" check from firing a wave of requests past the end.
+    const BATCH_SIZE = 4;
     const MAX_PAGES = 200; // Safety cap: 200 × 40 = 8000 games max
 
     try {
@@ -1412,16 +1511,20 @@ class EpicAPIClient {
         const expected = Math.min(effectiveLimit, MAX_PAGES * PAGE_SIZE);
         const truncated = Number.isFinite(expected) && totalLimit === 0 && uniqueItems.length < expected * 0.6;
         if (truncated) logger.warn(`[EpicAPI] Catalog crawl truncated: ${uniqueItems.length}/${expected} — not caching`);
-        else this.cache.set(cacheKey, uniqueItems, RELEASES_CACHE_TTL);
+        else this.cache.set(cacheKey, sliceToLimit(uniqueItems), RELEASES_CACHE_TTL);
         logger.log(`[EpicAPI] Catalog browse complete: ${uniqueItems.length} unique games from ${totalAvailable} total`);
-        return uniqueItems;
+        return sliceToLimit(uniqueItems);
       }
     } catch (error) {
       logger.error('[EpicAPI] browseCatalog failed:', error);
     }
 
-    // Fall back to promotional catalog if GQL fails
+    // Fall back to the stale crawl for this limit, then a stale full catalog, then promotions
     if (cached) return cached;
+    if (totalLimit > 0) {
+      const staleFull = this.cache.get<EpicCatalogItem[]>(fullKey, true);
+      if (Array.isArray(staleFull) && staleFull.length > 0) return sliceToLimit(staleFull);
+    }
     try {
       return await this.getPromotionalCatalog();
     } catch {
@@ -1504,8 +1607,11 @@ class EpicAPIClient {
 
     const cacheKey = `epic:news:${keyword.toLowerCase()}:${limit}`;
     const cached = this.cache.get<any[]>(cacheKey, true);
-    if (cached && !this.cache.isStale(cacheKey)) return cached;
+    if (Array.isArray(cached) && !this.cache.isStale(cacheKey)) return cached;
+    if (this.isKnownMiss(cacheKey)) return Array.isArray(cached) ? cached : [];
 
+    // Cleared by any failed request, so an empty result is only remembered when every source answered
+    let definitive = true;
     const results: Array<{
       title: string;
       url: string;
@@ -1527,6 +1633,7 @@ class EpicAPIClient {
           },
         });
 
+        if (!response.ok) definitive = false;
         if (response.ok) {
           const json = await response.json();
           const posts = Array.isArray(json) ? json : (json?.blogList || json?.elements || []);
@@ -1569,6 +1676,7 @@ class EpicAPIClient {
         this.rateLimiter.release();
       }
     } catch (error) {
+      definitive = false;
       logger.debug(`[EpicAPI] News feed fetch failed:`, (error as Error).message);
     }
 
@@ -1588,6 +1696,8 @@ class EpicAPIClient {
             },
           });
 
+          // 404 = no product page for this slug (definitive); anything else non-OK is not
+          if (!response.ok && response.status !== 404) definitive = false;
           if (response.ok) {
             const json = await response.json();
             const pages = json?.pages || [];
@@ -1618,12 +1728,15 @@ class EpicAPIClient {
         }
       } catch {
         // Silently ignore — news is a nice-to-have
+        definitive = false;
       }
     }
 
     if (results.length > 0) {
       this.cache.set(cacheKey, results, RELEASES_CACHE_TTL);
       logger.log(`[EpicAPI] News feed: ${results.length} articles for "${keyword}"`);
+    } else if (definitive) {
+      this.recordMiss(cacheKey);
     }
     return results;
   }
@@ -1651,6 +1764,10 @@ class EpicAPIClient {
     const cacheKey = `epic:reviews:${slug}`;
     const cached = this.cache.get<any>(cacheKey, true);
     if (cached && !this.cache.isStale(cacheKey)) return cached;
+    if (this.isKnownMiss(cacheKey)) return cached ?? null;
+
+    // A miss is only remembered when every SKU said 404 / OK-but-empty and OpenCritic answered
+    let definitive = true;
 
     // Try multiple SKU formats that Epic uses
     const skuVariants = [slug, `EPIC_${slug}`, slug.replace(/-/g, '')];
@@ -1704,11 +1821,14 @@ class EpicAPIClient {
               logger.log(`[EpicAPI] Product reviews for "${slug}": ${totalCount} reviews, avg ${avgRating}`);
               return result;
             }
+          } else if (response.status !== 404) {
+            definitive = false;
           }
         } finally {
           this.rateLimiter.release();
         }
       } catch (error) {
+        definitive = false;
         logger.debug(`[EpicAPI] Reviews fetch failed for SKU "${sku}":`, (error as Error).message);
       }
     }
@@ -1727,7 +1847,7 @@ class EpicAPIClient {
             }
           }
         }
-      `, { sandboxId: slug }).catch((err: any) => { logger.warn('[Epic] getProductReviews OpenCritic Non-fatal:', err); return null; });
+      `, { sandboxId: slug }).catch((err: any) => { definitive = false; logger.warn('[Epic] getProductReviews OpenCritic Non-fatal:', err); return null; });
 
       if (data?.OpenCritic?.productReviews) {
         const oc = data.OpenCritic.productReviews;
@@ -1750,8 +1870,10 @@ class EpicAPIClient {
       }
     } catch {
       // Silently ignore
+      definitive = false;
     }
 
+    if (definitive) this.recordMiss(cacheKey);
     if (cached) return cached;
     return null;
   }
@@ -1830,7 +1952,8 @@ class EpicAPIClient {
 
     const cacheKey = `epic:addons:${namespace}:${limit}`;
     const cached = this.cache.get<any[]>(cacheKey, true);
-    if (cached && !this.cache.isStale(cacheKey)) return cached;
+    if (Array.isArray(cached) && !this.cache.isStale(cacheKey)) return cached;
+    if (this.isKnownMiss(cacheKey)) return Array.isArray(cached) ? cached : [];
 
     try {
       const data = await this.gqlFetch<{
@@ -1869,13 +1992,16 @@ class EpicAPIClient {
       if (addons.length > 0) {
         this.cache.set(cacheKey, addons, RELEASES_CACHE_TTL);
         logger.log(`[EpicAPI] Addons for namespace "${namespace}": ${addons.length} found (total available: ${data.Catalog.searchStore.paging.total})`);
+      } else {
+        // GraphQL answered with no addons — a definitive miss
+        this.recordMiss(cacheKey);
       }
       return addons;
     } catch (error) {
       logger.debug(`[EpicAPI] Addons query failed for "${namespace}":`, (error as Error).message);
     }
 
-    if (cached) return cached;
+    if (Array.isArray(cached)) return cached;
     return [];
   }
 
