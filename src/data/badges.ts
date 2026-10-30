@@ -21,6 +21,10 @@ function pickShape(branch: string, index: number): MedalShape {
   return shapes[index % shapes.length];
 }
 
+// Badge ids are positional (declaration order) and stored unlock dates are keyed
+// by them. Edit badges in place or append at the end of the last list; never
+// insert or remove a b() call, or every later id shifts (guarded by
+// src/test/data/badge-ids.test.ts).
 let _id = 0;
 let _branchIdx: Record<string, number> = {};
 
@@ -135,9 +139,9 @@ const voyager: BadgeDefinition[] = [
   b('Epic Vanguard',           '25+ Epic games',                     'Twenty-five Epic titles — you definitely didn\'t pay for most of them.', 'voyager', 'gold', { type: 'storeGameCount', store: 'epic', min: 25 }),
   b('Custom Artisan',          '5+ custom games',                    'Five handcrafted entries. The Ark appreciates your personal touch.', 'voyager', 'silver', { type: 'storeGameCount', store: 'custom', min: 5 }),
   b('Custom Architect',        '10+ custom games',                   'Ten custom entries — you\'re basically running a shadow storefront.', 'voyager', 'gold', { type: 'storeGameCount', store: 'custom', min: 10 }),
-  b('Cycle Veteran',           'Games across 2+ years',              'You survived more than one Cycle. Most don\'t make it past the first.', 'voyager', 'silver', { type: 'releaseYearSpan', min: 2 }),
-  b('Cycle Master',            'Games across 3+ years',              'Three Cycles of service. The Ark remembers every one.', 'voyager', 'gold', { type: 'releaseYearSpan', min: 3 }),
-  b('Cycle Legend',             'Games across 5+ years',             'Five Cycles. Your service record is longer than some crew members\' lifespans.', 'voyager', 'platinum', { type: 'releaseYearSpan', min: 5 }),
+  b('Cycle Veteran',           'Games across 2+ years',              'You survived more than one Cycle. Most don\'t make it past the first.', 'voyager', 'silver', { type: 'releaseYearCount', min: 2 }),
+  b('Cycle Master',            'Games across 3+ years',              'Three Cycles of service. The Ark remembers every one.', 'voyager', 'gold', { type: 'releaseYearCount', min: 3 }),
+  b('Cycle Legend',             'Games across 5+ years',             'Five Cycles. Your service record is longer than some crew members\' lifespans.', 'voyager', 'platinum', { type: 'releaseYearCount', min: 5 }),
   b('Quartermaster',           'Add 125 games',                      'Supply requisitions for "entertainment research" are now auto-approved on your account.', 'voyager', 'platinum', { type: 'gameCount', min: 125 }),
   b('Pathfinder',              'Add 175 games',                      'The pathfinding algorithm was updated to account for your library detours.', 'voyager', 'platinum', { type: 'gameCount', min: 175 }),
   b('Trailblazer',             'Add 250 games',                      'Two hundred and fifty worlds. The star map can\'t keep up.', 'voyager', 'diamond', { type: 'gameCount', min: 250 }),
@@ -166,7 +170,7 @@ const voyager: BadgeDefinition[] = [
   b('Annual Expedition',        'Add 55 games',                     'Annual expedition complete — the manifest is thicc.', 'voyager', 'gold', { type: 'gameCount', min: 55 }),
   b('Stellar Wanderer',         'Add 95 games',                     'Ninety-five and counting. The wandering is the point.', 'voyager', 'gold', { type: 'gameCount', min: 95 }),
   b('Sale Season Survivor',     'Own 75+ total',                    'You emerged from the sale with your wallet wounded but your library victorious.', 'voyager', 'gold', { type: 'gameCount', min: 75 }),
-  b('Rapid Deployment',         'Add 3 games in a day',             'Three games in one rotation? That\'s not collecting, that\'s an invasion.', 'voyager', 'silver', { type: 'gamesPerYear', year: 'any', min: 3 }),
+  b('Rapid Deployment',         'Add 3 games in a day',             'Three games in one rotation? That\'s not collecting, that\'s an invasion.', 'voyager', 'silver', { type: 'gamesAddedInOneDay', min: 3 }),
 ];
 
 // ─── Branch 2: THE CONQUEROR — Completion (53) ────────────────────────────────
@@ -391,7 +395,7 @@ const pioneer: BadgeDefinition[] = [
 // ─── Branch 8: THE STARGAZER — Discovery & Metacritic (39) ───────────────────
 
 const stargazer: BadgeDefinition[] = [
-  b('Retro Signal',            'Games spanning decades',             'You picked up signals from gaming\'s ancient past. The archaeology team is thrilled.', 'stargazer', 'bronze', { type: 'releaseYearSpan', min: 1 }),
+  b('Retro Signal',            'Games with a known release era',     'You picked up signals from gaming\'s ancient past. The archaeology team is thrilled.', 'stargazer', 'bronze', { type: 'releaseYearSpan', min: 1 }),
   b('Decade Span',             'Games spanning 2 decades',          'Two decades of gaming history in your library. You are a living timeline.', 'stargazer', 'silver', { type: 'releaseYearSpan', min: 2 }),
   b('Triple Decade',           'Games spanning 3 decades',          'Three decades. Your library is a museum of interactive entertainment.', 'stargazer', 'gold', { type: 'releaseYearSpan', min: 3 }),
   b('Time Traveler',           'Games spanning 4+ decades',         'Four decades of games. You\'ve played history from Pong to the present.', 'stargazer', 'platinum', { type: 'releaseYearSpan', min: 4 }),
@@ -411,7 +415,7 @@ const stargazer: BadgeDefinition[] = [
   // Era explorers
   ...([3,5,7,10,15] as const).map((n) => {
     const tier: BadgeTier = n <= 3 ? 'bronze' : n <= 5 ? 'silver' : n <= 7 ? 'gold' : n <= 10 ? 'platinum' : 'diamond';
-    return b(`Era Explorer ${n}`, `Games from ${n}+ release years`, `Your library spans ${n} years — a temporal explorer of the highest order.`, 'stargazer', tier, { type: 'releaseYearSpan', min: n });
+    return b(`Era Explorer ${n}`, `Games from ${n}+ release years`, `Your library holds games from ${n} different release years — a temporal explorer of the highest order.`, 'stargazer', tier, { type: 'releaseYearCount', min: n });
   }),
 ];
 
@@ -492,7 +496,7 @@ const secretCount = 1000 - currentTotal;
 
 const secretTemplates: Array<{ name: string; desc: string; lore: string; tier: BadgeTier; cond: BadgeDefinition['condition'] }> = [
   { name: 'The Void Gazes Back',      desc: 'Visit Medals with empty library',       lore: 'You opened the medal case before earning anything. Bold.', tier: 'bronze',   cond: { type: 'gameCount', min: 0 } },
-  { name: 'Perfectly Average',         desc: 'Average rating exactly 3.0 (20+)',      lore: 'Achieving perfect mediocrity required a level of skill nobody expected.', tier: 'platinum', cond: { type: 'averageRating', min: 3.0, max: 3.0 } },
+  { name: 'Perfectly Average',         desc: 'Average rating exactly 3.0 (20+)',      lore: 'Achieving perfect mediocrity required a level of skill nobody expected.', tier: 'platinum', cond: { type: 'averageRating', min: 3.0, max: 3.0, minRatings: 20 } },
   { name: 'Ghost Fleet',              desc: '10+ games with 0 hours',                lore: 'Ten phantom ships in your fleet — purchased, never crewed, deeply haunting.', tier: 'silver',   cond: { type: 'gamesWithZeroHours', min: 10 } },
   { name: 'Session #1000',            desc: 'Log your 1,000th session',              lore: 'The millennial session triggered a system-wide celebration. You didn\'t notice — you were gaming.', tier: 'platinum', cond: { type: 'sessionCount', min: 1000 } },
   { name: 'The Absolute Commander',   desc: 'Unlock 900 badges',                     lore: 'Nine hundred medals. The Ark\'s structural integrity is compromised by their combined weight.', tier: 'diamond',  cond: { type: 'totalBadgeCount', min: 900 } },

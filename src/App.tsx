@@ -9,6 +9,7 @@ import { ChangelogModal } from '@/components/changelog-modal';
 import { trackPageView } from '@/services/analytics';
 import { SplashScreen } from '@/components/splash-screen';
 import { SessionTrackerProvider } from '@/hooks/session-tracker-context';
+import { useBadgeUnlockStamping } from '@/hooks/useBadgeUnlockStamping';
 import { getStorageHealth, subscribeStorageHealth } from '@/services/storage-health';
 import { loadSafeMode, type SafeModeState } from '@/services/safe-mode';
 
@@ -161,6 +162,8 @@ function ReliabilityNotices() {
 }
 
 export default function App() {
+  // Badge "Obtained" dates are stamped when earned, not when a vault card renders.
+  useBadgeUnlockStamping();
   return (
     <ToastProvider>
       {/* Session tracking is mounted at the root, independent of the splash
