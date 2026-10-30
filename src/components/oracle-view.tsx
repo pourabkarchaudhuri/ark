@@ -1948,7 +1948,7 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
             setEmbeddingStatus((generated > 0 || cachedCount > 0) ? 'ready' : 'unavailable');
             return generated;
           },
-          (candidateIds) => embeddingService.enrichWithCatalogEmbeddings(candidateIds),
+          (candidateIds, keepIds) => embeddingService.enrichWithCatalogEmbeddings(candidateIds, keepIds),
         );
       })();
     }

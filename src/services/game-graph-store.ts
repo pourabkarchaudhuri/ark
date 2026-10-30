@@ -15,6 +15,7 @@
 
 import { annIndex } from './ann-index';
 import { embeddingService, getAllPooledEmbeddingsForGraph, isRendererHeapPressureHigh } from './embedding-service';
+import { annGraphSignature } from './graph-signature';
 
 export interface GraphScores {
   pageRank: number;
@@ -77,6 +78,12 @@ export const GRAPH_METRICS_TIMEOUT_MS = 5 * 60_000;
 export const GRAPH_REBUILD_MIN_INTERVAL_MS = 10 * 60_000;
 /** Back-off after a failed build before another attempt is allowed. */
 const GRAPH_BUILD_FAILURE_COOLDOWN_MS = 2 * 60_000;
+/**
+ * ANN errors come back from `queryBatch` as `{}`, which reads like "no
+ * neighbours". Above this share of failed batches the graph is considered
+ * damaged and the build fails instead of being saved as ready.
+ */
+export const GRAPH_ANN_BATCH_FAILURE_RATIO = 0.05;
 
 function isCatalogEmbeddingRunning(): boolean {
   try {
@@ -242,14 +249,106 @@ async function idbGet<T>(key: string): Promise<T | null> {
   });
 }
 
-async function idbPut<T>(key: string, value: T): Promise<void> {
-  const db = await openDB();
-  return new Promise((resolve) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(value, key);
+export type GraphRecord = readonly [key: string, value: unknown];
+
+/**
+ * Write every record in ONE readwrite transaction: either all land or none
+ * do. The four graph keys used to go in separate transactions with errors
+ * ignored, so a quit (or a failed large put) mid-way left new node ids next
+ * to the previous build's scores and edges. Rejects on error / abort.
+ */
+export function putGraphRecordsAtomic(db: IDBDatabase, records: ReadonlyArray<GraphRecord>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let tx: IDBTransaction;
+    try {
+      tx = db.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE);
+      for (const [key, value] of records) store.put(value, key);
+    } catch (err) {
+      reject(err);
+      return;
+    }
     tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error('Graph persist failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('Graph persist aborted'));
   });
+}
+
+async function persistGraphRecords(records: ReadonlyArray<GraphRecord>): Promise<void> {
+  const db = await openDB();
+  await putGraphRecordsAtomic(db, records);
+}
+
+/**
+ * A persisted graph whose parts disagree (written by an older non-atomic
+ * persist, or truncated) — restoring it would pair node ids with another
+ * build's scores. Treated as a cache miss.
+ */
+export function isPersistedGraphConsistent(
+  meta: Pick<GraphMeta, 'nodeCount' | 'edgeCount'>,
+  nodeIds: ArrayLike<unknown>,
+  scores: { pageRank: ArrayLike<number>; community: ArrayLike<number>; degree: ArrayLike<number> },
+  edges: ArrayLike<number>,
+): boolean {
+  const n = nodeIds.length;
+  if (n !== meta.nodeCount) return false;
+  if (scores.pageRank?.length !== n || scores.community?.length !== n || scores.degree?.length !== n) return false;
+  return edges.length === meta.edgeCount * 3;
+}
+
+/** Compressed sparse row adjacency over node indices; rows sorted by weight descending. */
+export type NeighborCsr = { offsets: Int32Array; nbr: Int32Array; w: Float32Array };
+
+/**
+ * Both directions of every packed edge triple, each row sorted by weight
+ * descending. Ties keep fill order (edge order, `from` side before `to`
+ * side), which is exactly what the old per-node object lists produced with
+ * a stable sort. Triples whose endpoints are out of range are skipped.
+ */
+export function buildNeighborCsr(edges: Float32Array, nodeCount: number): NeighborCsr {
+  const tripleCount = Math.floor(edges.length / 3);
+  const valid = (i: number) => {
+    const a = edges[i * 3];
+    const b = edges[i * 3 + 1];
+    return Number.isInteger(a) && Number.isInteger(b) && a >= 0 && a < nodeCount && b >= 0 && b < nodeCount;
+  };
+  const offsets = new Int32Array(nodeCount + 1);
+  for (let i = 0; i < tripleCount; i++) {
+    if (!valid(i)) continue;
+    offsets[edges[i * 3] + 1]++;
+    offsets[edges[i * 3 + 1] + 1]++;
+  }
+  for (let i = 0; i < nodeCount; i++) offsets[i + 1] += offsets[i];
+  const total = offsets[nodeCount];
+  const nbr = new Int32Array(total);
+  const w = new Float32Array(total);
+  const cursor = offsets.slice(0, nodeCount);
+  for (let i = 0; i < tripleCount; i++) {
+    if (!valid(i)) continue;
+    const a = edges[i * 3];
+    const b = edges[i * 3 + 1];
+    const wt = edges[i * 3 + 2];
+    let slot = cursor[a]++;
+    nbr[slot] = b; w[slot] = wt;
+    slot = cursor[b]++;
+    nbr[slot] = a; w[slot] = wt;
+  }
+  // Sort each row (short: ~20 slots on a K=10 graph) by weight desc, ties by fill position.
+  const order: number[] = [];
+  const rowN: number[] = [];
+  const rowW: number[] = [];
+  for (let u = 0; u < nodeCount; u++) {
+    const start = offsets[u];
+    const end = offsets[u + 1];
+    if (end - start < 2) continue;
+    order.length = 0;
+    for (let k = start; k < end; k++) order.push(k);
+    order.sort((x, y) => (w[y] - w[x]) || (x - y));
+    rowN.length = 0; rowW.length = 0;
+    for (const k of order) { rowN.push(nbr[k]); rowW.push(w[k]); }
+    for (let j = 0; j < rowN.length; j++) { nbr[start + j] = rowN[j]; w[start + j] = rowW[j]; }
+  }
+  return { offsets, nbr, w };
 }
 
 export type GraphScoreBuffers = {
@@ -347,7 +446,13 @@ async function readAllEmbeddings(): Promise<GraphEmbeddingRow[]> {
 }
 
 export class GameGraphStore {
-  constructor(private readonly _opts: { metricsTimeoutMs?: number } = {}) {}
+  constructor(private readonly _opts: {
+    metricsTimeoutMs?: number;
+    /** ANN batch size (tests use small batches to exercise the failure ratio). */
+    queryBatchSize?: number;
+    /** Persistence seam — defaults to one atomic IDB transaction. */
+    persist?: (records: ReadonlyArray<GraphRecord>) => Promise<void>;
+  } = {}) {}
 
   private _listeners = new Set<() => void>();
   /** Shared in-flight build — set synchronously, before any await, so concurrent callers join it. */
@@ -373,7 +478,13 @@ export class GameGraphStore {
     degree: Uint16Array;
   } | null = null;
   private _edges: Float32Array | null = null;
-  private _adjacency = new Map<string, Array<{ id: string; weight: number }>>();
+  /**
+   * Neighbour lookup, built lazily from `_edges` on the first getNeighbors and
+   * reset wherever `_edges` is assigned. It replaced a Map of ~2M small
+   * {id, weight} objects built eagerly (one long main-thread task) on every
+   * restore/rebuild and held all session for a handful of lookups.
+   */
+  private _csr: NeighborCsr | null = null;
   private _meta: GraphMeta | null = null;
 
   subscribe(fn: () => void): () => void { this._listeners.add(fn); return () => this._listeners.delete(fn); }
@@ -541,9 +652,15 @@ export class GameGraphStore {
 
   /** Returns top-K neighbors (by edge weight = cosine similarity) of a gameId, or [] if none. */
   getNeighbors(gameId: string, k = 10): Array<{ id: string; weight: number }> {
-    const list = this._adjacency.get(gameId);
-    if (!list) return [];
-    return list.slice(0, k);
+    const idx = this._idIndex.get(gameId);
+    if (idx === undefined || !this._edges) return [];
+    if (!this._csr) this._csr = buildNeighborCsr(this._edges, this._nodeIds.length);
+    const { offsets, nbr, w } = this._csr;
+    const start = offsets[idx];
+    const end = Math.min(offsets[idx + 1], start + Math.max(0, k));
+    const out: Array<{ id: string; weight: number }> = [];
+    for (let j = start; j < end; j++) out.push({ id: this._nodeIds[nbr[j]], weight: w[j] });
+    return out;
   }
 
   /**
@@ -572,6 +689,10 @@ export class GameGraphStore {
       }>(SCORES_KEY);
       const edgesRaw = await idbGet<Float32Array>(EDGES_KEY);
       if (!nodeIds || !scoresRaw || !edgesRaw) return false;
+      if (!isPersistedGraphConsistent(meta, nodeIds, scoresRaw, edgesRaw)) {
+        console.warn('[GameGraph] persisted graph parts disagree — ignoring cache');
+        return false;
+      }
 
       this._nodeIds = nodeIds;
       this._idIndex = new Map();
@@ -608,7 +729,7 @@ export class GameGraphStore {
         degree: scoresRaw.degree instanceof Uint16Array ? scoresRaw.degree : new Uint16Array(scoresRaw.degree),
       };
       this._edges = edgesRaw instanceof Float32Array ? edgesRaw : new Float32Array(edgesRaw);
-      this._adjacency = this._buildAdjacencyFromEdges(edgesRaw, nodeIds);
+      this._csr = null;
       this._meta = meta;
       this._brokerSet = null; // invalidate memoized broker set on restore
       this._maxPageRank = null;
@@ -619,25 +740,6 @@ export class GameGraphStore {
       console.warn('[GameGraph] restore failed:', err);
       return false;
     }
-  }
-
-  private _buildAdjacencyFromEdges(edges: Float32Array, nodeIds: string[]): Map<string, Array<{ id: string; weight: number }>> {
-    const adj = new Map<string, Array<{ id: string; weight: number }>>();
-    const tripleCount = edges.length / 3;
-    for (let i = 0; i < tripleCount; i++) {
-      const fromIdx = edges[i * 3];
-      const toIdx = edges[i * 3 + 1];
-      const w = edges[i * 3 + 2];
-      const fromId = nodeIds[fromIdx];
-      const toId = nodeIds[toIdx];
-      if (!fromId || !toId) continue;
-      if (!adj.has(fromId)) adj.set(fromId, []);
-      if (!adj.has(toId)) adj.set(toId, []);
-      adj.get(fromId)!.push({ id: toId, weight: w });
-      adj.get(toId)!.push({ id: fromId, weight: w });
-    }
-    for (const list of adj.values()) list.sort((a, b) => b.weight - a.weight);
-    return adj;
   }
 
   /**
@@ -724,11 +826,18 @@ export class GameGraphStore {
     const idIndex = new Map<string, number>();
     for (let i = 0; i < nodeIds.length; i++) idIndex.set(nodeIds[i], i);
 
-    // Phase A — query ANN in batches, collect deduplicated undirected edges
-    const edgeSet = new Map<string, number>(); // "minIdx-maxIdx" → cosine similarity
-    const totalBatches = Math.ceil(embeddings.length / QUERY_BATCH_SIZE);
+    // Phase A — query ANN in batches, collect deduplicated undirected edges.
+    // Numeric pair keys (lo * nodeCount + hi): template-string keys made ~1.5M
+    // short strings per rebuild only to be parsed back in the pack loop.
+    const nodeCount = nodeIds.length;
+    const edgeSet = new Map<number, number>(); // lo * nodeCount + hi → cosine similarity
+    const batchSize = Math.max(1, this._opts.queryBatchSize ?? QUERY_BATCH_SIZE);
+    const totalBatches = Math.ceil(embeddings.length / batchSize);
+    const annVectorsAtStart = annIndex.vectorCount;
+    const annSigAtStart = annGraphSignature(annVectorsAtStart);
+    let failedBatches = 0;
     for (let b = 0; b < totalBatches; b++) {
-      const slice = embeddings.slice(b * QUERY_BATCH_SIZE, (b + 1) * QUERY_BATCH_SIZE);
+      const slice = embeddings.slice(b * batchSize, (b + 1) * batchSize);
       // Per-slice conversion keeps the IPC payload a plain number[] without
       // ever materialising every vector as doubles.
       const entries = slice.map((e) => ({
@@ -736,6 +845,9 @@ export class GameGraphStore {
         vector: e.embedding instanceof Float32Array ? Array.from(e.embedding) : e.embedding,
       }));
       const result = await annIndex.queryBatch(entries, NEIGHBORS_K);
+      // An ANN error is returned as `{}` — indistinguishable from "no neighbours" per row,
+      // but a whole batch coming back empty is a failed query.
+      if (entries.length > 0 && Object.keys(result).length === 0) failedBatches++;
 
       for (const [fromId, neighbors] of Object.entries(result)) {
         const fromIdx = idIndex.get(fromId);
@@ -748,7 +860,7 @@ export class GameGraphStore {
           if (sim <= 0) continue;
           const lo = Math.min(fromIdx, toIdx);
           const hi = Math.max(fromIdx, toIdx);
-          const key = `${lo}-${hi}`;
+          const key = lo * nodeCount + hi;
           const prev = edgeSet.get(key) ?? 0;
           if (sim > prev) edgeSet.set(key, sim);
         }
@@ -762,13 +874,27 @@ export class GameGraphStore {
     // Vectors are no longer needed — release them before the metrics phase.
     embeddings = [];
 
-    // Pack edges into Float32Array as packed triples
+    // A build during an ANN hiccup or index swap used to be saved as ready under the
+    // current signature (edgeless → flat PageRank) until the signature next moved.
+    const annFailure = this._annPhaseFailure({
+      failedBatches,
+      totalBatches,
+      edgeCount: edgeSet.size,
+      nodeCount,
+      annVectorsAtStart,
+      annSigAtStart,
+    });
+    if (annFailure) {
+      this._failBuild(annFailure, { cooldown: true });
+      return false;
+    }
+
+    // Pack edges into Float32Array as packed triples (Map insertion order — edgeBetweenness is index-aligned)
     const edges = new Float32Array(edgeSet.size * 3);
     let i = 0;
     for (const [key, weight] of edgeSet) {
-      const dash = key.indexOf('-');
-      const from = Number(key.slice(0, dash));
-      const to = Number(key.slice(dash + 1));
+      const from = Math.floor(key / nodeCount);
+      const to = key - from * nodeCount;
       edges[i * 3] = from;
       edges[i * 3 + 1] = to;
       edges[i * 3 + 2] = weight;
@@ -847,20 +973,57 @@ export class GameGraphStore {
       degree: workerResult.degree,
     };
     this._edges = edges;
+    this._csr = null;
     this._brokerSet = null; // invalidate memoized broker set on rebuild
     this._maxPageRank = null;
     this._lastBuildFailedAt = 0;
-    this._adjacency = this._buildAdjacencyFromEdges(edges, nodeIds);
     this._meta = meta;
 
-    await idbPut(META_KEY, meta);
-    await idbPut(NODE_IDS_KEY, nodeIds);
-    await idbPut(EDGES_KEY, edges);
-    await idbPut(SCORES_KEY, copyScoresForPersist(this._scores));
+    // META last, all in one transaction. A failed persist keeps the in-memory graph serving.
+    try {
+      await (this._opts.persist ?? persistGraphRecords)([
+        [NODE_IDS_KEY, nodeIds],
+        [EDGES_KEY, edges],
+        [SCORES_KEY, copyScoresForPersist(this._scores)],
+        [META_KEY, meta],
+      ]);
+    } catch (err) {
+      console.warn('[GameGraph] persist failed — keeping in-memory graph:', err);
+    }
 
     this._state = { phase: 'ready', meta };
     this._notify();
     return true;
+  }
+
+  /**
+   * Why Phase A's ANN results can't be trusted (null = fine): too many failed
+   * batches, no edges at all on a multi-node graph, or the index went away /
+   * started rebuilding / was swapped while we queried it. Plain growth from
+   * the background catalog embedder (signature moves only by vector count
+   * while catalog embedding runs) is not a failure — new vectors just aren't
+   * in this build's node list yet.
+   */
+  private _annPhaseFailure(p: {
+    failedBatches: number;
+    totalBatches: number;
+    edgeCount: number;
+    nodeCount: number;
+    annVectorsAtStart: number;
+    annSigAtStart: string;
+  }): string | null {
+    if (!annIndex.isReady) return 'ANN query failed (index no longer ready)';
+    if (embeddingService?.isAnnRebuilding === true) return 'ANN query failed (index rebuilding)';
+    const vectorsNow = annIndex.vectorCount;
+    if (annGraphSignature(vectorsNow) !== p.annSigAtStart) {
+      const catalogGrowth = vectorsNow > p.annVectorsAtStart && isCatalogEmbeddingRunning();
+      if (!catalogGrowth) return 'ANN query failed (index changed during build)';
+    }
+    if (p.totalBatches > 0 && p.failedBatches / p.totalBatches > GRAPH_ANN_BATCH_FAILURE_RATIO) {
+      return `ANN query failed (${p.failedBatches}/${p.totalBatches} batches)`;
+    }
+    if (p.edgeCount === 0 && p.nodeCount > 1) return 'ANN query failed (no edges)';
+    return null;
   }
 
   /**

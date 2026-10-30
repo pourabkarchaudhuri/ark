@@ -114,9 +114,45 @@ export function gamesAfterCursor<T extends { id: string }>(
   games: T[],
   cursorAfter: string | null,
 ): T[] {
-  const sorted = [...games].sort((a, b) => a.id.localeCompare(b.id));
+  const sorted = [...games].sort((a, b) => compareRechunkIds(a.id, b.id));
   if (cursorAfter == null) return sorted;
   return sorted.filter((g) => g.id > cursorAfter);
+}
+
+/** The comparator gamesAfterCursor sorts with — the resume cursor depends on this exact order. */
+export function compareRechunkIds(a: string, b: string): number {
+  return a.localeCompare(b);
+}
+
+/**
+ * Stream a catalog phase's entries and keep only their ids: the ones still
+ * after the cursor (same exclusive `id > cursorAfter` rule and sort order as
+ * gamesAfterCursor), plus a count of those already done. The re-chunk job
+ * used to build a PhaseItem — embedding text + hash — for all ~155K catalog
+ * entries up front and hold the whole array (~100 MB) for the hours-long
+ * phase, including everything before the cursor.
+ *
+ * `retain` is called for each queued entry (fallback when no bulk fetch dep
+ * is available to reload entries page by page).
+ */
+export async function collectRechunkQueue<E>(
+  iterate: (onBatch: (entries: E[]) => void) => Promise<number>,
+  idOf: (entry: E) => string,
+  cursorAfter: string | null,
+  retain?: (id: string, entry: E) => void,
+): Promise<{ queue: string[]; already: number }> {
+  const queue: string[] = [];
+  let already = 0;
+  await iterate((batch) => {
+    for (const entry of batch) {
+      const id = idOf(entry);
+      if (cursorAfter != null && !(id > cursorAfter)) { already++; continue; }
+      queue.push(id);
+      retain?.(id, entry);
+    }
+  });
+  queue.sort(compareRechunkIds);
+  return { queue, already };
 }
 
 export function rechunkBlockedReason(opts: {

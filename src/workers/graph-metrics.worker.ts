@@ -231,14 +231,16 @@ function computeHITS(
  *
  * Inputs:
  *  - csrOffsets/Neighbors: standard CSR adjacency
- *  - edgeIndexByPair: Map "u*N+v" (u<v) → index into original packed-triples edge list
+ *  - csrEdgeIdx: per CSR slot, the index of that edge in the original packed-triples
+ *    list (from buildCSR). It replaced a Map keyed by `lo*n+hi` — keys above the
+ *    small-integer range — that was looked up for every predecessor relation.
  *  - sampleCount K, e.g. 300
  */
-function sampledBrandes(
+export function sampledBrandes(
   n: number,
   csrOffsets: Uint32Array,
   csrNeighbors: Uint32Array,
-  edgeIndexByPair: Map<number, number>,
+  csrEdgeIdx: Uint32Array,
   edgeCount: number,
   sampleCount: number,
   onProgress: (pct: number) => void,
@@ -260,6 +262,8 @@ function sampledBrandes(
   // Conservatively size pred storage at edge count × 2 (max predecessors across all nodes ≤ degree)
   const predNext = new Uint32Array(edgeCount * 2);
   const predNode = new Uint32Array(edgeCount * 2);
+  // Edge (index into the input triples) that each predecessor slot came through.
+  const predEdge = new Uint32Array(edgeCount * 2);
   // BFS queue + visit order stack
   const queue = new Uint32Array(n);
   const stack = new Uint32Array(n);
@@ -304,6 +308,7 @@ function sampledBrandes(
           const slot = predCursor++;
           predNext[slot] = predCounts[w] === 0 ? 0xffffffff : head;
           predNode[slot] = v;
+          predEdge[slot] = csrEdgeIdx[k];
           predHead[w] = slot;
           predCounts[w]++;
         }
@@ -322,11 +327,7 @@ function sampledBrandes(
         const contrib = sigma[v] * coeff;
         delta[v] += contrib;
         // Edge dependency — split equally between predecessors when multiple shortest paths
-        const lo = v < w ? v : w;
-        const hi = v < w ? w : v;
-        const eKey = lo * n + hi;
-        const eIdx = edgeIndexByPair.get(eKey);
-        if (eIdx !== undefined) edgeBC[eIdx] += contrib;
+        edgeBC[predEdge[slot]] += contrib;
         remaining--;
         if (remaining > 0) slot = predNext[slot];
       }
@@ -347,13 +348,15 @@ function sampledBrandes(
 
 /**
  * Build CSR-like adjacency from a packed edge list (undirected → each edge added twice).
- * Returns offsets, neighbors, weights, and per-node weight sums.
+ * Returns offsets, neighbors, weights, per-node weight sums, and per-slot edge index
+ * (position of the slot's edge in the input triples, for edge betweenness).
  */
-function buildCSR(n: number, edges: Float32Array): {
+export function buildCSR(n: number, edges: Float32Array): {
   csrOffsets: Uint32Array;
   csrNeighbors: Uint32Array;
   csrWeights: Float32Array;
   weightSum: Float32Array;
+  csrEdgeIdx: Uint32Array;
 } {
   const tripleCount = edges.length / 3;
   // First pass: count degree per node (undirected → both endpoints)
@@ -372,6 +375,7 @@ function buildCSR(n: number, edges: Float32Array): {
 
   const csrNeighbors = new Uint32Array(totalSlots);
   const csrWeights = new Float32Array(totalSlots);
+  const csrEdgeIdx = new Uint32Array(totalSlots);
   const cursor = new Uint32Array(n);
   const weightSum = new Float32Array(n);
   for (let i = 0; i < tripleCount; i++) {
@@ -382,13 +386,31 @@ function buildCSR(n: number, edges: Float32Array): {
     const slotA = csrOffsets[a] + cursor[a]++;
     csrNeighbors[slotA] = b;
     csrWeights[slotA] = w;
+    csrEdgeIdx[slotA] = i;
     weightSum[a] += w;
     const slotB = csrOffsets[b] + cursor[b]++;
     csrNeighbors[slotB] = a;
     csrWeights[slotB] = w;
+    csrEdgeIdx[slotB] = i;
     weightSum[b] += w;
   }
-  return { csrOffsets, csrNeighbors, csrWeights, weightSum };
+  // Edges are deduplicated upstream, but a duplicate pair (either direction) must
+  // credit the first-seen triple, as the old pair→index Map did. One linear pass
+  // per row with a stamp array, so this stays O(slots).
+  const stamp = new Int32Array(n).fill(-1);
+  const firstIdx = new Uint32Array(n);
+  for (let u = 0; u < n; u++) {
+    const start = csrOffsets[u];
+    const end = csrOffsets[u + 1];
+    let dup = false;
+    for (let k = start; k < end; k++) {
+      const v = csrNeighbors[k];
+      if (stamp[v] !== u) { stamp[v] = u; firstIdx[v] = csrEdgeIdx[k]; }
+      else { dup = true; if (csrEdgeIdx[k] < firstIdx[v]) firstIdx[v] = csrEdgeIdx[k]; }
+    }
+    if (dup) for (let k = start; k < end; k++) csrEdgeIdx[k] = firstIdx[csrNeighbors[k]];
+  }
+  return { csrOffsets, csrNeighbors, csrWeights, weightSum, csrEdgeIdx };
 }
 
 self.onmessage = (e: MessageEvent<GraphMetricsWorkerInput>) => {
@@ -486,23 +508,12 @@ self.onmessage = (e: MessageEvent<GraphMetricsWorkerInput>) => {
     let nodeBetweenness: Float32Array | null = null;
     let edgeBetweenness: Float32Array | null = null;
     if (n > 0 && edgesAdded > 0) {
-      // Build edge-index map: canonical key (lo*n + hi) → index in input edges triple list
-      const edgeIndexByPair = new Map<number, number>();
       const tc = edges.length / 3;
-      for (let i = 0; i < tc; i++) {
-        const a = edges[i * 3];
-        const b = edges[i * 3 + 1];
-        if (a === b) continue;
-        const lo = Math.min(a, b);
-        const hi = Math.max(a, b);
-        const key = lo * n + hi;
-        if (!edgeIndexByPair.has(key)) edgeIndexByPair.set(key, i);
-      }
       const brandesResult = sampledBrandes(
         n,
         csr.csrOffsets,
         csr.csrNeighbors,
-        edgeIndexByPair,
+        csr.csrEdgeIdx,
         tc,
         300,
         (pct) => postProgress('Computing betweenness...', 80 + Math.round(pct * 10)),

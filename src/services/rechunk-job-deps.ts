@@ -49,6 +49,9 @@ export async function buildRechunkJobDeps(): Promise<RechunkJobDeps> {
     libraryGames: collectRechunkLibraryGames(),
     steamIterator: (onBatch) => catalogStore.getAllEntries(onBatch),
     epicIterator: (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+    // The iterators only supply ids; each page of ~200 entries is reloaded just before it is processed.
+    steamFetch: (appIds) => catalogStore.getEntries(appIds),
+    epicFetch: (epicIds) => epicCatalogStore.getEntries(epicIds),
     steamTotal,
     epicTotal,
   };

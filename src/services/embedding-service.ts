@@ -13,6 +13,7 @@
  */
 
 import { setEmbeddingCache } from './reco-store';
+import { recoHistoryStore } from './reco-history-store';
 import { annIndex, type AnnLease } from './ann-index';
 import { toCanonicalGenres } from '@/data/canonical-genres';
 import { extractFranchiseBase } from '@/services/franchise';
@@ -20,6 +21,14 @@ import type { CatalogEntry } from '@/types/catalog';
 import type { EpicCatalogEntry } from '@/services/epic-catalog-store';
 import { toRerankTier, rerankTierLabel, type RerankTier } from '@/services/oracle-rerank';
 import { quantizeEmbedding, dequantizeEmbedding, EMBEDDING_DIM } from '@/services/embedding-quant';
+import {
+  GALAXY_PROJ_DIM,
+  generateGaussianProjectionMatrix,
+  projectInt8RowInto,
+  projectFloatRowInto,
+  type GalaxyProjectionWorkerInput,
+  type GalaxyProjectionWorkerOutput,
+} from '@/services/galaxy-projection';
 import { storeGetMany } from '@/services/store-bulk';
 import {
   EMBEDDING_LAYOUT_STAMP,
@@ -56,6 +65,7 @@ import {
   beginRechunkPhase,
   createInitialRechunkWatermark,
   gameNeedsChunkWork,
+  collectRechunkQueue,
   gamesAfterCursor,
   nextRechunkPhase,
   recordRechunkFailure,
@@ -101,6 +111,14 @@ export interface RechunkJobDeps {
   libraryGames: RechunkLibraryGame[];
   steamIterator: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>;
   epicIterator?: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>;
+  /**
+   * Bulk reload of catalog entries by key, page by page while the phase runs.
+   * With these the iterators only contribute ids; without them the queued
+   * entries are kept from the iterator walk (no text / hash built up front).
+   * Entries missing from the result are skipped (deleted since the walk).
+   */
+  steamFetch?: (appIds: number[]) => Promise<CatalogEntry[]>;
+  epicFetch?: (epicIds: string[]) => Promise<EpicCatalogEntry[]>;
   /** Optional totals for progress UI (catalog entry counts). */
   steamTotal?: number;
   epicTotal?: number;
@@ -305,7 +323,21 @@ const CATALOG_TTL = 90 * 24 * 60 * 60 * 1000;  // 90 days
 
 // Refresh an entry's IDB timestamp lazily only when it's older than this.
 // Avoids hammering IDB with timestamp-only updates on every launch.
-const TTL_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const TTL_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/**
+ * Catalog rows live 90 days, so a 7-day refresh age meant any catalog pass
+ * after a daily sync rewrote every unchanged ~4 KB vector older than a week
+ * (~155K rows, over 1 GB of IPC + disk) just to bump its timestamp. Half the
+ * TTL still refreshes a row long before it expires while each row is
+ * rewritten at most every ~45 days.
+ */
+export const CATALOG_TTL_REFRESH_AGE_MS = CATALOG_TTL / 2;
+
+/** True when an unchanged catalog row's timestamp should be bumped this pass. */
+export function shouldRefreshCatalogTimestamp(ts: number, now: number = Date.now()): boolean {
+  return ts > 0 && ts < now - CATALOG_TTL_REFRESH_AGE_MS;
+}
 
 let embDbInstance: IDBDatabase | null = null;
 let embDbPromise: Promise<IDBDatabase> | null = null;
@@ -1729,6 +1761,49 @@ async function getCatalogEmbeddingsForIds(
 /** Live reference to the merged embedding cache (updated incrementally by catalog gen). */
 let embeddingCacheRef = new Map<string, number[]>();
 
+/**
+ * Ids whose live-cache vector came from the catalog store (enrich / the
+ * generateMissing catalog injection) rather than a library write. Only these
+ * are evictable: each Oracle compute used to add its candidates' catalog
+ * vectors (~8 KB each as number[]) and nothing ever removed them.
+ */
+const catalogTierIds = new Set<string>();
+
+/** Record a library-tier vector for `id`: it is no longer an evictable catalog entry. */
+function setLibraryCacheVector(id: string, vec: number[]): void {
+  embeddingCacheRef.set(id, vec);
+  catalogTierIds.delete(id);
+}
+
+/** Test seam: the evictable (catalog-tier) ids currently in the live cache. */
+export function getCatalogTierCacheIds(): ReadonlySet<string> {
+  return catalogTierIds;
+}
+
+/**
+ * Drop catalog-tier vectors no current consumer needs: not in `keep` (this
+ * compute's candidates / user games) and not pinned by a thumbs-down or a
+ * dismissal (collectNegativeEmbeddings reads those from the cache). Safe for
+ * the running compute: reco-store copies vectors onto `c.embedding` before
+ * it calls the enricher again. Returns how many were evicted.
+ */
+function evictUnneededCatalogVectors(keep: ReadonlySet<string>): number {
+  if (catalogTierIds.size === 0) return 0;
+  const pinned = new Set<string>();
+  try {
+    for (const id of recoHistoryStore.getThumbsDownIds()) pinned.add(id);
+    for (const d of recoHistoryStore.getDismissals()) pinned.add(d.gameId);
+  } catch { /* history unavailable — keep nothing extra pinned */ }
+  let evicted = 0;
+  for (const id of [...catalogTierIds]) {
+    if (keep.has(id) || pinned.has(id)) continue;
+    embeddingCacheRef.delete(id);
+    catalogTierIds.delete(id);
+    evicted++;
+  }
+  return evicted;
+}
+
 async function isEmbeddingChunkingEnabled(): Promise<boolean> {
   try {
     const settingsApi = (window as unknown as {
@@ -2414,6 +2489,7 @@ class EmbeddingService {
       }
 
       embeddingCacheRef = embeddingMap;
+      catalogTierIds.clear(); // fresh map holds library vectors only
       setEmbeddingCache(embeddingMap);
       this._embeddingsLoaded = true;
       this._loadedCount = embeddingMap.size;
@@ -2432,9 +2508,19 @@ class EmbeddingService {
    * Load catalog embeddings only for the given candidate IDs and merge them
    * into the live cache. This avoids loading 156K embeddings into memory —
    * only the ~8K candidates that actually need them are fetched.
+   *
+   * Before fetching, catalog-tier vectors from earlier computes that are in
+   * neither `candidateIds` nor `keepIds` (the whole current pool + user games
+   * — candidates that already carried a cached vector are not in
+   * `candidateIds`, and evicting them would refetch them on every other
+   * compute) nor pinned by negative feedback are evicted.
    */
-  async enrichWithCatalogEmbeddings(candidateIds: Set<string>): Promise<number> {
+  async enrichWithCatalogEmbeddings(candidateIds: Set<string>, keepIds?: ReadonlySet<string>): Promise<number> {
     try {
+      const keep = keepIds ? new Set([...keepIds, ...candidateIds]) : candidateIds;
+      const evicted = evictUnneededCatalogVectors(keep);
+      if (evicted > 0) setEmbeddingCache(embeddingCacheRef);
+
       const catalogEmbs = await getCatalogEmbeddingsForIds(candidateIds);
       if (catalogEmbs.size === 0) return 0;
 
@@ -2442,6 +2528,7 @@ class EmbeddingService {
       for (const [gameId, embedding] of catalogEmbs) {
         if (!embeddingCacheRef.has(gameId)) {
           embeddingCacheRef.set(gameId, embedding);
+          catalogTierIds.add(gameId);
           added++;
         }
       }
@@ -2586,7 +2673,7 @@ class EmbeddingService {
         if (catalogVecs.size > 0) {
           let injected = 0;
           for (const [id, vec] of catalogVecs) {
-            if (!embeddingCacheRef.has(id)) { embeddingCacheRef.set(id, vec); injected++; }
+            if (!embeddingCacheRef.has(id)) { embeddingCacheRef.set(id, vec); catalogTierIds.add(id); injected++; }
           }
           if (injected > 0) setEmbeddingCache(embeddingCacheRef);
           needsEmbedding = needsEmbedding.filter((n) => !catalogVecs.has(n.game.id));
@@ -2654,7 +2741,7 @@ class EmbeddingService {
             await saveCachedEmbeddings(batchEntries);
             for (const entry of batchEntries) {
               if (entry.embedding) {
-                embeddingCacheRef.set(entry.gameId, entry.embedding);
+                setLibraryCacheVector(entry.gameId, entry.embedding);
                 generated++;
               }
             }
@@ -2692,7 +2779,7 @@ class EmbeddingService {
             const outcome = res.outcomes.get(item.game.id);
             if (outcome?.status === 'ok') {
               // ANN upsert (pooled + chunks) happens inside embedAndPersistChunkedGames
-              embeddingCacheRef.set(item.game.id, Array.from(outcome.pooled));
+              setLibraryCacheVector(item.game.id, Array.from(outcome.pooled));
               generated++;
               wrote++;
             } else if (outcome && outcome.status !== 'empty') {
@@ -3016,6 +3103,18 @@ class EmbeddingService {
       };
 
       /**
+       * One phase's work: ids still after the cursor (in cursor order), how
+       * many were already done, and a loader that builds PhaseItems for one
+       * page of ids just before they are processed.
+       */
+      type PhaseSource = {
+        queue: string[];
+        already: number;
+        load: (ids: string[]) => Promise<Map<string, PhaseItem>>;
+      };
+      const RECHUNK_PAGE_SIZE = 200;
+
+      /**
        * Walk one phase from the cursor. A failing game is retried in place
        * (up to POISON_MAX_ATTEMPTS); on the last strike a real probe embed
        * decides whether the GAME is bad (mark poisoned, advance the cursor
@@ -3025,20 +3124,32 @@ class EmbeddingService {
        */
       const runPhase = async (
         phase: Exclude<RechunkPhase, 'done'>,
-        items: PhaseItem[],
+        source: PhaseSource,
         totalHint?: number,
       ): Promise<'complete' | 'stopped'> => {
-        const queue = gamesAfterCursor(items, wm.cursorAfter);
-        const total = totalHint ?? items.length;
-        const already = items.length - queue.length;
+        const { queue, already } = source;
+        const total = totalHint ?? already + queue.length;
         setProgress(already, total, phase, true);
 
+        let page = new Map<string, PhaseItem>();
+        let pageEnd = 0;
         for (let i = 0; i < queue.length; i++) {
           await yieldPolite();
           if (signal.aborted) return 'stopped';
           if (!(await isEmbeddingChunkingEnabled())) return 'stopped';
 
-          const item = queue[i];
+          if (i >= pageEnd) {
+            pageEnd = Math.min(queue.length, i + RECHUNK_PAGE_SIZE);
+            page = await source.load(queue.slice(i, pageEnd));
+          }
+          const item = page.get(queue[i]);
+          if (!item) {
+            // Gone from the catalog since the id walk — nothing to chunk.
+            await persistWm(advanceRechunkCursor(wm, queue[i], 'skipped'));
+            setProgress(already + i + 1, total, phase);
+            continue;
+          }
+          page.delete(item.id);
           const ledgerKey = `${item.tier}:${item.id}`;
           if (ledger.isPoisoned(ledgerKey, item.wholeHash)) {
             await persistWm(advanceRechunkCursor(wm, item.id, 'skipped'));
@@ -3137,12 +3248,22 @@ class EmbeddingService {
             similarGames: game.similarGames,
           },
           onPooled: (pooled) => {
-            embeddingCacheRef.set(game.id, Array.from(pooled));
+            setLibraryCacheVector(game.id, Array.from(pooled));
             setEmbeddingCache(embeddingCacheRef);
           },
         }));
+        const libQueue = gamesAfterCursor(items, wm.cursorAfter);
+        const libById = new Map(libQueue.map((item) => [item.id, item]));
+        const librarySource: PhaseSource = {
+          queue: libQueue.map((item) => item.id),
+          already: items.length - libQueue.length,
+          load: async (ids) => new Map(ids.flatMap((id) => {
+            const item = libById.get(id);
+            return item ? [[id, item] as const] : [];
+          })),
+        };
         // Only advance phase when every library id was processed or skipped.
-        if ((await runPhase('library', items)) === 'complete') {
+        if ((await runPhase('library', librarySource)) === 'complete') {
           await maybeSaveAnn(true);
           await persistWm(beginRechunkPhase(wm, nextRechunkPhase('library')));
         }
@@ -3150,27 +3271,47 @@ class EmbeddingService {
 
       // ── Steam catalog phase ──────────────────────────────────────────────
       if (wm.phase === 'steam' && !signal.aborted && !ollamaStalled && (await isEmbeddingChunkingEnabled())) {
-        const items: PhaseItem[] = [];
-        await deps.steamIterator((batch) => {
-          for (const entry of batch) {
-            items.push({
-              id: `steam-${entry.appid}`,
-              tier: 'cat',
-              pooledStore: CATALOG_STORE,
-              wholeHash: hashText(buildCatalogEmbeddingText(entry)),
-              chunkInput: {
-                title: entry.name,
-                genres: entry.genres,
-                themes: entry.themes,
-                modes: entry.modes,
-                developer: entry.developer,
-                shortDescription: entry.shortDescription,
-                source: 'steam',
-              },
-            });
-          }
+        const steamItem = (entry: CatalogEntry): PhaseItem => ({
+          id: `steam-${entry.appid}`,
+          tier: 'cat',
+          pooledStore: CATALOG_STORE,
+          wholeHash: hashText(buildCatalogEmbeddingText(entry)),
+          chunkInput: {
+            title: entry.name,
+            genres: entry.genres,
+            themes: entry.themes,
+            modes: entry.modes,
+            developer: entry.developer,
+            shortDescription: entry.shortDescription,
+            source: 'steam',
+          },
         });
-        if ((await runPhase('steam', items, deps.steamTotal)) === 'complete') {
+        const steamFetch = deps.steamFetch;
+        const retained = steamFetch ? null : new Map<string, CatalogEntry>();
+        const { queue, already } = await collectRechunkQueue(
+          deps.steamIterator,
+          (entry) => `steam-${entry.appid}`,
+          wm.cursorAfter,
+          retained ? (id, entry) => { retained.set(id, entry); } : undefined,
+        );
+        const steamSource: PhaseSource = {
+          queue,
+          already,
+          load: async (ids) => {
+            const out = new Map<string, PhaseItem>();
+            if (steamFetch) {
+              const appIds = ids.map((id) => Number(id.slice('steam-'.length)));
+              for (const entry of await steamFetch(appIds)) out.set(`steam-${entry.appid}`, steamItem(entry));
+            } else {
+              for (const id of ids) {
+                const entry = retained!.get(id);
+                if (entry) { out.set(id, steamItem(entry)); retained!.delete(id); }
+              }
+            }
+            return out;
+          },
+        };
+        if ((await runPhase('steam', steamSource, deps.steamTotal)) === 'complete') {
           await maybeSaveAnn(true);
           await persistWm(beginRechunkPhase(wm, nextRechunkPhase('steam')));
         }
@@ -3178,30 +3319,50 @@ class EmbeddingService {
 
       // ── Epic catalog phase ───────────────────────────────────────────────
       if (wm.phase === 'epic' && !signal.aborted && !ollamaStalled && (await isEmbeddingChunkingEnabled())) {
-        const items: PhaseItem[] = [];
-        if (deps.epicIterator) {
-          await deps.epicIterator((batch) => {
-            for (const entry of batch) {
-              items.push({
-                id: `epic-${entry.epicId}`,
-                tier: 'cat',
-                pooledStore: CATALOG_STORE,
-                wholeHash: hashText(buildEpicCatalogEmbeddingText(entry)),
-                chunkInput: {
-                  title: entry.name,
-                  genres: entry.genres,
-                  themes: entry.themes,
-                  modes: entry.modes,
-                  developer: entry.developer,
-                  description: entry.description,
-                  longDescription: entry.longDescription,
-                  source: 'epic',
-                },
-              });
+        const epicItem = (entry: EpicCatalogEntry): PhaseItem => ({
+          id: `epic-${entry.epicId}`,
+          tier: 'cat',
+          pooledStore: CATALOG_STORE,
+          wholeHash: hashText(buildEpicCatalogEmbeddingText(entry)),
+          chunkInput: {
+            title: entry.name,
+            genres: entry.genres,
+            themes: entry.themes,
+            modes: entry.modes,
+            developer: entry.developer,
+            description: entry.description,
+            longDescription: entry.longDescription,
+            source: 'epic',
+          },
+        });
+        const epicFetch = deps.epicFetch;
+        const retained = epicFetch ? null : new Map<string, EpicCatalogEntry>();
+        const { queue, already } = deps.epicIterator
+          ? await collectRechunkQueue(
+              deps.epicIterator,
+              (entry) => `epic-${entry.epicId}`,
+              wm.cursorAfter,
+              retained ? (id, entry) => { retained.set(id, entry); } : undefined,
+            )
+          : { queue: [] as string[], already: 0 };
+        const epicSource: PhaseSource = {
+          queue,
+          already,
+          load: async (ids) => {
+            const out = new Map<string, PhaseItem>();
+            if (epicFetch) {
+              const epicIds = ids.map((id) => id.slice('epic-'.length));
+              for (const entry of await epicFetch(epicIds)) out.set(`epic-${entry.epicId}`, epicItem(entry));
+            } else {
+              for (const id of ids) {
+                const entry = retained!.get(id);
+                if (entry) { out.set(id, epicItem(entry)); retained!.delete(id); }
+              }
             }
-          });
-        }
-        if ((await runPhase('epic', items, deps.epicTotal)) === 'complete') {
+            return out;
+          },
+        };
+        if ((await runPhase('epic', epicSource, deps.epicTotal)) === 'complete') {
           await maybeSaveAnn(true);
           await persistWm(beginRechunkPhase(wm, nextRechunkPhase('epic')));
         }
@@ -3508,7 +3669,7 @@ class EmbeddingService {
       let totalNeeds = 0;
       /** Set when the catalog changed size between window scans (positions may have shifted). */
       let catalogShifted = false;
-      const refreshCutoff = Date.now() - TTL_REFRESH_THRESHOLD_MS;
+      const refreshNow = Date.now();
 
       /**
        * Scan the catalog from scan position `fromPos`, keeping at most
@@ -3538,7 +3699,7 @@ class EmbeddingService {
               // Same content — just touch the timestamp if it's getting stale.
               if (first && !force) {
                 const ts = existing?.timestamp ?? 0;
-                if (ts > 0 && ts < refreshCutoff) refreshTimestampIds.push(id);
+                if (shouldRefreshCatalogTimestamp(ts, refreshNow)) refreshTimestampIds.push(id);
               }
               continue;
             }
@@ -4720,48 +4881,265 @@ export async function loadAllEmbeddingsForGraph(
 
 // ─── Streaming Random-Projected Embeddings (low-memory galaxy path) ──────────
 
-const PROJ_DIM = 100;
+const PROJ_DIM = GALAXY_PROJ_DIM;
+/** Rows per worker page / per main-thread yield. */
+const GALAXY_PROJECT_PAGE_ROWS = 200;
+/** Pages posted to the worker but not yet written back (bounded so pass 2 can't outrun it). */
+const GALAXY_PROJECT_MAX_INFLIGHT = 4;
 
-function generateGaussianProjectionMatrix(srcDim: number, tgtDim: number): Float32Array {
-  const scale = 1 / Math.sqrt(tgtDim);
-  const R = new Float32Array(tgtDim * srcDim);
-  for (let i = 0; i < R.length; i++) {
-    const u1 = Math.random() || 1e-10;
-    const u2 = Math.random();
-    R[i] = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * scale;
+function yieldToMacrotask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** The int8 payload of a pooled row as something indexable, or null (legacy float row / undecodable). */
+function pooledInt8Source(entry: CachedEmbedding): ArrayLike<number> | null {
+  if (typeof entry.scale !== 'number' || entry.q == null) return null;
+  // LevelDB rows carry `q` as a plain JSON array — read it in place, no Int8Array copy.
+  if (Array.isArray(entry.q)) return (entry.q as unknown[]).length === EMBEDDING_DIM ? (entry.q as unknown as number[]) : null;
+  return coerceInt8Q(entry.q);
+}
+
+function defaultGalaxyProjectionWorker(): Worker | null {
+  if (typeof Worker === 'undefined') return null;
+  try {
+    return new Worker(new URL('../workers/galaxy-projection.worker.ts', import.meta.url), {
+      type: 'module',
+      name: 'Ark Galaxy Projection',
+    });
+  } catch {
+    return null;
   }
-  return R;
+}
+
+/**
+ * Pass-2 sink of the galaxy precompute: L2-normalise + random-project rows
+ * into `projected`. Int8 rows are batched into pages for a worker (falling
+ * back to the main thread when there is none, or it dies); legacy float rows
+ * project inline after earlier pages land. Writes are applied strictly in
+ * add() order, so a catalog row still overwrites a library row with the same
+ * id exactly as the old inline pass did.
+ */
+class GalaxyRowProjector {
+  private readonly scratch = new Float64Array(EMBEDDING_DIM);
+  private readonly qPage = new Int8Array(GALAXY_PROJECT_PAGE_ROWS * EMBEDDING_DIM);
+  private readonly scalePage = new Float32Array(GALAXY_PROJECT_PAGE_ROWS);
+  private readonly dstPage = new Int32Array(GALAXY_PROJECT_PAGE_ROWS);
+  private pageCount = 0;
+  private nextPageId = 1;
+  private worker: Worker | null;
+  private readonly waiters = new Map<number, { resolve: (out: Float32Array) => void; reject: (err: unknown) => void }>();
+  /** Sequential write chain — page results are applied in post order. */
+  private tail: Promise<void> = Promise.resolve();
+  private inflight: Promise<void>[] = [];
+
+  constructor(
+    private readonly R: Float32Array,
+    private readonly projected: Float32Array,
+    private readonly filled: Uint8Array,
+    worker: Worker | null,
+  ) {
+    this.worker = worker;
+    if (worker) {
+      worker.onmessage = (e: MessageEvent<GalaxyProjectionWorkerOutput>) => {
+        const msg = e.data;
+        const w = this.waiters.get(msg.id);
+        if (!w) return;
+        this.waiters.delete(msg.id);
+        if (msg.type === 'page') w.resolve(msg.out);
+        else w.reject(new Error(msg.error));
+      };
+      worker.onerror = (err) => this.killWorker(err.error ?? new Error(err.message ?? 'galaxy projection worker errored'));
+      try {
+        worker.postMessage({ type: 'init', R, srcDim: EMBEDDING_DIM, projDim: PROJ_DIM } satisfies GalaxyProjectionWorkerInput);
+      } catch (err) {
+        this.killWorker(err);
+      }
+    }
+  }
+
+  private killWorker(err: unknown): void {
+    if (!this.worker) return;
+    console.warn('[EmbeddingService] Galaxy projection worker failed — projecting on the main thread:', err);
+    try { this.worker.terminate(); } catch { /* already gone */ }
+    this.worker = null;
+    for (const w of this.waiters.values()) w.reject(err);
+    this.waiters.clear();
+  }
+
+  /** Queue one row for slot `idx`. False when the row has no decodable pooled vector. */
+  async add(entry: CachedEmbedding, idx: number): Promise<boolean> {
+    const q = pooledInt8Source(entry);
+    if (q) {
+      if (!this.worker) {
+        // Worker died with pages still queued: let them land first to keep write order.
+        if (this.inflight.length > 0) await this.drain();
+        projectInt8RowInto(q, entry.scale as number, this.R, EMBEDDING_DIM, PROJ_DIM, this.projected, idx * PROJ_DIM, this.scratch);
+        this.filled[idx] = 1;
+        return true;
+      }
+      const n = this.pageCount++;
+      this.qPage.set(q, n * EMBEDDING_DIM);
+      this.scalePage[n] = entry.scale as number;
+      this.dstPage[n] = idx;
+      if (this.pageCount === GALAXY_PROJECT_PAGE_ROWS) await this.postPage();
+      return true;
+    }
+    if (Array.isArray(entry.embedding) && entry.embedding.length === EMBEDDING_DIM) {
+      // Rare legacy row: keep write order by letting queued pages land first.
+      await this.drain();
+      projectFloatRowInto(entry.embedding, this.R, EMBEDDING_DIM, PROJ_DIM, this.projected, idx * PROJ_DIM, this.scratch);
+      this.filled[idx] = 1;
+      return true;
+    }
+    return false;
+  }
+
+  private projectPageInline(q: Int8Array, scales: Float32Array, dst: Int32Array): void {
+    for (let i = 0; i < dst.length; i++) {
+      projectInt8RowInto(
+        q.subarray(i * EMBEDDING_DIM, (i + 1) * EMBEDDING_DIM), scales[i],
+        this.R, EMBEDDING_DIM, PROJ_DIM, this.projected, dst[i] * PROJ_DIM, this.scratch,
+      );
+      this.filled[dst[i]] = 1;
+    }
+  }
+
+  private async postPage(): Promise<void> {
+    const count = this.pageCount;
+    if (count === 0) return;
+    this.pageCount = 0;
+    // Retained copies: if the worker dies mid-page, the page is projected here instead.
+    const q = this.qPage.slice(0, count * EMBEDDING_DIM);
+    const scales = this.scalePage.slice(0, count);
+    const dst = this.dstPage.slice(0, count);
+    let result: Promise<Float32Array>;
+    const worker = this.worker;
+    if (!worker) {
+      result = Promise.reject(new Error('no worker'));
+    } else {
+      const id = this.nextPageId++;
+      result = new Promise<Float32Array>((resolve, reject) => this.waiters.set(id, { resolve, reject }));
+      const sent = q.slice();
+      try {
+        worker.postMessage(
+          { type: 'page', id, q: sent, scales: scales.slice(), count } satisfies GalaxyProjectionWorkerInput,
+          [sent.buffer as ArrayBuffer],
+        );
+      } catch (err) {
+        this.waiters.get(id)?.reject(err);
+        this.waiters.delete(id);
+        this.killWorker(err);
+      }
+    }
+    result.catch(() => { /* handled on the write chain */ });
+    const write = this.tail.then(() => result.then(
+      (out) => {
+        for (let i = 0; i < count; i++) {
+          this.projected.set(out.subarray(i * PROJ_DIM, (i + 1) * PROJ_DIM), dst[i] * PROJ_DIM);
+          this.filled[dst[i]] = 1;
+        }
+      },
+      () => this.projectPageInline(q, scales, dst),
+    ));
+    this.tail = write;
+    this.inflight.push(write);
+    while (this.inflight.length >= GALAXY_PROJECT_MAX_INFLIGHT) await this.inflight.shift();
+  }
+
+  /** Post the partial page and wait until every queued row has been written. */
+  async drain(): Promise<void> {
+    await this.postPage();
+    await this.tail;
+    this.inflight = [];
+  }
+
+  async finish(): Promise<void> {
+    try {
+      await this.drain();
+    } finally {
+      if (this.worker) {
+        try { this.worker.terminate(); } catch { /* already gone */ }
+        this.worker = null;
+      }
+    }
+  }
 }
 
 /**
  * Load ALL embeddings but stream-project each 1024D vector to 100D during the
- * IDB cursor pass.  The caller never holds the full 1024D buffer in memory.
+ * store walk.  The caller never holds the full 1024D buffer in memory.
  *
  * Memory comparison (71K vectors):
  *   loadAllEmbeddingsForGraph: allocates 71K × 1024 × 4 = 292 MB Float32Array
  *   loadProjectedEmbeddingsForGraph: allocates 71K × 100 × 4 = 29 MB Float32Array
  *
  * The output is L2-normalized → random-projected → centered, ready for UMAP.
+ *
+ * Main-thread cost: pass 1 only shape-checks rows (no dequantise), pass 2
+ * hands int8 rows to the projection worker in pages, and the LevelDB walks
+ * yield a macrotask every GALAXY_PROJECT_PAGE_ROWS rows. It used to fully
+ * decode every row twice and project inline — ~160 back-to-back 100-200 ms
+ * tasks about 20 s after the dashboard opened.
+ *
+ * @param opts.R             Fixed projection matrix (tests). Default: fresh Gaussian.
+ * @param opts.createWorker  Projection worker factory; return null to project on the main thread.
  */
 export async function loadProjectedEmbeddingsForGraph(
   onProgress?: (loaded: number, store: string) => void,
+  opts?: { R?: Float32Array; createWorker?: () => Worker | null },
 ): Promise<{ ids: string[]; projected: Float32Array; projDim: number }> {
   await migrateEmbeddingsFromIdbIfNeeded();
-  const srcDim = 1024;
+  const srcDim = EMBEDDING_DIM;
   const seen = new Set<string>();
-  const ids: string[] = [];
+  let ids: string[] = [];
   const now = Date.now();
+  const makeR = () => opts?.R ?? generateGaussianProjectionMatrix(srcDim, PROJ_DIM);
+
+  /** Drop slots pass 2 never filled (row vanished or failed to decode), then center in place. */
+  const finalize = (projected: Float32Array, filled: Uint8Array) => {
+    let out = projected;
+    let n = ids.length;
+    let kept = 0;
+    for (let i = 0; i < n; i++) if (filled[i]) kept++;
+    if (kept < n) {
+      const keptIds: string[] = [];
+      out = new Float32Array(kept * PROJ_DIM);
+      for (let i = 0; i < n; i++) {
+        if (!filled[i]) continue;
+        out.set(projected.subarray(i * PROJ_DIM, (i + 1) * PROJ_DIM), keptIds.length * PROJ_DIM);
+        keptIds.push(ids[i]);
+      }
+      ids = keptIds;
+      n = kept;
+    }
+    if (n === 0) return out;
+    const mean = new Float32Array(PROJ_DIM);
+    for (let i = 0; i < n; i++)
+      for (let j = 0; j < PROJ_DIM; j++) mean[j] += out[i * PROJ_DIM + j];
+    for (let j = 0; j < PROJ_DIM; j++) mean[j] /= n;
+    for (let i = 0; i < n; i++)
+      for (let j = 0; j < PROJ_DIM; j++) out[i * PROJ_DIM + j] -= mean[j];
+    return out;
+  };
 
   if (useLevelDB()) {
+    let sinceYield = 0;
+    const maybeYield = async () => {
+      if (++sinceYield >= GALAXY_PROJECT_PAGE_ROWS) {
+        sinceYield = 0;
+        await yieldToMacrotask();
+      }
+    };
     const collectIdsLevel = async (namespace: string, label: string, ttl: number) => {
       let count = 0;
-      await levelStreamPooled(namespace, (entry) => {
-        if (readPooledVector(entry) && !seen.has(entry.gameId) && now - entry.timestamp < ttl) {
+      await levelStreamPooled(namespace, async (entry) => {
+        if (hasDecodablePooledVector(entry) && !seen.has(entry.gameId) && now - entry.timestamp < ttl) {
           seen.add(entry.gameId);
           ids.push(entry.gameId);
           count++;
           if (count % 2000 === 0) onProgress?.(count, label);
         }
+        await maybeYield();
       });
     };
     await collectIdsLevel(LEVEL_LIBRARY_NAMESPACE, 'library', LIBRARY_TTL);
@@ -4772,45 +5150,39 @@ export async function loadProjectedEmbeddingsForGraph(
     const n = ids.length;
     if (n === 0) return { ids, projected: new Float32Array(0), projDim: PROJ_DIM };
 
-    const R = generateGaussianProjectionMatrix(srcDim, PROJ_DIM);
     const projected = new Float32Array(n * PROJ_DIM);
+    const filled = new Uint8Array(n);
     const idToIdx = new Map<string, number>();
     for (let i = 0; i < n; i++) idToIdx.set(ids[i], i);
+    const projector = new GalaxyRowProjector(
+      makeR(), projected, filled,
+      opts?.createWorker ? opts.createWorker() : defaultGalaxyProjectionWorker(),
+    );
 
-    const projectFromLevel = async (namespace: string, ttl: number) => {
-      await levelStreamPooled(namespace, (entry) => {
-        const emb = readPooledVector(entry);
-        if (!emb || now - entry.timestamp >= ttl) return;
-        const idx = idToIdx.get(entry.gameId);
-        if (idx === undefined) return;
-        let norm = 0;
-        for (let j = 0; j < srcDim; j++) norm += emb[j] * emb[j];
-        norm = Math.sqrt(norm);
-        const invNorm = norm > 1e-10 ? 1 / norm : 0;
-        const dstOff = idx * PROJ_DIM;
-        for (let k = 0; k < PROJ_DIM; k++) {
-          let s = 0;
-          const rOff = k * srcDim;
-          for (let j = 0; j < srcDim; j++) s += R[rOff + j] * (emb[j] * invNorm);
-          projected[dstOff + k] = s;
-        }
-      });
-    };
-    await projectFromLevel(LEVEL_LIBRARY_NAMESPACE, LIBRARY_TTL);
-    await projectFromLevel(LEVEL_CATALOG_NAMESPACE, CATALOG_TTL);
+    try {
+      const projectFromLevel = async (namespace: string, ttl: number) => {
+        await levelStreamPooled(namespace, async (entry) => {
+          if (now - entry.timestamp < ttl) {
+            const idx = idToIdx.get(entry.gameId);
+            if (idx !== undefined) await projector.add(entry, idx);
+          }
+          await maybeYield();
+        });
+      };
+      await projectFromLevel(LEVEL_LIBRARY_NAMESPACE, LIBRARY_TTL);
+      await projectFromLevel(LEVEL_CATALOG_NAMESPACE, CATALOG_TTL);
+    } finally {
+      await projector.finish();
+    }
 
-    const mean = new Float32Array(PROJ_DIM);
-    for (let i = 0; i < n; i++)
-      for (let j = 0; j < PROJ_DIM; j++) mean[j] += projected[i * PROJ_DIM + j];
-    for (let j = 0; j < PROJ_DIM; j++) mean[j] /= n;
-    for (let i = 0; i < n; i++)
-      for (let j = 0; j < PROJ_DIM; j++) projected[i * PROJ_DIM + j] -= mean[j];
-
-    return { ids, projected, projDim: PROJ_DIM };
+    const out = finalize(projected, filled);
+    return { ids, projected: out, projDim: PROJ_DIM };
   }
 
   const db = await getDB();
 
+  // Legacy IDB path: cursor callbacks can't await (the transaction would
+  // auto-commit), so rows project synchronously on this thread here.
   const collectIds = (storeName: string, label: string, ttl: number) =>
     new Promise<void>((resolve) => {
       const tx = db.transaction(storeName, 'readonly');
@@ -4822,7 +5194,7 @@ export async function loadProjectedEmbeddingsForGraph(
         if (!cursor) { resolve(); return; }
         const entry = cursor.value as CachedEmbedding;
         if (
-          readPooledVector(entry) &&
+          hasDecodablePooledVector(entry) &&
           !seen.has(entry.gameId) &&
           now - entry.timestamp < ttl
         ) {
@@ -4846,8 +5218,10 @@ export async function loadProjectedEmbeddingsForGraph(
 
   // L2-normalize + random-project each vector during the IDB cursor.
   // Only the 29 MB projected buffer is held, never the 292 MB raw buffer.
-  const R = generateGaussianProjectionMatrix(srcDim, PROJ_DIM);
+  const R = makeR();
   const projected = new Float32Array(n * PROJ_DIM);
+  const filled = new Uint8Array(n);
+  const scratch = new Float64Array(srcDim);
   const idToIdx = new Map<string, number>();
   for (let i = 0; i < n; i++) idToIdx.set(ids[i], i);
 
@@ -4861,22 +5235,15 @@ export async function loadProjectedEmbeddingsForGraph(
         const cursor = req.result;
         if (!cursor) { resolve(); return; }
         const entry = cursor.value as CachedEmbedding;
-        const emb = readPooledVector(entry);
-        if (emb && now - entry.timestamp < ttl) {
-          const idx = idToIdx.get(entry.gameId);
-          if (idx !== undefined) {
-            let norm = 0;
-            for (let j = 0; j < srcDim; j++) norm += emb[j] * emb[j];
-            norm = Math.sqrt(norm);
-            const invNorm = norm > 1e-10 ? 1 / norm : 0;
-
-            const dstOff = idx * PROJ_DIM;
-            for (let k = 0; k < PROJ_DIM; k++) {
-              let s = 0;
-              const rOff = k * srcDim;
-              for (let j = 0; j < srcDim; j++) s += R[rOff + j] * (emb[j] * invNorm);
-              projected[dstOff + k] = s;
-            }
+        const idx = now - entry.timestamp < ttl ? idToIdx.get(entry.gameId) : undefined;
+        if (idx !== undefined) {
+          const q = pooledInt8Source(entry);
+          if (q) {
+            projectInt8RowInto(q, entry.scale as number, R, srcDim, PROJ_DIM, projected, idx * PROJ_DIM, scratch);
+            filled[idx] = 1;
+          } else if (Array.isArray(entry.embedding) && entry.embedding.length === srcDim) {
+            projectFloatRowInto(entry.embedding, R, srcDim, PROJ_DIM, projected, idx * PROJ_DIM, scratch);
+            filled[idx] = 1;
           }
         }
         cursor.continue();
@@ -4887,13 +5254,6 @@ export async function loadProjectedEmbeddingsForGraph(
   await projectFromStore(LIBRARY_STORE, LIBRARY_TTL);
   await projectFromStore(CATALOG_STORE, CATALOG_TTL);
 
-  // Center the projected data in-place
-  const mean = new Float32Array(PROJ_DIM);
-  for (let i = 0; i < n; i++)
-    for (let j = 0; j < PROJ_DIM; j++) mean[j] += projected[i * PROJ_DIM + j];
-  for (let j = 0; j < PROJ_DIM; j++) mean[j] /= n;
-  for (let i = 0; i < n; i++)
-    for (let j = 0; j < PROJ_DIM; j++) projected[i * PROJ_DIM + j] -= mean[j];
-
-  return { ids, projected, projDim: PROJ_DIM };
+  const out = finalize(projected, filled);
+  return { ids, projected: out, projDim: PROJ_DIM };
 }

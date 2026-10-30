@@ -366,7 +366,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
           if (!available) return 0;
           return embeddingService.generateMissing(games, undefined, { signal });
         },
-        (candidateIds) => embeddingService.enrichWithCatalogEmbeddings(candidateIds),
+        (candidateIds, keepIds) => embeddingService.enrichWithCatalogEmbeddings(candidateIds, keepIds),
       );
     };
 
