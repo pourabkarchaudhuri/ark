@@ -23,6 +23,16 @@ export interface ChatMessage {
   suggestedFollowUps?: string[];
   /** Data URL of attached image (user messages); shown as thumbnail in chat. */
   attachedImageUrl?: string;
+  /** Library removals the model queued; applied only after the user confirms (assistant messages only). */
+  pendingRemovals?: PendingRemoval[];
+  /** State of the removal confirmation card. */
+  removalState?: 'pending' | 'removed' | 'cancelled';
+}
+
+/** A model-requested library removal awaiting user confirmation. */
+export interface PendingRemoval {
+  gameId: string;
+  gameName: string;
 }
 
 // Game context for the chat
@@ -83,6 +93,8 @@ export interface PersistedChatHistory {
 export interface LibraryAction {
   type: 'add' | 'remove';
   appId: number;
+  /** Explicit gameId (e.g. steam-123) set by main; preferred over appId. */
+  gameId?: string;
   status?: string;
   gameName?: string;
 }

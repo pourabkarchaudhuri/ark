@@ -35,6 +35,7 @@ import { chatStore } from './chat-store.js';
 import { settingsStore } from './settings-store.js';
 import { needsWebSearch, webSearch, formatSearchContext } from './web-search.js';
 import { logger } from './safe-logger.js';
+import { normalizeGameStatus } from '../src/lib/game-status-normalize.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -308,7 +309,9 @@ const getLibraryGamesTool = tool(
 );
 
 const addToLibraryTool = tool(
-  async ({ appId, status = 'Want to Play' }: { appId: number; status?: string }) => {
+  async ({ appId, status: rawStatus }: { appId: number; status?: string }) => {
+    // Normalize before queueing so the confirmation the model repeats names the status actually saved.
+    const status = normalizeGameStatus(rawStatus);
     logger.log(`[AI Tool] addToLibrary: ${appId} with status "${status}"`);
     try {
       const stringId = `steam-${appId}`;
@@ -328,7 +331,7 @@ const addToLibraryTool = tool(
     description: "Add a game to the user's library. You MUST get the Steam App ID first via searchSteamGames when the user names a game (e.g. 'Add Elden Ring'). Use the 'id' from search results as appId. If the user says 'add this game' and no game context is provided, ask which game they mean.",
     schema: z.object({
       appId: z.number().describe('The Steam App ID from searchSteamGames'),
-      status: z.string().optional().describe('Want to Play, Playing, Completed, or On Hold'),
+      status: z.string().optional().describe('Want to Play, Playing, Playing Now, Completed, or On Hold'),
     }),
   },
 );

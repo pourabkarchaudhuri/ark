@@ -30,6 +30,8 @@ const OracleView = lazy(() => import('@/components/oracle-view').then(m => ({ de
 const EmbeddingSpaceView = lazy(() => import('@/features/embedding-space/ui/EmbeddingSpaceView'));
 const DataFlowView = lazy(() => import('@/components/data-flow-view').then(m => ({ default: m.DataFlowView })));
 const DevLogView = lazy(() => import('@/components/devlog-view').then(m => ({ default: m.DevLogView })));
+// Lazy: the chat panel pulls in markdown + emoji libraries and is off by default (Beta).
+const AIChatPanel = lazy(() => import('@/components/ai-chat-panel').then(m => ({ default: m.AIChatPanel })));
 import { useToast } from '@/components/ui/toast';
 
 import { cn } from '@/lib/utils';
@@ -67,7 +69,6 @@ import {
 } from 'lucide-react';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
-import { AIChatPanel } from '@/components/ai-chat-panel';
 import { SettingsScreen } from '@/components/settings-screen';
 import { GuidedTour, getTourSteps, useTourState, viewModeToTourId, waitForTourDomReady, type TourId } from '@/components/guided-tour';
 import { YearWrapped, WrappedSnackbar } from '@/components/year-wrapped';
@@ -259,7 +260,10 @@ export function Dashboard() {
   
   // AI Chat panel state
   const [isAIChatOpen, setIsAIChatOpen] = useState(false);
-  
+  // Sticky: the lazy chat chunk loads on first open and the panel stays mounted (keeps its state).
+  const hasOpenedChatRef = useRef(false);
+  if (betaFeatures && isAIChatOpen) hasOpenedChatRef.current = true;
+
   // Year Wrapped state
   const [showWrapped, setShowWrapped] = useState(false);
   
@@ -1752,11 +1756,13 @@ export function Dashboard() {
       />
 
       {/* AI Chat Panel (beta features) */}
-      {betaFeatures && (
-        <AIChatPanel
-          isOpen={isAIChatOpen}
-          onClose={closeAIChat}
-        />
+      {betaFeatures && hasOpenedChatRef.current && (
+        <Suspense fallback={null}>
+          <AIChatPanel
+            isOpen={isAIChatOpen}
+            onClose={closeAIChat}
+          />
+        </Suspense>
       )}
 
       {/* Settings Screen is now a full-page view rendered via viewMode === 'settings' */}
