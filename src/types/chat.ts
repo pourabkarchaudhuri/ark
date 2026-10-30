@@ -123,6 +123,9 @@ export interface SendMessagePayload {
     status: string;
     priority: string;
     addedAt?: string;
+    /** Seed choice for the getGameRecommendations tool (most played / highest rated). */
+    hoursPlayed?: number;
+    rating?: number;
   }>;
   /** Selected LLM provider; backend uses this when implemented */
   provider?: ChatProviderId;

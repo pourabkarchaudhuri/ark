@@ -12,24 +12,109 @@ const { ipcMain, net, app } = electron;
 import { logger } from '../safe-logger.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { GAMING_EVENTS } from '../../src/data/gaming-events.js';
 
 const CACHE_TTL = 24 * 60 * 60 * 1000;
+/** A failed entry is retried after this long (instead of being "fresh" for the full 24 h). */
+const FAILED_RETRY_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT = 15_000;
 const MAX_HTML_BYTES = 512 * 1024;
 
-interface ScrapedEvent {
+export interface ScrapedEvent {
   id: string;
+  /** URL this entry was scraped from — a changed URL makes the entry stale. */
+  url?: string;
   startDate?: number;
   endDate?: number;
   youtubeUrls: string[];
   twitchUrls: string[];
   imageUrl?: string;
   scrapedAt: number;
+  /** The fetch failed and there was no earlier good entry to keep. */
+  failed?: boolean;
 }
 
-interface EventCache {
+export interface EventCache {
   events: Record<string, ScrapedEvent>;
   updatedAt: number;
+}
+
+// ─── Allow-list ─────────────────────────────────────────────────────────────
+
+/**
+ * The only pages main will fetch: id → URL from the same GAMING_EVENTS list the renderer uses,
+ * so a new event added there is scraped without touching this file. events:scrapeAll used to
+ * fetch any http(s) URL the renderer sent (localhost, intranet hosts) with the default session.
+ */
+const EVENT_URLS: ReadonlyMap<string, string> = new Map(
+  GAMING_EVENTS.filter((ev) => ev.url).map((ev) => [ev.id, ev.url!] as const),
+);
+const EVENT_ID_RE = /^[a-z0-9-]{1,64}$/;
+
+const bareHost = (h: string) => h.toLowerCase().replace(/^www\./, '');
+const ALLOWED_HOSTS: ReadonlySet<string> = new Set(
+  [...EVENT_URLS.values()].map((u) => bareHost(new URL(u).hostname)),
+);
+
+/** Main's own scrape list (what background refreshes use — never the caller's array). */
+export function allowedEvents(): Array<{ id: string; url: string }> {
+  return [...EVENT_URLS].map(([id, url]) => ({ id, url }));
+}
+
+/**
+ * Keep only requests whose id is a known event and whose URL is exactly main's URL for it;
+ * everything else is dropped without fetching. Capped at the list length, deduped by id.
+ */
+export function sanitizeEventRequest(events: unknown): Array<{ id: string; url: string }> {
+  if (!Array.isArray(events)) return [];
+  const out: Array<{ id: string; url: string }> = [];
+  const seen = new Set<string>();
+  for (const ev of events.slice(0, GAMING_EVENTS.length)) {
+    if (!ev || typeof ev !== 'object') continue;
+    const { id, url } = ev as { id?: unknown; url?: unknown };
+    if (typeof id !== 'string' || !EVENT_ID_RE.test(id) || seen.has(id)) continue;
+    const expected = EVENT_URLS.get(id);
+    if (!expected || url !== expected) continue;
+    seen.add(id);
+    out.push({ id, url: expected });
+  }
+  return out;
+}
+
+/** True when a (post-redirect) URL is http(s) on one of the event hosts. */
+export function isAllowedEventHost(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    return ALLOWED_HOSTS.has(bareHost(parsed.hostname));
+  } catch {
+    return false;
+  }
+}
+
+// ─── Injectable seams (tests) ───────────────────────────────────────────────
+
+export interface EventScraperDeps {
+  fetch: (url: string, init: RequestInit) => Promise<Response>;
+  readCache: () => EventCache | null;
+  writeCache: (cache: EventCache) => void;
+  now: () => number;
+}
+
+const realDeps = (): EventScraperDeps => ({
+  fetch: (url, init) => net.fetch(url, init),
+  readCache,
+  writeCache,
+  now: Date.now,
+});
+
+let deps: EventScraperDeps = realDeps();
+
+/** Replace I/O for tests; call with no argument to restore the real implementations. */
+export function __setEventScraperDepsForTests(overrides?: Partial<EventScraperDeps>): void {
+  deps = { ...realDeps(), ...overrides };
+  backgroundScrape = null;
+  lastScrapeFinishedAt = -Infinity;
 }
 
 // ─── Month lookup ───────────────────────────────────────────────────────────
@@ -63,17 +148,6 @@ function writeCache(cache: EventCache): void {
     fs.writeFileSync(getCachePath(), JSON.stringify(cache, null, 2));
   } catch (err) {
     logger.warn('[EventScraper] Cache write failed:', err);
-  }
-}
-
-// ─── URL validation ─────────────────────────────────────────────────────────
-
-function isAllowedUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch {
-    return false;
   }
 }
 
@@ -358,14 +432,20 @@ async function fetchPage(url: string): Promise<{ html: string; text: string } | 
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
-    const res = await net.fetch(url, {
+    const res = await deps.fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
+      credentials: 'omit',
       signal: ctrl.signal,
     });
     clearTimeout(timer);
+    // A redirect off the event hosts (e.g. to a LAN address) is not read.
+    if (res.url && !isAllowedEventHost(res.url)) {
+      logger.warn(`[EventScraper] Redirect off the event hosts rejected for ${url}`);
+      return null;
+    }
     if (!res.ok) return null;
 
     let html = await res.text();
@@ -386,22 +466,32 @@ async function fetchPage(url: string): Promise<{ html: string; text: string } | 
 
 // ─── Scrape logic (extracted so it can run in background) ───────────────────
 
-async function scrapeAll(events: Array<{ id: string; url?: string }>): Promise<Record<string, ScrapedEvent>> {
+/**
+ * Scrape `events` (already sanitized) one by one. A failed page keeps the previous good entry
+ * for that id (same URL) instead of overwriting it with an empty one; with no good entry it is
+ * stored as `failed` so the handler retries it after FAILED_RETRY_MS. When every fetch fails
+ * (offline) nothing is written, so the next online call scrapes again instead of serving a
+ * "fresh" empty cache for 24 h.
+ */
+async function scrapeAll(events: Array<{ id: string; url: string }>): Promise<Record<string, ScrapedEvent>> {
   logger.log(`[EventScraper] Scraping ${events.length} event sites…`);
-  const results: Record<string, ScrapedEvent> = {};
-  const now = Date.now();
+  const previous = deps.readCache();
+  const results: Record<string, ScrapedEvent> = Object.fromEntries(
+    Object.entries(previous?.events ?? {}).filter(([id]) => EVENT_URLS.has(id)),
+  );
+  const now = deps.now();
+  let succeeded = 0;
 
   for (const ev of events) {
-    if (!ev.url || !isAllowedUrl(ev.url)) {
-      results[ev.id] = { id: ev.id, youtubeUrls: [], twitchUrls: [], scrapedAt: now };
-      continue;
-    }
-
-    const page = await fetchPage(ev.url);
+    const page = isAllowedEventHost(ev.url) ? await fetchPage(ev.url) : null;
     if (!page) {
-      results[ev.id] = { id: ev.id, youtubeUrls: [], twitchUrls: [], scrapedAt: now };
+      const prev = previous?.events?.[ev.id];
+      if (!(prev && !prev.failed && prev.url === ev.url)) {
+        results[ev.id] = { id: ev.id, url: ev.url, youtubeUrls: [], twitchUrls: [], scrapedAt: now, failed: true };
+      }
       continue;
     }
+    succeeded++;
 
     const dates = extractDates(page.html, page.text);
     const links = extractLinks(page.html);
@@ -409,6 +499,7 @@ async function scrapeAll(events: Array<{ id: string; url?: string }>): Promise<R
 
     results[ev.id] = {
       id: ev.id,
+      url: ev.url,
       startDate: dates.start,
       endDate: dates.end,
       youtubeUrls: links.youtubeUrls,
@@ -422,46 +513,63 @@ async function scrapeAll(events: Array<{ id: string; url?: string }>): Promise<R
     );
   }
 
-  writeCache({ events: results, updatedAt: now });
+  if (succeeded > 0) deps.writeCache({ events: results, updatedAt: now });
+  else if (events.length > 0) logger.warn('[EventScraper] Every fetch failed — cache not written');
   return results;
 }
 
-let backgroundScrapeRunning = false;
+/** Single-flight scrape of main's own list (never the caller's array). */
+let backgroundScrape: Promise<Record<string, ScrapedEvent>> | null = null;
+let lastScrapeFinishedAt = -Infinity;
 
-function scrapeInBackground(events: Array<{ id: string; url?: string }>): void {
-  if (backgroundScrapeRunning) return;
-  backgroundScrapeRunning = true;
+function scrapeInBackground(): Promise<Record<string, ScrapedEvent>> {
+  if (backgroundScrape) return backgroundScrape;
   logger.log('[EventScraper] Stale cache — refreshing in background');
-  scrapeAll(events).catch((err) => {
-    logger.warn('[EventScraper] Background refresh failed:', err);
-  }).finally(() => { backgroundScrapeRunning = false; });
+  backgroundScrape = scrapeAll(allowedEvents())
+    .catch((err) => {
+      logger.warn('[EventScraper] Background refresh failed:', err);
+      return {} as Record<string, ScrapedEvent>;
+    })
+    .finally(() => { backgroundScrape = null; lastScrapeFinishedAt = deps.now(); });
+  return backgroundScrape;
+}
+
+/**
+ * events:scrapeAll. Stale-while-revalidate: cached data is returned instantly and a background
+ * refresh runs when the cache is stale — older than 24 h, or any requested event is missing,
+ * was scraped from a different URL, or failed more than FAILED_RETRY_MS ago. When none of the
+ * requested events is cached the refresh is awaited instead.
+ */
+export async function handleScrapeAll(events: unknown): Promise<Record<string, ScrapedEvent>> {
+  const requested = sanitizeEventRequest(events);
+  if (requested.length === 0) return {};
+
+  const cache = deps.readCache();
+  if (!cache) return await scrapeInBackground();
+
+  const now = deps.now();
+  const entryStale = (ev: { id: string; url: string }) => {
+    const entry = cache.events?.[ev.id];
+    if (!entry || entry.url !== ev.url) return true;
+    return !!entry.failed && now - entry.scrapedAt > FAILED_RETRY_MS;
+  };
+  const isStale = now - cache.updatedAt >= CACHE_TTL || requested.some(entryStale);
+  if (!isStale) {
+    logger.log('[EventScraper] Serving from cache (fresh)');
+    return cache.events;
+  }
+  const anyCached = requested.some((ev) => !!cache.events?.[ev.id]);
+  if (!anyCached) return await scrapeInBackground();
+  // A scrape that just finished without fixing the staleness (offline: nothing written) is not
+  // repeated on every call — retry after FAILED_RETRY_MS.
+  if (now - lastScrapeFinishedAt >= FAILED_RETRY_MS) void scrapeInBackground();
+  return cache.events;
 }
 
 // ─── IPC Registration ───────────────────────────────────────────────────────
 
 export function register(): void {
-  // Stale-while-revalidate: always return cached data instantly if available.
-  // If stale (>TTL), trigger a background refresh so the next call gets fresh data.
-  ipcMain.handle(
-    'events:scrapeAll',
-    async (_event: any, events: Array<{ id: string; url?: string }>) => {
-      if (!Array.isArray(events)) return {};
-
-      const cache = readCache();
-
-      if (cache) {
-        const isStale = Date.now() - cache.updatedAt >= CACHE_TTL;
-        if (isStale) {
-          scrapeInBackground(events);
-        } else {
-          logger.log('[EventScraper] Serving from cache (fresh)');
-        }
-        return cache.events;
-      }
-
-      return await scrapeAll(events);
-    },
-  );
+  ipcMain.handle('events:scrapeAll', (_event: any, events: unknown) => handleScrapeAll(events));
 
   ipcMain.handle('events:clearCache', async () => {
     try { fs.unlinkSync(getCachePath()); return { success: true }; } catch { return { success: false }; }

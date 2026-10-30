@@ -720,6 +720,8 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
           status: e.status,
           priority: e.priority,
           addedAt: e.addedAt.toISOString(),
+          hoursPlayed: e.hoursPlayed,
+          rating: e.rating,
         };
       });
       

@@ -37,6 +37,7 @@ import { settingsStore, DEFAULT_CHAT_NUM_CTX, type PreferredChatProvider } from 
 import { needsWebSearch, webSearch, formatSearchContext } from './web-search.js';
 import { logger } from './safe-logger.js';
 import { normalizeGameStatus } from '../src/lib/game-status-normalize.js';
+import { pickRecommendationSeed, librarySignature, steamAppIdOf } from './ai-reco-seed.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -52,6 +53,9 @@ interface LibraryEntry {
   status: string;
   priority: string;
   addedAt?: string;
+  /** Used to pick the recommendation seed (most played / highest rated). */
+  hoursPlayed?: number;
+  rating?: number;
 }
 
 interface LibraryAction {
@@ -465,21 +469,35 @@ const removeFromLibraryTool = tool(
   },
 );
 
+/**
+ * getGameRecommendations results per library signature (seed + limit + sorted Steam ids): each
+ * uncached call costs Steam store requests, and repeated "what should I play?" questions used
+ * to burst ~60 of them per message into a 429.
+ */
+const RECO_TOOL_CACHE_TTL = 30 * 60 * 1000;
+const recoToolCache = new Map<string, { result: string; until: number }>();
+
 const getRecommendationsTool = tool(
   async ({ limit = 10 }: { limit?: number }) => {
     logger.log(`[AI Tool] getRecommendations (limit: ${limit})`);
     if (currentLibraryData.length === 0) return 'Cannot provide recommendations — the library is empty.';
 
     const steamAppIds = currentLibraryData
-      .map(e => { const m = e.gameId.match(/^(?:steam-)?(\d+)$/); return m ? Number(m[1]) : null; })
+      .map(e => steamAppIdOf(e.gameId))
       .filter((id): id is number => id !== null);
 
     if (steamAppIds.length === 0) return 'No Steam games found in the library.';
 
+    // Seed from the most played / highest rated game, not whichever entry happens to be first.
+    const seed = pickRecommendationSeed(currentLibraryData) ?? steamAppIds[0];
+    const signature = librarySignature(steamAppIds, seed, limit);
+    const cachedResult = recoToolCache.get(signature);
+    if (cachedResult && cachedResult.until > Date.now()) return cachedResult.result;
+
     try {
-      const recommendations = await steamAPI.getRecommendations(steamAppIds[0], steamAppIds, limit);
+      const recommendations = await steamAPI.getRecommendations(seed, steamAppIds, limit);
       if (recommendations.length === 0) return 'No recommendations found.';
-      return JSON.stringify({
+      const result = JSON.stringify({
         basedOn: currentLibraryData.map(e => e.name || `Game ${e.gameId}`).slice(0, 5),
         totalLibraryGames: currentLibraryData.length,
         recommendations: recommendations.map((rec, i) => ({
@@ -490,6 +508,9 @@ const getRecommendationsTool = tool(
           reasons: rec.reasons.slice(0, 3),
         })),
       });
+      if (recoToolCache.size >= 20) recoToolCache.clear(); // bound memory in long sessions
+      recoToolCache.set(signature, { result, until: Date.now() + RECO_TOOL_CACHE_TTL });
+      return result;
     } catch (error) {
       return `Error getting recommendations: ${error}`;
     }

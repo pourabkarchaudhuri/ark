@@ -37,7 +37,11 @@ contextBridge.exposeInMainWorld('steam', {
   // Get details for a single game
   getAppDetails: (appId) => 
     ipcRenderer.invoke('steam:getAppDetails', appId),
-  
+
+  // Same, plus why it is empty: { data, status: 'ok' | 'not_found' | 'rate_limited' | 'error' }
+  getAppDetailsWithStatus: (appId) =>
+    ipcRenderer.invoke('steam:getAppDetailsWithStatus', appId),
+
   // Get details for multiple games (batched)
   getMultipleAppDetails: (appIds) => 
     ipcRenderer.invoke('steam:getMultipleAppDetails', appIds),

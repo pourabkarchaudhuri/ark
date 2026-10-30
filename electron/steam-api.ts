@@ -237,12 +237,37 @@ export interface SteamReviewsResponse {
 // the API multiple times.
 const MAX_QUEUE_SIZE = 500; // Prevent unbounded queue growth
 
-class RateLimiter {
-  private queue: Array<() => Promise<void>> = [];
+export interface RateLimiterOptions {
+  /** Minimum spacing between request starts (ms). */
+  delay?: number;
+  /** Requests running at once. */
+  maxConcurrent?: number;
+  /** Waiting requests before new ones are rejected. */
+  maxQueue?: number;
+}
+
+/**
+ * Concurrency + spacing limiter. A slot is taken synchronously in execute() and the start time
+ * is reserved synchronously too (nextSlot), so calls made in the same tick queue up instead of
+ * all passing the "is a slot free?" check together — the old limiter only counted a request as
+ * active after its spacing wait, so a 200-id sweep fired ~200 requests at once.
+ */
+export class RateLimiter {
+  private queue: Array<() => void> = [];
   private activeRequests = 0;
-  private lastRequestTime = 0;
+  /** Earliest time the next request may start. */
+  private nextSlot = 0;
+  private readonly delay: number;
+  private readonly maxConcurrent: number;
+  private readonly maxQueue: number;
   /** In-flight promise cache keyed by dedup key — collapses identical requests */
   private inFlight = new Map<string, Promise<unknown>>();
+
+  constructor(opts: RateLimiterOptions = {}) {
+    this.delay = opts.delay ?? RATE_LIMIT_DELAY;
+    this.maxConcurrent = opts.maxConcurrent ?? MAX_CONCURRENT_REQUESTS;
+    this.maxQueue = opts.maxQueue ?? MAX_QUEUE_SIZE;
+  }
 
   /**
    * Execute a rate-limited request.
@@ -250,7 +275,7 @@ class RateLimiter {
    * @param dedupKey - Optional dedup key; if provided, concurrent calls with the
    *                   same key share one in-flight promise (promise coalescing).
    */
-  async execute<T>(fn: () => Promise<T>, dedupKey?: string): Promise<T> {
+  execute<T>(fn: () => Promise<T>, dedupKey?: string): Promise<T> {
     // Promise coalescing — reuse an existing in-flight request for the same key
     if (dedupKey) {
       const existing = this.inFlight.get(dedupKey) as Promise<T> | undefined;
@@ -258,26 +283,14 @@ class RateLimiter {
     }
 
     const promise = new Promise<T>((resolve, reject) => {
-      // Reject immediately if queue is at capacity to prevent memory bloat
-      if (this.queue.length >= MAX_QUEUE_SIZE) {
-        reject(new Error('Rate limiter queue full'));
-        return;
-      }
-
+      // Runs with its slot already counted in activeRequests.
       const task = async () => {
-        const now = Date.now();
-        const timeSinceLastRequest = now - this.lastRequestTime;
-        
-        if (timeSinceLastRequest < RATE_LIMIT_DELAY) {
-          await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY - timeSinceLastRequest));
-        }
-        
-        this.lastRequestTime = Date.now();
-        this.activeRequests++;
-        
         try {
-          const result = await fn();
-          resolve(result);
+          const start = Math.max(Date.now(), this.nextSlot);
+          this.nextSlot = start + this.delay;
+          const wait = start - Date.now();
+          if (wait > 0) await new Promise(r => setTimeout(r, wait));
+          resolve(await fn());
         } catch (error) {
           reject(error);
         } finally {
@@ -286,8 +299,12 @@ class RateLimiter {
         }
       };
 
-      if (this.activeRequests < MAX_CONCURRENT_REQUESTS) {
-        task();
+      if (this.activeRequests < this.maxConcurrent) {
+        this.activeRequests++;
+        void task();
+      } else if (this.queue.length >= this.maxQueue) {
+        // Reject immediately if queue is at capacity to prevent memory bloat
+        reject(new Error('Rate limiter queue full'));
       } else {
         this.queue.push(task);
       }
@@ -296,19 +313,24 @@ class RateLimiter {
     // Register in-flight promise for dedup
     if (dedupKey) {
       this.inFlight.set(dedupKey, promise);
-      promise.finally(() => this.inFlight.delete(dedupKey!));
+      const clear = () => { this.inFlight.delete(dedupKey); };
+      promise.then(clear, clear);
     }
 
     return promise;
   }
 
   private processQueue() {
-    if (this.queue.length > 0 && this.activeRequests < MAX_CONCURRENT_REQUESTS) {
-      const nextTask = this.queue.shift();
-      if (nextTask) {
-        nextTask();
-      }
+    while (this.queue.length > 0 && this.activeRequests < this.maxConcurrent) {
+      const nextTask = this.queue.shift()!;
+      this.activeRequests++;
+      nextTask();
     }
+  }
+
+  /** Requests currently running (for tests and diagnostics). */
+  getActiveCount(): number {
+    return this.activeRequests;
   }
 
   getQueueSize(): number {
@@ -323,6 +345,7 @@ import { SteamAppListStore, type AppListEntry } from './steam-applist-store.js';
 import { atomicWriteFile } from './safe-write.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { titleCollator } from '../src/lib/title-collator.js';
 
 // Alias for backwards compatibility
 const Cache = PersistentCache;
@@ -354,7 +377,86 @@ export const PLAYER_COUNT_ALIASES: Readonly<Record<number, number>> = {
   1962663: 1938090, // Call of Duty: Warzone
 };
 
-class SteamAPIClient {
+/** Player-count limiter config: the public counts endpoint tolerates far more than appdetails. */
+export const PLAYER_COUNT_LIMITER_OPTIONS: Readonly<Required<RateLimiterOptions>> = {
+  delay: 25,
+  maxConcurrent: 8,
+  maxQueue: 1000,
+};
+
+/** Uncached appdetails fetched per recommendation run; the rest are scored once cached. */
+export const RECO_MAX_UNCACHED_FETCHES = 10;
+
+/** Outcome of an appdetails lookup that callers can tell apart (see getAppDetailsWithStatus). */
+export type AppDetailsStatus = 'ok' | 'not_found' | 'rate_limited' | 'error';
+
+type Recommendation = { appId: number; name: string; score: number; reasons: string[] };
+
+/** The subset of PersistentCache the client uses (tests pass an in-memory one). */
+export type SteamCacheLike = Pick<PersistentCache, 'get' | 'set' | 'has' | 'delete' | 'clear' | 'getStats' | 'flushSync'>;
+
+/** Where the full app list is stored (tests pass an in-memory SteamAppListStore). */
+export type AppListStoreLike = Pick<SteamAppListStore, 'load' | 'save'>;
+
+export interface SteamAPIClientDeps {
+  fetch?: (url: string, timeoutMs?: number) => Promise<Response>;
+  cache?: SteamCacheLike;
+  appListStore?: AppListStoreLike;
+}
+
+/** Names that are not base games, dropped from the broad candidate lists before scoring. */
+const NON_GAME_NAME = /\b(dlc|soundtrack|ost|demo|season pass|artbook|expansion pack)\b/i;
+
+/** Recommendation candidates by source, highest-signal first (see buildRecommendationCandidates). */
+export interface RecommendationCandidateBuckets {
+  /** Current game + library ids — never candidates. */
+  exclude: number[];
+  /** Store-search hits for the current game's developers / publisher. */
+  creator: number[];
+  /** Store-search hits for its top genres. */
+  genre: number[];
+  topSellers: number[];
+  newReleases: number[];
+  mostPlayed: number[];
+}
+
+/**
+ * Ordered, deduped list of ids to score: up to ~15 developer/publisher matches, then up to ~15
+ * genre matches, then top sellers / new releases / most played alternated to fill `total`.
+ * The old flat `slice(0, 50)` kept only the chart games (they were added first), so the
+ * game-specific search hits were never scored.
+ */
+export function buildRecommendationCandidates(
+  b: RecommendationCandidateBuckets,
+  opts: { total?: number; perSearchBucket?: number } = {},
+): number[] {
+  const total = opts.total ?? 50;
+  const perSearch = opts.perSearchBucket ?? 15;
+  const excluded = new Set(b.exclude);
+  const seen = new Set<number>();
+  const out: number[] = [];
+  const take = (id: number) => {
+    if (out.length >= total || excluded.has(id) || seen.has(id) || !Number.isFinite(id)) return false;
+    seen.add(id);
+    out.push(id);
+    return true;
+  };
+  for (const list of [b.creator, b.genre]) {
+    let n = 0;
+    for (const id of list) {
+      if (n >= perSearch) break;
+      if (take(id)) n++;
+    }
+  }
+  const broad = [b.topSellers, b.newReleases, b.mostPlayed];
+  const longest = Math.max(0, ...broad.map(l => l.length));
+  for (let i = 0; i < longest && out.length < total; i++) {
+    for (const list of broad) if (i < list.length) take(list[i]);
+  }
+  return out;
+}
+
+export class SteamAPIClient {
   private rateLimiter = new RateLimiter();
   /**
    * Player counts (api.steampowered.com) get their own limiter so a Browse sweep never queues
@@ -362,12 +464,20 @@ class SteamAPIClient {
    * writing hundreds of short-lived counts into the persistent cache rewrote steam-cache.json (which
    * holds the full app list) on every sweep and evicted real appdetails entries.
    */
-  private playerCountLimiter = new RateLimiter();
+  private playerCountLimiter = new RateLimiter(PLAYER_COUNT_LIMITER_OPTIONS);
   private playerCountCache = new Map<number, { v: number | null; until: number }>();
-  private cache = new Cache('steam-cache.json');
+  private cache: SteamCacheLike;
+  private fetchWithTimeout: (url: string, timeoutMs?: number) => Promise<Response>;
   /** Full app list — its own file (steam-applist.json), not part of steam-cache.json. */
-  private appListStore: SteamAppListStore | null = null;
+  private appListStore: AppListStoreLike | null;
+  /** Shared refresh so concurrent getAppList callers download the ~155k list once. */
   private appListRefresh: Promise<AppListEntry[]> | null = null;
+
+  constructor(deps: SteamAPIClientDeps = {}) {
+    this.cache = deps.cache ?? new Cache('steam-cache.json');
+    this.fetchWithTimeout = deps.fetch ?? fetchWithTimeout;
+    this.appListStore = deps.appListStore ?? null;
+  }
   /** appdetails circuit: set from a 429 (Retry-After, capped at 5 min; default 60s). */
   private appDetailsPausedUntil = 0;
   /** Catalog-batch throttle state (see catalogSlot). */
@@ -415,7 +525,7 @@ class SteamAPIClient {
     
     const response = await this.rateLimiter.execute(async () => {
       logger.log('[Steam] Fetching fresh most played games...');
-      const res = await fetchWithTimeout(url);
+      const res = await this.fetchWithTimeout(url);
       if (!res.ok) throw new Error(`Steam API error: ${res.status}`);
       return res.json() as Promise<SteamMostPlayedResponse>;
     });
@@ -467,7 +577,7 @@ class SteamAPIClient {
     const url = `${STEAM_STORE_API_BASE}/appdetails?appids=${ids}&cc=us&l=english`;
     try {
       const response = await this.rateLimiter.execute(async () => {
-        const res = await fetchWithTimeout(url, 15000);
+        const res = await this.fetchWithTimeout(url, 15000);
         if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
         return res.json() as Promise<Record<string, { success?: boolean; data?: SteamAppDetails['data'] }>>;
       }, `appdetails-batch-${appIds[0]}`);
@@ -493,16 +603,43 @@ class SteamAPIClient {
    * Force refresh app details (called by stale-while-revalidate)
    */
   private async refreshAppDetails(appId: number): Promise<SteamAppDetails['data'] | null> {
+    return (await this.fetchAppDetailsWithStatus(appId)).data;
+  }
+
+  /** True while the appdetails 429 circuit is open. */
+  isAppDetailsPaused(): boolean {
+    return Date.now() < this.appDetailsPausedUntil;
+  }
+
+  /**
+   * getAppDetails plus why it came back empty, so the details page can tell a delisted game
+   * ('not_found': Steam answered success:false) from a temporary failure ('rate_limited' while
+   * the 429 pause is active, 'error' for network/HTTP failures). Cached data (fresh or stale)
+   * is 'ok'. getAppDetails keeps returning plain null for its existing callers.
+   */
+  async getAppDetailsWithStatus(appId: number): Promise<{ data: SteamAppDetails['data'] | null; status: AppDetailsStatus }> {
+    const cacheKey = `app-details-${appId}`;
+    const fresh = this.cache.get<SteamAppDetails['data']>(cacheKey);
+    if (fresh) return { data: fresh, status: 'ok' };
+    const stale = this.cache.get<SteamAppDetails['data']>(cacheKey, true);
+    if (stale) {
+      this.refreshAppDetails(appId).catch(err => logger.warn(`[Steam] Background refresh for ${appId} failed:`, err));
+      return { data: stale, status: 'ok' };
+    }
+    return this.fetchAppDetailsWithStatus(appId);
+  }
+
+  private async fetchAppDetailsWithStatus(appId: number): Promise<{ data: SteamAppDetails['data'] | null; status: AppDetailsStatus }> {
     const cacheKey = `app-details-${appId}`;
     const url = `${STEAM_STORE_API_BASE}/appdetails?appids=${appId}&cc=in&l=english`;
     // While Steam is answering 429, don't queue more appdetails calls behind the limiter —
     // every one would wait its turn only to be rejected, starving browse/Oracle/Similar Games.
-    if (Date.now() < this.appDetailsPausedUntil) return null;
+    if (this.isAppDetailsPaused()) return { data: null, status: 'rate_limited' };
 
     try {
       const response = await this.rateLimiter.execute(async () => {
-        if (Date.now() < this.appDetailsPausedUntil) throw new Error('Steam appdetails paused after 429');
-        const res = await fetchWithTimeout(url);
+        if (this.isAppDetailsPaused()) throw new Error('Steam appdetails paused after 429');
+        const res = await this.fetchWithTimeout(url);
         if (res.status === 429) {
           const retryAfterSec = Number(res.headers.get('retry-after'));
           const pauseMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? Math.min(retryAfterSec * 1000, 5 * 60_000) : 60_000;
@@ -513,15 +650,15 @@ class SteamAPIClient {
         return res.json() as Promise<{ [key: string]: SteamAppDetails }>;
       }, `appdetails-${appId}`);
 
-      const appData = response[appId.toString()];
+      const appData = response?.[appId.toString()];
       if (appData?.success && appData.data) {
         this.cache.set(cacheKey, appData.data, DETAILS_CACHE_TTL);
-        return appData.data;
+        return { data: appData.data, status: 'ok' };
       }
-      return null;
+      return { data: null, status: 'not_found' };
     } catch (error) {
       logger.error(`[Steam] Error fetching app details for ${appId}:`, error);
-      return null;
+      return { data: null, status: this.isAppDetailsPaused() ? 'rate_limited' : 'error' };
     }
   }
 
@@ -577,7 +714,7 @@ class SteamAPIClient {
     try {
       const response = await this.rateLimiter.execute(async () => {
         logger.log(`[Steam] Searching for: ${query}`);
-        const res = await fetchWithTimeout(url);
+        const res = await this.fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
         return res.json() as Promise<SteamSearchResult>;
       });
@@ -662,7 +799,7 @@ class SteamAPIClient {
     try {
       const response = await this.rateLimiter.execute(async () => {
         logger.log('[Steam] Fetching featured categories...');
-        const res = await fetchWithTimeout(url);
+        const res = await this.fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam Store API error: ${res.status}`);
         return res.json() as Promise<SteamFeaturedCategories>;
       }, 'featured-categories');
@@ -736,7 +873,7 @@ class SteamAPIClient {
     try {
       const response = await this.rateLimiter.execute(async () => {
         logger.log(`[Steam] Fetching reviews for appId: ${appId}`);
-        const res = await fetchWithTimeout(url);
+        const res = await this.fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam Reviews API error: ${res.status}`);
         return res.json() as Promise<SteamReviewsResponse>;
       });
@@ -763,7 +900,7 @@ class SteamAPIClient {
     try {
       const response = await this.rateLimiter.execute(async () => {
         logger.log(`[Steam] Fetching news for appId: ${appId}`);
-        const res = await fetchWithTimeout(url);
+        const res = await this.fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Steam News API error: ${res.status}`);
         return res.json();
       });
@@ -823,7 +960,7 @@ class SteamAPIClient {
     try {
       const url = `https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=${sourceId}&format=json`;
       const result = await this.playerCountLimiter.execute(async () => {
-        const res = await fetchWithTimeout(url);
+        const res = await this.fetchWithTimeout(url);
         if (!res.ok) throw new Error(`Player count API error: ${res.status}`);
         return res.json();
       }, `player-count-${sourceId}`);
@@ -945,12 +1082,15 @@ class SteamAPIClient {
     currentAppId: number,
     libraryAppIds: number[] = [],
     limit: number = 10
-  ): Promise<Array<{ appId: number; name: string; score: number; reasons: string[] }>> {
-    const cacheKey = `recommendations-${currentAppId}-${libraryAppIds.slice(0, 5).join('-')}`;
-    const cached = this.cache.get<Array<{ appId: number; name: string; score: number; reasons: string[] }>>(cacheKey);
-    if (cached) return cached;
+  ): Promise<Recommendation[]> {
+    // The full scored list is cached (key without `limit`) and sliced on read, so a 3-result
+    // answer is never reused for a 10-result request.
+    const cacheKey = `recommendations-v2-${currentAppId}-${libraryAppIds.slice(0, 5).join('-')}`;
+    const cached = this.cache.get<Recommendation[]>(cacheKey);
+    if (cached) return cached.slice(0, limit);
 
     logger.log(`[Steam] Getting recommendations for appId: ${currentAppId}`);
+    const runStartedAt = Date.now();
 
     try {
       // 1. Get current game details
@@ -969,17 +1109,22 @@ class SteamAPIClient {
       });
 
       // 3. Get candidate games from various sources
-      const candidates = await this.getCandidateGames(tasteProfile, currentAppId, libraryAppIds);
-      logger.log(`[Steam] Found ${candidates.length} candidate games`);
+      const buckets = await this.getCandidateGames(tasteProfile, currentAppId, libraryAppIds);
+      const toScore = buildRecommendationCandidates(buckets);
+      logger.log(`[Steam] Scoring ${toScore.length} candidate games`);
 
       // 4. Score and rank candidates
-      const scored = await this.scoreAndRankCandidates(candidates, currentGame, tasteProfile, libraryAppIds);
-      
-      // 5. Return top results
+      const { scored, fetched, failed } = await this.scoreAndRankCandidates(toScore, currentGame, tasteProfile, libraryAppIds);
+
+      // 5. Cache the full list unless the run was degraded: nothing scored, the 429 pause was
+      //    active at some point during the run, or most of the details we fetched came back empty.
+      const degraded = scored.length === 0
+        || this.appDetailsPausedUntil > runStartedAt
+        || (fetched > 0 && failed > fetched / 2);
+      if (!degraded) this.cache.set(cacheKey, scored, DETAILS_CACHE_TTL);
+
       const results = scored.slice(0, limit);
-      this.cache.set(cacheKey, results, DETAILS_CACHE_TTL);
-      
-      logger.log(`[Steam] Returning ${results.length} recommendations`);
+      logger.log(`[Steam] Returning ${results.length} recommendations${degraded ? ' (not cached: degraded run)' : ''}`);
       return results;
     } catch (error) {
       logger.error('[Steam] Error getting recommendations:', error);
@@ -1064,15 +1209,10 @@ class SteamAPIClient {
     tasteProfile: Awaited<ReturnType<typeof this.buildTasteProfile>>,
     excludeAppId: number,
     excludeLibrary: number[]
-  ): Promise<number[]> {
-    const excludeSet = new Set([excludeAppId, ...excludeLibrary]);
-    const candidateSet = new Set<number>();
-
-    const addCandidates = (ids: number[]) => {
-      for (const id of ids) {
-        if (!excludeSet.has(id)) candidateSet.add(id);
-      }
-    };
+  ): Promise<RecommendationCandidateBuckets> {
+    const exclude = [excludeAppId, ...excludeLibrary];
+    const broadIds = (items: Array<{ id: number; name?: string }>) =>
+      items.filter(g => !g.name || !NON_GAME_NAME.test(g.name)).map(g => g.id);
 
     // 1. Broad sources (top sellers, new releases, most played) — run in parallel
     const [topSellers, newReleases, mostPlayed] = await Promise.all([
@@ -1081,42 +1221,39 @@ class SteamAPIClient {
       this.getMostPlayedGames().catch((err: any) => { logger.warn('[Steam] getCandidateGames getMostPlayedGames Non-fatal:', err); return []; })
     ]);
 
-    addCandidates(topSellers.map(g => g.id));
-    addCandidates(newReleases.map(g => g.id));
-    addCandidates(mostPlayed.map(g => g.appid));
-
-    // 2. Game-specific searches: developer names (up to 2), publisher, and top 2-3 genres
-    const searchTerms: string[] = [];
-
-    // Add developer names
-    for (const dev of tasteProfile.developers.slice(0, 2)) {
-      searchTerms.push(dev);
-    }
-
-    // Add publisher (if different from developers)
+    // 2. Game-specific searches: developer names (up to 2), publisher, and top 2-3 genres.
+    //    Kept in separate buckets so they are scored before the generic chart games.
+    const creatorTerms: string[] = [...tasteProfile.developers.slice(0, 2)];
     for (const pub of tasteProfile.publishers.slice(0, 1)) {
-      if (!tasteProfile.developers.includes(pub)) {
-        searchTerms.push(pub);
-      }
+      if (!tasteProfile.developers.includes(pub)) creatorTerms.push(pub);
     }
+    const genreTerms = tasteProfile.genres.slice(0, 3).map(g => g.description);
 
-    // Add top 2-3 genre descriptions
-    for (const genre of tasteProfile.genres.slice(0, 3)) {
-      searchTerms.push(genre.description);
-    }
+    const search = (term: string) =>
+      this.searchGames(term, 50).catch((err: any) => { logger.warn('[Steam] getCandidateGames searchGames Non-fatal:', err); return []; });
+    const [creatorResults, genreResults] = await Promise.all([
+      Promise.all(creatorTerms.map(search)),
+      Promise.all(genreTerms.map(search)),
+    ]);
 
-    // Run all game-specific searches in parallel
-    const searchPromises = searchTerms.map(term =>
-      this.searchGames(term, 50).catch((err: any) => { logger.warn('[Steam] getCandidateGames searchGames Non-fatal:', err); return []; })
-    );
-    const searchResults = await Promise.all(searchPromises);
+    // Interleave per-term results so one prolific developer doesn't take every creator slot.
+    const interleave = (lists: Array<Array<{ id: number }>>) => {
+      const out: number[] = [];
+      const longest = Math.max(0, ...lists.map(l => l.length));
+      for (let i = 0; i < longest; i++) for (const l of lists) if (l[i]) out.push(l[i].id);
+      return out;
+    };
 
-    for (const results of searchResults) {
-      addCandidates(results.map(g => g.id));
-    }
-
-    logger.log(`[Steam] getCandidateGames: ${candidateSet.size} candidates from ${searchTerms.length} searches + broad sources`);
-    return Array.from(candidateSet);
+    const buckets: RecommendationCandidateBuckets = {
+      exclude,
+      creator: interleave(creatorResults),
+      genre: interleave(genreResults),
+      topSellers: broadIds(topSellers),
+      newReleases: broadIds(newReleases),
+      mostPlayed: mostPlayed.map(g => g.appid),
+    };
+    logger.log(`[Steam] getCandidateGames: ${buckets.creator.length} creator, ${buckets.genre.length} genre, ${buckets.topSellers.length + buckets.newReleases.length + buckets.mostPlayed.length} broad`);
+    return buckets;
   }
 
   /**
@@ -1128,15 +1265,25 @@ class SteamAPIClient {
     currentGame: NonNullable<Awaited<ReturnType<typeof this.getAppDetails>>>,
     tasteProfile: Awaited<ReturnType<typeof this.buildTasteProfile>>,
     libraryAppIds: number[]
-  ): Promise<Array<{ appId: number; name: string; score: number; reasons: string[] }>> {
-    // Limit candidates to avoid too many API calls
-    const toScore = candidateAppIds.slice(0, 50);
+  ): Promise<{ scored: Recommendation[]; fetched: number; failed: number }> {
     const librarySet = new Set(libraryAppIds);
-    
-    // Fetch details for candidates (many should be cached from getCandidateGames sources)
-    const candidateDetails = await Promise.all(
-      toScore.map(id => this.getAppDetails(id).catch((err: any) => { logger.warn('[Steam] scoreAndRankCandidates getAppDetails Non-fatal:', err); return null; }))
+
+    // Cached candidates (fresh or stale) are scored as-is, without starting background
+    // refreshes; at most RECO_MAX_UNCACHED_FETCHES uncached ones are fetched per run (in
+    // candidate priority order) so one "what should I play?" no longer bursts ~60 appdetails
+    // calls into a 429. Later runs fetch the next uncached ones.
+    const candidateDetails: Array<SteamAppDetails['data'] | null> = [];
+    const toFetch: number[] = [];
+    for (const id of candidateAppIds) {
+      const cached = this.cache.get<SteamAppDetails['data']>(`app-details-${id}`, true);
+      if (cached) candidateDetails.push(cached);
+      else if (toFetch.length < RECO_MAX_UNCACHED_FETCHES) toFetch.push(id);
+    }
+    const fetchedDetails = await Promise.all(
+      toFetch.map(id => this.refreshAppDetails(id).catch((err: any) => { logger.warn('[Steam] scoreAndRankCandidates getAppDetails Non-fatal:', err); return null; }))
     );
+    const failed = fetchedDetails.filter(d => !d).length;
+    candidateDetails.push(...fetchedDetails);
 
     const currentGenres = new Set(currentGame.genres?.map(g => g.id) || []);
     const currentCategories = new Set(currentGame.categories?.map(c => c.id) || []);
@@ -1234,7 +1381,7 @@ class SteamAPIClient {
     // Sort by score descending
     scored.sort((a, b) => b.score - a.score);
 
-    return scored;
+    return { scored, fetched: toFetch.length, failed };
   }
 
   /**
@@ -1271,7 +1418,7 @@ class SteamAPIClient {
     return this.refreshAppListOnce();
   }
 
-  private getAppListStore(): SteamAppListStore {
+  private getAppListStore(): AppListStoreLike {
     return this.appListStore ??= new SteamAppListStore({
       filePath: path.join(electron?.app?.getPath?.('userData') || './cache', 'steam-applist.json'),
       readFile: (p) => fs.promises.readFile(p, 'utf-8'),
@@ -1321,7 +1468,7 @@ class SteamAPIClient {
       const response = await this.rateLimiter.execute(async () => {
         logger.log(`[Steam] getAppList page ${page}${lastAppId ? ` (after appid ${lastAppId})` : ''}...`);
         // 50k-entry pages: the timeout now covers the whole download, so give slow links room
-        const res = await fetchWithTimeout(url, 120_000);
+        const res = await this.fetchWithTimeout(url, 120_000);
         if (!res.ok) throw new Error(`Steam IStoreService API error: ${res.status}`);
         return res.json() as Promise<{
           response: {
@@ -1347,7 +1494,8 @@ class SteamAPIClient {
     }
 
     // Sort by name (A–Z) for catalog browsing
-    allApps.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    // (shared collator: options-form localeCompare built a collator per compare, ~19 s for 155k)
+    allApps.sort((a, b) => titleCollator.compare(a.name, b.name));
 
     logger.log(`[Steam] getAppList: complete — ${allApps.length} games fetched and sorted`);
     await this.getAppListStore().save(allApps);
@@ -1387,7 +1535,7 @@ class SteamAPIClient {
       const release = await this.catalogSlot();
       let failure: string;
       try {
-        const res = await fetchWithTimeout(url, 15000);
+        const res = await this.fetchWithTimeout(url, 15000);
         if (res.ok) {
           const data = await res.json() as { response?: { store_items?: any[] } };
           this.catalog429Streak = 0;
@@ -1453,7 +1601,7 @@ class SteamAPIClient {
       return [];
     }
     const url = steamWebApiUrl('IStoreService/GetTagList/v1/', { language: 'english' });
-    const res = await fetchWithTimeout(url);
+    const res = await this.fetchWithTimeout(url);
     if (!res.ok) throw new Error(`GetTagList API error: ${res.status}`);
     const data = await res.json() as { response?: { tags?: Array<{ tagid: number; name: string }> } };
     const tags = data.response?.tags ?? [];

@@ -121,9 +121,11 @@ function useResolvedEvents() {
     return () => clearInterval(id);
   }, [events.length]);
 
-  const forceRefresh = useCallback(() => {
+  const forceRefresh = useCallback(async () => {
     clearResolvedCache();
-    window.eventScraper?.clearCache();
+    // Wait for main to drop its cache file — bumping refreshKey first raced the delete and
+    // re-served the old cache.
+    try { await window.eventScraper?.clearCache(); } catch { /* re-resolve anyway */ }
     setRefreshKey((k) => k + 1);
   }, []);
 
@@ -1059,7 +1061,7 @@ export const BuzzView = memo(function BuzzView() {
   }, []);
 
   const handleRefresh = useCallback(() => {
-    forceRefreshEvents();
+    void forceRefreshEvents();
     loadNews(true);
   }, [loadNews, forceRefreshEvents]);
 
