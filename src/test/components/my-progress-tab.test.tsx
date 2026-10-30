@@ -221,4 +221,22 @@ describe('MyProgressTab', () => {
     // But the specific "4/5" or similar should not be there when rating is 0
     expect(screen.queryByText(/^[1-5]\/5$/)).not.toBeInTheDocument();
   });
+
+  it('shows the picker error when a non-.exe is chosen and keeps the field empty', async () => {
+    (libraryStore.getEntry as ReturnType<typeof vi.fn>).mockReturnValue(mockLibraryEntry);
+    const error = "Pick the game's .exe (shortcuts and .bat/.cmd files cannot be tracked)";
+    Object.defineProperty(window, 'fileDialog', {
+      value: { selectExecutable: vi.fn(async () => ({ success: false, error })) },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      render(<MyProgressTab gameId="steam-730" />);
+      fireEvent.click(screen.getByText('Browse'));
+      expect(await screen.findByText(error)).toBeInTheDocument();
+      expect(screen.getByText('No executable selected')).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, 'fileDialog', { value: undefined, writable: true, configurable: true });
+    }
+  });
 });

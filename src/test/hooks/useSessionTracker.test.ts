@@ -94,3 +94,42 @@ describe('useSessionTracker — pending-session replay', () => {
     expect(sessionStore.getForGame('steam-11')).toHaveLength(1);
   });
 });
+
+describe('useSessionTracker — launcher gate on auto-transition', () => {
+  afterEach(() => {
+    Object.defineProperty(window, 'exeInfo', { value: undefined, writable: true, configurable: true });
+  });
+
+  it('clears a stale launcherDetected stamp when analyze now says the exe is the game', async () => {
+    localStorage.setItem('ark:autoStatusTransition', 'true');
+    libraryStore.updateEntry('steam-11', { status: 'Want to Play', launcherDetected: true });
+    const analyze = vi.fn(async () => ({ isLikelyLauncher: false }));
+    Object.defineProperty(window, 'exeInfo', { value: { analyze }, writable: true, configurable: true });
+
+    const { tracker, endedHandlers } = installTracker([]);
+    renderHook(() => useSessionTracker());
+    await waitFor(() => expect(tracker.setTrackedGames).toHaveBeenCalled());
+
+    endedHandlers.forEach((h) => h({ gameId: 'steam-11', session: session('live-1') }));
+
+    await waitFor(() => expect(libraryStore.getEntry('steam-11')?.status).toBe('Playing'));
+    expect(analyze).toHaveBeenCalledWith('C:\\Games\\g.exe');
+    expect(libraryStore.getEntry('steam-11')?.launcherDetected).toBe(false);
+  });
+
+  it('keeps the stamp and the status when analyze still reports a launcher', async () => {
+    localStorage.setItem('ark:autoStatusTransition', 'true');
+    libraryStore.updateEntry('steam-11', { status: 'Want to Play' });
+    const analyze = vi.fn(async () => ({ isLikelyLauncher: true }));
+    Object.defineProperty(window, 'exeInfo', { value: { analyze }, writable: true, configurable: true });
+
+    const { tracker, endedHandlers } = installTracker([]);
+    renderHook(() => useSessionTracker());
+    await waitFor(() => expect(tracker.setTrackedGames).toHaveBeenCalled());
+
+    endedHandlers.forEach((h) => h({ gameId: 'steam-11', session: session('live-2') }));
+
+    await waitFor(() => expect(libraryStore.getEntry('steam-11')?.launcherDetected).toBe(true));
+    expect(libraryStore.getEntry('steam-11')?.status).toBe('Want to Play');
+  });
+});

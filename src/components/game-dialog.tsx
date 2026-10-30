@@ -201,6 +201,8 @@ export function GameDialog({
   const [executablePath, setExecutablePath] = useState<string | undefined>(undefined);
   const [addedAt, setAddedAt] = useState<Date | undefined>(undefined);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  /** Picker rejection (e.g. a .bat/.lnk) — shown under the Executable field. */
+  const [exeError, setExeError] = useState<string | null>(null);
 
   const isEditing = !!initialEntry;
 
@@ -208,6 +210,7 @@ export function GameDialog({
   // In edit mode, pre-fill from initialEntry; otherwise reset to defaults.
   useEffect(() => {
     if (open) {
+      setExeError(null);
       if (initialEntry) {
         setFormData({
           status: initialEntry.status,
@@ -257,6 +260,9 @@ export function GameDialog({
     const result = await window.fileDialog.selectExecutable();
     if (result.success && result.filePath) {
       setExecutablePath(result.filePath);
+      setExeError(null);
+    } else if (result.error) {
+      setExeError(result.error);
     }
   }, []);
 
@@ -433,6 +439,9 @@ export function GameDialog({
                   <p className="text-[11px] text-white/40 truncate" title={executablePath}>
                     {executablePath}
                   </p>
+                )}
+                {exeError && (
+                  <p role="alert" className="text-[11px] text-red-400">{exeError}</p>
                 )}
               </div>
 

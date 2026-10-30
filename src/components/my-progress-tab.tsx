@@ -278,6 +278,8 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
     initialData?.recommendationSource || 'Personal Discovery'
   );
   const [executablePath, setExecutablePath] = useState(initialData?.executablePath ?? '');
+  /** Picker rejection (e.g. a .bat/.lnk) — shown under the Executable field. */
+  const [exeError, setExeError] = useState<string | null>(null);
   const [addedAt, setAddedAt] = useState<Date>(initialData?.addedAt ?? new Date());
   // updatedAt is read-only (app-managed); we display it from loaded data
   const [isSaving, setIsSaving] = useState(false);
@@ -353,7 +355,12 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
   const handleBrowseExecutable = useCallback(async () => {
     if (!window.fileDialog?.selectExecutable) return;
     const result = await window.fileDialog.selectExecutable();
-    if (result.success && result.filePath) setExecutablePath(result.filePath);
+    if (result.success && result.filePath) {
+      setExecutablePath(result.filePath);
+      setExeError(null);
+    } else if (result.error) {
+      setExeError(result.error);
+    }
   }, []);
 
   // Star rating component
@@ -554,6 +561,9 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
                 </Button>
               )}
             </div>
+            {exeError && (
+              <p role="alert" className="text-[11px] text-red-400">{exeError}</p>
+            )}
             {executablePath && (
               <p className="text-[11px] text-white/40 truncate" title={executablePath}>
                 {executablePath}

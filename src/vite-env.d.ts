@@ -96,6 +96,8 @@ interface ElectronAPI {
   isMaximized: () => Promise<boolean>;
   onMaximizedChange?: (cb: (maximized: boolean) => void) => (() => void);
   openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
+  /** Run a Steam game via steam://rungameid (optional: absent in older preloads). */
+  launchSteamGame?: (appId: number) => Promise<{ success: boolean; error?: string }>;
   /** Fetch HTML from a URL via the main process (bypasses CORS). Domain-restricted. */
   fetchHtml: (url: string) => Promise<string | null>;
   /** Crash-loop breaker state for this launch (optional: absent in older preloads). */

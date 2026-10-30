@@ -119,6 +119,9 @@ async function maybeAutoTransitionStatus(rawSession: GameSession): Promise<void>
     libraryStore.updateEntry(gameId, {
       status: 'Playing',
       autoTransitionedAt: new Date().toISOString(),
+      // A stamp from an older, broader heuristic (or a since-fixed exe path)
+      // is stale once analyze says this exe is the game itself.
+      ...(entry.launcherDetected ? { launcherDetected: false } : {}),
     }, { source: 'auto-promote' });
   } catch (err) {
     // Never let a status-transition failure disturb session recording.

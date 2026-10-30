@@ -75,4 +75,31 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
       return { success: false, error: String(error) };
     }
   });
+
+  // Launch a Steam game by appId. A narrow channel instead of adding steam:
+  // to the openExternal allowlist — steam:// URLs can do far more than run a game.
+  ipcMain.handle('steam:launchGame', async (_event: any, appId: unknown) => launchSteamGame(appId));
+}
+
+// Test-only injectable seam (see launch-handlers.ts for why vi.mock('electron')
+// can't reach createRequire'd modules).
+let _openExternal: (url: string) => Promise<void> = (url) => shell.openExternal(url);
+
+export function __setWindowDepsForTests(deps?: { openExternal?: (url: string) => Promise<void> }): void {
+  _openExternal = deps?.openExternal ?? ((url) => shell.openExternal(url));
+}
+
+/** Open `steam://rungameid/<appId>` for a strictly validated numeric appId. */
+export async function launchSteamGame(appId: unknown): Promise<{ success: boolean; error?: string }> {
+  if (typeof appId !== 'number' || !Number.isInteger(appId) || appId <= 0 || appId >= 2 ** 32) {
+    return { success: false, error: 'Invalid Steam app id' };
+  }
+  try {
+    await _openExternal(`steam://rungameid/${appId}`);
+    logger.log(`[Shell] Launched Steam app ${appId}`);
+    return { success: true };
+  } catch (error) {
+    logger.warn('[Shell] Could not launch Steam app:', error);
+    return { success: false, error: String(error) };
+  }
 }

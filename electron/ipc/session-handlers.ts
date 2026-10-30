@@ -5,8 +5,8 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { ipcMain } = electron;
-import path from 'path';
 import { logger } from '../safe-logger.js';
+import { isValidExePath } from './exe-path.js';
 import { setTrackedGames, getActiveSessions, getUnackedSessions, ackSessions } from '../session-tracker.js';
 
 export function register(): void {
@@ -17,11 +17,8 @@ export function register(): void {
     // Security: validate each executable path — must be absolute and end with .exe
     const validated = (Array.isArray(games) ? games : []).filter(g => {
       if (!g || typeof g.executablePath !== 'string' || !g.executablePath) return false;
-      const p = g.executablePath;
-      const isAbsolute = path.isAbsolute(p);
-      const isExe = p.toLowerCase().endsWith('.exe');
-      if (!isAbsolute || !isExe) {
-        logger.warn(`[Session] Rejected invalid executable path: ${p}`);
+      if (!isValidExePath(g.executablePath)) {
+        logger.warn(`[Session] Rejected invalid executable path: ${g.executablePath}`);
         return false;
       }
       return true;

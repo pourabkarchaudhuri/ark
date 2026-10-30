@@ -2,8 +2,8 @@
  * Game Launch IPC Handlers (Phase 4a — Launch games from Ark)
  *
  * Launches a library/custom game's tracked executable via shell.openPath.
- * Reuses the same absolute-path + .exe validation as session-handlers.ts /
- * exe-info-handlers.ts so a path that's already rejected by session tracking
+ * Reuses the shared exe-path.ts validation (also used by session-handlers.ts,
+ * exe-info-handlers.ts and the picker) so a path that's already rejected by session tracking
  * can't be launched from here either.
  */
 import { createRequire } from 'node:module';
@@ -11,8 +11,8 @@ const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { ipcMain, shell } = electron;
 import * as fs from 'fs';
-import * as path from 'path';
 import { logger } from '../safe-logger.js';
+import { exePathError, isValidExePath } from './exe-path.js';
 
 export interface LaunchResult {
   success: boolean;
@@ -35,14 +35,8 @@ export function __setLaunchDepsForTests(deps?: {
 }
 
 export async function launchExecutable(exePath: unknown): Promise<LaunchResult> {
-  if (typeof exePath !== 'string' || !exePath) {
-    return { success: false, error: 'No executable path provided' };
-  }
-  if (!path.isAbsolute(exePath)) {
-    return { success: false, error: 'Executable path must be absolute' };
-  }
-  if (!exePath.toLowerCase().endsWith('.exe')) {
-    return { success: false, error: 'Executable path must end with .exe' };
+  if (!isValidExePath(exePath)) {
+    return { success: false, error: exePathError(exePath) ?? 'Invalid executable path' };
   }
 
   try {
