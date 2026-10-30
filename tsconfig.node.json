@@ -20,6 +20,7 @@
     "src/lib/game-status-normalize.ts",
     "src/lib/title-collator.ts",
     "src/data/gaming-events.ts",
+    "src/lib/chat-providers.ts",
     "package.json"
   ]
 }

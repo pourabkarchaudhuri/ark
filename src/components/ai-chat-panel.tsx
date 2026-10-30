@@ -40,6 +40,8 @@ import type {
 import { useLibrary, extractCachedMeta } from '@/hooks/useGameStore';
 import { gameService } from '@/services/game-service';
 import { journeyStore } from '@/services/journey-store';
+import { listConfiguredChatProviders } from '@/lib/chat-providers';
+import { ensureLegacyAiKeysMigrated } from '@/lib/ai-key-migration';
 import { applyAIChatActions, confirmAIChatRemovals } from '@/services/ai-chat-actions';
 
 // Emoji picker + its ~430 KB data load only when the picker is first opened.
@@ -573,26 +575,28 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
     };
 
     const loadProviders = async () => {
-      const list: string[] = [];
+      // Keys live encrypted in main (1.0.97): ask main what is saved. Only providers with a
+      // chat backend are listed (CHAT_IMPLEMENTED_PROVIDERS), so Anthropic is not offered yet.
+      let list: string[] = [];
       try {
+        await ensureLegacyAiKeysMigrated();
         const azureEndpoint = localStorage.getItem('ark-azure-endpoint')?.trim();
-        const azureKey = localStorage.getItem('ark-azure-key')?.trim();
         const azureDeployment = localStorage.getItem('ark-azure-deployment')?.trim();
-        if (azureEndpoint && azureKey && azureDeployment) list.push('azure-openai');
-        const anthropicKey = localStorage.getItem('ark-anthropic-key')?.trim();
-        if (anthropicKey) list.push('anthropic');
         if (window.settings) {
-          const [hasGemini, ollamaSettings] = await Promise.all([
+          const [hasGemini, ollamaSettings, hasAzureKey] = await Promise.all([
             window.settings.hasApiKey(),
             window.settings.getOllamaSettings(),
+            window.settings.hasAzureKey?.() ?? Promise.resolve(false),
           ]);
-          if (hasGemini) list.push('gemini');
-          if (ollamaSettings?.url?.trim()) list.push('ollama');
+          list = listConfiguredChatProviders({
+            ollamaUrl: ollamaSettings?.url,
+            betaFeatures: true, // the chat panel only exists with Beta on
+            hasGeminiKey: !!hasGemini,
+            azureConfigured: !!(azureEndpoint && azureDeployment && hasAzureKey),
+          });
         }
       } catch {
-        // fallback from localStorage only
-        if (localStorage.getItem('ark-azure-endpoint') && localStorage.getItem('ark-azure-key') && localStorage.getItem('ark-azure-deployment')) list.push('azure-openai');
-        if (localStorage.getItem('ark-anthropic-key')) list.push('anthropic');
+        // main unreachable: fall back to Ollama below
       }
       setAvailableProviders(list.length ? list : ['ollama']);
       try {
@@ -741,13 +745,12 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
       };
       if (preferredProvider === 'azure-openai') {
         try {
+          // The key is added by main from its encrypted store; only endpoint/deployment go from here.
           const endpoint = localStorage.getItem('ark-azure-endpoint')?.trim();
-          const key = localStorage.getItem('ark-azure-key')?.trim();
           const deployment = localStorage.getItem('ark-azure-deployment')?.trim();
           const apiVersion = localStorage.getItem('ark-azure-api-version')?.trim();
-          if (endpoint && key && deployment) {
+          if (endpoint && deployment) {
             payload.azureEndpoint = endpoint;
-            payload.azureKey = key;
             payload.azureDeployment = deployment;
             if (apiVersion) payload.azureApiVersion = apiVersion;
           }

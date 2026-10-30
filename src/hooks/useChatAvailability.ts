@@ -6,6 +6,8 @@
 
 import { useState, useEffect } from 'react';
 import { useBetaFeatures, isBetaFeatures } from '@/hooks/useBetaFeatures';
+import { listConfiguredChatProviders } from '@/lib/chat-providers';
+import { ensureLegacyAiKeysMigrated } from '@/lib/ai-key-migration';
 
 export interface ChatAvailability {
   available: boolean;
@@ -16,11 +18,16 @@ const BETA_OFF_MESSAGE =
   'Turn on Beta features in Settings → General to use AI Chat.';
 
 const UNAVAILABLE_MESSAGE =
-  'No AI provider configured. Add at least one in Settings → AI Models: Ollama (local), Google Gemini, Azure OpenAI, or Anthropic.';
+  'No AI provider configured. Add at least one in Settings → AI Models: Ollama (local), Google Gemini, or Azure OpenAI.';
 const OLLAMA_ONLY_MESSAGE =
   'Chat uses Ollama by default. Ensure Ollama is running, or add another provider in Settings → AI Models.';
 
-export function useChatAvailability(): ChatAvailability {
+/**
+ * @param refreshKey Re-check when this changes. The dashboard passes its view mode, so
+ *   providers added or removed in Settings (a view inside the same Dashboard) are picked
+ *   up when the user leaves Settings — not on every keystroke there.
+ */
+export function useChatAvailability(refreshKey?: unknown): ChatAvailability {
   const [betaFeatures] = useBetaFeatures();
   const [state, setState] = useState<ChatAvailability>(() => ({
     available: false,
@@ -35,23 +42,25 @@ export function useChatAvailability(): ChatAvailability {
 
     let cancelled = false;
     (async () => {
-      const list: string[] = [];
+      let list: string[] = [];
       try {
+        await ensureLegacyAiKeysMigrated();
         const azureEndpoint = localStorage.getItem('ark-azure-endpoint')?.trim();
-        const azureKey = localStorage.getItem('ark-azure-key')?.trim();
         const azureDeployment = localStorage.getItem('ark-azure-deployment')?.trim();
-        if (azureEndpoint && azureKey && azureDeployment) list.push('azure');
-
-        const anthropicKey = localStorage.getItem('ark-anthropic-key')?.trim();
-        if (anthropicKey) list.push('anthropic');
 
         if (window.settings) {
-          const [hasGemini, ollamaSettings] = await Promise.all([
+          const [hasGemini, ollamaSettings, hasAzureKey] = await Promise.all([
             window.settings.hasApiKey(),
             window.settings.getOllamaSettings(),
+            window.settings.hasAzureKey?.() ?? Promise.resolve(false),
           ]);
-          if (hasGemini) list.push('gemini');
-          if (ollamaSettings.url?.trim()) list.push('ollama');
+          // Anthropic is never counted: there is no chat backend for it.
+          list = listConfiguredChatProviders({
+            ollamaUrl: ollamaSettings?.url,
+            betaFeatures: true,
+            hasGeminiKey: !!hasGemini,
+            azureConfigured: !!(azureEndpoint && azureDeployment && hasAzureKey),
+          });
         }
       } catch {
         // ignore
@@ -68,7 +77,7 @@ export function useChatAvailability(): ChatAvailability {
       setState({ available: true, message: 'Chat with the AI Assistant — ask about games, get recommendations, or explore your library.' });
     })();
     return () => { cancelled = true; };
-  }, [betaFeatures]);
+  }, [betaFeatures, refreshKey]);
 
   return state;
 }

@@ -166,13 +166,12 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
           preferredProvider = localStorage.getItem('ark-preferred-chat-provider') ?? 'ollama';
         }
         if (preferredProvider === 'azure-openai') {
+          // The key is added by main from its encrypted store; only endpoint/deployment go from here.
           const endpoint = localStorage.getItem('ark-azure-endpoint')?.trim();
-          const key = localStorage.getItem('ark-azure-key')?.trim();
           const deployment = localStorage.getItem('ark-azure-deployment')?.trim();
           const apiVersion = localStorage.getItem('ark-azure-api-version')?.trim();
-          if (endpoint && key && deployment) {
+          if (endpoint && deployment) {
             payload.azureEndpoint = endpoint;
-            payload.azureKey = key;
             payload.azureDeployment = deployment;
             if (apiVersion) payload.azureApiVersion = apiVersion;
           }

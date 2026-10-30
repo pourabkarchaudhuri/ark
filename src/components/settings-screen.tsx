@@ -43,9 +43,12 @@ import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { EmbeddingBatchSizeControl } from '@/components/settings/embedding-batch-size';
 import { AboutUpdateButton, useAboutUpdate } from '@/components/settings/about-update';
-import { GeminiKeyInput } from '@/components/settings/gemini-key-input';
+import { GeminiKeyInput, KEY_SAVED_PLACEHOLDER } from '@/components/settings/gemini-key-input';
 import { LibraryDataSection } from '@/components/settings/library-data-section';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
+import { useDebouncedKeySave, type KeySaveStatus } from '@/components/settings/use-debounced-key-save';
+import { isImplementedChatProvider, listConfiguredChatProviders, type ImplementedChatProvider } from '@/lib/chat-providers';
+import { ensureLegacyAiKeysMigrated } from '@/lib/ai-key-migration';
 import {
   OVERLAY_CYCLE_HOTKEY_LABEL,
   OVERLAY_TOGGLE_HOTKEY_LABEL,
@@ -53,13 +56,47 @@ import {
 
 export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
 
+/** Fields of settings:setOllamaSettings; any omitted key keeps its stored value. */
+export interface OllamaSettingsPatch {
+  enabled?: boolean;
+  url?: string;
+  model?: string;
+  useGeminiInstead?: boolean;
+  rerankModel?: string;
+  neighborRerankEnabled?: boolean;
+  oracleRerankEnabled?: boolean;
+  oracleRerankBlend?: number;
+  embeddingChunkingEnabled?: boolean;
+  chunkAnnMaxSimEnabled?: boolean;
+  embeddingMrl256Enabled?: boolean;
+  embeddingBatchSize?: number;
+}
+
+/** True for an absolute http(s) address — what main accepts as the Ollama URL. */
+export function isHttpUrl(value: string): boolean {
+  try {
+    const u = new URL(value.trim());
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 declare global {
   interface Window {
     settings?: {
-      getApiKeyHint: () => Promise<{ has: boolean; hint: string }>;
-      setApiKey: (key: string) => Promise<void>;
+      getApiKeyHint?: () => Promise<{ has: boolean; hint: string }>;
+      // No getters for cloud keys (1.0.97): they are encrypted in main and only set/checked/cleared here.
+      setApiKey: (key: string) => Promise<{ success: boolean; error?: string }>;
       removeApiKey: () => Promise<void>;
       hasApiKey: () => Promise<boolean>;
+      hasAzureKey?: () => Promise<boolean>;
+      setAzureKey?: (key: string) => Promise<{ success: boolean; error?: string }>;
+      clearAzureKey?: () => Promise<{ success: boolean }>;
+      testAzureConnection?: (input: { endpoint: string; deployment: string; apiVersion?: string }) => Promise<{ ok: boolean; message: string }>;
+      hasAnthropicKey?: () => Promise<boolean>;
+      setAnthropicKey?: (key: string) => Promise<{ success: boolean; error?: string }>;
+      clearAnthropicKey?: () => Promise<{ success: boolean }>;
       getOllamaSettings: () => Promise<{
         enabled: boolean;
         url: string;
@@ -75,22 +112,9 @@ declare global {
         /** 0 = Auto; otherwise clamped to 16–512 by main. */
         embeddingBatchSize: number;
       }>;
-      setOllamaSettings: (settings: {
-        enabled?: boolean;
-        url?: string;
-        model?: string;
-        useGeminiInstead?: boolean;
-        rerankModel?: string;
-        neighborRerankEnabled?: boolean;
-        oracleRerankEnabled?: boolean;
-        oracleRerankBlend?: number;
-        embeddingChunkingEnabled?: boolean;
-        chunkAnnMaxSimEnabled?: boolean;
-        embeddingMrl256Enabled?: boolean;
-        embeddingBatchSize?: number;
-      }) => Promise<void>;
+      setOllamaSettings: (settings: OllamaSettingsPatch) => Promise<void>;
       getAutoLaunch: () => Promise<boolean>;
-      setAutoLaunch: (enabled: boolean) => Promise<void>;
+      setAutoLaunch: (enabled: boolean) => Promise<{ success: boolean; error?: string } | undefined>;
       getPreferredChatProvider: () => Promise<PreferredChatProvider>;
       setPreferredChatProvider: (provider: PreferredChatProvider) => Promise<{ success: boolean; error?: string }>;
       getBetaFeatures: () => Promise<boolean>;
@@ -139,9 +163,13 @@ function SectionHeading({ icon: Icon, children }: { icon: React.ElementType; chi
   );
 }
 
-function Toggle({ value, onChange, disabled }: { value: boolean; onChange: () => void; disabled?: boolean }) {
+function Toggle({ value, onChange, disabled, label }: { value: boolean; onChange: () => void; disabled?: boolean; label?: string }) {
   return (
     <button
+      type="button"
+      role="switch"
+      aria-checked={value}
+      aria-label={label}
       onClick={onChange}
       disabled={disabled}
       className={cn(
@@ -160,7 +188,7 @@ function Toggle({ value, onChange, disabled }: { value: boolean; onChange: () =>
 
 // ─── General Tab ──────────────────────────────────────────────────────────────
 
-const GeneralTab = memo(function GeneralTab() {
+export const GeneralTab = memo(function GeneralTab() {
   const [autoLaunch, setAutoLaunchState] = useState(true);
   const [overlayEnabled, setOverlayEnabledState] = useState(false);
   const [analyticsEnabled, setAnalyticsEnabledState] = useState(false);
@@ -187,8 +215,10 @@ const GeneralTab = memo(function GeneralTab() {
     if (!window.settings) return;
     const newValue = !autoLaunch;
     setAutoLaunchState(newValue);
-    try { await window.settings.setAutoLaunch(newValue); }
-    catch { setAutoLaunchState(!newValue); }
+    try {
+      const result = await window.settings.setAutoLaunch(newValue);
+      if (!result?.success) setAutoLaunchState(!newValue);
+    } catch { setAutoLaunchState(!newValue); }
   }, [autoLaunch]);
 
   const handleOverlayToggle = useCallback(async () => {
@@ -225,7 +255,7 @@ const GeneralTab = memo(function GeneralTab() {
               <p className="text-sm font-medium text-white/90">Launch on Startup</p>
               <p className="text-xs text-white/35 mt-0.5">Automatically start Ark when you log in (minimized to system tray)</p>
             </div>
-            <Toggle value={autoLaunch} onChange={handleAutoLaunchToggle} />
+            <Toggle value={autoLaunch} onChange={handleAutoLaunchToggle} label="Launch on startup" />
           </div>
           <div className="border-t border-white/[0.04] pt-4">
             <div className="flex items-center justify-between">
@@ -367,7 +397,28 @@ const CHAT_PROVIDER_LABELS: Record<PreferredChatProvider, string> = {
   'anthropic': 'Anthropic (Claude)',
 };
 
-const AIModelsTab = memo(function AIModelsTab() {
+/** Shown in a key field once a key is saved; the saved key itself is never loaded back. */
+export { KEY_SAVED_PLACEHOLDER };
+
+/**
+ * Accurate since 1.0.97: every cloud key on this page is encrypted in the main process
+ * (Windows encryption when available). Before, Azure and Anthropic sat in plaintext localStorage.
+ */
+export const API_KEY_STORAGE_NOTE =
+  'Gemini, Azure OpenAI and Anthropic keys are stored encrypted on this computer and are only sent to that provider. A saved key is never shown again.';
+
+function KeySaveStatusLine({ status, hasKey }: { status: KeySaveStatus; hasKey: boolean }) {
+  return (
+    <div className="flex items-center gap-2 text-xs" role="status">
+      {status === 'saving' && <><Loader2 className="h-3 w-3 animate-spin text-white/40" /><span className="text-white/40">Saving...</span></>}
+      {status === 'saved' && <><Check className="h-3 w-3 text-emerald-400/60" /><span className="text-white/40">Saved</span></>}
+      {(status === 'idle' || status === 'error') && hasKey && <><Check className="h-3 w-3 text-white/30" /><span className="text-white/30">Key configured</span></>}
+      {status === 'idle' && !hasKey && <span className="text-white/25">Changes save automatically</span>}
+    </div>
+  );
+}
+
+export const AIModelsTab = memo(function AIModelsTab() {
   const [betaFeatures] = useBetaFeatures();
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
@@ -397,10 +448,21 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [migration, setMigration] = useState(() => embeddingService.migrationState);
   useEffect(() => {
     void embeddingService.refreshMigrationState();
+    // Job progress follows the service, not the button that started the job, so reopening
+    // Settings mid-job keeps counting (the click handlers only start jobs and set final status).
     const sync = () => {
-      setAnnJobBusy(embeddingService.isAnnRebuilding);
-      setForceReindexBusy(embeddingService.isForceReindexRunning || embeddingService.isForceReindexAllRunning);
+      const annBusy = embeddingService.isAnnRebuilding;
+      setAnnJobBusy(annBusy);
+      if (!annBusy) setAnnRebuildProgress(null);
+      const reindexBusy = embeddingService.isForceReindexRunning || embeddingService.isForceReindexAllRunning;
+      setForceReindexBusy(reindexBusy);
+      setForceReindexProgress(reindexBusy ? { ...embeddingService.catalogProgress } : null);
       setMigration(embeddingService.migrationState);
+      const rechunkRunning = embeddingService.isRechunkRunning;
+      setRechunkBusy(rechunkRunning);
+      setRechunkMessage(embeddingService.rechunkMessage);
+      setRechunkProgress(rechunkRunning ? { ...embeddingService.rechunkProgress } : embeddingService.rechunkProgress);
+      setRechunkSuggestAnn(embeddingService.rechunkSuggestRebuildAnn);
     };
     const unsubEmb = embeddingService.subscribe(sync);
     const unsubAnn = annIndex.subscribe(() => {
@@ -415,7 +477,10 @@ const AIModelsTab = memo(function AIModelsTab() {
   const forceReindexRunning = forceReindexStatus === 'running' || forceReindexBusy;
   const [weightSweepMsg, setWeightSweepMsg] = useState<string | null>(null);
   const [weightSweepBusy, setWeightSweepBusy] = useState(false);
-  const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [ollamaSaveStatus, setOllamaSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [ollamaSaveError, setOllamaSaveError] = useState<string | null>(null);
+  /** Latest scheduled Ollama payload, flushed if the tab unmounts before the timer fires. */
+  const pendingOllamaRef = useRef<OllamaSettingsPatch | null>(null);
   const [rerankDiag, setRerankDiag] = useState<{
     state: 'idle' | 'testing' | 'ok' | 'fail';
     ollamaUp?: boolean;
@@ -428,23 +493,25 @@ const AIModelsTab = memo(function AIModelsTab() {
   const initialLoadRef = useRef(true);
 
   const [preferredChatProvider, setPreferredChatProviderState] = useState<PreferredChatProvider>('ollama');
-  const [availableProviders, setAvailableProviders] = useState<PreferredChatProvider[]>([]);
+  const [availableProviders, setAvailableProviders] = useState<ImplementedChatProvider[]>([]);
 
-  const [apiKey, setApiKey] = useState('');
   const [apiKeyHint, setApiKeyHint] = useState('');
   const [hasExistingKey, setHasExistingKey] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [error, setError] = useState<string | null>(null);
-  const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Gemini key field: an empty draft, never the stored key (fixes bullets being saved as the key).
+  // { has, hint } from main; the decrypted key itself never reaches the renderer.
+  const refreshApiKeyHint = useCallback(() => {
+    window.settings?.getApiKeyHint?.().then((h) => setApiKeyHint(h?.hint ?? '')).catch(() => {});
+  }, []);
+  const gemini = useDebouncedKeySave(window.settings?.setApiKey, () => { setHasExistingKey(true); refreshApiKeyHint(); });
+  const { status: saveStatus, error, setError } = gemini;
 
-  // Azure OpenAI state
+  // Azure OpenAI state (the key itself lives encrypted in main; endpoint/deployment stay here)
   const [azureEndpoint, setAzureEndpoint] = useState(() => {
     try { return localStorage.getItem('ark-azure-endpoint') || ''; } catch { return ''; }
   });
-  const [azureKey, setAzureKey] = useState(() => {
-    try { return localStorage.getItem('ark-azure-key') || ''; } catch { return ''; }
-  });
+  const [hasAzureKey, setHasAzureKey] = useState(false);
+  const azureKey = useDebouncedKeySave(window.settings?.setAzureKey, () => setHasAzureKey(true));
   const [azureDeployment, setAzureDeployment] = useState(() => {
     try { return localStorage.getItem('ark-azure-deployment') || ''; } catch { return ''; }
   });
@@ -454,10 +521,9 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [azureTestStatus, setAzureTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [azureTestMessage, setAzureTestMessage] = useState('');
 
-  // Anthropic state
-  const [anthropicKey, setAnthropicKey] = useState(() => {
-    try { return localStorage.getItem('ark-anthropic-key') || ''; } catch { return ''; }
-  });
+  // Anthropic state: key encrypted in main (served by the AI router, B35); model name stays here
+  const [hasAnthropicKey, setHasAnthropicKey] = useState(false);
+  const anthropicKey = useDebouncedKeySave(window.settings?.setAnthropicKey, () => setHasAnthropicKey(true));
   const [anthropicModel, setAnthropicModel] = useState(() => {
     try { return localStorage.getItem('ark-anthropic-model') || 'claude-sonnet-4-20250514'; } catch { return 'claude-sonnet-4-20250514'; }
   });
@@ -466,14 +532,20 @@ const AIModelsTab = memo(function AIModelsTab() {
     const load = async () => {
       if (!window.settings) return;
       try {
-        const [exists, s, preferred] = await Promise.all([
+        // Legacy plaintext Azure/Anthropic keys move into main before we ask what is saved.
+        await ensureLegacyAiKeysMigrated();
+        const [exists, s, preferred, azureSaved, anthropicSaved] = await Promise.all([
           window.settings.hasApiKey(),
           window.settings.getOllamaSettings(),
           window.settings.getPreferredChatProvider(),
+          window.settings.hasAzureKey?.() ?? Promise.resolve(false),
+          window.settings.hasAnthropicKey?.() ?? Promise.resolve(false),
         ]);
         setHasExistingKey(exists);
         // Write-only key: the field stays empty, a stored key is shown as a hint.
-        if (exists) { const h = await window.settings.getApiKeyHint(); setApiKeyHint(h?.hint ?? ''); }
+        if (exists) refreshApiKeyHint();
+        setHasAzureKey(!!azureSaved);
+        setHasAnthropicKey(!!anthropicSaved);
         setOllamaUrl(s.url);
         setOllamaModel(s.model);
         setOllamaRerankModel(s.rerankModel ?? DEFAULT_OLLAMA_RERANK_MODEL);
@@ -497,71 +569,97 @@ const AIModelsTab = memo(function AIModelsTab() {
       } catch { initialLoadRef.current = false; }
     };
     load();
-    return () => { if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current); if (ollamaDebounceRef.current) clearTimeout(ollamaDebounceRef.current); };
+    return () => {
+      if (ollamaDebounceRef.current) clearTimeout(ollamaDebounceRef.current);
+      // Leaving the tab inside the debounce window: still save the latest change (no setState here).
+      const pending = pendingOllamaRef.current;
+      pendingOllamaRef.current = null;
+      if (pending && window.settings) {
+        window.settings.setOllamaSettings(pending)
+          .then(() => embeddingService.clearUnavailableVerdict())
+          .catch(() => {});
+      }
+    };
   }, []);
 
-  // Compute available providers whenever credentials change (cloud only when Beta is on)
+  // Compute available providers whenever credentials change (cloud only when Beta is on).
+  // Only providers with a chat backend are listed (CHAT_IMPLEMENTED_PROVIDERS).
   useEffect(() => {
-    const list: PreferredChatProvider[] = [];
-    if (ollamaUrl.trim()) list.push('ollama');
-    if (betaFeatures) {
-      if (hasExistingKey) list.push('gemini');
-      if (azureEndpoint.trim() && azureKey.trim() && azureDeployment.trim()) list.push('azure-openai');
-      if (anthropicKey.trim()) list.push('anthropic');
-    }
-    setAvailableProviders(list);
-  }, [azureEndpoint, azureKey, azureDeployment, azureApiVersion, anthropicKey, hasExistingKey, ollamaUrl, betaFeatures]);
+    setAvailableProviders(listConfiguredChatProviders({
+      ollamaUrl,
+      betaFeatures,
+      hasGeminiKey: hasExistingKey,
+      azureConfigured: !!(azureEndpoint.trim() && hasAzureKey && azureDeployment.trim()),
+    }));
+  }, [azureEndpoint, hasAzureKey, azureDeployment, hasExistingKey, ollamaUrl, betaFeatures]);
+
+  // Empty is allowed (no local AI); anything else must be an http(s) address, as main requires.
+  const ollamaUrlValid = !ollamaUrl.trim() || isHttpUrl(ollamaUrl);
 
   useEffect(() => {
     if (initialLoadRef.current || !window.settings) return;
     if (ollamaDebounceRef.current) clearTimeout(ollamaDebounceRef.current);
+    // An address being typed ("localhost:11434") must not block the toggles: send them without it.
+    const payload: OllamaSettingsPatch = {
+      ...(ollamaUrlValid ? { url: ollamaUrl } : {}),
+      model: ollamaModel,
+      rerankModel: ollamaRerankModel,
+      neighborRerankEnabled,
+      oracleRerankEnabled,
+      oracleRerankBlend,
+      embeddingChunkingEnabled,
+      chunkAnnMaxSimEnabled,
+      embeddingMrl256Enabled,
+      embeddingBatchSize,
+    };
+    pendingOllamaRef.current = payload;
     setOllamaSaveStatus('saving');
+    setOllamaSaveError(null);
     ollamaDebounceRef.current = setTimeout(async () => {
+      ollamaDebounceRef.current = null;
+      pendingOllamaRef.current = null;
       try {
-        await window.settings!.setOllamaSettings({
-          url: ollamaUrl,
-          model: ollamaModel,
-          rerankModel: ollamaRerankModel,
-          neighborRerankEnabled,
-          oracleRerankEnabled,
-          oracleRerankBlend,
-          embeddingChunkingEnabled,
-          chunkAnnMaxSimEnabled,
-          embeddingMrl256Enabled,
-          embeddingBatchSize,
-        });
+        await window.settings!.setOllamaSettings(payload);
         // A new URL/model may make Ollama reachable — drop any cached "unavailable" verdict now
         embeddingService.clearUnavailableVerdict();
         setOllamaSaveStatus('saved');
-        setTimeout(() => setOllamaSaveStatus('idle'), 2000);
+        setTimeout(() => setOllamaSaveStatus((s) => (s === 'saved' ? 'idle' : s)), 2000);
+      } catch (err) {
+        setOllamaSaveStatus('error');
+        const detail = err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : '';
+        setOllamaSaveError(detail ? `Could not save: ${detail}` : 'Could not save these settings.');
       }
-      catch { /* ignore */ }
     }, 800);
-  }, [ollamaUrl, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled, embeddingMrl256Enabled, embeddingBatchSize]);
+    // Per-change cleanup only stops the timer; the mount cleanup above flushes a pending save.
+    return () => { if (ollamaDebounceRef.current) clearTimeout(ollamaDebounceRef.current); };
+  }, [ollamaUrl, ollamaUrlValid, ollamaModel, ollamaRerankModel, neighborRerankEnabled, oracleRerankEnabled, oracleRerankBlend, embeddingChunkingEnabled, chunkAnnMaxSimEnabled, embeddingMrl256Enabled, embeddingBatchSize]);
 
-  useEffect(() => {
-    if (initialLoadRef.current || !window.settings || !apiKey.trim()) { setSaveStatus('idle'); return; }
-    if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
-    setSaveStatus('saving');
-    debounceTimeoutRef.current = setTimeout(async () => {
-      try { await window.settings!.setApiKey(apiKey.trim()); setSaveStatus('saved'); setHasExistingKey(true); setError(null); window.settings!.getApiKeyHint().then((h) => setApiKeyHint(h?.hint ?? '')).catch(() => {}); setTimeout(() => setSaveStatus('idle'), 2000); }
-      catch { setSaveStatus('error'); setError('Failed to save API key'); }
-    }, 800);
-    return () => { if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current); };
-  }, [apiKey]);
+  // Persist the non-secret Azure & Anthropic fields to localStorage (keys go to main)
+  useEffect(() => { try { localStorage.setItem('ark-azure-endpoint', azureEndpoint); localStorage.setItem('ark-azure-deployment', azureDeployment); localStorage.setItem('ark-azure-api-version', azureApiVersion); } catch {} }, [azureEndpoint, azureDeployment, azureApiVersion]);
+  useEffect(() => { try { localStorage.setItem('ark-anthropic-model', anthropicModel); } catch {} }, [anthropicModel]);
 
-  // Persist Azure & Anthropic to localStorage
-  useEffect(() => { try { localStorage.setItem('ark-azure-endpoint', azureEndpoint); localStorage.setItem('ark-azure-key', azureKey); localStorage.setItem('ark-azure-deployment', azureDeployment); localStorage.setItem('ark-azure-api-version', azureApiVersion); } catch {} }, [azureEndpoint, azureKey, azureDeployment, azureApiVersion]);
-  useEffect(() => { try { localStorage.setItem('ark-anthropic-key', anthropicKey); localStorage.setItem('ark-anthropic-model', anthropicModel); } catch {} }, [anthropicKey, anthropicModel]);
-
+  const { setDraft: setGeminiDraft, setStatus: setGeminiStatus } = gemini;
   const handleRemoveApiKey = useCallback(async () => {
     if (!window.settings) return;
     setIsLoading(true); setError(null);
-    try { await window.settings.removeApiKey(); setApiKey(''); setApiKeyHint(''); setHasExistingKey(false); setSaveStatus('idle'); }
+    try { await window.settings.removeApiKey(); setGeminiDraft(''); setApiKeyHint(''); setHasExistingKey(false); setGeminiStatus('idle'); }
     catch { setError('Failed to remove API key'); }
     finally { setIsLoading(false); }
-  }, []);
+  }, [setGeminiDraft, setGeminiStatus, setError]);
 
+  const { setDraft: setAzureDraft, setStatus: setAzureKeyStatus, setError: setAzureKeyError } = azureKey;
+  const handleRemoveAzureKey = useCallback(async () => {
+    const r = await window.settings?.clearAzureKey?.().catch(() => ({ success: false }));
+    if (r?.success) { setHasAzureKey(false); setAzureDraft(''); setAzureKeyStatus('idle'); setAzureTestStatus('idle'); }
+    else { setAzureKeyStatus('error'); setAzureKeyError('Failed to remove the key'); }
+  }, [setAzureDraft, setAzureKeyStatus, setAzureKeyError]);
+
+  const { setDraft: setAnthropicDraft, setStatus: setAnthropicKeyStatus, setError: setAnthropicKeyError } = anthropicKey;
+  const handleRemoveAnthropicKey = useCallback(async () => {
+    const r = await window.settings?.clearAnthropicKey?.().catch(() => ({ success: false }));
+    if (r?.success) { setHasAnthropicKey(false); setAnthropicDraft(''); setAnthropicKeyStatus('idle'); }
+    else { setAnthropicKeyStatus('error'); setAnthropicKeyError('Failed to remove the key'); }
+  }, [setAnthropicDraft, setAnthropicKeyStatus, setAnthropicKeyError]);
 
   const handlePreferredProviderChange = useCallback(async (value: PreferredChatProvider) => {
     setPreferredChatProviderState(value);
@@ -571,7 +669,7 @@ const AIModelsTab = memo(function AIModelsTab() {
     } catch { /* ignore */ }
   }, []);
 
-  const effectivePreferred = availableProviders.includes(preferredChatProvider)
+  const effectivePreferred: PreferredChatProvider = (availableProviders as readonly string[]).includes(preferredChatProvider)
     ? preferredChatProvider
     : (availableProviders[0] ?? 'ollama');
 
@@ -583,12 +681,11 @@ const AIModelsTab = memo(function AIModelsTab() {
     }
   }, [effectivePreferred, preferredChatProvider, availableProviders.length]);
 
+  // Runs in main with the stored key, so the key never has to be readable here.
   const testAzureConnection = useCallback(async () => {
-    const endpoint = azureEndpoint.trim().replace(/\/+$/, '');
-    const key = azureKey.trim();
+    const endpoint = azureEndpoint.trim();
     const deployment = azureDeployment.trim();
-    const apiVersion = azureApiVersion.trim() || '2024-12-01-preview';
-    if (!endpoint || !key || !deployment) {
+    if (!endpoint || !hasAzureKey || !deployment || !window.settings?.testAzureConnection) {
       setAzureTestStatus('error');
       setAzureTestMessage('Endpoint, API key, and deployment name are required.');
       return;
@@ -596,33 +693,14 @@ const AIModelsTab = memo(function AIModelsTab() {
     setAzureTestStatus('testing');
     setAzureTestMessage('');
     try {
-      const url = `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'api-key': key,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: [
-            { role: 'user', content: 'Hi' },
-          ],
-          max_completion_tokens: 20,
-        }),
-      });
-      if (res.ok) {
-        setAzureTestStatus('success');
-        setAzureTestMessage('Connection successful. Azure OpenAI is reachable.');
-      } else {
-        const body = await res.text();
-        setAzureTestStatus('error');
-        setAzureTestMessage(body || `HTTP ${res.status} ${res.statusText}`);
-      }
+      const r = await window.settings.testAzureConnection({ endpoint, deployment, apiVersion: azureApiVersion.trim() });
+      setAzureTestStatus(r.ok ? 'success' : 'error');
+      setAzureTestMessage(r.message);
     } catch (err) {
       setAzureTestStatus('error');
       setAzureTestMessage(err instanceof Error ? err.message : 'Network or request failed.');
     }
-  }, [azureEndpoint, azureKey, azureDeployment, azureApiVersion]);
+  }, [azureEndpoint, hasAzureKey, azureDeployment, azureApiVersion]);
 
   return (
     <div className="space-y-6">
@@ -662,8 +740,11 @@ const AIModelsTab = memo(function AIModelsTab() {
         <div>
           <label className="text-xs text-white/40 mb-1 block">Ollama address</label>
           <Input type="text" value={ollamaUrl} onChange={(e) => setOllamaUrl(e.target.value)} placeholder="http://localhost:11434"
-            className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
-          <p className="text-[11px] text-white/25 mt-1">Leave as is unless you run Ollama on another machine.</p>
+            aria-invalid={!ollamaUrlValid}
+            className={cn('bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]', !ollamaUrlValid && 'border-red-400/40 focus:border-red-400/60')} />
+          {ollamaUrlValid
+            ? <p className="text-[11px] text-white/25 mt-1">Leave as is unless you run Ollama on another machine.</p>
+            : <p className="text-[11px] text-red-400/70 mt-1">Enter a full address starting with http:// or https://, for example http://localhost:11434. Your other changes still save.</p>}
         </div>
         <div>
           <label className="text-xs text-white/40 mb-1 block">Chat model</label>
@@ -742,7 +823,7 @@ const AIModelsTab = memo(function AIModelsTab() {
             </p>
             <p className="text-[10px] text-white/20 mt-0.5">Technical: cross-encoder rerank of Embedding Space neighbors.</p>
           </div>
-          <Toggle value={neighborRerankEnabled} onChange={() => setNeighborRerankEnabled(!neighborRerankEnabled)} />
+          <Toggle value={neighborRerankEnabled} onChange={() => setNeighborRerankEnabled(!neighborRerankEnabled)} label="Rerank similar games" />
         </div>
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -908,9 +989,7 @@ const AIModelsTab = memo(function AIModelsTab() {
               setAnnRebuildStatus('building');
               setAnnRebuildMessage(null);
               setAnnRebuildProgress({ done: 0, total: 1 });
-              const unsub = annIndex.subscribe(() => {
-                setAnnRebuildProgress({ ...annIndex.buildProgress });
-              });
+              // Progress comes from the mount-level annIndex subscription.
               try {
                 const count = await embeddingService.rebuildAnnFromCache();
                 setAnnRebuildStatus('done');
@@ -924,7 +1003,6 @@ const AIModelsTab = memo(function AIModelsTab() {
                 setAnnRebuildMessage(`Rebuild failed: ${detail}`);
                 console.warn('[Settings] ANN rebuild failed:', err);
               } finally {
-                unsub();
                 setAnnRebuildProgress(null);
               }
             }}
@@ -981,12 +1059,7 @@ const AIModelsTab = memo(function AIModelsTab() {
               onClick={async () => {
                 setRechunkBusy(true);
                 setRechunkMessage(null);
-                const unsub = embeddingService.subscribe(() => {
-                  setRechunkBusy(embeddingService.isRechunkRunning);
-                  setRechunkMessage(embeddingService.rechunkMessage);
-                  setRechunkProgress({ ...embeddingService.rechunkProgress });
-                  setRechunkSuggestAnn(embeddingService.rechunkSuggestRebuildAnn);
-                });
+                // Progress comes from the mount-level embeddingService subscription.
                 try {
                   const deps = await buildRechunkJobDeps();
                   // Resume watermark unless prior job finished (service restarts when phase=done).
@@ -994,7 +1067,6 @@ const AIModelsTab = memo(function AIModelsTab() {
                 } catch (err) {
                   console.warn('[Settings] Re-chunk failed:', err);
                 } finally {
-                  unsub();
                   setRechunkBusy(embeddingService.isRechunkRunning);
                   setRechunkMessage(embeddingService.rechunkMessage);
                   setRechunkSuggestAnn(embeddingService.rechunkSuggestRebuildAnn);
@@ -1072,11 +1144,7 @@ const AIModelsTab = memo(function AIModelsTab() {
             setForceReindexStatus('running');
             setForceReindexMessage(null);
             setForceReindexProgress({ completed: 0, total: 0 });
-
-            const unsub = embeddingService.subscribe(() => {
-              setForceReindexProgress({ ...embeddingService.catalogProgress });
-            });
-
+            // Progress comes from the mount-level embeddingService subscription.
             try {
               // Single service-level operation: cancels background passes + the
               // re-chunk job, waits out any ANN backfill/rebuild, then runs both
@@ -1107,14 +1175,14 @@ const AIModelsTab = memo(function AIModelsTab() {
               setForceReindexMessage(`Re-index failed: ${detail}`);
               console.warn('[Settings] Force re-index failed:', err);
             } finally {
-              unsub();
               setForceReindexProgress(null);
             }
           }}
         />
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex items-center gap-2 text-xs" role="status">
           {ollamaSaveStatus === 'saving' && <><Loader2 className="h-3 w-3 animate-spin text-white/40" /><span className="text-white/40">Saving...</span></>}
           {ollamaSaveStatus === 'saved' && <><Check className="h-3 w-3 text-emerald-400/60" /><span className="text-white/40">Saved</span></>}
+          {ollamaSaveStatus === 'error' && <><AlertCircle className="h-3 w-3 text-red-400/70" /><span className="text-red-400/70">{ollamaSaveError}</span></>}
           {ollamaSaveStatus === 'idle' && <span className="text-white/25">Changes save automatically</span>}
         </div>
       </SectionCard>
@@ -1128,15 +1196,10 @@ const AIModelsTab = memo(function AIModelsTab() {
           <p className="text-sm font-medium text-white/90">Google Gemini</p>
           <p className="text-xs text-white/35 mt-0.5">Cloud AI with tools and search. Add your API key and select it above as the chat model.</p>
         </div>
-        <GeminiKeyInput value={apiKey} onChange={setApiKey} hasExistingKey={hasExistingKey} hint={apiKeyHint} disabled={isLoading} />
+        <GeminiKeyInput value={gemini.draft} onChange={gemini.setDraft} hasExistingKey={hasExistingKey} hint={apiKeyHint} disabled={isLoading} />
         {error && <div className="flex items-center gap-2 text-red-400/70 text-xs"><AlertCircle className="h-3 w-3" />{error}</div>}
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-xs">
-            {saveStatus === 'saving' && <><Loader2 className="h-3 w-3 animate-spin text-white/40" /><span className="text-white/40">Saving...</span></>}
-            {saveStatus === 'saved' && <><Check className="h-3 w-3 text-emerald-400/60" /><span className="text-white/40">Saved</span></>}
-            {saveStatus === 'idle' && hasExistingKey && <><Check className="h-3 w-3 text-white/30" /><span className="text-white/30">Key configured</span></>}
-            {saveStatus === 'idle' && !hasExistingKey && <span className="text-white/25">Changes save automatically</span>}
-          </div>
+          <KeySaveStatusLine status={saveStatus} hasKey={hasExistingKey} />
           {hasExistingKey && (
             <Button variant="ghost" size="sm" onClick={handleRemoveApiKey} disabled={isLoading} className="h-7 text-white/30 hover:text-red-400/70 hover:bg-red-500/10">
               <Trash2 className="h-3 w-3 mr-1" /> Remove
@@ -1158,9 +1221,19 @@ const AIModelsTab = memo(function AIModelsTab() {
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
         </div>
         <div>
-          <label className="text-xs text-white/40 mb-1 block">API Key</label>
-          <Input type="password" value={azureKey} onChange={(e) => setAzureKey(e.target.value)} placeholder="Your Azure OpenAI API key"
+          <label htmlFor="azure-api-key" className="text-xs text-white/40 mb-1 block">API Key</label>
+          <Input id="azure-api-key" type="password" value={azureKey.draft} onChange={(e) => azureKey.setDraft(e.target.value)} autoComplete="off" spellCheck={false}
+            placeholder={hasAzureKey ? KEY_SAVED_PLACEHOLDER : 'Your Azure OpenAI API key'}
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
+          {azureKey.error && <div className="flex items-center gap-2 text-red-400/70 text-xs mt-1"><AlertCircle className="h-3 w-3" />{azureKey.error}</div>}
+          <div className="flex items-center justify-between mt-1">
+            <KeySaveStatusLine status={azureKey.status} hasKey={hasAzureKey} />
+            {hasAzureKey && (
+              <Button variant="ghost" size="sm" onClick={handleRemoveAzureKey} className="h-7 text-white/30 hover:text-red-400/70 hover:bg-red-500/10">
+                <Trash2 className="h-3 w-3 mr-1" /> Remove
+              </Button>
+            )}
+          </div>
         </div>
         <div>
           <label className="text-xs text-white/40 mb-1 block">Deployment Name</label>
@@ -1173,7 +1246,8 @@ const AIModelsTab = memo(function AIModelsTab() {
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Button type="button" variant="outline" size="sm" onClick={testAzureConnection} disabled={azureTestStatus === 'testing' || !azureEndpoint.trim() || !azureKey.trim() || !azureDeployment.trim()}
+          <Button type="button" variant="outline" size="sm" onClick={testAzureConnection}
+            disabled={azureTestStatus === 'testing' || azureKey.status === 'saving' || !azureEndpoint.trim() || !hasAzureKey || !azureDeployment.trim()}
             className="border-white/10 text-white/70 hover:bg-white/5 hover:text-white/90">
             {azureTestStatus === 'testing' ? <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> Testing…</> : <>Test connection</>}
           </Button>
@@ -1183,17 +1257,30 @@ const AIModelsTab = memo(function AIModelsTab() {
         <p className="text-xs text-white/25">Configure your Azure OpenAI resource in the <a href="https://portal.azure.com/" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Azure Portal</a>.</p>
       </SectionCard>
 
-      {/* Anthropic */}
+      {/* Anthropic: key stored encrypted in main; chat through it arrives with the AI router */}
       <SectionHeading icon={MessageCircle}>Anthropic (Claude)</SectionHeading>
       <SectionCard>
         <div>
           <p className="text-sm font-medium text-white/90">Anthropic Claude</p>
           <p className="text-xs text-white/35 mt-0.5">Use Claude models from Anthropic for nuanced, safety-focused AI responses.</p>
         </div>
+        {!isImplementedChatProvider('anthropic') && (
+          <p className="text-xs text-amber-300/70">Chat through Anthropic is not available in this build yet, so it is not offered as a chat provider. A key you save here is kept for when it is.</p>
+        )}
         <div>
-          <label className="text-xs text-white/40 mb-1 block">API Key</label>
-          <Input type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)} placeholder="sk-ant-..."
+          <label htmlFor="anthropic-api-key" className="text-xs text-white/40 mb-1 block">API Key</label>
+          <Input id="anthropic-api-key" type="password" value={anthropicKey.draft} onChange={(e) => anthropicKey.setDraft(e.target.value)} autoComplete="off" spellCheck={false}
+            placeholder={hasAnthropicKey ? KEY_SAVED_PLACEHOLDER : 'sk-ant-...'}
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
+          {anthropicKey.error && <div className="flex items-center gap-2 text-red-400/70 text-xs mt-1"><AlertCircle className="h-3 w-3" />{anthropicKey.error}</div>}
+          <div className="flex items-center justify-between mt-1">
+            <KeySaveStatusLine status={anthropicKey.status} hasKey={hasAnthropicKey} />
+            {hasAnthropicKey && (
+              <Button variant="ghost" size="sm" onClick={handleRemoveAnthropicKey} className="h-7 text-white/30 hover:text-red-400/70 hover:bg-red-500/10">
+                <Trash2 className="h-3 w-3 mr-1" /> Remove
+              </Button>
+            )}
+          </div>
         </div>
         <div>
           <label className="text-xs text-white/40 mb-1 block">Model</label>
@@ -1217,7 +1304,7 @@ const AIModelsTab = memo(function AIModelsTab() {
               <li>• <strong className="text-white/40">Anthropic Claude</strong> — Advanced reasoning and nuanced responses with safety focus.</li>
             </>
           )}
-          <li>• All API keys are stored securely and encrypted on your device.</li>
+          <li>• {API_KEY_STORAGE_NOTE}</li>
         </ul>
       </div>
     </div>

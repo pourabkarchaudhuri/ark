@@ -9,9 +9,12 @@ import { useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 
+/** Placeholder for a saved cloud key (Gemini, Azure OpenAI, Anthropic) the field never shows. */
+export const KEY_SAVED_PLACEHOLDER = 'Key saved - paste a new one to replace it';
+
 export function geminiKeyPlaceholder(hasExistingKey: boolean, hint: string): string {
   if (!hasExistingKey) return 'Enter your Google AI API key...';
-  return hint ? `Key saved (${hint}) — paste a new one to replace it` : 'Key saved — paste a new one to replace it';
+  return hint ? `Key saved (${hint}) - paste a new one to replace it` : KEY_SAVED_PLACEHOLDER;
 }
 
 export function GeminiKeyInput({

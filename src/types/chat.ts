@@ -129,9 +129,11 @@ export interface SendMessagePayload {
   }>;
   /** Selected LLM provider; backend uses this when implemented */
   provider?: ChatProviderId;
-  /** Required when provider is 'azure-openai'; sent from renderer (Settings store in localStorage) */
+  /**
+   * Required when provider is 'azure-openai'; sent from renderer (Settings store in localStorage).
+   * The API key is not sent: main reads it from its encrypted store (1.0.97).
+   */
   azureEndpoint?: string;
-  azureKey?: string;
   azureDeployment?: string;
   /** Optional API version (e.g. 2025-04-01-preview). From Settings > Azure OpenAI. */
   azureApiVersion?: string;

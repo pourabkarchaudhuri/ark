@@ -9,13 +9,37 @@ import { logger } from '../safe-logger.js';
 import { processMessage, searchGamesForContext, chatStore, type ChatProviderOptions } from '../ai-chat.js';
 import { settingsStore } from '../settings-store.js';
 
+/**
+ * Azure OpenAI options for one chat request. The key is read from the encrypted store
+ * in main (1.0.97); a key in the renderer payload is ignored.
+ */
+export function buildAzureProviderOptions(
+  payload: { azureEndpoint?: unknown; azureDeployment?: unknown; azureApiVersion?: unknown } | null | undefined,
+  preferredProvider: string,
+  storedKey: string | null,
+): ChatProviderOptions | undefined {
+  if (preferredProvider !== 'azure-openai' || !storedKey) return undefined;
+  const endpoint = typeof payload?.azureEndpoint === 'string' ? payload.azureEndpoint.trim() : '';
+  const deployment = typeof payload?.azureDeployment === 'string' ? payload.azureDeployment.trim() : '';
+  const apiVersion = typeof payload?.azureApiVersion === 'string' ? payload.azureApiVersion.trim() : '';
+  if (!endpoint || !deployment) return undefined;
+  return {
+    azure: {
+      endpoint,
+      apiKey: storedKey.trim(),
+      deployment,
+      ...(apiVersion ? { apiVersion } : {}),
+    },
+  };
+}
+
 export function register(): void {
   /**
    * Send a message to the AI chat
    * Supports streaming responses via 'ai:streamChunk' event
    */
   ipcMain.handle('ai:sendMessage', async (event: any, payload: any) => {
-    const { message, gameContext, libraryData, azureEndpoint, azureKey, azureDeployment, azureApiVersion, imageAttachment, ggRegion } = payload || {};
+    const { message, gameContext, libraryData, imageAttachment, ggRegion } = payload || {};
     try {
       const MAX_MSG_LEN = 4000;
       if (typeof message !== 'string' || message.length > MAX_MSG_LEN) {
@@ -28,17 +52,11 @@ export function register(): void {
         : undefined;
 
       const preferredProvider = settingsStore.getPreferredChatProvider();
-      let providerOptions: ChatProviderOptions | undefined;
-      if (preferredProvider === 'azure-openai' && azureEndpoint && azureKey && azureDeployment) {
-        providerOptions = {
-          azure: {
-            endpoint: String(azureEndpoint).trim(),
-            apiKey: String(azureKey).trim(),
-            deployment: String(azureDeployment).trim(),
-            ...(azureApiVersion?.trim() ? { apiVersion: String(azureApiVersion).trim() } : {}),
-          },
-        };
-      }
+      const providerOptions = buildAzureProviderOptions(
+        payload,
+        preferredProvider,
+        preferredProvider === 'azure-openai' ? settingsStore.getAzureOpenAIKey() : null,
+      );
 
       const safeImageAttachment =
         preferredProvider === 'azure-openai' &&
