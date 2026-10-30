@@ -28,11 +28,14 @@ export interface SynthMeta {
 /** Below this much metadata a synthesised score is noise (measured: tags alone do not correlate). */
 export const MIN_SYNTH_TAGS = 2;
 
-const ALIASES: Record<string, string> = {
+/** Store tag name → model vocabulary name. Every target must be a tag_mapping.json entry (pinned by a test). */
+export const ALIASES: Readonly<Record<string, string>> = {
   'role-playing': 'rpg',
   'role playing': 'rpg',
   'role-playing game': 'rpg',
-  'massively multiplayer': 'mmo',
+  // The vocabulary has 'massively multiplayer', not 'mmo' — mapping the other way dropped the tag.
+  'mmo': 'massively multiplayer',
+  'mmorpg': 'massively multiplayer',
   'first person': 'first-person',
   'third-person': 'third person',
   'science fiction': 'sci-fi',

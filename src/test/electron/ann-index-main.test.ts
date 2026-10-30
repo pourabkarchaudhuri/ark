@@ -29,6 +29,8 @@ import {
   getStatus,
   loadIndex,
   query,
+  queryBatch,
+  QUERY_SLICE,
   saveIndex,
   setAnnModelTag,
 } from '../../../electron/ann-index';
@@ -51,13 +53,31 @@ class FakeIndex {
   contains(key: bigint) { return this.vectors.has(key); }
   size() { return this.vectors.size; }
   dimensions() { return this.dims; }
-  search(vec: Float32Array, k: number) {
-    const scored = [...this.vectors.entries()].map(([key, v]) => {
+  static searchCalls: number[] = [];
+  private searchOne(vec: Float32Array, k: number) {
+    return [...this.vectors.entries()].map(([key, v]) => {
       let dot = 0;
       for (let i = 0; i < v.length; i++) dot += v[i] * vec[i];
       return { key, distance: 1 - dot };
-    }).sort((a, b) => a.distance - b.distance).slice(0, k);
-    return { keys: scored.map((s) => s.key), distances: scored.map((s) => s.distance) };
+    }).sort((a, b) => a.distance - b.distance || Number(a.key - b.key)).slice(0, k);
+  }
+  /** Mirrors usearch: one vector → Matches; a flat matrix → BatchMatches padded to `k` per row. */
+  search(vecs: Float32Array, k: number) {
+    const rows = vecs.length / this.dims;
+    FakeIndex.searchCalls.push(rows);
+    if (rows === 1) {
+      const scored = this.searchOne(vecs, k);
+      return { keys: scored.map((s) => s.key), distances: scored.map((s) => s.distance) };
+    }
+    const keys = new BigUint64Array(rows * k).fill(0xffffffffffffffffn);
+    const distances = new Float32Array(rows * k).fill(Number.POSITIVE_INFINITY);
+    const counts = new BigUint64Array(rows);
+    for (let r = 0; r < rows; r++) {
+      const scored = this.searchOne(vecs.subarray(r * this.dims, (r + 1) * this.dims), k);
+      scored.forEach((s, j) => { keys[r * k + j] = s.key; distances[r * k + j] = s.distance; });
+      counts[r] = BigInt(scored.length);
+    }
+    return { keys, distances, counts };
   }
   save(p: string) {
     fs.writeFileSync(p, JSON.stringify([...this.vectors.keys()].map(String)));
@@ -82,6 +102,7 @@ beforeEach(() => {
   FakeIndex.created = 0;
   FakeIndex.failAdd = null;
   FakeIndex.loadThrows = false;
+  FakeIndex.searchCalls = [];
   __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
 });
 
@@ -168,16 +189,16 @@ describe('loadIndex', () => {
   it('is a no-op while an index is already in memory (renderer reload never stacks a second copy)', async () => {
     await persistTwo();
     const before = FakeIndex.created;
-    expect(loadIndex()).toBe(true);
-    expect(loadIndex()).toBe(true);
+    expect(await loadIndex()).toBe(true);
+    expect(await loadIndex()).toBe(true);
     expect(FakeIndex.created).toBe(before);
 
     // Fresh main state → loads from disk exactly once.
     __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
-    expect(loadIndex()).toBe(true);
+    expect(await loadIndex()).toBe(true);
     expect(FakeIndex.created).toBe(before + 1);
     expect(getStatus()).toMatchObject({ ready: true, vectorCount: 2, partial: false });
-    expect(loadIndex()).toBe(true);
+    expect(await loadIndex()).toBe(true);
     expect(FakeIndex.created).toBe(before + 1);
   });
 
@@ -185,7 +206,7 @@ describe('loadIndex', () => {
     await persistTwo();
     __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
     FakeIndex.loadThrows = true;
-    expect(loadIndex()).toBe(false);
+    expect(await loadIndex()).toBe(false);
     expect(getStatus().ready).toBe(false);
     expect(fs.existsSync(path.join(dir, 'ann-hnsw.usearch'))).toBe(false);
     expect(fs.existsSync(path.join(dir, 'ann-hnsw.usearch.corrupt'))).toBe(true);
@@ -201,7 +222,7 @@ describe('loadIndex', () => {
     fs.writeFileSync(metaPath, JSON.stringify(meta));
 
     __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
-    expect(loadIndex()).toBe(false);
+    expect(await loadIndex()).toBe(false);
     expect(getStatus()).toMatchObject({ ready: false, partial: true });
     expect(fs.existsSync(path.join(dir, 'ann-hnsw-meta.json.corrupt'))).toBe(true);
   });
@@ -240,7 +261,7 @@ describe('layout generation + model tag stamp (re-embed foundation)', () => {
     rewriteMeta(m => { m.layoutGeneration = ANN_LAYOUT_GENERATION + 1; });
     __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
     const created = FakeIndex.created;
-    expect(loadIndex()).toBe(false);
+    expect(await loadIndex()).toBe(false);
     expect(FakeIndex.created).toBe(created); // the (multi-GB) native index was not even opened
     expect(getStatus()).toMatchObject({ ready: false, partial: true });
     expect(fs.existsSync(indexPath())).toBe(false);
@@ -252,7 +273,7 @@ describe('layout generation + model tag stamp (re-embed foundation)', () => {
     await persistTwo();
     __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
     setAnnModelTag('snowflake-arctic-embed2:latest');
-    expect(loadIndex()).toBe(true);
+    expect(await loadIndex()).toBe(true);
     expect(fs.existsSync(indexPath())).toBe(true);
   });
 
@@ -268,7 +289,7 @@ describe('layout generation + model tag stamp (re-embed foundation)', () => {
     rewriteMeta(m => { delete m.layoutGeneration; delete m.modelTag; });
     __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
     setAnnModelTag('snowflake-arctic-embed2');
-    expect(loadIndex()).toBe(true);
+    expect(await loadIndex()).toBe(true);
     expect(getStatus().ready).toBe(true);
     await addVectors([{ id: 'steam-3', vector: unit(3) }]);
     expect(saveIndex({ complete: true, force: true })).toBe(true);
@@ -281,6 +302,113 @@ describe('layout generation + model tag stamp (re-embed foundation)', () => {
     await persistTwo();
     __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
     setAnnModelTag('');
-    expect(loadIndex()).toBe(true);
+    expect(await loadIndex()).toBe(true);
+  });
+});
+
+describe('queryBatch — batched native search instead of a per-vector loop (1.0.97)', () => {
+  /** Mixed vectors so every query has a distinct, deterministic neighbour order. */
+  function mixed(i: number): number[] {
+    const v = new Array(DIMS).fill(0);
+    v[i % DIMS] = 1;
+    v[(i * 7 + 3) % DIMS] += 0.5;
+    v[(i * 13 + 5) % DIMS] += 0.25;
+    return v;
+  }
+
+  async function seed(n: number): Promise<void> {
+    await addVectors(Array.from({ length: n }, (_, i) => ({ id: `g${i}`, vector: mixed(i) })));
+  }
+
+  it('returns the same neighbours as one query() per vector, minus the source id', async () => {
+    await seed(80);
+    const entries = Array.from({ length: 70 }, (_, i) => ({ id: `g${i}`, vector: mixed(i) }));
+    const batched = await queryBatch(entries, 5);
+    for (const e of entries) {
+      const single = query(e.vector, 6).filter((r) => r.id !== e.id);
+      expect(batched[e.id].map((r) => r.id)).toEqual(single.map((r) => r.id));
+      batched[e.id].forEach((r, j) => expect(r.distance).toBeCloseTo(single[j].distance, 6));
+    }
+  });
+
+  it('searches QUERY_SLICE vectors per native call instead of one call per vector', async () => {
+    await seed(40);
+    FakeIndex.searchCalls = [];
+    const entries = Array.from({ length: 200 }, (_, i) => ({ id: `q${i}`, vector: mixed(i) }));
+    await queryBatch(entries, 3);
+    expect(FakeIndex.searchCalls.length).toBe(Math.ceil(200 / QUERY_SLICE));
+    expect(Math.max(...FakeIndex.searchCalls)).toBeLessThanOrEqual(QUERY_SLICE);
+  });
+
+  it('filters padding (sentinel keys / non-finite distances) and vacated slots', async () => {
+    await seed(3);
+    // Vacate g1's slot: the id map keeps 3 slots but only 2 vectors hold live ids.
+    FakeIndex.failAdd = (key) => key === 1n;
+    await addVectors([{ id: 'g1', vector: mixed(1) }]);
+    FakeIndex.failAdd = null;
+    const out = await queryBatch([{ id: 'g0', vector: mixed(0) }, { id: 'g2', vector: mixed(2) }], 5);
+    expect(out.g0.map((r) => r.id)).toEqual(['g2']);
+    expect(out.g2.map((r) => r.id)).toEqual(['g0']);
+    for (const rows of Object.values(out)) for (const r of rows) expect(Number.isFinite(r.distance)).toBe(true);
+  });
+
+  it('yields to the event loop between slices of a 200-vector batch', async () => {
+    await seed(40);
+    let ticks = 0;
+    let running = true;
+    const spin = () => { if (!running) return; ticks++; setImmediate(spin); };
+    setImmediate(spin);
+    const entries = Array.from({ length: 200 }, (_, i) => ({ id: `q${i}`, vector: mixed(i) }));
+    await queryBatch(entries, 3);
+    running = false;
+    expect(ticks).toBeGreaterThanOrEqual(Math.ceil(200 / QUERY_SLICE) - 2);
+  });
+
+  it('returns {} when the index is cleared while the batch is yielding', async () => {
+    await seed(40);
+    const entries = Array.from({ length: 200 }, (_, i) => ({ id: `q${i}`, vector: mixed(i) }));
+    const p = queryBatch(entries, 3);
+    clearIndex();
+    expect(await p).toEqual({});
+  });
+});
+
+describe('loadIndex — async id map read (1.0.97)', () => {
+  async function persistTwo(): Promise<void> {
+    await addVectors([{ id: 'steam-1', vector: unit(1) }, { id: 'steam-2', vector: unit(2) }]);
+    expect(saveIndex({ complete: true })).toBe(true);
+  }
+
+  it('reads the id map with fs.promises.readFile and returns a promise', async () => {
+    await persistTwo();
+    __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
+    const asyncRead = vi.spyOn(fs.promises, 'readFile');
+    try {
+      const pending = loadIndex();
+      expect(pending).toBeInstanceOf(Promise);
+      expect(await pending).toBe(true);
+      const metaPath = path.join(dir, 'ann-hnsw-meta.json');
+      expect(asyncRead.mock.calls.some((c) => String(c[0]) === metaPath)).toBe(true);
+    } finally {
+      asyncRead.mockRestore();
+    }
+  });
+
+  it('concurrent loads share one native load', async () => {
+    await persistTwo();
+    __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
+    const before = FakeIndex.created;
+    const [a, b] = await Promise.all([loadIndex(), loadIndex()]);
+    expect([a, b]).toEqual([true, true]);
+    expect(FakeIndex.created).toBe(before + 1);
+  });
+
+  it('a clear while the id map is being read leaves the index unloaded', async () => {
+    await persistTwo();
+    __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
+    const pending = loadIndex();
+    clearIndex();
+    expect(await pending).toBe(false);
+    expect(getStatus().ready).toBe(false);
   });
 });

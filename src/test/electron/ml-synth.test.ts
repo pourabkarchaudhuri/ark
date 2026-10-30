@@ -3,7 +3,9 @@
  * Kaggle set, with strict minimums, validated IPC input, and lower weight in scoring.
  */
 import { describe, it, expect } from 'vitest';
-import { buildSyntheticProfile, buildTagIndex, normalizeTagName, parseSynthMeta, MIN_SYNTH_TAGS } from '../../../electron/ml-synth';
+import fs from 'node:fs';
+import path from 'node:path';
+import { ALIASES, buildSyntheticProfile, buildTagIndex, normalizeTagName, parseSynthMeta, MIN_SYNTH_TAGS } from '../../../electron/ml-synth';
 import { FIXTURE_NOW, candidatePool, multiTasteLibrary } from '../oracle/fixtures';
 import { baseWorkerInput, runWorkerPipeline } from '../oracle/pipeline-harness';
 
@@ -36,6 +38,31 @@ describe('buildSyntheticProfile', () => {
   it('normalises aliases', () => {
     expect(normalizeTagName('  Single-Player ')).toBe('singleplayer');
     expect(normalizeTagName('Co-Operative')).toBe('co-op');
+  });
+});
+
+// dataset/ is gitignored (built locally). A worktree under .claude/worktrees reads the main checkout's copy.
+const ROOT = path.resolve(__dirname, '../../..');
+const TAG_MAPPING = [ROOT, path.resolve(ROOT, '../../..')]
+  .map(r => path.join(r, 'dataset/ml/tag_mapping.json'))
+  .find(p => fs.existsSync(p));
+
+describe('ALIASES (1.0.97: MMO tag reached the model as an unknown tag)', () => {
+  it("'Massively Multiplayer', 'MMO' and 'MMORPG' all resolve to the vocabulary's 'massively multiplayer'", () => {
+    const idx = buildTagIndex(['action', 'massively multiplayer']);
+    for (const name of ['Massively Multiplayer', 'MMO', 'mmorpg']) {
+      expect(idx.get(normalizeTagName(name))).toBe(1);
+    }
+    expect(Object.values(ALIASES)).not.toContain('mmo');
+    expect(buildSyntheticProfile({ positivity: 0.8, tags: ['Action', 'Massively Multiplayer'] }, idx)!.tags).toEqual([0, 1]);
+  });
+
+  it.skipIf(!TAG_MAPPING)('every alias target is a tag in the bundled tag_mapping.json', () => {
+    const vocab = buildTagIndex(JSON.parse(fs.readFileSync(TAG_MAPPING!, 'utf-8')) as string[]);
+    const missing = [...new Set(Object.values(ALIASES))].filter(t => !vocab.has(t));
+    expect(missing).toEqual([]);
+    expect(vocab.has(normalizeTagName('Massively Multiplayer'))).toBe(true);
+    expect(vocab.has(normalizeTagName('MMO'))).toBe(true);
   });
 });
 

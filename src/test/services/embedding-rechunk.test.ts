@@ -17,6 +17,8 @@ import {
   gamesAfterCursor,
   rechunkBlockedReason,
   rechunkProgressPercent,
+  createRechunkAnnSaver,
+  RECHUNK_ANN_SAVE_INTERVAL_MS,
   type RechunkWatermark,
 } from '@/services/embedding-rechunk';
 
@@ -155,5 +157,46 @@ describe('rechunkProgressPercent', () => {
     expect(rechunkProgressPercent(0, 0)).toBe(0);
     expect(rechunkProgressPercent(50, 100)).toBe(50);
     expect(rechunkProgressPercent(150, 100)).toBe(100);
+  });
+});
+
+describe('re-chunk ANN saves (1.0.97: whole-index re-serialisation no longer once a minute)', () => {
+  function harness() {
+    let t = 1_000_000;
+    const saves: number[] = [];
+    const saver = createRechunkAnnSaver({ save: async () => { saves.push(t); }, now: () => t });
+    return { saver, saves, advance: (ms: number) => { t += ms; } };
+  }
+
+  it('throttles periodic saves to at least 10 minutes', () => {
+    expect(RECHUNK_ANN_SAVE_INTERVAL_MS).toBeGreaterThanOrEqual(10 * 60_000);
+  });
+
+  it('a success inside the interval does not save; one after it does', async () => {
+    const { saver, saves, advance } = harness();
+    saver.noteSuccess();
+    advance(60_000);
+    await saver.maybeSave();
+    expect(saves).toHaveLength(0);
+    advance(RECHUNK_ANN_SAVE_INTERVAL_MS);
+    await saver.maybeSave();
+    expect(saves).toHaveLength(1);
+  });
+
+  it('end-of-phase saves are still forced, but only when something was added', async () => {
+    const { saver, saves } = harness();
+    await saver.maybeSave(true);
+    expect(saves).toHaveLength(0);
+    saver.noteSuccess();
+    await saver.maybeSave(true);
+    expect(saves).toHaveLength(1);
+    await saver.maybeSave(true);
+    expect(saves).toHaveLength(1);
+  });
+
+  it('a failing save is non-fatal', async () => {
+    const saver = createRechunkAnnSaver({ save: async () => { throw new Error('ipc gone'); } });
+    saver.noteSuccess();
+    await expect(saver.maybeSave(true)).resolves.toBeUndefined();
   });
 });

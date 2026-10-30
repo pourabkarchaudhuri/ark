@@ -18,7 +18,7 @@ const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
-import { getLevelStore } from '../storage/level-store.js';
+import { getLevelStore, STORE_BATCH_MAX_OPS } from '../storage/level-store.js';
 import { UpcomingSelector } from '../../src/lib/upcoming-select.js';
 
 // ---------------------------------------------------------------------------
@@ -224,6 +224,9 @@ export function register(): void {
       if (!Array.isArray(ops)) {
         return { error: 'ops must be an array' };
       }
+      if (ops.length > STORE_BATCH_MAX_OPS) {
+        return { error: `batch is capped at ${STORE_BATCH_MAX_OPS} ops per call` };
+      }
       await store.batch(ops as any);
       return { ok: true };
     } catch (err) {
@@ -238,6 +241,18 @@ export function register(): void {
       return { value: await store.has(namespace) };
     } catch (err) {
       logger.error('[Store IPC] store:has failed:', err);
+      return toError(err);
+    }
+  });
+
+  // Keys-only row count (1.0.97): never decodes values. { value: number, keys?: string[] }
+  ipcMain.handle('store:count', async (event: any, namespace: string, opts?: { keys?: boolean }) => {
+    if (!checkRateLimit('store:count', senderIdOf(event))) return rateLimited('store:count', senderIdOf(event));
+    try {
+      const res = await store.count(namespace, { keys: opts?.keys === true });
+      return res.keys ? { value: res.count, keys: res.keys } : { value: res.count };
+    } catch (err) {
+      logger.error('[Store IPC] store:count failed:', err);
       return toError(err);
     }
   });

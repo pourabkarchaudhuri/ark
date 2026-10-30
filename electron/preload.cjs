@@ -625,6 +625,21 @@ contextBridge.exposeInMainWorld('eventScraper', {
   clearCache: () => ipcRenderer.invoke('events:clearCache'),
 });
 
+// Main caps store:batch at this many ops (electron/storage/level-store.ts STORE_BATCH_MAX_OPS).
+const STORE_BATCH_MAX_OPS = 5000;
+
+// Larger writes go as sequential slices, stopping at the first error. Every caller's batch is an
+// idempotent put/del diff that is retried whole after an error, so slices that already landed are harmless.
+async function storeBatch(ops) {
+  if (!Array.isArray(ops) || ops.length <= STORE_BATCH_MAX_OPS) return ipcRenderer.invoke('store:batch', ops);
+  let res = { ok: true };
+  for (let i = 0; i < ops.length; i += STORE_BATCH_MAX_OPS) {
+    res = await ipcRenderer.invoke('store:batch', ops.slice(i, i + STORE_BATCH_MAX_OPS));
+    if (!res || res.error) return res;
+  }
+  return res;
+}
+
 // Expose LevelDB-backed persistent store (v1.0.61 foundation).
 // Renderer wrappers (per namespace) are landed in the parallel Migrate phase;
 // the raw surface exposed here is namespace-generic. Every call returns an
@@ -640,8 +655,10 @@ contextBridge.exposeInMainWorld('store', {
   queryUpcoming: (ns, opts) => ipcRenderer.invoke('catalog:queryUpcoming', ns, opts),
   put: (ns, key, value) => ipcRenderer.invoke('store:put', ns, key, value),
   del: (ns, key) => ipcRenderer.invoke('store:del', ns, key),
-  batch: (ops) => ipcRenderer.invoke('store:batch', ops),
+  batch: storeBatch,
   has: (ns) => ipcRenderer.invoke('store:has', ns),
+  // Keys-only row count (1.0.97): { value: number, keys?: string[] } — values are never decoded.
+  count: (ns, opts) => ipcRenderer.invoke('store:count', ns, opts),
   clearNamespace: (ns) => ipcRenderer.invoke('store:clearNamespace', ns),
 });
 

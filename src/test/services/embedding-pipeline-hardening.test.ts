@@ -21,9 +21,9 @@ const MIGRATION_MARKER = 'ark-embeddings-migrated-v1';
 
 type BatchOp = { type: 'put' | 'del'; namespace: string; key: string; value?: unknown };
 
-function installFakeStore() {
+function installFakeStore(opts: { withCount?: boolean } = {}) {
   const db = new Map<string, unknown>();
-  const calls = { batch: 0, put: 0, embedPuts: 0, get: 0, getChunk: 0 };
+  const calls = { batch: 0, put: 0, embedPuts: 0, get: 0, getChunk: 0, count: 0 };
   const batches: BatchOp[][] = [];
 
   const fake = {
@@ -78,6 +78,15 @@ function installFakeStore() {
       for (const k of Array.from(db.keys())) if (k.startsWith(prefix)) db.delete(k);
       return { ok: true };
     },
+    // Keys-only count (1.0.97 store:count); absent unless asked for, like an older preload.
+    ...(opts.withCount ? {
+      count: async (ns: string, o?: { keys?: boolean }) => {
+        calls.count++;
+        const prefix = `${ns}::`;
+        const keys = [...db.keys()].filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length)).sort();
+        return o?.keys ? { value: keys.length, keys } : { value: keys.length };
+      },
+    } : {}),
   };
   Object.defineProperty(window, 'store', { value: fake, writable: true, configurable: true });
   return { db, calls, batches };
@@ -540,5 +549,27 @@ describe('getPooledEmbeddingCount', () => {
     expect(await getPooledEmbeddingCount()).toBe(2);
     expect(calls.getChunk).toBe(scansAfterPass);
     expect(scansAfterFirst).toBeGreaterThan(0);
+  });
+
+  it('counts through the keys-only store:count when the preload has it — no vector row is read (1.0.97)', async () => {
+    const { db, calls } = installFakeStore({ withCount: true });
+    // Rows already on disk before this session: the first count must see them without reading values.
+    db.set('embed-catalog::steam-900', { gameId: 'steam-900' });
+    db.set('embed-catalog::steam-901', { gameId: 'steam-901' });
+    installOllama(embedAll);
+    const { embeddingService, getPooledEmbeddingCount } = await loadService();
+
+    const chunkReadsBefore = calls.getChunk;
+    expect(await getPooledEmbeddingCount()).toBe(2);
+    expect(calls.getChunk).toBe(chunkReadsBefore);
+    expect(calls.count).toBe(2); // one per pooled namespace
+
+    await embeddingService.generateCatalogEmbeddings(iteratorOf([makeCatalogEntry(1), makeCatalogEntry(2)]), {
+      storeKey: 'steam-catalog',
+      lastSyncTimestamp: 0,
+    });
+    expect(await getPooledEmbeddingCount()).toBe(4);
+    expect(await getPooledEmbeddingCount()).toBe(4);
+    expect(calls.count).toBe(2); // seeded key index stays exact across writes
   });
 });

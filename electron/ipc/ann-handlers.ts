@@ -28,7 +28,7 @@ export function register(): void {
 
   ipcMain.handle('ann:load', async () => {
     try {
-      return loadIndex();
+      return await loadIndex();
     } catch (err) {
       logger.error('[ANN IPC] load error:', err);
       return false;
@@ -85,7 +85,7 @@ export function register(): void {
 
   ipcMain.handle('ann:queryBatch', async (_event: any, entries: Array<{ id: string; vector: number[] }>, k: number) => {
     try {
-      return queryBatch(entries, k);
+      return await queryBatch(entries, k);
     } catch (err) {
       logger.error('[ANN IPC] queryBatch error:', err);
       return {};

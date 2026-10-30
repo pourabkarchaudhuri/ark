@@ -274,6 +274,7 @@ interface StoreGetResult<T = unknown> { value?: T | null; error?: string; }
 interface StoreGetAllResult<T = unknown> { rows?: Array<{ key: string; value: T }>; error?: string; }
 interface StoreOkResult { ok?: boolean; error?: string; }
 interface StoreHasResult { value?: boolean; error?: string; }
+interface StoreCountResult { value?: number; keys?: string[]; error?: string; }
 /**
  * Paginated chunk result (v1.0.65+). Callers pass `nextKey` back as
  * `startAfter` on the next `getChunk` call. `done` is true when the
@@ -313,6 +314,8 @@ interface StoreAPI {
   del: (namespace: string, key: string) => Promise<StoreOkResult>;
   batch: (ops: StoreBatchOp[]) => Promise<StoreOkResult>;
   has: (namespace: string) => Promise<StoreHasResult>;
+  /** Keys-only row count; `keys: true` also returns the keys (absent in older preloads and test fakes). */
+  count?: (namespace: string, opts?: { keys?: boolean }) => Promise<StoreCountResult>;
   clearNamespace: (namespace: string) => Promise<StoreOkResult>;
 }
 
