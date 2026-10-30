@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/select';
 import { Combobox } from '@/components/ui/combobox';
 import { cn } from '@/lib/utils';
+import { countActiveFilters } from '@/lib/active-filters';
 import { motion, AnimatePresence } from 'framer-motion';
 import { TooltipCard } from '@/components/ui/tooltip-card';
 import {
@@ -99,15 +100,7 @@ export const FilterTrigger = memo(function FilterTrigger({
   filters,
   viewMode,
 }: FilterTriggerProps) {
-  const activeFilterCount = [
-    filters.status !== 'All' && viewMode === 'library',
-    filters.priority !== 'All' && viewMode === 'library',
-    filters.genre !== 'All',
-    filters.platform !== 'All',
-    filters.category !== 'trending' && viewMode === 'browse',
-    filters.releaseYear !== 'All',
-    filters.store.length > 0,
-  ].filter(Boolean).length;
+  const activeFilterCount = countActiveFilters(filters, viewMode);
 
   return (
     <Button
