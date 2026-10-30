@@ -96,6 +96,7 @@ export function register(): void {
     chunkAnnMaxSimEnabled?: boolean;
     embeddingMrl256Enabled?: boolean;
     embeddingBatchSize?: number;
+    chatNumCtx?: number;
   }) => {
     try {
       // Security: validate URL scheme (allow http/https only — do NOT block localhost/private IPs

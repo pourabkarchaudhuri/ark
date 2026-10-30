@@ -13,6 +13,7 @@ import type {
   AIResponse 
 } from '@/types/chat';
 import { useLibrary } from './useGameStore';
+import { getGgRegion } from '@/services/ggdeals-service';
 
 interface UseAIChatOptions {
   initialGameContext?: GameContext;
@@ -91,7 +92,8 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
   // Execute library actions
   const executeActions = useCallback((actions: LibraryAction[]) => {
     for (const action of actions) {
-      const stringId = `steam-${action.appId}`;
+      // gameId covers Epic/custom entries the chat can now remove; appId is Steam-only.
+      const stringId = action.gameId || `steam-${action.appId}`;
       if (action.type === 'add') {
         addToLibrary({
           gameId: stringId,
@@ -149,6 +151,7 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
         message: content,
         gameContext,
         libraryData,
+        ggRegion: getGgRegion(),
       };
       try {
         let preferredProvider: string = 'ollama';

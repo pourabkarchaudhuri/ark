@@ -83,6 +83,8 @@ export interface PersistedChatHistory {
 export interface LibraryAction {
   type: 'add' | 'remove';
   appId: number;
+  /** Library gameId (steam-123, epic-ns:offer, custom-4); preferred over appId when present. */
+  gameId?: string;
   status?: string;
   gameName?: string;
 }
@@ -122,6 +124,8 @@ export interface SendMessagePayload {
   azureApiVersion?: string;
   /** Image attachment as data URL (e.g. data:image/png;base64,...). Only used when provider is Azure OpenAI (vision). */
   imageAttachment?: string;
+  /** gg.deals region from Settings → Prices (`getGgRegion()`), so chat prices match the details page. */
+  ggRegion?: string;
 }
 
 // Streaming chunk data
