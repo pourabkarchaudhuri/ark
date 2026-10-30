@@ -106,7 +106,7 @@ export default function FrictionPanel({
   gameId: string;
   sessions: GameSessionLike[];
 }): JSX.Element {
-  const samples: OverheadSample[] = useTrackerOverhead(gameId);
+  const samples: readonly OverheadSample[] = useTrackerOverhead(gameId);
 
   const spans: SessionSpan[] = React.useMemo(() => {
     const out: SessionSpan[] = [];

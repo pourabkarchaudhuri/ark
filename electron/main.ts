@@ -1006,7 +1006,8 @@ app.whenReady().then(async () => {
     let handlerRegistered = false;
     // Allow-list: connectivity probes must never be blocked, even if a filter list matches.
     // HowLongToBeat: Ark's own API lookups (electron/hltb-api.ts) use the default session too.
-    const ALLOWED_PROBE_HOSTS = ['connectivitycheck.gstatic.com', 'www.gstatic.com', 'howlongtobeat.com', 'api.gg.deals'];
+    // store.steampowered.com: fallback connectivity probe (src/hooks/useOnlineStatus.ts).
+    const ALLOWED_PROBE_HOSTS = ['connectivitycheck.gstatic.com', 'www.gstatic.com', 'store.steampowered.com', 'howlongtobeat.com', 'api.gg.deals'];
     const blockAds = (details: any, callback: any) => {
         try {
           const { url, resourceType, referrer } = details;

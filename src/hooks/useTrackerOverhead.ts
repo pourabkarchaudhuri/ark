@@ -19,7 +19,7 @@ function getServerSnapshot(): readonly OverheadSample[] {
   return EMPTY;
 }
 
-export function useTrackerOverhead(gameId?: string): OverheadSample[] {
+export function useTrackerOverhead(gameId?: string): readonly OverheadSample[] {
   const subscribe = useCallback(
     (listener: () => void) => trackerOverheadStore.subscribe(listener),
     [],
@@ -34,7 +34,7 @@ export function useTrackerOverhead(gameId?: string): OverheadSample[] {
 
   return useMemo(() => {
     if (!gameId) {
-      return all as OverheadSample[];
+      return all;
     }
     const out: OverheadSample[] = [];
     for (let i = 0; i < all.length; i += 1) {

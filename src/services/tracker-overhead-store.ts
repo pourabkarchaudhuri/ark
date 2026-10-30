@@ -37,6 +37,10 @@ class TrackerOverheadStore {
   private writeIndex = 0;
   private size = 0;
   private listeners = new Set<Listener>();
+  // Cached getAll() result. useSyncExternalStore compares snapshots by
+  // reference, so returning a fresh array per call re-renders forever
+  // ('Maximum update depth exceeded'). null = rebuild on next read.
+  private snapshot: readonly OverheadSample[] | null = null;
 
   ingest(sample: OverheadSample): void {
     this.buffer[this.writeIndex] = sample;
@@ -44,11 +48,16 @@ class TrackerOverheadStore {
     if (this.size < this.capacity) {
       this.size += 1;
     }
+    this.snapshot = null;
     this.emit();
   }
 
   getAll(): readonly OverheadSample[] {
+    if (this.snapshot) {
+      return this.snapshot;
+    }
     if (this.size === 0) {
+      this.snapshot = EMPTY;
       return EMPTY;
     }
     const out: OverheadSample[] = new Array(this.size);
@@ -58,7 +67,8 @@ class TrackerOverheadStore {
       const idx = (start + i) % this.capacity;
       out[i] = this.buffer[idx] as OverheadSample;
     }
-    return out;
+    this.snapshot = Object.freeze(out);
+    return this.snapshot;
   }
 
   getForGame(gameId: string, sinceMs?: number): OverheadSample[] {
@@ -78,6 +88,7 @@ class TrackerOverheadStore {
     this.buffer = new Array(this.capacity);
     this.writeIndex = 0;
     this.size = 0;
+    this.snapshot = null;
     this.emit();
   }
 

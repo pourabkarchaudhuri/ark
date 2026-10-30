@@ -18,8 +18,6 @@ export function useOnlineStatus() {
   
   // Use ref to track previous online status to avoid stale closures
   const wasOnlineRef = useRef(navigator.onLine);
-  // Gate state updates after unmount
-  const mountedRef = useRef(true);
 
   // Update pending sync count
   const updatePendingCount = useCallback(async () => {
@@ -33,8 +31,12 @@ export function useOnlineStatus() {
 
   // Set up event listeners - using refs to avoid stale closures
   useEffect(() => {
+    // Per-effect liveness flag (not a ref): StrictMode's mount-cleanup-mount
+    // left a shared ref false forever, so dev builds ignored every event.
+    let active = true;
+
     const handleOnline = () => {
-      if (!mountedRef.current) return;
+      if (!active) return;
       // Check ref for previous state to avoid stale closure
       if (!wasOnlineRef.current) {
         setWasOffline(true);
@@ -44,7 +46,7 @@ export function useOnlineStatus() {
     };
 
     const handleOffline = () => {
-      if (!mountedRef.current) return;
+      if (!active) return;
       wasOnlineRef.current = false;
       setIsOnline(false);
     };
@@ -61,30 +63,63 @@ export function useOnlineStatus() {
     const PROBE_INTERVAL_MS = 30_000; // 30 seconds
     const PROBE_TIMEOUT_MS = 12_000;  // 12 second timeout — tolerate slow networks
     const FAIL_THRESHOLD = 2;         // require N consecutive failures before flipping offline
+    const RECOVER_THRESHOLD = 2;      // require N consecutive successes before flipping back online
+    // Fallback for networks that block Google (corporate filters, some regions):
+    // a probe only fails when BOTH endpoints fail. Host is allow-listed in electron/main.ts.
+    const PROBE_URLS = [
+      'https://connectivitycheck.gstatic.com/generate_204',
+      'https://store.steampowered.com/favicon.ico',
+    ];
 
-    // Local (per-effect) counter — resets to 0 on any success.
+    // Local (per-effect) counters — each resets on the opposite outcome.
     let failCount = 0;
+    let successCount = 0;
 
-    const probeNetwork = async () => {
-      // Only probe when the browser thinks we're online
-      if (!navigator.onLine) return;
+    const probeOnce = async (url: string): Promise<boolean> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-        await fetch('https://connectivitycheck.gstatic.com/generate_204', {
+        await fetch(url, {
           method: 'HEAD',
           mode: 'no-cors',
           cache: 'no-store',
           signal: controller.signal,
         });
+        return true;
+      } catch {
+        return false;
+      } finally {
         clearTimeout(timer);
-        // Success — reset the fail counter and flip back online if needed
+      }
+    };
+
+    const probeNetwork = async () => {
+      // Only probe when the browser thinks we're online
+      if (!navigator.onLine) return;
+      // Window hidden in the tray: nobody sees the banner, skip the ping.
+      // visibilitychange re-probes as soon as it is shown again.
+      if (document.hidden) return;
+      let ok = false;
+      for (const url of PROBE_URLS) {
+        if (await probeOnce(url)) { ok = true; break; }
+      }
+      if (!active) return;
+      if (ok) {
+        // Success — reset the fail counter; flip back online only after N
+        // consecutive successes so a flapping link doesn't repeat the toast.
         failCount = 0;
         if (!wasOnlineRef.current) {
-          handleOnline();
+          successCount += 1;
+          if (successCount >= RECOVER_THRESHOLD) {
+            successCount = 0;
+            handleOnline();
+          }
+        } else {
+          successCount = 0;
         }
-      } catch {
+      } else {
         // Probe failed — only flip offline after N consecutive failures
+        successCount = 0;
         failCount += 1;
         if (failCount >= FAIL_THRESHOLD && wasOnlineRef.current) {
           handleOffline();
@@ -92,14 +127,20 @@ export function useOnlineStatus() {
       }
     };
 
+    const handleVisibility = () => {
+      if (!document.hidden) probeNetwork();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
     const probeInterval = setInterval(probeNetwork, PROBE_INTERVAL_MS);
     // Run an initial probe after a short delay (don't block mount)
     const initialProbe = setTimeout(probeNetwork, 3000);
 
     return () => {
-      mountedRef.current = false;
+      active = false;
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibility);
       clearInterval(probeInterval);
       clearTimeout(initialProbe);
     };

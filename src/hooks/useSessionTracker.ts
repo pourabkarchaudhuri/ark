@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { GameSession } from '@/types/game';
 import { libraryStore } from '@/services/library-store';
 import { customGameStore } from '@/services/custom-game-store';
@@ -390,10 +390,12 @@ export function useSessionTracker() {
     [liveGames]
   );
 
-  return {
+  // Memoised so SessionTrackerProvider's context value only changes when
+  // liveGames does, not on every provider render.
+  return useMemo(() => ({
     /** Set of gameIds whose executables are currently running */
     liveGames,
     /** Check if a specific game is live */
     isPlayingNow,
-  };
+  }), [liveGames, isPlayingNow]);
 }

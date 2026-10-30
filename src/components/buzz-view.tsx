@@ -788,15 +788,19 @@ const EventCard = memo(function EventCard({
 
 const SCROLL_STEP = 276; // card width (260) + gap (16)
 
-const BroadcastsStrip = memo(function BroadcastsStrip({
-  events, eventsLoading, tick, eventFilter, onEventLatest, onClearFilter, onOpenUrl,
+/**
+ * Expanded body of the broadcasts strip. Its own component so the scroll
+ * element exists when the drag hook and scroll/resize effect mount: the strip
+ * mounts collapsed (events load later), and effects bound on the parent ran
+ * once against a null ref and never again. Collapse unmounts this, so
+ * re-expanding binds everything to the new element.
+ */
+const BroadcastsScroller = memo(function BroadcastsScroller({
+  sorted, tick, onEventLatest, onOpenUrl,
 }: {
-  events: ResolvedEvent[];
-  eventsLoading: boolean;
+  sorted: ResolvedEvent[];
   tick: number;
-  eventFilter: string | null;
   onEventLatest: (name: string) => void;
-  onClearFilter: () => void;
   onOpenUrl: (url: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -826,12 +830,61 @@ const BroadcastsStrip = memo(function BroadcastsStrip({
     };
   }, [checkScroll]);
 
+  // Card count changes the scroll width without resizing the container.
+  useEffect(() => {
+    checkScroll();
+  }, [sorted.length, checkScroll]);
+
   const scroll = useCallback((dir: 'left' | 'right') => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollBy({ left: dir === 'left' ? -SCROLL_STEP : SCROLL_STEP, behavior: 'smooth' });
   }, []);
 
+  return (
+    <div className="flex items-center gap-1 pt-1">
+      <button
+        type="button"
+        onClick={() => scroll('left')}
+        disabled={!canScrollLeft}
+        aria-label="Previous broadcasts"
+        className="shrink-0 p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/5 disabled:opacity-25 disabled:pointer-events-none transition-colors"
+      >
+        <ChevronLeft className="w-4 h-4" />
+      </button>
+      <div
+        ref={scrollRef}
+        data-testid="broadcasts-scroll"
+        className="flex gap-4 overflow-x-auto scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10 flex-1 min-w-0 py-5 px-5 pb-2"
+      >
+        {sorted.map((ev) => (
+          <EventCard key={ev.id} event={ev} tick={tick} onLatest={onEventLatest} onOpenUrl={onOpenUrl} />
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={() => scroll('right')}
+        disabled={!canScrollRight}
+        aria-label="Next broadcasts"
+        className="shrink-0 p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/5 disabled:opacity-25 disabled:pointer-events-none transition-colors"
+      >
+        <ChevronRight className="w-4 h-4" />
+      </button>
+    </div>
+  );
+});
+
+export const BroadcastsStrip = memo(function BroadcastsStrip({
+  events, eventsLoading, tick, eventFilter, onEventLatest, onClearFilter, onOpenUrl,
+}: {
+  events: ResolvedEvent[];
+  eventsLoading: boolean;
+  tick: number;
+  eventFilter: string | null;
+  onEventLatest: (name: string) => void;
+  onClearFilter: () => void;
+  onOpenUrl: (url: string) => void;
+}) {
   const { sorted, liveCount, upcomingCount, todayCount } = useMemo(() => {
     let live = 0;
     let upcoming = 0;
@@ -894,34 +947,7 @@ const BroadcastsStrip = memo(function BroadcastsStrip({
       </button>
       {expanded && (
         <div className="px-3 pb-3">
-          <div className="flex items-center gap-1 pt-1">
-            <button
-              type="button"
-              onClick={() => scroll('left')}
-              disabled={!canScrollLeft}
-              aria-label="Previous broadcasts"
-              className="shrink-0 p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/5 disabled:opacity-25 disabled:pointer-events-none transition-colors"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <div
-              ref={scrollRef}
-              className="flex gap-4 overflow-x-auto scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10 flex-1 min-w-0 py-5 px-5 pb-2"
-            >
-              {sorted.map((ev) => (
-                <EventCard key={ev.id} event={ev} tick={tick} onLatest={onEventLatest} onOpenUrl={onOpenUrl} />
-              ))}
-            </div>
-            <button
-              type="button"
-              onClick={() => scroll('right')}
-              disabled={!canScrollRight}
-              aria-label="Next broadcasts"
-              className="shrink-0 p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/5 disabled:opacity-25 disabled:pointer-events-none transition-colors"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
+          <BroadcastsScroller sorted={sorted} tick={tick} onEventLatest={onEventLatest} onOpenUrl={onOpenUrl} />
           {eventFilter && (
             <button onClick={onClearFilter} className="mt-2 text-[10px] text-fuchsia-400 hover:text-fuchsia-300">
               Clear filter: &ldquo;{eventFilter}&rdquo;
@@ -1035,10 +1061,12 @@ export const BuzzView = memo(function BuzzView() {
 
   // ─── Data fetching ────────────────────────────────────────────
 
-  const loadNews = useCallback(async (force = false) => {
+  // background: timed/visibility refresh — no spinner (the old timed path
+  // never showed one either), and the news-service TTL cache applies.
+  const loadNews = useCallback(async (force = false, background = false) => {
     try {
       if (force) clearNewsCache();
-      else setLoading(true);
+      else if (!background) setLoading(true);
       setError(null);
       const items = await fetchAllNews(force);
       if (abortedRef.current) return;
@@ -1053,7 +1081,23 @@ export const BuzzView = memo(function BuzzView() {
   }, []);
 
   useEffect(() => { abortedRef.current = false; loadNews(); return () => { abortedRef.current = true; }; }, [loadNews]);
-  useEffect(() => { const i = setInterval(() => { if (!abortedRef.current) loadNews(true); }, AUTO_REFRESH_INTERVAL); return () => clearInterval(i); }, [loadNews]);
+  // Auto-refresh goes through the 10-minute news cache (only the Refresh
+  // button forces a refetch) and pauses while the window is hidden/in the tray;
+  // becoming visible again catches up once.
+  useEffect(() => {
+    const i = setInterval(() => {
+      if (abortedRef.current || document.hidden) return;
+      loadNews(false, true);
+    }, AUTO_REFRESH_INTERVAL);
+    const onVisibility = () => {
+      if (!document.hidden && !abortedRef.current) loadNews(false, true);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(i);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [loadNews]);
 
   // Ensure native webview overlay is destroyed when BuzzView unmounts (tab switch)
   useEffect(() => {
