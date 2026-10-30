@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback, memo, lazy, Suspense, type MouseEvent } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo, lazy, Suspense, type MouseEvent } from 'react';
 import { formatPlayingNow } from '@/lib/player-count';
 import { useRoute, useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -21,6 +21,7 @@ import {
   Monitor,
   Cpu,
   Download,
+  Volume2,
 } from 'lucide-react';
 import { FaWindows, FaApple, FaLinux, FaSteam } from 'react-icons/fa';
 import { SiEpicgames, SiSteam } from 'react-icons/si';
@@ -30,7 +31,9 @@ import { HltbBadge } from '@/components/hltb-chip';
 import { DealPriceBlock } from '@/components/deal-price';
 import { releaseYearOf } from '@/hooks/useHltbTimes';
 import { GameDialog } from '@/components/game-dialog';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { cn, buildGameImageChain } from '@/lib/utils';
+import { epicStoreUrl, parseSteamLanguages } from '@/lib/game-details-helpers';
 import { annIndex } from '@/services/ann-index';
 import {
   getSimilarGamesForDetails,
@@ -190,7 +193,7 @@ function epicToSteamDetails(
   }
 
   // ── Store URL ─────────────────────────────────────────────────────────
-  const epicStoreUrl = game.epicSlug
+  const epicProductUrl = game.epicSlug
     ? `https://store.epicgames.com/en-US/p/${game.epicSlug}`
     : null;
 
@@ -220,7 +223,7 @@ function epicToSteamDetails(
     header_image: heroBackground,
     capsule_image: game.coverUrl || game.headerImage || '',
     capsule_imagev5: game.coverUrl || game.headerImage || '',
-    website: epicStoreUrl,
+    website: epicProductUrl,
     pc_requirements: pcRequirements,
     developers: game.developer && game.developer !== 'Unknown Developer' ? [game.developer] : undefined,
     publishers: game.publisher && game.publisher !== 'Unknown Publisher' ? [game.publisher] : undefined,
@@ -741,9 +744,18 @@ export function GameDetailsPage() {
   
   const autoplayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const resumeAutoplayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const similarGamesScrollRef = useRef<HTMLDivElement>(null);
-  const similarGamesAutoScrollRef = useRef<NodeJS.Timeout | null>(null);
-  
+  const similarGamesScrollRef = useRef<HTMLDivElement | null>(null);
+  // The strip mounts/unmounts with the Details tab, so the auto-scroll effect keys on the
+  // element itself (state via callback ref) rather than a ref that never re-runs it.
+  const [recsEl, setRecsEl] = useState<HTMLDivElement | null>(null);
+  const setRecsRef = useCallback((el: HTMLDivElement | null) => {
+    similarGamesScrollRef.current = el;
+    setRecsEl(el);
+  }, []);
+  // Slug whose product content the main fetch already requested (whatever it returned), so the
+  // requirements effect does not fetch it a second time.
+  const lastProductContentSlugRef = useRef<string | null>(null);
+
   // Ref mirror of currentMediaIndex — lets callbacks read the latest value
   // without adding it as a dependency (prevents needless re-creation every 5s
   // autoplay tick, which would otherwise bust GameDetailsContent's memo).
@@ -757,9 +769,31 @@ export function GameDetailsPage() {
   }, [gameId]);
   
   // Library management
-  const { addToLibrary, removeFromLibrary, isInLibrary, updateEntry } = useLibrary();
+  const { addToLibrary, removeFromLibrary, removeCustomGame, isInLibrary, updateEntry } = useLibrary();
   const gameInLibrary = gameId ? isInLibrary(gameId) : false;
   const { success: toastSuccess } = useToast();
+
+  // useLibrary re-renders this page on libraryStore AND customGameStore changes, so the reads
+  // below stay fresh (an exe set via Edit, a deleted custom game) without a remount.
+  // Dual-store page opened by an epic- id (Steam data shown, Epic kept as crossStoreGame): when
+  // the same game is already in the library under its steam- id, the buttons edit that entry
+  // instead of adding an epic- duplicate. Otherwise the URL id is the library key.
+  const isDualStoreEpicPage = isEpicGame && !epicGame && crossStoreGame?.store === 'epic' && !!details;
+  const dualStoreSteamId = isDualStoreEpicPage && details?.steam_appid ? `steam-${details.steam_appid}` : null;
+  const libraryKey = gameId && !gameInLibrary && dualStoreSteamId && isInLibrary(dualStoreSteamId)
+    ? dualStoreSteamId
+    : gameId;
+  const keyInLibrary = libraryKey ? isInLibrary(libraryKey) : false;
+  // UI-only "in library": custom games count. The page's own gameInLibrary (wasInLibraryOnLoad,
+  // isNewAdd) stays libraryStore-only.
+  const inLibraryForUi = keyInLibrary || (isCustomGame && !!(gameId && customGameStore.getGame(gameId)));
+  // Tracked executable, passed down as a string so the memoized content re-renders when it changes.
+  const launchExecutablePath = libraryKey
+    ? (libraryStore.getEntry(libraryKey)?.executablePath ?? customGameStore.getGame(libraryKey)?.executablePath)
+    : undefined;
+
+  // Remove asks first (every other remove path in the app does).
+  const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
 
   // Track whether the game was already in the library when this page loaded.
   // If the user adds it during this session, we keep showing the details view
@@ -791,6 +825,13 @@ export function GameDetailsPage() {
     typeof window !== 'undefined' && window.location.hash === '#telemetry' && hasSessions
       ? 'telemetry'
       : 'progress';
+  // Controlled so effects (media autoplay) can tell whether the Details tab is showing.
+  const [activeTab, setActiveTab] = useState<string>(defaultTab);
+  const defaultTabRef = useRef(defaultTab);
+  defaultTabRef.current = defaultTab;
+  useEffect(() => {
+    setActiveTab(defaultTabRef.current);
+  }, [gameId]);
 
   // Dialog state for add to library / edit library entry
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -831,6 +872,22 @@ export function GameDetailsPage() {
       };
     }
 
+    // Dual-store page opened by an epic- id: the page shows Steam data and never sets epicGame,
+    // and there is no URL Steam app id, so build from the cross-store Epic game. The id is the
+    // library key (the URL id unless the steam- twin is already in the library) so it matches
+    // keyInLibrary and handleSaveLibraryEntry. setEpicGame is not used here: it would flip the
+    // page into Epic-primary pricing.
+    if (isDualStoreEpicPage && crossStoreGame && details && libraryKey) {
+      return {
+        ...crossStoreGame,
+        id: libraryKey,
+        store: libraryKey.startsWith('steam-') ? 'steam' : 'epic',
+        steamAppId: details.steam_appid || crossStoreGame.steamAppId,
+        price: crossStoreGame.price,
+        isInLibrary: keyInLibrary,
+      };
+    }
+
     if (!details || !appId) return null;
     
     const platforms: string[] = [];
@@ -858,7 +915,7 @@ export function GameDetailsPage() {
       updatedAt: new Date(),
       isInLibrary: gameInLibrary,
     };
-  }, [details, appId, epicGame, gameInLibrary, isCustomGame, gameId]);
+  }, [details, appId, epicGame, gameInLibrary, isCustomGame, gameId, isDualStoreEpicPage, crossStoreGame, libraryKey, keyInLibrary]);
   
   // Handle opening the add to library dialog
   const handleDialogOpenChange = useCallback((open: boolean) => {
@@ -875,9 +932,9 @@ export function GameDetailsPage() {
       setDialogGame(game);
 
       // If already in library, open in edit mode with current values pre-filled
-      if (gameId && (gameInLibrary || isCustomGame)) {
-        const libEntry = libraryStore.getEntry(gameId);
-        const customEntry = isCustomGame ? customGameStore.getGame(gameId) : null;
+      if (libraryKey && (keyInLibrary || isCustomGame)) {
+        const libEntry = libraryStore.getEntry(libraryKey);
+        const customEntry = isCustomGame ? customGameStore.getGame(libraryKey) : null;
         setDialogInitialEntry({
           status: libEntry?.status ?? customEntry?.status ?? 'Want to Play',
           priority: libEntry?.priority ?? customEntry?.priority ?? 'Medium',
@@ -892,13 +949,13 @@ export function GameDetailsPage() {
 
       setIsDialogOpen(true);
     }
-  }, [createGameFromDetails, gameId, gameInLibrary, isCustomGame]);
+  }, [createGameFromDetails, gameId, libraryKey, keyInLibrary, isCustomGame]);
   
   // Handle saving library entry from dialog
   const handleSaveLibraryEntry = useCallback(async (gameData: Partial<Game> & { executablePath?: string; addedAt?: Date }) => {
-    if (!gameId) return;
+    if (!gameId || !libraryKey) return;
 
-    const isNewAdd = !gameInLibrary && !isCustomGame;
+    const isNewAdd = !keyInLibrary && !isCustomGame;
     const gameName = details?.name || epicGame?.title || 'Game';
 
     try {
@@ -911,8 +968,8 @@ export function GameDetailsPage() {
         executablePath: gameData.executablePath,
         addedAt: gameData.addedAt,
       });
-    } else if (gameInLibrary) {
-      updateEntry(gameId, {
+    } else if (keyInLibrary) {
+      updateEntry(libraryKey, {
         status: gameData.status,
         priority: gameData.priority,
         publicReviews: gameData.publicReviews,
@@ -923,22 +980,23 @@ export function GameDetailsPage() {
     } else {
       // Add to library — always cache metadata; resolve from API if dialog didn't have it
       let meta = dialogGame ? extractCachedMeta(dialogGame) : undefined;
-      if (!meta && (gameId.startsWith('epic-') || gameId.startsWith('steam-'))) {
+      if (!meta && (libraryKey.startsWith('epic-') || libraryKey.startsWith('steam-'))) {
         try {
-          const game = await gameService.getGameDetails(gameId);
-          meta = game ? extractCachedMeta(game) : { title: 'Unknown Game', store: gameId.startsWith('epic-') ? 'epic' : 'steam' };
+          const game = await gameService.getGameDetails(libraryKey);
+          meta = game ? extractCachedMeta(game) : { title: 'Unknown Game', store: libraryKey.startsWith('epic-') ? 'epic' : 'steam' };
         } catch {
-          meta = { title: 'Unknown Game', store: gameId.startsWith('epic-') ? 'epic' : 'steam' };
+          meta = { title: 'Unknown Game', store: libraryKey.startsWith('epic-') ? 'epic' : 'steam' };
         }
       }
-      addToLibrary(gameId, gameData.status || 'Want to Play', meta);
+      addToLibrary(libraryKey, gameData.status || 'Want to Play', meta);
       if (gameData.priority || gameData.publicReviews || gameData.recommendationSource || gameData.executablePath || gameData.addedAt) {
-        updateEntry(gameId, {
+        updateEntry(libraryKey, {
           priority: gameData.priority,
           publicReviews: gameData.publicReviews,
           recommendationSource: gameData.recommendationSource,
           executablePath: gameData.executablePath,
-          addedAt: gameData.addedAt,
+          // Only send addedAt when the user picked one (an undefined key would overwrite it).
+          ...(gameData.addedAt !== undefined ? { addedAt: gameData.addedAt } : {}),
         });
       }
     }
@@ -954,7 +1012,24 @@ export function GameDetailsPage() {
       setDialogGame(null);
       setDialogInitialEntry(null);
     }
-  }, [gameId, gameInLibrary, isCustomGame, addToLibrary, updateEntry, details, epicGame, toastSuccess, dialogGame]);
+  }, [gameId, libraryKey, keyInLibrary, isCustomGame, addToLibrary, updateEntry, details, epicGame, toastSuccess, dialogGame]);
+
+  // Remove (after the confirm dialog). Custom games live in customGameStore: removing them
+  // from libraryStore would be a no-op, and their page has nothing left to show afterwards.
+  const handleRequestRemove = useCallback(() => setRemoveConfirmOpen(true), []);
+  const handleRemoveConfirm = useCallback(() => {
+    if (!libraryKey) return;
+    const gameName = details?.name || epicGame?.title || 'Game';
+    if (isCustomGame) {
+      removeCustomGame(libraryKey);
+      toastSuccess(`"${gameName}" removed from your library`);
+      navigate(getBackToDashboardUrl());
+      return;
+    }
+    removeFromLibrary(libraryKey);
+    toastSuccess(`"${gameName}" removed from your library`);
+  }, [libraryKey, isCustomGame, removeCustomGame, removeFromLibrary, toastSuccess, navigate, details?.name, epicGame?.title]);
+
 
   // Fetch game details and reviews - uses prefetch store first, then API
   useEffect(() => {
@@ -993,6 +1068,7 @@ export function GameDetailsPage() {
       setSteamNews([]);
       setSteamNewsLoading(false);
       setPlayerCount(null);
+      lastProductContentSlugRef.current = null;
 
       try {
         // --- Custom Games (no API calls needed) ---
@@ -1153,6 +1229,9 @@ export function GameDetailsPage() {
             let enrichedGame = epicData;
             const enrichNs = epicData.epicNamespace;
             const enrichOid = epicData.epicOfferId;
+            if (epicData.epicSlug && window.epic?.getProductContent) {
+              lastProductContentSlugRef.current = epicData.epicSlug;
+            }
 
             // Fire parallel requests: full details + CMS product content
             const [fullDetails, productContent] = await Promise.all([
@@ -1210,6 +1289,7 @@ export function GameDetailsPage() {
               const slug = game.epicSlug;
               let productContent: Awaited<ReturnType<NonNullable<typeof window.epic>['getProductContent']>> = null;
               if (slug && window.epic?.getProductContent) {
+                lastProductContentSlugRef.current = slug;
                 productContent = await window.epic.getProductContent(slug).catch((err) => { console.warn('[GameDetails] Epic product content (slug):', err); return null; });
               }
               if (controller.signal.aborted) return;
@@ -1316,7 +1396,7 @@ export function GameDetailsPage() {
                   if (isCrossStoreEpic) {
                     setCrossStoreGame({
                       ...prefetched,
-                      epicSlug: prefetched?.epicSlug,
+                      epicSlug: prefetched?.epicSlug || epicMeta?.epicSlug || epicGameData.epicSlug,
                       epicNamespace: prefetched?.epicNamespace,
                       epicOfferId: prefetched?.epicOfferId,
                       store: 'epic',
@@ -1341,10 +1421,12 @@ export function GameDetailsPage() {
 
           // Update cross-store Epic price from live fetch — overwrite if the
           // existing price is missing or has no finalFormatted string.
-          if (liveEpicDetails?.price?.finalFormatted && isCrossStoreEpic) {
+          if (liveEpicDetails && isCrossStoreEpic && (liveEpicDetails.price?.finalFormatted || liveEpicDetails.epicSlug)) {
             setCrossStoreGame(prev => prev ? {
               ...prev,
-              price: prev.price?.finalFormatted ? prev.price : liveEpicDetails.price,
+              price: prev.price?.finalFormatted || !liveEpicDetails.price?.finalFormatted ? prev.price : liveEpicDetails.price,
+              // A real product slug from the live fetch (the namespace is not one).
+              epicSlug: prev.epicSlug || liveEpicDetails.epicSlug,
             } as Game : prev);
           }
 
@@ -1557,6 +1639,8 @@ export function GameDetailsPage() {
     const slug = epicGame?.epicSlug;
     if (!slug || !details || details.pc_requirements?.minimum || details.pc_requirements?.recommended) return;
     if (!window.epic?.getProductContent) return;
+    // The main fetch already asked for this slug's product content (with or without specs).
+    if (slug === lastProductContentSlugRef.current) return;
 
     const controller = new AbortController();
     window.epic.getProductContent(slug).then((productContent) => {
@@ -1647,8 +1731,9 @@ export function GameDetailsPage() {
 
   // Autoplay media every 5 seconds
   useEffect(() => {
-    // Don't autoplay if paused, loading, no media, or only 1 item
-    if (isAutoplayPaused || loading || mediaItems.length <= 1) {
+    // Don't autoplay if paused, loading, no media, or only 1 item — nor while the media is
+    // not on screen (library games open on My Progress; each tick re-renders the whole page).
+    if (isAutoplayPaused || loading || mediaItems.length <= 1 || (showProgressTabs && activeTab !== 'details')) {
       return;
     }
 
@@ -1668,7 +1753,7 @@ export function GameDetailsPage() {
         clearTimeout(autoplayTimeoutRef.current);
       }
     };
-  }, [currentMediaIndex, isAutoplayPaused, loading, mediaItems, nextMedia]);
+  }, [currentMediaIndex, isAutoplayPaused, loading, mediaItems, nextMedia, showProgressTabs, activeTab]);
 
   // Cleanup timeouts on unmount
   useEffect(() => {
@@ -1679,40 +1764,29 @@ export function GameDetailsPage() {
       if (resumeAutoplayTimeoutRef.current) {
         clearTimeout(resumeAutoplayTimeoutRef.current);
       }
-      if (similarGamesAutoScrollRef.current) {
-        clearInterval(similarGamesAutoScrollRef.current);
-      }
     };
   }, []);
 
-  // Auto-scroll similar games every 10 seconds
+  // Auto-scroll similar games every 10 seconds. Keyed on the mounted strip element: it
+  // appears only with the Details tab, and a tab switch replaces it (the old interval is
+  // cleared with the old element instead of driving a detached node).
   useEffect(() => {
-    if (!similarGamesScrollRef.current || similarGames.length === 0 || isRecommendationsPaused) {
+    if (!recsEl || similarGames.length === 0 || isRecommendationsPaused) {
       return;
     }
 
-    const scrollContainer = similarGamesScrollRef.current;
     const cardWidth = 280;
-
-    similarGamesAutoScrollRef.current = setInterval(() => {
-      if (scrollContainer && !isRecommendationsPaused) {
-        const maxScroll = scrollContainer.scrollWidth - scrollContainer.clientWidth;
-        const currentScroll = scrollContainer.scrollLeft;
-
-        if (currentScroll >= maxScroll - 10) {
-          scrollContainer.scrollTo({ left: 0, behavior: 'smooth' });
-        } else {
-          scrollContainer.scrollBy({ left: cardWidth, behavior: 'smooth' });
-        }
+    const id = setInterval(() => {
+      const maxScroll = recsEl.scrollWidth - recsEl.clientWidth;
+      if (recsEl.scrollLeft >= maxScroll - 10) {
+        recsEl.scrollTo({ left: 0, behavior: 'smooth' });
+      } else {
+        recsEl.scrollBy({ left: cardWidth, behavior: 'smooth' });
       }
     }, 10000);
 
-    return () => {
-      if (similarGamesAutoScrollRef.current) {
-        clearInterval(similarGamesAutoScrollRef.current);
-      }
-    };
-  }, [similarGames, isRecommendationsPaused]);
+    return () => clearInterval(id);
+  }, [recsEl, similarGames.length, isRecommendationsPaused]);
 
 
   // Memoize derived arrays to avoid creating new references on every render
@@ -2063,7 +2137,7 @@ export function GameDetailsPage() {
       <div className="max-w-7xl mx-auto px-4 py-6" data-tour="game-details-main">
         {/* Tabbed view — only when game was already in library on page load */}
         {showProgressTabs && gameId ? (
-          <Tabs defaultValue={defaultTab} className="w-full">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
             <TabsList className="mb-6 bg-white/5">
               <TabsTrigger value="progress" className="flex items-center gap-2">
                 <BarChart3 className="w-4 h-4" />
@@ -2112,15 +2186,17 @@ export function GameDetailsPage() {
                 isRecommendationsPaused={isRecommendationsPaused}
                 setIsRecommendationsPaused={setIsRecommendationsPaused}
                 similarGamesScrollRef={similarGamesScrollRef}
+                setRecsRef={setRecsRef}
                 steamNews={steamNews}
                 steamNewsLoading={steamNewsLoading}
                 epicNews={epicNews}
                 epicNewsLoading={epicNewsLoading}
                 epicReviews={epicReviews}
                 epicAddons={epicAddons}
-                gameInLibrary={gameInLibrary}
+                gameInLibrary={inLibraryForUi}
+                launchExecutablePath={launchExecutablePath}
                 handleOpenLibraryDialog={handleOpenLibraryDialog}
-                removeFromLibrary={removeFromLibrary}
+                onRemove={handleRequestRemove}
                 crossStoreGame={crossStoreGame}
                 gameId={gameId}
                 appId={appId}
@@ -2169,15 +2245,17 @@ export function GameDetailsPage() {
             isRecommendationsPaused={isRecommendationsPaused}
             setIsRecommendationsPaused={setIsRecommendationsPaused}
             similarGamesScrollRef={similarGamesScrollRef}
+            setRecsRef={setRecsRef}
             steamNews={steamNews}
             steamNewsLoading={steamNewsLoading}
             epicNews={epicNews}
             epicNewsLoading={epicNewsLoading}
             epicReviews={epicReviews}
             epicAddons={epicAddons}
-            gameInLibrary={gameInLibrary}
+            gameInLibrary={inLibraryForUi}
+            launchExecutablePath={launchExecutablePath}
             handleOpenLibraryDialog={handleOpenLibraryDialog}
-            removeFromLibrary={removeFromLibrary}
+            onRemove={handleRequestRemove}
             crossStoreGame={crossStoreGame}
             gameId={gameId}
             appId={appId}
@@ -2195,6 +2273,17 @@ export function GameDetailsPage() {
         genres={dialogGenres}
         platforms={dialogPlatforms}
         initialEntry={dialogInitialEntry}
+      />
+
+      <ConfirmDialog
+        open={removeConfirmOpen}
+        onOpenChange={setRemoveConfirmOpen}
+        title="Remove from Library"
+        description={`Are you sure you want to remove "${details.name}" from your library? This will delete your progress tracking and notes.`}
+        confirmText="Remove"
+        cancelText="Cancel"
+        variant="danger"
+        onConfirm={handleRemoveConfirm}
       />
 
       <GuidedTour
@@ -2234,16 +2323,23 @@ interface GameDetailsContentProps {
   similarGamesPhase: SimilarGamesSectionPhase;
   isRecommendationsPaused: boolean;
   setIsRecommendationsPaused: (paused: boolean) => void;
-  similarGamesScrollRef: React.RefObject<HTMLDivElement>;
+  /** Read by the chevron buttons. */
+  similarGamesScrollRef: React.RefObject<HTMLDivElement | null>;
+  /** Callback ref for the strip; the parent's auto-scroll effect keys on the element. */
+  setRecsRef: (el: HTMLDivElement | null) => void;
   steamNews: SteamNewsItem[];
   steamNewsLoading: boolean;
   epicNews: import('@/types/epic').EpicNewsArticle[];
   epicNewsLoading: boolean;
   epicReviews: import('@/types/epic').EpicProductReviews | null;
   epicAddons: import('@/types/epic').EpicAddon[];
+  /** In the library for UI purposes (custom games included). */
   gameInLibrary: boolean;
+  /** Tracked executable (library or custom entry), resolved by the parent. */
+  launchExecutablePath: string | undefined;
   handleOpenLibraryDialog: () => void;
-  removeFromLibrary: (gameId: string) => void;
+  /** Opens the remove confirmation; the parent routes custom vs library removal. */
+  onRemove: () => void;
   crossStoreGame: Game | null;
   gameId: string | null;
   appId: number | null;
@@ -2276,6 +2372,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
   isRecommendationsPaused: _isRecommendationsPaused, // Used for scrolling pause state
   setIsRecommendationsPaused,
   similarGamesScrollRef,
+  setRecsRef,
   steamNews,
   steamNewsLoading,
   epicNews,
@@ -2283,10 +2380,11 @@ const GameDetailsContent = memo(function GameDetailsContent({
   epicReviews,
   epicAddons,
   gameInLibrary,
+  launchExecutablePath,
   handleOpenLibraryDialog,
-  removeFromLibrary,
+  onRemove,
   crossStoreGame,
-  gameId,
+  gameId: _gameId,
   appId: _appId,
   navigate,
 }: GameDetailsContentProps) {
@@ -2307,13 +2405,40 @@ const GameDetailsContent = memo(function GameDetailsContent({
   // Determine whether Epic is the primary store for this game
   const isEpicPrimary = !!epicGame;
 
-  const { error: toastLaunchError } = useToast();
+  // Sanitized description / requirements HTML. Memoized on the source strings: the regex
+  // rewrites and DOMPurify parse are costly on long descriptions and the 5 s media autoplay
+  // re-renders this component.
+  const descSource = details.detailed_description || details.about_the_game || '';
+  const descriptionHtml = useMemo(
+    () => (descSource ? DOMPurify.sanitize(embedDescriptionImages(normalizeDescriptionMediaUrls(descSource))) : ''),
+    [descSource],
+  );
+  const minReqSource = details.pc_requirements?.minimum || '';
+  const minimumReqHtml = useMemo(() => (minReqSource ? DOMPurify.sanitize(minReqSource) : ''), [minReqSource]);
+  const recReqSource = details.pc_requirements?.recommended || '';
+  const recommendedReqHtml = useMemo(() => (recReqSource ? DOMPurify.sanitize(recReqSource) : ''), [recReqSource]);
+  const languages = useMemo(() => parseSteamLanguages(details.supported_languages), [details.supported_languages]);
 
-  // Resolve the tracked executable for this game (library or custom entry) —
-  // re-read fresh on every render since it can change via the Edit dialog.
-  const launchExecutablePath = gameId
-    ? (libraryStore.getEntry(gameId)?.executablePath ?? customGameStore.getGame(gameId)?.executablePath)
-    : undefined;
+  // Read More is decided by rendered height, not string length: a short description with
+  // images (or a few paragraphs) can be far taller than the collapsed box. Measured only while
+  // collapsed; lazy images are 0px until they load, so their load events re-measure.
+  const descriptionRef = useRef<HTMLDivElement | null>(null);
+  const [isDescriptionOverflowing, setIsDescriptionOverflowing] = useState(false);
+  useLayoutEffect(() => {
+    const el = descriptionRef.current;
+    if (!el || showFullDescription) return;
+    const measure = () => setIsDescriptionOverflowing(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    el.addEventListener('load', measure, true);
+    return () => {
+      ro?.disconnect();
+      el.removeEventListener('load', measure, true);
+    };
+  }, [descriptionHtml, showFullDescription]);
+
+  const { error: toastLaunchError } = useToast();
 
   const handlePlayGame = useCallback(async () => {
     if (!launchExecutablePath) return;
@@ -2590,22 +2715,23 @@ const GameDetailsContent = memo(function GameDetailsContent({
             )}
 
             {/* Description */}
-            {(details.detailed_description || details.about_the_game) && (
+            {descSource && (
               <section>
                 <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">About This Game</h2>
-                <div 
+                <div
+                  ref={descriptionRef}
                   className={cn(
                     "prose prose-invert prose-sm max-w-none prose-img:rounded-lg prose-img:my-4 prose-img:max-w-full",
                     !showFullDescription && "max-h-[10rem] overflow-hidden"
                   )}
-                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(embedDescriptionImages(normalizeDescriptionMediaUrls(details.detailed_description || details.about_the_game))) }}
+                  dangerouslySetInnerHTML={{ __html: descriptionHtml }}
                   onClick={handleContentLinkClick}
                 />
                 {/* Gradient fade at bottom when collapsed */}
-                {!showFullDescription && (details.detailed_description || details.about_the_game)?.length > 300 && (
+                {!showFullDescription && isDescriptionOverflowing && (
                   <div className="h-12 -mt-12 relative bg-gradient-to-t from-[#0a0a0a] to-transparent pointer-events-none" />
                 )}
-                {(details.detailed_description || details.about_the_game)?.length > 500 && (
+                {(isDescriptionOverflowing || showFullDescription) && (
                   <Button
                     variant="link"
                     onClick={() => setShowFullDescription(!showFullDescription)}
@@ -2630,7 +2756,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
                       </h3>
                       <div 
                         className="prose prose-invert prose-sm text-white/70"
-                        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(details.pc_requirements.minimum) }}
+                        dangerouslySetInnerHTML={{ __html: minimumReqHtml }}
                         onClick={handleContentLinkClick}
                       />
                     </div>
@@ -2643,7 +2769,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
                       </h3>
                       <div 
                         className="prose prose-invert prose-sm text-white/70"
-                        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(details.pc_requirements.recommended) }}
+                        dangerouslySetInnerHTML={{ __html: recommendedReqHtml }}
                         onClick={handleContentLinkClick}
                       />
                     </div>
@@ -3055,13 +3181,15 @@ const GameDetailsContent = memo(function GameDetailsContent({
                 <h2 className="text-xl font-semibold mb-4 font-['Orbitron']">DLC & Add-ons</h2>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
                   {epicAddons.slice(0, 8).map((addon) => {
-                    const fallbackSlug = epicGame?.epicSlug
-                      || (crossStoreGame?.store === 'epic' ? (crossStoreGame.epicSlug || crossStoreGame.epicNamespace) : null);
+                    // Add-on slug, then the parent's product slug, then a store search. Never the
+                    // namespace: it is not a product slug and opens a 404.
+                    const parentSlug = epicGame?.epicSlug
+                      || (crossStoreGame?.store === 'epic' ? crossStoreGame.epicSlug : undefined);
                     const storeUrl = addon.slug
-                      ? `https://store.epicgames.com/en-US/p/${addon.slug}`
-                      : fallbackSlug
-                        ? `https://store.epicgames.com/en-US/p/${fallbackSlug}`
-                        : null;
+                      ? epicStoreUrl(addon.slug, addon.title)
+                      : parentSlug
+                        ? epicStoreUrl(parentSlug, details.name)
+                        : epicStoreUrl(undefined, addon.title);
                     return (
                       <button
                         key={addon.id}
@@ -3137,23 +3265,28 @@ const GameDetailsContent = memo(function GameDetailsContent({
               {/* ── Store Price Buttons ─────────────────────────────────── */}
               {(() => {
                 // Resolve each store's price string and URL
-                const steamUrl = details.steam_appid
+                // Epic-primary (incl. the fallback when Steam was unreachable for a Steam+Epic
+                // game): `details` came from epicToSteamDetails, so its price and is_free are
+                // Epic's. No Steam price button then; crossSteamUrl renders the one Steam link.
+                const steamUrl = !isEpicPrimary && details.steam_appid
                   ? `https://store.steampowered.com/app/${details.steam_appid}`
                   : null;
-                const steamPrice = details.is_free
-                  ? 'Free to Play'
-                  : details.price_overview?.final_formatted || null;
-                const steamDiscount = details.price_overview?.discount_percent || 0;
+                const steamPrice = isEpicPrimary
+                  ? null
+                  : details.is_free
+                    ? 'Free to Play'
+                    : details.price_overview?.final_formatted || null;
+                const steamDiscount = isEpicPrimary ? 0 : (details.price_overview?.discount_percent || 0);
 
+                // Product slug when known, else a store search by title (never the namespace).
+                const onEpic = isEpicPrimary || crossStoreGame?.store === 'epic';
                 const epicSlug = isEpicPrimary
                   ? epicGame.epicSlug
                   : crossStoreGame?.store === 'epic'
-                    ? (crossStoreGame.epicSlug || crossStoreGame.epicNamespace)
-                    : crossStoreGame?.store === 'steam'
-                      ? null
-                      : null;
-                const epicUrl = epicSlug
-                  ? `https://store.epicgames.com/en-US/p/${epicSlug}`
+                    ? crossStoreGame.epicSlug
+                    : undefined;
+                const epicUrl = onEpic
+                  ? epicStoreUrl(epicSlug, isEpicPrimary ? epicGame.title : (crossStoreGame?.title || details.name))
                   : null;
 
                 // Resolve Epic price — try the direct price field first, then
@@ -3309,7 +3442,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
               {/* Remove from Library - only show if in library */}
               {gameInLibrary && (
                 <Button
-                  onClick={() => gameId && removeFromLibrary(gameId)}
+                  onClick={onRemove}
                   variant="outline"
                   className="w-full text-red-400 border-red-400/30 hover:bg-red-400/10"
                 >
@@ -3430,21 +3563,21 @@ const GameDetailsContent = memo(function GameDetailsContent({
             </div>
 
             {/* Languages */}
-            {details.supported_languages && (
+            {languages.length > 0 && (
               <div className="p-6 rounded-lg bg-white/5 border border-white/10">
                 <h3 className="font-semibold font-['Orbitron'] mb-3">Languages</h3>
                 <div className="flex flex-wrap gap-1">
-                  {details.supported_languages
-                    .replace(/<[^>]*>/g, '')
-                    .split(',')
-                    .map(l => l.trim())
-                    .filter(Boolean)
-                    .map((lang) => (
-                      <Badge key={lang} variant="outline" className="text-xs border-white/20">
-                        {lang}
-                            </Badge>
-                    ))
-                  }
+                  {languages.map((lang) => (
+                    <Badge
+                      key={lang.name}
+                      variant="outline"
+                      className="text-xs border-white/20"
+                      title={lang.fullAudio ? 'Full audio support' : undefined}
+                    >
+                      {lang.name}
+                      {lang.fullAudio && <Volume2 className="w-3 h-3 ml-1 text-white/50" aria-label="Full audio support" />}
+                    </Badge>
+                  ))}
                         </div>
                           </div>
                         )}
@@ -3551,7 +3684,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
                 </button>
 
                 <div
-                  ref={similarGamesScrollRef}
+                  ref={setRecsRef}
                   onMouseEnter={() => setIsRecommendationsPaused(true)}
                   onMouseLeave={() => setIsRecommendationsPaused(false)}
                   className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin scrollbar-thumb-white/20 scrollbar-track-transparent scroll-smooth"

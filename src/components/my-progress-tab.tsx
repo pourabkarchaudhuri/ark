@@ -4,7 +4,7 @@
  * Steam, Epic, and custom games.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Star, Clock, Save, CheckCircle, FolderOpen, X, Calendar } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -109,45 +109,29 @@ function loadProgressData(gameId: string): ProgressData | null {
   };
 }
 
-/** Persist back to the correct store. */
-function saveProgressData(
-  gameId: string,
-  data: {
-    status: GameStatus;
-    priority: GamePriority;
-    hoursPlayed: number;
-    rating: number;
-    publicReviews: string;
-    recommendationSource: string;
-    executablePath?: string;
-    addedAt?: Date;
-    updatedAt?: Date;
-  },
-): void {
+/** Fields the editor can change. Only the keys present are written. */
+type ProgressUpdate = Partial<{
+  status: GameStatus;
+  priority: GamePriority;
+  hoursPlayed: number;
+  rating: number;
+  publicReviews: string;
+  recommendationSource: string;
+  executablePath: string | undefined;
+  addedAt: Date;
+}>;
+
+/**
+ * Persist back to the correct store. Callers send only the fields the user changed: hoursPlayed
+ * resets the session baseline and status would undo an auto transition, so untouched values
+ * must not be written back. An `executablePath: undefined` key is an explicit clear.
+ */
+function saveProgressData(gameId: string, update: ProgressUpdate): void {
+  if (Object.keys(update).length === 0) return;
   if (isCustomId(gameId)) {
-    customGameStore.updateGame(gameId, {
-      status: data.status,
-      priority: data.priority,
-      hoursPlayed: data.hoursPlayed,
-      rating: data.rating,
-      publicReviews: data.publicReviews,
-      recommendationSource: data.recommendationSource,
-      executablePath: data.executablePath,
-      addedAt: data.addedAt,
-      updatedAt: data.updatedAt,
-    });
+    customGameStore.updateGame(gameId, update);
   } else {
-    libraryStore.updateEntry(gameId, {
-      hoursPlayed: data.hoursPlayed,
-      rating: data.rating,
-      status: data.status,
-      priority: data.priority,
-      publicReviews: data.publicReviews,
-      recommendationSource: data.recommendationSource,
-      executablePath: data.executablePath,
-      addedAt: data.addedAt,
-      updatedAt: data.updatedAt,
-    });
+    libraryStore.updateEntry(gameId, update);
   }
 }
 
@@ -284,6 +268,12 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
 
+  // Latest values for the store listeners below (they outlive any one render).
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const fieldsRef = useRef({ hoursPlayed, rating, status, priority, notes, recommendationSource, executablePath, addedAt });
+  fieldsRef.current = { hoursPlayed, rating, status, priority, notes, recommendationSource, executablePath, addedAt };
+
   // Re-sync when navigating to a different game
   useEffect(() => {
     const loaded = loadProgressData(gameId);
@@ -298,6 +288,42 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
       setExecutablePath(loaded.executablePath ?? '');
       setAddedAt(loaded.addedAt);
     }
+  }, [gameId]);
+
+  // Follow live store changes (session playtime, auto status moves) while the tab is open.
+  // Fields the user has edited (state differs from `data`) are left alone; the rest follow
+  // the store, and `data` becomes the new baseline for the dirty check.
+  useEffect(() => {
+    const refreshAll = () => {
+      const loaded = loadProgressData(gameId);
+      const prev = dataRef.current;
+      if (!loaded || !prev) return;
+      const cur = fieldsRef.current;
+      if (cur.hoursPlayed === prev.hoursPlayed) setHoursPlayed(loaded.hoursPlayed);
+      if (cur.rating === prev.rating) setRating(loaded.rating);
+      if (cur.status === prev.status) setStatus(loaded.status);
+      if (cur.priority === prev.priority) setPriority(loaded.priority);
+      if (cur.notes === prev.publicReviews) setNotes(loaded.publicReviews);
+      if (cur.recommendationSource === prev.recommendationSource) setRecommendationSource(loaded.recommendationSource);
+      if (cur.executablePath === (prev.executablePath ?? '')) setExecutablePath(loaded.executablePath ?? '');
+      if (cur.addedAt.getTime() === prev.addedAt.getTime()) setAddedAt(loaded.addedAt);
+      setData(loaded);
+    };
+    // Hours channel: only playtime moves.
+    const refreshHours = () => {
+      const loaded = loadProgressData(gameId);
+      const prev = dataRef.current;
+      if (!loaded || !prev || loaded.hoursPlayed === prev.hoursPlayed) return;
+      if (fieldsRef.current.hoursPlayed === prev.hoursPlayed) setHoursPlayed(loaded.hoursPlayed);
+      setData({ ...prev, hoursPlayed: loaded.hoursPlayed });
+    };
+    const store = isCustomId(gameId) ? customGameStore : libraryStore;
+    const unsubAll = store.subscribe(refreshAll);
+    const unsubHours = store.subscribeHours(refreshHours);
+    return () => {
+      unsubAll();
+      unsubHours();
+    };
   }, [gameId]);
 
   // Track changes
@@ -321,17 +347,17 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
     
     setIsSaving(true);
 
-    saveProgressData(gameId, {
-      status,
-      priority,
-      hoursPlayed,
-      rating,
-      publicReviews: notes,
-      recommendationSource,
-      executablePath: executablePath || undefined,
-      addedAt,
-      // updatedAt is not passed — stores set it to now on save (app-managed)
-    });
+    // Dirty fields only (see saveProgressData). updatedAt is app-managed by the stores.
+    const update: ProgressUpdate = {};
+    if (status !== data.status) update.status = status;
+    if (priority !== data.priority) update.priority = priority;
+    if (hoursPlayed !== data.hoursPlayed) update.hoursPlayed = hoursPlayed;
+    if (rating !== data.rating) update.rating = rating;
+    if (notes !== data.publicReviews) update.publicReviews = notes;
+    if (recommendationSource !== data.recommendationSource) update.recommendationSource = recommendationSource;
+    if (executablePath !== (data.executablePath ?? '')) update.executablePath = executablePath || undefined;
+    if (addedAt.getTime() !== data.addedAt.getTime()) update.addedAt = addedAt;
+    saveProgressData(gameId, update);
 
     // Show success feedback
     setTimeout(() => {
@@ -433,7 +459,7 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
             <Slider
               value={[hoursPlayed]}
               onValueChange={(values) => setHoursPlayed(values[0])}
-              max={500}
+              max={Math.max(500, Math.ceil(hoursPlayed))}
               step={1}
               className="py-2"
             />
@@ -548,6 +574,7 @@ export function MyProgressTab({ gameId, gameName: _gameName }: MyProgressTabProp
                   variant="ghost"
                   size="sm"
                   onClick={() => setExecutablePath('')}
+                  aria-label="Clear executable"
                   className="h-8 w-8 p-0 text-white/40 hover:text-white/80 flex-shrink-0"
                 >
                   <X className="h-3.5 w-3.5" />

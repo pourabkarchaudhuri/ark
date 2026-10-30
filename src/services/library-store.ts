@@ -610,9 +610,12 @@ export class LibraryStore {
       // moment the user (or a sync) moved the game into its current status.
       updated.statusChangedAt = new Date().toISOString();
     }
-    if (input.addedAt !== undefined) {
-      updated.addedAt = LibraryStore.toValidDate(input.addedAt, existing.addedAt);
-    }
+    // App-managed dates: an explicit `addedAt: undefined` in the input (spread above) must not
+    // wipe the stored date. Other keys may be cleared by spreading undefined (e.g. executablePath).
+    updated.addedAt = input.addedAt !== undefined
+      ? LibraryStore.toValidDate(input.addedAt, existing.addedAt)
+      : existing.addedAt;
+    if (!statusChanged) updated.statusChangedAt = (existing as LibraryEntryWithStatusStamp).statusChangedAt;
 
     // When user edits hours, set baseline so session updates add on top instead of overwriting
     if (input.hoursPlayed !== undefined) {
@@ -632,7 +635,7 @@ export class LibraryStore {
     }
 
     const hasJourney = journeyStore.has(gameId);
-    const addedAtIso = (updated.addedAt instanceof Date ? updated.addedAt : new Date(updated.addedAt)).toISOString();
+    const addedAtIso = LibraryStore.toValidDate(updated.addedAt, new Date()).toISOString();
     const nowIso = new Date().toISOString();
 
     // Create journey entry when game first reaches Playing (or Playing Now) so it appears in Your Ark / Logs

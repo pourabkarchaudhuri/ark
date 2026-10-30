@@ -33,6 +33,7 @@ const DevLogView = lazy(() => import('@/components/devlog-view').then(m => ({ de
 import { useToast } from '@/components/ui/toast';
 
 import { cn } from '@/lib/utils';
+import { isGameLive } from '@/lib/game-details-helpers';
 import { setNavigatingGame } from '@/services/prefetch-store';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -216,7 +217,7 @@ export function Dashboard() {
   const journeyEntries = useJourneyHistory();
   
   // Session tracking (live "Playing Now" status)
-  const { isPlayingNow, liveGames } = useSessionTrackerContext();
+  const { liveGames } = useSessionTrackerContext();
   const [devMode] = useDevMode();
   const [betaFeatures] = useBetaFeatures();
   const chatAvailability = useChatAvailability();
@@ -399,14 +400,14 @@ export function Dashboard() {
     if (filters.status !== 'All') {
       if (filters.status === 'Playing Now') {
         list = list.filter(
-          (g) => liveGames?.has(g.id) || (g.steamAppId ? liveGames?.has(`steam-${g.steamAppId}`) : false)
+          (g) => isGameLive(g, liveGames)
         );
       } else {
         list = list.filter((g) => g.status === filters.status);
       }
     }
     const statusOrder = (g: Game) => {
-      const isLive = liveGames?.has(g.id) || (g.steamAppId ? liveGames?.has(`steam-${g.steamAppId}`) : false);
+      const isLive = isGameLive(g, liveGames);
       if (isLive || g.status === 'Playing Now') return 0;
       if (g.status === 'Playing') return 1;
       if (g.status === 'On Hold') return 2;
@@ -731,7 +732,8 @@ export function Dashboard() {
               publicReviews: gameData.publicReviews,
               recommendationSource: gameData.recommendationSource,
               executablePath: gameData.executablePath,
-              addedAt: gameData.addedAt,
+              // Only send addedAt when the user picked one (an undefined key would overwrite it).
+              ...(gameData.addedAt !== undefined ? { addedAt: gameData.addedAt } : {}),
             });
           }
           success(`"${editingGame.title}" added to your library`);
@@ -841,8 +843,7 @@ export function Dashboard() {
 
     // Use libraryDisplayGames so we always group the full 66, not a stale Browse list.
     for (const game of libraryDisplayGames) {
-      const isLive = liveGames?.has(game.id) ||
-        (game.steamAppId ? liveGames?.has(`steam-${game.steamAppId}`) : false);
+      const isLive = isGameLive(game, liveGames);
       // "Playing Now" section = only games actually running (tracked); other statuses use stored value
       const effectiveStatus = isLive ? 'Playing Now' : (game.status || 'Want to Play');
       if (groups[effectiveStatus]) groups[effectiveStatus].push(game);
@@ -861,8 +862,10 @@ export function Dashboard() {
   }, []);
 
   // Stable render callback for VirtualGameGrid
-  const isPlayingNowRef = useRef(isPlayingNow);
-  isPlayingNowRef.current = isPlayingNow;
+  // Live set via ref so the render callback stays stable; isGameLive also matches an
+  // epic- keyed entry whose Steam id is the one running.
+  const liveGamesRef = useRef(liveGames);
+  liveGamesRef.current = liveGames;
   const renderGameCard = useCallback((game: Game) => {
     return (
       <GameCard
@@ -871,7 +874,7 @@ export function Dashboard() {
         onDelete={handleCardDelete}
         onPlay={handleCardPlay}
         isInLibrary={game.isInLibrary}
-        isPlayingNow={isPlayingNowRef.current(game.steamAppId ?? game.id)}
+        isPlayingNow={isGameLive(game, liveGamesRef.current)}
         onAddToLibrary={handleCardAddToLibrary}
         onRemoveFromLibrary={handleCardRemoveFromLibrary}
         onStatusChange={handleCardStatusChange}

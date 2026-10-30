@@ -26,6 +26,7 @@ import {
 import { FaWindows, FaPlaystation, FaXbox, FaSteam, FaReddit, FaTwitter, FaTwitch, FaYoutube, FaFacebook, FaInstagram, FaGlobe, FaWikipediaW } from 'react-icons/fa';
 import { SiNintendoswitch, SiEpicgames, SiGogdotcom } from 'react-icons/si';
 import { cn, getHardcodedCover } from '@/lib/utils';
+import { epicStoreUrl } from '@/lib/game-details-helpers';
 
 interface GameDetailPanelProps {
   game: Game | null;
@@ -157,11 +158,13 @@ function StoreLinksSection({
   steamAppId,
   epicSlug,
   epicNamespace,
+  title,
 }: { 
   websites?: { url: string; category: number }[]; 
   steamAppId?: number;
   epicSlug?: string;
   epicNamespace?: string;
+  title?: string;
 }) {
   const storeLinks = getStoreLinks(websites);
   const otherLinks = getOtherLinks(websites);
@@ -173,11 +176,12 @@ function StoreLinksSection({
     ? { url: `https://store.steampowered.com/app/${steamAppId}`, category: 13, ...WEBSITE_CATEGORIES[13] }
     : null;
 
-  // If we have an Epic slug/namespace but no Epic link in websites, add one
+  // If we have an Epic slug/namespace but no Epic link in websites, add one. The namespace is
+  // not a product slug (it 404s), so without a slug the link is a store search by title.
   const hasEpicLink = storeLinks.some(l => l.category === 16);
-  const epicStoreSlug = epicSlug || epicNamespace;
-  const epicLink = epicStoreSlug && !hasEpicLink
-    ? { url: `https://store.epicgames.com/en-US/p/${epicStoreSlug}`, category: 16, ...WEBSITE_CATEGORIES[16] }
+  const epicUrl = (epicSlug || epicNamespace) && !hasEpicLink ? epicStoreUrl(epicSlug, title) : null;
+  const epicLink = epicUrl
+    ? { url: epicUrl, category: 16, ...WEBSITE_CATEGORIES[16] }
     : null;
   
   const allStoreLinks = [
@@ -599,7 +603,7 @@ export function GameDetailPanel({
                 
                 {/* Store Links */}
                 {((game.websites && game.websites.length > 0) || game.steamAppId || game.epicSlug || game.epicNamespace) && (
-                  <StoreLinksSection websites={game.websites} steamAppId={game.steamAppId} epicSlug={game.epicSlug} epicNamespace={game.epicNamespace} />
+                  <StoreLinksSection websites={game.websites} steamAppId={game.steamAppId} epicSlug={game.epicSlug} epicNamespace={game.epicNamespace} title={game.title} />
                 )}
 
                 {/* Storyline (expandable) */}
