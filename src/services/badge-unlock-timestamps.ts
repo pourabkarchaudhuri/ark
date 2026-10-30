@@ -7,6 +7,11 @@
  * cache is hydrated on init and every read still returns synchronously. When
  * `window.store` is unavailable (unit tests, jsdom, pre-preload boot window)
  * the store transparently falls back to the previous localStorage path.
+ *
+ * v1.0.97: writes come from the app-level stamper (badge-unlock-stamper), not
+ * from card renders. Persistence is per key (only new ids are put), setters
+ * before hydration are queued and merged with stored values winning, and a
+ * version/subscribe pair lets useBadgeProgress re-derive latched badges.
  */
 
 /** Legacy localStorage key — retained for boot-time hydrate + rollback. */
@@ -26,6 +31,18 @@ let _cache: Stored = {};
 /** Set of badge ids currently persisted in LevelDB (used to diff writes). */
 let _knownKeys: Set<number> = new Set();
 let _isInitialized = false;
+/** Ids set before hydration finished; merged (stored values win) on init. */
+let _pending: Stored = {};
+/** Bumped on hydration and on every new stamp. */
+let _version = 0;
+const _listeners = new Set<() => void>();
+
+function notify(): void {
+  _version++;
+  for (const l of _listeners) {
+    try { l(); } catch { /* listener errors must not break stamping */ }
+  }
+}
 
 /** Best-effort feature detect for the preload-exposed LevelDB bridge. */
 type StoreBridge = NonNullable<Window['store']>;
@@ -152,6 +169,18 @@ async function initialize(): Promise<void> {
     initFromLocalStorage();
   }
   _isInitialized = true;
+  // Merge stamps queued before hydration; a stored (historical) date wins.
+  const queued = _pending;
+  _pending = {};
+  const fresh: number[] = [];
+  for (const [k, v] of Object.entries(queued)) {
+    const id = Number(k);
+    if (_cache[id] !== undefined) continue;
+    _cache[id] = v;
+    fresh.push(id);
+  }
+  if (fresh.length > 0) persist(fresh);
+  notify();
 }
 
 const _ready = initialize();
@@ -164,44 +193,29 @@ function persistLocalStorage(): void {
   }
 }
 
-async function persistLevelDB(): Promise<void> {
+/** Puts only the given ids; stored rows are never re-written. */
+async function persistLevelDB(ids: number[]): Promise<void> {
   const store = getStore();
   if (!store) return;
+  const ops = ids
+    .filter(id => _cache[id] !== undefined && !_knownKeys.has(id))
+    .map(id => ({ type: 'put' as const, namespace: LEVEL_NAMESPACE, key: String(id), value: _cache[id] }));
+  if (ops.length === 0) return;
   try {
-    const currentIds = new Set<number>();
-    const ops: Array<
-      | { type: 'put'; namespace: string; key: string; value: unknown }
-      | { type: 'del'; namespace: string; key: string }
-    > = [];
-
-    for (const [k, v] of Object.entries(_cache)) {
-      const id = Number(k);
-      if (!Number.isFinite(id)) continue;
-      currentIds.add(id);
-      ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: String(id), value: v });
-    }
-    for (const oldKey of _knownKeys) {
-      if (!currentIds.has(oldKey)) {
-        ops.push({ type: 'del', namespace: LEVEL_NAMESPACE, key: String(oldKey) });
-      }
-    }
-
-    if (ops.length === 0) return;
-
     const res = await store.batch(ops);
     if (res && res.error) {
       console.error('[BadgeUnlockTimestamps] batch save failed:', res.error);
       return;
     }
-    _knownKeys = currentIds;
+    for (const op of ops) _knownKeys.add(Number(op.key));
   } catch (err) {
     console.error('[BadgeUnlockTimestamps] save failed:', err);
   }
 }
 
-function persist(): void {
+function persist(ids: number[]): void {
   if (_useLevelDB) {
-    void persistLevelDB();
+    void persistLevelDB(ids);
     return;
   }
   persistLocalStorage();
@@ -212,19 +226,55 @@ export function getBadgeUnlockedAt(badgeId: number): number | undefined {
   return ts === undefined ? undefined : ts;
 }
 
+/** True when the badge has a stamped unlock date (hydrated or stamped this session). */
+export function hasBadgeUnlockedAt(badgeId: number): boolean {
+  return _cache[badgeId] !== undefined || _pending[badgeId] !== undefined;
+}
+
+/**
+ * Stamps every id that has no date yet in one write. Before hydration the
+ * stamps are queued and merged on init (stored dates win). Returns how many
+ * ids were newly stamped.
+ */
+export function setBadgeUnlockedAtMany(entries: Iterable<readonly [number, number]>): number {
+  const fresh: number[] = [];
+  for (const [id, ts] of entries) {
+    if (!Number.isFinite(id) || !Number.isFinite(ts)) continue;
+    if (hasBadgeUnlockedAt(id)) continue;
+    if (_isInitialized) _cache[id] = ts;
+    else _pending[id] = ts;
+    fresh.push(id);
+  }
+  if (fresh.length === 0) return 0;
+  if (_isInitialized) persist(fresh);
+  notify();
+  return fresh.length;
+}
+
 export function setBadgeUnlockedAt(badgeId: number, timestamp: number): void {
-  if (_cache[badgeId] !== undefined) return;
-  _cache[badgeId] = timestamp;
-  persist();
+  setBadgeUnlockedAtMany([[badgeId, timestamp]]);
 }
 
 export function ensureUnlockedAt(badgeId: number): number {
-  const existing = _cache[badgeId];
+  const existing = _cache[badgeId] ?? _pending[badgeId];
   if (existing !== undefined) return existing;
   const now = Date.now();
-  _cache[badgeId] = now;
-  persist();
+  setBadgeUnlockedAt(badgeId, now);
   return now;
+}
+
+export function isBadgeUnlockTimestampsHydrated(): boolean {
+  return _isInitialized;
+}
+
+/** For useSyncExternalStore: fires on hydration and on each new stamp. */
+export function subscribeBadgeUnlockTimestamps(listener: () => void): () => void {
+  _listeners.add(listener);
+  return () => { _listeners.delete(listener); };
+}
+
+export function getBadgeUnlockTimestampsVersion(): number {
+  return _version;
 }
 
 /**
@@ -238,6 +288,7 @@ export function badgeUnlockTimestampsReady(): Promise<void> {
 /** Clear all unlock timestamps. LevelDB namespace + legacy key + marker. */
 export function clearBadgeUnlockTimestamps(): void {
   _cache = {};
+  _pending = {};
   _knownKeys = new Set();
   if (_useLevelDB) {
     const store = getStore();
@@ -260,4 +311,5 @@ export function clearBadgeUnlockTimestamps(): void {
   } catch {
     // ignore
   }
+  notify();
 }

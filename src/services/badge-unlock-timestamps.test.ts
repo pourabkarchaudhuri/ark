@@ -27,7 +27,7 @@ interface FakeStoreCalls {
   clearNamespace: number;
 }
 
-function makeFakeStore(opts: { getAllError?: string } = {}): {
+function makeFakeStore(opts: { getAllError?: string; getAllGate?: Promise<void> } = {}): {
   state: FakeStoreState;
   api: StoreAPI;
   calls: FakeStoreCalls;
@@ -42,6 +42,7 @@ function makeFakeStore(opts: { getAllError?: string } = {}): {
     }),
     getAll: vi.fn(async <T,>(ns: string) => {
       calls.getAll++;
+      if (opts.getAllGate) await opts.getAllGate;
       if (opts.getAllError) return { error: opts.getAllError };
       const bucket = state.rows.get(ns);
       if (!bucket) return { rows: [] };
@@ -280,5 +281,94 @@ describe('badge-unlock-timestamps — clearBadgeUnlockTimestamps()', () => {
     expect(mod.getBadgeUnlockedAt(1)).toBeUndefined();
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
     expect(localStorage.getItem(MIGRATION_MARKER)).toBeNull();
+  });
+});
+
+describe('badge-unlock-timestamps — per-key persistence (v1.0.97)', () => {
+  it('stamping 16 new ids issues one batch with 16 puts and never re-puts stored ids', async () => {
+    const { state, api, calls } = makeFakeStore();
+    const bucket = new Map<string, unknown>();
+    bucket.set('1', 111);
+    state.rows.set(LEVEL_NAMESPACE, bucket);
+    installStore(api);
+
+    const mod = await loadFreshModule();
+    await mod.badgeUnlockTimestampsReady();
+    calls.batch.length = 0;
+
+    const entries: Array<[number, number]> = [[1, 999]];
+    for (let id = 100; id < 116; id++) entries.push([id, id * 10]);
+    expect(mod.setBadgeUnlockedAtMany(entries)).toBe(16);
+    await Promise.resolve();
+
+    expect(calls.batch.length).toBe(1);
+    const ops = calls.batch[0] as Array<{ type: string; key: string }>;
+    expect(ops).toHaveLength(16);
+    expect(ops.every(o => o.type === 'put')).toBe(true);
+    expect(ops.some(o => o.key === '1')).toBe(false);
+    expect(mod.getBadgeUnlockedAt(1)).toBe(111);
+
+    // A second stamp of one more id sends only that id.
+    calls.batch.length = 0;
+    mod.setBadgeUnlockedAt(200, 2000);
+    await Promise.resolve();
+    expect(calls.batch).toEqual([[{ type: 'put', namespace: LEVEL_NAMESPACE, key: '200', value: 2000 }]]);
+    // Already-stamped ids are a no-op (no batch at all).
+    calls.batch.length = 0;
+    expect(mod.setBadgeUnlockedAtMany([[200, 1], [100, 1]])).toBe(0);
+    await Promise.resolve();
+    expect(calls.batch.length).toBe(0);
+  });
+
+  it('a set before hydration does not overwrite the stored value; new ids are persisted after hydration', async () => {
+    let open!: () => void;
+    const gate = new Promise<void>(r => { open = r; });
+    const { state, api, calls } = makeFakeStore({ getAllGate: gate });
+    const bucket = new Map<string, unknown>();
+    bucket.set('5', 500);
+    state.rows.set(LEVEL_NAMESPACE, bucket);
+    installStore(api);
+
+    const mod = await loadFreshModule();
+    expect(mod.isBadgeUnlockTimestampsHydrated()).toBe(false);
+    mod.setBadgeUnlockedAt(5, 999);
+    mod.setBadgeUnlockedAt(6, 600);
+    expect(calls.batch.length).toBe(0); // queued, nothing written yet
+
+    open();
+    await mod.badgeUnlockTimestampsReady();
+    await Promise.resolve();
+
+    expect(mod.isBadgeUnlockTimestampsHydrated()).toBe(true);
+    expect(mod.getBadgeUnlockedAt(5)).toBe(500);
+    expect(mod.getBadgeUnlockedAt(6)).toBe(600);
+    expect(state.rows.get(LEVEL_NAMESPACE)?.get('5')).toBe(500);
+    expect(state.rows.get(LEVEL_NAMESPACE)?.get('6')).toBe(600);
+    const puts = calls.batch.flat() as Array<{ key: string }>;
+    expect(puts.map(p => p.key)).toEqual(['6']);
+  });
+
+  it('hasBadgeUnlockedAt and the version/subscribe pair track hydration and stamps', async () => {
+    let open!: () => void;
+    const gate = new Promise<void>(r => { open = r; });
+    const { state, api } = makeFakeStore({ getAllGate: gate });
+    state.rows.set(LEVEL_NAMESPACE, new Map<string, unknown>([['7', 70]]));
+    installStore(api);
+
+    const mod = await loadFreshModule();
+    const listener = vi.fn();
+    const unsub = mod.subscribeBadgeUnlockTimestamps(listener);
+    open();
+    await mod.badgeUnlockTimestampsReady();
+    expect(mod.hasBadgeUnlockedAt(7)).toBe(true);
+    expect(mod.hasBadgeUnlockedAt(8)).toBe(false);
+    const v = mod.getBadgeUnlockTimestampsVersion();
+    expect(listener).toHaveBeenCalled();
+
+    listener.mockClear();
+    mod.setBadgeUnlockedAtMany([[8, 80]]);
+    expect(mod.getBadgeUnlockTimestampsVersion()).toBeGreaterThan(v);
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsub();
   });
 });

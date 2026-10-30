@@ -8,14 +8,14 @@
 import { memo, useMemo, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, Filter, ChevronDown, X, Lock } from 'lucide-react';
-import type { BadgeProgress, BadgeBranch, BadgeTier } from '@/data/badge-types';
+import type { BadgeProgress, BadgeBranch, BadgeTier, BadgeDefinition } from '@/data/badge-types';
 import {
   TIER_POINTS, MEDAL_PATHS,
   BRANCH_MOTIFS, TIER_NEON, BRANCH_META,
 } from '@/data/badge-types';
 import { cn } from '@/lib/utils';
 import { Icon } from '@/components/ui/evervault-card';
-import { ensureUnlockedAt } from '@/services/badge-unlock-timestamps';
+import { getBadgeUnlockedAt } from '@/services/badge-unlock-timestamps';
 
 // Shield: almost background, just visible. Lock: neon purple, centered.
 const SHIELD_FILL = 'rgba(255,255,255,0.06)'; // subtle on dark cards; use class for light if needed
@@ -90,11 +90,27 @@ function formatObtained(ts: number): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+/**
+ * Lower-cased text the vault search may match. A locked secret card shows only
+ * "Classified" and its branch label, so that is all it can match; otherwise
+ * search would reveal the hidden objective by trial and error.
+ */
+export function getVisibleSearchText(badge: BadgeDefinition, unlocked: boolean): string {
+  if (badge.secret && !unlocked) {
+    return `classified ${(BRANCH_META[badge.branch]?.label ?? badge.branch)}`.toLowerCase();
+  }
+  return [badge.name, badge.description, badge.lore, badge.genre]
+    .filter(Boolean)
+    .join('\n') // newline-separated so a query cannot match across fields
+    .toLowerCase();
+}
+
 const BadgeCard = memo(function BadgeCard({ bp, index }: { bp: BadgeProgress; index: number }) {
   const { badge, unlocked, current, target } = bp;
   const neon = TIER_NEON[badge.tier];
   const isSecret = badge.secret && !unlocked;
-  const unlockedAt = unlocked ? ensureUnlockedAt(badge.id) : undefined;
+  // Read-only: dates are stamped by the app-level stamper (useBadgeUnlockStamping).
+  const unlockedAt = unlocked ? getBadgeUnlockedAt(badge.id) : undefined;
   const branchLabel = BRANCH_META[badge.branch]?.label ?? badge.branch;
   const progressPct = target > 0 ? Math.min(100, (current / target) * 100) : 0;
 
@@ -281,12 +297,7 @@ export const BadgeVault = memo(function BadgeVault({ badges, unlockedCount }: Ba
     }
     if (search.trim()) {
       const q = search.toLowerCase();
-      list = list.filter(b =>
-        b.badge.name.toLowerCase().includes(q) ||
-        b.badge.description.toLowerCase().includes(q) ||
-        b.badge.lore?.toLowerCase().includes(q) ||
-        (b.badge.genre && b.badge.genre.toLowerCase().includes(q))
-      );
+      list = list.filter(b => getVisibleSearchText(b.badge, b.unlocked).includes(q));
     }
     return list;
   }, [badges, filter, search]);

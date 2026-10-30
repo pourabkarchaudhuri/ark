@@ -56,13 +56,18 @@ export type BadgeCondition =
   | { type: 'singleGameHours'; min: number }
   | { type: 'singleSessionMinutes'; min: number }
   | { type: 'completionRate'; min: number }
-  | { type: 'averageRating'; min?: number; max?: number }
+  /** minRatings defaults to 10 ratings before the average counts. */
+  | { type: 'averageRating'; min?: number; max?: number; minRatings?: number }
   | { type: 'gamesInStatus'; status: string; min: number }
+  /** Decades touched between the oldest and newest release (1985 + 2015 = 4). */
   | { type: 'releaseYearSpan'; min: number }
+  /** Distinct release years in the journey. */
+  | { type: 'releaseYearCount'; min: number }
   | { type: 'metacriticAbove'; score: number; min: number }
+  /** Journey entries added in one calendar year ('current' = this year, 'any' = best year). */
   | { type: 'gamesPerYear'; year: 'current' | 'any'; min: number }
-  | { type: 'hoursInMonth'; min: number }
-  | { type: 'completionsInMonth'; min: number }
+  /** Most journey entries added on a single local calendar day. */
+  | { type: 'gamesAddedInOneDay'; min: number }
   | { type: 'gamesWithZeroHours'; min: number }
   | { type: 'multiGenreCompletion'; min: number }
   | { type: 'branchBadgeCount'; min: number }
