@@ -17,6 +17,7 @@
 import type { EpicCatalogItem } from '@/types/epic';
 import { idbStreamStoreBatches } from './idb-stream';
 import { levelStreamNamespace, type LevelScanResult } from './level-stream';
+import { storeGetMany } from './store-bulk';
 
 // ─── Dummy-page predicate ───────────────────────────────────────────────────────
 // Mirrors electron/epic-api.ts and epic-service.ts.  A page is "dummy" when
@@ -635,6 +636,37 @@ export class EpicCatalogStore {
         if (batch.length > 0) onBatch(batch);
         resolve({ count, complete: false });
       };
+    });
+  }
+
+  /**
+   * Get specific entries by epicId (missing ids are simply absent). LevelDB:
+   * one `store:getMany` round trip per 2000 ids. Used by the re-chunk job to
+   * reload one page of entries at a time instead of holding the catalog.
+   */
+  async getEntries(epicIds: string[]): Promise<EpicCatalogEntry[]> {
+    if (epicIds.length === 0) return [];
+    await this.migrateFromIdbIfNeeded();
+    if (useLevelDB()) {
+      const values = await storeGetMany<EpicCatalogEntry>(LEVEL_ENTRIES_NAMESPACE, epicIds);
+      return values.filter((v): v is EpicCatalogEntry => !!v);
+    }
+    const db = await getDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(ENTRIES_STORE, 'readonly');
+      const store = tx.objectStore(ENTRIES_STORE);
+      const results: EpicCatalogEntry[] = [];
+      let remaining = epicIds.length;
+      for (const epicId of epicIds) {
+        const req = store.get(epicId);
+        req.onsuccess = () => {
+          if (req.result) results.push(req.result);
+          if (--remaining === 0) resolve(results);
+        };
+        req.onerror = () => {
+          if (--remaining === 0) resolve(results);
+        };
+      }
     });
   }
 }

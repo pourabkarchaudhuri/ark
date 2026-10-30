@@ -588,7 +588,11 @@ export class RecoStore {
       /** Aborted when this compute is superseded or overruns its budget — stop using Ollama. */
       signal?: AbortSignal,
     ) => Promise<number>,
-    catalogEmbeddingEnricher?: (candidateIds: Set<string>) => Promise<number>,
+    /**
+     * Fetch catalog vectors for `candidateIds` into the live cache. `keepIds` is the whole
+     * current pool + user games: catalog vectors from earlier computes outside it are evicted.
+     */
+    catalogEmbeddingEnricher?: (candidateIds: Set<string>, keepIds: Set<string>) => Promise<number>,
   ) {
     if (this.state.status === 'computing') return; // prevent double-fire
 
@@ -734,8 +738,11 @@ export class RecoStore {
           if (!ug.embedding && hasCatalogVector(ug.gameId)) catalogIds.add(ug.gameId);
         }
         if (catalogIds.size > 0) {
+          const keepIds = new Set<string>();
+          for (const c of candidates) keepIds.add(c.gameId);
+          for (const ug of userGames) keepIds.add(ug.gameId);
           const enriched = await runWithDeadline(
-            () => catalogEmbeddingEnricher(catalogIds),
+            () => catalogEmbeddingEnricher(catalogIds, keepIds),
             budget(CATALOG_ENRICH_TIMEOUT_MS), 0, signal, 'Catalog embedding enrich',
           );
           if (isStale()) return;
