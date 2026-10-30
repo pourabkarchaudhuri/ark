@@ -6,7 +6,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { Router, useRoute } from 'wouter';
-import DOMPurify from 'dompurify';
+import { sanitizeStoreHtml } from '@/lib/content-links';
 import { GameDetailsPage } from '@/pages/game-details';
 import { ToastProvider } from '@/components/ui/toast';
 import type { SteamAppDetails } from '@/types/steam';
@@ -56,6 +56,12 @@ vi.mock('@/services/epic-service', () => ({
 
 // window.electron is stubbed with only openExternal below.
 vi.mock('@/components/window-controls', () => ({ WindowControls: () => null }));
+
+// Store HTML goes through sanitizeStoreHtml (its own DOMPurify instance); wrap it to count calls.
+vi.mock('@/lib/content-links', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/content-links')>();
+  return { ...actual, sanitizeStoreHtml: vi.fn(actual.sanitizeStoreHtml) };
+});
 
 // The real dialog is a large form; a stub exposes what the page hands it and a save button.
 const dialogProps: { current: Record<string, unknown> | null } = { current: null };
@@ -344,7 +350,8 @@ describe('About This Game', () => {
   });
 
   it('sanitizes the description once, not on every media change', async () => {
-    const spy = vi.spyOn(DOMPurify, 'sanitize');
+    const spy = vi.mocked(sanitizeStoreHtml);
+    spy.mockClear();
     try {
       renderPage();
       await screen.findByText('About This Game');
@@ -356,7 +363,7 @@ describe('About This Game', () => {
       await screen.findByText('3 / 3');
       expect(descCalls()).toBe(1);
     } finally {
-      spy.mockRestore();
+      spy.mockClear();
     }
   });
 });
