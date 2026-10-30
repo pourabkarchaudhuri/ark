@@ -19,7 +19,6 @@ import { useMemo, useState, useEffect, memo, useCallback } from 'react';
 import { formatPlayerCount } from '@/lib/player-count';
 import { DealBadge } from '@/components/deal-price';
 import { useLocation } from 'wouter';
-import { motion } from 'framer-motion';
 import { Gamepad2, Clock, Star, Calendar, Trash2, Library, Users, Clapperboard, ClipboardCheck, ScrollText, X, Box, Award } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -69,6 +68,8 @@ interface JourneyViewProps {
   entries: JourneyEntry[];
   loading: boolean;
   onSwitchToBrowse?: () => void;
+  /** Something covers the Voyage (the full-screen Wrapped overlay): pause the Ark's render loop. */
+  suspended?: boolean;
 }
 
 // Status badge color mapping
@@ -154,7 +155,20 @@ const JourneyCoverImage = memo(function JourneyCoverImage({ entry }: { entry: Jo
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { entry: JourneyEntry; playerCount?: number }) {
+/** Captain's Log months rendered at first; "Show older" adds this many more. */
+const LOG_MONTH_PAGE = 24;
+
+/**
+ * Steam player counts are fetched in batches of this size, one batch at a time, so a large Log never
+ * floods the player-count limiter's queue.
+ */
+const PLAYER_COUNT_BATCH = 20;
+
+/**
+ * `inLibrary` comes from the parent: reading libraryStore here would go stale, since the card is
+ * memoized on its props and library changes do not touch them.
+ */
+const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount, inLibrary }: { entry: JourneyEntry; playerCount?: number; inLibrary: boolean }) {
   const [, navigate] = useLocation();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const displayTitle = useMemo(
@@ -167,7 +181,6 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
     ? parsedAdded.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
     : '';
   const isRemoved = !!entry.removedAt;
-  const inLibrary = libraryStore.isInLibrary(entry.gameId);
 
   const handleClick = useCallback(() => {
     // Removed entries have no detail page — the only interaction is delete
@@ -187,16 +200,15 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
   }, [confirmDelete, entry.gameId]);
 
   return (
-    <motion.div
+    // CSS hover scale, not a framer-motion whileHover per card: the Log can hold hundreds of cards.
+    <div
       className={cn(
-        'rounded-lg bg-white/5 border border-white/10 overflow-hidden transition-colors min-h-[120px] relative group',
+        'rounded-lg bg-white/5 border border-white/10 overflow-hidden transition duration-200 min-h-[120px] relative group',
         isRemoved
           ? 'opacity-60 cursor-default'
-          : 'cursor-pointer hover:border-fuchsia-500/40'
+          : 'cursor-pointer hover:border-fuchsia-500/40 hover:scale-[1.02]'
       )}
       onClick={handleClick}
-      whileHover={isRemoved ? undefined : { scale: 1.02 }}
-      transition={{ duration: 0.2 }}
     >
       {/* Delete button — top-right corner */}
       <button
@@ -279,7 +291,7 @@ const JourneyGameCard = memo(function JourneyGameCard({ entry, playerCount }: { 
           </div>
         </div>
       </div>
-    </motion.div>
+    </div>
   );
 });
 
@@ -369,7 +381,7 @@ const LOG_FULL_FMT = new Intl.DateTimeFormat(undefined, {
 });
 const EMPTY_LOG_EVENTS: Map<string, LogEvent[]> = new Map();
 const EMPTY_ID_SET: Set<string> = new Set();
-const EMPTY_TIMELINE: TimelineEntry[] = [];
+const EMPTY_LOG_TIMELINE: { data: TimelineEntry[]; monthCount: number } = { data: [], monthCount: 0 };
 
 function LogEventMarkers({ events, estimated }: { events: LogEvent[]; estimated: boolean }) {
   return (
@@ -393,65 +405,13 @@ function LogEventMarkers({ events, estimated }: { events: LogEvent[]; estimated:
   );
 }
 
-export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
+export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse, suspended = false }: JourneyViewProps) {
   const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('ark');
+  const [logMonthLimit, setLogMonthLimit] = useState(LOG_MONTH_PAGE);
 
-  // Fetch live player counts for journey entries in the background.
+  // Live player counts, shown only on Captain's Log cards.
   // Keys are gameId strings ("steam-730") — values are player counts.
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
-
-  // Stabilise the dependency: only re-fetch when the set of game IDs changes,
-  // not when the parent passes a new array reference with the same entries.
-  const entryIdsKey = useMemo(
-    () => entries.map(e => e.gameId).join(','),
-    [entries]
-  );
-
-  useEffect(() => {
-    if (entries.length === 0) return;
-    let cancelled = false;
-
-    const fetchCounts = async () => {
-      // Only fetch player counts for Steam games
-      const steamIds = entries
-        .filter(e => e.gameId.startsWith('steam-'))
-        .map(e => parseInt(e.gameId.replace('steam-', ''), 10))
-        .filter(id => !isNaN(id));
-
-      if (steamIds.length === 0) return;
-
-      const allCounts: Record<string, number> = {};
-
-      const BATCH_SIZE = 20;
-      for (let i = 0; i < steamIds.length; i += BATCH_SIZE) {
-        if (cancelled) return;
-        const batch = steamIds.slice(i, i + BATCH_SIZE);
-        try {
-          const counts = await steamService.getMultiplePlayerCounts(batch);
-          if (cancelled) return;
-          // Map numeric Steam IDs back to string gameId keys
-          for (const [numericId, count] of Object.entries(counts)) {
-            allCounts[`steam-${numericId}`] = count as number;
-          }
-        } catch {
-          // Non-critical
-        }
-      }
-
-      if (!cancelled && Object.keys(allCounts).length > 0) {
-        setPlayerCounts(prev => {
-          const next = { ...prev, ...allCounts };
-          const changed = Object.keys(allCounts).some(k => prev[k] !== allCounts[k]);
-          return changed ? next : prev;
-        });
-      }
-    };
-
-    fetchCounts();
-    return () => { cancelled = true; };
-  // Use the stable key instead of the raw entries array
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entryIdsKey]);
 
   // Scenes and Audit merge journey entries with status history + sessions (and,
   // for Audit, the live library). Those stores update without changing `entries`,
@@ -521,6 +481,50 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     });
   }, [entries]);
 
+  // Steam ids of the games the Log shows, as a stable key: only re-fetch when that set changes,
+  // not when the parent passes a new array with the same games.
+  const logSteamIdsKey = useMemo(
+    () => arkAndLogEntries
+      .filter(e => e.gameId.startsWith('steam-'))
+      .map(e => parseInt(e.gameId.replace('steam-', ''), 10))
+      .filter(id => !isNaN(id))
+      .join(','),
+    [arkAndLogEntries],
+  );
+
+  // Fetch player counts only while the Log is open (the only view that shows them). Each batch is
+  // merged as it arrives; counts already fetched are kept when leaving the Log.
+  useEffect(() => {
+    if (viewStyle !== 'log' || !logSteamIdsKey) return;
+    let cancelled = false;
+    const steamIds = logSteamIdsKey.split(',').map(Number);
+
+    const fetchCounts = async () => {
+      for (let i = 0; i < steamIds.length; i += PLAYER_COUNT_BATCH) {
+        if (cancelled) return;
+        const batch = steamIds.slice(i, i + PLAYER_COUNT_BATCH);
+        try {
+          const counts = await steamService.getMultiplePlayerCounts(batch);
+          if (cancelled) return;
+          // Map numeric Steam IDs back to string gameId keys
+          const batchCounts: Record<string, number> = {};
+          for (const [numericId, count] of Object.entries(counts)) {
+            batchCounts[`steam-${numericId}`] = count as number;
+          }
+          setPlayerCounts(prev => {
+            const changed = Object.keys(batchCounts).some(k => prev[k] !== batchCounts[k]);
+            return changed ? { ...prev, ...batchCounts } : prev;
+          });
+        } catch {
+          // Non-critical
+        }
+      }
+    };
+
+    fetchCounts();
+    return () => { cancelled = true; };
+  }, [viewStyle, logSteamIdsKey]);
+
   // Status-change events per game for the Captain's Log (Started / Resumed / On Hold / Completed).
   const logStatusHistory = viewStyle === 'log' ? storeSnap?.statusHistory : undefined;
   const logSessions = viewStyle === 'log' ? storeSnap?.sessions : undefined;
@@ -540,8 +544,8 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // Captain's Log: per-month grouping. An entry appears in a month if firstPlayedAt or lastPlayedAt falls in that month (same game can appear in Jan and March),
   // and in the month of each status event (Started / Resumed / On Hold / Completed).
   // Within each month, sort by the latest date that applies to that month, desc.
-  const timelineData: TimelineEntry[] = useMemo(() => {
-    if (viewStyle !== 'log' || arkAndLogEntries.length === 0) return EMPTY_TIMELINE;
+  const { data: timelineData, monthCount: logMonthTotal } = useMemo(() => {
+    if (viewStyle !== 'log' || arkAndLogEntries.length === 0) return EMPTY_LOG_TIMELINE;
 
     const monthToEntries = new Map<string, Array<{ entry: JourneyEntry; sortDate: string }>>();
 
@@ -613,11 +617,17 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     }
     const sortedYears = Array.from(byYear.keys()).sort((a, b) => b - a);
 
-    return sortedYears.map((year) => {
-      const monthsWithEntries = byYear.get(year)!;
+    // Only the newest `logMonthLimit` months are rendered ("Show older" pages in more); the year
+    // summaries still count the whole year.
+    let monthBudget = logMonthLimit;
+    const data = sortedYears.flatMap((year): TimelineEntry[] => {
+      if (monthBudget <= 0) return [];
+      const allMonths = byYear.get(year)!;
+      const monthsWithEntries = allMonths.slice(0, monthBudget);
+      monthBudget -= monthsWithEntries.length;
       const yearEntriesUnique = Array.from(
         new Map(
-          monthsWithEntries.flatMap(({ list }) => list.map((x) => x.entry)).map((e) => [e.gameId, e])
+          allMonths.flatMap(({ list }) => list.map((x) => x.entry)).map((e) => [e.gameId, e])
         ).values()
       );
       const completed = yearEntriesUnique.filter((e) => e.status === 'Completed').length;
@@ -625,7 +635,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
       const removed = yearEntriesUnique.filter((e) => !!e.removedAt).length;
       const yearHours = yearEntriesUnique.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
 
-      return {
+      return [{
         title: String(year),
         content: (
           <div>
@@ -674,7 +684,11 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
                           const estimated = !gamesWithEvidence.has(entry.gameId);
                           return (
                             <div key={`${entry.gameId}-${year}-${m}`} className="flex flex-col gap-1">
-                              <JourneyGameCard entry={entry} playerCount={playerCounts[entry.gameId]} />
+                              <JourneyGameCard
+                                entry={entry}
+                                playerCount={playerCounts[entry.gameId]}
+                                inLibrary={!entry.removedAt && libraryStore.isInLibrary(entry.gameId)}
+                              />
                               {(monthEvents.length > 0 || estimated) && (
                                 <LogEventMarkers events={monthEvents} estimated={estimated} />
                               )}
@@ -693,15 +707,17 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
                     key={entry.gameId}
                     entry={entry}
                     playerCount={playerCounts[entry.gameId]}
+                    inLibrary={!entry.removedAt && libraryStore.isInLibrary(entry.gameId)}
                   />
                 ))}
               </div>
             )}
           </div>
         ),
-      };
+      }];
     });
-  }, [arkAndLogEntries, playerCounts, viewStyle, logEventsByGame, gamesWithEvidence]);
+    return { data, monthCount: monthToEntries.size };
+  }, [arkAndLogEntries, playerCounts, viewStyle, logEventsByGame, gamesWithEvidence, logMonthLimit]);
 
   // Total stats
   const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
@@ -826,7 +842,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
 
       {/* Conditional view rendering */}
       {viewStyle === 'ark' ? (
-        <ShowcaseView entries={arkAndLogEntries} />
+        <ShowcaseView entries={arkAndLogEntries} paused={suspended} />
       ) : viewStyle === 'medals' ? (
         <MedalsView entries={entries} />
       ) : viewStyle === 'chronicle' && storeSnap ? (
@@ -843,7 +859,20 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
           sessions={storeSnap.sessions}
         />
       ) : viewStyle === 'chronicle' || viewStyle === 'audit' ? null : (
-        <Timeline data={timelineData} />
+        <>
+          <Timeline data={timelineData} />
+          {logMonthTotal > logMonthLimit && (
+            <div className="flex justify-center pb-16 -mt-8">
+              <Button
+                variant="outline"
+                onClick={() => setLogMonthLimit((n) => n + LOG_MONTH_PAGE)}
+                className="border-white/15 text-white/70 hover:text-white"
+              >
+                Show older ({logMonthTotal - logMonthLimit} more month{logMonthTotal - logMonthLimit !== 1 ? 's' : ''})
+              </Button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

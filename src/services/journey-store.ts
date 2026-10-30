@@ -573,7 +573,8 @@ export class JourneyStore {
     const existing = this.entries.get(gameId);
     if (!existing) return;
 
-    existing.removedAt = new Date().toISOString();
+    // Copy-on-write: memoized Voyage cards compare rows by identity.
+    this.entries.set(gameId, { ...existing, removedAt: new Date().toISOString() });
     this.markDirty(gameId);
     this.invalidateSortedCache();
     this.scheduleSave();
@@ -589,32 +590,33 @@ export class JourneyStore {
 
     // Track WHAT changed: an hours-only change (the 15s live-session tick)
     // fires only the hours channel; anything else is a general mutation.
+    const changes: Partial<JourneyEntry> = {};
     let generalChange = false;
     let hoursChange = false;
     if (fields.status !== undefined && existing.status !== fields.status) {
-      existing.status = fields.status;
+      changes.status = fields.status;
       generalChange = true;
     }
     if (fields.hoursPlayed !== undefined && existing.hoursPlayed !== fields.hoursPlayed) {
-      existing.hoursPlayed = fields.hoursPlayed;
+      changes.hoursPlayed = fields.hoursPlayed;
       hoursChange = true;
     }
     if (fields.rating !== undefined && existing.rating !== fields.rating) {
-      existing.rating = fields.rating;
+      changes.rating = fields.rating;
       generalChange = true;
     }
     if (fields.firstPlayedAt !== undefined) {
       // Reject garbage strings ("undefined", "") and implausible dates; keep the earliest value.
       const iso = earliestIso(toValidIso(fields.firstPlayedAt), toValidIso(existing.firstPlayedAt));
       if (iso && existing.firstPlayedAt !== iso) {
-        existing.firstPlayedAt = iso;
+        changes.firstPlayedAt = iso;
         generalChange = true;
       }
     }
     if (fields.lastPlayedAt !== undefined) {
       const iso = toValidIso(fields.lastPlayedAt);
       if (iso && existing.lastPlayedAt !== iso) {
-        existing.lastPlayedAt = iso;
+        changes.lastPlayedAt = iso;
         generalChange = true;
       }
     }
@@ -624,11 +626,14 @@ export class JourneyStore {
     this.markDirty(gameId);
     this.scheduleSave();
     if (generalChange) {
+      // Copy-on-write so memoized Voyage cards (identity-compared) re-render.
+      this.entries.set(gameId, { ...existing, ...changes });
       this.invalidateSortedCache();
       this.notifyListeners();
     } else {
-      // Sort order (addedAt) is unaffected and rows are mutated in place, so
-      // the cached sorted array stays valid — no general notify.
+      // Hours-only: the row is mutated in place on purpose. Sort order (addedAt) is
+      // unaffected, so the cached sorted array stays valid — no general notify.
+      existing.hoursPlayed = changes.hoursPlayed!;
       this.notifyHoursListeners();
     }
   }
@@ -645,7 +650,7 @@ export class JourneyStore {
     if (!isPlaceholderJourneyTitle(existing.title)) return;
     if (existing.title === trimmed) return;
 
-    existing.title = trimmed;
+    this.entries.set(gameId, { ...existing, title: trimmed });
     this.markDirty(gameId);
     this.invalidateSortedCache();
     this.scheduleSave();
@@ -663,7 +668,7 @@ export class JourneyStore {
     if (!existing) return;
     if (existing.title === trimmed) return;
 
-    existing.title = trimmed;
+    this.entries.set(gameId, { ...existing, title: trimmed });
     this.markDirty(gameId);
     this.invalidateSortedCache();
     this.scheduleSave();
