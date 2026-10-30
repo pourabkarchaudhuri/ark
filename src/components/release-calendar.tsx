@@ -372,6 +372,25 @@ async function scanCatalogUpcoming(): Promise<UpcomingRelease[]> {
 /** Undated "Coming Soon" entries kept from the prefetch, per store (Epic's list must not crowd out Steam's). */
 const COMING_SOON_CAP = 300;
 
+/**
+ * Where a prefetched browse game goes in the calendar: the undated Coming Soon
+ * bucket, a dated slot (its timestamp), or nowhere (no usable date). A game the
+ * store flags as coming soon whose date is not in the future (a year-only
+ * '2026' parsed as 1 Jan, or text Date cannot parse) is not an exact past
+ * release, so it goes to Coming Soon. Exported for tests.
+ */
+export function prefetchReleaseSlot(
+  game: Pick<Game, 'releaseDate' | 'comingSoon'> & { _releaseTs?: number },
+  now: number,
+): 'coming-soon' | number | null {
+  if (!game.releaseDate) return null;
+  if (game.comingSoon && game.releaseDate === 'Coming Soon') return 'coming-soon';
+  const raw = game._releaseTs ?? new Date(game.releaseDate).getTime();
+  const ts = Number.isFinite(raw) ? raw : 0;
+  if (game.comingSoon && !(ts > now)) return 'coming-soon';
+  return ts === 0 ? null : ts;
+}
+
 /** Name key for merging the same game across stores. Unicode-aware: non-Latin titles keep their letters. */
 export function releaseNameKey(name: string): string {
   return name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
@@ -1616,7 +1635,8 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       const epicOfferId = game.epicOfferId;
       const epicSlug = game.epicSlug;
 
-      if (game.comingSoon && game.releaseDate === 'Coming Soon') {
+      const slot = prefetchReleaseSlot(game as Game & { _releaseTs?: number }, now);
+      if (slot === 'coming-soon') {
         if (comingSoonCount[store] < COMING_SOON_CAP) {
           results.push({ id: game.id, name: game.title, image, headerImage, screenshots, epicNamespace, epicOfferId, epicSlug, releaseDate: 'Coming Soon', comingSoon: true, genres, platforms, store });
           comingSoonCount[store]++;
@@ -1624,8 +1644,8 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
         continue;
       }
 
-      const ts = (game as any)._releaseTs ?? new Date(game.releaseDate).getTime();
-      if (isNaN(ts) || ts === 0) continue;
+      if (slot === null) continue;
+      const ts = slot;
       if (ts < windowStartMs || ts > futureCutoff) continue;
 
       results.push({ id: game.id, name: game.title, image, headerImage, screenshots, epicNamespace, epicOfferId, epicSlug, releaseDate: game.releaseDate, comingSoon: ts > now, genres, platforms, store });

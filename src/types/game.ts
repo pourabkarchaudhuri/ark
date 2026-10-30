@@ -52,7 +52,9 @@ export interface Game {
   achievements?: number;
   recommendations?: number;
   comingSoon?: boolean;
-  
+  /** Steam's raw release text ('Q1 2027', '2026') when releaseDate is the 'Coming Soon' placeholder. */
+  releaseDateText?: string;
+
   // Extended metadata
   gameModes?: string[];
   themes?: string[];

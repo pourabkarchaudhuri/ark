@@ -23,6 +23,7 @@ import { Clock, Calendar, Star, Library, ChevronLeft, ChevronRight, Mouse } from
 import type { JourneyEntry, GameStatus } from '@/types/game';
 import { cn, buildGameImageChain, formatHours } from '@/lib/utils';
 import { resolveJourneyDisplayTitle } from '@/lib/journey-display-title';
+import { formatRegistryReleaseDate } from '@/lib/release-date-display';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
 
@@ -1074,8 +1075,7 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
                 const steamId = libEntry?.steamAppId ?? meta?.steamAppId;
                 const store = meta?.store ?? (entry.gameId.startsWith('epic-') ? 'Epic' : entry.gameId.startsWith('steam-') ? 'Steam' : 'Custom');
                 const metacritic = meta?.metacriticScore;
-                const relDate = entry.releaseDate ?? meta?.releaseDate;
-                const techDate = relDate ? new Date(relDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short' }) : null;
+                const techDate = formatRegistryReleaseDate(entry.releaseDate, meta?.releaseDate);
                 const je = journeyStore.getEntry(entry.gameId);
                 const lastPlayed = je?.lastPlayedAt ?? libEntry?.lastPlayedAt;
 

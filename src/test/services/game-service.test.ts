@@ -217,9 +217,9 @@ describe('deduplicateGames', () => {
     ];
 
     const result = deduplicateGames(games);
-    // Should deduplicate by title, keeping the first occurrence
-    expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('steam-1');
+    // 1.0.97: distinct Steam apps under one title are both kept (only exact id repeats drop)
+    expect(result).toHaveLength(2);
+    expect(result.map((g) => g.id)).toEqual(['steam-1', 'steam-2']);
   });
 
   it('handles empty input', () => {

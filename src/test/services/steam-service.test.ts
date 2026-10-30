@@ -64,7 +64,9 @@ describe('transformSteamGame', () => {
       release_date: { coming_soon: false, date: 'Jan 15, 2025' },
     });
     const game = transformSteamGame(details);
-    expect(game.releaseDate).toBe(new Date('Jan 15, 2025').toISOString());
+    // 1.0.97: pinned to 12:00 UTC so the calendar day survives every time zone
+    // (local midnight via toISOString landed on 14 Jan east of UTC).
+    expect(game.releaseDate).toBe('2025-01-15T12:00:00.000Z');
   });
 
   it('keeps raw date string when parsing fails', () => {
