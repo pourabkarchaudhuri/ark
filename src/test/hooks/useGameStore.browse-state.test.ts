@@ -18,6 +18,7 @@ vi.mock('@/services/journey-store', () => ({
   journeyStore: {
     record: vi.fn(),
     markRemoved: vi.fn(),
+    clearRemoved: vi.fn().mockReturnValue(false),
     syncProgress: vi.fn(),
     syncTitleIfPlaceholder: vi.fn(),
     getEntry: vi.fn().mockReturnValue(undefined),
@@ -61,6 +62,7 @@ const gameSvc = vi.hoisted(() => ({
   clearCache: vi.fn(),
   getGameDetails: vi.fn().mockResolvedValue(null),
   searchGames: vi.fn().mockResolvedValue([]),
+  backfillLibraryMissingCachedMeta: vi.fn(() => Promise.resolve()),
 }));
 const prefetch = vi.hoisted(() => ({
   getPrefetchedGames: vi.fn(),
