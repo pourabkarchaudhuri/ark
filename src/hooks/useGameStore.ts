@@ -20,7 +20,7 @@ import {
 import { scoreGame, buildSingleSearchIndex, compareBrowseSearchZeroScore } from '@/services/game-search-scoring';
 import { Game, GameFilters, GameCategory, UpdateLibraryEntry, CreateCustomGameEntry, GameStatus, CachedGameMeta, LibraryGameEntry } from '@/types/game';
 import { SteamAppListItem } from '@/types/steam';
-import { detailEnricher } from '@/services/detail-enricher';
+import { detailEnricher, evictOldestEnrichments } from '@/services/detail-enricher';
 import {
   getCachedCatalog,
   setCachedCatalog,
@@ -785,6 +785,10 @@ export function useSteamGames(category: GameCategory = 'trending') {
   // displayCount widening makes "scrolled to" the whole list, and 400 counts per sweep starved the
   // shared Steam queue), refreshed every 10 minutes while the window is visible, and stored
   // out-of-band; one enrichmentEpoch bump makes the `games` useMemo re-merge the visible cards.
+  const keptCountsShownRef = useRef(false);
+  useEffect(() => {
+    if (loading) keptCountsShownRef.current = false;
+  }, [loading]);
   useEffect(() => {
     if (loading || allGames.length === 0) return;
 
@@ -838,8 +842,12 @@ export function useSteamGames(category: GameCategory = 'trending') {
       }
     };
 
-    // Counts kept from an earlier visit show straight away.
-    if (playerCountMapRef.current.size > 0) setEnrichmentEpoch(e => e + 1);
+    // Counts kept from an earlier visit show straight away — once per load, not on every
+    // displayCount change (each loadMore page would otherwise remap the whole grid).
+    if (playerCountMapRef.current.size > 0 && !keptCountsShownRef.current) {
+      keptCountsShownRef.current = true;
+      setEnrichmentEpoch(e => e + 1);
+    }
     // Debounced so scrolling (displayCount growing) fetches once per pause.
     const timer = setTimeout(fetchLiveCounts, 400);
     const refresh = setInterval(fetchLiveCounts, REFRESH_MS);
@@ -1017,15 +1025,10 @@ export function useSteamGames(category: GameCategory = 'trending') {
     }
     // Evict oldest entries when the map grows too large (prevents memory bloat
     // during long catalog browsing sessions).
-    if (map.size > MAX_ENRICHMENT_MAP_SIZE) {
-      const excess = map.size - MAX_ENRICHMENT_MAP_SIZE;
-      let removed = 0;
-      for (const key of map.keys()) {
-        if (removed >= excess) break;
-        map.delete(key);
-        removed++;
-      }
-    }
+    // 1.0.97: the enricher forgets evicted ids so their cards are fetched again when they
+    // scroll back into view (its done-set is larger than this map; they would stay bare).
+    const evicted = evictOldestEnrichments(map, MAX_ENRICHMENT_MAP_SIZE);
+    if (evicted.length > 0) detailEnricher.forget(evicted);
     setEnrichmentEpoch(prev => prev + 1);
   }, []);
 
@@ -1060,6 +1063,9 @@ export function useSteamGames(category: GameCategory = 'trending') {
     enrichGames,
     allGamesRef,
     enrichmentMapRef,
+    // Bumped when player counts / enrichment / library status are merged into `games`
+    // (same ids, new objects). Lets the filter/sort hook remap without a full recompute.
+    enrichmentEpoch,
   };
 }
 

@@ -92,7 +92,26 @@ const MAX_ENRICHED_IDS = 5_000;
 const MAX_ENRICH_ATTEMPTS = 3;
 const MAX_ELEMENT_MAP_SIZE = 500;
 
-class DetailEnricher {
+/** Pending-queue cap: after a fast scroll only the most recently seen cards are worth fetching. */
+export const MAX_PENDING_QUEUE = 60;
+
+/**
+ * Evict the oldest entries of an insertion-ordered enrichment map down to `max`.
+ * Returns the evicted ids so the caller can tell the enricher to forget them.
+ */
+export function evictOldestEnrichments<V>(map: Map<string, V>, max: number): string[] {
+  const excess = map.size - max;
+  if (excess <= 0) return [];
+  const evicted: string[] = [];
+  for (const key of map.keys()) {
+    if (evicted.length >= excess) break;
+    evicted.push(key);
+  }
+  for (const key of evicted) map.delete(key);
+  return evicted;
+}
+
+export class DetailEnricher {
   // --- config (set via configure()) ---
   private config: EnricherConfig | null = null;
 
@@ -116,6 +135,13 @@ class DetailEnricher {
 
   // --- batch-in-progress flag ---
   private processing = false;
+
+  /**
+   * Bumped by reset()/configure(). A batch captures it before its fetch and drops its result
+   * (and its cooldown chain) when it no longer matches, so a reset during an in-flight batch
+   * never leaves two batch chains running or writes old-category results into the new session.
+   */
+  private generation = 0;
 
   // --- element ↔ gameId mapping ---
   private elementToGameId = new Map<HTMLElement, string>();
@@ -168,6 +194,7 @@ class DetailEnricher {
   configure(config: EnricherConfig): void {
     // Clear any pending timer from a previous configure() call
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this.generation++;
     this.config = config;
     this.ensureObserver();
   }
@@ -198,6 +225,7 @@ class DetailEnricher {
   reset(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    this.generation++;
     this.processing = false;
     this.pendingQueue = [];
     this.enrichedIds.clear();
@@ -209,6 +237,17 @@ class DetailEnricher {
       this.observer = null;
     }
     this.elementToGameId.clear();
+  }
+
+  /**
+   * Forget ids whose enrichment the store evicted, so observe() and the observer queue them
+   * again when their cards come back into view. In-flight ids are left alone.
+   */
+  forget(ids: Iterable<string>): void {
+    for (const id of ids) {
+      this.enrichedIds.delete(id);
+      this.attempts.delete(id);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -239,9 +278,10 @@ class DetailEnricher {
         this.observer?.unobserve(el);
         continue;
       }
-      // LIFO: push to end (popped from end in processBatch)
+      // LIFO: push to end (popped from end in processBatch); drop the oldest past the cap
       if (!this.pendingQueue.includes(gameId)) {
         this.pendingQueue.push(gameId);
+        if (this.pendingQueue.length > MAX_PENDING_QUEUE) this.pendingQueue.shift();
         added = true;
       }
     }
@@ -260,11 +300,16 @@ class DetailEnricher {
   private async processBatch(): Promise<void> {
     if (!this.config || !window.steam || this.processing) return;
 
-    // Take up to MAX_BATCH_SIZE from the END (LIFO — most recently visible)
+    // Take up to MAX_BATCH_SIZE from the END (LIFO — most recently visible).
+    // Skip cards that are no longer mounted (re-intersection re-queues ones that come back)
+    // and ones that picked up their details some other way since they were queued.
+    const live = new Set(this.elementToGameId.values());
     const batch: string[] = [];
     while (batch.length < MAX_BATCH_SIZE && this.pendingQueue.length > 0) {
       const gameId = this.pendingQueue.pop()!;
       if (this.enrichedIds.has(gameId) || this.inFlightIds.has(gameId)) continue;
+      if (!live.has(gameId)) continue;
+      if (!this.config.needsEnrichment(gameId)) { this.enrichedIds.add(gameId); continue; }
       batch.push(gameId);
     }
 
@@ -275,6 +320,7 @@ class DetailEnricher {
     }
 
     this.processing = true;
+    const gen = this.generation;
 
     // Mark in-flight
     for (const id of batch) this.inFlightIds.add(id);
@@ -299,6 +345,8 @@ class DetailEnricher {
 
       console.log(`[DetailEnricher] Fetching details for ${numericBatch.length} games: [${numericBatch.slice(0, 5).join(', ')}${numericBatch.length > 5 ? '...' : ''}]`);
       const results = await window.steam.getMultipleAppDetails(numericBatch);
+      // Superseded by reset()/configure(): the new session owns all state now.
+      if (gen !== this.generation) return;
 
       const enrichments = new Map<string, Partial<Game>>();
       for (const { appId, details } of results) {
@@ -324,6 +372,7 @@ class DetailEnricher {
       // Prevent enrichedIds from growing without bound
       this.pruneEnrichedIds();
     } catch (err) {
+      if (gen !== this.generation) return;
       console.error('[DetailEnricher] Batch fetch failed:', err);
       // Move failed IDs out of in-flight but mark as enriched to avoid retry storm
       for (const id of batch) {
@@ -334,7 +383,10 @@ class DetailEnricher {
 
     // Cooldown before the next batch to stay under Steam's rate limit
     if (this.pendingQueue.length > 0) {
+      if (this.timer) clearTimeout(this.timer);
       this.timer = setTimeout(() => {
+        if (gen !== this.generation) return;
+        this.timer = null;
         this.processing = false;
         this.processBatch();
       }, BATCH_COOLDOWN_MS);
