@@ -1,7 +1,7 @@
 import { JourneyEntry, GameStatus, migrateGameId } from '@/types/game';
 import { sessionStore } from './session-store';
 import { statusHistoryStore } from './status-history-store';
-import { SerialWriteQueue, readWithRetry, reportStorageReadOnly } from './storage-health';
+import { SaveRetry, SerialWriteQueue, readWithRetry, reportStorageReadOnly } from './storage-health';
 import { earliestIso } from './first-played';
 
 const STORAGE_KEY = 'ark-journey-history';
@@ -112,6 +112,9 @@ export class JourneyStore {
   /** LevelDB unreadable this session → no writes at all (see storage-health). */
   private _readOnly = false;
 
+  /** Backoff retry for a failed LevelDB save (also forces the unload flush). */
+  private readonly _saveRetry = new SaveRetry('JourneyStore', () => this.saveNow());
+
   /** Gate flag captured once at construction — LevelDB path vs. legacy fallback. */
   private readonly _useLevelDB: boolean;
 
@@ -200,6 +203,7 @@ export class JourneyStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
+    this._saveRetry.cancel();
     let migrated = true;
     try { migrated = localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes'; } catch { /* assume migrated */ }
     if (!migrated) {
@@ -240,7 +244,8 @@ export class JourneyStore {
    * Stamps `MIGRATION_MARKER_KEY = 'yes'` on success (or on an empty/invalid
    * payload) so we don't retry every boot.
    *
-   * Returns `true` if any rows were copied.
+   * Returns `true` if any rows were copied, or the copy failed and the store
+   * went read-only (listeners already notified either way).
    */
   private async tryMigrateFromLocalStorage(): Promise<boolean> {
     try {
@@ -289,10 +294,19 @@ export class JourneyStore {
         value: e,
       }));
 
-      const res = await window.store!.batch(ops);
+      let res: { error?: string };
+      try {
+        res = await window.store!.batch(ops);
+      } catch (err) {
+        res = { error: err instanceof Error ? err.message : String(err) };
+      }
       if (res.error) {
         console.error('[JourneyStore] Migration batch failed:', res.error);
-        return false;
+        // Read-only with the legacy journey visible: no edit can write a row
+        // this session, so the next boot still finds an empty namespace and
+        // retries. enterReadOnly notifies listeners.
+        this.enterReadOnly(res.error);
+        return true;
       }
 
       // IMPORTANT: keep the original STORAGE_KEY intact for one release as
@@ -391,16 +405,21 @@ export class JourneyStore {
 
   /** Flush any pending debounced save (used on beforeunload). */
   private flushSave() {
+    // A failed save (or a pending retry) is unsaved work too, not only a
+    // pending debounce.
+    const retryPending = this._useLevelDB && this._saveRetry.needsFlush;
+    if (!this._saveTimer && !retryPending) return;
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
-      if (this._useLevelDB && !this._readOnly) {
-        // Unloading — can't wait behind an in-flight batch; send the delta now.
-        void this.saveNowLevelDB();
-        return;
-      }
-      this.saveNow();
     }
+    this._saveRetry.cancel();
+    if (this._useLevelDB && !this._readOnly) {
+      // Unloading — can't wait behind an in-flight batch; send the delta now.
+      void this.saveNowLevelDB();
+      return;
+    }
+    this.saveNow();
   }
 
   private saveNow(): void {
@@ -458,19 +477,23 @@ export class JourneyStore {
         }
       }
 
-      if (ops.length === 0) return;
+      if (ops.length === 0) {
+        this._saveRetry.success();
+        return;
+      }
 
       const res = await window.store!.batch(ops);
       if (res.error) {
-        console.error('[JourneyStore] batch save failed:', res.error);
-        for (const id of dirty) this._dirty.add(id); // retry on next save
+        for (const id of dirty) this._dirty.add(id); // retried below
+        this._saveRetry.failure(res.error);
         return;
       }
       for (const id of putIds) this._knownKeys.add(id);
       for (const id of delIds) this._knownKeys.delete(id);
+      this._saveRetry.success();
     } catch (err) {
       for (const id of dirty) this._dirty.add(id);
-      console.error('[JourneyStore] Failed to save (LevelDB):', err);
+      this._saveRetry.failure(err);
     }
   }
 

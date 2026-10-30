@@ -10,15 +10,17 @@
  * `window.store` IPC surface (see `electron/ipc/store-handlers.ts`). Both
  * collections live in the same namespace with prefixed keys so a single
  * `getAll` fills the in-memory cache. The public sync API is unchanged —
- * the constructor still hydrates synchronously from localStorage (so any
- * caller that reads on the same tick sees data), and the async LevelDB
- * layer either migrates or overrides that cache once ready. When
+ * before the one-shot migration the constructor still hydrates synchronously
+ * from localStorage (so any caller that reads on the same tick sees data),
+ * and the async LevelDB layer either migrates or overrides that cache once
+ * ready; after it, LevelDB alone is read. When
  * `window.store` is unavailable (unit tests, jsdom, pre-preload boot
  * window) the store transparently falls back to the previous localStorage
  * path.
  */
 
 import { canonicalFranchiseBase } from '@/services/franchise';
+import { readWithRetry, reportStorageReadOnly } from '@/services/storage-health';
 import type { DismissMeta } from '@/services/hard-negative';
 
 const LS_DISMISSED_KEY = 'ark-reco-dismissed-v1';
@@ -91,6 +93,13 @@ class RecoHistoryStore {
    */
   private _knownKeys: Set<string> = new Set();
 
+  /**
+   * LevelDB unreadable after retries. Nothing is written this session (the
+   * in-memory maps still update) so a partial view can never overwrite the
+   * real dismissals / history rows.
+   */
+  private _readOnly = false;
+
   /** Ids written before the async LevelDB hydrate finished (merged back over the hydrated rows). */
   private _touchedD: Set<string> = new Set();
   private _touchedH: Set<string> = new Set();
@@ -110,10 +119,14 @@ class RecoHistoryStore {
     this._useLevelDB =
       typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
 
-    // Always run a synchronous hydrate from localStorage so callers that
-    // read immediately after construction (e.g. isDismissed during render)
-    // still see data even in the LevelDB pre-hydrate boot window.
-    this.hydrateFromLocalStorage();
+    // Synchronous hydrate from localStorage only while it is still the source
+    // of truth (no bridge, or the one-shot migration has not run). After the
+    // markers are stamped the legacy keys are frozen at v1.0.61: loading them
+    // meant a failed boot read let the next dismiss/click save that stale
+    // snapshot over the real LevelDB rows.
+    if (!this._useLevelDB || !RecoHistoryStore.migrationMarked()) {
+      this.hydrateFromLocalStorage();
+    }
 
     this.ready = this._useLevelDB
       ? this.initializeFromLevelDB().finally(() => { this._hydrated = true; this._touchedD.clear(); this._touchedH.clear(); })
@@ -139,6 +152,16 @@ class RecoHistoryStore {
   }
 
   // ── Persistence: sync load ──
+
+  /** Both one-shot migration markers stamped (LevelDB is authoritative). */
+  private static migrationMarked(): boolean {
+    try {
+      return localStorage.getItem(MIGRATION_MARKER_DISMISSED) === 'yes'
+        && localStorage.getItem(MIGRATION_MARKER_HISTORY) === 'yes';
+    } catch {
+      return false;
+    }
+  }
 
   private hydrateFromLocalStorage() {
     try {
@@ -191,19 +214,25 @@ class RecoHistoryStore {
    *      current in-memory entries (already hydrated from localStorage)
    *      into LevelDB and stamp both markers. Legacy localStorage keys
    *      remain intact for one-release rollback.
-   *   3. On any hard IPC failure, keep the localStorage-hydrated cache and
-   *      leave `_knownKeys` empty so subsequent writes still fall back to
-   *      the localStorage path via `saveNow()`.
+   *   3. If the read still fails after retries (or throws), go read-only:
+   *      the in-memory maps keep working for this session but nothing is
+   *      written, so neither a partial view nor the frozen localStorage
+   *      snapshot can overwrite the real rows. (Writes never fall back to
+   *      localStorage while the bridge exists.)
    */
   private async initializeFromLevelDB(): Promise<void> {
     try {
-      const res = await window.store!.getAll<unknown>(LEVEL_NAMESPACE);
-      if (res.error) {
-        console.error('[RecoHistoryStore] getAll IPC error:', res.error);
+      const outcome = await readWithRetry('RecoHistoryStore', () =>
+        window.store!.getAll<unknown>(LEVEL_NAMESPACE),
+      );
+      if (!outcome.ok) {
+        this.enterReadOnly(outcome.error);
         return;
       }
-      const rows = res.rows ?? [];
-      if (rows.length > 0) {
+      const rows = outcome.value.rows ?? [];
+      // Markers stamped + empty namespace = the user's state really is empty:
+      // rebuild from the (zero) rows so only ids touched this boot survive.
+      if (rows.length > 0 || RecoHistoryStore.migrationMarked()) {
         this.hydrateFromRows(rows);
         this.notify();
         return;
@@ -211,8 +240,22 @@ class RecoHistoryStore {
       // LevelDB empty — attempt one-shot migration from localStorage.
       await this.tryMigrateFromLocalStorage();
     } catch (err) {
-      console.error('[RecoHistoryStore] Failed to init from LevelDB, falling back:', err);
+      this.enterReadOnly(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  private enterReadOnly(error: string): void {
+    this._readOnly = true;
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    reportStorageReadOnly('reco-history', error);
+  }
+
+  /** True when LevelDB could not be read this session — nothing is persisted. */
+  isReadOnly(): boolean {
+    return this._readOnly;
   }
 
   private hydrateFromRows(rows: Array<{ key: string; value: unknown }>) {
@@ -384,6 +427,7 @@ class RecoHistoryStore {
   }
 
   private async saveNowLevelDB(): Promise<void> {
+    if (this._readOnly) return;
     try {
       const currentKeys = new Set<string>();
       const ops: Array<
@@ -703,6 +747,11 @@ class RecoHistoryStore {
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
+    }
+    if (this._readOnly) {
+      // Read-only session: in-memory reset only, nothing on disk is touched.
+      this.notify();
+      return;
     }
     if (this._useLevelDB) {
       // Fire-and-forget: also nuke the LevelDB namespace so subsequent

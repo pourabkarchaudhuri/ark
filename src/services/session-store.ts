@@ -199,7 +199,8 @@ export class SessionStore {
    * Stamps `MIGRATION_MARKER_KEY = 'yes'` on success (or on an empty/invalid
    * payload) so we don't retry every boot.
    *
-   * Returns `true` if any rows were copied.
+   * Returns `true` if any rows were copied, or the copy failed and the store
+   * went read-only (listeners already notified either way).
    */
   private async tryMigrateFromLocalStorage(): Promise<boolean> {
     try {
@@ -236,10 +237,19 @@ export class SessionStore {
         return false;
       }
 
-      const res = await window.store!.batch(ops);
+      let res: { error?: string };
+      try {
+        res = await window.store!.batch(ops);
+      } catch (err) {
+        res = { error: err instanceof Error ? err.message : String(err) };
+      }
       if (res.error) {
         console.error('[SessionStore] Migration batch failed:', res.error);
-        return false;
+        // Read-only with the legacy log visible: a new session cannot write a
+        // row this session, so the next boot still finds an empty namespace
+        // and retries. enterReadOnly notifies listeners.
+        this.enterReadOnly(res.error);
+        return true;
       }
 
       // IMPORTANT: keep the original STORAGE_KEY intact for one release as
