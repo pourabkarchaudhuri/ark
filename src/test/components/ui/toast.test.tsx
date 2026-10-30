@@ -1,10 +1,29 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { forwardRef, type ReactNode } from 'react';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { ToastProvider, useToast } from '@/components/ui/toast';
 
-// Helper component to test toast functionality
+// Exit animations never finish under fake timers; render motion.div as a
+// plain div so removed toasts leave the DOM immediately.
+vi.mock('framer-motion', () => {
+  const MOTION_PROPS = ['initial', 'animate', 'exit', 'transition', 'layout'];
+  const Div = forwardRef<HTMLDivElement, Record<string, unknown>>(({ children, ...props }, ref) => {
+    const safe: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(props)) {
+      if (!MOTION_PROPS.includes(k)) safe[k] = v;
+    }
+    return <div ref={ref} {...safe}>{children as ReactNode}</div>;
+  });
+  return {
+    motion: { div: Div },
+    AnimatePresence: ({ children }: { children: ReactNode }) => <>{children}</>,
+  };
+});
+
+// Helper component to test toast functionality. The toast list is no longer
+// in context (1.0.97 B23), so assertions read the rendered toasts instead.
 function ToastTestComponent() {
-  const { success, error, info, warning, toasts, removeToast } = useToast();
+  const { success, error, info, warning } = useToast();
 
   return (
     <div>
@@ -12,10 +31,6 @@ function ToastTestComponent() {
       <button onClick={() => error('Error message')}>Show Error</button>
       <button onClick={() => info('Info message')}>Show Info</button>
       <button onClick={() => warning('Warning message')}>Show Warning</button>
-      <button onClick={() => toasts.length > 0 && removeToast(toasts[0].id)}>
-        Remove First
-      </button>
-      <div data-testid="toast-count">{toasts.length}</div>
     </div>
   );
 }
@@ -27,6 +42,8 @@ function renderWithProvider() {
     </ToastProvider>
   );
 }
+
+const toastCount = () => screen.queryAllByRole('status').length;
 
 describe('Toast System', () => {
   beforeEach(() => {
@@ -92,41 +109,69 @@ describe('Toast System', () => {
 
     expect(screen.getByText('Success message')).toBeInTheDocument();
     expect(screen.getByText('Error message')).toBeInTheDocument();
-    expect(screen.getByTestId('toast-count').textContent).toBe('2');
+    expect(toastCount()).toBe(2);
   });
 
-  it('removes toast from state after duration', async () => {
+  it('removes toast after duration', async () => {
     renderWithProvider();
 
     await act(async () => {
       fireEvent.click(screen.getByText('Show Success'));
     });
 
-    expect(screen.getByTestId('toast-count').textContent).toBe('1');
+    expect(toastCount()).toBe(1);
 
-    // Advance past the toast duration (3000ms) 
+    // Advance past the toast duration (3000ms)
     await act(async () => {
       vi.advanceTimersByTime(3100);
     });
 
-    // The toast should be removed from state
-    expect(screen.getByTestId('toast-count').textContent).toBe('0');
+    expect(toastCount()).toBe(0);
   });
 
-  it('can remove toast manually via hook', async () => {
+  it('can remove toast manually via the dismiss button', async () => {
     renderWithProvider();
 
     await act(async () => {
       fireEvent.click(screen.getByText('Show Success'));
     });
 
-    expect(screen.getByTestId('toast-count').textContent).toBe('1');
+    expect(toastCount()).toBe(1);
 
     await act(async () => {
-      fireEvent.click(screen.getByText('Remove First'));
+      fireEvent.click(screen.getByLabelText('Dismiss notification'));
     });
 
-    expect(screen.getByTestId('toast-count').textContent).toBe('0');
+    expect(toastCount()).toBe(0);
+  });
+
+  it('does not re-render useToast consumers when toasts show and dismiss', async () => {
+    let renders = 0;
+    let api: ReturnType<typeof useToast> | null = null;
+    function Consumer() {
+      renders += 1;
+      api = useToast();
+      return null;
+    }
+    render(
+      <ToastProvider>
+        <Consumer />
+      </ToastProvider>
+    );
+    expect(renders).toBe(1);
+    const first = api;
+
+    await act(async () => {
+      api!.addToast('hello', 'info', 1000);
+    });
+    expect(screen.getByText('hello')).toBeInTheDocument();
+    await act(async () => {
+      vi.advanceTimersByTime(1100);
+    });
+    expect(screen.queryByText('hello')).not.toBeInTheDocument();
+
+    expect(renders).toBe(1);
+    expect(api).toBe(first);
   });
 
   it('throws error when useToast is used outside provider', () => {

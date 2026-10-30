@@ -366,11 +366,15 @@ export async function fetchAllNews(force = false): Promise<NewsItem[]> {
     // non-critical
   }
 
+  // Lowercase each title once, not once per news item (large libraries stalled here).
+  const needles = libraryTitles.filter((t) => t.length > 2).map((t) => t.toLowerCase());
   for (const item of deduped) {
+    if (needles.length === 0) {
+      item.isFromYourFleet = false;
+      continue;
+    }
     const text = `${item.title} ${item.summary}`.toLowerCase();
-    item.isFromYourFleet = libraryTitles.some(
-      (t) => t.length > 2 && text.includes(t.toLowerCase()),
-    );
+    item.isFromYourFleet = needles.some((n) => text.includes(n));
   }
 
   // Cache

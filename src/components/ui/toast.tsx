@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useRef, useEffect, ReactNode, forwardRef } from 'react';
+import { createContext, useContext, useState, useCallback, useMemo, useRef, useEffect, ReactNode, forwardRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, CheckCircle, AlertCircle, Info, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -18,8 +18,9 @@ interface Toast {
   action?: ToastAction;
 }
 
+// Actions only: the toast list stays out of context so showing or dismissing
+// a toast doesn't re-render every useToast consumer (ToastContainer gets it as a prop).
 interface ToastContextType {
-  toasts: Toast[];
   addToast: (message: string, type?: ToastType, duration?: number, action?: ToastAction) => void;
   removeToast: (id: string) => void;
   success: (message: string, duration?: number) => void;
@@ -111,10 +112,13 @@ export function ToastProvider({ children }: ToastProviderProps) {
   const info = useCallback((message: string, duration?: number) => addToast(message, 'info', duration), [addToast]);
   const warning = useCallback((message: string, duration?: number) => addToast(message, 'warning', duration), [addToast]);
 
+  const value = useMemo(
+    () => ({ addToast, removeToast, success, error, info, warning }),
+    [addToast, removeToast, success, error, info, warning]
+  );
+
   return (
-    <ToastContext.Provider
-      value={{ toasts, addToast, removeToast, success, error, info, warning }}
-    >
+    <ToastContext.Provider value={value}>
       {children}
       <ToastContainer toasts={toasts} onRemove={removeToast} />
     </ToastContext.Provider>
