@@ -239,16 +239,24 @@ export class GgDealsClient {
 }
 
 let defaultClient: Promise<GgDealsClient> | null = null;
+/** Held so the quit path can flush synchronously (it cannot await the client promise). */
+let defaultCache: { flushSync(): void } | null = null;
 
 /** One client per process (concurrent first calls share the same construction and disk cache). */
 export function getGgDealsClient(): Promise<GgDealsClient> {
   return defaultClient ??= createDefaultClient();
 }
 
+/** Synchronously flush the disk cache (for use in before-quit). No-op if never created. */
+export function flushGgDealsCache(): void {
+  defaultCache?.flushSync();
+}
+
 async function createDefaultClient(): Promise<GgDealsClient> {
   const { PersistentCache } = await import('./persistent-cache.js');
   const { settingsStore } = await import('./settings-store.js');
   const cache = new PersistentCache('ggdeals-cache.json');
+  defaultCache = cache;
   const netFetch = electron?.net?.fetch as FetchFn | undefined;
   return new GgDealsClient({
     fetch: netFetch ? (u, i) => netFetch(u, i) : (u, i) => fetch(u, i),

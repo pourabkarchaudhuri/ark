@@ -295,6 +295,10 @@ class RateLimiter {
 // PersistentCache — imported from shared module
 import { PersistentCache } from './persistent-cache.js';
 import { logger } from './safe-logger.js';
+import { SteamAppListStore, type AppListEntry } from './steam-applist-store.js';
+import { atomicWriteFile } from './safe-write.js';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // Alias for backwards compatibility
 const Cache = PersistentCache;
@@ -337,6 +341,9 @@ class SteamAPIClient {
   private playerCountLimiter = new RateLimiter();
   private playerCountCache = new Map<number, { v: number | null; until: number }>();
   private cache = new Cache('steam-cache.json');
+  /** Full app list — its own file (steam-applist.json), not part of steam-cache.json. */
+  private appListStore: SteamAppListStore | null = null;
+  private appListRefresh: Promise<AppListEntry[]> | null = null;
   /** appdetails circuit: set from a 429 (Retry-After, capped at 5 min; default 60s). */
   private appDetailsPausedUntil = 0;
   /** Catalog-batch throttle state (see catalogSlot). */
@@ -1215,39 +1222,51 @@ class SteamAPIClient {
    *
    * The old ISteamApps/GetAppList/v2 endpoint is now defunct (returns 404).
    *
-   * Cached on disk for 24 hours with stale-while-revalidate.
+   * Stored in steam-applist.json (see steam-applist-store.ts): fresh for 24 hours, then
+   * served stale while a background refresh runs.
    */
   async getAppList(): Promise<Array<{ appid: number; name: string }>> {
-    const cacheKey = 'full-app-list-v2'; // New key — don't read the old stale 143-entry cache
     const APP_LIST_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
-    // Check fresh cache
-    const freshCached = this.cache.get<Array<{ appid: number; name: string }>>(cacheKey);
-    if (freshCached) {
-      logger.log(`[Steam] getAppList: returning fresh cache (${freshCached.length} apps)`);
-      return freshCached;
-    }
-
-    // Check stale cache — return immediately, refresh in background
-    const staleCached = this.cache.get<Array<{ appid: number; name: string }>>(cacheKey, true);
-    if (staleCached) {
-      logger.log(`[Steam] getAppList: returning stale cache (${staleCached.length} apps), refreshing in background`);
-      this.refreshAppList(APP_LIST_TTL).catch(err =>
+    const stored = await this.getAppListStore().load();
+    if (stored && stored.apps.length > 0) {
+      if (Date.now() - stored.savedAt <= APP_LIST_TTL) {
+        logger.log(`[Steam] getAppList: returning fresh list (${stored.apps.length} apps)`);
+        return stored.apps;
+      }
+      // Stale — return immediately, refresh in background
+      logger.log(`[Steam] getAppList: returning stale list (${stored.apps.length} apps), refreshing in background`);
+      this.refreshAppListOnce().catch(err =>
         logger.warn('[Steam] Background refresh of app list failed:', err)
       );
-      return staleCached;
+      return stored.apps;
     }
 
-    // No cache — must fetch
-    return this.refreshAppList(APP_LIST_TTL);
+    // Nothing stored — must fetch
+    return this.refreshAppListOnce();
+  }
+
+  private getAppListStore(): SteamAppListStore {
+    return this.appListStore ??= new SteamAppListStore({
+      filePath: path.join(electron?.app?.getPath?.('userData') || './cache', 'steam-applist.json'),
+      readFile: (p) => fs.promises.readFile(p, 'utf-8'),
+      writeFile: (p, d) => new Promise<void>((resolve, reject) =>
+        atomicWriteFile(p, d, (err) => (err ? reject(err) : resolve()))),
+      legacy: this.cache,
+      now: () => Date.now(),
+    });
+  }
+
+  /** Concurrent callers (and stale-hit background refreshes) share one paginated download. */
+  private refreshAppListOnce(): Promise<AppListEntry[]> {
+    return this.appListRefresh ??= this.refreshAppList().finally(() => { this.appListRefresh = null; });
   }
 
   /**
    * Paginate through IStoreService/GetAppList/v1 to build the full games list.
    * Each page returns up to 50 000 entries; typically 3-4 pages for ~155k games.
    */
-  private async refreshAppList(ttl: number): Promise<Array<{ appid: number; name: string }>> {
-    const cacheKey = 'full-app-list-v2';
+  private async refreshAppList(): Promise<Array<{ appid: number; name: string }>> {
     const PAGE_SIZE = 50000;
     const allApps: Array<{ appid: number; name: string }> = [];
     let lastAppId: number | undefined;
@@ -1296,7 +1315,7 @@ class SteamAPIClient {
     allApps.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
     logger.log(`[Steam] getAppList: complete — ${allApps.length} games fetched and sorted`);
-    this.cache.set(cacheKey, allApps, ttl);
+    await this.getAppListStore().save(allApps);
     return allApps;
   }
 

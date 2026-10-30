@@ -40,15 +40,26 @@ export function atomicWriteFileSync(filePath: string, data: string): void {
 // Asynchronous (for debounced background saves)
 // ---------------------------------------------------------------------------
 
+/**
+ * `shouldCommit` is checked after the temp file is written and before the rename:
+ * returning false drops the temp file and reports success without touching
+ * `filePath` (e.g. a newer synchronous flush already replaced it).
+ */
 export function atomicWriteFile(
   filePath: string,
   data: string,
   callback: (err: NodeJS.ErrnoException | null) => void,
+  shouldCommit?: () => boolean,
 ): void {
   const tmp = uniqueTmpPath(filePath);
   fs.writeFile(tmp, data, 'utf-8', (writeErr) => {
     if (writeErr) {
       callback(writeErr);
+      return;
+    }
+    if (shouldCommit && !shouldCommit()) {
+      fs.unlink(tmp, () => { /* ignore cleanup failure */ });
+      callback(null);
       return;
     }
     fs.rename(tmp, filePath, (renameErr) => {
