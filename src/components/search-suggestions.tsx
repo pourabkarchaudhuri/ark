@@ -1,4 +1,4 @@
-import { memo, useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { memo, useRef, useEffect, useState, useCallback, useMemo, type RefObject } from 'react';
 import { Game } from '@/types/game';
 import { cn } from '@/lib/utils';
 import { Search, Gamepad2 } from 'lucide-react';
@@ -14,6 +14,9 @@ interface SearchSuggestionsProps {
   onSelect: (game: Game) => void;
   onClose: () => void;
   searchQuery: string;
+  /** Element whose clicks do not count as "outside" (the search box wrapper), so clicking
+   *  in the focused input to move the cursor keeps the dropdown open. */
+  anchorRef?: RefObject<HTMLElement | null>;
 }
 
 // Image component with fallback handling
@@ -21,13 +24,6 @@ function SearchResultImage({ game }: { game: Game }) {
   const [imageError, setImageError] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [fallbackAttempt, setFallbackAttempt] = useState(0);
-  
-  // Reset state when game changes
-  useEffect(() => {
-    setImageError(false);
-    setImageLoaded(false);
-    setFallbackAttempt(0);
-  }, [game.id]);
 
   // Deduplicated fallback URL list — prevents chain stalling on duplicate URLs.
   // Epic images use various CDN hosts; we collect every unique URL we can find
@@ -70,6 +66,23 @@ function SearchResultImage({ game }: { game: Game }) {
       return true;
     });
   }, [game.id, game.store, game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
+
+  // Re-sync fallback state when the URL list changes (new game, or enriched art for the
+  // same game) during render: stay on the URL on screen if it is still listed, else restart.
+  const urlKey = fallbackUrls.join('|');
+  const [prevUrls, setPrevUrls] = useState({ key: urlKey, urls: fallbackUrls });
+  if (prevUrls.key !== urlKey) {
+    const shown = imageError ? '' : prevUrls.urls[fallbackAttempt];
+    const keepAt = shown ? fallbackUrls.indexOf(shown) : -1;
+    setPrevUrls({ key: urlKey, urls: fallbackUrls });
+    if (keepAt >= 0) {
+      setFallbackAttempt(keepAt);
+    } else {
+      setFallbackAttempt(0);
+      setImageError(false);
+      setImageLoaded(false);
+    }
+  }
 
   const handleError = useCallback(() => {
     if (fallbackAttempt < fallbackUrls.length - 1) {
@@ -117,7 +130,7 @@ function SearchResultImage({ game }: { game: Game }) {
       <img
         src={imageUrl}
         alt=""
-        loading="lazy"
+        // Not lazy: the 4 s per-URL timeout above must match a request that actually started.
         decoding="async"
         referrerPolicy="no-referrer"
         className={cn(
@@ -170,13 +183,16 @@ function SearchSuggestionsComponent({
   onSelect,
   onClose,
   searchQuery,
+  anchorRef,
 }: SearchSuggestionsProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Close on click outside
+  // Close on click outside (the anchor, i.e. the search box, is not outside)
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (anchorRef?.current?.contains(target)) return;
+      if (containerRef.current && !containerRef.current.contains(target)) {
         onClose();
       }
     }
@@ -187,7 +203,7 @@ function SearchSuggestionsComponent({
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [visible, onClose]);
+  }, [visible, onClose, anchorRef]);
 
   // Close on escape
   useEffect(() => {

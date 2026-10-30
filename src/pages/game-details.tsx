@@ -30,7 +30,7 @@ import { HltbBadge } from '@/components/hltb-chip';
 import { DealPriceBlock } from '@/components/deal-price';
 import { releaseYearOf } from '@/hooks/useHltbTimes';
 import { GameDialog } from '@/components/game-dialog';
-import { cn, buildGameImageChain } from '@/lib/utils';
+import { cn, buildGameImageChain, formatDisplayDate } from '@/lib/utils';
 import { annIndex } from '@/services/ann-index';
 import {
   getSimilarGamesForDetails,
@@ -573,11 +573,7 @@ function NewsCard({
           {card.title}
         </p>
         <p className="text-left text-[10px] text-white/50 mt-1 md:text-xs">
-          {new Date(newsItem.date * 1000).toLocaleDateString('en-US', {
-            year: 'numeric',
-            month: 'short',
-            day: 'numeric',
-          })}
+          {formatDisplayDate(newsItem.date * 1000)}
         </p>
         {newsItem.feedlabel && (
           <p className="text-left text-[9px] text-white/30 mt-0.5 md:text-[10px] truncate">
@@ -3026,7 +3022,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
                                         {review.date && (
                                           <>
                                             <span className="text-white/40">•</span>
-                                            {new Date(review.date).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                                            {formatDisplayDate(review.date)}
                                           </>
                                         )}
                                       </div>

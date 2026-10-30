@@ -1,4 +1,4 @@
-import { memo, useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { memo, useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
 import { formatPlayingNow } from '@/lib/player-count';
 import { DealBadge } from '@/components/deal-price';
 import { createPortal } from 'react-dom';
@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { FaWindows, FaApple, FaLinux, FaSteam } from 'react-icons/fa';
 import { SiEpicgames } from 'react-icons/si';
-import { cn, getHardcodedCover } from '@/lib/utils';
+import { cn, getHardcodedCover, formatDisplayDate } from '@/lib/utils';
 import { TooltipCard } from '@/components/ui/tooltip-card';
 import { detailEnricher } from '@/services/detail-enricher';
 import { AnimateIcon } from '@/components/ui/animate-icon';
@@ -105,22 +105,6 @@ function getGameInitials(title: string): string {
     .map(word => word[0])
     .join('')
     .toUpperCase();
-}
-
-// Format date as "Jan 18, 2025"
-function formatDisplayDate(isoDate: string): string {
-  if (!isoDate) return '';
-  try {
-    const date = new Date(isoDate);
-    if (isNaN(date.getTime())) return isoDate;
-    return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    });
-  } catch {
-    return isoDate;
-  }
 }
 
 // Format date in terminal style: 2025.01.18
@@ -223,18 +207,36 @@ function GameCardComponent({
     return () => window.removeEventListener(CONTEXT_MENU_CLOSE_EVENT, handler);
   }, [game.id]);
 
-  // Close context menu on outside click or scroll
+  // Close context menu on outside click, scroll or Escape
   useEffect(() => {
     if (!ctxMenu) return;
     const close = () => setCtxMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setCtxMenu(null); };
     window.addEventListener('click', close);
     window.addEventListener('scroll', close, true);
     window.addEventListener('contextmenu', close);
+    window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('click', close);
       window.removeEventListener('scroll', close, true);
       window.removeEventListener('contextmenu', close);
+      window.removeEventListener('keydown', onKey);
     };
+  }, [ctxMenu]);
+
+  // Keep the context menu inside the window: flip above the cursor near the bottom edge
+  // and clamp to the right edge. offsetWidth/offsetHeight, not getBoundingClientRect —
+  // the zoom-in animation scales the box down on the first frame. Written straight to the
+  // DOM before paint so it cannot loop through state.
+  useLayoutEffect(() => {
+    const el = ctxMenuRef.current;
+    if (!ctxMenu || !el) return;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const left = Math.max(8, Math.min(ctxMenu.x, window.innerWidth - w - 8));
+    const top = ctxMenu.y + h > window.innerHeight - 8 ? Math.max(8, ctxMenu.y - h) : ctxMenu.y;
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
   }, [ctxMenu]);
 
   // Same ghost-click guard as dropdowns when the context menu closes (layout may shift).
@@ -332,6 +334,24 @@ function GameCardComponent({
       return true;
     });
   }, [game.title, game.id, game.store, game.steamAppId, game.coverUrl, game.headerImage, game.screenshots]);
+
+  // The enricher can supply new image URLs after the old CDN ones failed. Re-sync the
+  // fallback state during render (derived-state pattern) whenever the list changes:
+  // stay on the URL currently on screen if it is still in the list, else start over.
+  const urlKey = fallbackUrls.join('|');
+  const [prevUrls, setPrevUrls] = useState({ key: urlKey, urls: fallbackUrls });
+  if (prevUrls.key !== urlKey) {
+    const shown = imageError ? '' : prevUrls.urls[fallbackAttempt];
+    const keepAt = shown ? fallbackUrls.indexOf(shown) : -1;
+    setPrevUrls({ key: urlKey, urls: fallbackUrls });
+    if (keepAt >= 0) {
+      setFallbackAttempt(keepAt);
+    } else {
+      setFallbackAttempt(0);
+      setImageError(false);
+      setImageLoaded(false);
+    }
+  }
 
   // Handle image error - try next fallback URL
   const handleImageError = useCallback(() => {

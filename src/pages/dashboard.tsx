@@ -352,7 +352,10 @@ export function Dashboard() {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  
+  // Search box wrapper: clicks inside it do not close the suggestions dropdown.
+  const searchAnchorRef = useRef<HTMLDivElement>(null);
+  const closeSuggestions = useCallback(() => setShowSuggestions(false), []);
+
   // Delete confirmation state
   const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; game: Game | null }>({
     open: false,
@@ -1224,7 +1227,7 @@ export function Dashboard() {
           <div className="flex items-center gap-3 shrink-0">
             {/* Search - hidden in journey, buzz, calendar, oracle, devlog, settings mode */}
             {viewMode !== 'journey' && viewMode !== 'buzz' && viewMode !== 'calendar' && viewMode !== 'oracle' && viewMode !== 'devlog' && viewMode !== 'settings' && (
-              <div data-tour="search-input" className="relative">
+              <div ref={searchAnchorRef} data-tour="search-input" className="relative">
                 <AnimateIcon hover="wiggle" className="absolute left-3 inset-y-0 z-10"><Search className="h-4 w-4 text-white/40" /></AnimateIcon>
                 <Input
                   ref={searchInputRef}
@@ -1284,8 +1287,9 @@ export function Dashboard() {
                         navigate(`/game/${encodeURIComponent(game.id)}`);
                       }
                     }}
-                    onClose={() => setShowSuggestions(false)}
+                    onClose={closeSuggestions}
                     searchQuery={typingQuery}
+                    anchorRef={searchAnchorRef}
                   />
                 )}
               </div>
