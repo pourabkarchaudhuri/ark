@@ -5,6 +5,9 @@ vi.mock('@/services/journey-store', () => ({
   journeyStore: {
     record: vi.fn(),
     markRemoved: vi.fn(),
+    markRemovedBatch: vi.fn(),
+    clearRemoved: vi.fn(),
+    clearRemovedFor: vi.fn(),
     syncProgress: vi.fn(),
     getEntry: vi.fn(),
     has: vi.fn().mockReturnValue(true),
