@@ -20,29 +20,117 @@ import {
 } from '../overlay-window.js';
 import { getActiveSessions, syncOverlayVisibilityLatch } from '../session-tracker.js';
 import { clearIndex, syncAnnDimsFromSettings } from '../ann-index.js';
+import { isImplementedChatProvider } from '../../src/lib/chat-providers.js';
+
+/**
+ * Cloud API keys are URL-safe tokens. Rejecting anything else is the backstop that
+ * stops a masked display value ("AIza••••…") from ever replacing a real key.
+ */
+const API_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
+const MAX_API_KEY_LEN = 500;
+
+function cleanApiKey(key: unknown): string | null {
+  if (typeof key !== 'string') return null;
+  const t = key.trim();
+  return t.length > 0 && t.length <= MAX_API_KEY_LEN && API_KEY_PATTERN.test(t) ? t : null;
+}
+
+type SaveResult = { success: boolean; error?: string };
+
+export async function setGeminiApiKey(key: unknown): Promise<SaveResult> {
+  const clean = cleanApiKey(key);
+  if (!clean) return { success: false, error: 'That does not look like an API key.' };
+  try {
+    settingsStore.setGoogleAIKey(clean);
+    return { success: true };
+  } catch (error) {
+    logger.error('[Settings] Error setting API key:', error);
+    return { success: false, error: 'Failed to save API key' };
+  }
+}
+
+export async function setAzureKeyIpc(key: unknown): Promise<SaveResult> {
+  const clean = cleanApiKey(key);
+  if (!clean) return { success: false, error: 'That does not look like an Azure OpenAI key.' };
+  try {
+    settingsStore.setAzureOpenAIKey(clean);
+    return { success: true };
+  } catch (error) {
+    logger.error('[Settings] Error setting Azure OpenAI key:', error);
+    return { success: false, error: 'Failed to save the key' };
+  }
+}
+
+export async function setAnthropicKeyIpc(key: unknown): Promise<SaveResult> {
+  const clean = cleanApiKey(key);
+  if (!clean) return { success: false, error: 'That does not look like an Anthropic key.' };
+  try {
+    settingsStore.setAnthropicKey(clean);
+    return { success: true };
+  } catch (error) {
+    logger.error('[Settings] Error setting Anthropic key:', error);
+    return { success: false, error: 'Failed to save the key' };
+  }
+}
+
+export async function setPreferredChatProviderIpc(provider: unknown): Promise<SaveResult> {
+  // Only providers with a chat backend (CHAT_IMPLEMENTED_PROVIDERS) are accepted; Anthropic
+  // joins that list when the AI router (B35) serves it.
+  if (!isImplementedChatProvider(provider)) return { success: false, error: 'Invalid provider' };
+  try {
+    settingsStore.setPreferredChatProvider(provider);
+    return { success: true };
+  } catch (error) {
+    logger.error('[Settings] Error setting preferred chat provider:', error);
+    return { success: false, error: 'Failed to save' };
+  }
+}
+
+type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body: string }) => Promise<{
+  ok: boolean; status: number; statusText: string; text(): Promise<string>;
+}>;
+
+/**
+ * Azure OpenAI "Test connection". Runs in main so the key never has to be readable by
+ * the renderer: the renderer sends endpoint/deployment/version and main adds the key.
+ */
+export async function testAzureConnection(
+  input: unknown,
+  deps: { fetch: FetchLike } = { fetch: (url, init) => fetch(url, init) },
+): Promise<{ ok: boolean; message: string }> {
+  const o = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  const str = (v: unknown, max: number) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+  const endpoint = str(o.endpoint, 500).replace(/\/+$/, '');
+  const deployment = str(o.deployment, 200);
+  const apiVersion = str(o.apiVersion, 50) || '2024-12-01-preview';
+  const key = settingsStore.getAzureOpenAIKey();
+  if (!endpoint || !deployment || !key) {
+    return { ok: false, message: 'Endpoint, API key, and deployment name are required.' };
+  }
+  try {
+    const parsed = new URL(endpoint);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error('bad scheme');
+  } catch {
+    return { ok: false, message: 'The endpoint must be an http(s) address.' };
+  }
+  try {
+    const url = `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
+    const res = await deps.fetch(url, {
+      method: 'POST',
+      headers: { 'api-key': key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Hi' }], max_completion_tokens: 20 }),
+    });
+    if (res.ok) return { ok: true, message: 'Connection successful. Azure OpenAI is reachable.' };
+    const body = await res.text().catch(() => '');
+    return { ok: false, message: body.slice(0, 1000) || `HTTP ${res.status} ${res.statusText}` };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : 'Network or request failed.' };
+  }
+}
 
 export function register(): void {
-  ipcMain.handle('settings:getApiKey', async () => {
-    try {
-      return settingsStore.getGoogleAIKey();
-    } catch (error) {
-      logger.error('[Settings] Error getting API key:', error);
-      return null;
-    }
-  });
-
-  ipcMain.handle('settings:setApiKey', async (_event: any, key: string) => {
-    try {
-      if (typeof key !== 'string' || key.length === 0 || key.length > 500) {
-        return { success: false, error: 'Invalid API key' };
-      }
-      settingsStore.setGoogleAIKey(key);
-      return { success: true };
-    } catch (error) {
-      logger.error('[Settings] Error setting API key:', error);
-      return { success: false, error: 'Failed to save API key' };
-    }
-  });
+  // There is deliberately no settings:getApiKey: the Gemini key stays in main (1.0.97).
+  ipcMain.handle('settings:setApiKey', (_event: any, key: unknown) => setGeminiApiKey(key));
 
   ipcMain.handle('settings:removeApiKey', async () => {
     try {
@@ -60,6 +148,48 @@ export function register(): void {
     } catch (error) {
       logger.error('[Settings] Error checking API key:', error);
       return false;
+    }
+  });
+
+  ipcMain.handle('settings:hasAzureKey', async () => {
+    try {
+      return settingsStore.hasAzureOpenAIKey();
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle('settings:setAzureKey', (_event: any, key: unknown) => setAzureKeyIpc(key));
+
+  ipcMain.handle('settings:clearAzureKey', async () => {
+    try {
+      settingsStore.clearAzureOpenAIKey();
+      return { success: true };
+    } catch (error) {
+      logger.error('[Settings] Error removing Azure OpenAI key:', error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('settings:testAzureConnection', (_event: any, input: unknown) => testAzureConnection(input));
+
+  ipcMain.handle('settings:hasAnthropicKey', async () => {
+    try {
+      return settingsStore.hasAnthropicKey();
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle('settings:setAnthropicKey', (_event: any, key: unknown) => setAnthropicKeyIpc(key));
+
+  ipcMain.handle('settings:clearAnthropicKey', async () => {
+    try {
+      settingsStore.clearAnthropicKey();
+      return { success: true };
+    } catch (error) {
+      logger.error('[Settings] Error removing Anthropic key:', error);
+      return { success: false };
     }
   });
 
@@ -163,19 +293,7 @@ export function register(): void {
     }
   });
 
-  ipcMain.handle('settings:setPreferredChatProvider', async (_event: any, provider: string) => {
-    try {
-      const valid = ['ollama', 'gemini', 'azure-openai', 'anthropic'];
-      if (typeof provider !== 'string' || !valid.includes(provider)) {
-        return { success: false, error: 'Invalid provider' };
-      }
-      settingsStore.setPreferredChatProvider(provider as 'ollama' | 'gemini' | 'azure-openai' | 'anthropic');
-      return { success: true };
-    } catch (error) {
-      logger.error('[Settings] Error setting preferred chat provider:', error);
-      return { success: false, error: 'Failed to save' };
-    }
-  });
+  ipcMain.handle('settings:setPreferredChatProvider', (_event: any, provider: unknown) => setPreferredChatProviderIpc(provider));
 
   ipcMain.handle('settings:getBetaFeatures', async () => {
     try {

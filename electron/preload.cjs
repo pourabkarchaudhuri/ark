@@ -282,11 +282,7 @@ contextBridge.exposeInMainWorld('aiChat', {
 
 // Expose Settings API to renderer
 contextBridge.exposeInMainWorld('settings', {
-  // Get the Google AI API key
-  getApiKey: () => 
-    ipcRenderer.invoke('settings:getApiKey'),
-  
-  // Set the Google AI API key
+  // Set the Google AI API key (there is no getter: the key stays in main)
   setApiKey: (key) => 
     ipcRenderer.invoke('settings:setApiKey', key),
   
@@ -298,6 +294,25 @@ contextBridge.exposeInMainWorld('settings', {
   hasApiKey: () => 
     ipcRenderer.invoke('settings:hasApiKey'),
   
+  // Azure OpenAI key: set / check / clear only, encrypted in main
+  hasAzureKey: () =>
+    ipcRenderer.invoke('settings:hasAzureKey'),
+  setAzureKey: (key) =>
+    ipcRenderer.invoke('settings:setAzureKey', key),
+  clearAzureKey: () =>
+    ipcRenderer.invoke('settings:clearAzureKey'),
+  // Azure "Test connection" runs in main with the stored key
+  testAzureConnection: (input) =>
+    ipcRenderer.invoke('settings:testAzureConnection', input),
+
+  // Anthropic key: set / check / clear only, encrypted in main
+  hasAnthropicKey: () =>
+    ipcRenderer.invoke('settings:hasAnthropicKey'),
+  setAnthropicKey: (key) =>
+    ipcRenderer.invoke('settings:setAnthropicKey', key),
+  clearAnthropicKey: () =>
+    ipcRenderer.invoke('settings:clearAnthropicKey'),
+
   // Get Ollama settings
   getOllamaSettings: () => 
     ipcRenderer.invoke('settings:getOllamaSettings'),

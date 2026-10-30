@@ -219,7 +219,8 @@ export function Dashboard() {
   const { isPlayingNow, liveGames } = useSessionTrackerContext();
   const [devMode] = useDevMode();
   const [betaFeatures] = useBetaFeatures();
-  const chatAvailability = useChatAvailability();
+  // viewMode as refresh key: providers changed in Settings (a view of this page) apply on leaving it.
+  const chatAvailability = useChatAvailability(viewMode);
 
   // Background precompute for Embedding Space galaxy data (runs once, 20s after mount)
   // Not in crash-loop safe mode — the galaxy precompute is one of the heavy jobs it defers
