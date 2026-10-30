@@ -1776,7 +1776,8 @@ export function Dashboard() {
         onClose={() => setShowWrapped(false)}
         onLaunchFlythrough={() => {
           // Phase 3.0 — finale handoff. Keyframes already stashed in localStorage by Year Wrapped.
-          // Galaxy view checks `ark.flythrough.pending` on mount and triggers the cinematic.
+          // Galaxy view consumes `ark.flythrough.pending` on load, or on the 'ark:flythrough-pending'
+          // event when it is already open, and triggers the cinematic.
           setShowWrapped(false);
           switchToAnnGraph();
         }}

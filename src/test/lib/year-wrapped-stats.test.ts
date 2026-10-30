@@ -190,3 +190,39 @@ describe('computeWrappedStats — time of day', () => {
     expect(s.isNightOwl).toBe(true);
   });
 });
+
+describe('computeWrappedStats — completion denominator', () => {
+  it('divides completions by games engaged with, not every wishlist add', () => {
+    const wish = Array.from({ length: 30 }, (_, i) => journey(`w${i}`, `Wish ${i}`, iso(2026, 2, 1), { status: 'Want to Play' }));
+    const played = ['p1', 'p2', 'p3', 'p4'].map((id) => journey(id, id, iso(2026, 3, 1)));
+    const s = computeWrappedStats(2026, {
+      journey: [...wish, ...played],
+      sessions: played.map((p, i) => session(p.gameId, iso(2026, 4, 1 + i, 20), 60)),
+      statusChanges: [change('p1', 'Completed', iso(2026, 5, 1)), change('p2', 'Completed', iso(2026, 5, 2))],
+    }, NOW_2026);
+    expect(s.gamesPlayed).toBe(4);
+    expect(s.gamesCompleted).toBe(2);
+    expect(s.completionBase).toBe(4);
+    expect(s.completionRate).toBe(50);
+  });
+
+  it('counts a game completed by status only (never played) once in the base', () => {
+    const s = computeWrappedStats(2026, {
+      journey: [
+        journey('a', 'A', iso(2026, 3, 1)),
+        journey('b', 'B', iso(2026, 3, 2), { status: 'Completed' }),
+      ],
+      sessions: [session('a', iso(2026, 4, 1, 20), 60)],
+      statusChanges: [change('b', 'Completed', iso(2026, 3, 3))],
+    }, NOW_2026);
+    expect(s.gamesCompleted).toBe(1);
+    expect(s.completionBase).toBe(2);
+    expect(s.completionRate).toBe(50);
+  });
+
+  it('has a zero base and rate with no engagement', () => {
+    const s = computeWrappedStats(2026, { journey: [journey('w', 'W', iso(2026, 2, 1), { status: 'Want to Play' })], sessions: [], statusChanges: [] }, NOW_2026);
+    expect(s.completionBase).toBe(0);
+    expect(s.completionRate).toBe(0);
+  });
+});

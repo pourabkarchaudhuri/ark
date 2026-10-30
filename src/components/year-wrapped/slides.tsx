@@ -518,7 +518,7 @@ function SlideCompletion({ stats }: { stats: WrappedStats }) {
   const R = 42;
   const C = 2 * Math.PI * R;
   const offset = C - (C * stats.completionRate) / 100;
-  const base = Math.max(stats.gamesPlayed, stats.gamesCompleted);
+  const base = stats.completionBase;
   return (
     <SlideLayout
       eyebrow="Finish line"

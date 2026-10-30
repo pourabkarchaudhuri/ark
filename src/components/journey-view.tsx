@@ -710,8 +710,8 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   if (loading) {
     return (
       <div className="relative w-full overflow-clip" data-tour="journey-main">
-        {/* Header skeleton */}
-        <div className="max-w-7xl mx-auto py-10 px-4 md:px-8 lg:px-10">
+        {/* Header skeleton (carries the tour's last-step anchor so a tour started while loading doesn't stall) */}
+        <div className="max-w-7xl mx-auto py-10 px-4 md:px-8 lg:px-10" data-tour="journey-header">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <div className="h-8 md:h-9 w-48 md:w-64 bg-white/10 rounded animate-pulse mb-2" />
@@ -752,7 +752,8 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         <div className="w-20 h-20 rounded-full bg-white/5 flex items-center justify-center mb-6 shadow-lg shadow-fuchsia-500/10">
           <Gamepad2 className="w-10 h-10 text-fuchsia-500" />
         </div>
-        <h2 className="text-2xl font-bold mb-2 font-['Orbitron']">Your Voyage Awaits</h2>
+        {/* Visible anchor for the tour's last step (the real header isn't rendered when empty). */}
+        <h2 className="text-2xl font-bold mb-2 font-['Orbitron']" data-tour="journey-header">Your Voyage Awaits</h2>
         <p className="text-white/60 mb-6 max-w-md">
           Start adding games to your library to see your gaming voyage unfold as a timeline.
         </p>

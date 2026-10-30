@@ -32,6 +32,32 @@ const RECHECK_MS = 30 * 60_000;
 /** At most one desktop notification per app run (matters for the 'always' dev override). */
 let notifiedThisSession = false;
 
+/** Fired by requestWrappedOpen so a mounted snackbar opens Wrapped right away. */
+export const WRAPPED_OPEN_EVENT = 'ark-wrapped-open';
+
+/**
+ * Module-level handoff: a notification click outlives the snackbar that sent it (the user
+ * may be on a game page, where the Dashboard and its snackbar are unmounted). The flag
+ * waits for the next snackbar mount; the event covers a snackbar that is mounted now.
+ */
+let pendingWrappedOpen = false;
+
+function takePendingWrappedOpen(): boolean {
+  const was = pendingWrappedOpen;
+  pendingWrappedOpen = false;
+  return was;
+}
+
+/** Ask the app to open Wrapped: navigate back to the Dashboard if needed, then open it there. */
+export function requestWrappedOpen(): void {
+  pendingWrappedOpen = true;
+  try {
+    const path = window.location.hash.replace(/^#/, '').split('?')[0];
+    if (path !== '' && path !== '/') window.location.hash = '#/';
+  } catch { /* no location */ }
+  window.dispatchEvent(new CustomEvent(WRAPPED_OPEN_EVENT));
+}
+
 function currentPermission(): NotificationPermissionLike {
   try {
     if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
@@ -96,12 +122,22 @@ export function WrappedSnackbar({ onLaunch }: { onLaunch: () => void }) {
         const again = notificationYear(new Date(), defaultStorage(), currentPermission(), readForceMode());
         if (again == null) { notifyPendingRef.current = false; return; }
         notifiedThisSession = true;
-        void sendWrappedNotification(again, () => onLaunchRef.current()).finally(() => {
+        // Not onLaunchRef: this snackbar may be gone (user on a game page) by the time it's clicked.
+        void sendWrappedNotification(again, requestWrappedOpen).finally(() => {
           // Mark even when permission was refused so we never prompt again this season.
           markWrappedNotified(again);
         });
       }, NOTIFY_DELAY_MS);
     }
+  }, []);
+
+  // Notification click handoff: consume a request made while no snackbar was mounted,
+  // and handle new ones while this one is.
+  useEffect(() => {
+    if (takePendingWrappedOpen()) onLaunchRef.current();
+    const onOpen = () => { if (takePendingWrappedOpen()) onLaunchRef.current(); };
+    window.addEventListener(WRAPPED_OPEN_EVENT, onOpen);
+    return () => window.removeEventListener(WRAPPED_OPEN_EVENT, onOpen);
   }, []);
 
   useEffect(() => {

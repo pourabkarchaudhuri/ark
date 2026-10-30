@@ -168,6 +168,7 @@ function WrappedOverlay({ onClose, onLaunchFlythrough }: Omit<YearWrappedProps, 
   const touchStartXRef = useRef<number | null>(null);
   const navLockRef = useRef(-Infinity);
   const mountedRef = useRef(true);
+  const exportingRef = useRef(false);
   const celebratedRef = useRef<Set<string>>(new Set());
 
   const bundle = bundles[year];
@@ -353,16 +354,20 @@ function WrappedOverlay({ onClose, onLaunchFlythrough }: Omit<YearWrappedProps, 
   }, [stats, showToast]);
 
   const handleSaveImages = useCallback(async () => {
-    if (!stats || exporting || slides.length === 0) return;
-    const [{ toBlob, getFontEmbedCSS }, { default: JSZip }, { saveAs }] = await Promise.all([
-      import('html-to-image'),
-      import('jszip'),
-      import('file-saver'),
-    ]);
-    const zip = new JSZip();
+    // Ref guard, not just `exporting`: a double click lands before the progress state re-renders.
+    if (!stats || exporting || exportingRef.current || slides.length === 0) return;
+    exportingRef.current = true;
+    // Disable the button now, while the export libraries are still loading.
+    setExportProgress({ current: 0, total: slides.length });
     let fontCSS: string | null = null;
     let saved = 0;
     try {
+      const [{ toBlob, getFontEmbedCSS }, { default: JSZip }, { saveAs }] = await Promise.all([
+        import('html-to-image'),
+        import('jszip'),
+        import('file-saver'),
+      ]);
+      const zip = new JSZip();
       for (let i = 0; i < slides.length; i++) {
         if (!mountedRef.current) return;
         setExportProgress({ current: i + 1, total: slides.length });
@@ -405,6 +410,7 @@ function WrappedOverlay({ onClose, onLaunchFlythrough }: Omit<YearWrappedProps, 
       console.error('[ArkWrapped] Export failed:', err);
       if (mountedRef.current) showToast('Couldn’t save images — please try again');
     } finally {
+      exportingRef.current = false;
       if (mountedRef.current) {
         setExportSlide(null);
         setExportProgress(null);

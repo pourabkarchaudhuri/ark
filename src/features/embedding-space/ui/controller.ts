@@ -27,6 +27,7 @@ import { NEIGHBOR_K, cosineDistance, fetchNeighbors, spatialNeighbors } from '..
 import { buildMockPath, buildPath, type PathStop } from '../data/path';
 import { fetchNodeDetail } from '../data/detail';
 import { INITIAL_STATE, type StatePatch, type ViewState, type ScannerMode } from './state';
+import { FLYTHROUGH_PENDING_EVENT, consumePendingFlythrough } from '@/components/year-wrapped/flythrough';
 
 export interface ControllerRefs {
   canvasHost: HTMLDivElement | null;
@@ -143,6 +144,11 @@ export class EmbeddingSpaceController {
       window.removeEventListener('blur', onBlur);
     });
     this.cleanups.push(libraryStore.subscribe(() => this.set(s => ({ libVersion: s.libVersion + 1 }))));
+    // Wrapped can hand off while the Galaxy is already open. Once loaded, take it now;
+    // while still loading, leave it in storage for load() to pick up.
+    const onFlythroughPending = () => { if (this.engine && !this.state.loading) this.consumeFlythroughHandoff(); };
+    window.addEventListener(FLYTHROUGH_PENDING_EVENT, onFlythroughPending);
+    this.cleanups.push(() => window.removeEventListener(FLYTHROUGH_PENDING_EVENT, onFlythroughPending));
     if (typeof window !== 'undefined' && window.settings?.getOllamaSettings) {
       void window.settings.getOllamaSettings().then(s => { this.neighborRerankEnabled = s.neighborRerankEnabled !== false; }).catch(() => {});
     }
@@ -302,17 +308,7 @@ export class EmbeddingSpaceController {
       this.later(buildChunk, 100);
 
       // One-shot flythrough trigger from Year Wrapped
-      try {
-        const raw = localStorage.getItem('ark.flythrough.pending');
-        if (raw) {
-          localStorage.removeItem('ark.flythrough.pending');
-          const payload = JSON.parse(raw) as { keyframes?: Array<{ gameId: string; title: string; subtitle: string }> };
-          if (payload.keyframes && payload.keyframes.length >= 2) {
-            const kf = payload.keyframes;
-            this.later(() => this.launchFlythroughKeyframes(kf), 600);
-          }
-        }
-      } catch { /* malformed handoff — ignore */ }
+      this.consumeFlythroughHandoff();
     } catch (err) {
       console.error('[Embedding Space] Loading failed:', err);
       if (alive()) this.set({ loading: false });
@@ -963,6 +959,12 @@ export class EmbeddingSpaceController {
   }
 
   // ─── Flythrough (Year Wrapped handoff) ─────────────────────────────────────
+  /** Take a pending (fresh) Wrapped handoff, if any, and launch it shortly. */
+  private consumeFlythroughHandoff() {
+    const kf = consumePendingFlythrough();
+    if (kf) this.later(() => this.launchFlythroughKeyframes(kf), 600);
+  }
+
   launchFlythroughKeyframes(keyframes: Array<{ gameId: string; title: string; subtitle: string }>) {
     const eng = this.engine;
     if (!eng || keyframes.length < 2) return;

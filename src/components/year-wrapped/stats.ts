@@ -67,6 +67,8 @@ export interface WrappedStats {
   busiestMonth: { month: string; monthLong: string; index: number; hours: number; sessions: number; gamesAdded: number } | null;
 
   completionRate: number;
+  /** Games played or completed this year — the completion ring's denominator. */
+  completionBase: number;
   completedGames: WrappedGameRef[];
 
   playTimeOfDay: { period: string; percentage: number; icon: TimeOfDayIcon }[];
@@ -312,7 +314,10 @@ export function computeWrappedStats(year: number, input: WrappedInputs, now: Dat
     }
   }
   const gamesCompleted = completedIds.length;
-  const completionBase = Math.max(touchedIds.size, gamesCompleted);
+  // Denominator = games the user actually engaged with (played or finished), not every
+  // wishlist add — the ring and the "X of the Y games" sentence share this base.
+  const engagedIds = new Set<string>([...gamesPlayedIds, ...completedSet]);
+  const completionBase = engagedIds.size;
   const completionRate = completionBase > 0 ? Math.min(100, Math.round((gamesCompleted / completionBase) * 100)) : 0;
 
   // ── Genres & platforms (games touched this year) ──
@@ -543,6 +548,7 @@ export function computeWrappedStats(year: number, input: WrappedInputs, now: Dat
     monthlyActivity,
     busiestMonth,
     completionRate,
+    completionBase,
     completedGames: completedIds.map(ref),
     playTimeOfDay,
     hasTimeOfDay,
