@@ -3,7 +3,7 @@
  * Cursor-like polished AI assistant interface
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   X, 
@@ -21,11 +21,10 @@ import {
   Eye,
   Copy,
   Check,
-  Paperclip
+  Paperclip,
+  AlertTriangle
 } from 'lucide-react';
-import Picker from '@emoji-mart/react';
-import data from '@emoji-mart/data';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -38,10 +37,27 @@ import type {
   SendMessagePayload,
   ThoughtStep 
 } from '@/types/chat';
-import { GameStatus, type CachedGameMeta } from '@/types/game';
 import { useLibrary, extractCachedMeta } from '@/hooks/useGameStore';
 import { gameService } from '@/services/game-service';
 import { journeyStore } from '@/services/journey-store';
+import { applyAIChatActions, confirmAIChatRemovals } from '@/services/ai-chat-actions';
+
+// Emoji picker + its ~430 KB data load only when the picker is first opened.
+const EmojiPicker = lazy(() => import('@emoji-mart/react'));
+const loadEmojiData = async () => (await import('@emoji-mart/data')).default;
+
+// Module-level so ReactMarkdown gets the same references every render.
+const REMARK_PLUGINS = [remarkGfm];
+const MARKDOWN_COMPONENTS: Components = {
+  a: ({ href, children, ...props }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+      {children}
+    </a>
+  ),
+};
+
+/** Within this many px of the bottom counts as "following" the conversation. */
+const STICK_TO_BOTTOM_PX = 80;
 
 interface AIChatPanelProps {
   isOpen: boolean;
@@ -260,8 +276,79 @@ const ChainOfThought = React.memo(function ChainOfThought({ steps, isStreaming }
   );
 });
 
+// Confirmation card for library removals the model queued; nothing is removed until the user clicks.
+function RemovalConfirmCard({
+  message,
+  onConfirm,
+  onCancel,
+}: {
+  message: ChatMessage;
+  onConfirm?: (messageId: string) => void;
+  onCancel?: (messageId: string) => void;
+}) {
+  const removals = message.pendingRemovals ?? [];
+  const n = removals.length;
+  const noun = n === 1 ? 'game' : 'games';
+  if (message.removalState === 'removed') {
+    return (
+      <div className="text-xs text-zinc-400 border border-zinc-800 rounded-lg px-3 py-2" data-testid="ai-chat-removal-done">
+        Removed {n} {noun} from your library.
+      </div>
+    );
+  }
+  if (message.removalState === 'cancelled') {
+    return (
+      <div className="text-xs text-zinc-500 border border-zinc-800 rounded-lg px-3 py-2" data-testid="ai-chat-removal-cancelled">
+        Removal cancelled. Your library was not changed.
+      </div>
+    );
+  }
+  return (
+    <div className="border border-amber-900/60 bg-amber-950/20 rounded-lg px-3 py-2 space-y-2" data-testid="ai-chat-removal-confirm">
+      <div className="flex items-center gap-2 text-xs text-amber-300">
+        <AlertTriangle className="h-3.5 w-3.5" />
+        <span>Remove from your library?</span>
+      </div>
+      <ul className="text-xs text-zinc-300 list-disc pl-5 space-y-0.5">
+        {removals.map(r => (
+          <li key={r.gameId}>{r.gameName}</li>
+        ))}
+      </ul>
+      <div className="flex gap-2 justify-end">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => onCancel?.(message.id)}
+          className="h-7 text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+        >
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => onConfirm?.(message.id)}
+          className="h-7 text-xs bg-red-600 hover:bg-red-700 text-white"
+        >
+          Remove {n} {noun}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 // Message bubble - Clean and minimal
-const MessageBubble = React.memo(function MessageBubble({ message, onFollowUpClick }: { message: ChatMessage; onFollowUpClick?: (text: string) => void }) {
+const MessageBubble = React.memo(function MessageBubble({
+  message,
+  onFollowUpClick,
+  onConfirmRemovals,
+  onCancelRemovals,
+}: {
+  message: ChatMessage;
+  onFollowUpClick?: (text: string) => void;
+  onConfirmRemovals?: (messageId: string) => void;
+  onCancelRemovals?: (messageId: string) => void;
+}) {
   const isUser = message.role === 'user';
   
   return (
@@ -342,14 +429,8 @@ const MessageBubble = React.memo(function MessageBubble({ message, onFollowUpCli
                 "prose-table:text-xs prose-th:text-white prose-td:text-zinc-300"
               )}>
                 <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    a: ({ href, children, ...props }) => (
-                      <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-                        {children}
-                      </a>
-                    ),
-                  }}
+                  remarkPlugins={REMARK_PLUGINS}
+                  components={MARKDOWN_COMPONENTS}
                 >
                   {message.content}
                 </ReactMarkdown>
@@ -360,6 +441,15 @@ const MessageBubble = React.memo(function MessageBubble({ message, onFollowUpCli
               </div>
             )}
             
+            {/* Pending library removals (confirm before anything is removed) */}
+            {message.pendingRemovals && message.pendingRemovals.length > 0 && (
+              <RemovalConfirmCard
+                message={message}
+                onConfirm={onConfirmRemovals}
+                onCancel={onCancelRemovals}
+              />
+            )}
+
             {/* Tools used badge */}
             {message.toolCalls && message.toolCalls.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-2">
@@ -436,6 +526,13 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
   const [availableProviders, setAvailableProviders] = useState<string[]>([]);
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  // Auto-scroll only while the user is at (or near) the bottom; scrolling up to read pauses it.
+  const stickToBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const prevMessageCountRef = useRef(0);
+  // Stops the in-flight stream subscription and its pending animation frame (unmount safety).
+  const stopStreamRef = useRef<(() => void) | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
@@ -527,10 +624,31 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
     }
   }, [isOpen]);
   
-  // Scroll to bottom
+  // Scroll to bottom: smooth when a message is added, instant (once per flushed frame) while a
+  // reply streams in, and never while the user has scrolled up.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const countChanged = messages.length !== prevMessageCountRef.current;
+    prevMessageCountRef.current = messages.length;
+    if (!stickToBottomRef.current) return;
+    if (countChanged) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    } else {
+      const el = messagesContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
   }, [messages]);
+
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_TO_BOTTOM_PX;
+    // Only an upward move un-sticks: content growth and our own scrolling never move scrollTop up.
+    if (nearBottom) stickToBottomRef.current = true;
+    else if (el.scrollTop < lastScrollTopRef.current) stickToBottomRef.current = false;
+    lastScrollTopRef.current = el.scrollTop;
+  }, []);
+
+  useEffect(() => () => stopStreamRef.current?.(), []);
   
   // Focus input
   useEffect(() => {
@@ -586,6 +704,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
       isLoading: true,
     };
     
+    stickToBottomRef.current = true;
     setMessages(prev => [...prev, userMessage, loadingMessage]);
     setInputValue('');
     setIsLoading(true);
@@ -648,79 +767,63 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
         }
       }
       
-      // Subscribe to streaming chunks for real-time updates
+      // Subscribe to streaming chunks for real-time updates. Chunks are coalesced: only the latest
+      // fullContent is kept and flushed with one setMessages per animation frame.
       let unsubscribe: (() => void) | null = null;
       const streamingMessageId = loadingMessage.id;
-      
+      let latestContent: string | null = null;
+      let frame: number | null = null;
+      let streamDone = false;
+      const flushStream = () => {
+        frame = null;
+        if (streamDone || latestContent === null) return;
+        const content = latestContent;
+        latestContent = null;
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === streamingMessageId
+              ? { ...m, content, isStreaming: true }
+              : m
+          )
+        );
+      };
+      // Must run before the final replace so no late frame resurrects the streaming message.
+      const stopStream = () => {
+        streamDone = true;
+        if (frame !== null) {
+          cancelAnimationFrame(frame);
+          frame = null;
+        }
+        if (unsubscribe) unsubscribe();
+        unsubscribe = null;
+        if (stopStreamRef.current === stopStream) stopStreamRef.current = null;
+      };
+      stopStreamRef.current = stopStream;
+
       if (window.aiChat?.onStreamChunk) {
         unsubscribe = window.aiChat.onStreamChunk((data) => {
-          // Update the loading message with streaming content
-          setMessages(prev => 
-            prev.map(m => 
-              m.id === streamingMessageId 
-                ? { ...m, content: data.fullContent, isStreaming: true }
-                : m
-            )
-          );
+          if (streamDone) return;
+          latestContent = data.fullContent;
+          if (frame === null) frame = requestAnimationFrame(flushStream);
         });
       }
-      
+
       try {
         const response = await window.aiChat.sendMessage(payload);
-        
+
         setAttachedImage(null);
-        // Unsubscribe from streaming
-        if (unsubscribe) unsubscribe();
-        
-        // Handle library actions
-        if (response.actions && response.actions.length > 0) {
-          for (const action of response.actions) {
-            const actionWithMeta = action as { gameId?: string; appId?: number; gameName?: string };
-            const stringId =
-              typeof actionWithMeta.gameId === 'string' && actionWithMeta.gameId.length > 0
-                ? actionWithMeta.gameId
-                : typeof actionWithMeta.appId === 'number' && Number.isFinite(actionWithMeta.appId)
-                  ? `steam-${actionWithMeta.appId}`
-                  : '';
-            if (!stringId || stringId === 'steam-undefined' || stringId === 'steam-NaN') {
-              console.warn('[AI Chat] Skipping action with invalid gameId/appId:', action);
-              continue;
-            }
-            if (action.type === 'add') {
-              try {
-                let cachedMeta: CachedGameMeta;
-                try {
-                  const game = await gameService.getGameDetails(stringId);
-                  if (game) cachedMeta = extractCachedMeta(game);
-                  else {
-                    const store = stringId.startsWith('epic-') ? 'epic' : 'steam';
-                    cachedMeta = { title: actionWithMeta.gameName || 'Unknown Game', store };
-                  }
-                } catch {
-                  const store = stringId.startsWith('epic-') ? 'epic' : 'steam';
-                  cachedMeta = { title: actionWithMeta.gameName || 'Unknown Game', store };
-                }
-                const steamAppId = stringId.startsWith('steam-') ? parseInt(stringId.slice(6), 10) : undefined;
-                const validAppId = typeof steamAppId === 'number' && !isNaN(steamAppId) ? steamAppId : undefined;
-                await addToLibrary({
-                  gameId: stringId,
-                  steamAppId: validAppId,
-                  status: (action.status as GameStatus) || 'Want to Play',
-                  cachedMeta,
-                });
-              } catch (e) {
-                console.error('Failed to add game:', stringId, e);
-              }
-            } else if (action.type === 'remove') {
-              try {
-                removeFromLibrary(stringId);
-              } catch (e) {
-                console.error('Failed to remove game:', e);
-              }
-            }
-          }
-        }
-        
+        stopStream();
+
+        // Adds apply now; removals wait for the user's confirmation on the message card
+        const { pendingRemovals } = await applyAIChatActions(response.actions, {
+          addToLibrary,
+          resolveCachedMeta: async (id) => {
+            const game = await gameService.getGameDetails(id);
+            return game ? extractCachedMeta(game) : null;
+          },
+          lookupName: (id) => libraryEntries.find(e => e.gameId === id)?.cachedMeta?.title ?? journeyStore.getEntry(id)?.title,
+        });
+
         // Add final assistant message (replaces streaming message)
         const assistantMessage: ChatMessage = {
           id: Date.now().toString(),
@@ -731,6 +834,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
           chainOfThought: response.chainOfThought,
           model: response.model,
           suggestedFollowUps: response.suggestedFollowUps?.length ? response.suggestedFollowUps : undefined,
+          ...(pendingRemovals.length > 0 ? { pendingRemovals, removalState: 'pending' as const } : {}),
         };
         
         setMessages(prev => 
@@ -738,7 +842,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
         );
       } catch (innerError) {
         // Unsubscribe from streaming on error
-        if (unsubscribe) unsubscribe();
+        stopStream();
         throw innerError;
       }
     } catch (error) {
@@ -760,6 +864,28 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
     }
   };
   
+  // Follow-up chips get one stable callback (keeps MessageBubble memo intact) that always calls the
+  // latest handleSend, so it sends with the current attachedImage/gameContext.
+  const handleSendRef = useRef(handleSend);
+  handleSendRef.current = handleSend;
+  const handleFollowUp = useCallback((question: string) => {
+    void handleSendRef.current(question);
+  }, []);
+
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
+  const handleConfirmRemovals = useCallback((messageId: string) => {
+    const msg = messagesRef.current.find(m => m.id === messageId);
+    if (!msg || msg.removalState !== 'pending') return;
+    confirmAIChatRemovals(msg.pendingRemovals, removeFromLibrary);
+    setMessages(prev => prev.map(m => (m.id === messageId ? { ...m, removalState: 'removed' } : m)));
+  }, [removeFromLibrary]);
+
+  const handleCancelRemovals = useCallback((messageId: string) => {
+    setMessages(prev => prev.map(m => (m.id === messageId && m.removalState === 'pending' ? { ...m, removalState: 'cancelled' } : m)));
+  }, []);
+
   // Key handler
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -769,8 +895,10 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
   };
   
   // Clear history
+  // Clear history / new conversation are blocked while a reply is pending: main saves the reply into
+  // whichever conversation is active when it finishes, which would put the old exchange back.
   const handleClearHistory = async () => {
-    if (!window.aiChat) return;
+    if (!window.aiChat || isLoading) return;
     
     try {
       await window.aiChat.clearHistory();
@@ -782,7 +910,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
   
   // New conversation
   const handleNewConversation = async () => {
-    if (!window.aiChat) return;
+    if (!window.aiChat || isLoading) return;
     
     try {
       await window.aiChat.createNewConversation();
@@ -817,8 +945,10 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   variant="ghost"
                   size="icon"
                   onClick={handleNewConversation}
+                  disabled={isLoading}
                   className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
-                  title="New conversation"
+                  title={isLoading ? 'Wait for the reply to finish before starting a new conversation' : 'New conversation'}
+                  aria-label="New conversation"
                 >
                   <AnimateIcon hover="pulse"><Plus className="h-4 w-4 pointer-events-none" /></AnimateIcon>
                 </Button>
@@ -826,8 +956,10 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   variant="ghost"
                   size="icon"
                   onClick={handleClearHistory}
+                  disabled={isLoading}
                   className="h-7 w-7 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
-                  title="Clear history"
+                  title={isLoading ? 'Wait for the reply to finish before clearing history' : 'Clear history'}
+                  aria-label="Clear history"
                 >
                   <AnimateIcon hover="lift"><Trash2 className="h-4 w-4 pointer-events-none" /></AnimateIcon>
                 </Button>
@@ -885,7 +1017,12 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
             )}
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 custom-scrollbar">
+            <div
+              ref={messagesContainerRef}
+              onScroll={handleMessagesScroll}
+              className="flex-1 overflow-y-auto px-4 py-4 space-y-4 custom-scrollbar"
+              data-testid="ai-chat-messages"
+            >
               {messages.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center px-6">
                   <div className="w-12 h-12 rounded-2xl bg-zinc-800/50 flex items-center justify-center mb-4">
@@ -917,9 +1054,9 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                   <MessageBubble
                     key={message.id}
                     message={message}
-                    onFollowUpClick={(question) => {
-                      handleSend(question);
-                    }}
+                    onFollowUpClick={handleFollowUp}
+                    onConfirmRemovals={handleConfirmRemovals}
+                    onCancelRemovals={handleCancelRemovals}
                   />
                 ))
               )}
@@ -938,13 +1075,15 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
                     exit={{ opacity: 0, y: 10 }}
                     className="absolute bottom-20 left-4 right-4 z-10"
                   >
-                    <Picker
-                      data={data}
-                      onEmojiSelect={handleEmojiSelect}
-                      theme="dark"
-                      previewPosition="none"
-                      skinTonePosition="none"
-                    />
+                    <Suspense fallback={null}>
+                      <EmojiPicker
+                        data={loadEmojiData}
+                        onEmojiSelect={handleEmojiSelect}
+                        theme="dark"
+                        previewPosition="none"
+                        skinTonePosition="none"
+                      />
+                    </Suspense>
                   </motion.div>
                 )}
               </AnimatePresence>

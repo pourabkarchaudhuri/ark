@@ -3,16 +3,17 @@
  * Manages AI chat state and interactions
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { 
   ChatMessage, 
   ChatConversation, 
   GameContext, 
-  LibraryAction,
   SendMessagePayload,
   AIResponse 
 } from '@/types/chat';
-import { useLibrary } from './useGameStore';
+import { useLibrary, extractCachedMeta } from './useGameStore';
+import { gameService } from '@/services/game-service';
+import { applyAIChatActions, confirmAIChatRemovals } from '@/services/ai-chat-actions';
 
 interface UseAIChatOptions {
   initialGameContext?: GameContext;
@@ -33,6 +34,10 @@ interface UseAIChatReturn {
   clearHistory: () => Promise<void>;
   createNewConversation: () => Promise<void>;
   loadConversations: () => Promise<void>;
+  /** Apply the library removals the model queued on this assistant message (user clicked Remove). */
+  confirmPendingRemovals: (messageId: string) => void;
+  /** Dismiss the queued removals on this assistant message without touching the library. */
+  cancelPendingRemovals: (messageId: string) => void;
   
   // Status
   isAvailable: boolean;
@@ -88,22 +93,20 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
     }
   }, [initialGameContext]);
   
-  // Execute library actions
-  const executeActions = useCallback((actions: LibraryAction[]) => {
-    for (const action of actions) {
-      const stringId = `steam-${action.appId}`;
-      if (action.type === 'add') {
-        addToLibrary({
-          gameId: stringId,
-          steamAppId: action.appId,
-          status: (action.status as 'Want to Play' | 'Playing' | 'Playing Now' | 'Completed' | 'On Hold') || 'Want to Play',
-          priority: 'Medium',
-        });
-      } else if (action.type === 'remove') {
-        removeFromLibrary(stringId);
-      }
-    }
-  }, [addToLibrary, removeFromLibrary]);
+  // Latest messages for the confirm/cancel handlers (they must read the pending list at click time).
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
+  const confirmPendingRemovals = useCallback((messageId: string) => {
+    const msg = messagesRef.current.find(m => m.id === messageId);
+    if (!msg || msg.removalState !== 'pending') return;
+    confirmAIChatRemovals(msg.pendingRemovals, removeFromLibrary);
+    setMessages(prev => prev.map(m => (m.id === messageId ? { ...m, removalState: 'removed' } : m)));
+  }, [removeFromLibrary]);
+
+  const cancelPendingRemovals = useCallback((messageId: string) => {
+    setMessages(prev => prev.map(m => (m.id === messageId && m.removalState === 'pending' ? { ...m, removalState: 'cancelled' } : m)));
+  }, []);
   
   // Send a message
   const sendMessage = useCallback(async (content: string) => {
@@ -176,10 +179,16 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
 
       const response: AIResponse = await window.aiChat.sendMessage(payload);
       
-      // Execute any library actions
-      if (response.actions && response.actions.length > 0) {
-        executeActions(response.actions);
-      }
+      // Adds apply now; removals wait for the user's confirmation on the message card
+      const { pendingRemovals } = await applyAIChatActions(response.actions, {
+        addToLibrary,
+        priority: 'Medium',
+        resolveCachedMeta: async (id) => {
+          const game = await gameService.getGameDetails(id);
+          return game ? extractCachedMeta(game) : null;
+        },
+        lookupName: (id) => getAllEntries().find(e => e.gameId === id)?.cachedMeta?.title,
+      });
       
       // Replace loading message with response
       const assistantMessage: ChatMessage = {
@@ -189,6 +198,7 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
         timestamp: new Date(),
         toolCalls: response.toolsUsed?.map(name => ({ name, args: {} })),
         chainOfThought: response.chainOfThought,
+        ...(pendingRemovals.length > 0 ? { pendingRemovals, removalState: 'pending' as const } : {}),
       };
       
       setMessages(prev => 
@@ -213,11 +223,13 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [gameContext, isLoading, getAllEntries, executeActions]);
+  }, [gameContext, isLoading, getAllEntries, addToLibrary]);
   
   // Clear history
+  // Blocked while a reply is pending: main saves the reply into whichever conversation is active
+  // when it finishes, so clearing/starting a new one mid-reply would put the old exchange back.
   const clearHistory = useCallback(async () => {
-    if (!window.aiChat) return;
+    if (!window.aiChat || isLoading) return;
     
     try {
       await window.aiChat.clearHistory();
@@ -228,11 +240,11 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
       console.error('Failed to clear history:', err);
       setError('Failed to clear chat history');
     }
-  }, []);
+  }, [isLoading]);
   
   // Create new conversation
   const createNewConversation = useCallback(async () => {
-    if (!window.aiChat) return;
+    if (!window.aiChat || isLoading) return;
     
     try {
       await window.aiChat.createNewConversation();
@@ -243,7 +255,7 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
       console.error('Failed to create new conversation:', err);
       setError('Failed to create new conversation');
     }
-  }, [loadConversations]);
+  }, [loadConversations, isLoading]);
   
   return {
     messages,
@@ -256,6 +268,8 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
     clearHistory,
     createNewConversation,
     loadConversations,
+    confirmPendingRemovals,
+    cancelPendingRemovals,
     isAvailable,
   };
 }
