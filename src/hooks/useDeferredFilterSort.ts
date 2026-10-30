@@ -27,6 +27,7 @@ import type { MutableRefObject } from 'react';
 import type { Game, GameFilters } from '@/types/game';
 import { scoreGame, buildSingleSearchIndex, type SearchIndexEntry } from '@/services/prefetch-store';
 import { isAdultContentByDescription } from '@/services/adult-content-filter';
+import { titleCollator } from '@/lib/title-collator';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -378,7 +379,7 @@ function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
       const bStatus = b.isInLibrary ? statusPriority(b) : 5;
       if (aStatus !== bStatus) return aStatus - bStatus;
       // Within each status section: always alphabetical by title
-      return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
+      return titleCollator.compare(a.title, b.title);
     }
 
     let comparison = 0;

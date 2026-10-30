@@ -38,11 +38,13 @@ import {
   type SimilarGameCard,
   type SimilarGamesSectionPhase,
 } from '@/services/similar-games';
-import { SteamAppDetails, SteamReviewsResponse, SteamNewsItem } from '@/types/steam';
+import { SteamAppDetails, SteamReviewsResponse, SteamNewsItem, type SteamAppDetailsStatus } from '@/types/steam';
 import { MetacriticGameResponse } from '@/types/metacritic';
 import { Game } from '@/types/game';
 import { useLibrary, extractCachedMeta } from '@/hooks/useGameStore';
 import { libraryStore } from '@/services/library-store';
+import { journeyStore } from '@/services/journey-store';
+import { storedGameMeta, isTransientDetailsFailure, type MinimalGameMeta } from '@/lib/details-fallback';
 import { customGameStore } from '@/services/custom-game-store';
 import { sessionStore } from '@/services/session-store';
 import { GameDialogInitialEntry } from '@/components/game-dialog';
@@ -62,7 +64,7 @@ import { Carousel, BlurImage, type CardType } from '@/components/ui/apple-cards-
 const TelemetryTab = lazy(() => import('@/components/telemetry-tab'));
 
 // ─── Minimal SteamAppDetails from cached Game (fallback when API returns null) ─
-function gameToMinimalSteamDetails(g: Game, steamAppId: number): SteamAppDetails {
+function gameToMinimalSteamDetails(g: MinimalGameMeta, steamAppId: number): SteamAppDetails {
   const hasWindows = g.platform?.some(p => /win|pc/i.test(p)) ?? true;
   const hasMac = g.platform?.some(p => /mac|osx/i.test(p)) ?? false;
   const hasLinux = g.platform?.some(p => /linux/i.test(p)) ?? false;
@@ -637,6 +639,34 @@ function ErrorFallback({ error, navigate }: { error: string | null; navigate: (t
 }
 
 /**
+ * Steam is rate limiting or unreachable and Ark has nothing stored for this game: unlike
+ * ErrorFallback this never redirects — the game probably exists, so offer a retry.
+ */
+function SteamUnavailableFallback({ onRetry, navigate }: { onRetry: () => void; navigate: (to: string) => void }) {
+  return (
+    <div className="min-h-screen bg-black flex flex-col">
+      <div className="flex items-center justify-between px-4 py-3 app-drag-region">
+        <div />
+        <WindowControls />
+      </div>
+      <div className="flex-1 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 text-center" role="alert">
+          <p className="text-amber-300 text-xl">Steam is busy or unreachable</p>
+          <p className="text-white/40 text-sm">The game details could not be loaded right now. Try again in a moment.</p>
+          <div className="flex gap-2">
+            <Button onClick={onRetry} variant="outline">Retry</Button>
+            <Button onClick={() => navigate(getBackToDashboardUrl())} variant="ghost">
+              <ArrowLeft className="w-4 h-4 mr-2 pointer-events-none" />
+              Back to Dashboard
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Hero backdrop: one image layer under the two dark fade overlays, identical
  * for Steam and Epic. Shared by the loading skeleton and the loaded page so
  * the artwork is continuous across the transition. A dead URL degrades to the
@@ -696,6 +726,10 @@ export function GameDetailsPage() {
   const [metacriticLoading, setMetacriticLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** Steam appdetails failed transiently (429 pause / offline) and nothing is stored to show. */
+  const [steamUnavailable, setSteamUnavailable] = useState(false);
+  /** Bumped by the Retry button to re-run the fetch effect. */
+  const [detailsRetryKey, setDetailsRetryKey] = useState(0);
   const [currentMediaIndex, setCurrentMediaIndex] = useState(0);
   const [showFullDescription, setShowFullDescription] = useState(false);
   const [mediaLoading, setMediaLoading] = useState(true);
@@ -970,6 +1004,7 @@ export function GameDetailsPage() {
       // Reset ALL state to avoid stale data from the previous game bleeding through
       setLoading(true);
       setError(null);
+      setSteamUnavailable(false);
       setDetails(null);
       setEpicGame(null);
       setCrossStoreGame(null);
@@ -1280,7 +1315,12 @@ export function GameDetailsPage() {
 
         if (isElectron()) {
           // Fetch Steam details + reviews in PARALLEL
-          const detailsPromise = window.steam!.getAppDetails(appId);
+          // With status, so a rate-limited / offline lookup is not mistaken for a delisted game.
+          // (Older preloads without the channel: an empty answer counts as not found, as before.)
+          const detailsPromise: Promise<{ data: SteamAppDetails | null; status: SteamAppDetailsStatus }> =
+            typeof window.steam!.getAppDetailsWithStatus === 'function'
+              ? window.steam!.getAppDetailsWithStatus(appId)
+              : window.steam!.getAppDetails(appId).then(data => ({ data, status: data ? 'ok' as const : 'not_found' as const }));
           const reviewsPromise = typeof window.steam!.getGameReviews === 'function'
             ? window.steam!.getGameReviews(appId, 10).catch((err) => { console.warn('[GameDetails] Steam reviews:', err); return null; })
             : Promise.resolve(null);
@@ -1295,7 +1335,8 @@ export function GameDetailsPage() {
             ? epicService.getGameDetails(resolvedEpicNs, resolvedEpicOid).catch((err) => { console.warn('[GameDetails] Epic details (cross-store):', err); return null; })
             : Promise.resolve(null);
 
-          const [detailsData, reviewsData, liveEpicDetails] = await Promise.all([detailsPromise, reviewsPromise, epicPricePromise]);
+          const [detailsResult, reviewsData, liveEpicDetails] = await Promise.all([detailsPromise, reviewsPromise, epicPricePromise]);
+          const detailsData = detailsResult?.data ?? null;
           
           if (controller.signal.aborted) return;
           
@@ -1330,8 +1371,15 @@ export function GameDetailsPage() {
                 // Fall through to prefetched minimal
               }
             }
-            if (prefetched?.title) {
-              setDetails(gameToMinimalSteamDetails(prefetched, appId));
+            // Then what Ark already stores for this game (library snapshot, else journey entry).
+            const stored = prefetched?.title
+              ? prefetched
+              : storedGameMeta(libraryStore.getEntry(gameId)?.cachedMeta, journeyStore.getEntry(gameId));
+            const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+            if (stored?.title) {
+              setDetails(gameToMinimalSteamDetails(stored, appId));
+            } else if (isTransientDetailsFailure(detailsResult?.status ?? 'error', online)) {
+              setSteamUnavailable(true);
             } else {
               setError('Game not found');
             }
@@ -1375,7 +1423,7 @@ export function GameDetailsPage() {
       controller.abort();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameId, isEpicGame, isCustomGame, appId]);
+  }, [gameId, isEpicGame, isCustomGame, appId, detailsRetryKey]);
 
   // Resolved Steam App ID — works for Steam-primary (from URL) and dual-store
   // Epic-primary games (from details.steam_appid set during dual-store resolution)
@@ -1908,6 +1956,12 @@ export function GameDetailsPage() {
           </div>
         )}
       </div>
+    );
+  }
+
+  if (steamUnavailable && !details && !epicGame && !error) {
+    return (
+      <SteamUnavailableFallback onRetry={() => setDetailsRetryKey(k => k + 1)} navigate={navigate} />
     );
   }
 

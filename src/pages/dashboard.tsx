@@ -85,6 +85,7 @@ import { prewarmNews } from '@/services/news-service';
 import { prewarmEvents } from '@/services/event-resolver-service';
 import { TooltipCard } from '@/components/ui/tooltip-card';
 import { MovingBorderButton } from '@/components/ui/moving-border';
+import { titleCollator } from '@/lib/title-collator';
 
 type SortOption = 'rating' | 'releaseDate' | 'title';
 type SortDirection = 'asc' | 'desc';
@@ -419,7 +420,7 @@ export function Dashboard() {
         const diff = statusOrder(a) - statusOrder(b);
         if (diff !== 0) return diff;
         // Within each status section: alphabetical by title
-        return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
+        return titleCollator.compare(a.title, b.title);
       }
       const effectiveSort = sortBy as 'rating' | 'releaseDate' | 'title';
       const releaseTs = (g: Game) => (g.releaseDate ? new Date(g.releaseDate).getTime() : 0);

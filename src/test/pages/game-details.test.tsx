@@ -834,3 +834,86 @@ describe('epicToSteamDetails normalizer (via Epic rendering)', () => {
     });
   });
 });
+
+// ─── Steam rate limited / offline (1.0.97 B06) ──────────────────────────────
+// An empty appdetails answer while Steam is rate limiting or unreachable is not "Game not
+// found": the page shows a retry state and does not bounce to the dashboard after 5 s.
+
+import { useLocation } from 'wouter';
+import { journeyStore } from '@/services/journey-store';
+
+describe('GameDetailsPage — Steam busy / unreachable', () => {
+  const navigateSpy = vi.fn();
+  let journeySpy: { mockRestore: () => void } | null = null;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(useLocation).mockReturnValue(['/', navigateSpy] as any);
+    mockUseRoute.mockReturnValue([true, { id: 'steam-730' }] as any);
+    Object.defineProperty(window, 'steam', {
+      value: {
+        getAppDetails: vi.fn().mockResolvedValue(null),
+        getAppDetailsWithStatus: vi.fn().mockResolvedValue({ data: null, status: 'rate_limited' }),
+        getGameReviews: vi.fn().mockResolvedValue(null),
+        getMultiplePlayerCounts: vi.fn().mockResolvedValue({}),
+        getNewsForApp: vi.fn().mockResolvedValue([]),
+        getRecommendations: vi.fn().mockResolvedValue([]),
+        getCoverUrl: vi.fn(() => null),
+        getHeaderUrl: vi.fn(() => null),
+      },
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(window, 'epic', {
+      value: { getGameDetails: vi.fn().mockResolvedValue(null), searchGames: vi.fn().mockResolvedValue([]) },
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(window, 'metacritic', {
+      value: { getGameReviews: vi.fn().mockResolvedValue(null), clearCache: vi.fn() },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    journeySpy?.mockRestore();
+    journeySpy = null;
+    vi.clearAllMocks();
+    vi.mocked(useLocation).mockImplementation(() => ['/', vi.fn()] as any);
+  });
+
+  it('rate_limited shows a retry state and does not navigate after 5 s', async () => {
+    renderGameDetails();
+    await waitFor(() => expect(screen.getByText('Steam is busy or unreachable')).toBeInTheDocument());
+    expect(screen.queryByText('Game not found')).not.toBeInTheDocument();
+    await act(async () => { vi.advanceTimersByTime(6000); });
+    expect(navigateSpy).not.toHaveBeenCalled();
+  });
+
+  it('Retry fetches again and renders the game once Steam answers', async () => {
+    renderGameDetails();
+    await waitFor(() => expect(screen.getByText('Retry')).toBeInTheDocument());
+    vi.mocked(window.steam!.getAppDetailsWithStatus!).mockResolvedValue({ data: mockGameDetails, status: 'ok' });
+    await act(async () => { screen.getByText('Retry').click(); });
+    await waitFor(() => expect(screen.getByText('Counter-Strike 2')).toBeInTheDocument());
+    expect(window.steam!.getAppDetailsWithStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('not_found keeps today\'s "Game not found" and redirects after 5 s', async () => {
+    vi.mocked(window.steam!.getAppDetailsWithStatus!).mockResolvedValue({ data: null, status: 'not_found' });
+    renderGameDetails();
+    await waitFor(() => expect(screen.getByText('Game not found')).toBeInTheDocument());
+    await act(async () => { vi.advanceTimersByTime(5100); });
+    expect(navigateSpy).toHaveBeenCalledWith('/');
+  });
+
+  it('a game Ark has stored metadata for renders minimal details instead', async () => {
+    journeySpy = vi.spyOn(journeyStore, 'getEntry').mockImplementation((id: string) =>
+      id === 'steam-730' ? ({ gameId: id, title: 'Stored Strike', genre: ['Shooter'], platform: ['PC'] } as any) : undefined);
+    renderGameDetails();
+    await waitFor(() => expect(screen.getAllByText('Stored Strike').length).toBeGreaterThan(0));
+    expect(screen.queryByText('Steam is busy or unreachable')).not.toBeInTheDocument();
+  });
+});

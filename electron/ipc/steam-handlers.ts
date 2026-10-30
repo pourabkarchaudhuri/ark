@@ -62,6 +62,21 @@ export function register(): void {
   });
 
   /**
+   * Like steam:getAppDetails, plus why it is empty: { data, status: 'ok' | 'not_found' |
+   * 'rate_limited' | 'error' }. Used only by the details page so it can show a retry state
+   * instead of "Game not found" while Steam is rate limiting or unreachable.
+   */
+  ipcMain.handle('steam:getAppDetailsWithStatus', async (_event: any, appId: number) => {
+    if (typeof appId !== 'number' || !Number.isFinite(appId) || appId < 0) return { data: null, status: 'not_found' };
+    try {
+      return await steamAPI.getAppDetailsWithStatus(appId);
+    } catch (error) {
+      logger.error(`[Steam IPC] Error fetching app details (with status) for ${appId}:`, error);
+      return { data: null, status: 'error' };
+    }
+  });
+
+  /**
    * Get app details for multiple games (batched)
    */
   ipcMain.handle('steam:getMultipleAppDetails', async (_event: any, appIds: number[]) => {
@@ -335,13 +350,31 @@ export function register(): void {
    * Batch-fetches getAppDetails for each game to get release_date, genres, platforms.
    * Cached for 1 hour to avoid repeated batch fetches.
    */
-  let upcomingReleasesCache: { data: any[]; timestamp: number } | null = null;
-  const UPCOMING_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+  ipcMain.handle('steam:getUpcomingReleases', createUpcomingReleasesLoader(steamAPI));
+}
 
-  ipcMain.handle('steam:getUpcomingReleases', async () => {
+/** What the upcoming-releases loader needs from the Steam client (tests pass a fake). */
+export type UpcomingReleasesApi = Pick<typeof steamAPI, 'getComingSoon' | 'getNewReleases' | 'getAppDetails'>;
+
+const UPCOMING_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Builds the steam:getUpcomingReleases handler with its own 1 h cache. Only a non-empty
+ * result is cached: when offline (or Steam's featured call fails) both lists come back empty,
+ * and caching that hid upcoming releases for an hour after the connection came back.
+ */
+export function createUpcomingReleasesLoader(
+  api: UpcomingReleasesApi,
+  opts: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
+): () => Promise<any[]> {
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  let upcomingReleasesCache: { data: any[]; timestamp: number } | null = null;
+
+  return async () => {
     try {
       // Return cached data if still fresh
-      if (upcomingReleasesCache && (Date.now() - upcomingReleasesCache.timestamp < UPCOMING_CACHE_TTL)) {
+      if (upcomingReleasesCache && (now() - upcomingReleasesCache.timestamp < UPCOMING_CACHE_TTL)) {
         logger.log('[Steam IPC] getUpcomingReleases returning cached data');
         return upcomingReleasesCache.data;
       }
@@ -350,8 +383,8 @@ export function register(): void {
 
       // Fetch coming soon and new releases in parallel
       const [comingSoon, newReleases] = await Promise.all([
-        steamAPI.getComingSoon().catch((err: any) => { logger.warn('[Steam IPC] getUpcomingReleases getComingSoon Non-fatal:', err); return []; }),
-        steamAPI.getNewReleases().catch((err: any) => { logger.warn('[Steam IPC] getUpcomingReleases getNewReleases Non-fatal:', err); return []; }),
+        api.getComingSoon().catch((err: any) => { logger.warn('[Steam IPC] getUpcomingReleases getComingSoon Non-fatal:', err); return []; }),
+        api.getNewReleases().catch((err: any) => { logger.warn('[Steam IPC] getUpcomingReleases getNewReleases Non-fatal:', err); return []; }),
       ]);
 
       // Merge and deduplicate by id
@@ -382,7 +415,7 @@ export function register(): void {
         const detailsResults = await Promise.allSettled(
           batch.map(async (game) => {
             try {
-              const details = await steamAPI.getAppDetails(game.id);
+              const details = await api.getAppDetails(game.id);
               return {
                 id: game.id,
                 name: details?.name || game.name,
@@ -414,12 +447,14 @@ export function register(): void {
 
         // Delay between batches to avoid Steam 429 rate limits
         if (i + batchSize < allGames.length) {
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await sleep(500);
         }
       }
 
-      // Cache the result for 1 hour
-      upcomingReleasesCache = { data: enriched, timestamp: Date.now() };
+      // Cache the result for 1 hour — but never an empty one (offline / featured call failed)
+      if (comingSoon.length + newReleases.length > 0) {
+        upcomingReleasesCache = { data: enriched, timestamp: now() };
+      }
 
       logger.log(`[Steam IPC] getUpcomingReleases returning ${enriched.length} enriched games`);
       return enriched;
@@ -427,5 +462,5 @@ export function register(): void {
       logger.error('[Steam IPC] Error fetching upcoming releases:', error);
       return [];
     }
-  });
+  };
 }

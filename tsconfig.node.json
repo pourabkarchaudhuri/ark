@@ -17,6 +17,8 @@
     "electron/**/*",
     "src/overlay/detail-level.ts",
     "src/lib/upcoming-select.ts",
+    "src/lib/title-collator.ts",
+    "src/data/gaming-events.ts",
     "package.json"
   ]
 }

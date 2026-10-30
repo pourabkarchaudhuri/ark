@@ -220,6 +220,12 @@ export interface SteamReviewsResponse {
   reviews: SteamReview[];
 }
 
+/**
+ * steam:getAppDetailsWithStatus outcome: 'not_found' = Steam answered success:false (delisted /
+ * region-locked), 'rate_limited' = the appdetails 429 pause is active, 'error' = network/HTTP.
+ */
+export type SteamAppDetailsStatus = 'ok' | 'not_found' | 'rate_limited' | 'error';
+
 // App list item from ISteamApps/GetAppList/v2 (for Catalog A–Z browsing)
 export interface SteamAppListItem {
   appid: number;
@@ -232,6 +238,8 @@ declare global {
     steam?: {
       getMostPlayedGames: () => Promise<SteamMostPlayedGame[]>;
       getAppDetails: (appId: number) => Promise<SteamAppDetails | null>;
+      /** Details-page lookup that tells a delisted game from a rate-limited / offline one. */
+      getAppDetailsWithStatus?: (appId: number) => Promise<{ data: SteamAppDetails | null; status: SteamAppDetailsStatus }>;
       getMultipleAppDetails: (appIds: number[]) => Promise<Array<{ appId: number; details: SteamAppDetails }>>;
       searchGames: (query: string, limit?: number) => Promise<SteamSearchItem[]>;
       getNewReleases: () => Promise<Array<{ id: number; name: string; image: string }>>;

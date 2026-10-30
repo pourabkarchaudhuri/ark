@@ -143,6 +143,8 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
         status: entry.status,
         priority: entry.priority,
         addedAt: entry.addedAt?.toISOString(),
+        hoursPlayed: entry.hoursPlayed,
+        rating: entry.rating,
       }));
       
       const payload: SendMessagePayload = {
