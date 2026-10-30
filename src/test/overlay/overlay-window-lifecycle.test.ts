@@ -44,6 +44,8 @@ class FakeWindow extends FakeEmitter {
   webContents = Object.assign(new FakeEmitter(), {
     send: vi.fn(),
     setBackgroundThrottling: vi.fn(),
+    // B02 denies window.open from the overlay (setWindowOpenHandler) before load.
+    setWindowOpenHandler: vi.fn(),
   });
   constructor(opts: { width: number; height: number }) {
     super();

@@ -41,7 +41,8 @@ vi.mock('@/services/catalog-store', () => ({ catalogStore: {} }));
 vi.mock('@/services/epic-catalog-store', () => ({ epicCatalogStore: {} }));
 vi.mock('@/services/reco-store', () => ({ recoStore: {} }));
 vi.mock('@/services/embedding-migration', () => ({ describeReindexAllResult: vi.fn(() => '') }));
-vi.mock('@/services/library-store', () => ({ libraryStore: {} }));
+// General renders LibraryDataSection (B16), which asks for the last import snapshot on mount.
+vi.mock('@/services/library-store', () => ({ libraryStore: { getLastImportSnapshot: vi.fn(() => null) } }));
 vi.mock('@/services/game-service', () => ({ gameService: {} }));
 vi.mock('@/components/year-wrapped', () => ({ YearWrapped: () => null }));
 vi.mock('@/components/settings/embedding-batch-size', () => ({ EmbeddingBatchSizeControl: () => null }));
