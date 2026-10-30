@@ -162,7 +162,8 @@ export async function runFullCatalogAdultFilterTest(): Promise<FullCatalogAdultF
         logger.log(`[Catalog] Epic excluded (sexual-content tag): ${excludedEpic.length}`);
       } else {
         logger.log('[Catalog] Fetching Epic catalog (GraphQL)...');
-        const EPIC_CATALOG_TIMEOUT_MS = 120000;
+        // The limiter now really holds the crawl to 2 in flight, 300ms apart (~150 pages)
+        const EPIC_CATALOG_TIMEOUT_MS = 240000;
         const epicItems = await Promise.race([
           epicAPI.browseCatalog(0),
           new Promise<never>((_, rej) =>

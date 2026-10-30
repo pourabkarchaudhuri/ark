@@ -55,8 +55,10 @@ const EGDATA_PAGE_COUNT = 10;
 /**
  * Fetch one page of Epic top sellers from api.egdata.app (renderer). API uses page=1,2,... not skip.
  */
-async function fetchEgdataTopSellersPage(pageNum: number): Promise<(EgdataOfferLike & { position?: number })[]> {
+export async function fetchEgdataTopSellersPage(pageNum: number): Promise<(EgdataOfferLike & { position?: number })[]> {
   const controller = new AbortController();
+  // Armed until the body is read: a server that sends headers then stalls used to hang
+  // Top Sellers (and its preload guard) for the whole session.
   const timeout = setTimeout(() => controller.abort(), EGDATA_FETCH_TIMEOUT_MS);
   try {
     const url = `${EGDATA_TOP_SELLERS_BASE}?limit=${EGDATA_PAGE_SIZE}&page=${pageNum}`;
@@ -64,13 +66,13 @@ async function fetchEgdataTopSellersPage(pageNum: number): Promise<(EgdataOfferL
       signal: controller.signal,
       headers: { Accept: 'application/json' },
     });
-    clearTimeout(timeout);
     if (!res.ok) return [];
     const data = (await res.json()) as { elements?: unknown[] };
     return Array.isArray(data?.elements) ? (data.elements as (EgdataOfferLike & { position?: number })[]) : [];
   } catch {
-    clearTimeout(timeout);
     return [];
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

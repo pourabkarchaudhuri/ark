@@ -1056,13 +1056,9 @@ app.whenReady().then(async () => {
 
   // ML model is lazy-loaded on first score request (see ml-handlers.ts)
 
-  // ---- Epic Cloudflare clearance (background, non-blocking) ----
-  // Epic's GraphQL API is behind Cloudflare JS challenge.  We solve it once
-  // at startup using a hidden BrowserWindow so all Epic catalog queries work.
-  withTimeout(epicAPI.initCloudflare(), 20000, 'Epic Cloudflare clearance').then(ok => {
-    if (ok) logger.log('[Startup] Epic Cloudflare clearance ready');
-    else logger.warn('[Startup] Epic Cloudflare clearance failed or timed out — REST fallback active');
-  }).catch((err: any) => { logger.warn('[Epic] Cloudflare init Non-fatal:', err); });
+  // ---- Epic Cloudflare clearance ----
+  // No eager solve at startup: it loaded the whole Epic store in a hidden window on every
+  // launch (even --hidden auto-start). gqlFetch starts the solver lazily after a 403.
 
   // ---- System Tray ----
   try {
