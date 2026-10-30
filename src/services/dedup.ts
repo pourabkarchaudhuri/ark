@@ -9,6 +9,19 @@ import type { Game } from '@/types/game';
 // Title normalisation for deduplication
 // ---------------------------------------------------------------------------
 
+// Roman numerals to Arabic (up to 20 covers virtually all games). Module scope so
+// normalizeTitle does not rebuild 19 regexes per call; String.replace resets a /g
+// regex's lastIndex, so sharing them across calls is safe.
+const ROMAN_MAP: [RegExp, string][] = [
+  [/\bxx\b/g, '20'], [/\bxix\b/g, '19'], [/\bxviii\b/g, '18'],
+  [/\bxvii\b/g, '17'], [/\bxvi\b/g, '16'], [/\bxv\b/g, '15'],
+  [/\bxiv\b/g, '14'], [/\bxiii\b/g, '13'], [/\bxii\b/g, '12'],
+  [/\bxi\b/g, '11'], [/\bx\b/g, '10'], [/\bix\b/g, '9'],
+  [/\bviii\b/g, '8'], [/\bvii\b/g, '7'], [/\bvi\b/g, '6'],
+  [/\bv\b/g, '5'], [/\biv\b/g, '4'], [/\biii\b/g, '3'],
+  [/\bii\b/g, '2'],
+];
+
 /**
  * Normalise a game title for fuzzy matching across stores.
  * Aggressively strips edition suffixes, symbols, and normalises Roman
@@ -31,17 +44,8 @@ export function normalizeTitle(title: string | undefined | null): string {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Normalise Roman numerals to Arabic (up to 20 covers virtually all games)
-  const romanMap: [RegExp, string][] = [
-    [/\bxx\b/g, '20'], [/\bxix\b/g, '19'], [/\bxviii\b/g, '18'],
-    [/\bxvii\b/g, '17'], [/\bxvi\b/g, '16'], [/\bxv\b/g, '15'],
-    [/\bxiv\b/g, '14'], [/\bxiii\b/g, '13'], [/\bxii\b/g, '12'],
-    [/\bxi\b/g, '11'], [/\bx\b/g, '10'], [/\bix\b/g, '9'],
-    [/\bviii\b/g, '8'], [/\bvii\b/g, '7'], [/\bvi\b/g, '6'],
-    [/\bv\b/g, '5'], [/\biv\b/g, '4'], [/\biii\b/g, '3'],
-    [/\bii\b/g, '2'],
-  ];
-  for (const [rx, num] of romanMap) {
+  // Normalise Roman numerals to Arabic (see ROMAN_MAP)
+  for (const [rx, num] of ROMAN_MAP) {
     t = t.replace(rx, num);
   }
 

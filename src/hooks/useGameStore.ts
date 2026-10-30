@@ -1689,33 +1689,11 @@ export function useLibraryGames() {
   }, [updateCount]);
 
   // ── Backfill cachedMeta for entries that have none (e.g. after import or legacy add) ──
-  const backfillStartedRef = useRef<Set<string>>(new Set());
+  // 1.0.97: the queue lives in gameService (module scope), shared with the Settings
+  // import backfill, so a Dashboard remount never starts a second chain over the same
+  // ids. Not cancelled on unmount: it writes to the global library store.
   useEffect(() => {
-    const idsToBackfill = libraryStore
-      .getAllGameIds()
-      .filter((id) => {
-        if (!id.startsWith('epic-') && !id.startsWith('steam-')) return false;
-        if (backfillStartedRef.current.has(id)) return false;
-        const entry = libraryStore.getEntry(id);
-        return entry && !entry.cachedMeta;
-      });
-    if (idsToBackfill.length === 0) return;
-    idsToBackfill.forEach((id) => backfillStartedRef.current.add(id));
-    const queue = [...idsToBackfill];
-    const runNext = () => {
-      const id = queue.shift();
-      if (!id) return;
-      gameService
-        .getGameDetails(id)
-        .then((game) => {
-          if (game) libraryStore.updateEntry(id, { cachedMeta: extractCachedMeta(game) });
-        })
-        .catch(() => { /* non-critical */ })
-        .finally(() => {
-          if (queue.length > 0) setTimeout(runNext, 200);
-        });
-    };
-    runNext();
+    gameService.backfillLibraryMissingCachedMeta().catch(() => { /* non-critical */ });
   }, [updateCount]);
 
   return { games, loading, error };

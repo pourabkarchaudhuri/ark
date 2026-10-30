@@ -99,6 +99,69 @@ async function fetchEgdataTopSellersFromRenderer(): Promise<(EgdataOfferLike & {
 }
 
 // ---------------------------------------------------------------------------
+// cachedMeta backfill (shared by every caller)
+// ---------------------------------------------------------------------------
+
+/**
+ * Module-level so the Settings import backfill and every useLibraryGames mount
+ * share ONE chain: an id is fetched at most once per session (failures included)
+ * no matter how often the Dashboard remounts. Reset when the library is cleared
+ * or replaced by an import (libraryStore.getReplaceEpoch()).
+ */
+const backfillAttempted = new Set<string>();
+const backfillQueue: string[] = [];
+let backfillRun: Promise<void> | null = null;
+let backfillEpoch: number | null = null;
+const BACKFILL_TIMING_DEFAULTS = { delayMs: 200, flushEvery: 25, flushMs: 2000 };
+let backfillTiming = { ...BACKFILL_TIMING_DEFAULTS };
+
+/** Drop the per-session sets once the library they describe is gone. */
+function syncBackfillEpoch(): void {
+  const epoch = libraryStore.getReplaceEpoch();
+  if (epoch === backfillEpoch) return;
+  backfillEpoch = epoch;
+  backfillAttempted.clear();
+  backfillQueue.length = 0;
+}
+
+/** Test seam: forget all backfill state and optionally shorten its timing. */
+export function __resetCachedMetaBackfillForTests(
+  timing: Partial<typeof BACKFILL_TIMING_DEFAULTS> = {},
+): void {
+  backfillAttempted.clear();
+  backfillQueue.length = 0;
+  backfillRun = null;
+  backfillEpoch = null;
+  backfillTiming = { ...BACKFILL_TIMING_DEFAULTS, ...timing };
+}
+
+/** Display metadata cached on the library entry (same shape as useGameStore's extractCachedMeta). */
+function toCachedMeta(game: Game): CachedGameMeta {
+  return {
+    title: game.title,
+    store: game.store,
+    coverUrl: game.coverUrl,
+    headerImage: game.headerImage,
+    developer: game.developer,
+    publisher: game.publisher,
+    genre: game.genre,
+    platform: game.platform,
+    releaseDate: game.releaseDate,
+    metacriticScore: game.metacriticScore,
+    summary: game.summary,
+    longDescription: game.longDescription,
+    epicSlug: game.epicSlug,
+    epicNamespace: game.epicNamespace,
+    epicOfferId: game.epicOfferId,
+    steamAppId: game.steamAppId,
+    themes: game.themes,
+    gameModes: game.gameModes,
+    playerPerspectives: game.playerPerspectives,
+    similarGames: game.similarGames?.map((sg) => ({ id: sg.id, name: sg.name })),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Unified Game Service
 // ---------------------------------------------------------------------------
 
@@ -427,45 +490,70 @@ class GameService {
   /**
    * Backfill cachedMeta for library entries that have none (e.g. after import).
    * Fetches metadata from Steam/Epic and updates the library entry. Non-blocking.
+   *
+   * 1.0.97: one shared chain for every caller. Ids already attempted this session
+   * are skipped, a call while the chain runs only enqueues new ids and returns the
+   * running promise, and results are written in batches (every ~25 games or ~2 s)
+   * so the library notifies a handful of times instead of once per game.
    */
-  async backfillLibraryMissingCachedMeta(): Promise<void> {
-    const entries = libraryStore.getAllEntries();
-    const idsToBackfill = entries
-      .filter((e) => !e.cachedMeta && (e.gameId.startsWith('epic-') || e.gameId.startsWith('steam-')))
-      .map((e) => e.gameId);
+  backfillLibraryMissingCachedMeta(): Promise<void> {
+    syncBackfillEpoch();
+    // getAllGameIds, not getAllEntries: no sort needed to find the gaps.
+    for (const id of libraryStore.getAllGameIds()) {
+      if (!id.startsWith('epic-') && !id.startsWith('steam-')) continue;
+      if (backfillAttempted.has(id)) continue;
+      if (libraryStore.getEntry(id)?.cachedMeta) continue;
+      backfillAttempted.add(id);
+      backfillQueue.push(id);
+    }
+    if (!backfillRun && backfillQueue.length > 0) {
+      const run = this.runCachedMetaBackfill().finally(() => {
+        if (backfillRun === run) backfillRun = null;
+      });
+      backfillRun = run;
+    }
+    return backfillRun ?? Promise.resolve();
+  }
+
+  private async runCachedMetaBackfill(): Promise<void> {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    for (const id of idsToBackfill) {
-      try {
-        const game = await this.getGameDetails(id);
-        if (game) {
-          const meta: CachedGameMeta = {
-            title: game.title,
-            store: game.store,
-            coverUrl: game.coverUrl,
-            headerImage: game.headerImage,
-            developer: game.developer,
-            publisher: game.publisher,
-            genre: game.genre,
-            platform: game.platform,
-            releaseDate: game.releaseDate,
-            metacriticScore: game.metacriticScore,
-            summary: game.summary,
-            longDescription: game.longDescription,
-            epicSlug: game.epicSlug,
-            epicNamespace: game.epicNamespace,
-            epicOfferId: game.epicOfferId,
-            steamAppId: game.steamAppId,
-            themes: game.themes,
-            gameModes: game.gameModes,
-            playerPerspectives: game.playerPerspectives,
-            similarGames: game.similarGames?.map((sg) => ({ id: sg.id, name: sg.name })),
-          };
-          libraryStore.updateEntry(id, { cachedMeta: meta });
-        }
-      } catch {
-        /* non-critical */
+    let pending = new Map<string, CachedGameMeta>();
+    let lastFlush = Date.now();
+    const flush = () => {
+      if (pending.size === 0) return;
+      const batch = pending;
+      pending = new Map();
+      lastFlush = Date.now();
+      // An entry may have been filled (or re-imported with meta) while we fetched.
+      for (const id of batch.keys()) {
+        if (libraryStore.getEntry(id)?.cachedMeta) batch.delete(id);
       }
-      await delay(200);
+      libraryStore.setCachedMetaBatch(batch);
+    };
+    try {
+      for (;;) {
+        // A clear / import empties the queue; the next caller re-fills it.
+        syncBackfillEpoch();
+        const id = backfillQueue.shift();
+        if (!id) break;
+        // Re-check before fetching: filled elsewhere since it was queued.
+        if (libraryStore.getEntry(id)?.cachedMeta) continue;
+        try {
+          const game = await this.getGameDetails(id);
+          if (game) pending.set(id, toCachedMeta(game));
+        } catch {
+          /* non-critical — the id stays attempted for this session */
+        }
+        if (
+          pending.size >= backfillTiming.flushEvery ||
+          Date.now() - lastFlush >= backfillTiming.flushMs
+        ) {
+          flush();
+        }
+        if (backfillQueue.length > 0) await delay(backfillTiming.delayMs);
+      }
+    } finally {
+      flush();
     }
   }
 
