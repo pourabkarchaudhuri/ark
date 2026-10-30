@@ -2,8 +2,13 @@
 //!
 //! `session_enumerate()` replaces the PowerShell/tasklist subprocess pair in
 //! `electron/session-tracker.ts` with a single native syscall-based process
-//! enumeration: `EnumProcesses` (psapi) to list PIDs, then
+//! enumeration: a Toolhelp32 process snapshot (`CreateToolhelp32Snapshot`)
+//! to list PIDs plus each image's basename (`szExeFile`), then
 //! `QueryFullProcessImageNameW` per PID to resolve the full executable path.
+//! The basename is available even for processes whose path cannot be read,
+//! so the JS side no longer needs `tasklist` for basenames (1.0.97). When the
+//! snapshot itself fails we fall back to `EnumProcesses` (psapi) with no
+//! basenames.
 //! No subprocess spawn, no shell, no PowerShell startup cost, and no
 //! dependency on PowerShell's availability/reliability under load (the root
 //! cause class of the v1.0.60 tracker-never-ends bug — see session-tracker.ts
@@ -27,13 +32,20 @@ pub struct NativeProcessInfo {
     /// resolved (elevated process, protected process, or the process exited
     /// mid-enumeration).
     pub path: Option<String>,
+    /// Image basename (Toolhelp32 `szExeFile`), lowercased. Present even when
+    /// `path` is `None`; `None` only on the `EnumProcesses` fallback.
+    pub name: Option<String>,
 }
 
 #[cfg(windows)]
 mod windows_impl {
     use super::NativeProcessInfo;
     use std::mem;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, MAX_PATH};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, MAX_PATH};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
     use windows_sys::Win32::System::ProcessStatus::EnumProcesses;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -99,12 +111,54 @@ mod windows_impl {
         }
     }
 
+    /// Every process's PID and lowercased image basename from one Toolhelp32
+    /// snapshot. `None` when the snapshot could not be taken.
+    fn snapshot_pids_and_names() -> Option<Vec<(u32, String)>> {
+        unsafe {
+            let snap: HANDLE = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE || snap == 0 {
+                return None;
+            }
+            let mut out: Vec<(u32, String)> = Vec::new();
+            let mut entry: PROCESSENTRY32W = mem::zeroed();
+            entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut entry);
+            while ok != 0 {
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
+                out.push((entry.th32ProcessID, name));
+                ok = Process32NextW(snap, &mut entry);
+            }
+            CloseHandle(snap);
+            if out.is_empty() {
+                None
+            } else {
+                Some(out)
+            }
+        }
+    }
+
     pub fn enumerate() -> Vec<NativeProcessInfo> {
+        if let Some(entries) = snapshot_pids_and_names() {
+            return entries
+                .into_iter()
+                .map(|(pid, name)| NativeProcessInfo {
+                    pid,
+                    path: query_image_path(pid),
+                    name: if name.is_empty() { None } else { Some(name) },
+                })
+                .collect();
+        }
         enum_pids()
             .into_iter()
             .map(|pid| NativeProcessInfo {
                 pid,
                 path: query_image_path(pid),
+                name: None,
             })
             .collect()
     }

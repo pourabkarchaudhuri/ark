@@ -111,7 +111,11 @@ interface GameLauncherAPI {
 
 // Session Tracker API types (exposed via Electron preload)
 interface SessionTrackerAPI {
-  setTrackedGames: (games: Array<{ gameId: string; executablePath: string }>) => Promise<{ success: boolean }>;
+  /** `keepSources`: stores that could not be read this time; main keeps their previously tracked games. */
+  setTrackedGames: (
+    games: Array<{ gameId: string; executablePath: string }>,
+    options?: { keepSources?: Array<'library' | 'custom'> },
+  ) => Promise<{ success: boolean }>;
   getActiveSessions: () => Promise<Array<{ gameId: string; startTime: string; elapsedMinutes: number }>>;
   getRecoveredSessions: () => Promise<Array<import('@/types/game').GameSession>>;
   /** Confirm sessions are recorded so main drops them from its pending queue (optional for older preloads). */

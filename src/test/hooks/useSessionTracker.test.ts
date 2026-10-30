@@ -94,3 +94,42 @@ describe('useSessionTracker — pending-session replay', () => {
     expect(sessionStore.getForGame('steam-11')).toHaveLength(1);
   });
 });
+
+describe('useSessionTracker (1.0.97 B10)', () => {
+  it('a read-only, empty library store asks main to keep its library games (hooks#16)', async () => {
+    const { customGameStore } = await import('@/services/custom-game-store');
+    libraryStore.clear();
+    const custom = customGameStore.addGame({
+      title: 'Homebrew',
+      platform: ['Windows'],
+      status: 'Playing',
+      executablePath: 'C:\Games\h.exe',
+    });
+    vi.spyOn(libraryStore, 'isReadOnly').mockReturnValue(true);
+    const { tracker } = installTracker([]);
+    renderHook(() => useSessionTracker());
+
+    await waitFor(() => expect(tracker.setTrackedGames).toHaveBeenCalled());
+    expect(tracker.setTrackedGames).toHaveBeenLastCalledWith(
+      [{ gameId: custom.id, executablePath: 'C:\Games\h.exe' }],
+      { keepSources: ['library'] },
+    );
+    vi.restoreAllMocks();
+    customGameStore.removeGame(custom.id);
+  });
+
+  it('a crash-recovered session resumes a game the idle sweep put On Hold', async () => {
+    const { runAutoOnHoldSweep } = await import('@/hooks/useAutoOnHold');
+    libraryStore.updateEntry('steam-11', {
+      addedAt: new Date(Date.now() - 200 * 24 * 60 * 60 * 1000),
+      lastPlayedAt: new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    await runAutoOnHoldSweep(Date.now() + 60 * 24 * 60 * 60 * 1000);
+    expect(libraryStore.getEntry('steam-11')?.status).toBe('On Hold');
+
+    const { tracker } = installTracker([session('rec-1')]);
+    renderHook(() => useSessionTracker());
+    await waitFor(() => expect(tracker.ackSessions).toHaveBeenCalled());
+    await waitFor(() => expect(libraryStore.getEntry('steam-11')?.status).toBe('Playing'));
+  });
+});

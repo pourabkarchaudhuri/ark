@@ -170,7 +170,15 @@ export function useSessionTracker() {
   // lifecycle. Kept as a hook call (not an effect inside this one) so its own
   // interval is cleaned up independently and unit tests can mount it alone.
   const liveGamesRef = useRef<ReadonlySet<string>>(new Set());
-  useAutoOnHold(liveGamesRef);
+  // The first sweep waits until crash-recovered sessions are recorded (their play would otherwise
+  // be invisible to it). Resolved by the effect below on every path, including "no tracker".
+  const recoveredGateRef = useRef<{ promise: Promise<void>; resolve: () => void } | null>(null);
+  if (!recoveredGateRef.current) {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    recoveredGateRef.current = { promise, resolve };
+  }
+  useAutoOnHold(liveGamesRef, { ready: recoveredGateRef.current.promise });
 
   const [liveGames, setLiveGames] = useState<Set<string>>(new Set());
   liveGamesRef.current = liveGames;
@@ -189,12 +197,24 @@ export function useSessionTracker() {
       .filter((g) => g.executablePath)
       .map((g) => ({ gameId: g.id, executablePath: g.executablePath! }));
 
-    void window.sessionTracker.setTrackedGames([...libraryTrackable, ...customTrackable]);
+    // A read-only store with no entries failed to load (LevelDB read error): its games are not
+    // gone, so main keeps the ones it already tracks instead of ending their sessions as orphans.
+    const keepSources: Array<'library' | 'custom'> = [];
+    if (libraryStore.isReadOnly() && libraryStore.getAllEntries().length === 0) keepSources.push('library');
+    if (customGameStore.isReadOnly() && customGameStore.getAllGames().length === 0) keepSources.push('custom');
+
+    const games = [...libraryTrackable, ...customTrackable];
+    if (keepSources.length > 0) void window.sessionTracker.setTrackedGames(games, { keepSources });
+    else void window.sessionTracker.setTrackedGames(games);
   }, []);
 
   useEffect(() => {
     const tracker = window.sessionTracker;
-    if (!tracker) return;
+    const releaseSweep = recoveredGateRef.current!.resolve;
+    if (!tracker) {
+      releaseSweep();
+      return;
+    }
 
     let disposed = false;
     let storesReady = false;
@@ -324,15 +344,22 @@ export function useSessionTracker() {
 
       // Every session main still holds un-acked: crashed-run recoveries plus
       // live-ended sessions a crashed/reloading renderer never recorded.
-      tracker.getRecoveredSessions?.().then((pending) => {
+      const recovered = tracker.getRecoveredSessions?.().then(async (pending) => {
         if (disposed || !pending || pending.length === 0) return;
         const ids: string[] = [];
+        const resumes: Array<Promise<boolean>> = [];
         for (const s of pending) {
-          recordCompletedSession(s);
+          // Played while the renderer was down: an auto-held game resumes like after a live session.
+          if (recordCompletedSession(s) && Number.isFinite(s.durationMinutes)
+            && s.durationMinutes >= AUTO_TRANSITION_MIN_MINUTES) {
+            resumes.push(maybeResumeAutoHeld(normalizeSession(s).gameId));
+          }
           if (s.id) ids.push(s.id);
         }
         ackPersisted(ids);
+        await Promise.all(resumes);
       }).catch(() => { /* non-critical — retried on next mount */ });
+      void Promise.resolve(recovered).finally(releaseSweep);
     });
 
     cleanupRef.current = unsubs;
