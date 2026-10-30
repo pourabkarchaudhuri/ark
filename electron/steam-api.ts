@@ -12,8 +12,32 @@ const electron = require('electron');
 // Steam API Configuration — key loaded from .env via dotenv in main.ts
 // Read lazily: ESM imports hoist above dotenv's loadEnv() call, so
 // process.env isn't populated yet at module-scope evaluation time.
-function steamApiKey() { return process.env.STEAM_API_KEY || ''; }
+function steamApiKey() { return (process.env.STEAM_API_KEY || '').trim(); }
 const STEAM_WEB_API_BASE = 'https://api.steampowered.com';
+
+/**
+ * Build a Steam Web API URL. The `key` param is added only when a key is set — a packaged build
+ * can ship without one (the key is extractable from the installer, so it may be withheld), and
+ * `key=` with an empty value is rejected by Steam where an absent key is not.
+ */
+export function steamWebApiUrl(
+  endpoint: string,
+  params: Record<string, string | number | boolean | undefined> = {},
+  key: string = steamApiKey(),
+): string {
+  const qs = new URLSearchParams();
+  if (key) qs.set('key', key);
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined) qs.set(k, String(v));
+  }
+  const q = qs.toString();
+  return `${STEAM_WEB_API_BASE}/${endpoint.replace(/^\/+/, '')}${q ? `?${q}` : ''}`;
+}
+
+/** True when a Steam Web API key is configured (IStoreService list/tag calls need one). */
+export function hasSteamApiKey(): boolean {
+  return steamApiKey().length > 0;
+}
 const STEAM_STORE_API_BASE = 'https://store.steampowered.com/api';
 const STEAM_CDN_BASE = 'https://cdn.akamai.steamstatic.com/steam/apps';
 
@@ -386,7 +410,8 @@ class SteamAPIClient {
    */
   private async refreshMostPlayedGames(): Promise<SteamMostPlayedGame[]> {
     const cacheKey = 'most-played-games';
-    const url = `${STEAM_WEB_API_BASE}/ISteamChartsService/GetMostPlayedGames/v1/?key=${steamApiKey()}`;
+    // Works without a key; steamWebApiUrl omits the param when none is set.
+    const url = steamWebApiUrl('ISteamChartsService/GetMostPlayedGames/v1/');
     
     const response = await this.rateLimiter.execute(async () => {
       logger.log('[Steam] Fetching fresh most played games...');
@@ -1272,16 +1297,26 @@ class SteamAPIClient {
     let lastAppId: number | undefined;
     let page = 0;
 
+    // IStoreService requires a key: without one, skip the request (it would only 403) and return
+    // an empty list that is not cached, so a later build/launch with a key fetches normally.
+    if (!hasSteamApiKey()) {
+      logger.warn('[Steam] getAppList: no STEAM_API_KEY configured — full app list unavailable');
+      return [];
+    }
+
     logger.log('[Steam] Fetching full game list from IStoreService/GetAppList/v1 (paginated)...');
 
     while (true) {
       page++;
-      let url = `${STEAM_WEB_API_BASE}/IStoreService/GetAppList/v1/?key=${steamApiKey()}`
-        + `&max_results=${PAGE_SIZE}`
-        + `&include_games=true&include_dlc=false&include_software=false&include_videos=false&include_hardware=false`;
-      if (lastAppId !== undefined) {
-        url += `&last_appid=${lastAppId}`;
-      }
+      const url = steamWebApiUrl('IStoreService/GetAppList/v1/', {
+        max_results: PAGE_SIZE,
+        include_games: true,
+        include_dlc: false,
+        include_software: false,
+        include_videos: false,
+        include_hardware: false,
+        last_appid: lastAppId,
+      });
 
       const response = await this.rateLimiter.execute(async () => {
         logger.log(`[Steam] getAppList page ${page}${lastAppId ? ` (after appid ${lastAppId})` : ''}...`);
@@ -1413,7 +1448,11 @@ class SteamAPIClient {
       return cached;
     }
 
-    const url = `${STEAM_WEB_API_BASE}/IStoreService/GetTagList/v1/?key=${steamApiKey()}&language=english`;
+    if (!hasSteamApiKey()) {
+      logger.warn('[Steam] getTagList: no STEAM_API_KEY configured — tag list unavailable');
+      return [];
+    }
+    const url = steamWebApiUrl('IStoreService/GetTagList/v1/', { language: 'english' });
     const res = await fetchWithTimeout(url);
     if (!res.ok) throw new Error(`GetTagList API error: ${res.status}`);
     const data = await res.json() as { response?: { tags?: Array<{ tagid: number; name: string }> } };

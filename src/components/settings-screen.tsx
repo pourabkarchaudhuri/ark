@@ -163,6 +163,7 @@ function Toggle({ value, onChange, disabled }: { value: boolean; onChange: () =>
 const GeneralTab = memo(function GeneralTab() {
   const [autoLaunch, setAutoLaunchState] = useState(true);
   const [overlayEnabled, setOverlayEnabledState] = useState(false);
+  const [analyticsEnabled, setAnalyticsEnabledState] = useState(false);
   const [overlayCycleHotkeyOk, setOverlayCycleHotkeyOk] = useState(true);
   const [betaFeatures, setBetaFeatures] = useBetaFeatures();
   const [devMode, setDevMode] = useDevMode();
@@ -181,6 +182,8 @@ const GeneralTab = memo(function GeneralTab() {
     // IPC wiring lands, so guard the call and default to off.
     window.settings?.getOverlayEnabled?.().then(setOverlayEnabledState).catch(() => {});
     window.settings?.getOverlayCycleHotkeyRegistered?.().then(setOverlayCycleHotkeyOk).catch(() => {});
+    // Usage analytics opt-in lives in main (default off) so app_launch is covered before any UI.
+    window.analytics?.getEnabled?.().then(setAnalyticsEnabledState).catch(() => {});
   }, []);
 
   const handleAutoLaunchToggle = useCallback(async () => {
@@ -202,6 +205,18 @@ const GeneralTab = memo(function GeneralTab() {
       setOverlayEnabledState(!newValue);
     }
   }, [overlayEnabled]);
+
+  const handleAnalyticsToggle = useCallback(async () => {
+    if (!window.analytics?.setEnabled) return;
+    const newValue = !analyticsEnabled;
+    setAnalyticsEnabledState(newValue);
+    try {
+      const result = await window.analytics.setEnabled(newValue);
+      if (!result?.success) setAnalyticsEnabledState(!newValue);
+    } catch {
+      setAnalyticsEnabledState(!newValue);
+    }
+  }, [analyticsEnabled]);
 
   const handleExportLibrary = useCallback(async () => {
     setExportStatus('loading');
@@ -337,6 +352,17 @@ const GeneralTab = memo(function GeneralTab() {
                 <p className="text-xs text-white/35 mt-0.5">When off, games classified as sexually explicit (from description) are hidden from browse and library. Turn on to show all games.</p>
               </div>
               <Toggle value={allowAdultContent} onChange={() => setAllowAdultContent(!allowAdultContent)} />
+            </div>
+          </div>
+          <div className="border-t border-white/[0.04] pt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-white/90">Usage analytics</p>
+                <p className="text-xs text-white/35 mt-0.5">
+                  Send anonymous usage data to Google Analytics: app launches, app version, platform and which screen is open (never which game). Off by default; turning it off also deletes the anonymous id.
+                </p>
+              </div>
+              <Toggle value={analyticsEnabled} onChange={handleAnalyticsToggle} />
             </div>
           </div>
           <div className="border-t border-white/[0.04] pt-4">
@@ -1769,7 +1795,7 @@ const AboutTab = memo(function AboutTab() {
             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.3 }} className="overflow-hidden">
               <div className="pt-3 border-t border-white/[0.04] space-y-3 text-xs text-white/35 leading-relaxed">
                 <p><strong className="text-white/50">Personal Use.</strong> Ark is provided for personal, non-commercial use. It is not affiliated with, endorsed by, or connected to Valve Corporation (Steam), Epic Games, Google, Microsoft, or Anthropic.</p>
-                <p><strong className="text-white/50">Data Privacy.</strong> All library data, play history, and preferences are stored locally on your device. No personal data is sent to external servers unless you explicitly configure a cloud AI provider (Gemini, Azure OpenAI, or Anthropic), in which case only conversation context is transmitted to the selected provider per their terms.</p>
+                <p><strong className="text-white/50">Data Privacy.</strong> All library data, play history, and preferences are stored locally on your device. Ark contacts game stores and services (Steam, Epic, HowLongToBeat and others) to fetch game information, which sends the titles or ids being looked up. Usage analytics (Settings → General) is off unless you turn it on; when on, app launches and the screen in use (never which game) go to Google Analytics with an anonymous id. If you configure a cloud AI provider (Gemini, Azure OpenAI, or Anthropic), conversation context is sent to that provider per their terms.</p>
                 <p><strong className="text-white/50">Third-Party APIs.</strong> Ark accesses the Steam Web API, Epic Games Store API, and IGDB API to retrieve publicly available game metadata (titles, descriptions, images, pricing, reviews). This data belongs to the respective platforms and is used under their API terms of service.</p>
                 <p><strong className="text-white/50">AI & Recommendations.</strong> Recommendations are generated algorithmically and may not reflect personal preferences perfectly. The ML model is trained on aggregated, anonymized public review data. AI chat responses are generated by language models and should not be considered authoritative.</p>
                 <p><strong className="text-white/50">News Content.</strong> Transmissions aggregates publicly available RSS feeds from gaming news outlets. Article content belongs to the respective publishers. Ark provides links back to original sources.</p>

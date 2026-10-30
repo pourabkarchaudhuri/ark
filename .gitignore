@@ -73,3 +73,6 @@ design_handoff_*/
 
 # Mimir code-graph output
 graphify-out/
+
+# Release .env written from .env through the allow-list (scripts/build-release-env.mjs)
+build/.env.release

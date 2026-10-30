@@ -167,8 +167,14 @@ interface WebviewAPI {
 }
 
 interface AnalyticsAPI {
+  /** Resolves false when the event name is not on main's allow-list. Sends nothing while analytics is off. */
   trackEvent: (name: string, params?: Record<string, string | number | boolean>) => Promise<boolean>;
+  /** Main strips game ids, query and hash before sending. Sends nothing while analytics is off. */
   trackPageView: (page: string) => Promise<boolean>;
+  /** Usage analytics opt-in (default off). */
+  getEnabled?: () => Promise<boolean>;
+  /** Save the opt-in; turning it off also deletes the stored analytics client id. */
+  setEnabled?: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
 }
 
 interface MLUserProfile {
@@ -263,7 +269,8 @@ interface EgdataAPI {
   isEnabled: () => Promise<boolean>;
 }
 
-// Catalog helpers (e.g. full-catalog adult filter test)
+// Developer-only catalog helpers (full-catalog adult filter test). Exposed only in unpacked dev
+// runs (main passes --ark-dev-tools); `window.catalog` is undefined in packaged builds.
 interface CatalogAPI {
   runFullCatalogAdultFilterTest: () => Promise<{
     steam: { total: number; excluded: number; excludedList: Array<{ appid: number; name: string }>; error?: string };

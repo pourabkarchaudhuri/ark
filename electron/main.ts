@@ -8,6 +8,7 @@ import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
 import path from 'path';
 import https from 'node:https';
+import { APP_USER_MODEL_ID } from './app-identity.js';
 
 let tray: any = null;
 let isQuitting = false;
@@ -107,6 +108,7 @@ import { epicAPI } from './epic-api.js';
 import { chatStore, processMessage } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
 import { trackAppLaunch } from './analytics.js';
+import { applyLoginItem } from './login-item.js';
 import { initAutoUpdater, registerUpdaterIpcHandlers } from './auto-updater.js';
 import {
   startSessionTracker,
@@ -317,7 +319,9 @@ function markCleanExit(): void {
 // Set the app name early — affects window titles, tray labels, and process
 // descriptions where the runtime can influence them.
 app.name = 'Ark';
-app.setAppUserModelId('com.ark.gametracker');
+// Must equal package.json build.appId (the id stamped on the installer shortcuts) and be set
+// before any window or Tray exists — see app-identity.ts.
+app.setAppUserModelId(APP_USER_MODEL_ID);
 
 // ---------------------------------------------------------------------------
 // Single Instance Lock — prevent multiple instances from running
@@ -426,6 +430,8 @@ function createWindow() {
       sandbox: false,
       preload: preloadPath,
       backgroundThrottling: true,
+      // Dev-only renderer bindings (window.catalog) — never in a packaged build.
+      additionalArguments: app.isPackaged ? [] : ['--ark-dev-tools'],
     },
     frame: false,
     titleBarStyle: 'hidden',
@@ -958,10 +964,7 @@ app.whenReady().then(async () => {
   // Apply auto-launch setting on startup
   try {
     const autoLaunchEnabled = settingsStore.getAutoLaunch();
-    app.setLoginItemSettings({
-      openAtLogin: autoLaunchEnabled,
-      args: autoLaunchEnabled ? ['--hidden'] : [],
-    });
+    applyLoginItem(autoLaunchEnabled); // no-op in dev runs (would hijack the installed app's Run entry)
     logger.log(`[Startup] Auto-launch is ${autoLaunchEnabled ? 'enabled' : 'disabled'}`);
   } catch (err) {
     logger.warn('[Startup] Failed to apply auto-launch setting:', err);

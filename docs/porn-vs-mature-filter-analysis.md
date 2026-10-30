@@ -114,8 +114,9 @@ To run the filter logic against the **entire** Steam catalog (~150K games) and E
    - `excluded-epic-adult-filter.json` — list of `{ title, id, namespace, matchingTags }` for every Epic item that has a sexual-content tag.
    - `adult-filter-full-catalog-summary.json` — run timestamp, totals, excluded counts, and the same lists.
 
-4. **From inside the app:** Open DevTools and run:
+4. **From inside the app (dev runs only):** In an unpacked dev run (`npm run electron:dev`), open DevTools and run:
    ```js
    await window.catalog.runFullCatalogAdultFilterTest()
    ```
    The promise resolves with the summary; the same three files are written to `docs/`. The window stays open; Steam will run in the background (~50–90 min) so keep the app open until it finishes.
+   Since 1.0.97 packaged builds neither register the `catalog:runFullCatalogAdultFilterTest` channel nor expose `window.catalog`; when the crawl runs from a packaged build via the CLI flag, its files go to `<userData>/docs` instead of the install directory.

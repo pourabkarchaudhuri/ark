@@ -16,6 +16,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { RELEASE_ENV_KEYS } from './lib/release-env.mjs';
+import { checkPackagedDir } from './after-pack-check.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -26,11 +28,9 @@ const version = args.find((a) => !a.startsWith('--'))?.replace(/^v/, '')
   ?? JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 const exeName = `Ark-Setup-${version}.exe`;
 
-// Names (never values) of the keys that are meant to ship in the installer's .env.
-const ENV_ALLOWED = new Set([
-  'STEAM_API_KEY', 'GA_MEASUREMENT_ID', 'GA_API_SECRET',
-  'AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_KEY', 'AZURE_OPENAI_DEPLOYMENT', 'AZURE_OPENAI_KEY_VERSION',
-]);
+// Names (never values) of the keys that are meant to ship in the installer's .env. No AZURE_*:
+// the Azure key is billable and only the dev-only --run-chat-prompts CLI uses it.
+const ENV_ALLOWED = new Set(RELEASE_ENV_KEYS);
 
 const failures = [];
 const ok = (m) => console.log(`  ok   ${m}`);
@@ -112,6 +112,8 @@ if (fs.existsSync(buildDir)) {
       const extra = names.filter((n) => !ENV_ALLOWED.has(n));
       extra.length ? bad(`packaged .env has unexpected keys: ${extra.join(', ')}`) : ok(`packaged .env keys allow-listed (${names.length})`);
     }
+    const leaks = checkPackagedDir(unpacked);
+    leaks.length ? bad(`forbidden env keys packaged: ${leaks.join('; ')}`) : ok('no AZURE_* assignment in any packaged file');
     const found = [];
     const walk = (d, depth) => {
       if (depth > 6) return;

@@ -12,6 +12,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { logger } from './safe-logger.js';
 import { atomicWriteFileSync } from './safe-write.js';
+import { applyLoginItem } from './login-item.js';
 
 export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
 
@@ -49,6 +50,12 @@ interface Settings {
      * (Ctrl+Shift+O) toggles visibility while enabled.
      */
     overlayEnabled?: boolean;
+    /**
+     * Send anonymous usage analytics (app launch, screen views with game ids stripped) to
+     * Google Analytics (v1.0.97). Default false — nothing is sent until the user turns it on
+     * in Settings; turning it off also deletes the stored analytics client id.
+     */
+    analyticsEnabled?: boolean;
   };
   ollama: {
     enabled: boolean;
@@ -157,7 +164,7 @@ class SettingsStore {
     const defaults = (): Settings => ({
       version: SETTINGS_VERSION,
       apiKeys: {},
-      preferences: { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: false, autoStatusTransition: false, autoOnHoldTransition: true, overlayEnabled: false },
+      preferences: { autoLaunch: true, preferredChatProvider: 'ollama', betaFeatures: false, autoStatusTransition: false, autoOnHoldTransition: true, overlayEnabled: false, analyticsEnabled: false },
       ollama: {
         enabled: true,
         url: 'http://localhost:11434',
@@ -480,12 +487,9 @@ class SettingsStore {
     }
     this.saveSettings();
 
-    // Apply immediately via Electron's login item settings
+    // Apply immediately via Electron's login item settings (packaged builds only — see login-item.ts)
     try {
-      app.setLoginItemSettings({
-        openAtLogin: enabled,
-        args: enabled ? ['--hidden'] : [],
-      });
+      applyLoginItem(enabled);
     } catch (err) {
       logger.error('[SettingsStore] Failed to set login item settings:', err);
     }
@@ -537,6 +541,22 @@ class SettingsStore {
     }
     this.saveSettings();
     logger.log(`[SettingsStore] Overlay enabled set to ${enabled}`);
+  }
+
+  // Usage analytics (opt-in; default false). Callers go through analytics.ts setAnalyticsEnabled,
+  // which also deletes the client id on opt-out.
+  getAnalyticsEnabled(): boolean {
+    return this.settings.preferences?.analyticsEnabled === true;
+  }
+
+  setAnalyticsEnabled(enabled: boolean): void {
+    if (!this.settings.preferences) {
+      this.settings.preferences = { autoLaunch: true, analyticsEnabled: enabled };
+    } else {
+      this.settings.preferences.analyticsEnabled = enabled;
+    }
+    this.saveSettings();
+    logger.log(`[SettingsStore] Analytics enabled set to ${enabled}`);
   }
 }
 

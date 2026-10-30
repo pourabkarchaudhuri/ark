@@ -216,11 +216,15 @@ contextBridge.exposeInMainWorld('egdata', {
     ipcRenderer.invoke('egdata:isEnabled'),
 });
 
-// Expose catalog helpers (e.g. full-catalog adult filter test)
-contextBridge.exposeInMainWorld('catalog', {
-  runFullCatalogAdultFilterTest: () =>
-    ipcRenderer.invoke('catalog:runFullCatalogAdultFilterTest'),
-});
+// Developer-only catalog helpers (full-catalog adult filter test, an hour-long
+// crawl). Main passes --ark-dev-tools via additionalArguments only in unpacked
+// dev runs and registers the IPC channel only there; packaged builds get no binding.
+if ((process.argv || []).includes('--ark-dev-tools')) {
+  contextBridge.exposeInMainWorld('catalog', {
+    runFullCatalogAdultFilterTest: () =>
+      ipcRenderer.invoke('catalog:runFullCatalogAdultFilterTest'),
+  });
+}
 
 // Expose Metacritic API to renderer
 contextBridge.exposeInMainWorld('metacritic', {
@@ -610,10 +614,13 @@ contextBridge.exposeInMainWorld('ml', {
   hasRealSteamProfile: (games) => ipcRenderer.invoke('ml:hasRealSteamProfile', games),
 });
 
-// Google Analytics (Measurement Protocol via main process)
+// Google Analytics (Measurement Protocol via main process). Opt-in: main sends
+// nothing until analytics:setEnabled(true); opting out deletes the client id.
 contextBridge.exposeInMainWorld('analytics', {
   trackEvent: (name, params) => ipcRenderer.invoke('analytics:trackEvent', name, params),
   trackPageView: (page) => ipcRenderer.invoke('analytics:trackPageView', page),
+  getEnabled: () => ipcRenderer.invoke('analytics:getEnabled'),
+  setEnabled: (enabled) => ipcRenderer.invoke('analytics:setEnabled', enabled),
 });
 
 // Expose DevLog API to renderer (reads docs/dev-journal.json for dev-mode timeline)
