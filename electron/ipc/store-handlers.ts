@@ -125,6 +125,35 @@ export function register(): void {
     }
   });
 
+  // Count-only existence check: the catalog sync resume needs how many pending ids are
+  // already stored, not the rows themselves (it used to fetch up to ~155k full rows).
+  ipcMain.handle('store:countExisting', async (event: any, namespace: string, keys: unknown) => {
+    if (!checkRateLimit('store:countExisting', senderIdOf(event))) return rateLimited('store:countExisting', senderIdOf(event));
+    try {
+      if (!Array.isArray(keys) || keys.some((k) => typeof k !== 'string')) return { error: 'keys must be a string[]' };
+      if (keys.length > 10_000) return { error: 'countExisting is capped at 10000 keys per call' };
+      return { count: await store.countExisting(namespace, keys as string[]) };
+    } catch (err) {
+      logger.error('[Store IPC] store:countExisting failed:', err);
+      return toError(err);
+    }
+  });
+
+  // Storage panel: live LevelDB row counts and approximate sizes per namespace.
+  ipcMain.handle('store:namespaceStats', async (event: any, namespaces: unknown) => {
+    if (!checkRateLimit('store:namespaceStats', senderIdOf(event))) return rateLimited('store:namespaceStats', senderIdOf(event));
+    try {
+      if (!Array.isArray(namespaces) || namespaces.some((n) => typeof n !== 'string')) {
+        return { error: 'namespaces must be a string[]' };
+      }
+      if (namespaces.length > 16) return { error: 'namespaceStats is capped at 16 namespaces per call' };
+      return { stats: await store.namespaceStats(namespaces as string[]) };
+    } catch (err) {
+      logger.error('[Store IPC] store:namespaceStats failed:', err);
+      return toError(err);
+    }
+  });
+
   ipcMain.handle('store:getAll', async (event: any, namespace: string) => {
     if (!checkRateLimit('store:getAll', senderIdOf(event))) return rateLimited('store:getAll', senderIdOf(event));
     try {

@@ -202,6 +202,81 @@ const IDB_DATABASES: Array<{ label: string; subtitle?: string; dbName: string; v
   { label: 'Galaxy Cache', dbName: 'galaxy-cache', version: 1, stores: ['data'] },
 ];
 
+/**
+ * Rows whose live data moved to LevelDB (v1.0.65+). Once a store's migration
+ * marker is 'yes' the IndexedDB copy is frozen (kept only as rollback
+ * insurance), so measuring it showed migration-day numbers forever, or 0 on a
+ * fresh install. `countNamespaces` feeds the entry count (catalog meta rows
+ * are not games); every namespace counts toward the size.
+ */
+const LEVEL_BACKED_ROWS: Record<string, { marker: string; namespaces: string[]; countNamespaces: string[] }> = {
+  'ark-steam-catalog': {
+    marker: 'ark-steam-catalog-migrated-v1',
+    namespaces: ['catalog-entries', 'catalog-meta'],
+    countNamespaces: ['catalog-entries'],
+  },
+  'ark-epic-catalog': {
+    marker: 'ark-epic-catalog-migrated-v1',
+    namespaces: ['epic-catalog-entries', 'epic-catalog-meta'],
+    countNamespaces: ['epic-catalog-entries'],
+  },
+  'ark-embeddings': {
+    marker: 'ark-embeddings-migrated-v1',
+    namespaces: ['embed-library', 'embed-catalog', 'embed-chunks', 'embed-meta'],
+    countNamespaces: ['embed-library', 'embed-catalog', 'embed-chunks', 'embed-meta'],
+  },
+};
+
+function migratedToLevel(marker: string): boolean {
+  try { return localStorage.getItem(marker) === 'yes'; } catch { return false; }
+}
+
+/**
+ * LevelDB size/count for one storage row via `store:namespaceStats`, or null
+ * when unavailable (older preload, IPC error) so the caller keeps the IDB
+ * measurement. Reads the namespaces directly — never through catalogStore,
+ * whose getters would start the IDB→LevelDB migration from the panel.
+ */
+async function measureLevelRow(row: { namespaces: string[]; countNamespaces: string[] }): Promise<{ size: number; count: number } | null> {
+  const statsFn = typeof window !== 'undefined' ? window.store?.namespaceStats : undefined;
+  if (typeof statsFn !== 'function') return null;
+  try {
+    const res = await statsFn(row.namespaces);
+    if (res.error || !Array.isArray(res.stats)) return null;
+    let size = 0;
+    let count = 0;
+    for (const s of res.stats) {
+      size += s.sizeBytes || 0;
+      if (row.countNamespaces.includes(s.namespace)) count += s.count || 0;
+    }
+    return { size, count };
+  } catch {
+    return null;
+  }
+}
+
+/** Storage panel rows (IDB databases, LevelDB-backed rows once migrated, localStorage). Exported for tests. */
+export async function measureStorageMetrics(): Promise<StorageMetric[]> {
+  const metrics: StorageMetric[] = [];
+  for (const db of IDB_DATABASES) {
+    const level = LEVEL_BACKED_ROWS[db.dbName];
+    const live = level && migratedToLevel(level.marker) ? await measureLevelRow(level) : null;
+    const { size, count } = live ?? await measureIdbStore(db.dbName, db.version, db.stores);
+    metrics.push({ label: db.label, subtitle: db.subtitle, dbName: db.dbName, sizeBytes: size, entryCount: count });
+  }
+
+  // Also measure localStorage
+  let lsSize = 0;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key) lsSize += (localStorage.getItem(key)?.length ?? 0) * 2; // UTF-16
+    }
+  } catch { /* ignore */ }
+  metrics.push({ label: 'LocalStorage', dbName: 'localStorage', sizeBytes: lsSize, entryCount: localStorage.length });
+  return metrics;
+}
+
 async function measureIdbStore(dbName: string, version: number, stores: string[]): Promise<{ size: number; count: number }> {
   return new Promise((resolve) => {
     try {
@@ -585,23 +660,7 @@ class SystemStatus {
   }
 
   private async _refreshStorage() {
-    const metrics: StorageMetric[] = [];
-    for (const db of IDB_DATABASES) {
-      const { size, count } = await measureIdbStore(db.dbName, db.version, db.stores);
-      metrics.push({ label: db.label, subtitle: db.subtitle, dbName: db.dbName, sizeBytes: size, entryCount: count });
-    }
-
-    // Also measure localStorage
-    let lsSize = 0;
-    try {
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key) lsSize += (localStorage.getItem(key)?.length ?? 0) * 2; // UTF-16
-      }
-    } catch { /* ignore */ }
-    metrics.push({ label: 'LocalStorage', dbName: 'localStorage', sizeBytes: lsSize, entryCount: localStorage.length });
-
-    this._storageCache = metrics;
+    this._storageCache = await measureStorageMetrics();
     this._notify();
   }
 

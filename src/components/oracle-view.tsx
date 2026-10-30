@@ -180,7 +180,7 @@ function startCatalogEmbeddingPipeline() {
 
     const steamSyncTs = await catalogStore.getLastSyncTimestamp();
     await embeddingService.generateCatalogEmbeddings(
-      (onBatch) => catalogStore.getAllEntries(onBatch),
+      (onBatch) => catalogStore.scanAllEntries(onBatch),
       { storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs },
     );
 
@@ -191,7 +191,7 @@ function startCatalogEmbeddingPipeline() {
     if (epicCount > 0) {
       const epicSyncTs = await epicCatalogStore.getLastSyncTimestamp();
       await embeddingService.generateEpicCatalogEmbeddings(
-        (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+        (onBatch) => epicCatalogStore.scanAllEntries(onBatch),
         { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs },
       );
     }

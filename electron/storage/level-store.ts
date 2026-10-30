@@ -67,7 +67,11 @@ export interface LevelStore {
   getChunk<T>(
     namespace: string,
     opts: { startAfter?: string; limit: number },
-  ): Promise<{ rows: Array<{ key: string; value: T }>; nextKey?: string; done: boolean }>;
+  ): Promise<{ rows: Array<{ key: string; value: T }>; nextKey?: string; done: boolean; skipped?: string[] }>;
+  /** How many of `keys` exist — values are never decoded or returned. */
+  countExisting(namespace: string, keys: string[]): Promise<number>;
+  /** Key count + approximate on-disk bytes per namespace (storage panel). */
+  namespaceStats(namespaces: string[]): Promise<Array<{ namespace: string; count: number; sizeBytes: number }>>;
   /** Fast "does this namespace have any keys?" check — returns on first hit. */
   has(namespace: string): Promise<boolean>;
   clearNamespace(namespace: string): Promise<void>;
@@ -333,10 +337,46 @@ async function* streamImpl<T>(
   }
 }
 
+/**
+ * Drain one getChunk iterator slice, decoding each row on its own. A corrupt
+ * row used to throw for the whole chunk, so every full walk (catalog,
+ * embeddings) stopped at that row on every scan. Undecodable rows are now
+ * skipped and reported in `skipped`; `nextKey` / `done` still follow the raw
+ * iteration, so a trailing corrupt row doesn't end or stall the walk.
+ * Exported for tests.
+ */
+export async function collectChunkLenient<T>(
+  namespace: string,
+  iter: AsyncIterable<[string, string]>,
+  limit: number,
+): Promise<{ rows: Array<{ key: string; value: T }>; nextKey?: string; done: boolean; skipped: string[] }> {
+  const rows: Array<{ key: string; value: T }> = [];
+  const skipped: string[] = [];
+  let seen = 0;
+  let lastKey: string | undefined;
+  for await (const [fullKey, raw] of iter) {
+    seen++;
+    const key = decodeKey(namespace, fullKey);
+    lastKey = key;
+    try {
+      rows.push({ key, value: JSON.parse(raw) as T });
+    } catch {
+      skipped.push(key);
+    }
+  }
+  if (skipped.length > 0) {
+    logger.error(
+      `[LevelStore] getChunk(${namespace}) skipped ${skipped.length} corrupt row(s):`,
+      skipped.slice(0, 20).join(', '),
+    );
+  }
+  return { rows, nextKey: lastKey, done: seen < limit, skipped };
+}
+
 async function getChunkImpl<T>(
   namespace: string,
   opts: { startAfter?: string; limit: number },
-): Promise<{ rows: Array<{ key: string; value: T }>; nextKey?: string; done: boolean }> {
+): Promise<{ rows: Array<{ key: string; value: T }>; nextKey?: string; done: boolean; skipped?: string[] }> {
   validateNamespace(namespace);
   const limit = Math.max(1, Math.min(10_000, Math.floor(opts.limit)));
   const db = await openDb();
@@ -346,12 +386,11 @@ async function getChunkImpl<T>(
   const iterOpts: Record<string, unknown> = opts.startAfter
     ? { gt: encodeKey(namespace, opts.startAfter), lt, limit }
     : { gte: prefix, lt, limit };
-  const rows: Array<{ key: string; value: T }> = [];
   const iter = db.iterator(iterOpts);
   try {
-    for await (const [fullKey, raw] of iter) {
-      rows.push({ key: decodeKey(namespace, fullKey), value: decodeValue<T>(raw) });
-    }
+    const res = await collectChunkLenient<T>(namespace, iter, limit);
+    // Keep the reply shape unchanged for the common case (no corrupt rows).
+    return res.skipped.length > 0 ? res : { rows: res.rows, nextKey: res.nextKey, done: res.done };
   } catch (err) {
     logger.error(`[LevelStore] getChunk(${namespace}) failed:`, err);
     throw err;
@@ -362,9 +401,83 @@ async function getChunkImpl<T>(
       /* ignore */
     }
   }
-  const nextKey = rows.length > 0 ? rows[rows.length - 1].key : undefined;
-  const done = rows.length < limit;
-  return { rows, nextKey, done };
+}
+
+/** Minimal handle surface the count/stats helpers need (a ClassicLevel instance, or a test fake). */
+export interface LevelHandleLike {
+  getMany(keys: string[]): Promise<Array<string | undefined | null>>;
+  iterator(opts: Record<string, unknown>): AsyncIterable<unknown> & { close(): Promise<void> };
+  approximateSize?: (start: string, end: string) => Promise<number>;
+}
+
+/**
+ * Count how many of `keys` are present. Raw values are only null-checked,
+ * never JSON-decoded, and nothing but the number goes back over IPC — the
+ * catalog sync resume used to fetch ~155k full rows just to count them.
+ * Exported for tests.
+ */
+export async function countExistingWith(db: LevelHandleLike, namespace: string, keys: string[]): Promise<number> {
+  validateNamespace(namespace);
+  for (const k of keys) validateKey(k);
+  if (keys.length === 0) return 0;
+  const raws = await db.getMany(keys.map((k) => encodeKey(namespace, k)));
+  let count = 0;
+  for (const raw of raws) if (raw !== undefined && raw !== null) count++;
+  return count;
+}
+
+/**
+ * Keys-only count plus `approximateSize` over each namespace's key range.
+ * Feeds the Settings storage panel, which used to measure the frozen legacy
+ * IndexedDB copies after the LevelDB migration. Exported for tests.
+ */
+export async function namespaceStatsWith(
+  db: LevelHandleLike,
+  namespaces: string[],
+): Promise<Array<{ namespace: string; count: number; sizeBytes: number }>> {
+  const out: Array<{ namespace: string; count: number; sizeBytes: number }> = [];
+  for (const namespace of namespaces) {
+    validateNamespace(namespace);
+    const gte = `${namespace}${NS_SEP}`;
+    const lt = `${namespace}${NS_SEP}${NS_HIGH}`;
+    let count = 0;
+    const iter = db.iterator({ gte, lt, values: false });
+    try {
+      for await (const _key of iter) count++;
+    } finally {
+      try { await iter.close(); } catch { /* ignore */ }
+    }
+    let sizeBytes = 0;
+    if (typeof db.approximateSize === 'function') {
+      try {
+        sizeBytes = Number(await db.approximateSize(gte, lt)) || 0;
+      } catch (err) {
+        logger.warn(`[LevelStore] approximateSize(${namespace}) failed:`, err);
+      }
+    }
+    out.push({ namespace, count, sizeBytes });
+  }
+  return out;
+}
+
+async function countExistingImpl(namespace: string, keys: string[]): Promise<number> {
+  const db = await openDb();
+  try {
+    return await countExistingWith(db, namespace, keys);
+  } catch (err) {
+    logger.error(`[LevelStore] countExisting(${namespace}, ${keys.length} keys) failed:`, err);
+    throw err;
+  }
+}
+
+async function namespaceStatsImpl(namespaces: string[]): Promise<Array<{ namespace: string; count: number; sizeBytes: number }>> {
+  const db = await openDb();
+  try {
+    return await namespaceStatsWith(db, namespaces);
+  } catch (err) {
+    logger.error('[LevelStore] namespaceStats failed:', err);
+    throw err;
+  }
 }
 
 async function hasImpl(namespace: string): Promise<boolean> {
@@ -435,6 +548,8 @@ export function getLevelStore(): LevelStore {
     batch: batchImpl,
     stream: streamImpl,
     getChunk: getChunkImpl,
+    countExisting: countExistingImpl,
+    namespaceStats: namespaceStatsImpl,
     has: hasImpl,
     clearNamespace: clearNamespaceImpl,
     close: closeImpl,

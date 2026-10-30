@@ -27,7 +27,9 @@ import type {
   SteamTagDefinition,
 } from '@/types/catalog';
 import { classifyTags } from '@/data/steam-tag-map';
-import { storeGetMany } from './store-bulk';
+import { storeCountExisting, storeGetMany } from './store-bulk';
+import { idbStreamStoreBatches } from './idb-stream';
+import { levelStreamNamespace, type LevelScanResult } from './level-stream';
 import { UpcomingSelector } from '@/lib/upcoming-select';
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
@@ -131,60 +133,14 @@ async function idbSetMeta<T>(key: string, value: T): Promise<void> {
 /**
  * Cursor-stream every IDB entry, invoking `onBatch` with up to `size`
  * entries per hop. Used only for the one-shot IDB → LevelDB migration.
+ * Rejects on the first failed batch write (see idb-stream.ts).
  */
 async function idbStreamAllEntries(
   onBatch: (entries: CatalogEntry[]) => Promise<void>,
   size = 500,
 ): Promise<number> {
   const db = await getDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(ENTRIES_STORE, 'readonly');
-    const store = tx.objectStore(ENTRIES_STORE);
-    const req = store.openCursor();
-    let count = 0;
-    let batch: CatalogEntry[] = [];
-    // Buffer for `onBatch` calls that outlive a cursor tick — the cursor
-    // must not `continue()` until the async batch write finishes.
-    let pending: Promise<void> = Promise.resolve();
-    // Set as soon as any batch write rejects. Once true, the cursor stops
-    // advancing (see below) so we never silently drop further batches by
-    // chaining `.then()` onto an already-rejected `pending` — every batch
-    // we have already read but not yet flushed is either flushed or
-    // accounted for in the final rejection.
-    let failed: unknown = null;
-
-    req.onsuccess = async () => {
-      const cursor = req.result;
-      if (failed) {
-        // A previous batch write already failed — stop reading further rows.
-        // `pending` is already rejected; let the tx wind down naturally.
-        return;
-      }
-      if (!cursor) {
-        try {
-          await pending;
-          if (batch.length > 0) await onBatch(batch);
-          resolve(count);
-        } catch (err) {
-          reject(err);
-        }
-        return;
-      }
-      batch.push(cursor.value as CatalogEntry);
-      count++;
-      if (batch.length >= size) {
-        const drain = batch;
-        batch = [];
-        pending = pending.then(() => onBatch(drain)).catch((err) => {
-          failed = err;
-          throw err;
-        });
-      }
-      if (failed) return; // the batch we just queued may have already settled synchronously as a rejection
-      cursor.continue();
-    };
-    req.onerror = () => reject(req.error ?? new Error('[CatalogStore] IDB cursor error during migration stream'));
-  });
+  return idbStreamStoreBatches<CatalogEntry>(db, ENTRIES_STORE, onBatch, size, '[CatalogStore]');
 }
 
 // ─── LevelDB Helpers ────────────────────────────────────────────────────────────
@@ -239,32 +195,16 @@ async function levelSetMeta<T>(key: string, value: T): Promise<void> {
 
 /**
  * Chunked walk of every LevelDB entry row, invoking `onEntry` per row.
- * Returns total rows visited. Uses `store.getChunk` under the hood so
- * we never marshal all 155k rows at once.
+ * Uses `store.getChunk` under the hood so we never marshal all 155k rows at
+ * once. A hop that fails twice ends the walk with `complete: false`.
  */
 async function levelStreamAllEntries(
   onEntry: (entry: CatalogEntry) => void,
-): Promise<number> {
-  let startAfter: string | undefined;
-  let total = 0;
-  while (true) {
-    const res = await window.store!.getChunk<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, {
-      startAfter,
-      limit: LEVEL_CHUNK_SIZE,
-    });
-    if (res.error) {
-      console.error('[CatalogStore] getChunk failed:', res.error);
-      break;
-    }
-    const rows = res.rows ?? [];
-    for (const row of rows) {
-      onEntry(row.value);
-      total++;
-    }
-    if (res.done || !res.nextKey) break;
-    startAfter = res.nextKey;
-  }
-  return total;
+): Promise<LevelScanResult> {
+  return levelStreamNamespace<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, (row) => { onEntry(row.value); }, {
+    pageSize: LEVEL_CHUNK_SIZE,
+    label: '[CatalogStore]',
+  });
 }
 
 // ─── Tag Resolver ───────────────────────────────────────────────────────────────
@@ -638,13 +578,17 @@ export class CatalogStore {
       const resume = !force && pending.length > 0 && (Date.now() - lastAttempt) < SYNC_STALE_TTL;
 
       let appIds: number[];
-      let alreadyStoredBeforeResume = 0;
+      /** Pending games already stored before this resume; null = couldn't count them. */
+      let alreadyStoredBeforeResume: number | null = 0;
       if (resume) {
         appIds = pending;
         console.log(`[CatalogStore] Resuming incomplete sync: ${appIds.length} pending games`);
         if (useLevelDB()) {
-          const existing = await storeGetMany<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, appIds.map(String)).catch(() => []);
-          alreadyStoredBeforeResume = existing.filter(Boolean).length;
+          // Count only: reading the full rows (up to ~155k) over IPC just to count them was the old cost.
+          alreadyStoredBeforeResume = await storeCountExisting(LEVEL_ENTRIES_NAMESPACE, appIds.map(String)).catch((err) => {
+            console.warn('[CatalogStore] Could not count already-stored pending games:', err);
+            return null;
+          });
         }
       } else {
         // Step 1: Get all app IDs from main process
@@ -777,9 +721,11 @@ export class CatalogStore {
       const stillPending = failed.flatMap((f) => f.batch);
       const prevTotal = prevState?.totalEntries ?? 0;
       const finishedAt = Date.now();
-      const totalEntries = resume
+      const totalEntries = resume && alreadyStoredBeforeResume !== null
         // Pending games may already be stored from an earlier full sync — only newly added rows count
         ? prevTotal + Math.max(0, totalGamesStored - alreadyStoredBeforeResume)
+        // Count unavailable: never inflate; rows are keyed overwrites, so keep the larger figure
+        : resume ? Math.max(prevTotal, totalGamesStored)
         // Rows are keyed overwrites, so a partial run never shrinks what's stored
         : (complete ? totalGamesStored : Math.max(totalGamesStored, prevTotal));
       const syncState: CatalogSyncState = {
@@ -864,7 +810,8 @@ export class CatalogStore {
     const selector = new UpcomingSelector<CatalogEntry>(selectOpts);
     const admit = (entry: CatalogEntry) => selector.admit(entry);
     if (useLevelDB()) {
-      await levelStreamAllEntries(admit);
+      const scan = await levelStreamAllEntries(admit);
+      if (!scan.complete) console.warn(`[CatalogStore] Upcoming scan stopped early — partial results (${scan.count} rows read)`);
     } else {
       const db = await getDB();
       await new Promise<void>((resolve) => {
@@ -933,7 +880,8 @@ export class CatalogStore {
     };
 
     if (useLevelDB()) {
-      await levelStreamAllEntries(admit);
+      const scan = await levelStreamAllEntries(admit);
+      if (!scan.complete) console.warn(`[CatalogStore] Candidate scan stopped early — partial pool (${scan.count} rows read)`);
     } else {
       const db = await getDB();
       await new Promise<void>((resolve) => {
@@ -967,20 +915,29 @@ export class CatalogStore {
    * cursor with a 500-row buffer.
    */
   async getAllEntries(onBatch: (entries: CatalogEntry[]) => void): Promise<number> {
+    const scan = await this.scanAllEntries(onBatch);
+    if (!scan.complete) console.warn(`[CatalogStore] Catalog scan stopped early — ${scan.count} entries read (partial)`);
+    return scan.count;
+  }
+
+  /**
+   * `getAllEntries` that also says whether the walk reached the end. Embedding
+   * passes use it so a scan cut short by a read error never advances their
+   * watermark (the partial set used to be treated as the whole catalog).
+   */
+  async scanAllEntries(onBatch: (entries: CatalogEntry[]) => void): Promise<LevelScanResult> {
     await this.migrateFromIdbIfNeeded();
     if (useLevelDB()) {
-      let count = 0;
       let buffer: CatalogEntry[] = [];
-      await levelStreamAllEntries((entry) => {
+      const scan = await levelStreamAllEntries((entry) => {
         buffer.push(entry);
-        count++;
         if (buffer.length >= 500) {
           onBatch(buffer);
           buffer = [];
         }
       });
       if (buffer.length > 0) onBatch(buffer);
-      return count;
+      return scan;
     }
     const db = await getDB();
     return new Promise((resolve) => {
@@ -994,7 +951,7 @@ export class CatalogStore {
         const cursor = req.result;
         if (!cursor) {
           if (batch.length > 0) onBatch(batch);
-          resolve(count);
+          resolve({ count, complete: true });
           return;
         }
         batch.push(cursor.value);
@@ -1005,7 +962,10 @@ export class CatalogStore {
         }
         cursor.continue();
       };
-      req.onerror = () => resolve(count);
+      req.onerror = () => {
+        if (batch.length > 0) onBatch(batch);
+        resolve({ count, complete: false });
+      };
     });
   }
 

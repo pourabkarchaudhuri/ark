@@ -283,6 +283,8 @@ interface StoreChunkResult<T = unknown> {
   rows?: Array<{ key: string; value: T }>;
   nextKey?: string;
   done?: boolean;
+  /** Keys in this slice whose stored value could not be decoded (skipped, v1.0.97). */
+  skipped?: string[];
   error?: string;
 }
 
@@ -298,6 +300,19 @@ interface StoreAPI {
    * Optional: absent in older preloads and some test mocks — fall back to `get`.
    */
   getMany?: <T = unknown>(namespace: string, keys: string[]) => Promise<{ values?: Array<T | null>; error?: string }>;
+  /**
+   * How many of `keys` (up to 10k per call) exist, without returning the rows (v1.0.97).
+   * Optional: absent in older preloads and some test mocks — see `storeCountExisting`.
+   */
+  countExisting?: (namespace: string, keys: string[]) => Promise<{ count?: number; error?: string }>;
+  /**
+   * Row count and approximate on-disk bytes per namespace, for the Settings storage panel (v1.0.97).
+   * Optional: absent in older preloads and test mocks.
+   */
+  namespaceStats?: (namespaces: string[]) => Promise<{
+    stats?: Array<{ namespace: string; count: number; sizeBytes: number }>;
+    error?: string;
+  }>;
   getAll: <T = unknown>(namespace: string) => Promise<StoreGetAllResult<T>>;
   /** Paginated chunk read for large namespaces (catalog: 155k, epic-catalog: 40k). */
   getChunk: <T = unknown>(

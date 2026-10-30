@@ -21,6 +21,7 @@ import type { EpicCatalogEntry } from '@/services/epic-catalog-store';
 import { toRerankTier, rerankTierLabel, type RerankTier } from '@/services/oracle-rerank';
 import { quantizeEmbedding, dequantizeEmbedding, EMBEDDING_DIM } from '@/services/embedding-quant';
 import { storeGetMany } from '@/services/store-bulk';
+import { getChunkWithRetry, IncompleteScanError, levelStreamNamespace, type LevelScanResult } from '@/services/level-stream';
 import {
   EMBEDDING_LAYOUT_STAMP,
   EMBEDDING_MODEL_VERSION,
@@ -99,8 +100,8 @@ export type RechunkLibraryGame = {
 
 export interface RechunkJobDeps {
   libraryGames: RechunkLibraryGame[];
-  steamIterator: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>;
-  epicIterator?: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>;
+  steamIterator: CatalogIterator<CatalogEntry>;
+  epicIterator?: CatalogIterator<EpicCatalogEntry>;
   /** Optional totals for progress UI (catalog entry counts). */
   steamTotal?: number;
   epicTotal?: number;
@@ -461,7 +462,7 @@ async function levelPooledCount(namespace: string): Promise<number> {
   let inFlight = _pooledCountInFlight.get(namespace);
   if (!inFlight) {
     inFlight = levelStreamPooled(namespace, () => { /* count only */ })
-      .then((n) => _pooledKeyIndex.get(namespace)?.size ?? n)
+      .then((scan) => _pooledKeyIndex.get(namespace)?.size ?? scan.count)
       .finally(() => { _pooledCountInFlight.delete(namespace); });
     _pooledCountInFlight.set(namespace, inFlight);
   }
@@ -517,7 +518,7 @@ async function levelStreamPooled(
   namespace: string,
   onEntry: (entry: CachedEmbedding) => void | Promise<void>,
   opts?: { prefix?: string },
-): Promise<number> {
+): Promise<LevelScanResult> {
   const prefix = opts?.prefix;
   const seed = !prefix && !_pooledKeyIndex.has(namespace) && !_pooledKeyJournal.has(namespace);
   const seenKeys = seed ? new Set<string>() : null;
@@ -529,12 +530,10 @@ async function levelStreamPooled(
   let complete = false;
   try {
     while (true) {
-      const res = await window.store!.getChunk<CachedEmbedding>(namespace, { startAfter, limit: LEVEL_CHUNK_PAGE_SIZE });
-      if (res.error) {
-        console.error(`[EmbeddingService] getChunk(${namespace}) failed:`, res.error);
-        break;
-      }
-      const rows = res.rows ?? [];
+      // One retry per hop; a hop that still fails ends the walk as incomplete.
+      const res = await getChunkWithRetry<CachedEmbedding>(namespace, { startAfter, limit: LEVEL_CHUNK_PAGE_SIZE }, '[EmbeddingService]');
+      if (!res) break;
+      const rows = res.rows;
       let pastPrefix = false;
       for (const row of rows) {
         if (prefix && !row.key.startsWith(prefix)) { pastPrefix = true; break; }
@@ -555,7 +554,7 @@ async function levelStreamPooled(
       }
     }
   }
-  return total;
+  return { count: total, complete };
 }
 
 async function levelGetChunkGroup(tier: EmbeddingTier, gameId: string): Promise<CachedChunk[]> {
@@ -570,21 +569,11 @@ async function levelGetChunkGroup(tier: EmbeddingTier, gameId: string): Promise<
 /** Paginated full-namespace walk over embed-chunks (each row is one game's chunk array). */
 async function levelStreamAllChunkGroups(
   onGroup: (chunks: CachedChunk[]) => void | Promise<void>,
-): Promise<number> {
-  let startAfter: string | undefined;
-  let total = 0;
-  while (true) {
-    const res = await window.store!.getChunk<CachedChunk[]>(LEVEL_CHUNKS_NAMESPACE, { startAfter, limit: LEVEL_CHUNK_PAGE_SIZE });
-    if (res.error) {
-      console.error('[EmbeddingService] getChunk(embed-chunks) failed:', res.error);
-      break;
-    }
-    const rows = res.rows ?? [];
-    for (const row of rows) { await onGroup(row.value); total++; }
-    if (res.done || !res.nextKey) break;
-    startAfter = res.nextKey;
-  }
-  return total;
+): Promise<LevelScanResult> {
+  return levelStreamNamespace<CachedChunk[]>(LEVEL_CHUNKS_NAMESPACE, async (row) => { await onGroup(row.value); }, {
+    pageSize: LEVEL_CHUNK_PAGE_SIZE,
+    label: '[EmbeddingService]',
+  });
 }
 
 /**
@@ -929,9 +918,10 @@ export async function getChunksForGame(gameId: string): Promise<CachedChunk[]> {
   await migrateEmbeddingsFromIdbIfNeeded();
   if (useLevelDB()) {
     const out: CachedChunk[] = [];
-    await levelStreamAllChunkGroups((chunks) => {
+    const scan = await levelStreamAllChunkGroups((chunks) => {
       for (const c of chunks) if (c.gameId === gameId) out.push(c);
     });
+    if (!scan.complete) console.warn(`[EmbeddingService] getChunksForGame(${gameId}): chunk scan stopped early — partial result`);
     return out;
   }
   const db = await getDB();
@@ -981,7 +971,7 @@ export async function streamChunkVectorsForAnn(
 
   if (useLevelDB()) {
     let buffer: AnnBackfillRow[] = [];
-    await levelStreamAllChunkGroups(async (chunks) => {
+    const scan = await levelStreamAllChunkGroups(async (chunks) => {
       for (const row of chunks) {
         const decoded = chunkRowToAnn(row, now, ttl);
         if (decoded) buffer.push(decoded);
@@ -997,6 +987,8 @@ export async function streamChunkVectorsForAnn(
       total += buffer.length;
       await onPage(buffer);
     }
+    // A backfill that stopped early must not be reported (and saved) as a complete index.
+    if (!scan.complete) throw new IncompleteScanError('[EmbeddingService] chunk vectors for ANN');
     return total;
   }
 
@@ -1035,9 +1027,10 @@ async function getCachedEmbeddings(
   const now = Date.now();
 
   if (useLevelDB()) {
-    await levelStreamPooled(pooledNamespaceFor(storeName), (entry) => {
+    const scan = await levelStreamPooled(pooledNamespaceFor(storeName), (entry) => {
       if (now - entry.timestamp < ttl) map.set(entry.gameId, entry);
     });
+    if (!scan.complete) console.warn(`[EmbeddingService] ${storeName} scan stopped early — ${map.size} cached embeddings (partial)`);
     return map;
   }
 
@@ -1648,7 +1641,10 @@ async function getCatalogSkipIndex(idPrefix: string): Promise<Map<string, Catalo
   };
 
   if (useLevelDB()) {
-    await levelStreamPooled(LEVEL_CATALOG_NAMESPACE, add, { prefix: idPrefix });
+    const scan = await levelStreamPooled(LEVEL_CATALOG_NAMESPACE, add, { prefix: idPrefix });
+    // A partial index would send every unread game back to Ollama as "not cached":
+    // fail the pass instead (it reports 'error' and retries later).
+    if (!scan.complete) throw new IncompleteScanError(`[EmbeddingService] catalog skip index (${idPrefix})`);
     return map;
   }
 
@@ -2054,6 +2050,12 @@ export function isRendererHeapPressureHigh(ratio = HEAP_PRESSURE_RATIO): boolean
 }
 
 type CatalogSource = 'steam' | 'epic';
+/**
+ * Streams a source catalog in batches. Returning a `LevelScanResult`
+ * (`catalogStore.scanAllEntries`) lets the pass see a scan cut short by a read
+ * error and keep its watermark; a bare count is treated as complete.
+ */
+export type CatalogIterator<E> = (onBatch: (entries: E[]) => void) => Promise<number | LevelScanResult>;
 /** How a catalog pass ended — lets Force Re-index tell "done" from "paused". */
 export type CatalogPassOutcome = 'done' | 'skipped' | 'cancelled' | 'tripped' | 'unavailable' | 'error';
 
@@ -3312,7 +3314,7 @@ class EmbeddingService {
    *                                 corrupted stored vector.
    */
   generateCatalogEmbeddings(
-    catalogIterator: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>,
+    catalogIterator: CatalogIterator<CatalogEntry>,
     opts?: { storeKey?: string; lastSyncTimestamp?: number; force?: boolean },
   ): Promise<number> {
     return this._startCatalogPass('steam', (signal) => this._runCatalogPass<CatalogEntry>({
@@ -3346,7 +3348,7 @@ class EmbeddingService {
    * Shares the same catalog embedding store and ANN index.
    */
   generateEpicCatalogEmbeddings(
-    epicIterator: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>,
+    epicIterator: CatalogIterator<EpicCatalogEntry>,
     opts?: { storeKey?: string; lastSyncTimestamp?: number; force?: boolean },
   ): Promise<number> {
     return this._startCatalogPass('epic', async (signal) => {
@@ -3437,7 +3439,7 @@ class EmbeddingService {
   private async _runCatalogPass<E>(cfg: {
     which: CatalogSource;
     signal: AbortSignal;
-    iterate: (onBatch: (entries: E[]) => void) => Promise<number>;
+    iterate: CatalogIterator<E>;
     storeKey: string;
     lastSyncTimestamp: number;
     force: boolean;
@@ -3508,6 +3510,8 @@ class EmbeddingService {
       let totalNeeds = 0;
       /** Set when the catalog changed size between window scans (positions may have shifted). */
       let catalogShifted = false;
+      /** Set when any catalog scan stopped early (read error): the pass must not advance its watermark. */
+      let scanIncomplete = false;
       const refreshCutoff = Date.now() - TTL_REFRESH_THRESHOLD_MS;
 
       /**
@@ -3524,7 +3528,7 @@ class EmbeddingService {
         const window: Need[] = [];
         let pos = 0;
         let nextPos: number | null = null;
-        await cfg.iterate((batch) => {
+        const scanned = await cfg.iterate((batch) => {
           for (const entry of batch) {
             const p = pos++;
             if (p < fromPos) continue;
@@ -3552,6 +3556,7 @@ class EmbeddingService {
             else nextPos = p;
           }
         });
+        if (typeof scanned === 'object' && scanned && !scanned.complete) scanIncomplete = true;
         if (first) scannedTotal = pos;
         else if (pos !== scannedTotal) catalogShifted = true;
         return { window, nextPos };
@@ -3587,6 +3592,12 @@ class EmbeddingService {
           await this._ensureAnnBackfill();
         }
         annIndex.finishBuild(progressOwner);
+        if (scanIncomplete) {
+          // The catalog read stopped early: "nothing to do" only covers the rows we saw.
+          console.warn(`[EmbeddingService] ${label} scan incomplete (${scannedTotal} read) — watermark not advanced`);
+          setOutcome('error');
+          return 0;
+        }
         // Write watermark — scan was clean, no work needed for current sync state.
         if (lastSyncTimestamp > 0) {
           await setEmbeddingMeta<EmbeddingPassWatermark>({
@@ -3828,6 +3839,13 @@ class EmbeddingService {
       // ambiguous (Ollama vs game) — retry them next time, don't count them.
       unresolvedFailures += failureStreak.length;
 
+      if (scanIncomplete) {
+        // Games past the failed read were never seen — retry the whole pass later.
+        console.warn(`[EmbeddingService] ${label}: catalog scan incomplete — ${totalGenerated} generated, watermark not advanced`);
+        setOutcome('error');
+        return totalGenerated;
+      }
+
       // Watermark once nothing is left to retry: no unpersisted writes, and
       // every failed game has reached the poison limit (and will be skipped).
       if (writeFailures === 0 && unresolvedFailures === 0 && lastSyncTimestamp > 0) {
@@ -4067,7 +4085,7 @@ class EmbeddingService {
 
     const streamPooledNs = async (namespace: string, ttl: number): Promise<void> => {
       let buffer: AnnBackfillRow[] = [];
-      await levelStreamPooled(namespace, async (entry) => {
+      const scan = await levelStreamPooled(namespace, async (entry) => {
         if (seen.has(entry.gameId)) return;
         const vec = readPooledVector(entry);
         if (!vec || now - entry.timestamp >= ttl) return;
@@ -4080,6 +4098,8 @@ class EmbeddingService {
         }
       });
       if (buffer.length > 0) await flushRows(buffer, 'pooled');
+      // Never reach _completeBackfill (which marks the index coherent) on a partial read.
+      if (!scan.complete) throw new IncompleteScanError(`[EmbeddingService] ANN backfill (${namespace})`);
     };
 
     // try/finally guarantees annIndex._building always resolves to false when
@@ -4243,11 +4263,11 @@ class EmbeddingService {
    */
   forceReindexCatalog(sources: {
     steam: {
-      iterate: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>;
+      iterate: CatalogIterator<CatalogEntry>;
       lastSyncTimestamp: () => Promise<number> | number;
     };
     epic: {
-      iterate: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>;
+      iterate: CatalogIterator<EpicCatalogEntry>;
       lastSyncTimestamp: () => Promise<number> | number;
     };
   }): Promise<ForceReindexResult> {
@@ -4360,11 +4380,11 @@ class EmbeddingService {
   forceReindexAll(args: {
     libraryGames: () => Promise<LibraryEmbedGames> | LibraryEmbedGames;
     steam: {
-      iterate: (onBatch: (entries: CatalogEntry[]) => void) => Promise<number>;
+      iterate: CatalogIterator<CatalogEntry>;
       lastSyncTimestamp: () => Promise<number> | number;
     };
     epic: {
-      iterate: (onBatch: (entries: EpicCatalogEntry[]) => void) => Promise<number>;
+      iterate: CatalogIterator<EpicCatalogEntry>;
       lastSyncTimestamp: () => Promise<number> | number;
     };
     resume?: boolean;
@@ -4576,8 +4596,10 @@ export async function getAllPooledEmbeddingsForGraph(): Promise<Array<{ gameId: 
   };
 
   if (useLevelDB()) {
-    await levelStreamPooled(LEVEL_LIBRARY_NAMESPACE, collect);
-    await levelStreamPooled(LEVEL_CATALOG_NAMESPACE, collect);
+    const lib = await levelStreamPooled(LEVEL_LIBRARY_NAMESPACE, collect);
+    const cat = await levelStreamPooled(LEVEL_CATALOG_NAMESPACE, collect);
+    // The graph built from this is persisted: never build (and save) it from a partial set.
+    if (!lib.complete || !cat.complete) throw new IncompleteScanError('[EmbeddingService] graph embeddings');
     return out;
   }
 
@@ -4615,7 +4637,7 @@ export async function loadAllEmbeddingsForGraph(
   if (useLevelDB()) {
     const collectIdsLevel = async (namespace: string, label: string, ttl: number) => {
       let count = 0;
-      await levelStreamPooled(namespace, (entry) => {
+      const scan = await levelStreamPooled(namespace, (entry) => {
         if (readPooledVector(entry) && !seen.has(entry.gameId) && now - entry.timestamp < ttl) {
           seen.add(entry.gameId);
           ids.push(entry.gameId);
@@ -4623,6 +4645,8 @@ export async function loadAllEmbeddingsForGraph(
           if (count % 2000 === 0) onProgress?.(count, label);
         }
       });
+      // UI view only: a partial galaxy is still worth showing.
+      if (!scan.complete) console.warn(`[EmbeddingService] ${label} embeddings scan stopped early — ${count} loaded (partial)`);
     };
     await collectIdsLevel(LEVEL_LIBRARY_NAMESPACE, 'library', LIBRARY_TTL);
     onProgress?.(ids.length, 'library');
@@ -4755,7 +4779,7 @@ export async function loadProjectedEmbeddingsForGraph(
   if (useLevelDB()) {
     const collectIdsLevel = async (namespace: string, label: string, ttl: number) => {
       let count = 0;
-      await levelStreamPooled(namespace, (entry) => {
+      const scan = await levelStreamPooled(namespace, (entry) => {
         if (readPooledVector(entry) && !seen.has(entry.gameId) && now - entry.timestamp < ttl) {
           seen.add(entry.gameId);
           ids.push(entry.gameId);
@@ -4763,6 +4787,8 @@ export async function loadProjectedEmbeddingsForGraph(
           if (count % 2000 === 0) onProgress?.(count, label);
         }
       });
+      // UI view only: a partial galaxy is still worth showing.
+      if (!scan.complete) console.warn(`[EmbeddingService] ${label} embeddings scan stopped early — ${count} loaded (partial)`);
     };
     await collectIdsLevel(LEVEL_LIBRARY_NAMESPACE, 'library', LIBRARY_TTL);
     onProgress?.(ids.length, 'library');
