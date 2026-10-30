@@ -293,6 +293,28 @@ function getCalendarWindowStart(now: Date): Date {
   return new Date(y, m - 1, 1, 0, 0, 0, 0);
 }
 
+/** Sunday 00:00 (local) of the week containing `d`. */
+function startOfWeek(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - d.getDay());
+}
+
+/**
+ * First day of the Week view. Anchored on today's week when the selected month is today's month,
+ * else on the week of the 1st; `weekOffset` steps whole weeks (negative allowed). Local date
+ * arithmetic, so DST changes never shift the day. Exported for tests.
+ */
+export function getCalendarWeekStart(year: number, month: number, weekOffset: number, now: Date): Date {
+  const anchor = year === now.getFullYear() && month === now.getMonth()
+    ? startOfWeek(now)
+    : startOfWeek(new Date(year, month, 1));
+  return new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + weekOffset * 7);
+}
+
+/** Earliest Week view start: the week containing the window floor. Exported for tests. */
+export function getWeekNavFloor(now: Date): Date {
+  return startOfWeek(getCalendarWindowStart(now));
+}
+
 /** True if the release’s calendar day is on or after {@link getCalendarWindowStart}. */
 function isReleaseInCalendarWindow(parsedDate: Date, now: Date): boolean {
   const startMs = getCalendarWindowStart(now).getTime();
@@ -326,8 +348,39 @@ let catalogUpcomingCache: { at: number; list: UpcomingRelease[] } | null = null;
 let catalogUpcomingInFlight: Promise<UpcomingRelease[]> | null = null;
 const CATALOG_UPCOMING_TTL_MS = 30 * 60 * 1000;
 
+/** Mounted calendars re-load catalog releases through these when a catalog sync completes. */
+const catalogUpcomingListeners = new Set<() => void>();
+let catalogSyncWatched = false;
+
 function freshCatalogUpcoming(): UpcomingRelease[] | null {
   return catalogUpcomingCache && Date.now() - catalogUpcomingCache.at < CATALOG_UPCOMING_TTL_MS ? catalogUpcomingCache.list : null;
+}
+
+/**
+ * Drop the cached list when a catalog sync finishes, so a fresh install (empty catalog at first
+ * scan) picks up the synced releases instead of waiting out the TTL.
+ */
+function watchCatalogSync(store: { subscribe?: (fn: () => void) => unknown; syncProgress?: { stage: string } }): void {
+  if (catalogSyncWatched || typeof store.subscribe !== 'function') return;
+  catalogSyncWatched = true;
+  let lastStage = store.syncProgress?.stage;
+  store.subscribe(() => {
+    const stage = store.syncProgress?.stage;
+    if (stage === 'done' && lastStage !== 'done') {
+      catalogUpcomingCache = null;
+      catalogUpcomingInFlight = null;
+      catalogUpcomingListeners.forEach((fn) => fn());
+    }
+    lastStage = stage;
+  });
+}
+
+/** Test seam: forget the module-level catalog cache and sync watch. */
+export function resetCatalogUpcomingCacheForTests(): void {
+  catalogUpcomingCache = null;
+  catalogUpcomingInFlight = null;
+  catalogSyncWatched = false;
+  catalogUpcomingListeners.clear();
 }
 
 /** Recent + upcoming Steam releases from the synced catalog, as calendar rows ([] if not synced). */
@@ -340,6 +393,7 @@ function loadCatalogUpcoming(): Promise<UpcomingRelease[]> {
 async function scanCatalogUpcoming(): Promise<UpcomingRelease[]> {
   try {
     const { catalogStore } = await import('@/services/catalog-store');
+    watchCatalogSync(catalogStore);
     const now = new Date();
     const entries = await catalogStore.queryUpcoming({
       fromMs: getCalendarWindowStart(now).getTime(),
@@ -359,7 +413,8 @@ async function scanCatalogUpcoming(): Promise<UpcomingRelease[]> {
         store: 'steam',
       };
     });
-    catalogUpcomingCache = { at: Date.now(), list };
+    // An empty list (catalog not synced yet) is not cached: the next mount scans again.
+    if (list.length > 0) catalogUpcomingCache = { at: Date.now(), list };
     return list;
   } catch (err) {
     console.warn('[ReleaseCalendar] Steam catalog releases unavailable:', err);
@@ -422,6 +477,8 @@ export function mergeAcrossStores<T extends { name: string; store?: string }>(
   return out;
 }
 const INITIAL_CARD_COUNT = 30;
+/** Cards added per '+N more' click. */
+const CARD_PAGE_STEP = 60;
 
 const VIEW_TOGGLE_OPTIONS: { id: CalendarView; icon: typeof Grid3X3; label: string }[] = [
   { id: 'year', icon: Grid3X3, label: 'Year' },
@@ -434,6 +491,14 @@ const VIEW_TOGGLE_OPTIONS: { id: CalendarView; icon: typeof Grid3X3; label: stri
 function buildLibraryIdSet(): Set<string> {
   const ids = libraryStore.getAllGameIds();
   return new Set(ids);
+}
+
+/** Keep the previous set when membership is unchanged (status / cachedMeta notifies), so nothing re-renders. */
+function nextLibraryIdSet(prev: Set<string>): Set<string> {
+  const next = buildLibraryIdSet();
+  if (next.size !== prev.size) return next;
+  for (const id of next) if (!prev.has(id)) return next;
+  return prev;
 }
 
 function isReleaseInLibrary(id: string | number, libSet: Set<string>): boolean {
@@ -471,6 +536,9 @@ function releaseToMeta(game: ParsedRelease): CachedGameMeta {
 // ─── ParsedRelease → Game adapter ────────────────────────────────────────────
 // Converts a ParsedRelease into a Game-shaped object so we can reuse the
 // shared GameCard component for visual consistency with browse / library views.
+
+/** Shared timestamp: GameCard's memo compares updatedAt by reference, so a fresh Date per card never skips. */
+const EPOCH = new Date(0);
 
 function releaseToGame(release: ParsedRelease, inLibrary: boolean): Game {
   const platformArr: string[] = [];
@@ -511,8 +579,8 @@ function releaseToGame(release: ParsedRelease, inLibrary: boolean): Game {
     priority: 'Medium' as any,
     publicReviews: '',
     recommendationSource: '',
-    createdAt: new Date(0),
-    updatedAt: new Date(0),
+    createdAt: EPOCH,
+    updatedAt: EPOCH,
     isInLibrary: inLibrary,
   } as Game;
 }
@@ -534,6 +602,10 @@ const PLATFORM_OPTIONS: { value: string; label: string }[] = [
   { value: 'mac', label: 'Mac' },
   { value: 'linux', label: 'Linux' },
 ];
+
+/** My Radar is a library filter (no taste matching); exported for tests. */
+export const RADAR_TOOLTIP = 'Show only releases already in your library (tracked or Want to Play).';
+export const RADAR_EMPTY_MESSAGE = 'None of your library games release in this period.';
 
 /** Borderless trigger: the surrounding labelled field draws the frame. */
 const COMPACT_TRIGGER_CLASS =
@@ -589,7 +661,7 @@ const FilterChips = memo(function FilterChips({
 
   return (
     <div className="flex items-center gap-1.5 flex-wrap" role="group" aria-label="Filters">
-      <TooltipCard content="Show only games that match your library's taste (your radar).">
+      <TooltipCard content={RADAR_TOOLTIP}>
         <button
           onClick={() => setRadarActive(!radarActive)}
           aria-pressed={radarActive}
@@ -727,6 +799,7 @@ const GroupedFeed = memo(function GroupedFeed({
   fillViewport = true,
   attachDataAttrs = true,
   markCurrentPeriodFocusAnchor = false,
+  emptyMessage = 'No releases match your filters',
 }: {
   groups: FeedGroup[];
   libraryIds: Set<string>;
@@ -737,13 +810,26 @@ const GroupedFeed = memo(function GroupedFeed({
   attachDataAttrs?: boolean;
   /** Year view: mark the current calendar month row for initial scroll-into-view. */
   markCurrentPeriodFocusAnchor?: boolean;
+  /** Shown when no group has a release. */
+  emptyMessage?: string;
 }) {
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  // Cards shown per group beyond the default; '+N more' steps by CARD_PAGE_STEP instead of
+  // mounting a whole period (often hundreds of cards) at once.
+  const [visibleCounts, setVisibleCounts] = useState<Map<string, number>>(() => new Map());
 
-  const toggleGroup = useCallback((key: string) => {
-    setExpandedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
+  const showMore = useCallback((key: string) => {
+    setVisibleCounts(prev => {
+      const next = new Map(prev);
+      next.set(key, (prev.get(key) ?? INITIAL_CARD_COUNT) + CARD_PAGE_STEP);
+      return next;
+    });
+  }, []);
+
+  const showLess = useCallback((key: string) => {
+    setVisibleCounts(prev => {
+      if (!prev.has(key)) return prev;
+      const next = new Map(prev);
+      next.delete(key);
       return next;
     });
   }, []);
@@ -760,10 +846,15 @@ const GroupedFeed = memo(function GroupedFeed({
     return map;
   }, [groups]);
 
+  // Read through a ref (assigned during render, before any click) so the callback, a GameCard
+  // memo input, stays stable when the groups change.
+  const releaseMapRef = useRef(releaseMap);
+  releaseMapRef.current = releaseMap;
+
   const handleAddToLibrary = useCallback((gameId: string) => {
-    const release = releaseMap.get(gameId);
+    const release = releaseMapRef.current.get(gameId);
     if (release) onAddToLibrary(release);
-  }, [releaseMap, onAddToLibrary]);
+  }, [onAddToLibrary]);
 
   const hasAnyReleases = groups.some(g => g.releases.length > 0);
 
@@ -781,7 +872,7 @@ const GroupedFeed = memo(function GroupedFeed({
         )}
       >
         <CalendarDays className="w-10 h-10 text-white/[0.06] mb-3" />
-        <p className="text-sm text-white/20">No releases match your filters</p>
+        <p className="text-sm text-white/20">{emptyMessage}</p>
       </div>
     );
   }
@@ -795,10 +886,13 @@ const GroupedFeed = memo(function GroupedFeed({
       )}
     >
       {groups.map((group) => {
-        const isExpanded = expandedGroups.has(group.key);
-        const hasMore = group.releases.length > INITIAL_CARD_COUNT;
-        const visible = isExpanded ? group.releases : group.releases.slice(0, INITIAL_CARD_COUNT);
-        const remaining = group.releases.length - INITIAL_CARD_COUNT;
+        const total = group.releases.length;
+        const visibleCount = Math.min(visibleCounts.get(group.key) ?? INITIAL_CARD_COUNT, total);
+        const remaining = total - visibleCount;
+        const nextStep = Math.min(CARD_PAGE_STEP, remaining);
+        // Only the first page animates; extra pages mount as plain cells (no layout measuring).
+        const animated = group.releases.slice(0, Math.min(visibleCount, INITIAL_CARD_COUNT));
+        const extra = visibleCount > INITIAL_CARD_COUNT ? group.releases.slice(INITIAL_CARD_COUNT, visibleCount) : [];
         const density = Math.min(group.releases.length / 10, 1);
 
         return (
@@ -855,7 +949,7 @@ const GroupedFeed = memo(function GroupedFeed({
               <div style={{ contentVisibility: 'auto', containIntrinsicBlockSize: '400px' }}>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8 gap-2.5 mt-2">
                   <AnimatePresence mode="popLayout">
-                    {visible.map((release) => {
+                    {animated.map((release) => {
                       const owned = isReleaseInLibrary(release.id, libraryIds);
                       const gameObj = releaseToGame(release, owned);
                       return (
@@ -885,24 +979,44 @@ const GroupedFeed = memo(function GroupedFeed({
           );
         })}
                   </AnimatePresence>
+                  {extra.map((release) => {
+                    const owned = isReleaseInLibrary(release.id, libraryIds);
+                    return (
+                      <div key={release.id} className="min-w-0">
+                        <GameCard
+                          game={releaseToGame(release, owned)}
+                          isInLibrary={owned}
+                          onEdit={NOOP_EDIT}
+                          onDelete={NOOP_DELETE}
+                          onAddToLibrary={handleAddToLibrary}
+                          hideLibraryBadge={false}
+                          compact
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
-                {hasMore && !isExpanded && (
-                  <button
-                    onClick={() => toggleGroup(group.key)}
-                    className="mt-3 flex items-center gap-1.5 mx-auto px-4 py-1.5 rounded-lg text-[11px] font-medium bg-white/[0.04] text-white/40 hover:bg-white/[0.08] hover:text-white/70 transition-colors"
-                  >
-                    <ChevronDown className="w-3 h-3" />
-                    +{remaining} more
-                    <span className="text-white/20">of {group.releases.length} total</span>
-                  </button>
-                )}
-                {hasMore && isExpanded && (
-                  <button
-                    onClick={() => toggleGroup(group.key)}
-                    className="mt-3 flex items-center gap-1.5 mx-auto px-4 py-1.5 rounded-lg text-[11px] font-medium bg-white/[0.04] text-white/40 hover:bg-white/[0.08] hover:text-white/70 transition-colors"
-                  >
-                    Show less
-                  </button>
+                {(remaining > 0 || visibleCount > INITIAL_CARD_COUNT) && (
+                  <div className="mt-3 flex items-center justify-center gap-2">
+                    {remaining > 0 && (
+                      <button
+                        onClick={() => showMore(group.key)}
+                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-[11px] font-medium bg-white/[0.04] text-white/40 hover:bg-white/[0.08] hover:text-white/70 transition-colors"
+                      >
+                        <ChevronDown className="w-3 h-3" />
+                        +{nextStep} more
+                        <span className="text-white/20">{remaining} of {total} hidden</span>
+                      </button>
+                    )}
+                    {visibleCount > INITIAL_CARD_COUNT && (
+                      <button
+                        onClick={() => showLess(group.key)}
+                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-[11px] font-medium bg-white/[0.04] text-white/40 hover:bg-white/[0.08] hover:text-white/70 transition-colors"
+                      >
+                        Show less
+                      </button>
+                    )}
+                  </div>
         )}
       </div>
             )}
@@ -921,11 +1035,13 @@ const YearFeed = memo(function YearFeed({
   year,
   libraryIds,
   onAddToLibrary,
+  emptyMessage,
 }: {
   releases: ParsedRelease[];
   year: number;
   libraryIds: Set<string>;
   onAddToLibrary: (game: ParsedRelease) => void;
+  emptyMessage?: string;
 }) {
   const groups = useMemo((): FeedGroup[] => {
     const buckets: ParsedRelease[][] = Array.from({ length: 12 }, () => []);
@@ -966,6 +1082,7 @@ const YearFeed = memo(function YearFeed({
       libraryIds={libraryIds}
       onAddToLibrary={onAddToLibrary}
       markCurrentPeriodFocusAnchor
+      emptyMessage={emptyMessage}
     />
   );
 });
@@ -980,6 +1097,7 @@ const MonthFeed = memo(function MonthFeed({
   onAddToLibrary,
   fillViewport = true,
   attachDataAttrs = true,
+  emptyMessage,
 }: {
   releases: ParsedRelease[];
   year: number;
@@ -988,6 +1106,7 @@ const MonthFeed = memo(function MonthFeed({
   onAddToLibrary: (game: ParsedRelease) => void;
   fillViewport?: boolean;
   attachDataAttrs?: boolean;
+  emptyMessage?: string;
 }) {
   const groups = useMemo((): FeedGroup[] => {
     const lastDay = new Date(year, month + 1, 0);
@@ -1046,6 +1165,7 @@ const MonthFeed = memo(function MonthFeed({
       onAddToLibrary={onAddToLibrary}
       fillViewport={fillViewport}
       attachDataAttrs={attachDataAttrs}
+      emptyMessage={emptyMessage}
     />
   );
 });
@@ -1058,12 +1178,14 @@ const MonthWithPreviousFeed = memo(function MonthWithPreviousFeed({
   currentMonth,
   libraryIds,
   onAddToLibrary,
+  emptyMessage,
 }: {
   releases: ParsedRelease[];
   currentYear: number;
   currentMonth: number;
   libraryIds: Set<string>;
   onAddToLibrary: (game: ParsedRelease) => void;
+  emptyMessage?: string;
 }) {
   const { prevYear, prevMonth } = useMemo(() => {
     let py = currentYear;
@@ -1125,6 +1247,7 @@ const MonthWithPreviousFeed = memo(function MonthWithPreviousFeed({
               onAddToLibrary={onAddToLibrary}
               fillViewport={false}
               attachDataAttrs={false}
+              emptyMessage={emptyMessage}
             />
           </div>
         )}
@@ -1145,6 +1268,7 @@ const MonthWithPreviousFeed = memo(function MonthWithPreviousFeed({
           onAddToLibrary={onAddToLibrary}
           fillViewport={false}
           attachDataAttrs={false}
+          emptyMessage={emptyMessage}
         />
       </div>
     </div>
@@ -1158,11 +1282,13 @@ const WeekFeed = memo(function WeekFeed({
   releases,
   libraryIds,
   onAddToLibrary,
+  emptyMessage,
 }: {
   weekStart: Date;
   releases: ParsedRelease[];
   libraryIds: Set<string>;
   onAddToLibrary: (game: ParsedRelease) => void;
+  emptyMessage?: string;
 }) {
   const groups = useMemo((): FeedGroup[] => {
     const days: { date: Date; releases: ParsedRelease[] }[] = [];
@@ -1202,6 +1328,7 @@ const WeekFeed = memo(function WeekFeed({
       groups={groups}
       libraryIds={libraryIds}
       onAddToLibrary={onAddToLibrary}
+      emptyMessage={emptyMessage}
     />
   );
 });
@@ -1488,7 +1615,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
 
   const [libraryIds, setLibraryIds] = useState(() => buildLibraryIdSet());
   useEffect(() => {
-    const unsub = libraryStore.subscribe(() => setLibraryIds(buildLibraryIdSet()));
+    const unsub = libraryStore.subscribe(() => setLibraryIds(nextLibraryIdSet));
     return unsub;
   }, []);
 
@@ -1562,6 +1689,10 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
 
   const topGenres = useMemo(() => [...getCanonicalGenres()] as string[], []);
 
+  // Only My Radar reads library membership, so with it off a library change does not refilter.
+  const radarLibraryIds = radarActive ? libraryIds : null;
+  const feedEmptyMessage = radarActive ? RADAR_EMPTY_MESSAGE : undefined;
+
   const filteredReleases = useMemo(() => {
     const now = new Date();
     let result = baseReleases.filter((r) => {
@@ -1581,11 +1712,11 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     if (genreFilter) {
       result = result.filter((r) => (toCanonicalGenres(r.genres) as string[]).includes(genreFilter));
     }
-    if (radarActive) {
-      result = result.filter((r) => isReleaseInLibrary(r.id, libraryIds));
+    if (radarLibraryIds) {
+      result = result.filter((r) => isReleaseInLibrary(r.id, radarLibraryIds));
     }
     return result;
-  }, [baseReleases, storeFilter, platformFilter, genreFilter, radarActive, libraryIds]);
+  }, [baseReleases, storeFilter, platformFilter, genreFilter, radarLibraryIds]);
 
   const tbdReleases = useMemo(() => {
     return filteredReleases.filter(r => !r.parsedDate);
@@ -1758,14 +1889,22 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   }, [fetchReleases]);
 
   // Steam catalog releases arrive after the first paint (a full catalog pass), then merge in.
+  // A completed catalog sync clears the module cache and re-runs this load.
   useEffect(() => {
     let cancelled = false;
-    loadCatalogUpcoming().then((list) => {
-      if (cancelled || list.length === 0 || list === catalogUpcomingRef.current) return;
-      catalogUpcomingRef.current = list;
-      void fetchReleases();
-    });
-    return () => { cancelled = true; };
+    const load = () => {
+      loadCatalogUpcoming().then((list) => {
+        if (cancelled || list.length === 0 || list === catalogUpcomingRef.current) return;
+        catalogUpcomingRef.current = list;
+        void fetchReleases();
+      });
+    };
+    load();
+    catalogUpcomingListeners.add(load);
+    return () => {
+      cancelled = true;
+      catalogUpcomingListeners.delete(load);
+    };
   }, [fetchReleases]);
 
   // ── Navigation ────────────────────────────────────────────────────────────
@@ -1789,7 +1928,10 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       return;
     }
     if (calView === 'week') {
-      setWeekOffset((w) => Math.max(w - 1, 0));
+      // Step back a week unless that would pass the week of the window floor.
+      const prevStart = getCalendarWeekStart(currentYear, currentMonth, weekOffset - 1, new Date());
+      if (prevStart < getWeekNavFloor(new Date())) return;
+      setWeekOffset((w) => w - 1);
       return;
     }
     if (currentYear === fy && currentMonth === fm) return;
@@ -1800,7 +1942,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
       }
       return m - 1;
     });
-  }, [calView, currentYear, currentMonth]);
+  }, [calView, currentYear, currentMonth, weekOffset]);
 
   const goToday = useCallback(() => {
     const n = new Date();
@@ -1821,26 +1963,29 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
     setCurrentMonth(m);
   }, []);
 
+  // Keyed on the day so the 60 s tick does not hand WeekFeed a new Date every minute.
+  const todayKey = `${todayYear}-${todayMonth}-${calendarNow.getDate()}`;
+  const weekStart = useMemo(
+    () => getCalendarWeekStart(currentYear, currentMonth, weekOffset, new Date()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentYear, currentMonth, weekOffset, todayKey],
+  );
+  const weekEndExclusive = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + 7);
+  const prevWeekStart = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() - 7);
+
   const canGoPrev =
     calView === 'year'
       ? currentYear > floorYear
       : calView === 'week'
-        ? weekOffset > 0
+        ? prevWeekStart >= getWeekNavFloor(calendarNow)
         : currentYear > floorYear || (currentYear === floorYear && currentMonth > floorMonth);
 
   const isCurrentPeriod =
     calView === 'year'
       ? currentYear === todayYear
       : calView === 'week'
-        ? currentYear === todayYear && currentMonth === todayMonth && weekOffset === 0
+        ? calendarNow >= weekStart && calendarNow < weekEndExclusive
         : currentYear === todayYear && currentMonth === todayMonth;
-
-  const weekStart = useMemo(() => {
-    const d = new Date(currentYear, currentMonth, 1);
-    d.setDate(d.getDate() + weekOffset * 7);
-    d.setDate(d.getDate() - d.getDay());
-    return d;
-  }, [currentYear, currentMonth, weekOffset]);
 
   const weekLabel = useMemo(() => {
     const end = new Date(weekStart);
@@ -1962,6 +2107,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
               <button
                 onClick={goPrev}
                 disabled={!canGoPrev}
+                aria-label="Previous period"
                 className={cn('p-1.5 rounded-md transition-colors', canGoPrev ? 'hover:bg-white/10 text-white/60 hover:text-white' : 'text-white/15 cursor-not-allowed')}
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -1969,7 +2115,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
               <h2 className="text-lg font-semibold text-white min-w-[180px] text-center">
                 {headerLabel}
               </h2>
-              <button onClick={goNext} className="p-1.5 rounded-md hover:bg-white/10 text-white/60 hover:text-white transition-colors">
+              <button onClick={goNext} aria-label="Next period" className="p-1.5 rounded-md hover:bg-white/10 text-white/60 hover:text-white transition-colors">
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
@@ -2063,7 +2209,8 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
               releases={filteredReleases}
               year={currentYear}
               libraryIds={libraryIds}
-                                    onAddToLibrary={handleAddToLibrary}
+              onAddToLibrary={handleAddToLibrary}
+              emptyMessage={feedEmptyMessage}
             />
           ) : calView === 'month' ? (
             <MonthWithPreviousFeed
@@ -2072,6 +2219,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
               currentMonth={currentMonth}
               libraryIds={libraryIds}
               onAddToLibrary={handleAddToLibrary}
+              emptyMessage={feedEmptyMessage}
             />
           ) : (
             <WeekFeed
@@ -2079,6 +2227,7 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
             releases={filteredReleases}
             libraryIds={libraryIds}
             onAddToLibrary={handleAddToLibrary}
+            emptyMessage={feedEmptyMessage}
           />
         )}
         </div>
