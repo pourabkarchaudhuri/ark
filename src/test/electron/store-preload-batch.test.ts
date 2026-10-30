@@ -29,7 +29,7 @@ function loadPreload(invoke: (channel: string, ...args: unknown[]) => Promise<un
   const fakeConsole = { ...console, log: () => {} };
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   new Function('require', 'process', 'console', fs.readFileSync(PRELOAD, 'utf-8'))(
-    fakeRequire, { env: { NODE_ENV: 'production' }, platform: 'win32' }, fakeConsole,
+    fakeRequire, { env: { NODE_ENV: 'production' }, platform: 'win32', argv: [] }, fakeConsole,
   );
   return apis.store;
 }
