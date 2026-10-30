@@ -223,3 +223,51 @@
   100% { opacity: 0; transform: translateY(-30px); }
 }
 
+/* Decorative loops on CSS keyframes (v1.0.97). framer-motion runs repeat: Infinity on its own
+   JavaScript loop (SVG opacity under a blur, image scale), so the renderer never idled while Audit,
+   Oracle or an empty state was open. Opacity and transform keyframes on an HTML element run on the
+   compositor instead. Same cadence as the framer versions they replace. */
+@keyframes oracle-kenburns {
+  from { transform: scale(1); }
+  to   { transform: scale(1.05); }
+}
+.oracle-kenburns {
+  animation: oracle-kenburns 20s linear infinite alternate;
+  will-change: transform;
+}
+@keyframes audit-ring-glow {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 0.7; }
+}
+.audit-ring-glow {
+  opacity: 0.25;
+  animation: audit-ring-glow 2.4s ease-in-out infinite;
+}
+@keyframes empty-state-ring-a {
+  0%, 100% { transform: scale(1); opacity: 0.3; }
+  50%      { transform: scale(1.2); opacity: 0.1; }
+}
+@keyframes empty-state-ring-b {
+  0%, 100% { transform: scale(1); opacity: 0.2; }
+  50%      { transform: scale(1.4); opacity: 0.05; }
+}
+.empty-state-ring-a {
+  opacity: 0.3;
+  animation: empty-state-ring-a 3s ease-in-out infinite;
+}
+.empty-state-ring-b {
+  opacity: 0.2;
+  animation: empty-state-ring-b 3s ease-in-out 0.5s infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .oracle-kenburns,
+  .empty-state-ring-a,
+  .empty-state-ring-b {
+    animation: none;
+  }
+  .audit-ring-glow {
+    animation: none;
+    opacity: 0.45;
+  }
+}
+

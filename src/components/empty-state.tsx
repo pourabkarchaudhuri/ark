@@ -228,35 +228,17 @@ function IconEmptyState({ type, onAction, className }: EmptyStateProps) {
           <Icon className={cn("w-16 h-16", config.iconColor)} />
         </div>
 
-        {/* Animated rings */}
-        <motion.div
-          animate={{ 
-            scale: [1, 1.2, 1],
-            opacity: [0.3, 0.1, 0.3]
-          }}
-          transition={{
-            duration: 3,
-            repeat: Infinity,
-            ease: "easeInOut"
-          }}
+        {/* Animated rings — CSS keyframes (index.css), so the loop runs on the
+            compositor rather than framer's JS loop, and honours reduced motion. */}
+        <div
           className={cn(
-            "absolute inset-0 rounded-full border",
+            "empty-state-ring-a absolute inset-0 rounded-full border",
             config.iconColor.replace('text-', 'border-').replace('500', '500/30')
           )}
         />
-        <motion.div
-          animate={{ 
-            scale: [1, 1.4, 1],
-            opacity: [0.2, 0.05, 0.2]
-          }}
-          transition={{
-            duration: 3,
-            repeat: Infinity,
-            ease: "easeInOut",
-            delay: 0.5
-          }}
+        <div
           className={cn(
-            "absolute inset-0 rounded-full border",
+            "empty-state-ring-b absolute inset-0 rounded-full border",
             config.iconColor.replace('text-', 'border-').replace('500', '500/20')
           )}
         />

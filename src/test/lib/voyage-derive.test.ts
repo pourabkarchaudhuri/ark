@@ -18,8 +18,10 @@ import {
   computeStatusDistribution,
   computeStreaks,
   DAY_MS,
+  deriveMilestones,
   MINUTE_MS,
 } from '@/lib/voyage-derive';
+import type { PlayScene } from '@/lib/voyage-derive';
 
 function session(
   gameId: string,
@@ -437,5 +439,173 @@ describe('computeOpenItemsTrend', () => {
     expect(byLabel['2024-5'].decided).toBe(1);
     expect(byLabel['2024-5'].open).toBe(0);
     expect(byLabel['2024-6'].open).toBe(0);
+  });
+});
+
+// ─── v1.0.97 B29 ─────────────────────────────────────────────────────────────
+
+function sceneAt(id: string, gameId: string, startMs: number, endMs: number): PlayScene {
+  return {
+    id,
+    gameId,
+    title: gameId,
+    startMs,
+    endMs,
+    spanMs: endMs - startMs,
+    minutes: 60,
+    sessionCount: 1,
+    dayCount: 1,
+    longestSessionMinutes: 60,
+    sincePreviousMs: null,
+    isFirstForGame: true,
+    isLastForGame: true,
+    isMicroLaunch: false,
+    type: 'drip',
+  };
+}
+
+describe('computeSceneGaps — overlapping episodes (ui-voyage#16)', () => {
+  const t = (iso: string) => Date.parse(iso);
+
+  it('reports no gap while a long episode on another game covers the silence', () => {
+    // A: Jan → Jun steadily. B (Feb 10) and C (May 1) are short and start inside A.
+    const a = sceneAt('a', 'steam-a', t('2024-01-01T00:00:00Z'), t('2024-06-30T00:00:00Z'));
+    const b = sceneAt('b', 'steam-b', t('2024-02-10T00:00:00Z'), t('2024-02-10T02:00:00Z'));
+    const c = sceneAt('c', 'steam-c', t('2024-05-01T00:00:00Z'), t('2024-05-01T02:00:00Z'));
+    // Newest-first by start, as clusterSessionsIntoScenes returns them.
+    expect(computeSceneGaps([c, b, a], 14 * DAY_MS)).toHaveLength(0);
+  });
+
+  it('measures the silence from the latest end seen, not the previous start', () => {
+    const a = sceneAt('a', 'steam-a', t('2024-01-01T00:00:00Z'), t('2024-06-30T00:00:00Z'));
+    const b = sceneAt('b', 'steam-b', t('2024-02-10T00:00:00Z'), t('2024-02-10T02:00:00Z'));
+    const d = sceneAt('d', 'steam-d', t('2024-08-01T00:00:00Z'), t('2024-08-01T02:00:00Z'));
+    const gaps = computeSceneGaps([d, b, a], 14 * DAY_MS);
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].startMs).toBe(a.endMs);
+    expect(gaps[0].endMs).toBe(d.startMs);
+    expect(gaps[0].id).toBe('gap:a->d');
+    expect(gaps[0].nextSceneId).toBe('d');
+    expect(gaps[0].isLongest).toBe(true);
+  });
+
+  it('leaves the plain non-overlapping case unchanged and newest-first', () => {
+    const s1 = sceneAt('s1', 'g1', t('2024-01-01T00:00:00Z'), t('2024-01-01T01:00:00Z'));
+    const s2 = sceneAt('s2', 'g2', t('2024-02-01T00:00:00Z'), t('2024-02-01T01:00:00Z'));
+    const s3 = sceneAt('s3', 'g3', t('2024-06-01T00:00:00Z'), t('2024-06-01T01:00:00Z'));
+    const gaps = computeSceneGaps([s3, s2, s1], 14 * DAY_MS);
+    expect(gaps.map((g) => g.id)).toEqual(['gap:s2->s3', 'gap:s1->s2']);
+    expect(gaps[0].ms).toBe(s3.startMs - s2.endMs);
+    expect(gaps[1].ms).toBe(s2.startMs - s1.endMs);
+    expect(gaps.filter((g) => g.isLongest).map((g) => g.id)).toEqual(['gap:s2->s3']);
+  });
+
+  it('handles equal start times without a negative or duplicate gap', () => {
+    const x = sceneAt('x', 'g1', t('2024-01-01T00:00:00Z'), t('2024-01-01T01:00:00Z'));
+    const y = sceneAt('y', 'g2', t('2024-01-01T00:00:00Z'), t('2024-01-03T00:00:00Z'));
+    const z = sceneAt('z', 'g3', t('2024-02-01T00:00:00Z'), t('2024-02-01T01:00:00Z'));
+    const gaps = computeSceneGaps([z, y, x], 14 * DAY_MS);
+    expect(gaps).toHaveLength(1);
+    // The silence starts when the longer of the two equal-start episodes ended.
+    expect(gaps[0].startMs).toBe(y.endMs);
+    expect(gaps[0].ms).toBeGreaterThan(0);
+  });
+});
+
+describe('computeRhythmHeatmap — peakSlot (ui-voyage#17)', () => {
+  it('names the busiest cell, not the busiest weekday plus the busiest hour', () => {
+    const sessions: GameSession[] = [];
+    // 20 Saturday-morning sessions, spread over hours 6..11 so no single hour wins.
+    for (let i = 0; i < 20; i++) {
+      sessions.push(localSession('sat', new Date(2024, 5, 15 - 7 * (i % 4), 6 + (i % 6), i, 0), 30));
+    }
+    // 15 Wednesday 21:00 sessions — the busiest single hour.
+    for (let i = 0; i < 15; i++) {
+      sessions.push(localSession('wed', new Date(2024, 5, 12 - 7 * (i % 4), 21, i, 0), 30));
+    }
+    const heat = computeRhythmHeatmap(sessions);
+    expect(heat.peakWeekday).toBe(6);
+    expect(heat.peakHour).toBe(21);
+    expect(heat.peakSlot).toEqual({ weekday: 6, daypart: 1 });
+    expect(heat.grid[6][1]).toBe(20);
+    expect(heat.max).toBe(20);
+  });
+
+  it('is null with no play', () => {
+    expect(computeRhythmHeatmap([]).peakSlot).toBeNull();
+  });
+});
+
+describe('deriveMilestones — bookkeeping rows (ui-voyage#18)', () => {
+  it('counts a completion once when a sync row marks the store twin Completed', () => {
+    const history: StatusChangeEntry[] = [
+      {
+        gameId: 'steam-1',
+        title: 'Hades',
+        previousStatus: 'Playing',
+        newStatus: 'Completed',
+        timestamp: '2024-03-01T10:00:00Z',
+        source: 'user',
+      },
+      {
+        gameId: 'epic-hades',
+        title: 'Hades',
+        previousStatus: 'Playing',
+        newStatus: 'Completed',
+        timestamp: '2024-03-01T10:00:01Z',
+        source: 'sync',
+      },
+    ];
+    const milestones = deriveMilestones(history, []);
+    const completions = milestones.filter((m) => m.kind === 'completions');
+    expect(completions).toHaveLength(1);
+    expect(completions[0].gameId).toBe('steam-1');
+    // The twin is not a second title logged either.
+    expect(milestones.filter((m) => m.kind === 'titles')).toHaveLength(1);
+  });
+
+  it('still counts source-less legacy rows', () => {
+    const history: StatusChangeEntry[] = Array.from({ length: 5 }, (_, i) => ({
+      gameId: `steam-${i}`,
+      title: `G${i}`,
+      previousStatus: 'Playing' as const,
+      newStatus: 'Completed' as const,
+      timestamp: new Date(Date.UTC(2024, 0, 1 + i)).toISOString(),
+    }));
+    const completions = deriveMilestones(history, []).filter((m) => m.kind === 'completions');
+    expect(completions.map((m) => m.ordinal).sort((a, b) => a - b)).toEqual([1, 5]);
+  });
+});
+
+describe('computeOpenItemsTrend — removed games (ui-voyage#19)', () => {
+  it('ignores decisions for games no longer in the library', () => {
+    const libraryEntries: LibraryGameEntry[] = [];
+    const journeyEntries: JourneyEntry[] = [];
+    const statusHistory: StatusChangeEntry[] = [];
+    // 30 removed games that were completed.
+    for (let i = 0; i < 30; i++) {
+      const id = `steam-removed-${i}`;
+      journeyEntries.push(
+        journey({ gameId: id, status: 'Completed', addedAt: new Date(2024, 0, 5).toISOString() }),
+      );
+      statusHistory.push({
+        gameId: id,
+        title: id,
+        previousStatus: 'Want to Play',
+        newStatus: 'Completed',
+        timestamp: new Date(2024, 4, 2).toISOString(),
+      });
+    }
+    // 5 undecided games still in the library.
+    for (let i = 0; i < 5; i++) {
+      const id = `steam-lib-${i}`;
+      libraryEntries.push(library({ gameId: id, addedAt: new Date(2024, 3, 10) }));
+      journeyEntries.push(journey({ gameId: id, addedAt: new Date(2024, 3, 10).toISOString() }));
+    }
+    const rollups = buildGameRollups({ journeyEntries, libraryEntries, statusHistory, sessions: [] });
+    expect(rollups.filter((r) => r.inLibrary)).toHaveLength(5);
+    const trend = computeOpenItemsTrend(rollups, statusHistory, NOW, 6);
+    expect(trend[trend.length - 1].open).toBe(5);
+    expect(trend.every((m) => m.decided === 0)).toBe(true);
   });
 });
