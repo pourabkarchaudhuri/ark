@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { GameCard } from '@/components/game-card';
 import { Game } from '@/types/game';
@@ -554,6 +554,115 @@ describe('GameCard', () => {
       // Should have store badge area rendered
       const card = screen.getByText('Test Game').closest('.group');
       expect(card).toBeInTheDocument();
+    });
+  });
+  describe('Image fallback reset when URLs change (1.0.97)', () => {
+    const customGame: Game = {
+      ...mockGame,
+      id: 'custom-img',
+      store: 'custom',
+      steamAppId: undefined,
+      isCustom: true,
+      coverUrl: 'https://img.test/broken.jpg',
+      headerImage: undefined,
+    };
+
+    function markLoaded(img: HTMLImageElement) {
+      Object.defineProperty(img, 'naturalWidth', { configurable: true, value: 600 });
+      Object.defineProperty(img, 'naturalHeight', { configurable: true, value: 300 });
+      fireEvent.load(img);
+    }
+
+    it('shows the new image after enrichment supplies a URL, even when every old URL failed', () => {
+      const { container, rerender } = render(
+        <GameCard game={customGame} onEdit={() => {}} onDelete={() => {}} />
+      );
+      const img = container.querySelector('img') as HTMLImageElement;
+      expect(img.getAttribute('src')).toBe('https://img.test/broken.jpg');
+      fireEvent.error(img);
+      expect(container.querySelector('img')).toBeNull();
+      expect(screen.getByText('TG')).toBeInTheDocument();
+
+      rerender(
+        <GameCard game={{ ...customGame, coverUrl: 'https://img.test/enriched.jpg' }} onEdit={() => {}} onDelete={() => {}} />
+      );
+      const next = container.querySelector('img') as HTMLImageElement;
+      expect(next).not.toBeNull();
+      expect(next.getAttribute('src')).toBe('https://img.test/enriched.jpg');
+    });
+
+    it('keeps the working image when the new list still contains it', () => {
+      const epic: Game = {
+        ...mockEpicGame,
+        headerImage: 'https://img.test/header-a.jpg',
+        coverUrl: 'https://img.test/cover-b.jpg',
+        screenshots: [],
+      };
+      const { container, rerender } = render(
+        <GameCard game={epic} onEdit={() => {}} onDelete={() => {}} />
+      );
+      fireEvent.error(container.querySelector('img') as HTMLImageElement);
+      const working = container.querySelector('img') as HTMLImageElement;
+      expect(working.getAttribute('src')).toBe('https://img.test/cover-b.jpg');
+      markLoaded(working);
+      expect(working.className).toContain('opacity-100');
+
+      // A new header arrives first in the list; the URL on screen is still in it.
+      rerender(
+        <GameCard game={{ ...epic, headerImage: 'https://img.test/header-c.jpg' }} onEdit={() => {}} onDelete={() => {}} />
+      );
+      const after = container.querySelector('img') as HTMLImageElement;
+      expect(after.getAttribute('src')).toBe('https://img.test/cover-b.jpg');
+      expect(after.className).toContain('opacity-100');
+    });
+  });
+
+  describe('Context menu placement and Escape (1.0.97)', () => {
+    const MENU_W = 160;
+    const MENU_H = 120;
+    let restore: (() => void) | null = null;
+
+    beforeEach(() => {
+      const w = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+      const h = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get: () => MENU_W });
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, get: () => MENU_H });
+      restore = () => {
+        if (w) Object.defineProperty(HTMLElement.prototype, 'offsetWidth', w);
+        if (h) Object.defineProperty(HTMLElement.prototype, 'offsetHeight', h);
+      };
+    });
+    afterEach(() => { restore?.(); restore = null; });
+
+    it('keeps a menu opened near the bottom-right corner fully inside the window', () => {
+      render(<GameCard game={mockGame} onEdit={() => {}} onDelete={() => {}} isInLibrary={true} />);
+      const card = screen.getByText('Test Game').closest('.group') as HTMLElement;
+      fireEvent.contextMenu(card, { clientX: window.innerWidth - 10, clientY: window.innerHeight - 10 });
+      const menu = screen.getByText('Remove from Library').closest('.fixed') as HTMLElement;
+      const left = parseFloat(menu.style.left);
+      const top = parseFloat(menu.style.top);
+      expect(left).toBeGreaterThanOrEqual(8);
+      expect(top).toBeGreaterThanOrEqual(8);
+      expect(left + MENU_W).toBeLessThanOrEqual(window.innerWidth - 8);
+      expect(top + MENU_H).toBeLessThanOrEqual(window.innerHeight - 8);
+    });
+
+    it('leaves a menu with room to spare at the cursor', () => {
+      render(<GameCard game={mockGame} onEdit={() => {}} onDelete={() => {}} isInLibrary={true} />);
+      const card = screen.getByText('Test Game').closest('.group') as HTMLElement;
+      fireEvent.contextMenu(card, { clientX: 20, clientY: 30 });
+      const menu = screen.getByText('Edit Entry').closest('.fixed') as HTMLElement;
+      expect(parseFloat(menu.style.left)).toBe(20);
+      expect(parseFloat(menu.style.top)).toBe(30);
+    });
+
+    it('closes on Escape', () => {
+      render(<GameCard game={mockGame} onEdit={() => {}} onDelete={() => {}} isInLibrary={true} />);
+      const card = screen.getByText('Test Game').closest('.group') as HTMLElement;
+      fireEvent.contextMenu(card, { clientX: 20, clientY: 30 });
+      expect(screen.getByText('Edit Entry')).toBeInTheDocument();
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(screen.queryByText('Edit Entry')).not.toBeInTheDocument();
     });
   });
 });
