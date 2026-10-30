@@ -126,8 +126,19 @@ import {
   destroyOverlay,
 } from './overlay-window.js';
 import { logger } from './safe-logger.js';
-import { setEmbeddingBackgroundMode } from './ipc/ollama-handlers.js';
+import {
+  setEmbeddingBackgroundMode,
+  applyInitialWindowBackground,
+  setEmbeddingHiddenStart,
+  setEmbeddingGameRunning,
+} from './ipc/ollama-handlers.js';
+import { unloadArkModels } from './ollama-setup.js';
+import { setGameActivityListener } from './game-activity.js';
 import { atomicWriteFileSync } from './safe-write.js';
+// A tracked game starting forces embedding background mode, holds background
+// embed/rerank work and frees Ark's Ollama models; the game ending restores
+// the window-derived state.
+setGameActivityListener(setEmbeddingGameRunning);
 let mainWindow: BrowserWindowType | null = null;
 
 // ---------------------------------------------------------------------------
@@ -369,6 +380,10 @@ function getPreloadPath(): string {
 }
 
 function createWindow() {
+  // Hidden auto-start: embedding pacing starts in background mode and the
+  // boot warm-up is skipped (no window event will ever say otherwise until
+  // the user opens Ark). Set before the renderer can ask for ollama:setup.
+  if (process.argv.includes('--hidden')) setEmbeddingHiddenStart(true);
   // Resolve paths: when packaged, use app path so loadFile/preload work from installed location
   const preloadPath = getPreloadPath();
   let indexPath: string;
@@ -513,7 +528,11 @@ function createWindow() {
     } else {
       logger.log('[Startup] Launched with --hidden flag, staying in tray');
     }
-    
+    // Window events never fire for a window that stays hidden, so derive the
+    // embedding background state from the show decision; the show/focus
+    // handlers below switch it off once the user opens Ark.
+    if (mainWindow) applyInitialWindowBackground(mainWindow);
+
     // Initialize auto-updater in production mode
     if (app.isPackaged && mainWindow) {
       initAutoUpdater(mainWindow);
@@ -1166,6 +1185,9 @@ const handleOsSessionEnd = createSessionEndHandler({
   quit: () => app.quit(),
 });
 
+/** Started in before-quit; will-quit waits for it (it is bounded by its own timeout). */
+let ollamaUnloadOnQuit: Promise<void> | null = null;
+
 // Set isQuitting flag before quit so close interceptor lets through
 // Also flush caches synchronously so no data is lost on shutdown
 app.on('before-quit', () => {
@@ -1174,6 +1196,10 @@ app.on('before-quit', () => {
   // Tear down the overlay HUD and release its global hotkey.
   try { unregisterOverlayHotkey(); } catch (e) { logger.error('[Shutdown] Overlay hotkey unregister failed:', e); }
   try { destroyOverlay(); } catch (e) { logger.error('[Shutdown] Overlay destroy failed:', e); }
+  // Free Ark's Ollama models instead of leaving them loaded for keep_alive
+  // after Ark is gone. Bounded (~1 s) and awaited alongside the LevelDB close
+  // in will-quit, so it never holds the quit beyond that.
+  if (!ollamaUnloadOnQuit) ollamaUnloadOnQuit = unloadArkModels().then(() => undefined, () => undefined);
 });
 
 // Flush LevelDB on shutdown. Fires after all windows have closed but before
@@ -1194,7 +1220,8 @@ app.on('will-quit', (event: any) => {
     .then(() => getLevelStore().close())
     .catch((err) => { logger.error('[Shutdown] LevelDB close failed:', err); });
   const cap = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_CLOSE_TIMEOUT_MS));
-  void Promise.race([closeDb, cap]).finally(() => {
+  const shutdownWork = Promise.all([closeDb, ollamaUnloadOnQuit ?? Promise.resolve()]);
+  void Promise.race([shutdownWork, cap]).finally(() => {
     try { app.exit(0); } catch { process.exit(0); }
   });
 });

@@ -27,6 +27,9 @@ import {
   ensureRerankModelPull,
   getRerankQwenModelTag,
   EMBEDDING_MODEL_NAME,
+  OLLAMA_KEEP_ALIVE,
+  unloadArkModels,
+  warmUpIfSkipped,
 } from '../ollama-setup.js';
 import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
 import { getGpuStats } from '../gpu-stats.js';
@@ -146,13 +149,13 @@ async function rerankViaNativeEndpoint(
     res = await fetch(`${baseUrl}/api/rerank`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // v1.0.60 fix: pin bge-reranker in memory forever. Without keep_alive,
-      // Ollama unloads the ~1.2 GB model after its default 5 min idle. Every
-      // subsequent call pays a 30–80 s reload — and if arctic-embed2 (which
-      // IS pinned) is called between two rerank calls on a single-GPU box
-      // with OLLAMA_NUM_PARALLEL=1, the two models thrash-swap. Wave 3's
-      // ES neighbor rerank made this the top perf bug (24 h reco cycles).
-      body: JSON.stringify({ model, query, documents, top_n: topN, keep_alive: -1 }),
+      // v1.0.60 fix: without keep_alive, Ollama unloads the ~1.2 GB model
+      // after its default 5 min idle. Every subsequent call pays a 30–80 s
+      // reload — and if arctic-embed2 is called between two rerank calls on a
+      // single-GPU box with OLLAMA_NUM_PARALLEL=1, the two models thrash-swap.
+      // The shared finite window (same as the embedder) avoids that without
+      // pinning the model forever.
+      body: JSON.stringify({ model, query, documents, top_n: topN, keep_alive: OLLAMA_KEEP_ALIVE }),
       signal: ac.signal,
     });
   } catch (err) {
@@ -233,28 +236,141 @@ const EMBED_BISECT_BUDGET = 24;
 
 // ─── Session-scoped state ─────────────────────────────────────────────────
 const embedState = {
-  /** True when main window has been blurred for >2s — assume user is in another app (likely gaming). */
-  background: false,
+  /** Window-derived: blurred for >2s, minimized, hidden, or never shown (hidden start). */
+  windowBackground: false,
+  /** A tracked game session is running (session-tracker). */
+  gameRunning: false,
+  /** Ark was started with --hidden and the window has not been shown yet. */
+  hiddenStart: false,
 };
 
+/** Batch-embed calls waiting for the hold to lift (see isOllamaWorkHeld). */
+let releaseWaiters: Array<() => void> = [];
+
+/** Polite pacing applies while the window is in the background OR a game runs. */
+export function isEmbeddingBackground(): boolean {
+  return embedState.windowBackground || embedState.gameRunning;
+}
+
 /**
- * Toggle polite background mode. Called by main.ts when the main window
- * blur/focus state changes. Affects only app-side pacing (sub-batch size,
- * in-flight count, cooldown) — never the Ollama runner options.
+ * Background embedding / rerank work is held while a game runs and the user is
+ * not looking at Ark — otherwise the next batch would reload the models that
+ * `unloadArkModels` just freed for the game. Bringing Ark to the front lifts
+ * the hold (the user is asking for results now).
+ */
+export function isOllamaWorkHeld(): boolean {
+  return embedState.gameRunning && embedState.windowBackground;
+}
+
+/** Resolves as soon as the hold is lifted (immediately when there is none). */
+export function waitForOllamaRelease(): Promise<void> {
+  if (!isOllamaWorkHeld()) return Promise.resolve();
+  return new Promise((resolve) => { releaseWaiters.push(resolve); });
+}
+
+function flushReleaseWaiters(): void {
+  if (isOllamaWorkHeld() || releaseWaiters.length === 0) return;
+  const waiters = releaseWaiters;
+  releaseWaiters = [];
+  for (const w of waiters) w();
+}
+
+/**
+ * Window-derived background mode. Called by main.ts when the main window
+ * blur/focus/show/hide state changes. Affects only app-side pacing (sub-batch
+ * size, in-flight count, cooldown) — never the Ollama runner options, and
+ * never unloads models (that would bring back the v1.0.60 reload thrash).
  */
 export function setEmbeddingBackgroundMode(on: boolean): void {
-  if (embedState.background === on) return;
-  embedState.background = on;
-  logger.log(`[Ollama] Embedding background mode: ${on ? 'ON (polite — foreground app gets GPU)' : 'OFF (full throughput)'}`);
+  if (embedState.windowBackground === on) return;
+  embedState.windowBackground = on;
+  logger.log(`[Ollama] Embedding background mode (window): ${on ? 'ON (polite — foreground app gets GPU)' : 'OFF (full throughput)'}`);
+  if (!on) {
+    embedState.hiddenStart = false;
+    // A hidden start skipped the boot warm-up; run it now that the window is
+    // up — unless a game is running, where it would only take its VRAM.
+    if (!embedState.gameRunning) warmUpIfSkipped();
+  }
+  flushReleaseWaiters();
+}
+
+/**
+ * Initial window-derived state, applied in ready-to-show after the show
+ * decision. Window events never fire for a window that starts hidden in the
+ * tray, so without this a hidden auto-start embedded at full speed.
+ */
+export function applyInitialWindowBackground(win: { isVisible(): boolean; isFocused(): boolean }): void {
+  setEmbeddingBackgroundMode(!win.isVisible() || !win.isFocused());
+}
+
+/** main.ts: Ark was launched with --hidden (auto-start), so the boot warm-up is skipped. */
+export function setEmbeddingHiddenStart(on: boolean): void {
+  embedState.hiddenStart = on;
+  if (on) setEmbeddingBackgroundMode(true);
+}
+
+/**
+ * Game-session state from session-tracker. Combined with the window state
+ * (it never overwrites it): when the game ends, pacing returns to whatever
+ * the window says. A game start also frees Ark's models from VRAM/RAM.
+ */
+export function setEmbeddingGameRunning(on: boolean): void {
+  if (embedState.gameRunning === on) return;
+  embedState.gameRunning = on;
+  logger.log(`[Ollama] Game ${on ? 'started — background mode forced, unloading Ark models' : 'ended — background mode follows the window again'}`);
+  if (on) void unloadArkModels();
+  flushReleaseWaiters();
+}
+
+// ─── Drain unload ─────────────────────────────────────────────────────────
+// keep_alive keeps the models for OLLAMA_KEEP_ALIVE after the last request.
+// When background work drains while nobody is looking at Ark (hidden start,
+// minimized), there is no reason to hold them that long.
+export const DRAIN_UNLOAD_DELAY_MS = 2 * 60 * 1000;
+let activeOllamaWork = 0;
+let drainTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Mark the start of an embed / rerank call (cancels a pending drain unload). */
+export function beginOllamaWork(): void {
+  activeOllamaWork += 1;
+  if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
+}
+
+/** Mark the end of an embed / rerank call; the last one arms the drain unload. */
+export function endOllamaWork(): void {
+  activeOllamaWork = Math.max(0, activeOllamaWork - 1);
+  if (activeOllamaWork > 0) return;
+  if (drainTimer) clearTimeout(drainTimer);
+  drainTimer = setTimeout(() => {
+    drainTimer = null;
+    if (activeOllamaWork === 0 && embedState.windowBackground) void unloadArkModels();
+  }, DRAIN_UNLOAD_DELAY_MS);
+  drainTimer.unref?.();
+}
+
+/** Test seam: back to the boot state. */
+export function resetOllamaRuntimeStateForTests(): void {
+  embedState.windowBackground = false;
+  embedState.gameRunning = false;
+  embedState.hiddenStart = false;
+  releaseWaiters = [];
+  activeOllamaWork = 0;
+  if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
 }
 
 const RERANK_MAX_DOCS = 100;
 const RERANK_MAX_CHARS = 8000;
 const RERANK_TIMEOUT_MS = 120_000;
 
-export function register(): void {
+/** The slice of ipcMain this module uses — injectable so tests can drive the handlers. */
+export interface OllamaIpcRegistrar {
+  handle(channel: string, listener: (event: any, ...args: any[]) => unknown): void;
+  on(channel: string, listener: (event: any, ...args: any[]) => void): void;
+}
+
+export function register(ipc: OllamaIpcRegistrar = ipcMain): void {
   // Check if Ollama is running
-  ipcMain.handle('ollama:healthCheck', async () => {
+  ipc.handle('ollama:healthCheck', async () => {
     try {
       return await isOllamaRunning();
     } catch (error) {
@@ -265,7 +381,7 @@ export function register(): void {
 
   // Run the full setup sequence (check + pull missing models).
   // Progress is sent to the renderer via ollama:setup-progress for splash UI.
-  ipcMain.handle('ollama:setup', async (event) => {
+  ipc.handle('ollama:setup', async (event) => {
     const sender = event.sender;
     try {
       return await runOllamaSetup(
@@ -287,6 +403,9 @@ export function register(): void {
             // Window may have closed
           }
         },
+        // Hidden auto-start with no window: no work is queued, so loading the
+        // embedder now would only hold VRAM while the user games.
+        { skipWarmUp: embedState.hiddenStart && embedState.windowBackground },
       );
     } catch (error) {
       logger.error('[Ollama] Setup error:', error);
@@ -303,7 +422,7 @@ export function register(): void {
   });
 
   // Generate embedding for a single text
-  ipcMain.handle('ollama:generateEmbedding', async (_event: any, text: string) => {
+  ipc.handle('ollama:generateEmbedding', async (_event: any, text: string) => {
     try {
       if (!text || typeof text !== 'string') return null;
       return await generateEmbedding(text);
@@ -319,9 +438,10 @@ export function register(): void {
   // `opts.reportTransient` (v1.0.73): return `{ results, transientIds }` instead of the bare map.
   // transientIds = items that got no vector for a reason that says nothing about the text
   // (timeout / server gone / never sent) — the caller must not count those as the game's fault.
-  ipcMain.handle('ollama:generateEmbeddings', async (_event: any, items: Array<{ id: string; text: string }>, opts?: { reportTransient?: boolean }) => {
+  ipc.handle('ollama:generateEmbeddings', async (_event: any, items: Array<{ id: string; text: string }>, opts?: { reportTransient?: boolean }) => {
     const transientIds: string[] = [];
     const reply = (results: Record<string, number[]>) => (opts?.reportTransient ? { results, transientIds } : results);
+    beginOllamaWork();
     try {
       if (!Array.isArray(items)) return reply({});
 
@@ -357,7 +477,7 @@ export function register(): void {
       // User override from Settings (0 = Auto). Background mode stays polite regardless.
       const userBatch = settingsStore.getOllamaSettings().embeddingBatchSize;
       const pickProfile = () => {
-        const background = embedState.background;
+        const background = isEmbeddingBackground();
         const numBatch = getSessionNumBatch();
         if (!onGpu) {
           return {
@@ -425,6 +545,13 @@ export function register(): void {
       let cursor = 0;
       const runWorker = async (): Promise<void> => {
         while (cursor < subBatches.length && !serverDown) {
+          // Hold the pass while a game runs in the foreground — the next
+          // sub-batch would reload the models freed for the game.
+          if (isOllamaWorkHeld()) {
+            logger.log('[Ollama] Embedding pass held while a game is running');
+            await waitForOllamaRelease();
+            if (cursor >= subBatches.length) break;
+          }
           const myIdx = cursor++;
           const subBatch = subBatches[myIdx];
           const texts = subBatch.map(item => item.text);
@@ -462,6 +589,8 @@ export function register(): void {
       logger.error('[Ollama] Batch embedding error:', error);
       for (const item of Array.isArray(items) ? items : []) if (item?.id) transientIds.push(item.id);
       return reply({});
+    } finally {
+      endOllamaWork();
     }
   });
 
@@ -477,7 +606,7 @@ export function register(): void {
    *     and times it. Returns embeds/sec + per-text avg ms.
    */
   // Live VRAM readout for the Settings batch-size slider (polled while the panel is open).
-  ipcMain.handle('ollama:gpuStats', async () => {
+  ipc.handle('ollama:gpuStats', async () => {
     try {
       return await getGpuStats();
     } catch (err) {
@@ -486,7 +615,7 @@ export function register(): void {
     }
   });
 
-  ipcMain.handle('ollama:embedDiagnostic', async () => {
+  ipc.handle('ollama:embedDiagnostic', async () => {
     const result: {
       ollamaUp: boolean;
       ollamaVersion: string | null;
@@ -559,7 +688,7 @@ export function register(): void {
       // Same session-fixed runner options as production — so the number
       // reflects real throughput and the probe never triggers a model reload.
       const onGpu = result.onGpu;
-      const background = embedState.background;
+      const background = isEmbeddingBackground();
       const opts = getSessionEmbedOptions();
 
       const t0 = Date.now();
@@ -589,7 +718,7 @@ export function register(): void {
     }
   });
 
-  ipcMain.handle('ollama:modelInfo', async () => {
+  ipc.handle('ollama:modelInfo', async () => {
     try {
       const info = await getEmbeddingModelInfo();
       if (info) return info;
@@ -631,11 +760,12 @@ export function register(): void {
    *               renderer passes slightly less than its own deadline so a
    *               truncated pass still comes back in time to be used
    */
-  ipcMain.handle('ollama:rerank', async (_event: any, payload: unknown): Promise<OllamaRerankIpcResult> => {
+  ipc.handle('ollama:rerank', async (_event: any, payload: unknown): Promise<OllamaRerankIpcResult> => {
     const startedAt = Date.now();
     const rawId = payload && typeof payload === 'object' ? (payload as { requestId?: unknown }).requestId : undefined;
     const requestId = typeof rawId === 'string' && rawId.length > 0 && rawId.length <= 128 ? rawId : null;
     const signal = beginRerankRequest(requestId);
+    beginOllamaWork();
 
     const fail = (
       code: string,
@@ -702,6 +832,11 @@ export function register(): void {
         return succeed(all.slice(0, topN), 'embed_fallback', all, slice.length);
       };
 
+      // A game is running in the foreground: any tier would reload a model
+      // freed for the game. 'cancelled' maps to a skipped rerank in the
+      // renderer, which keeps its un-reranked order.
+      if (isOllamaWorkHeld()) return fail('cancelled', 'Rerank paused while a game is running');
+
       let detection = await detectRerankTier();
       if (signal.aborted) return fail('cancelled', 'Cancelled by the renderer');
 
@@ -736,7 +871,7 @@ export function register(): void {
           graded: detection.tier === 'qwen_graded',
           // Same politeness contract as embeddings: when the window has been
           // blurred we assume a game has the GPU and pause between documents.
-          isBackground: () => embedState.background,
+          isBackground: isEmbeddingBackground,
           ...(budgetMs !== undefined ? { budgetMs } : {}),
           signal,
         });
@@ -763,6 +898,7 @@ export function register(): void {
       return fail(code, message);
     } finally {
       endRerankRequest(requestId);
+      endOllamaWork();
     }
   });
 
@@ -771,7 +907,7 @@ export function register(): void {
    * Stops the Qwen3 loop before its next document and aborts a native request,
    * so Ollama is not kept busy producing a result nobody will read.
    */
-  ipcMain.handle('ollama:rerankCancel', async (_event: any, requestId: unknown): Promise<boolean> => {
+  ipc.handle('ollama:rerankCancel', async (_event: any, requestId: unknown): Promise<boolean> => {
     if (typeof requestId !== 'string' || !requestId) return false;
     return cancelRerankRequest(requestId);
   });
@@ -781,7 +917,7 @@ export function register(): void {
    * budget and document pool by tier (Qwen3 costs one generate call per doc).
    * Uses the cached detection when it is still fresh.
    */
-  ipcMain.handle('ollama:rerankTier', async () => {
+  ipc.handle('ollama:rerankTier', async () => {
     try {
       const d = await detectRerankTier();
       return { tier: d.tier, label: rerankTierLabel(d.tier), model: d.model, ollamaUp: d.ollamaUp };
@@ -795,7 +931,7 @@ export function register(): void {
    * One summary line per rerank run, composed by the renderer (it is the only
    * side that knows how many positions actually moved). Fire-and-forget.
    */
-  ipcMain.on('ollama:rerankLog', (_event: any, line: unknown) => {
+  ipc.on('ollama:rerankLog', (_event: any, line: unknown) => {
     if (typeof line !== 'string' || !line.startsWith('[Rerank]')) return;
     logger.log(line.slice(0, 400).replace(/[\r\n]+/g, ' '));
   });
@@ -807,7 +943,7 @@ export function register(): void {
    * `ollamaUp` / `modelName` / `modelInstalled` / `rerankWorking` / `latencyMs`
    * are kept for the Settings screen's existing "Test reranker" button.
    */
-  ipcMain.handle('ollama:rerankDiagnostic', async () => {
+  ipc.handle('ollama:rerankDiagnostic', async () => {
     const ollama = settingsStore.getOllamaSettings();
     const baseUrl = ollama.url.replace(/\/$/, '');
     const modelName = ollama.rerankModel?.trim() || DEFAULT_OLLAMA_RERANK_MODEL;

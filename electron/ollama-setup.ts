@@ -69,6 +69,18 @@ const HEALTH_TIMEOUT_MS = 15_000; // 15s — Ollama can be slow to respond on lo
 const LIST_TIMEOUT_MS = 15_000; // 15s for listing models
 const EMBED_TIMEOUT_MS = 120_000; // 120s — first call needs to load the 1.1 GB model into memory
 
+/**
+ * keep_alive sent with every Ark embed / rerank request. It used to be -1
+ * (never unload), which kept ~2-3 GB of models in VRAM/RAM through games and
+ * after Ark quit. A finite window still covers a whole embedding or rerank
+ * pass (no reload between calls — the v1.0.60 thrash fix), and
+ * `unloadArkModels` frees them early when a game starts, on quit, and after
+ * background work drains.
+ */
+export const OLLAMA_KEEP_ALIVE = '30m';
+/** Upper bound for `unloadArkModels` — it runs on quit and must never hold it up. */
+const UNLOAD_TIMEOUT_MS = 1_000;
+
 export interface OllamaSetupStatus {
   ollamaDetected: boolean;
   ollamaVersion: string | null;
@@ -241,9 +253,29 @@ export function createNdjsonLineSplitter(): (chunk: Buffer) => string[] {
 }
 
 /**
- * Pull a model (streaming progress). Returns true on success.
+ * True when `/api/tags` lists `tag` itself. A bare name means `:latest`, so a
+ * different quantization of the same model does not count as this tag.
  */
-async function pullModel(
+export function isExactTagInstalled(fullTags: string[], tag: string): boolean {
+  const target = tag.trim().toLowerCase();
+  if (!target) return false;
+  const withTag = target.includes(':') ? target : `${target}:latest`;
+  return fullTags.some((t) => {
+    const n = t.toLowerCase();
+    return n === target || n === withTag;
+  });
+}
+
+/**
+ * Pull a model (streaming progress). Returns true on success.
+ *
+ * Settles exactly once. A stream that ends without Ollama's final `success`
+ * line (truncated download, server restart) only counts as success when
+ * `/api/tags` confirms the tag is installed; a response error, abort or early
+ * close resolves false instead of raising an uncaught exception or leaving
+ * the caller waiting forever.
+ */
+export async function pullModel(
   modelName: string,
   onProgress?: (status: string, pct: number) => void,
 ): Promise<boolean> {
@@ -257,6 +289,12 @@ async function pullModel(
     const body = JSON.stringify({ name: modelName, stream: true });
     let sawSuccess = false;
     let sawError: string | null = null;
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
 
     const req = http.request(
       {
@@ -271,12 +309,14 @@ async function pullModel(
         if (res.statusCode && res.statusCode >= 400) {
           logger.error(`[Ollama Setup] Pull returned HTTP ${res.statusCode}`);
           onProgress?.(`HTTP error ${res.statusCode}`, 0);
+          res.on('error', () => finish(false));
           res.resume();
-          resolve(false);
+          finish(false);
           return;
         }
 
         const splitLines = createNdjsonLineSplitter();
+        let ended = false;
         res.on('data', (chunk: Buffer) => {
           for (const line of splitLines(chunk)) {
             if (!line.trim()) continue;
@@ -308,13 +348,39 @@ async function pullModel(
         });
 
         res.on('end', () => {
+          ended = true;
           if (sawError) {
             logger.error(`[Ollama Setup] Model pull failed: ${sawError}`);
-            resolve(false);
-          } else {
-            logger.log(`[Ollama Setup] Model pull completed: ${modelName} (success=${sawSuccess})`);
-            resolve(true);
+            finish(false);
+            return;
           }
+          if (sawSuccess) {
+            logger.log(`[Ollama Setup] Model pull completed: ${modelName}`);
+            finish(true);
+            return;
+          }
+          // No final "success" line: the stream was cut short, or this build
+          // does not send one. Only the installed-models list can tell.
+          listModels().then(({ fullTags }) => {
+            const installed = isExactTagInstalled(fullTags, modelName);
+            logger.warn(
+              `[Ollama Setup] Pull stream for ${modelName} ended without "success" — tag ${installed ? 'is' : 'is NOT'} installed`,
+            );
+            if (!installed) onProgress?.('Download ended early', 0);
+            finish(installed);
+          }, () => finish(false));
+        });
+        res.on('error', (err: Error) => {
+          logger.error(`[Ollama Setup] Model pull stream error: ${err.message}`);
+          onProgress?.(`Network error: ${err.message}`, 0);
+          finish(false);
+        });
+        res.on('aborted', () => {
+          logger.warn(`[Ollama Setup] Model pull stream aborted: ${modelName}`);
+          finish(false);
+        });
+        res.on('close', () => {
+          if (!ended && !res.complete) finish(false);
         });
       },
     );
@@ -322,14 +388,14 @@ async function pullModel(
     req.on('error', (err) => {
       logger.error(`[Ollama Setup] Model pull failed: ${err.message}`);
       onProgress?.(`Network error: ${err.message}`, 0);
-      resolve(false);
+      finish(false);
     });
 
     req.on('timeout', () => {
       logger.warn(`[Ollama Setup] Model pull timed out: ${modelName}`);
       onProgress?.('Download timed out', 0);
       req.destroy();
-      resolve(false);
+      finish(false);
     });
 
     req.write(body);
@@ -340,8 +406,10 @@ async function pullModel(
 // Rerank pull: in-flight dedupe plus a retry cooldown. A one-shot Set used to
 // block retries for the whole session, so a transient network failure during
 // boot meant no reranker until the app restarted.
-let _rerankPullInFlight: Promise<boolean> | null = null;
-let _rerankPullTarget: string | null = null;
+// In-flight pulls are keyed by tag: with one shared slot, the first of two
+// overlapping pulls cleared it on finish while the second was still running,
+// and later callers for the second tag started a duplicate download.
+const _rerankPullsInFlight = new Map<string, Promise<boolean>>();
 /** Model tag → timestamp of the last failed pull. */
 const _rerankPullFailedAt = new Map<string, number>();
 const RERANK_PULL_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
@@ -366,9 +434,8 @@ export function ensureRerankModelPull(
   onProgress?: (status: string, pct: number) => void,
 ): Promise<boolean> {
   const model = modelName?.trim() || getRerankQwenModelTag();
-  if (_rerankPullInFlight && _rerankPullTarget === model) {
-    return _rerankPullInFlight;
-  }
+  const inFlight = _rerankPullsInFlight.get(model);
+  if (inFlight) return inFlight;
 
   const failedAt = _rerankPullFailedAt.get(model);
   if (failedAt !== undefined) {
@@ -380,7 +447,6 @@ export function ensureRerankModelPull(
     }
   }
 
-  _rerankPullTarget = model;
   logger.log(`[Ollama Setup] Pulling rerank model: ${model}`);
   const pull = pullModel(model, onProgress)
     .then(async (ok) => {
@@ -408,10 +474,9 @@ export function ensureRerankModelPull(
       return false;
     })
     .finally(() => {
-      _rerankPullInFlight = null;
-      _rerankPullTarget = null;
+      if (_rerankPullsInFlight.get(model) === pull) _rerankPullsInFlight.delete(model);
     });
-  _rerankPullInFlight = pull;
+  _rerankPullsInFlight.set(model, pull);
   return pull;
 }
 
@@ -582,10 +647,10 @@ export async function generateEmbeddingsBatchDetailed(
   const bodyObj: Record<string, unknown> = {
     model: getEmbeddingModelTag(),
     input: texts,
-    // Pin model in memory forever — without this, Ollama unloads after 5min idle
-    // and the next embed call pays an ~80s model reload cost. Pinned is free
-    // (it's already loaded for embedding work anyway).
-    keep_alive: -1,
+    // Ollama's default 5 min idle unload made the next embed call pay an ~80s
+    // reload mid-pass. The shared finite window covers a pass without pinning
+    // the model forever (see OLLAMA_KEEP_ALIVE).
+    keep_alive: OLLAMA_KEEP_ALIVE,
   };
   if (Object.keys(ollamaOpts).length > 0) bodyObj.options = ollamaOpts;
   const bodyStr = JSON.stringify(bodyObj);
@@ -759,6 +824,70 @@ export function resetGpuModeCache(): void {
   _gpuLastInconclusiveAt = 0;
 }
 
+/** True when an /api/ps model name is one of the models Ark loads. */
+function isArkModelName(name: string): 'embed' | 'rerank' | null {
+  const n = name.toLowerCase();
+  if (n.startsWith(EMBEDDING_MODEL) || n.split(':')[0] === EMBEDDING_MODEL) return 'embed';
+  for (const tag of [getRerankModelTag(), getRerankQwenModelTag()]) {
+    if (isRerankModelInstalled([], [name], tag)) return 'rerank';
+  }
+  return null;
+}
+
+/**
+ * Ask Ollama to unload every Ark model it currently holds (keep_alive: 0).
+ *
+ * Reads /api/ps, then sends one unload request per loaded Ark model — the
+ * embedder via /api/embed with no input, rerankers via /api/generate with an
+ * empty prompt. Models Ark did not load are left alone. Bounded by
+ * `timeoutMs` end to end and never throws, so callers can fire and forget it
+ * (game start, quit, background work drained). Resolves with the names it
+ * asked Ollama to unload.
+ */
+export async function unloadArkModels(opts?: { timeoutMs?: number }): Promise<string[]> {
+  const timeoutMs = opts?.timeoutMs ?? UNLOAD_TIMEOUT_MS;
+  const settings = settingsStore.getOllamaSettings();
+  const baseUrl = (settings.url || 'http://localhost:11434').replace(/\/$/, '');
+  const ac = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<string[]>((resolve) => {
+    timer = setTimeout(() => { ac.abort(); resolve([]); }, timeoutMs);
+  });
+
+  const work = (async (): Promise<string[]> => {
+    const psRes = await fetch(`${baseUrl}/api/ps`, { signal: ac.signal });
+    if (!psRes.ok) return [];
+    const ps = (await psRes.json()) as { models?: Array<{ name?: string; model?: string }> };
+    const loaded = (ps.models ?? [])
+      .map((m) => m.name || m.model || '')
+      .filter((name) => name && isArkModelName(name));
+    await Promise.all(loaded.map(async (name) => {
+      const kind = isArkModelName(name);
+      const [path, body] = kind === 'embed'
+        ? ['/api/embed', { model: name, input: [], keep_alive: 0 }]
+        : ['/api/generate', { model: name, prompt: '', keep_alive: 0 }];
+      try {
+        await fetch(`${baseUrl}${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: ac.signal,
+        });
+      } catch {
+        // Best effort — keep_alive expires the model anyway.
+      }
+    }));
+    if (loaded.length > 0) logger.log(`[Ollama Setup] Asked Ollama to unload: ${loaded.join(', ')}`);
+    return loaded;
+  })().catch(() => [] as string[]);
+
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Run the full setup sequence during splash screen boot.
  *
@@ -863,10 +992,29 @@ async function settleRerankModelStatus(
   })();
 }
 
+export interface OllamaSetupOptions {
+  /**
+   * Skip the boot warm-up (Ark started hidden in the tray). Loading ~1.2 GB
+   * into VRAM with no work queued only took memory from whatever the user
+   * runs next; real work loads the model itself, and `warmUpIfSkipped` runs
+   * the warm-up once the window is shown.
+   */
+  skipWarmUp?: boolean;
+}
+
 export async function runOllamaSetup(
   onProgress?: (status: string, pct: number) => void,
   onRerankProgress?: RerankProgressCallback,
+  options?: OllamaSetupOptions,
 ): Promise<OllamaSetupStatus> {
+  const warmUp = () => {
+    if (options?.skipWarmUp) {
+      _warmUpSkipped = true;
+      logger.log('[Ollama Setup] Started hidden — embedding warm-up deferred until the window is shown');
+      return;
+    }
+    warmUpAndDetectGpu();
+  };
   const result: OllamaSetupStatus = {
     ollamaDetected: false,
     ollamaVersion: null,
@@ -914,7 +1062,7 @@ export async function runOllamaSetup(
       // Warm up + detect GPU mode even in the "already installed" path so the
       // first real embedding batch hits a loaded-and-mode-known model.
       // Fire-and-forget — never blocks the splash.
-      warmUpAndDetectGpu();
+      warmUp();
       // Previously returned here and never considered the rerank model.
       await settleRerankModelStatus(result, onRerankProgress);
       onProgress?.('Embedding model ready', 100);
@@ -937,7 +1085,7 @@ export async function runOllamaSetup(
       // after install would otherwise force a ~80s model load AND a CPU-mode
       // round-trip on slow machines. Fire-and-forget so splash isn't blocked.
       onProgress?.('Warming up embedding model...', 95);
-      warmUpAndDetectGpu();
+      warmUp();
       await settleRerankModelStatus(result, onRerankProgress);
       onProgress?.('Embedding model ready', 100);
     } else {
@@ -980,6 +1128,21 @@ function warmUpAndDetectGpu(): void {
       }
     }
   });
+}
+
+/** Set when runOllamaSetup skipped the boot warm-up (hidden start). */
+let _warmUpSkipped = false;
+
+/**
+ * Run the warm-up that a hidden start skipped — called once the window is
+ * shown, so the first search does not pay the cold load. No-op otherwise.
+ * Returns true when it started a warm-up.
+ */
+export function warmUpIfSkipped(): boolean {
+  if (!_warmUpSkipped) return false;
+  _warmUpSkipped = false;
+  warmUpAndDetectGpu();
+  return true;
 }
 
 /** Exported model name for IPC consumers. */

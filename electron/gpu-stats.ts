@@ -25,16 +25,42 @@ export interface GpuStats {
 }
 
 const NVIDIA_SMI_CANDIDATES = ['nvidia-smi', 'C:\\Windows\\System32\\nvidia-smi.exe'];
+/** After a slow or failed (but present) nvidia-smi, skip it this long before retrying. */
+export const NVIDIA_SMI_BACKOFF_MS = 20_000;
+/** Latched only when every candidate is absent (ENOENT / EACCES) — the tool really is not there. */
 let nvidiaSmiMissing = false;
+let nvidiaSmiRetryAt = 0;
+
+/** Test seam: forget the latch and backoff. */
+export function resetGpuStatsForTests(): void {
+  nvidiaSmiMissing = false;
+  nvidiaSmiRetryAt = 0;
+}
+
+function isNotInstalledError(err: NodeJS.ErrnoException): boolean {
+  return err.code === 'ENOENT' || err.code === 'EACCES';
+}
 
 function runNvidiaSmi(): Promise<{ name: string; totalMB: number; usedMB: number } | null> {
   if (nvidiaSmiMissing) return Promise.resolve(null);
+  if (Date.now() < nvidiaSmiRetryAt) return Promise.resolve(null);
   const args = ['--query-gpu=name,memory.total,memory.used', '--format=csv,noheader,nounits'];
+  // One slow call (a game loading the GPU) or a non-zero exit used to latch
+  // "missing" for the whole session; only an absent binary latches now.
+  let allMissing = true;
   const tryAt = (i: number): Promise<{ name: string; totalMB: number; usedMB: number } | null> => {
-    if (i >= NVIDIA_SMI_CANDIDATES.length) { nvidiaSmiMissing = true; return Promise.resolve(null); }
+    if (i >= NVIDIA_SMI_CANDIDATES.length) {
+      if (allMissing) nvidiaSmiMissing = true;
+      else nvidiaSmiRetryAt = Date.now() + NVIDIA_SMI_BACKOFF_MS;
+      return Promise.resolve(null);
+    }
     return new Promise((resolve) => {
       execFile(NVIDIA_SMI_CANDIDATES[i], args, { timeout: 2500, windowsHide: true }, (err, stdout) => {
-        if (err) { resolve(tryAt(i + 1)); return; }
+        if (err) {
+          if (!isNotInstalledError(err as NodeJS.ErrnoException)) allMissing = false;
+          resolve(tryAt(i + 1));
+          return;
+        }
         // First GPU line: "NVIDIA GeForce RTX 4070, 12282, 3120"
         const line = String(stdout).split(/\r?\n/).find((l) => l.trim());
         const parts = line?.split(',').map((p) => p.trim()) ?? [];

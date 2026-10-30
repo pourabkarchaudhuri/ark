@@ -27,6 +27,7 @@ import {
   isRerankModelInstalled,
   getRerankModelTag,
   getRerankQwenModelTag,
+  OLLAMA_KEEP_ALIVE,
 } from './ollama-setup.js';
 import { normalizeOllamaRerankRows, type RerankResultRow } from './ollama-rerank-normalize.js';
 
@@ -641,8 +642,9 @@ async function generateOnce(
     // Bypass Ollama's own template — buildQwenPrompt already supplies the
     // reranker's chat template including the assistant prefix.
     raw: true,
-    // Pin the model so 100 sequential calls don't each pay a reload.
-    keep_alive: -1,
+    // Keep the model loaded so 100 sequential calls don't each pay a reload
+    // (shared finite window — never pinned forever).
+    keep_alive: OLLAMA_KEEP_ALIVE,
     options: { num_predict: 1, temperature: 0 },
   };
   if (graded) {
