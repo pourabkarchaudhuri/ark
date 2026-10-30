@@ -342,6 +342,14 @@ interface StoreAPI {
     namespace: string,
     opts: { fromMs: number; toMs: number; nowMs: number; minRecentReviews: number; maxRecent: number; maxFuture: number },
   ) => Promise<{ rows?: T[]; error?: string }>;
+  /** Oracle catalog candidates selected in the main process (absent in older preloads). */
+  queryCandidates?: <T = unknown>(
+    namespace: string,
+    opts: {
+      topGenres: string[]; loyalDevelopers: string[]; loyalPublishers: string[]; excludeIds: string[];
+      minReviews: number; minPositivity: number; maxResults: number; maxPopularQuota: number;
+    },
+  ) => Promise<{ rows?: T[]; error?: string }>;
   put: (namespace: string, key: string, value: unknown) => Promise<StoreOkResult>;
   del: (namespace: string, key: string) => Promise<StoreOkResult>;
   batch: (ops: StoreBatchOp[]) => Promise<StoreOkResult>;

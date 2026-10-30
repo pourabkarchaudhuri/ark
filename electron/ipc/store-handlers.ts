@@ -20,6 +20,7 @@ const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
 import { getLevelStore, STORE_BATCH_MAX_OPS } from '../storage/level-store.js';
 import { UpcomingSelector } from '../../src/lib/upcoming-select.js';
+import { sanitizeCandidateQueryOpts, scanCatalogCandidates, type CandidateRowLike } from '../../src/lib/candidate-selector.js';
 
 // ---------------------------------------------------------------------------
 // Rate limiting (Gap #25) — per-channel, per-sender token bucket
@@ -94,6 +95,26 @@ function senderIdOf(event: any): number {
 function toError(err: unknown): { error: string } {
   const msg = err instanceof Error ? err.message : String(err);
   return { error: msg };
+}
+
+/**
+ * Body of `catalog:queryCandidates` (exported for tests): validates and clamps the arguments, then
+ * scans `namespace` in 2000-row chunks with a setImmediate yield between them.
+ */
+export async function queryCatalogCandidates(
+  store: Pick<ReturnType<typeof getLevelStore>, 'getChunk'>,
+  namespace: unknown,
+  opts: unknown,
+): Promise<{ rows: unknown[] } | { error: string }> {
+  if (typeof namespace !== 'string' || !namespace) return { error: 'bad arguments' };
+  const selectOpts = sanitizeCandidateQueryOpts(opts);
+  if (!selectOpts) return { error: 'bad arguments' };
+  const rows = await scanCatalogCandidates<CandidateRowLike>(
+    (chunk) => store.getChunk(namespace, chunk),
+    selectOpts,
+    () => new Promise<void>((r) => setImmediate(r)),
+  );
+  return { rows };
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +242,23 @@ export function register(): void {
       return { rows: selector.result() };
     } catch (err) {
       logger.error('[Store IPC] catalog:queryUpcoming failed:', err);
+      return toError(err);
+    }
+  });
+
+  /**
+   * Oracle candidate rows from the Steam catalog, selected here next to LevelDB (same selector as
+   * the renderer fallback) so the renderer gets at most ~25K rows in one reply instead of streaming
+   * all ~155K over ~155 getChunk hops. Shares the getChunk rate bucket; yields between chunks.
+   */
+  ipcMain.handle('catalog:queryCandidates', async (event: any, namespace: string, opts: unknown) => {
+    if (!checkRateLimit('store:getChunk', senderIdOf(event))) {
+      return rateLimited('store:getChunk', senderIdOf(event));
+    }
+    try {
+      return await queryCatalogCandidates(store, namespace, opts);
+    } catch (err) {
+      logger.error('[Store IPC] catalog:queryCandidates failed:', err);
       return toError(err);
     }
   });

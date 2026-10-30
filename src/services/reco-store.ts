@@ -36,6 +36,7 @@ import {
   bestPreparedClusterSimilarity,
   buildGraphUserContext,
   computePoolNeighborsAsync,
+  computeBacklogSemanticScores,
   detectTasteClusters,
   normalizeTitleKey,
   prepareClusterCentroids,
@@ -61,6 +62,7 @@ import {
   rerankPlan,
   rerankStatus,
   ORACLE_RERANK_DEFAULT_BUDGET_MS,
+  RERANK_SUPERSEDED_REASON,
 } from '@/services/oracle-rerank';
 import type { RerankPlan, RerankStatus } from '@/services/oracle-rerank';
 import { computeEngagementWeight, computeNegativeWeight, countEvidenceLibrary } from '@/services/engagement-weight';
@@ -91,6 +93,7 @@ import { sketchEmbedding } from '@/services/mmr-embedding';
 import { oracleShelfKey } from '@/services/oracle-shelf-key';
 import { isAdultContentByDescription } from '@/services/adult-content-filter';
 import { getSimilarTitlesForRecoBatch, getAnnNeighborsForRecoBatch } from '@/services/similar-games';
+import { getPrefetchedGames } from '@/services/prefetch-store';
 import {
   djb2Fingerprint,
   fingerprintDismissals,
@@ -148,6 +151,11 @@ export const ORACLE_RERANK_BUDGET_MS = ORACLE_RERANK_DEFAULT_BUDGET_MS;
 /** Library / thumbs-up changes coalesce into one recompute after this quiet period. */
 export const LIBRARY_REFRESH_DEBOUNCE_MS = 3_000;
 
+/** Browse rows read by one compute's pool build, handed to pool hygiene (adult-description check). */
+interface BrowseRowsHolder {
+  rows: Record<string, any>[];
+}
+
 const EMPTY_GRAPH_PACK: GraphScoresPack = {
   graphScoresMap: undefined,
   userCommunityCounts: undefined,
@@ -171,7 +179,7 @@ export function runWithDeadline<T>(
 ): Promise<T> {
   const ac = new AbortController();
   if (parent?.aborted) {
-    ac.abort();
+    ac.abort(parent.reason);
     return Promise.resolve(fallback);
   }
   if (timeoutMs <= 0) {
@@ -188,7 +196,8 @@ export function runWithDeadline<T>(
       parent?.removeEventListener('abort', onAbort);
       apply();
     };
-    const onAbort = () => finish(() => { ac.abort(); resolve(fallback); });
+    // The parent's reason is forwarded, so `fn` can tell "superseded" from "out of time".
+    const onAbort = () => finish(() => { ac.abort(parent?.reason); resolve(fallback); });
     const timer = setTimeout(() => finish(() => {
       if (label) console.warn(`[RecoStore] ${label} exceeded ${timeoutMs}ms — continuing without it`);
       ac.abort();
@@ -235,7 +244,7 @@ export function getEmbeddingCache(): ReadonlyMap<string, number[]> {
  * buckets so engagement shifts invalidate restore; dismiss fp so muted franchise
  * siblings cannot resurrect from a 15‑min cache.
  */
-export function buildOracleLibrarySignature(): string {
+export function buildOracleLibrarySignature(opts?: { excludeThumbsUp?: boolean }): string {
   const libLines = libraryStore
     .getAllGameIds()
     .slice()
@@ -258,7 +267,7 @@ export function buildOracleLibrarySignature(): string {
   const dismissLine = `D:${fingerprintDismissals(recoHistoryStore.getDismissals())}`;
   const thumbsUpLine = `U:${fingerprintThumbsUp(recoHistoryStore.getThumbsUpIds())}`;
   const adultLine = `A:${isAllowAdultContent() ? 1 : 0}`;
-  return [...libLines, ...customLines, dismissLine, thumbsUpLine, adultLine].join('\n');
+  return [...libLines, ...customLines, dismissLine, ...(opts?.excludeThumbsUp ? [] : [thumbsUpLine]), adultLine].join('\n');
 }
 
 // ─── Cached-result pipeline signature ──────────────────────────────────────────
@@ -383,8 +392,19 @@ export class RecoStore {
   private resultStages: OraclePipelineStages | null = null;
   /** Aborts the in-flight compute's pre-worker steps on refresh/reset. */
   private computeAbort: AbortController | null = null;
+  /** The background Oracle rerank in flight; aborted (as superseded) by refresh(), reset() and a newer rerank. */
+  private rerankAbort: AbortController | null = null;
   /** Pending debounced `refresh()` from library / thumbs-up changes. */
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** What the pending refreshTimer runs: a full refresh wins over a thumbs-up-only re-dispatch. */
+  private refreshTimerKind: 'full' | 'thumbs-up' = 'full';
+  /**
+   * The last worker input this store dispatched from a full pipeline run, for recomputeThumbsUpOnly().
+   * `signature` is the library signature without thumbs-ups; `at` is when the pool was built. Released
+   * after RESULT_CACHE_TTL (lastDispatchTimer) so it does not pin the pool for the session.
+   */
+  private lastDispatch: { input: RecoWorkerInput; gen: number; signature: string; at: number } | null = null;
+  private lastDispatchTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Cold-start result caching — persists across app restarts
   private static readonly RESULT_CACHE_KEY = 'ark-oracle-results';
@@ -651,6 +671,8 @@ export class RecoStore {
           lastComputed: (cached.lastComputed as number) ?? Date.now(),
           libraryCount: (cached.libraryCount as number) ?? 0,
           candidateCount: (cached.candidateCount as number) ?? 0,
+          // The layer telemetry saved with these results (the dev panel read null after every cache hit).
+          telemetry: (cached.telemetry as RecoTelemetry | null | undefined) ?? null,
           oracleRerankStatus: (cached as { reranked?: boolean }).reranked === true && (cached as { oracleRerankStatus?: RerankStatus }).oracleRerankStatus
             ? (cached as { oracleRerankStatus: RerankStatus }).oracleRerankStatus
             : rerankStatus('none'),
@@ -677,14 +699,18 @@ export class RecoStore {
       // keeps whatever was gathered so far instead of dropping everything.
       setProgress('Loading candidate pool...', 5);
       const poolSink: CandidateGame[] = [];
+      // Browse rows of THIS compute only (the adult-description check reads them); dropped after hygiene.
+      // A pool build that overran its deadline before reading them leaves it empty — never a previous run's rows.
+      const browse: BrowseRowsHolder = { rows: [] };
       await runWithDeadline(
-        (s) => this.buildCandidatePool(userGames, poolSink, s),
+        (s) => this.buildCandidatePool(userGames, poolSink, s, browse),
         budget(CANDIDATE_POOL_TIMEOUT_MS), poolSink, signal, 'Candidate pool',
       );
       if (isStale()) return;
       // Pool hygiene runs HERE (not inside buildCandidatePool) so it also applies when the pool deadline fired
       // and we are using whatever the sources had gathered by then.
-      const candidates = this.hygienePool(poolSink.slice(), userGames);
+      const candidates = this.hygienePool(poolSink.slice(), userGames, browse.rows);
+      browse.rows = [];
 
       // Store counts for the UI (before pre-filter, so the user sees the real pool size)
       this.state = {
@@ -702,6 +728,11 @@ export class RecoStore {
         ...recoHistoryStore.getDismissals().map(d => d.gameId),
       ]);
       const feedbackPool = candidates.filter(c => feedbackIds.has(c.gameId));
+
+      // Hygiene and the pre-filter are each a long synchronous pass over ~25K candidates: let the UI paint
+      // between them instead of freezing for both back to back.
+      await new Promise<void>(r => setTimeout(r, 0));
+      if (isStale()) return;
 
       // 2.1. Pre-filter candidates with shelf-aware quotas (25K → ~3K)
       setProgress('Pre-filtering candidates...', 6);
@@ -832,7 +863,9 @@ export class RecoStore {
 
       // 3.58. Embedding neighbours of the user's strongest library games (graph signal).
       const neighborResult = await runWithDeadline(
-        () => this.computeLibraryNeighbors(userGames, candidates, scoringNow),
+        // The step's own signal aborts on its deadline or a superseding compute, so the pool search stops
+        // at the next source instead of running on (and holding the embedded pool) after we moved on.
+        (s) => this.computeLibraryNeighbors(userGames, candidates, scoringNow, () => s.aborted || isStale()),
         budget(LIBRARY_NEIGHBORS_TIMEOUT_MS), undefined, signal, 'Library neighbours',
       );
       if (isStale()) return;
@@ -852,7 +885,7 @@ export class RecoStore {
       // The taste centroid cosine is the expensive part; we compute it here to avoid
       // sending ~25K × 1024-dim embedding arrays through structured clone.
       let precomputedSemanticScores: Record<string, number> | undefined;
-      let mmrVectors: Record<string, number[]> | undefined;
+      let mmrVectors: Record<string, ArrayLike<number>> | undefined;
       let precomputedClusterScores: Record<string, { sim: number; label: string }> | undefined;
       if (tasteCentroid) {
         // Pass 1 (raw cosines, while candidate embeddings still exist). Pass 2 converts them
@@ -887,7 +920,8 @@ export class RecoStore {
             const magC = Math.sqrt(magB);
             rawTaste.set(c.gameId, centroidMag > 0 && magC > 0 ? dot / (centroidMag * magC) : 0);
             const sketch = sketchEmbedding(c.embedding);
-            if (sketch) mmrVectors![c.gameId] = Array.from(sketch);
+            // The Float32Array itself: only the top ~500 are read, and boxing all ~3K was wasted work.
+            if (sketch) mmrVectors![c.gameId] = sketch;
             if (negMag > 0) rawNeg.set(c.gameId, magC > 0 ? dotNeg / (negMag * magC) : 0);
             if (clusterScoringEnabled) {
               const best = bestPreparedClusterSimilarity(c.embedding, preparedClusters);
@@ -956,9 +990,16 @@ export class RecoStore {
       const feedbackCandidates = await this.resolveFeedbackCandidates(feedbackIds, feedbackPool, candidates);
       if (isStale()) return;
 
+      // 4.9. Backlog Advisor semantic similarity, here where the library vectors already are, so the worker
+      // payload can leave the 1024-d library embeddings out (millions of numbers cloned per dispatch).
+      const backlogSemanticScores = computeBacklogSemanticScores(userGames, tasteCentroid, embeddingCoverage);
+
       // 5. Dispatch to worker
       const input: RecoWorkerInput = {
-        userGames,
+        // Embeddings stripped (shallow copies; the snapshots here keep theirs) when the worker gets
+        // precomputed clusters: then only the Backlog Advisor read them, and that is precomputed above.
+        userGames: clusterScoringEnabled ? userGames.map(({ embedding: _e, ...rest }) => rest) : userGames,
+        backlogSemanticScores,
         candidates,
         now: scoringNow,
         currentHour: new Date().getHours(),
@@ -986,6 +1027,7 @@ export class RecoStore {
       };
 
       this.resultStages = currentOraclePipelineStages();
+      this.rememberDispatch(input, gen);
       this.runWorker(input, gen);
     } catch (err) {
       if (isStale()) return;
@@ -1009,6 +1051,7 @@ export class RecoStore {
     userGames: UserGameSnapshot[],
     candidates: CandidateGame[],
     now: number = Date.now(),
+    shouldStop?: () => boolean,
   ): Promise<{ neighbors: Record<string, Array<{ u: string; d: number }>> | undefined; source: 'pool' | 'ann' | 'none' }> {
     // Rank sources by the SAME weights the graph signal uses, so the games that set
     // the "fully related" reference mass are the ones whose neighbours we fetch.
@@ -1027,6 +1070,7 @@ export class RecoStore {
       const { neighbors, hits } = await computePoolNeighborsAsync(sources, candidates, {
         k: LIBRARY_NEIGHBOR_K,
         ceiling: GRAPH_NEIGHBOR_DISTANCE_CEILING,
+        shouldStop,
       });
       console.log(`[RecoStore] Library neighbours (pool): ${sources.length} sources -> ${hits} hits on ${Object.keys(neighbors).length} candidates`);
       return { neighbors, source: 'pool' };
@@ -1247,6 +1291,7 @@ export class RecoStore {
     userGames: UserGameSnapshot[],
     candidates: CandidateGame[] = [],
     signal?: AbortSignal,
+    browse?: BrowseRowsHolder,
   ): Promise<CandidateGame[]> {
     // Exclude library primaries + secondaryGameId twins across all sources
     const userGameIds = buildLinkedExclusionIds(
@@ -1268,14 +1313,22 @@ export class RecoStore {
     };
 
     // ── Source 1: Browse cache (existing path — 3K–6K games) ──
+    // The prefetch store already holds these rows in memory (deduped, the same list it saves to the browse
+    // cache); use them by reference — rows are only read here — instead of re-reading and deserializing the
+    // whole IndexedDB entry on the UI thread. IndexedDB is only the cold-start fallback before prefetch hydrates.
     let rawGames: Record<string, any>[] = [];
-    try {
-      rawGames = await this.loadBrowseCacheGames();
-    } catch (err) {
-      console.warn('[RecoStore] Failed to read browse cache for candidates:', err);
+    const prefetched = getPrefetchedGames() as Record<string, any>[] | null;
+    if (prefetched && prefetched.length > 0) {
+      rawGames = prefetched;
+    } else {
+      try {
+        rawGames = await this.loadBrowseCacheGames();
+      } catch (err) {
+        console.warn('[RecoStore] Failed to read browse cache for candidates:', err);
+      }
     }
 
-    this.lastBrowseRows = rawGames;
+    if (browse) browse.rows = rawGames;
     for (const g of rawGames) {
       const id = String(g.id ?? '');
       const secId = g.secondaryId ? String(g.secondaryId) : '';
@@ -1437,12 +1490,13 @@ export class RecoStore {
     this.interactedShelves.add(shelfKey);
   }
 
-  /** Browse rows of the latest pool build (kept for the adult-description check). */
-  private lastBrowseRows: Record<string, any>[] = [];
-
-  private hygienePool(pool: CandidateGame[], userGames: UserGameSnapshot[]): CandidateGame[] {
+  private hygienePool(
+    pool: CandidateGame[],
+    userGames: UserGameSnapshot[],
+    browseRows: Record<string, any>[],
+  ): CandidateGame[] {
     try {
-      const out = this.applyPoolHygiene(pool, userGames, this.lastBrowseRows);
+      const out = this.applyPoolHygiene(pool, userGames, browseRows);
       if (out.length !== pool.length) console.log(`[RecoStore] Pool hygiene: ${pool.length} → ${out.length}`);
       return out;
     } catch (err) {
@@ -2298,9 +2352,13 @@ export class RecoStore {
     const IDB_TIMEOUT_MS = 8000; // 8 second safety timeout
 
     return new Promise<Record<string, any>[]>((resolve) => {
-      // Safety timeout: if IDB hangs (blocked, version conflict), resolve empty
+      let openDb: IDBDatabase | null = null;
+      let timedOut = false;
+      // Safety timeout: if IDB hangs (blocked, version conflict), resolve empty and close whatever opened.
       const timer = setTimeout(() => {
+        timedOut = true;
         console.warn('[RecoStore] IDB read timed out — continuing without browse cache');
+        try { openDb?.close(); } catch { /* already closed */ }
         resolve([]);
       }, IDB_TIMEOUT_MS);
 
@@ -2333,6 +2391,11 @@ export class RecoStore {
 
       req.onsuccess = () => {
         const db = req.result;
+        if (timedOut) {
+          db.close();
+          return;
+        }
+        openDb = db;
         try {
           const tx = db.transaction(STORE_NAME, 'readonly');
           const store = tx.objectStore(STORE_NAME);
@@ -2425,6 +2488,7 @@ export class RecoStore {
     shelves: RecoShelf[],
     blend: number,
     plan: RerankPlan,
+    parent?: AbortSignal,
   ): Promise<{ shelves: RecoShelf[]; status: RerankStatus } | null> {
     const { applyOracleRerankShelves } = await import('@/services/oracle-rerank');
     return runWithDeadline(
@@ -2436,7 +2500,7 @@ export class RecoStore {
         // Concrete anchors for the cross-encoder: the user's most-engaged games per taste cluster.
         queryExtras: { lovedTitles: (tasteProfile.clusters ?? []).flatMap(c => c.topGames ?? []).filter(Boolean) },
       }),
-      plan.budgetMs, null, undefined, 'Oracle rerank',
+      plan.budgetMs, null, parent, 'Oracle rerank',
     );
   }
 
@@ -2462,8 +2526,13 @@ export class RecoStore {
     // The epoch the SHELVES were computed under (not "now"): a dismiss during the compute already bumped
     // cacheEpoch, and a rerank that captured the bumped value would re-save the stale shelves.
     const cacheEpochAtStart = opts.epoch ?? this.cacheEpoch;
+    // One background rerank at a time: a newer one supersedes (and cancels) this one's Ollama requests.
+    this.rerankAbort?.abort(RERANK_SUPERSEDED_REASON);
+    const ac = new AbortController();
+    this.rerankAbort = ac;
     const isCurrent = () =>
-      genAtStart === this.computeGeneration
+      !ac.signal.aborted
+      && genAtStart === this.computeGeneration
       && this.state.status === 'done'
       && this.state.shelves === shelves;
     try {
@@ -2471,7 +2540,7 @@ export class RecoStore {
       if (!isCurrent()) return;
       const out = 'skip' in prep
         ? { shelves, status: prep.skip }
-        : await this.runOracleRerankPass(tasteProfile, shelves, prep.blend, prep.plan);
+        : await this.runOracleRerankPass(tasteProfile, shelves, prep.blend, prep.plan, ac.signal);
       if (!isCurrent()) return;
       if (!out) {
         this.state = { ...this.state, oracleRerankStatus: rerankStatus('skipped_timeout') };
@@ -2504,6 +2573,8 @@ export class RecoStore {
       if (!isCurrent()) return;
       this.state = { ...this.state, oracleRerankStatus: rerankStatus('error') };
       this.notify();
+    } finally {
+      if (this.rerankAbort === ac) this.rerankAbort = null;
     }
   }
 
@@ -2668,6 +2739,11 @@ export class RecoStore {
     this.computeGeneration++;
     this.computeAbort?.abort();
     this.computeAbort = null;
+    // The background rerank too (refresh() / reset()): it would keep sending one Ollama request per
+    // document until its own deadline, competing with the next compute's embedding and ML calls.
+    // invalidateCacheOnly() deliberately does not get here — its shelves stay on screen.
+    this.rerankAbort?.abort(RERANK_SUPERSEDED_REASON);
+    this.rerankAbort = null;
   }
 
   private cancelScheduledRefresh() {
@@ -2675,6 +2751,92 @@ export class RecoStore {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
+    this.refreshTimerKind = 'full';
+  }
+
+  private rememberDispatch(input: RecoWorkerInput, gen: number) {
+    this.lastDispatch = { input, gen, signature: buildOracleLibrarySignature({ excludeThumbsUp: true }), at: Date.now() };
+    if (this.lastDispatchTimer) clearTimeout(this.lastDispatchTimer);
+    this.lastDispatchTimer = setTimeout(() => this.releaseLastDispatch(), RecoStore.RESULT_CACHE_TTL);
+  }
+
+  private releaseLastDispatch() {
+    this.lastDispatch = null;
+    if (this.lastDispatchTimer) {
+      clearTimeout(this.lastDispatchTimer);
+      this.lastDispatchTimer = null;
+    }
+  }
+
+  /**
+   * After a thumbs-up only the worker's feedback inputs change, so re-run just the worker on the last
+   * dispatched input (thumbsUpIds + feedback candidates re-read, clock refreshed) instead of the whole
+   * pre-worker pipeline (catalog read, retrieval, hygiene, metadata, ML, graph, neighbours).
+   * Falls back to refresh() when there is no remembered input, it is older than the result TTL, the
+   * library / dismissals / thumbs-downs changed since, a compute is in flight, or a new feedback game is
+   * not in the remembered pool (a full run would look it up in the pre-filter pool).
+   */
+  recomputeThumbsUpOnly() {
+    this.cancelScheduledRefresh();
+    const cached = this.lastDispatch;
+    if (
+      !cached
+      || this.state.status === 'computing'
+      || Date.now() - cached.at > RecoStore.RESULT_CACHE_TTL
+      || cached.signature !== buildOracleLibrarySignature({ excludeThumbsUp: true })
+    ) {
+      this.refresh();
+      return;
+    }
+    const prev = cached.input;
+    const thumbsUpIds = recoHistoryStore.getThumbsUpIds();
+    const thumbsDownIds = recoHistoryStore.getThumbsDownIds();
+    const sameDown = thumbsDownIds.length === (prev.thumbsDownIds ?? []).length
+      && thumbsDownIds.every((id, i) => id === prev.thumbsDownIds![i]);
+    if (!sameDown) {
+      this.refresh();
+      return;
+    }
+    // Same feedback set compute() builds; every id must already be in the pool or among the resolved extras.
+    const feedbackIds = new Set([
+      ...thumbsUpIds,
+      ...thumbsDownIds,
+      ...recoHistoryStore.getDismissals().map(d => d.gameId),
+    ]);
+    const poolIds = new Set(prev.candidates.map(c => c.gameId));
+    const resolved = new Set((prev.feedbackCandidates ?? []).map(c => c.gameId));
+    for (const id of feedbackIds) {
+      if (!poolIds.has(id) && !resolved.has(id)) {
+        this.refresh();
+        return;
+      }
+    }
+
+    // Supersede the shown result's background rerank, like a compute would.
+    this.abortInFlightCompute();
+    this.killWorker();
+    const gen = ++this.computeGeneration;
+    this.interactedShelves.clear();
+    markOracleLibraryBaseline();
+    this.computeCacheEpoch = this.cacheEpoch;
+    const input: RecoWorkerInput = {
+      ...prev,
+      thumbsUpIds,
+      feedbackCandidates: (prev.feedbackCandidates ?? []).filter(c => feedbackIds.has(c.gameId)),
+      now: Date.now(),
+      currentHour: new Date().getHours(),
+    };
+    // Same pool, so the pool's age (not this re-dispatch) still bounds how long it is reused.
+    this.lastDispatch = { ...cached, input, gen };
+    this.state = {
+      ...this.state,
+      status: 'computing',
+      progress: { stage: 'Applying your feedback...', percent: 30 },
+      error: null,
+      oracleRerankStatus: rerankStatus('none'),
+    };
+    this.notify();
+    this.runWorker(input, gen);
   }
 
   /**
@@ -2691,10 +2853,22 @@ export class RecoStore {
    * a row) into one `refresh()` after a quiet period.
    */
   scheduleRefresh(delayMs: number = LIBRARY_REFRESH_DEBOUNCE_MS) {
+    this.scheduleRefreshOfKind('full', delayMs);
+  }
+
+  /** Thumbs-up: like scheduleRefresh, but runs recomputeThumbsUpOnly() unless a full refresh is pending. */
+  scheduleThumbsUpRefresh(delayMs: number = LIBRARY_REFRESH_DEBOUNCE_MS) {
+    this.scheduleRefreshOfKind(this.refreshTimer && this.refreshTimerKind === 'full' ? 'full' : 'thumbs-up', delayMs);
+  }
+
+  private scheduleRefreshOfKind(kind: 'full' | 'thumbs-up', delayMs: number) {
     this.cancelScheduledRefresh();
+    this.refreshTimerKind = kind;
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
-      this.refresh();
+      this.refreshTimerKind = 'full';
+      if (kind === 'thumbs-up') this.recomputeThumbsUpOnly();
+      else this.refresh();
     }, delayMs);
   }
 
@@ -2713,6 +2887,7 @@ export class RecoStore {
     this.abortInFlightCompute();
     this.killWorker();
     this.clearResultsCache();
+    this.releaseLastDispatch();
     const prev = this.state;
     this.state = {
       ...INITIAL_STATE,
@@ -2739,6 +2914,7 @@ export class RecoStore {
     this.cancelScheduledRefresh();
     this.abortInFlightCompute();
     this.killWorker();
+    this.releaseLastDispatch();
     this.state = { ...INITIAL_STATE };
     this.notify();
   }

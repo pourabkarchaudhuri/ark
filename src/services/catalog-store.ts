@@ -31,6 +31,7 @@ import { storeCountExisting, storeGetMany } from './store-bulk';
 import { idbStreamStoreBatches } from './idb-stream';
 import { levelStreamNamespace, type LevelScanResult } from './level-stream';
 import { UpcomingSelector } from '@/lib/upcoming-select';
+import { CandidateSelector } from '@/lib/candidate-selector';
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
 
@@ -848,36 +849,33 @@ export class CatalogStore {
       loyalDevelopers,
       loyalPublishers = [],
       excludeIds,
-    minReviews = 10,
-    minPositivity = 0.5,
-    maxResults = 25_000,
-    maxPopularQuota = 200,
+      minReviews = 10,
+      minPositivity = 0.5,
+      maxResults = 25_000,
+      maxPopularQuota = 200,
     } = opts;
-
-    const genreSet = new Set(topGenres.map(g => g.toLowerCase()));
-    const devSet = new Set(loyalDevelopers.map(d => d.toLowerCase()));
-    const pubSet = new Set(loyalPublishers.map(p => p.toLowerCase()));
 
     await this.migrateFromIdbIfNeeded();
 
-    const matched: CatalogEntry[] = [];
-    const popularOnly: CatalogEntry[] = [];
-
-    const admit = (entry: CatalogEntry) => {
-      const id = `steam-${entry.appid}`;
-      if (excludeIds.has(id)) return;
-      if (entry.reviewCount < minReviews || entry.reviewPositivity < minPositivity) return;
-
-      const hasGenreMatch = entry.genres.some(g => genreSet.has(g.toLowerCase()));
-      const hasDevMatch = entry.developer && devSet.has(entry.developer.toLowerCase());
-      const hasPubMatch = entry.publisher && pubSet.size > 0 && pubSet.has(entry.publisher.toLowerCase());
-
-      if (hasGenreMatch || hasDevMatch || hasPubMatch) {
-        matched.push(entry);
-      } else if (entry.reviewCount >= 1000) {
-        popularOnly.push(entry);
+    // LevelDB: select next to the data in the main process (same selector as below) — one IPC
+    // returning at most maxResults rows instead of ~155 chunk hops cloning the whole catalog here.
+    if (useLevelDB() && typeof window.store?.queryCandidates === 'function') {
+      try {
+        const res = await window.store.queryCandidates<CatalogEntry>(LEVEL_ENTRIES_NAMESPACE, {
+          topGenres, loyalDevelopers, loyalPublishers, excludeIds: [...excludeIds],
+          minReviews, minPositivity, maxResults, maxPopularQuota,
+        });
+        if (!res.error && Array.isArray(res.rows)) return res.rows;
+      } catch {
+        /* fall through to the renderer scan */
       }
-    };
+    }
+
+    const selector = new CandidateSelector<CatalogEntry>({
+      topGenres, loyalDevelopers, loyalPublishers, excludeIds,
+      minReviews, minPositivity, maxResults, maxPopularQuota,
+    });
+    const admit = (entry: CatalogEntry) => selector.admit(entry);
 
     if (useLevelDB()) {
       const scan = await levelStreamAllEntries(admit);
@@ -901,11 +899,7 @@ export class CatalogStore {
       });
     }
 
-    popularOnly.sort((a, b) => b.reviewCount - a.reviewCount);
-    const popularCap = popularOnly.slice(0, maxPopularQuota);
-    const combined = [...matched, ...popularCap];
-    combined.sort((a, b) => b.reviewCount - a.reviewCount);
-    return combined.slice(0, maxResults);
+    return selector.result();
   }
 
   /**

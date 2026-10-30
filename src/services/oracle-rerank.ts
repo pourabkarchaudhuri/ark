@@ -588,6 +588,13 @@ export function blendShelfOrder(
   });
 }
 
+/**
+ * Abort reason for a rerank cancelled because its results were superseded (refresh / reset / a newer
+ * rerank), not because its budget ran out: the main-process loop is still cancelled, but the run is
+ * not recorded as 'skipped_timeout'.
+ */
+export const RERANK_SUPERSEDED_REASON = 'oracle-rerank-superseded';
+
 export type OracleRerankOptions = {
   /** When false, skip rerank entirely (default true). */
   enabled?: boolean;
@@ -672,6 +679,7 @@ export async function applyOracleRerankShelves(
     if (gaveUp) return;
     gaveUp = true;
     cancelRerankRequest(bridge, requestId);
+    if (signal?.reason === RERANK_SUPERSEDED_REASON) return;
     recordRerankRun(buildRerankRunRecord({
       source: 'oracle', outcome: 'skipped_timeout', tier: null, startedAt, requested: pool.length,
     }), bridge);

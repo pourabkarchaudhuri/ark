@@ -345,8 +345,14 @@ async function measureIdbStore(dbName: string, version: number, stores: string[]
 let _ollamaSetupStatus: SyncStatus = { label: 'Ollama Setup', stage: 'idle', detail: '', percent: 0, elapsed: 0, itemsDone: 0, itemsTotal: 0 };
 let _ollamaSetupStartTime = 0;
 
+/** A setup timer restarts on the first event after a finished run (a later pull is its own run). */
+function setupTimerNeedsStart(start: number, stage: SyncStatus['stage']): boolean {
+  return start === 0 || stage === 'done' || stage === 'error';
+}
+
 export function reportOllamaProgress(status: string, pct: number) {
-  if (_ollamaSetupStartTime === 0) _ollamaSetupStartTime = performance.now();
+  // Setup runs once per session; the guard is only for symmetry with the reranker timer.
+  if (setupTimerNeedsStart(_ollamaSetupStartTime, _ollamaSetupStatus.stage)) _ollamaSetupStartTime = performance.now();
   const elapsed = performance.now() - _ollamaSetupStartTime;
   const isFailed = /fail|error|not detected|timed? ?out/i.test(status);
   const isReady = !isFailed && (/ready|already installed|success/i.test(status));
@@ -429,7 +435,8 @@ function rerankDetail(ev: RerankProgressEvent, tier: RerankTier | null): string 
 }
 
 export function reportRerankProgress(ev: RerankProgressEvent) {
-  if (_rerankSetupStartTime === 0) _rerankSetupStartTime = performance.now();
+  // A model pull after an earlier 'done' starts from its own first event, not from the session's first.
+  if (setupTimerNeedsStart(_rerankSetupStartTime, _rerankSetupStatus.stage)) _rerankSetupStartTime = performance.now();
   if (ev.done) {
     reportRerankDone(ev);
     return;
@@ -451,7 +458,7 @@ export function reportRerankProgress(ev: RerankProgressEvent) {
  * degraded install, not a fault worth lighting the aggregate LED red.
  */
 export function reportRerankDone(ev: RerankProgressEvent) {
-  if (_rerankSetupStartTime === 0) _rerankSetupStartTime = performance.now();
+  if (setupTimerNeedsStart(_rerankSetupStartTime, _rerankSetupStatus.stage)) _rerankSetupStartTime = performance.now();
   const tier = asRerankTier(ev.tier);
   const ollamaUp = ev.ollamaUp !== false;
   const failed = ollamaUp && !!ev.error;
@@ -578,7 +585,10 @@ class SystemStatus {
   private _mlModelCache: MLModelStatus | null = null;
   private _catalogSyncStartTime = 0;
   private _catalogSyncEndTime = 0;
+  /** Per-compute Recommendation Engine timer: restarts on each transition into 'computing', freezes at 'done'/'error'. */
   private _recoPipelineStartTime = 0;
+  private _recoPipelineEndTime = 0;
+  private _recoPrevStatus: string = 'idle';
   private _initialized = false;
   private _storageTimer: ReturnType<typeof setInterval> | null = null;
   private _modelTimer: ReturnType<typeof setInterval> | null = null;
@@ -645,18 +655,22 @@ class SystemStatus {
       }
     });
 
-    recoStore.subscribe(() => {
-      const s = recoStore.getState();
-      if (s.status === 'computing' && this._recoPipelineStartTime === 0) {
-        this._recoPipelineStartTime = performance.now();
-      }
-      if (s.status === 'done' || s.status === 'error') {
-        // keep elapsed
-      }
-    });
+    recoStore.subscribe(() => this._trackRecoTimer(recoStore.getState().status));
 
     annIndex.subscribe(() => this._notify());
     subscribeGalaxy(() => this._notify());
+  }
+
+  /** Exposed for tests: the recoStore listener body. */
+  _trackRecoTimer(status: string) {
+    const prev = this._recoPrevStatus;
+    this._recoPrevStatus = status;
+    if (status === 'computing' && prev !== 'computing') {
+      this._recoPipelineStartTime = performance.now();
+      this._recoPipelineEndTime = 0;
+    } else if ((status === 'done' || status === 'error') && prev === 'computing' && this._recoPipelineStartTime > 0) {
+      this._recoPipelineEndTime = performance.now();
+    }
   }
 
   private async _refreshStorage() {
@@ -755,9 +769,13 @@ class SystemStatus {
 
     // Reco Pipeline
     const recoS = recoStore.getState();
-    const recoElapsed = this._recoPipelineStartTime > 0
-      ? (recoS.status === 'done' && recoS.computeTimeMs > 0 ? recoS.computeTimeMs : performance.now() - this._recoPipelineStartTime)
-      : 0;
+    // This compute's own time (it used to count from the session's first compute and keep growing while idle).
+    const recoStart = this._recoPipelineStartTime;
+    const recoRan = recoStart > 0 ? Math.max(0, (this._recoPipelineEndTime || performance.now()) - recoStart) : 0;
+    const recoElapsed = recoS.status === 'computing' ? (recoStart > 0 ? performance.now() - recoStart : 0)
+      : recoS.status === 'done' ? (recoS.computeTimeMs > 0 ? recoS.computeTimeMs : recoRan)
+        : recoS.status === 'error' ? recoRan
+          : 0;
     const recoPipeline: SyncStatus = {
       label: 'Recommendation Engine',
       stage: recoS.status === 'done' ? 'done'

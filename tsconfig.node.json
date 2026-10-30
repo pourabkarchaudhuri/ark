@@ -21,6 +21,7 @@
     "src/lib/title-collator.ts",
     "src/data/gaming-events.ts",
     "src/lib/chat-providers.ts",
+    "src/lib/candidate-selector.ts",
     "package.json"
   ]
 }

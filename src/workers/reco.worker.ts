@@ -74,6 +74,7 @@ import {
   fastCosineProfileVsCandidate,
   computeSemanticSimilarity,
   buildGraphUserContext,
+  buildGraphCandidateIndex,
   computeGraphSignal,
   computeQualitySignal,
   computePopularitySignal,
@@ -366,11 +367,13 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const todCtx = buildTimeOfDayContext(userGames, currentHour);
   const seqCtx = buildSequencingContext(userGames);
 
-  // Sort user games by engagement weight descending so computeGraphSignal's
-  // early termination (break after 3 matches) picks the strongest signals.
+  // Strongest-engaged library games first. computeGraphSignal has no early exit (every related
+  // library game contributes), but this order breaks its ties, and so which titles fill "similar to".
   userGames.sort((a, b) =>
     (graphCtx.ugWeights.get(b.gameId) ?? 0) - (graphCtx.ugWeights.get(a.gameId) ?? 0),
   );
+  // Inverted lookups for the graph pre-pass, built over the sorted order above.
+  const graphIndex = buildGraphCandidateIndex(userGames, graphCtx);
 
   // Pre-compute per-user-game normalized canonical genre sets for engagement curve bonus
   const ugGenreNorms = new Map<string, Set<string>>();
@@ -414,7 +417,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   const graphByCandidate = new Map<string, { score: number; similarTo: string[] }>();
   let graphNonZero = 0;
   for (const c of filteredCandidates) {
-    const g = computeGraphSignal(c, userGames, libraryNeighbors[c.gameId], graphCtx);
+    const g = computeGraphSignal(c, userGames, libraryNeighbors[c.gameId], graphCtx, graphIndex);
     graphByCandidate.set(c.gameId, g);
     if (g.score >= GRAPH_COVERAGE_MIN_SCORE) graphNonZero++;
   }
@@ -710,7 +713,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   // ── 17. Shelf assembly ──
   progress('Building shelves...', 84);
-  const shelves = buildShelvesFromScored(reranked, scored, userGames, tasteProfile, clusters, franchises, tasteCentroid, now);
+  const shelves = buildShelvesFromScored(reranked, scored, userGames, tasteProfile, clusters, franchises, tasteCentroid, now, input.backlogSemanticScores);
 
   const telemetry = computeRecoTelemetry({
     scored,
@@ -787,6 +790,7 @@ function buildShelvesFromScored(
   franchises: FranchiseCluster[],
   tasteCentroid: Float64Array | null,
   nowMs: number,
+  backlogSemanticScores?: Record<string, number>,
 ): RecoShelf[] {
   const shelves: RecoShelf[] = [];
   const usedGameIds = new Set<string>();
@@ -1202,7 +1206,11 @@ function buildShelvesFromScored(
       const pubMatch = profile.loyalPublishers.some(p => gPubs.includes(p)) ? 0.5 : 0;
       const ratingBoost = g.rating > 0 ? g.rating / 5 : 0;
 
-      const semanticSim = computeSemanticSimilarity(tasteCentroid, g.embedding);
+      // Precomputed on the main thread (library embeddings are not posted when clusters are precomputed);
+      // the in-worker cosine stays as the fallback. Same centroid values, same arithmetic.
+      const semanticSim = tasteCentroid
+        ? (backlogSemanticScores?.[g.gameId] ?? computeSemanticSimilarity(tasteCentroid, g.embedding))
+        : 0;
       // F8: High-priority WtP gets intent boost on wishlist ordering only
       const priorityBoost = g.priority === 'High' ? 0.12 : 0;
 

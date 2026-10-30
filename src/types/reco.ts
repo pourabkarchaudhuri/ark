@@ -361,8 +361,16 @@ export interface RecoWorkerInput {
    * payload to avoid expensive structured-clone serialization.
    */
   precomputedSemanticScores?: Record<string, number>;
-  /** Unit-length embedding sketches (128-d) per candidate for MMR diversity — full vectors are stripped before the worker. */
-  mmrVectors?: Record<string, number[]>;
+  /**
+   * Unit-length embedding sketches (128-d) per candidate for MMR diversity — full vectors are stripped
+   * before the worker. Float32Arrays as sketched (structured clone copies them as one buffer each).
+   */
+  mmrVectors?: Record<string, ArrayLike<number>>;
+  /**
+   * Backlog Advisor semantic similarity (taste-centroid cosine) per Want-to-Play library game, computed on
+   * the main thread so library embeddings need not be posted to the worker. Missing entry → computed in-worker.
+   */
+  backlogSemanticScores?: Record<string, number>;
   /**
    * Per-game graph metrics from the persisted neighbor graph.
    * When present, the worker can apply PageRank propagation, community-affinity, and
