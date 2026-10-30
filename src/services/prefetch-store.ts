@@ -66,14 +66,24 @@ let topSellersPromise: Promise<Game[]> | null = null;
 // Pre-computed lowercase search strings — avoids calling .toLowerCase() on
 // every game during every keystroke. Built once when games are set.
 let searchIndex: SearchIndexEntry[] | null = _hmr.searchIndex;
+// The list the committed index was built from. The index is matched to games by position, so it
+// is only used while this is still the live list (a same-length replacement must not reuse it).
+let searchIndexSource: Game[] | null = _hmr.searchIndex ? _hmr.games : null;
+// Bumped by every build and by clearBrowseCache, so an older chunked build finishing late never commits.
+let indexGen = 0;
 
 function buildSearchIndex(games: Game[]): void {
   // Build in chunks via requestIdleCallback/setTimeout to avoid blocking main thread
   const CHUNK_SIZE = 500;
+  const gen = ++indexGen;
+  searchIndex = null;
+  searchIndexSource = null;
+  _hmr.searchIndex = null;
   const result: SearchIndexEntry[] = new Array(games.length);
   let offset = 0;
 
   const processChunk = () => {
+    if (gen !== indexGen) return; // superseded by a newer build or a clear
     const end = Math.min(offset + CHUNK_SIZE, games.length);
     for (let i = offset; i < end; i++) {
       const g = games[i];
@@ -99,6 +109,7 @@ function buildSearchIndex(games: Game[]): void {
     } else {
       // Done — commit
       searchIndex = result;
+      searchIndexSource = games;
       _hmr.searchIndex = searchIndex;
     }
   };
@@ -118,6 +129,7 @@ function buildSearchIndex(games: Game[]): void {
       };
     }
     searchIndex = result;
+    searchIndexSource = games;
     _hmr.searchIndex = searchIndex;
     return;
   }
@@ -283,6 +295,60 @@ export function waitForTopSellersPreload(maxMs: number): Promise<Game[] | null> 
 // Total steps: 6 API sources + 1 dedup step
 const TOTAL_STEPS = 7;
 
+type BrowseSource = 'steam' | 'epic';
+
+function isFromSource(g: Game, source: BrowseSource): boolean {
+  return g.store === source || (g.availableOn?.includes(source) ?? false);
+}
+
+/**
+ * Commit a freshly fetched browse set to memory + IndexedDB, unless it would lose data.
+ *
+ * - An empty set never replaces anything (offline, every source failed).
+ * - When the current set is healthy and the new one is under 90% of it, the current entries of any
+ *   source that came back empty are re-added (like the dashboard refresh's Epic fallback) and the
+ *   set is deduped again. If it is still under 90%, the current set is kept and nothing is saved,
+ *   so the IDB timestamp stays stale and the next launch retries.
+ *
+ * `emptySources` names sources the caller knows failed; a source with no entries in the new set
+ * but some in the current one is treated as empty too.
+ */
+async function commitBrowseSet(
+  games: Game[],
+  emptySources: BrowseSource[] = [],
+): Promise<{ games: Game[]; saved: boolean }> {
+  const prev = prefetchedGames;
+  if (games.length === 0) {
+    console.warn('[PrefetchStore] Refresh returned no games — keeping the current browse set');
+    return { games: prev ?? [], saved: false };
+  }
+  let next = games;
+  if (prev && prev.length >= MIN_HEALTHY_CACHE_SIZE && next.length < prev.length * 0.9) {
+    const empty = new Set<BrowseSource>(emptySources);
+    for (const source of ['steam', 'epic'] as const) {
+      if (!next.some(g => isFromSource(g, source)) && prev.some(g => isFromSource(g, source))) empty.add(source);
+    }
+    if (empty.size > 0) {
+      const kept = prev.filter(g => [...empty].some(source => isFromSource(g, source)));
+      next = await dedupSortInWorker([...next, ...kept]);
+    }
+    if (next.length < prev.length * 0.9) {
+      console.warn(
+        `[PrefetchStore] Refresh shrank the browse set from ${prev.length} to ${next.length} games — keeping the current set`,
+      );
+      return { games: prev, saved: false };
+    }
+  }
+  prefetchedGames = next;
+  prefetchReady = true;
+  _hmr.games = prefetchedGames;
+  _hmr.ready = prefetchReady;
+  buildSearchIndex(next);
+  // Save to IndexedDB (non-blocking)
+  saveBrowseCache(next).catch((err) => { console.warn('[Prefetch] Cache save:', err); });
+  return { games: next, saved: true };
+}
+
 async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
   let completed = 0;
 
@@ -369,15 +435,12 @@ async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
   completed = TOTAL_STEPS;
   report(`Aggregation complete — ${deduplicated.length} unique games`);
 
-  // Store in memory for synchronous access by useSteamGames
-  prefetchedGames = deduplicated;
-  prefetchReady = true;
-  _hmr.games = prefetchedGames;
-  _hmr.ready = prefetchReady;
-  buildSearchIndex(deduplicated);
-
-  // Save to IndexedDB (non-blocking)
-  saveBrowseCache(deduplicated).catch((err) => { console.warn('[Prefetch] Cache save:', err); });
+  // Store in memory for synchronous access by useSteamGames, and in IndexedDB — unless the result
+  // is empty or a partial fetch would shrink a healthy cache.
+  const emptySources: BrowseSource[] = [];
+  if (mostPlayed.length + newReleases.length + topSellers.length + comingSoon.length === 0) emptySources.push('steam');
+  if (epicCatalog.length === 0) emptySources.push('epic');
+  const committed = await commitBrowseSet(deduplicated, emptySources);
 
   console.log(
     `[PrefetchStore] Prefetch complete: ${deduplicated.length} games ` +
@@ -385,7 +448,7 @@ async function _doPrefetch(onProgress?: ProgressCallback): Promise<Game[]> {
       `Epic: ${epicCatalog.length}+${epicFreeGames.length})`,
   );
 
-  return deduplicated;
+  return committed.games;
 }
 
 /**
@@ -411,15 +474,34 @@ export function findGameById(id: string): Game | null {
   ) {
     return _navTransfer.game;
   }
-  if (!prefetchedGames) return null;
-  // Direct match
-  const direct = prefetchedGames.find(g => g.id === id);
-  if (direct) return direct;
-  // Cross-store match (a game might be stored under its Steam ID but have a secondaryId for Epic or vice-versa)
-  const secondary = prefetchedGames.find(g => g.secondaryId === id);
-  if (secondary) return secondary;
-  return null;
+  if (!prefetchedGames) {
+    idIndexSource = null;
+    byIdIndex = null;
+    bySecondaryIdIndex = null;
+    return null;
+  }
+  if (idIndexSource !== prefetchedGames || !byIdIndex || !bySecondaryIdIndex) {
+    // Rebuilt lazily whenever the list is replaced. Only the first entry per key is kept, matching
+    // the first-match semantics of the find() scans this replaces.
+    const byId = new Map<string, Game>();
+    const bySec = new Map<string, Game>();
+    for (const g of prefetchedGames) {
+      if (!byId.has(g.id)) byId.set(g.id, g);
+      if (g.secondaryId && !bySec.has(g.secondaryId)) bySec.set(g.secondaryId, g);
+    }
+    byIdIndex = byId;
+    bySecondaryIdIndex = bySec;
+    idIndexSource = prefetchedGames;
+  }
+  // Direct match, then cross-store match (a game might be stored under its Steam ID but have a
+  // secondaryId for Epic or vice-versa)
+  return byIdIndex.get(id) ?? bySecondaryIdIndex.get(id) ?? null;
 }
+
+// Lazy id lookups for findGameById, keyed to the prefetchedGames array they were built from.
+let idIndexSource: Game[] | null = null;
+let byIdIndex: Map<string, Game> | null = null;
+let bySecondaryIdIndex: Map<string, Game> | null = null;
 
 // ---------------------------------------------------------------------------
 // Navigation transfer — lets the game card pass its full Game object to the
@@ -454,7 +536,7 @@ export function searchPrefetchedGames(
 
   const scored: Array<{ game: Game; score: number }> = [];
 
-  if (searchIndex && searchIndex.length === prefetchedGames.length) {
+  if (searchIndex && searchIndexSource === prefetchedGames && searchIndex.length === prefetchedGames.length) {
     for (let i = 0; i < searchIndex.length; i++) {
       const s = scoreGame(searchIndex[i], tokens, q, prefetchedGames[i]);
       if (s > 0) scored.push({ game: prefetchedGames[i], score: s });
@@ -481,16 +563,12 @@ export function isPrefetchReady(): boolean {
 }
 
 /**
- * Replace in-memory data (used by background refresh in useSteamGames).
+ * Replace in-memory data (used by background refresh in useSteamGames) and persist it, with the
+ * same empty/shrink guards as the splash prefetch. Resolves with the set now in memory and whether
+ * it was saved (false = the current set was kept).
  */
-export function setPrefetchedGames(games: Game[]): void {
-  prefetchedGames = games;
-  prefetchReady = true;
-  _hmr.games = prefetchedGames;
-  _hmr.ready = prefetchReady;
-  buildSearchIndex(games);
-  // Persist to IndexedDB silently
-  saveBrowseCache(games).catch((err) => { console.warn('[Prefetch] Cache save:', err); });
+export function setPrefetchedGames(games: Game[]): Promise<{ games: Game[]; saved: boolean }> {
+  return commitBrowseSet(games);
 }
 
 /**
@@ -501,6 +579,8 @@ export async function clearBrowseCache(): Promise<void> {
   prefetchReady = false;
   prefetchedTopSellers = null;
   searchIndex = null;
+  searchIndexSource = null;
+  indexGen++;
   _hmr.games = null;
   _hmr.ready = false;
   _hmr.searchIndex = null;

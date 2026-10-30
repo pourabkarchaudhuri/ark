@@ -24,7 +24,15 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { APP_VERSION } from '@/components/changelog-modal';
 import { WindowControls } from '@/components/window-controls';
 import { EmptyState } from '@/components/empty-state';
-import { JourneyView } from '@/components/journey-view';
+import { JourneyView, readStoredVoyageTab } from '@/components/journey-view';
+import {
+  loadDashboardReturnState,
+  saveDashboardReturnState,
+  dashboardStateFingerprint,
+  scrollFingerprintKey,
+  shouldRestoreScroll,
+  type DashboardReturnState,
+} from '@/lib/dashboard-return-state';
 import { ViewErrorBoundary } from '@/components/view-error-boundary';
 import { BuzzView } from '@/components/buzz-view';
 import { ReleaseCalendar } from '@/components/release-calendar';
@@ -100,6 +108,16 @@ function getScrollStorageKey(view: ViewMode): string {
   return `ark-dashboard-scroll-${view}`;
 }
 
+/** Scroll key per view; Voyage keeps one offset per tab so a Log offset never lands on Ark. */
+function scrollKeyFor(view: ViewMode): string {
+  return view === 'journey'
+    ? `${getScrollStorageKey('journey')}:${readStoredVoyageTab()}`
+    : getScrollStorageKey(view);
+}
+
+/** A scroll restore still pending after this long (content never grew tall enough) is dropped. */
+const PENDING_SCROLL_RESTORE_TIMEOUT_MS = 15_000;
+
 /** Default: long grids. Journey/Voyage: lower bar — 3D canvas captures wheel, so users need the FAB after modest page scroll. */
 const SCROLL_TOP_FAB_THRESHOLD_DEFAULT = 500;
 const SCROLL_TOP_FAB_THRESHOLD_JOURNEY = 180;
@@ -129,16 +147,24 @@ function LazyViewFallback({
 
 export function Dashboard() {
   const [location, navigate] = useLocation();
-  
-  // Local filter state
-  const { filters, updateFilter, resetFilters } = useFilteredGames();
-  
+
   // View mode state — restore from sessionStorage when returning from game details
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     if (typeof window === 'undefined') return 'browse';
     const saved = sessionStorage.getItem(RETURN_VIEW_KEY);
     return (saved && VALID_VIEW_MODES.includes(saved as ViewMode)) ? (saved as ViewMode) : 'browse';
   });
+
+  // Filters, sort, search and Catalog letter saved when the Dashboard was left (Back from game
+  // details restores them). Only used for the view it was taken in.
+  const [returnState] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    const saved = loadDashboardReturnState(VALID_VIEW_MODES);
+    return saved && saved.viewMode === viewMode ? saved : null;
+  });
+
+  // Local filter state
+  const { filters, updateFilter, resetFilters } = useFilteredGames(returnState?.filters);
 
   // Guided tour state
   const { tourRunning, tourKey, activeTourId, startTour, stopTour } = useTourState();
@@ -160,15 +186,42 @@ export function Dashboard() {
   /** Cancels stale `waitForTourDomReady` when the user starts another tour from Settings → Guide. */
   const guidedTourRunGenRef = useRef(0);
 
-  // Seed the pending scroll restore on mount
+  // Fingerprint of the list now on screen (assigned each render, below the sort state).
+  const stateFingerprintRef = useRef('');
+
+  // Seed the pending scroll restore on mount — only when the offset was taken in this same state,
+  // so an old offset is never applied to a different list.
   useEffect(() => {
     if (location !== '/') return;
-    const saved = sessionStorage.getItem(getScrollStorageKey(viewMode));
+    const key = scrollKeyFor(viewMode);
+    const saved = sessionStorage.getItem(key);
     const pos = saved ? parseInt(saved, 10) : 0;
     if (!isNaN(pos) && pos > 0) {
-      pendingScrollRestoreRef.current = { view: viewMode, pos };
+      if (shouldRestoreScroll(sessionStorage.getItem(scrollFingerprintKey(key)), stateFingerprintRef.current)) {
+        pendingScrollRestoreRef.current = { view: viewMode, pos };
+      } else {
+        sessionStorage.removeItem(key);
+        sessionStorage.removeItem(scrollFingerprintKey(key));
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A pending restore is dropped once the user scrolls themselves, or after a while.
+  useEffect(() => {
+    if (!pendingScrollRestoreRef.current) return;
+    const cancel = () => { pendingScrollRestoreRef.current = null; };
+    const timer = setTimeout(cancel, PENDING_SCROLL_RESTORE_TIMEOUT_MS);
+    const opts = { passive: true } as const;
+    window.addEventListener('wheel', cancel, opts);
+    window.addEventListener('touchmove', cancel, opts);
+    window.addEventListener('keydown', cancel);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('wheel', cancel);
+      window.removeEventListener('touchmove', cancel);
+      window.removeEventListener('keydown', cancel);
+    };
   }, []);
 
   useEffect(() => {
@@ -188,6 +241,20 @@ export function Dashboard() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
     rawJumpToLetter(letter);
   }, [rawJumpToLetter]);
+
+  // Restore the Catalog letter once the catalog list has loaded (raw jump: the scroll restore
+  // handles the offset, so no smooth scroll to top).
+  const pendingCatalogLetterRef = useRef<string | null>(
+    returnState?.filters.category === 'catalog' ? returnState.catalogLetter : null,
+  );
+  useEffect(() => {
+    const letter = pendingCatalogLetterRef.current;
+    if (!letter) return;
+    if (filters.category !== 'catalog') { pendingCatalogLetterRef.current = null; return; }
+    if (steamLoading || steamGames.length === 0) return;
+    pendingCatalogLetterRef.current = null;
+    rawJumpToLetter(letter);
+  }, [filters.category, steamLoading, steamGames.length, rawJumpToLetter]);
   
   // Note: Cache clearing removed - useSteamGames handles data fetching on mount
   
@@ -195,8 +262,8 @@ export function Dashboard() {
   // Grid commits on Enter, suggestion click, or 400ms of no typing.  This stops
   // the whole Browse grid from re-deriving on every keystroke while the user
   // still sees a live dropdown.
-  const [typingQuery, setTypingQuery] = useState('');
-  const [committedQuery, setCommittedQuery] = useState('');
+  const [typingQuery, setTypingQuery] = useState(() => returnState?.committedQuery ?? '');
+  const [committedQuery, setCommittedQuery] = useState(() => returnState?.committedQuery ?? '');
   const debouncedTyping = useDebounce(typingQuery, 400);
   useEffect(() => { setCommittedQuery(debouncedTyping); }, [debouncedTyping]);
   const clearSearch = useCallback(() => { setTypingQuery(''); setCommittedQuery(''); }, []);
@@ -349,8 +416,27 @@ export function Dashboard() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingGame, setEditingGame] = useState<Game | null>(null);
   const [editInitialEntry, setEditInitialEntry] = useState<GameDialogInitialEntry | null>(null);
-  const [sortBy, setSortBy] = useState<SortOption>('rating');
-  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [sortBy, setSortBy] = useState<SortOption>(() => returnState?.sortBy ?? 'rating');
+  const [sortDirection, setSortDirection] = useState<SortDirection>(() => returnState?.sortDirection ?? 'desc');
+
+  // Snapshot of what is on screen: saved when the Dashboard is left, fingerprinted next to each
+  // saved scroll offset.
+  const returnSnapshot: DashboardReturnState = {
+    viewMode,
+    filters,
+    sortBy,
+    sortDirection,
+    committedQuery,
+    // A letter still waiting to be restored counts as the current one.
+    catalogLetter: filters.category === 'catalog' ? (catalogLetter ?? pendingCatalogLetterRef.current) : null,
+  };
+  const returnSnapshotRef = useRef(returnSnapshot);
+  returnSnapshotRef.current = returnSnapshot;
+  stateFingerprintRef.current = dashboardStateFingerprint(returnSnapshot);
+  useEffect(() => {
+    if (location !== '/') saveDashboardReturnState(returnSnapshotRef.current);
+  }, [location]);
+  useEffect(() => () => saveDashboardReturnState(returnSnapshotRef.current), []);
   const [allowAdultContent] = useAllowAdultContent();
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -497,15 +583,19 @@ export function Dashboard() {
   viewModeRef.current = viewMode;
   useEffect(() => {
     let scrollSaveTimeout: ReturnType<typeof setTimeout>;
+    // Offset + the fingerprint of the list it was taken on (checked before restoring).
+    const saveScroll = () => {
+      const key = scrollKeyFor(viewModeRef.current);
+      sessionStorage.setItem(key, String(Math.round(window.scrollY)));
+      sessionStorage.setItem(scrollFingerprintKey(key), stateFingerprintRef.current);
+    };
     function handleScroll() {
       const threshold =
         viewModeRef.current === 'journey' ? SCROLL_TOP_FAB_THRESHOLD_JOURNEY : SCROLL_TOP_FAB_THRESHOLD_DEFAULT;
       setShowScrollTop(window.scrollY > threshold);
       if (location !== '/') return;
       clearTimeout(scrollSaveTimeout);
-      scrollSaveTimeout = setTimeout(() => {
-        sessionStorage.setItem(getScrollStorageKey(viewModeRef.current), String(Math.round(window.scrollY)));
-      }, 150);
+      scrollSaveTimeout = setTimeout(saveScroll, 150);
     }
 
     handleScroll();
@@ -514,7 +604,7 @@ export function Dashboard() {
       window.removeEventListener('scroll', handleScroll);
       clearTimeout(scrollSaveTimeout);
       // Flush one final save so the position isn't lost when navigating away
-      sessionStorage.setItem(getScrollStorageKey(viewModeRef.current), String(Math.round(window.scrollY)));
+      saveScroll();
     };
   }, [location, viewMode]);
 

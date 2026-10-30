@@ -141,6 +141,11 @@ self.onmessage = async (e: MessageEvent) => {
   const { type } = e.data;
 
   if (type === 'save') {
+    // An empty set would replace a usable 7-day cache with nothing (offline / every source failed).
+    if (!Array.isArray(e.data.games) || e.data.games.length === 0) {
+      self.postMessage({ type: 'save-done', skipped: true });
+      return;
+    }
     try {
       const db = await openDB();
       const slimmed = slimGames(e.data.games);
