@@ -21,6 +21,11 @@ export interface NativeProcessInfo {
   pid: number;
   /** Full executable path, lowercased. `undefined` when unresolvable. */
   path?: string;
+  /**
+   * Image basename (Toolhelp32 `szExeFile`), lowercased. Present even when
+   * `path` is not; absent from binaries built before 1.0.97.
+   */
+  name?: string;
 }
 
 interface ArkNativeModule {

@@ -18,25 +18,29 @@
  * the queue on mount (`session:getRecovered`) and records idempotently by id.
  */
 
-import { exec, type ExecOptions } from 'child_process';
+import { execFile, type ExecFileOptions } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import * as fs from 'fs';
 import { logger } from './safe-logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
-import { nativeSessionEnumerate } from './native-bridge.js';
+import { nativeSessionEnumerate, type NativeProcessInfo } from './native-bridge.js';
 import { atomicWriteFileSync } from './safe-write.js';
 import { reportGameActivity } from './game-activity.js';
 
-/** Async exec so process snapshots never block Electron's main/input pump. */
-const execAsync = promisify(exec);
+/**
+ * Async execFile (no shell, so no extra cmd.exe per poll) — process snapshots
+ * never block Electron's main/input pump.
+ */
+const execFileAsync = promisify(execFile);
 
-async function runCommand(
-  command: string,
-  options: ExecOptions,
+async function runFileDefault(
+  file: string,
+  args: string[],
+  options: ExecFileOptions,
 ): Promise<string> {
-  const { stdout } = await execAsync(command, {
+  const { stdout } = await execFileAsync(file, args, {
     ...options,
     encoding: 'utf8',
   });
@@ -47,6 +51,31 @@ const createRequire = (await import('node:module')).createRequire;
 const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { powerMonitor, app } = electron;
+
+/**
+ * Everything the poll loop reads from the OS, injectable so tests can drive
+ * the tracker without Electron (`require('electron')` is only a path string
+ * under vitest) — same seam pattern as launch-handlers / native-bridge.
+ */
+interface SessionTrackerDeps {
+  now: () => number;
+  getSystemIdleTime: () => number;
+  nativeEnumerate: () => NativeProcessInfo[] | null;
+  runFile: (file: string, args: string[], options: ExecFileOptions) => Promise<string>;
+  realpath: (p: string) => string;
+  platform: NodeJS.Platform;
+}
+
+const defaultDeps: SessionTrackerDeps = {
+  now: () => Date.now(),
+  getSystemIdleTime: () => powerMonitor.getSystemIdleTime(),
+  nativeEnumerate: nativeSessionEnumerate,
+  runFile: runFileDefault,
+  realpath: (p) => fs.realpathSync.native(p),
+  platform: process.platform,
+};
+
+let deps: SessionTrackerDeps = defaultDeps;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,6 +95,9 @@ interface ActiveSession {
   missedPolls: number;       // Consecutive polls where the process was not seen
   lastSeenMs: number;        // Timestamp (ms) of the last poll where the process was running
   activeInputMs: number;     // Total ms where the user was actively providing input
+  idleConfirmed: boolean;    // Idle already confirmed (its back-dated start counted) for the current AFK break
+  idleFloorMs: number;       // Idle before this instant is already accounted (session start, or the end of a sleep)
+  suspendedMs: number;       // System-suspend span reported by powerMonitor, applied as idle on the next seen tick
 }
 
 export interface CompletedSession {
@@ -97,6 +129,12 @@ const IDLE_THRESHOLD_S = 300;      // 5 minutes idle threshold
  * "Playing Now" indicator lag more than a minute past a real quit.
  */
 const MISSES_BEFORE_END = 4;
+/**
+ * A gap this long between two sightings of a still-running process means the
+ * poll loop was not running (system sleep / hibernate, or every snapshot
+ * failing). The span is idle, not play.
+ */
+const SLEEP_GAP_MS = 4 * POLL_INTERVAL_MS;
 
 // ---------------------------------------------------------------------------
 // Process detection — single OS call per poll tick, not per game
@@ -104,18 +142,34 @@ const MISSES_BEFORE_END = 4;
 
 /** Cache of lowercased process basenames from the most recent snapshot. */
 let _runningBasenames: Set<string> = new Set();
-/** Cache of lowercased full executable paths from the most recent snapshot. */
+/** Cache of lowercased, normalized full executable paths from the most recent snapshot. */
 let _runningPaths: Set<string> = new Set();
+/** basename → every full path seen for it in the most recent path snapshot. */
+let _basenamePaths: Map<string, Set<string>> = new Map();
 /**
- * True when the PowerShell path snapshot failed on the most recent tick, so
- * `_runningPaths` is either empty or from an older tick that no longer reflects
- * reality. When set, `isProcessRunning` must NOT trust `_runningPaths` — it
- * falls back to basename matching only. Without this, a game that has just
- * exited but was in the previous good `_runningPaths` snapshot appears
- * "running" forever and `MISSES_BEFORE_END` never accumulates, so
- * `session:ended` is never emitted (v1.0.60 tracker-never-ends bug).
+ * Basenames with at least one process whose path could not be read (elevated
+ * or protected process). Only these may still match by basename alone when a
+ * fresh path snapshot shows the name living in some other folder.
+ */
+let _unresolvedBasenames: Set<string> = new Set();
+/**
+ * True when the path snapshot failed on the most recent tick, so
+ * `_runningPaths` is empty and must not be trusted — `isProcessRunning`
+ * falls back to basename matching only. The previous good path set is never
+ * kept: a game that has just exited would appear "running" forever and
+ * `MISSES_BEFORE_END` would never accumulate, so `session:ended` is never
+ * emitted (v1.0.60 tracker-never-ends bug).
  */
 let _pathSnapshotStale = false;
+/**
+ * True when no basename source (native names / tasklist) answered this tick
+ * and `_runningBasenames` was derived from the path snapshot instead. The
+ * previous tick's basenames are never reused: a game that exited would keep
+ * matching them forever (1.0.97).
+ */
+let _basenameSnapshotStale = false;
+/** Logged once per failure streak so a blocked snapshot doesn't spam every 15s. */
+let _snapshotFailureLogged = false;
 
 /**
  * Basenames we have already warned about falling back to basename-only
@@ -124,151 +178,241 @@ let _pathSnapshotStale = false;
  */
 const _basenameCollisionWarned: Set<string> = new Set();
 
+function isWindowsPath(p: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\');
+}
+
+/** Lowercased, separator/`..`-normalized form used for every path comparison. */
+function normalizeExePath(p: string): string {
+  const normalized = isWindowsPath(p) ? path.win32.normalize(p) : path.posix.normalize(p);
+  return normalized.toLowerCase();
+}
+
+function exeBasename(p: string): string {
+  return (isWindowsPath(p) ? path.win32.basename(p) : path.posix.basename(p)).toLowerCase();
+}
+
+/** exePath → canonical keys (normalized path, plus its realpath when that resolves). */
+const _canonicalKeyCache: Map<string, string[]> = new Map();
+
 /**
- * Snapshot all running processes into `_runningBasenames` and `_runningPaths`.
- * Called once per poll tick — avoids spawning N per-game commands.
- *
- * On Windows we do two calls:
- *   - `tasklist /FO CSV /NH` → basenames (fast, always works, no path info)
- *   - `powershell Get-Process | Select-Object Path` → full paths (slower, may
- *     miss elevated processes when we're not admin)
- * Both are populated so we can primarily match on full path and fall back to
- * basename when the path snapshot doesn't include a process (e.g. game
- * launched with elevation).
+ * Canonical keys for a tracked exe: the normalized path and, when it resolves,
+ * the realpath (junctions, symlinked library folders). Cached — computed once
+ * per path, not per tick.
  */
-async function refreshProcessSnapshot(): Promise<void> {
+function canonicalKeys(exePath: string): string[] {
+  const cached = _canonicalKeyCache.get(exePath);
+  if (cached) return cached;
+  const keys = [normalizeExePath(exePath)];
   try {
-    if (process.platform === 'win32') {
-      // ---- Basenames (fast, primary source of truth for "is anything named X running") ----
+    const real = normalizeExePath(deps.realpath(exePath));
+    if (real && !keys.includes(real)) keys.push(real);
+  } catch {
+    // Missing / unreadable file — the normalized path is all we have.
+  }
+  _canonicalKeyCache.set(exePath, keys);
+  return keys;
+}
+
+/**
+ * Publish one tick's snapshot. `names` has one entry per process (duplicates
+ * kept); `paths` one entry per process whose path resolved, or `null` when no
+ * path snapshot is available this tick.
+ */
+function applySnapshot(names: string[], paths: string[] | null, trackUnresolved: boolean): void {
+  _runningBasenames = new Set(names);
+  _runningPaths = new Set(paths ?? []);
+  _pathSnapshotStale = paths === null;
+  _basenamePaths = new Map();
+  _unresolvedBasenames = new Set();
+  if (paths === null || !trackUnresolved) return;
+  const resolvedCount = new Map<string, number>();
+  for (const p of paths) {
+    const b = exeBasename(p);
+    let set = _basenamePaths.get(b);
+    if (!set) _basenamePaths.set(b, (set = new Set()));
+    set.add(p);
+    resolvedCount.set(b, (resolvedCount.get(b) ?? 0) + 1);
+  }
+  const nameCount = new Map<string, number>();
+  for (const n of names) nameCount.set(n, (nameCount.get(n) ?? 0) + 1);
+  // More processes of this name than resolved paths for it → at least one
+  // could not be read. (Two snapshots a few ms apart can disagree; the error
+  // direction is "allow the basename match", i.e. the pre-1.0.97 behaviour.)
+  for (const [n, count] of nameCount) {
+    if (count > (resolvedCount.get(n) ?? 0)) _unresolvedBasenames.add(n);
+  }
+}
+
+/** One basename per process from `tasklist /FO CSV /NH`. */
+function parseTasklist(output: string): string[] {
+  const names: string[] = [];
+  for (const line of output.split('\n')) {
+    // Extract the first quoted field (image name)
+    const match = line.match(/^"([^"]+)"/);
+    if (match) names.push(match[1].toLowerCase());
+  }
+  return names;
+}
+
+/**
+ * Snapshot all running processes into `_runningBasenames` / `_runningPaths`.
+ * Called once per poll tick — avoids spawning N per-game commands. Returns
+ * false when no source answered at all; the caller must then neither extend
+ * nor end any session for this tick.
+ *
+ * On Windows the native module (ark-native: one Toolhelp32 snapshot + a
+ * QueryFullProcessImageName per PID, ~10-20ms in-process) supplies both the
+ * basename and the full path of every process, so nothing is spawned. Only
+ * when it is unavailable (missing binary, wrong arch, corrupted install) or
+ * returns no basenames (binary built before 1.0.97) do we fall back to
+ * `tasklist` for basenames and, without native, PowerShell for paths — both
+ * via execFile, no shell. When tasklist fails but paths are known, basenames
+ * are derived from the paths for that tick.
+ */
+async function refreshProcessSnapshot(): Promise<boolean> {
+  if (deps.platform === 'win32') {
+    // A real Windows system always has hundreds of processes running (Ark
+    // itself, explorer.exe, system services) — an empty native result can
+    // only mean the enumeration call itself failed, so it is treated as
+    // "native unavailable", never as "nothing is running".
+    const nativeResult = deps.nativeEnumerate();
+    const nativeOk = nativeResult !== null && nativeResult.length > 0;
+
+    let paths: string[] | null = null;
+    let names: string[] | null = null;
+    if (nativeOk) {
+      paths = [];
+      for (const proc of nativeResult) {
+        if (proc.path) paths.push(normalizeExePath(proc.path));
+      }
+      if (nativeResult.every((proc) => proc.name || proc.path)) {
+        names = nativeResult.map((proc) => (proc.name ? proc.name.toLowerCase() : exeBasename(proc.path!)));
+      }
+    }
+
+    if (names === null) {
       // /FO CSV /NH → one line per process: "imagename","PID","sessionname","session#","memUsage"
-      // Async — never block the Electron main thread (sync exec was a mouse-hitch source).
-      const output = await runCommand('tasklist /FO CSV /NH', {
-        timeout: 10_000,
-        windowsHide: true,
-      });
-      const names = new Set<string>();
-      for (const line of output.split('\n')) {
-        // Extract the first quoted field (image name)
-        const match = line.match(/^"([^"]+)"/);
-        if (match) names.add(match[1].toLowerCase());
-      }
-      _runningBasenames = names;
-
-      // ---- Full paths ----
-      // Phase 3: prefer the native ark-native module (single in-process
-      // EnumProcesses + QueryFullProcessImageName syscall pass, ~10-20ms for
-      // a full system snapshot — see native/ark-native/src/lib.rs) over the
-      // PowerShell subprocess this replaces. PowerShell was both slow
-      // (~100ms-multi-second under AV/GPU load) AND the root cause class of
-      // the v1.0.60 tracker-never-ends bug when it failed outright. Falls
-      // back to the original PowerShell call when the native module isn't
-      // loaded (missing binary, wrong platform/arch, corrupted install) —
-      // every consumer of `_runningPaths`/`_pathSnapshotStale` is unchanged,
-      // so this swap is invisible below this function.
-      // A real Windows system always has hundreds of processes running
-      // (Ark itself, explorer.exe, system services) — an empty result can
-      // only mean the underlying EnumProcesses syscall itself failed
-      // (extremely rare: e.g. transient low-memory condition), not that
-      // nothing is running. Treat it the same as "native unavailable" and
-      // fall through to the PowerShell path, rather than trusting a
-      // spuriously-empty snapshot and marking every tracked game as missing.
-      const nativeResult = nativeSessionEnumerate();
-      if (nativeResult !== null && nativeResult.length > 0) {
-        const paths = new Set<string>();
-        for (const proc of nativeResult) {
-          if (proc.path) paths.add(proc.path.toLowerCase());
-        }
-        _runningPaths = paths;
-        _pathSnapshotStale = false;
-        return;
-      }
-
-      const paths = new Set<string>();
       try {
-        const psOut = await runCommand(
-          'powershell.exe -NoProfile -NonInteractive -Command "Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -ExpandProperty Path"',
+        names = parseTasklist(await deps.runFile('tasklist', ['/FO', 'CSV', '/NH'], {
+          timeout: 10_000,
+          windowsHide: true,
+        }));
+      } catch {
+        names = null;
+      }
+    }
+
+    if (paths === null) {
+      try {
+        const psOut = await deps.runFile(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            'Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -ExpandProperty Path',
+          ],
           { timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
         );
+        paths = [];
         for (const line of psOut.split('\n')) {
           const trimmed = line.trim();
-          if (trimmed) paths.add(trimmed.toLowerCase());
+          if (trimmed) paths.push(normalizeExePath(trimmed));
         }
       } catch {
-        // PowerShell path snapshot failed. The basename snapshot on line 136
-        // is FRESH, so a game that just exited will be absent from it. But if
-        // we leave `_runningPaths` populated with the previous good snapshot,
-        // `isProcessRunning` will still say "yes, it's running" from the stale
-        // path — `missedPolls` never increments and `session:ended` never
-        // fires. Clear the path set and mark it stale so `isProcessRunning`
-        // falls back to basename-only for this tick.
-        _runningPaths = new Set();
-        _pathSnapshotStale = true;
-        return;
+        // Path snapshot failed — basename-only matching for this tick.
+        paths = null;
       }
-      _runningPaths = paths;
-      _pathSnapshotStale = false;
-    } else {
-      // macOS / Linux — `ps -eo comm=,command=` prints basename + full command per line
-      const output = await runCommand('ps -eo comm=,command=', { timeout: 5000 });
-      const names = new Set<string>();
-      const paths = new Set<string>();
-      for (const line of output.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const spaceIdx = trimmed.indexOf(' ');
-        const comm = spaceIdx > 0 ? trimmed.slice(0, spaceIdx) : trimmed;
-        const command = spaceIdx > 0 ? trimmed.slice(spaceIdx + 1) : trimmed;
-        names.add(comm.toLowerCase());
-        // First token of `command` is the executable (usually an absolute path)
-        const firstArg = command.split(/\s+/)[0];
-        if (firstArg && firstArg.startsWith('/')) paths.add(firstArg.toLowerCase());
-      }
-      _runningBasenames = names;
-      _runningPaths = paths;
-      _pathSnapshotStale = false;
     }
+
+    if (names === null && paths === null) {
+      // Nothing answered. The old basename list must not be reused (it would
+      // keep exited games alive), and an empty one would end every session.
+      _runningPaths = new Set();
+      _pathSnapshotStale = true;
+      _basenameSnapshotStale = true;
+      return false;
+    }
+
+    _basenameSnapshotStale = names === null;
+    applySnapshot(names ?? paths!.map(exeBasename), paths, true);
+    return true;
+  }
+
+  // macOS / Linux — `ps -eo comm=,command=` prints basename + full command per line
+  try {
+    const output = await deps.runFile('ps', ['-eo', 'comm=,command='], { timeout: 5000 });
+    const names: string[] = [];
+    const paths: string[] = [];
+    for (const line of output.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const spaceIdx = trimmed.indexOf(' ');
+      const comm = spaceIdx > 0 ? trimmed.slice(0, spaceIdx) : trimmed;
+      const command = spaceIdx > 0 ? trimmed.slice(spaceIdx + 1) : trimmed;
+      names.push(comm.toLowerCase());
+      // First token of `command` is the executable (usually an absolute path)
+      const firstArg = command.split(/\s+/)[0];
+      if (firstArg && firstArg.startsWith('/')) paths.push(normalizeExePath(firstArg));
+    }
+    _basenameSnapshotStale = false;
+    // `comm` is truncated / not always the path basename here, so name and
+    // path counts can't be compared: keep the plain basename fallback.
+    applySnapshot(names, paths, false);
+    return true;
   } catch {
-    // Outer snapshot failed (e.g. `tasklist` itself threw). Both sets are now
-    // untrustworthy — clear paths and mark stale so we don't keep counting a
-    // just-exited game as running from an older snapshot.
     _runningPaths = new Set();
     _pathSnapshotStale = true;
+    _basenameSnapshotStale = true;
+    return false;
   }
 }
 
 /**
  * Check the cached snapshot for a specific executable.
  *
- * Prefers a full-path match (avoids treating two unrelated `game.exe` binaries
- * as the same tracked game). Falls back to basename match — and logs a
- * one-time warning — when the path snapshot doesn't include this process
- * (elevated processes, non-Windows, or a failed PowerShell call).
+ * Prefers a full-path match against the exe's canonical keys (avoids treating
+ * two unrelated `game.exe` binaries as the same tracked game). Falls back to
+ * a basename match — and logs a one-time warning — only when the path
+ * snapshot can't rule it out: the snapshot is stale, the name has no known
+ * path, or some process of that name has an unreadable path (elevated game).
  */
 function isProcessRunning(exePath: string): boolean {
-  const normalizedPath = exePath.toLowerCase();
+  const keys = canonicalKeys(exePath);
 
   // Primary: exact full-path match. Only trusted when the path snapshot is
   // fresh — a stale set from an old good snapshot would keep just-exited
   // games "running" forever (v1.0.60 tracker-never-ends bug).
-  if (!_pathSnapshotStale && _runningPaths.has(normalizedPath)) return true;
+  if (!_pathSnapshotStale && keys.some((k) => _runningPaths.has(k))) return true;
 
-  // Fallback: basename match. Only trust it if we can't identify by path.
-  const basename = path.basename(exePath).toLowerCase();
-  if (_runningBasenames.has(basename)) {
-    // Warn once per basename per app run — if _runningPaths is populated but
-    // this exact path isn't in it, we're guessing based on a common filename.
-    if (!_pathSnapshotStale && _runningPaths.size > 0 && !_basenameCollisionWarned.has(basename)) {
-      _basenameCollisionWarned.add(basename);
-      logger.warn(
-        `[SessionTracker] Basename-only match for "${basename}" — the full path ` +
-        `"${exePath}" was not in the process-path snapshot. This may be an elevated ` +
-        `process (safe) or an unrelated collision (a different program of the same ` +
-        `filename). If sessions look wrong, check whether both are running.`
-      );
+  const basename = exeBasename(keys[0]);
+  if (!_runningBasenames.has(basename)) return false;
+  // Basenames were only derived from the (fresh) path snapshot this tick, and
+  // the path itself did not match — nothing left to fall back on.
+  if (_basenameSnapshotStale && !_pathSnapshotStale) return false;
+
+  // A fresh snapshot shows every process of this name living somewhere else:
+  // a different program with the same filename, not the tracked game.
+  if (!_pathSnapshotStale) {
+    const known = _basenamePaths.get(basename);
+    if (known && known.size > 0 && !_unresolvedBasenames.has(basename)
+      && !keys.some((k) => known.has(k))) {
+      return false;
     }
-    return true;
   }
-  return false;
+
+  // Warn once per basename per app run — we're guessing based on a filename.
+  if (!_pathSnapshotStale && _runningPaths.size > 0 && !_basenameCollisionWarned.has(basename)) {
+    _basenameCollisionWarned.add(basename);
+    logger.warn(
+      `[SessionTracker] Basename-only match for "${basename}" — the full path ` +
+      `"${exePath}" was not in the process-path snapshot. This may be an elevated ` +
+      `process (safe) or an unrelated collision (a different program of the same ` +
+      `filename). If sessions look wrong, check whether both are running.`
+    );
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +424,16 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let pollInFlight = false;
 let mainWindowRef: BrowserWindowType | null = null;
 let trackedGames: TrackedGame[] = [];
+/**
+ * The merged list the renderer last sent, before one-owner-per-exe dedupe.
+ * `keepSources` re-uses its entries for a store the renderer could not read.
+ */
+let lastInputGames: TrackedGame[] = [];
+/** Signature of the last logged shared-exe collision set (log once per change). */
+let lastCollisionSignature = '';
+/** powerMonitor 'suspend' time; consumed by 'resume'. */
+let suspendStartMs: number | null = null;
+let powerEventsWired = false;
 const activeSessions: Map<string, ActiveSession> = new Map(); // gameId -> session
 
 // ---------------------------------------------------------------------------
@@ -495,6 +649,22 @@ function recoverPersistedSessions(): void {
 // Core poll loop
 // ---------------------------------------------------------------------------
 
+/**
+ * When a session ends without a final sighting (untracked, Ark quitting, the
+ * miss window running out): the last time the process was actually seen, so
+ * neither the miss window nor a suspension after it counts as playtime.
+ */
+function sessionEndMs(session: ActiveSession, nowMs: number): number {
+  return Math.max(session.startTime.getTime(), Math.min(nowMs, session.lastSeenMs || nowMs));
+}
+
+/** Add idle time, never letting total idle exceed the session's elapsed time. */
+function addIdle(session: ActiveSession, ms: number, nowMs: number): void {
+  if (!(ms > 0)) return;
+  const elapsed = Math.max(0, nowMs - session.startTime.getTime());
+  session.idleAccumulatedMs = Math.min(elapsed, session.idleAccumulatedMs + ms);
+}
+
 async function pollTick(): Promise<void> {
   if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
 
@@ -510,8 +680,21 @@ async function pollTick(): Promise<void> {
     // Snapshot all running processes ONCE — O(1) lookups for each game below.
     // Measure OS-probe duration so we can surface hook latency in telemetry.
     const _hookStart = performance.now();
-    await refreshProcessSnapshot();
+    const snapshotOk = await refreshProcessSnapshot();
     const hookLatencyMs = Math.round((performance.now() - _hookStart) * 100) / 100;
+
+    if (!snapshotOk) {
+      // No source could say what is running. Freeze: don't bump lastSeenMs
+      // (that would extend sessions of games that may have exited) and don't
+      // count misses (that would end sessions of games still running). If the
+      // outage outlasts SLEEP_GAP_MS, the next good sighting books it as idle.
+      if (!_snapshotFailureLogged) {
+        _snapshotFailureLogged = true;
+        logger.warn('[SessionTracker] Every process snapshot failed — sessions frozen until one succeeds');
+      }
+      return;
+    }
+    _snapshotFailureLogged = false;
 
     // Sample process resource usage for telemetry samples emitted below.
     const rssMb = Math.round((process.memoryUsage().rss / (1024 * 1024)) * 100) / 100;
@@ -529,12 +712,12 @@ async function pollTick(): Promise<void> {
     // Get system idle time (seconds)
     let systemIdleS = 0;
     try {
-      systemIdleS = powerMonitor.getSystemIdleTime();
+      systemIdleS = deps.getSystemIdleTime();
     } catch {
       // powerMonitor may not be available in all environments
     }
     const isSystemIdle = systemIdleS >= IDLE_THRESHOLD_S;
-    const nowMs = Date.now();
+    const nowMs = deps.now();
 
     for (const game of trackedGames) {
     const running = isProcessRunning(game.executablePath);
@@ -545,12 +728,15 @@ async function pollTick(): Promise<void> {
       const session: ActiveSession = {
         gameId: game.gameId,
         executablePath: game.executablePath,
-        startTime: new Date(),
+        startTime: new Date(nowMs),
         idleAccumulatedMs: 0,
         lastIdleCheck: false,
         missedPolls: 0,
         lastSeenMs: nowMs,
         activeInputMs: 0,
+        idleConfirmed: false,
+        idleFloorMs: nowMs,
+        suspendedMs: 0,
       };
       activeSessions.set(game.gameId, session);
 
@@ -561,22 +747,50 @@ async function pollTick(): Promise<void> {
 
     } else if (running && existingSession) {
       // ---- Game still running — accumulate idle if applicable ----
+      // Sleep / hibernate: the process is still there on resume, so without
+      // this the whole suspension counted as play. Either powerMonitor told
+      // us (suspendedMs) or the gap since the last sighting is far longer
+      // than one poll; one poll's worth stays as the normal tick.
+      const sinceSeenMs = nowMs - existingSession.lastSeenMs;
+      const gapIdleMs = sinceSeenMs > SLEEP_GAP_MS ? sinceSeenMs - POLL_INTERVAL_MS : 0;
+      const sleptMs = Math.max(existingSession.suspendedMs, gapIdleMs);
+      existingSession.suspendedMs = 0;
+
       // Recovered from a transient miss: clear the counter.
       existingSession.missedPolls = 0;
       existingSession.lastSeenMs = nowMs;
 
-      // Only count idle once it has been sustained across two consecutive polls,
-      // so a single idle blip (or controller-only play crossing the threshold for
-      // one tick) doesn't unfairly subtract active time.
-      if (isSystemIdle && existingSession.lastIdleCheck) {
-        existingSession.idleAccumulatedMs += POLL_INTERVAL_MS;
-      }
-      existingSession.lastIdleCheck = isSystemIdle;
+      if (sleptMs > 0) {
+        addIdle(existingSession, sleptMs, nowMs);
+        // The system idle clock spans the sleep too — restart idle
+        // confirmation so it can't be counted a second time.
+        existingSession.lastIdleCheck = false;
+        existingSession.idleConfirmed = false;
+        existingSession.idleFloorMs = nowMs;
+      } else {
+        // Only count idle once it has been sustained across two consecutive
+        // polls, so a single idle blip (or controller-only play crossing the
+        // threshold for one tick) doesn't unfairly subtract active time. On
+        // the confirming tick the whole break so far is back-dated (the
+        // system idle clock says how long ago the last input was), clamped
+        // to this session; after that, one poll per tick.
+        if (isSystemIdle && existingSession.lastIdleCheck) {
+          if (!existingSession.idleConfirmed) {
+            addIdle(existingSession, Math.min(systemIdleS * 1000, nowMs - existingSession.idleFloorMs), nowMs);
+            existingSession.idleConfirmed = true;
+          } else {
+            addIdle(existingSession, POLL_INTERVAL_MS, nowMs);
+          }
+        } else if (!isSystemIdle) {
+          existingSession.idleConfirmed = false;
+        }
+        existingSession.lastIdleCheck = isSystemIdle;
 
-      // Telemetry: count this tick as active-input when the system was not idle
-      // for longer than one poll interval — i.e. the user provided input recently.
-      if (systemIdleS < POLL_INTERVAL_S) {
-        existingSession.activeInputMs += POLL_INTERVAL_MS;
+        // Telemetry: count this tick as active-input when the system was not idle
+        // for longer than one poll interval — i.e. the user provided input recently.
+        if (systemIdleS < POLL_INTERVAL_S) {
+          existingSession.activeInputMs += POLL_INTERVAL_MS;
+        }
       }
 
       // Send live playtime update to the renderer
@@ -598,7 +812,7 @@ async function pollTick(): Promise<void> {
 
       // End the session at the LAST time we actually saw it running, so the
       // missed-poll window is not counted as playtime.
-      const completed = buildCompleted(game.gameId, existingSession, existingSession.lastSeenMs);
+      const completed = buildCompleted(game.gameId, existingSession, sessionEndMs(existingSession, nowMs));
 
       activeSessions.delete(game.gameId);
 
@@ -633,6 +847,40 @@ async function pollTick(): Promise<void> {
   updateOverlayVisibility();
   } finally {
     pollInFlight = false;
+  }
+}
+
+/** powerMonitor 'suspend': remember when the system went to sleep. */
+export function handlePowerSuspend(nowMs: number = deps.now()): void {
+  suspendStartMs = nowMs;
+}
+
+/**
+ * powerMonitor 'resume': book the suspended span as idle on every running
+ * session. Applied on the session's next sighting (not here), so a game that
+ * turns out to have exited during sleep still ends at its last sighting with
+ * no idle subtracted for time after it.
+ */
+export function handlePowerResume(nowMs: number = deps.now()): void {
+  if (suspendStartMs === null) return;
+  const spanMs = Math.max(0, nowMs - suspendStartMs);
+  suspendStartMs = null;
+  if (spanMs === 0) return;
+  for (const session of activeSessions.values()) {
+    session.suspendedMs += spanMs;
+  }
+  logger.log(`[SessionTracker] Resumed after ${Math.round(spanMs / 1000)}s suspended — counted as idle`);
+}
+
+function wirePowerEvents(): void {
+  if (powerEventsWired) return;
+  try {
+    if (!powerMonitor || typeof powerMonitor.on !== 'function') return;
+    powerMonitor.on('suspend', () => handlePowerSuspend());
+    powerMonitor.on('resume', () => handlePowerResume());
+    powerEventsWired = true;
+  } catch (err) {
+    logger.warn('[SessionTracker] powerMonitor suspend/resume unavailable:', err);
   }
 }
 
@@ -727,6 +975,8 @@ export function startSessionTracker(mainWindow: BrowserWindowType) {
 
   // Recover any sessions left unfinalized by a previous crash/force-kill.
   recoverPersistedSessions();
+  // Sleep / hibernate: the suspended span is idle, not play.
+  wirePowerEvents();
 
   if (pollTimer) {
     clearInterval(pollTimer);
@@ -778,10 +1028,9 @@ export function stopSessionTracker() {
 
   // Finalize any active sessions (up to the last time the process was seen —
   // quitting Ark must not count time the game wasn't confirmed running).
-  const nowMs = Date.now();
+  const nowMs = deps.now();
   for (const [gameId, session] of activeSessions) {
-    const endMs = Math.max(session.startTime.getTime(), Math.min(nowMs, session.lastSeenMs || nowMs));
-    finalizeCompleted(buildCompleted(gameId, session, endMs));
+    finalizeCompleted(buildCompleted(gameId, session, sessionEndMs(session, nowMs)));
   }
 
   activeSessions.clear();
@@ -793,21 +1042,95 @@ export function stopSessionTracker() {
   logger.log('[SessionTracker] Stopped');
 }
 
+export type TrackedSource = 'library' | 'custom';
+
+export interface SetTrackedGamesOptions {
+  /**
+   * Sources the renderer could not read this time (read-only store with no
+   * entries). Their previously tracked games are kept as they are and their
+   * running sessions are not finalized as orphans; only the other source's
+   * games are replaced.
+   */
+  keepSources?: readonly TrackedSource[];
+}
+
+function sourceOf(gameId: string): TrackedSource {
+  return gameId.startsWith('custom-') ? 'custom' : 'library';
+}
+
+/**
+ * One owner per exe. Two entries pointing at the same exe (Steam + Epic
+ * copies, two titles on one launcher) would otherwise each record the full
+ * session and double the hours. Owner: (1) the entry already running a
+ * session for that exe, so a resync never moves a live session, (2) a library
+ * entry over a custom one, (3) the first in input order.
+ */
+function pickExeOwners(games: readonly TrackedGame[]): TrackedGame[] {
+  const groups = new Map<string, TrackedGame[]>();
+  for (const g of games) {
+    const key = canonicalKeys(g.executablePath)[0];
+    const list = groups.get(key);
+    if (list) list.push(g);
+    else groups.set(key, [g]);
+  }
+
+  const owners = new Set<TrackedGame>();
+  const collisions: string[] = [];
+  for (const [key, list] of groups) {
+    if (list.length === 1) {
+      owners.add(list[0]);
+      continue;
+    }
+    const owner =
+      list.find((g) => {
+        const s = activeSessions.get(g.gameId);
+        return !!s && canonicalKeys(s.executablePath)[0] === key;
+      }) ??
+      list.find((g) => sourceOf(g.gameId) === 'library') ??
+      list[0];
+    owners.add(owner);
+    const others = [...new Set(list.filter((g) => g !== owner && g.gameId !== owner.gameId).map((g) => g.gameId))];
+    if (others.length > 0) collisions.push(`"${key}" → ${owner.gameId} (also: ${others.join(', ')})`);
+  }
+
+  const signature = collisions.join('|');
+  if (signature !== lastCollisionSignature) {
+    lastCollisionSignature = signature;
+    for (const c of collisions) {
+      logger.warn(`[SessionTracker] Several games share one exe; playtime goes to one owner: ${c}`);
+    }
+  }
+
+  return games.filter((g) => owners.has(g));
+}
+
 /**
  * Update the list of games to monitor.
  * Called from an IPC handler when the renderer sends its tracked games list.
  *
  * Any active session whose gameId is no longer in the new list is finalized
- * immediately — prevents orphaned "Playing Now" ghosts.
+ * immediately — prevents orphaned "Playing Now" ghosts. Games from a source
+ * in `options.keepSources` are taken from the previous list instead, so a
+ * store that failed to load never ends its games' sessions.
  */
-export function setTrackedGames(games: TrackedGame[]) {
-  const newIds = new Set(games.map((g) => g.gameId));
+export function setTrackedGames(games: TrackedGame[], options: SetTrackedGamesOptions = {}) {
+  const keep = new Set(options.keepSources ?? []);
+  const merged = [
+    ...lastInputGames.filter((g) => keep.has(sourceOf(g.gameId))),
+    ...games.filter((g) => !keep.has(sourceOf(g.gameId))),
+  ];
+  lastInputGames = merged;
+  const owned = pickExeOwners(merged);
+  // Kept-source sessions stay in `owned`: their entries are unchanged and an
+  // entry with a running session always wins its exe.
+  const newIds = new Set(owned.map((g) => g.gameId));
   let finalizedAny = false;
+  const nowMs = deps.now();
 
   // Finalize sessions for games that were removed from the tracked list
   for (const [gameId, session] of activeSessions) {
     if (!newIds.has(gameId)) {
-      const completed = buildCompleted(gameId, session, Date.now());
+      const completed = buildCompleted(gameId, session, sessionEndMs(session, nowMs));
 
       activeSessions.delete(gameId);
       finalizeCompleted(completed);
@@ -816,23 +1139,69 @@ export function setTrackedGames(games: TrackedGame[]) {
     }
   }
 
-  trackedGames = games;
+  trackedGames = owned;
   // Drop finalized sessions from the crash-recovery snapshot right away so a
   // crash before the next tick can't recover them a second time.
   if (finalizedAny) persistActiveSessions();
   // Untracking a game may have finalized its active session above.
   updateOverlayVisibility();
-  logger.log(`[SessionTracker] Now tracking ${games.length} game(s)`);
+  logger.log(
+    `[SessionTracker] Now tracking ${owned.length} game(s)` +
+    (keep.size > 0 ? ` (kept previous ${[...keep].join(' + ')} list)` : ''),
+  );
 }
 
 /**
- * Get currently active sessions (for IPC queries).
+ * Get currently active sessions (for IPC queries). `elapsedMinutes` is active
+ * play time — idle subtracted, exactly like `session:liveUpdate`.
  */
 export function getActiveSessions(): Array<{ gameId: string; startTime: string; elapsedMinutes: number }> {
-  const now = Date.now();
+  const now = deps.now();
   return Array.from(activeSessions.values()).map((s) => ({
     gameId: s.gameId,
     startTime: s.startTime.toISOString(),
-    elapsedMinutes: Math.round((now - s.startTime.getTime()) / 60_000 * 100) / 100,
+    elapsedMinutes: Math.round(Math.max(0, now - s.startTime.getTime() - s.idleAccumulatedMs) / 60_000 * 100) / 100,
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Test seams — never called from production code.
+// ---------------------------------------------------------------------------
+
+/**
+ * Reset all tracker state, point it at a fake window (no poll timer is
+ * started) and override any OS dependency. Omitted deps use the real ones.
+ */
+export function __resetSessionTrackerForTests(
+  mainWindow: BrowserWindowType | null,
+  overrides: Partial<SessionTrackerDeps> = {},
+): void {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  deps = { ...defaultDeps, ...overrides };
+  mainWindowRef = mainWindow;
+  stopped = false;
+  pollInFlight = false;
+  trackedGames = [];
+  lastInputGames = [];
+  lastCollisionSignature = '';
+  suspendStartMs = null;
+  activeSessions.clear();
+  pendingSessions.clear();
+  _canonicalKeyCache.clear();
+  _basenameCollisionWarned.clear();
+  _runningBasenames = new Set();
+  _runningPaths = new Set();
+  _basenamePaths = new Map();
+  _unresolvedBasenames = new Set();
+  _pathSnapshotStale = false;
+  _basenameSnapshotStale = false;
+  _snapshotFailureLogged = false;
+}
+
+/** Run one poll tick now. */
+export function __pollTickForTests(): Promise<void> {
+  return pollTick();
 }

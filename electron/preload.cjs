@@ -422,9 +422,10 @@ contextBridge.exposeInMainWorld('gameLauncher', {
 
 // Expose Session Tracker API to renderer
 contextBridge.exposeInMainWorld('sessionTracker', {
-  // Send the list of games with executable paths to track
-  setTrackedGames: (games) =>
-    ipcRenderer.invoke('session:setTrackedGames', games),
+  // Send the list of games with executable paths to track. options.keepSources
+  // names a store that could not be read, whose previous games main keeps.
+  setTrackedGames: (games, options) =>
+    ipcRenderer.invoke('session:setTrackedGames', games, options),
 
   // Get currently active sessions
   getActiveSessions: () =>

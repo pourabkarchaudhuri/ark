@@ -25,13 +25,17 @@ import type { GameStatus } from '@/types/game';
  *   - `lastPlayedAt` is NEVER overwritten. Waits for the stores to hydrate; skips read-only stores.
  *   - Switch: Settings → Application → "Auto On Hold" (localStorage, default ON).
  *
- * Triggers: once at mount (app startup), then every 60 minutes.
+ * Triggers: once ~75 s after mount (app startup), then every 60 minutes. The first sweep waits
+ * until the session tracker has had its first poll (and any crash-recovered sessions are recorded),
+ * and every sweep asks main which games are running, so a game being played right now is never held.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const ON_HOLD_THRESHOLD_DAYS = 28;
 const ON_HOLD_THRESHOLD_MS = ON_HOLD_THRESHOLD_DAYS * DAY_MS;
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 60 minutes
+/** Delay before the startup sweep: the tracker polls every 15 s, so live games are known by then. */
+export const FIRST_SWEEP_DELAY_MS = 75 * 1000;
 
 /** Set by a library import (libraryStore.importData) so imported Playing games get a fresh 4 weeks. */
 export const LIBRARY_IMPORTED_AT_LS_KEY = 'ark:libraryImportedAt';
@@ -153,7 +157,10 @@ export async function runAutoOnHoldSweep(now: number = Date.now(), opts: SweepOp
 
     if (!customGameStore.isReadOnly()) {
       for (const game of customGameStore.getAllGames()) {
-        if (!isStalePlaying(game.id, game.status, [game.lastPlayedAt, game.addedAt], now, opts)) continue;
+        // Custom games got status-history rows only in 1.0.87: an older game set to Playing has
+        // none, so its last save (updatedAt) stands in for "when it became Playing".
+        const floor = statusHistoryStore.getForGame(game.id).length === 0 ? [game.updatedAt] : [];
+        if (!isStalePlaying(game.id, game.status, [game.lastPlayedAt, game.addedAt, ...floor], now, opts)) continue;
         customGameStore.updateGame(game.id, { status: 'On Hold' }, { source: 'auto-hold' });
         moved.push({ gameId: game.id, title: game.title, custom: true });
       }
@@ -189,11 +196,11 @@ export function undoAutoHold(games: readonly AutoHeldGame[]): number {
 
 /**
  * When a real play session ends on a game the idle sweep put On Hold, it is being played again:
- * move it back to Playing. A game the user put On Hold themselves is never touched.
+ * move it back to Playing. A game the user put On Hold themselves is never touched. Not gated by
+ * the Auto On Hold switch: turning it off must not strand games it already held.
  */
 export async function maybeResumeAutoHeld(gameId: string): Promise<boolean> {
   try {
-    if (!(await isAutoOnHoldTransitionEnabled())) return false;
     const custom = gameId.startsWith('custom-');
     const status = custom ? customGameStore.getGame(gameId)?.status : libraryStore.getEntry(gameId)?.status;
     if (status !== 'On Hold') return false;
@@ -216,30 +223,63 @@ function describeMoved(moved: readonly AutoHeldGame[]): string {
     : `${moved.length} games moved to On Hold after 4 weeks without play: ${names}${more}.`;
 }
 
+/** Games main's tracker reports running right now (numeric legacy ids → `steam-<id>`). */
+async function fetchActiveGameIds(): Promise<Set<string>> {
+  const ids = new Set<string>();
+  try {
+    const active = await window.sessionTracker?.getActiveSessions?.();
+    for (const s of active ?? []) {
+      ids.add(typeof s.gameId === 'number' ? `steam-${s.gameId}` : String(s.gameId));
+    }
+  } catch {
+    /* no tracker answer — the renderer's live set still applies */
+  }
+  return ids;
+}
+
+export interface UseAutoOnHoldOptions {
+  /** Resolves when the sweep may run (crash-recovered sessions recorded). */
+  ready?: Promise<unknown>;
+}
+
 /**
  * useAutoOnHold — mounts the periodic Playing → On Hold sweep. Invoke this once from a component that
  * lives at the app root (SessionTrackerProvider does). `liveGames` is a ref to the set of games
  * running right now.
  */
-export function useAutoOnHold(liveGames?: { readonly current: ReadonlySet<string> }): void {
+export function useAutoOnHold(
+  liveGames?: { readonly current: ReadonlySet<string> },
+  options: UseAutoOnHoldOptions = {},
+): void {
   const toast = useOptionalToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  const readyRef = useRef(options.ready);
+  readyRef.current = options.ready;
 
   useEffect(() => {
+    let disposed = false;
     const sweep = async () => {
-      const moved = await runAutoOnHoldSweep(Date.now(), { isLive: (id) => liveGames?.current.has(id) ?? false });
+      await readyRef.current?.catch(() => undefined);
+      const active = await fetchActiveGameIds();
+      if (disposed) return;
+      const moved = await runAutoOnHoldSweep(Date.now(), {
+        isLive: (id) => active.has(id) || (liveGames?.current.has(id) ?? false),
+      });
       if (moved.length === 0) return;
       toastRef.current?.addToast(describeMoved(moved), 'info', 15_000, {
         label: 'Undo',
         onClick: () => { undoAutoHold(moved); },
       });
     };
-    // Kick a sweep on startup so long-idle games get flipped immediately.
-    void sweep();
+    // Startup sweep, delayed: until the tracker's first poll nobody knows what is running, and a
+    // game being played right now (last played weeks ago) would be held.
+    const firstId = window.setTimeout(() => { void sweep(); }, FIRST_SWEEP_DELAY_MS);
     // Time-based sweep so entries flip as they cross the 4-week boundary during a long session.
     const intervalId = window.setInterval(() => { void sweep(); }, CHECK_INTERVAL_MS);
     return () => {
+      disposed = true;
+      window.clearTimeout(firstId);
       window.clearInterval(intervalId);
     };
   // liveGames is a ref; reading .current at sweep time is intended.

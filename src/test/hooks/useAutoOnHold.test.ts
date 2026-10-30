@@ -4,7 +4,8 @@
  * (or addedAt) is more than 4 weeks old. v1.0.88: 28-day threshold, live games, custom games,
  * import grace, Undo and auto-resume.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { renderHook } from '@testing-library/react';
 
 // vitest runs with isolate:false, so module singletons can leak between test
 // files (and other files call vi.resetModules()). Import the hook and the
@@ -155,5 +156,83 @@ describe('runAutoOnHoldSweep (v1.0.88)', () => {
     libraryStore.updateEntry('steam-17', { status: 'On Hold' });
     expect(await mod.maybeResumeAutoHeld('steam-17')).toBe(false);
     expect(libraryStore.getEntry('steam-17')?.status).toBe('On Hold');
+  });
+});
+
+describe('auto-hold fixes (1.0.97 B10)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    Object.defineProperty(window, 'sessionTracker', { value: undefined, writable: true, configurable: true });
+  });
+
+  it('turning Auto On Hold off still resumes games it already held (hooks#15)', async () => {
+    add('steam-30', 'Want to Play');
+    libraryStore.updateEntry('steam-30', { status: 'Playing' });
+    await runAutoOnHoldSweep(Date.now() + 60 * DAY);
+    expect(libraryStore.getEntry('steam-30')?.status).toBe('On Hold');
+
+    localStorage.setItem('ark:autoOnHoldTransition', 'false');
+    expect(await mod.maybeResumeAutoHeld('steam-30')).toBe(true);
+    expect(libraryStore.getEntry('steam-30')?.status).toBe('Playing');
+    expect(statusHistoryStore.getForGame('steam-30').at(-1)?.source).toBe('auto-promote');
+
+    // A hold the user made themselves is never reverted, switch on or off.
+    add('steam-31', 'Want to Play');
+    libraryStore.updateEntry('steam-31', { status: 'On Hold' });
+    expect(await mod.maybeResumeAutoHeld('steam-31')).toBe(false);
+    expect(libraryStore.getEntry('steam-31')?.status).toBe('On Hold');
+  });
+
+  it('a pre-1.0.87 custom game with no history uses updatedAt as its status floor', async () => {
+    const g = customGameStore.addGame({ title: 'Old Homebrew', platform: ['Windows'], status: 'Playing' });
+    customGameStore.updateGame(g.id, { addedAt: longAgo, lastPlayedAt: longAgo.toISOString() } as never);
+    statusHistoryStore.clear(); // written before status history existed for custom games
+    expect(statusHistoryStore.getForGame(g.id)).toHaveLength(0);
+
+    expect((await runAutoOnHoldSweep(Date.now() + 20 * DAY)).map((m) => m.gameId)).not.toContain(g.id);
+    expect(customGameStore.getGame(g.id)?.status).toBe('Playing');
+    // Still held once 4 weeks pass after that last save.
+    expect((await runAutoOnHoldSweep(Date.now() + 60 * DAY)).map((m) => m.gameId)).toContain(g.id);
+  });
+
+  function installTracker(active: Array<{ gameId: string | number }>) {
+    const tracker = {
+      getActiveSessions: vi.fn(async () => active.map((a) => ({ ...a, startTime: '', elapsedMinutes: 1 }))),
+    };
+    Object.defineProperty(window, 'sessionTracker', { value: tracker, writable: true, configurable: true });
+    return tracker;
+  }
+
+  it('the startup sweep waits for the tracker and skips games it reports running (hooks#14)', async () => {
+    add('steam-40', 'Playing'); // running right now, reported by main as a numeric id
+    add('steam-41', 'Playing'); // not running
+    const tracker = installTracker([{ gameId: 40 }]);
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 60 * DAY);
+
+    renderHook(() => mod.useAutoOnHold({ current: new Set() }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(libraryStore.getEntry('steam-41')?.status).toBe('Playing'); // nothing at mount
+    expect(tracker.getActiveSessions).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(mod.FIRST_SWEEP_DELAY_MS);
+    await vi.waitFor(() => expect(libraryStore.getEntry('steam-41')?.status).toBe('On Hold'));
+    expect(tracker.getActiveSessions).toHaveBeenCalled();
+    expect(libraryStore.getEntry('steam-40')?.status).toBe('Playing');
+  });
+
+  it('the first sweep also waits for the ready gate (crash-recovered sessions)', async () => {
+    add('steam-42', 'Playing');
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 60 * DAY);
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { release = r; });
+
+    renderHook(() => mod.useAutoOnHold({ current: new Set() }, { ready }));
+    await vi.advanceTimersByTimeAsync(mod.FIRST_SWEEP_DELAY_MS + 1_000);
+    expect(libraryStore.getEntry('steam-42')?.status).toBe('Playing');
+
+    release();
+    await vi.waitFor(() => expect(libraryStore.getEntry('steam-42')?.status).toBe('On Hold'));
   });
 });
