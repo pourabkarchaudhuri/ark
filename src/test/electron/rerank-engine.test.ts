@@ -18,6 +18,7 @@ vi.mock('../../../electron/ollama-setup.js', () => ({
   isRerankModelInstalled,
   getRerankModelTag: () => 'dengcao/bge-reranker-v2-m3',
   getRerankQwenModelTag: () => 'qwen3-reranker:0.6b',
+  OLLAMA_KEEP_ALIVE: '30m',
 }));
 
 vi.mock('../../../electron/safe-logger.js', () => ({
@@ -189,6 +190,25 @@ describe('scoreWithQwen3', () => {
     expect(result!.scored).toBeGreaterThanOrEqual(8);
     expect(result!.rows.some((r) => r.relevance_score === 1)).toBe(true);
     expect(result!.rows.some((r) => r.relevance_score === 0)).toBe(true);
+  });
+
+  it('sends the shared finite keep_alive, never -1', async () => {
+    const keepAlives: unknown[] = [];
+    mockFetch({
+      '/api/generate': (init) => {
+        keepAlives.push((JSON.parse(String(init?.body)) as { keep_alive?: unknown }).keep_alive);
+        return new Response(JSON.stringify({ response: 'yes' }), { status: 200 });
+      },
+    });
+
+    await scoreWithQwen3('cozy roguelike', ['a', 'b', 'c'], {
+      model: 'qwen3-reranker:0.6b',
+      graded: false,
+      budgetMs: 60_000,
+    });
+
+    expect(keepAlives.length).toBeGreaterThan(0);
+    expect(new Set(keepAlives)).toEqual(new Set(['30m']));
   });
 });
 

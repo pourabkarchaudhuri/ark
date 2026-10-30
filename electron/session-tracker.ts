@@ -27,6 +27,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import { nativeSessionEnumerate } from './native-bridge.js';
 import { atomicWriteFileSync } from './safe-write.js';
+import { reportGameActivity } from './game-activity.js';
 
 /** Async exec so process snapshots never block Electron's main/input pump. */
 const execAsync = promisify(exec);
@@ -669,6 +670,9 @@ function sendToRenderer(channel: string, data: unknown) {
  * phantom HUD with a zeroed timer).
  */
 function updateOverlayVisibility(): void {
+  // Every activeSessions change ends here — also feed the game-running signal
+  // (Ollama unloads its models and pauses background work while gaming).
+  reportGameActivity(activeSessions.size);
   if (!overlayVisibilityCallback) return;
   const shouldShow = activeSessions.size > 0;
   if (!shouldShow) {
