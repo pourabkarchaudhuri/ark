@@ -15,6 +15,7 @@ vi.mock('../../../electron/persistent-cache.js', () => ({
     get() { return null; }
     set() {}
     has() { return false; }
+    delete() {}
     clear() {}
     getStats() { return { total: 0, fresh: 0, stale: 0 }; }
     flushSync() {}
@@ -29,6 +30,7 @@ import {
   buildRecommendationCandidates,
   type SteamCacheLike,
 } from '../../../electron/steam-api';
+import { SteamAppListStore } from '../../../electron/steam-applist-store';
 import { titleCollator, compareTitles } from '@/lib/title-collator';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -45,10 +47,26 @@ function memCache(): SteamCacheLike & { store: Map<string, { data: unknown; ttl:
     }) as SteamCacheLike['get'],
     set: (key: string, data: unknown, ttl = 5 * 60_000) => { store.set(key, { data, ttl, at: Date.now() }); },
     has: (key: string) => store.has(key),
+    delete: (key: string) => { store.delete(key); },
     clear: () => store.clear(),
     getStats: () => ({ total: store.size, fresh: store.size, stale: 0 }),
     flushSync: () => {},
   };
+}
+
+/** In-memory steam-applist.json (no disk), migrating from `legacy` like the real one. */
+function memAppListStore(legacy?: SteamCacheLike): SteamAppListStore {
+  let file: string | null = null;
+  return new SteamAppListStore({
+    filePath: 'steam-applist.json',
+    readFile: async () => {
+      if (file === null) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      return file;
+    },
+    writeFile: async (_p, d) => { file = d; },
+    legacy,
+    now: () => Date.now(),
+  });
 }
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -170,22 +188,31 @@ describe('RateLimiter', () => {
 // ─── getAppList ─────────────────────────────────────────────────────────────
 
 describe('SteamAPIClient.getAppList', () => {
+  // IStoreService/GetAppList needs a key (1.0.97 B01); without one getAppList returns [] unfetched.
+  const savedKey = process.env.STEAM_API_KEY;
+  beforeEach(() => { process.env.STEAM_API_KEY = 'test-key'; });
+  afterEach(() => {
+    if (savedKey === undefined) delete process.env.STEAM_API_KEY;
+    else process.env.STEAM_API_KEY = savedKey;
+  });
+
   it('two concurrent calls on an empty cache run one fetch sequence, sorted A–Z', async () => {
     const fetch = vi.fn(async () => json({ response: { apps: [
       { appid: 2, name: 'zeta' }, { appid: 1, name: 'Alpha' }, { appid: 3, name: 'éclair' },
     ], have_more_results: false } }));
-    const client = new SteamAPIClient({ fetch, cache: memCache() });
+    const cache = memCache();
+    const client = new SteamAPIClient({ fetch, cache, appListStore: memAppListStore(cache) });
     const [a, b] = await settle(Promise.all([client.getAppList(), client.getAppList()]));
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(a).toBe(b);
     expect(a.map(x => x.name)).toEqual(['Alpha', 'éclair', 'zeta']);
   });
 
-  it('stale cache is returned at once and concurrent callers share one background refresh', async () => {
+  it('stale (migrated) list is returned at once and concurrent callers share one background refresh', async () => {
     const cache = memCache();
     cache.store.set('full-app-list-v2', { data: [{ appid: 9, name: 'Old' }], ttl: 1, at: Date.now() - 10 });
     const fetch = vi.fn(async () => json({ response: { apps: [{ appid: 1, name: 'New' }] } }));
-    const client = new SteamAPIClient({ fetch, cache });
+    const client = new SteamAPIClient({ fetch, cache, appListStore: memAppListStore(cache) });
     const [a, b] = await Promise.all([client.getAppList(), client.getAppList()]);
     expect(a).toEqual([{ appid: 9, name: 'Old' }]);
     expect(b).toEqual([{ appid: 9, name: 'Old' }]);
