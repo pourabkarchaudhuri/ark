@@ -24,7 +24,6 @@ import type {
   RecoTelemetry,
   UserGameSnapshot,
   CandidateGame,
-  EngagementPattern,
 } from '@/types/reco';
 import type { GameSession, StatusChangeEntry } from '@/types/game';
 import { ORACLE_ENGINE_VERSION } from '@/services/oracle-engine-version';
@@ -35,6 +34,7 @@ import {
   _engagementCache,
   bestPreparedClusterSimilarity,
   buildGraphUserContext,
+  classifyEngagementCurve,
   computePoolNeighborsAsync,
   computeBacklogSemanticScores,
   detectTasteClusters,
@@ -88,7 +88,7 @@ import {
   preFilterCandidates as preFilterPool,
   selectColdStartSeedIds,
 } from '@/services/reco-prefilter';
-import { isAllowAdultContent } from '@/hooks/useAllowAdultContent';
+import { isAllowAdultContent, subscribeAllowAdultContent } from '@/hooks/useAllowAdultContent';
 import { sketchEmbedding } from '@/services/mmr-embedding';
 import { oracleShelfKey } from '@/services/oracle-shelf-key';
 import { isAdultContentByDescription } from '@/services/adult-content-filter';
@@ -388,6 +388,8 @@ export class RecoStore {
   private cacheEpoch = 0;
   /** `cacheEpoch` when the running compute started. */
   private computeCacheEpoch = 0;
+  /** Library signature when the shown result's compute (or cache restore) started; stamped on the saved cache. */
+  private computeLibrarySignature: string | null = null;
   /** Pipeline stages the CURRENT shelves were computed with (a later rerank re-save must not relabel them). */
   private resultStages: OraclePipelineStages | null = null;
   /** Aborts the in-flight compute's pre-worker steps on refresh/reset. */
@@ -448,7 +450,9 @@ export class RecoStore {
         lastComputed: this.state.lastComputed,
         libraryCount: this.state.libraryCount,
         candidateCount: this.state.candidateCount,
-        librarySignature: buildOracleLibrarySignature(),
+        // The library the shelves were computed from: a change made while the compute ran (hours, a quit inside
+        // the debounce) must make the next launch miss the cache, not be baked into older shelves.
+        librarySignature: this.computeLibrarySignature ?? buildOracleLibrarySignature(),
         pipelineStages: this.resultStages ?? currentOraclePipelineStages(),
         engineVersion: ORACLE_ENGINE_VERSION,
         // Results computed from vectors of this layout: a layout/generation bump must not serve them.
@@ -624,7 +628,8 @@ export class RecoStore {
     // What this compute (or the cache restore it may become) is based on: the library signature to diff
     // later changes against (the first change of a session used to be swallowed as "the baseline"), and the
     // cache epoch (a dismiss/thumbs/library change after this point must keep this result out of the cache).
-    markOracleLibraryBaseline();
+    // The saved cache is stamped with this start signature, not the one at save time.
+    this.computeLibrarySignature = markOracleLibraryBaseline();
     this.computeCacheEpoch = this.cacheEpoch;
     this.computeAbort?.abort();
     const abort = new AbortController();
@@ -688,6 +693,10 @@ export class RecoStore {
 
       // Every step below draws from one overall budget (see PRE_WORKER_BUDGET_MS).
       const deadline = Date.now() + PRE_WORKER_BUDGET_MS;
+      // One clock and a fresh engagement cache for the whole run: the pre-filter's loyal-studio profile used
+      // to read last run's cached engagement scores (a game re-rated to 1 star still counted as loved).
+      const scoringNow = Date.now();
+      _engagementCache.clear();
       const budget = (capMs: number) => Math.max(0, Math.min(capMs, deadline - Date.now()));
 
       // 1. Build user game snapshots from library + journey
@@ -737,7 +746,7 @@ export class RecoStore {
       // 2.1. Pre-filter candidates with shelf-aware quotas (25K → ~3K)
       setProgress('Pre-filtering candidates...', 6);
       const poolSizeBefore = candidates.length;
-      const filtered = preFilterPool(candidates, userGames, { now: Date.now(), coldQuota: QUOTA_COLD });
+      const filtered = preFilterPool(candidates, userGames, { now: scoringNow, coldQuota: QUOTA_COLD });
       // preFilterCandidates returns the SAME array when the pool is already
       // ≤ MAX_POOL — clearing it in place would then wipe every candidate.
       if (filtered !== candidates) {
@@ -855,8 +864,6 @@ export class RecoStore {
 
       // 3.55. Taste clusters (deterministic) — the main thread owns them so per-candidate
       // cluster similarity can be computed here, before candidate embeddings are stripped.
-      const scoringNow = Date.now();
-      _engagementCache.clear();
       const precomputedClusters = detectTasteClusters(userGames, scoringNow);
       const preparedClusters = prepareClusterCentroids(precomputedClusters);
       const clusterScoringEnabled = preparedClusters.length >= 2;
@@ -1150,9 +1157,6 @@ export class RecoStore {
       const sessionTimestamps = sortedSessions.map(s => new Date(s.startTime).getTime());
       const sessionDurations = sortedSessions.map(s => s.durationMinutes);
 
-      // Classify engagement pattern
-      const engagementPattern = this.classifyEngagement(sessionTimestamps, sessionDurations, sessions.length);
-
       // Attach embedding if available
       const embedding = embeddingCache.get(entry.gameId);
 
@@ -1162,7 +1166,7 @@ export class RecoStore {
         : [];
 
       snapshotIds.add(entry.gameId);
-      snapshots.push({
+      const snapshot: UserGameSnapshot = {
         gameId: entry.gameId,
         title: entry.title,
         genres: meta?.genre || entry.genre || [],
@@ -1186,13 +1190,17 @@ export class RecoStore {
         autoHeld,
         statusTrajectory: trajectory,
         similarGameTitles,
-        engagementPattern,
+        engagementPattern: 'unknown',
         sessionTimestamps,
         sessionDurations,
         priority: libEntry?.priority,
         userNotes: libEntry?.publicReviews || undefined,
         ...(embedding ? { embedding } : {}),
-      });
+      };
+      // The worker's shared classifier (a short run that ended in completion is not a binge-drop), so the
+      // main-thread clusters and neighbour sources see the same label as the worker's taste profile.
+      snapshot.engagementPattern = classifyEngagementCurve(snapshot);
+      snapshots.push(snapshot);
     }
 
     // Include library entries that have no journey entry yet (e.g. "Want to Play"
@@ -1240,45 +1248,6 @@ export class RecoStore {
     }
 
     return snapshots;
-  }
-
-  /** Classify engagement pattern on the main thread (before posting to worker). */
-  private classifyEngagement(
-    timestamps: number[],
-    durations: number[],
-    sessionCount: number,
-  ): EngagementPattern {
-    if (sessionCount < 3) return 'unknown';
-
-    let firstTime = Infinity;
-    let lastTime = -Infinity;
-    // Loop, not Math.min(...): a heavily played game can have enough sessions to overflow the argument limit.
-    for (const t of timestamps) { if (t < firstTime) firstTime = t; if (t > lastTime) lastTime = t; }
-    const spanDays = (lastTime - firstTime) / (1000 * 60 * 60 * 24);
-
-    if (spanDays <= 3 && sessionCount >= 3) return 'binge-drop';
-
-    const isSpread = spanDays >= 14;
-
-    if (durations.length >= 4) {
-      const firstHalf = durations.slice(0, Math.floor(durations.length / 2));
-      const secondHalf = durations.slice(Math.floor(durations.length / 2));
-      const avgFirst = firstHalf.reduce((s, d) => s + d, 0) / firstHalf.length;
-      const avgSecond = secondHalf.reduce((s, d) => s + d, 0) / secondHalf.length;
-
-      if (avgSecond > avgFirst * 1.2 && isSpread) return 'slow-burn';
-    }
-
-    if (durations.length >= 5) {
-      const firstThree = durations.slice(0, 3);
-      const rest = durations.slice(3);
-      const avgFirstThree = firstThree.reduce((s, d) => s + d, 0) / firstThree.length;
-      const avgRest = rest.reduce((s, d) => s + d, 0) / rest.length;
-      if (avgFirstThree > avgRest * 1.5) return 'honeymoon';
-    }
-
-    if (isSpread) return 'long-tail';
-    return 'unknown';
   }
 
   /**
@@ -2228,7 +2197,8 @@ export class RecoStore {
     let atLow = 0;
     for (const c of pick) {
       const p = prices.get(Number(c.gameId.slice(6)));
-      if (p && c.price && isAtHistoricalLow(p)) {
+      // A game that was never discounted is trivially at its low: only an actual discount counts as a deal.
+      if (p && c.price && (c.price.discountPercent ?? 0) > 0 && isAtHistoricalLow(p)) {
         c.price = { ...c.price, atHistoricalLow: true };
         atLow++;
       }
@@ -2283,9 +2253,13 @@ export class RecoStore {
 
       const BATCH_SIZE = 2000;
       const gameIds = candidates.map(c => c.gameId);
+      // Raw scores are collected here and written onto the shared candidates only once every batch is in and
+      // ranked: a deadline or a failed batch between two batches used to leave raw probabilities on the
+      // first batch (read by the worker as percentiles) and nothing on the rest.
+      const collected: Array<{ idx: number; score: number; synthetic: boolean }> = [];
 
       for (let start = 0; start < gameIds.length; start += BATCH_SIZE) {
-        // Deadline passed — stop mutating candidates the pipeline has moved on with.
+        // Deadline passed — the pipeline has moved on; drop what was collected.
         if (signal?.aborted) return;
         const batchIds = gameIds.slice(start, start + BATCH_SIZE);
         // Catalog metadata for games without a bundled profile (the main process decides who has one).
@@ -2310,22 +2284,24 @@ export class RecoStore {
         for (const result of scores) {
           if (result.score == null || !Number.isFinite(result.score)) continue;
           const idx = idToIdx.get(result.gameId);
-          if (idx !== undefined) {
-            candidates[idx].mlScore = result.score;
-            if (result.synthetic) candidates[idx].mlSynthetic = true;
-          }
+          if (idx !== undefined) collected.push({ idx, score: result.score, synthetic: !!result.synthetic });
         }
       }
+      if (signal?.aborted) return;
 
       // Rank-normalise within the pool: raw probabilities cluster near the base rate. Real and
       // synthesised scores are ranked separately (their raw scales differ), and synthesised ranks are
       // shrunk toward the middle — they order games less reliably (verify-synth: Spearman 0.71–0.92).
-      const real = candidates.filter(c => c.mlScore != null && !c.mlSynthetic);
-      const synth = candidates.filter(c => c.mlScore != null && c.mlSynthetic);
-      const realRanks = percentileRanks(real.map(c => c.mlScore as number));
-      real.forEach((c, i) => { c.mlScore = realRanks[i]; });
-      const synthRanks = percentileRanks(synth.map(c => c.mlScore as number));
-      synth.forEach((c, i) => { c.mlScore = 0.5 + (synthRanks[i] - 0.5) * SYNTH_ML_SHRINK; });
+      const real = collected.filter(r => !r.synthetic);
+      const synth = collected.filter(r => r.synthetic);
+      const realRanks = percentileRanks(real.map(r => r.score));
+      const synthRanks = percentileRanks(synth.map(r => r.score));
+      // One synchronous pass onto the shared candidates.
+      real.forEach((r, i) => { candidates[r.idx].mlScore = realRanks[i]; });
+      synth.forEach((r, i) => {
+        candidates[r.idx].mlScore = 0.5 + (synthRanks[i] - 0.5) * SYNTH_ML_SHRINK;
+        candidates[r.idx].mlSynthetic = true;
+      });
 
       const scored = real.length + synth.length;
       if (scored > 0) _mlScoringAvailable = true;
@@ -2817,7 +2793,7 @@ export class RecoStore {
     this.killWorker();
     const gen = ++this.computeGeneration;
     this.interactedShelves.clear();
-    markOracleLibraryBaseline();
+    this.computeLibrarySignature = markOracleLibraryBaseline();
     this.computeCacheEpoch = this.cacheEpoch;
     const input: RecoWorkerInput = {
       ...prev,
@@ -2932,9 +2908,10 @@ export const recoStore = new RecoStore();
 
 let oracleLibrarySnapBaseline: string | null = null;
 
-/** Called when a compute starts: later library changes are diffed against this signature. */
-function markOracleLibraryBaseline() {
+/** Called when a compute starts: later library changes are diffed against this signature (returned). */
+function markOracleLibraryBaseline(): string {
   oracleLibrarySnapBaseline = buildOracleLibrarySignature();
+  return oracleLibrarySnapBaseline;
 }
 let oracleLibraryInvalidateTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -2956,4 +2933,6 @@ if (typeof window !== 'undefined') {
   // Non-hours channel only — see v1.0.41 audit note above.
   libraryStore.subscribe(scheduleOracleInvalidateOnLibraryChange);
   customGameStore.subscribe(scheduleOracleInvalidateOnLibraryChange);
+  // Adult titles are filtered at compute time; the signature's A: line makes a real flip refresh once.
+  subscribeAllowAdultContent(scheduleOracleInvalidateOnLibraryChange);
 }

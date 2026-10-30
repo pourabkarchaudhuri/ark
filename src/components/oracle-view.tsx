@@ -140,6 +140,7 @@ import { catalogStore, type CatalogSyncProgress } from '@/services/catalog-store
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { bm25Index } from '@/services/bm25-index';
 import { libraryStore } from '@/services/library-store';
+import { isLibraryBackedOracleGame, oracleDismissMeta } from '@/services/oracle-library-cards';
 import { oracleShelfKey } from '@/services/oracle-shelf-key';
 import { oracleEventLog } from '@/services/oracle-event-log';
 import { journeyStore } from '@/services/journey-store';
@@ -864,15 +865,21 @@ function EvidenceChip({
   );
 }
 
-const WhyPanelBody = memo(function WhyPanelBody({
+export const WhyPanelBody = memo(function WhyPanelBody({
   game,
+  shelfType,
   onDismissed,
   onClose,
 }: {
   game: ScoredGame;
+  /** The shelf the game is on: library-backed shelves show the user's own games. */
+  shelfType?: string;
   onDismissed?: (gameId: string) => void;
   onClose: () => void;
 }) {
+  // A library game is not a recommendation to rate down: thumbs-down would mute its franchise and feed the
+  // negative profile with a game the user owns.
+  const libraryBacked = isLibraryBackedOracleGame(game.gameId, shelfType);
   const breakdown = useMemo(() => normalizeLayerScores(game, weightsFromTelemetry(recoStore.getState().telemetry)), [game]);
   const reasons = useMemo(() => explanationLines(game), [game]);
   const headline = useMemo(() => explanationHeadline(game), [game]);
@@ -1088,17 +1095,19 @@ const WhyPanelBody = memo(function WhyPanelBody({
         >
           <ThumbsUp className="w-3.5 h-3.5" />
         </button>
-        <button
-          type="button"
-          onClick={onThumbDown}
-          aria-label="Bad recommendation"
-          className={cn(
-            'p-1 rounded transition-colors cursor-pointer',
-            thumbs === -1 ? 'bg-red-500/20 text-red-400' : 'text-white/30 hover:text-red-400',
-          )}
-        >
-          <ThumbsDown className="w-3.5 h-3.5" />
-        </button>
+        {!libraryBacked && (
+          <button
+            type="button"
+            onClick={onThumbDown}
+            aria-label="Bad recommendation"
+            className={cn(
+              'p-1 rounded transition-colors cursor-pointer',
+              thumbs === -1 ? 'bg-red-500/20 text-red-400' : 'text-white/30 hover:text-red-400',
+            )}
+          >
+            <ThumbsDown className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
 
       {onDismissed && (
@@ -1117,7 +1126,7 @@ const WhyPanelBody = memo(function WhyPanelBody({
   );
 });
 
-const OracleCard = memo(function OracleCard({
+export const OracleCard = memo(function OracleCard({
   game,
   index,
   shelfType,
@@ -1174,8 +1183,12 @@ const OracleCard = memo(function OracleCard({
     onDismiss?.(game.gameId);
   }, [game.gameId, onDismiss, shelfType]);
 
+  const libraryBacked = isLibraryBackedOracleGame(game.gameId, shelfType);
+
   const handleAddToLibrary = useCallback((gameId: string) => {
-    if (libraryStore.isInLibrary(gameId)) return;
+    // The user's own games (library, custom games): adding would write a second entry that overrides the
+    // real game's status and hours in later snapshots.
+    if (isLibraryBackedOracleGame(gameId)) return;
     const g = gameObj;
     libraryStore.addToLibrary({
       gameId,
@@ -1213,6 +1226,8 @@ const OracleCard = memo(function OracleCard({
   }, [onExplain, game.gameId, shelfType]);
 
   const matchPct = matchPercent(game);
+  // Unfinished Business cards are not scored (score 0, no calibrated match): no "0%" badge.
+  const showMatch = !(game.score === 0 && game.matchPct === undefined);
   const hasDiscount = game.reasons.isOnSale && game.price?.discountPercent;
   const hasMC = game.reasons.metacriticScore && game.reasons.metacriticScore >= 80;
 
@@ -1235,7 +1250,7 @@ const OracleCard = memo(function OracleCard({
         game={gameObj}
         onEdit={NOOP}
         onDelete={NOOP}
-        onAddToLibrary={handleAddToLibrary}
+        onAddToLibrary={libraryBacked ? undefined : handleAddToLibrary}
         isInLibrary={false}
         hideLibraryBadge
         footer={oracleFooter}
@@ -1243,10 +1258,12 @@ const OracleCard = memo(function OracleCard({
 
       {/* Protruding lower-third tabs — top-left over the card art */}
       <div className="absolute top-3 left-0 z-20 flex flex-col gap-1.5 pointer-events-none">
-        <div className="flex items-center gap-1.5 bg-fuchsia-500/90 backdrop-blur-sm pl-2 pr-2.5 py-[3px] rounded-r-full shadow-lg shadow-fuchsia-500/25">
-          <Zap className="w-3 h-3 text-white" />
-          <span className="text-[11px] font-bold text-white tracking-wide">{matchPct}%</span>
-        </div>
+        {showMatch && (
+          <div className="flex items-center gap-1.5 bg-fuchsia-500/90 backdrop-blur-sm pl-2 pr-2.5 py-[3px] rounded-r-full shadow-lg shadow-fuchsia-500/25">
+            <Zap className="w-3 h-3 text-white" />
+            <span className="text-[11px] font-bold text-white tracking-wide">{matchPct}%</span>
+          </div>
+        )}
 
         {hasMC && (
           <div className="flex items-center gap-1.5 bg-amber-500/90 backdrop-blur-sm pl-2 pr-2.5 py-[3px] rounded-r-full shadow-lg shadow-amber-500/25">
@@ -1998,10 +2015,9 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
 
   const handleDismiss = useCallback((gameId: string) => {
     const fromShelf = state.shelves.flatMap(s => s.games).find(g => g.gameId === gameId);
-    recoHistoryStore.dismiss(gameId, {
-      title: fromShelf?.title,
-      developer: fromShelf?.developer,
-    });
+    // A library game (Unfinished Business, Backlog Advisor) only hides that card: with a title and developer
+    // the dismissal would mute its whole franchise and studio on every other shelf and in later pools.
+    recoHistoryStore.dismiss(gameId, oracleDismissMeta(gameId, state.shelves));
     applyLiveHardNegFilter(state.shelves);
     setUndoDismiss({ gameId, title: fromShelf?.title ?? '' });
   }, [state.shelves, applyLiveHardNegFilter]);
@@ -2093,10 +2109,11 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
 
   const explainingId = rightPanel?.kind === 'why' ? rightPanel.gameId : null;
 
-  const whyGame = useMemo(() => {
+  const whyShelf = useMemo(() => {
     if (!explainingId) return null;
-    return state.shelves.flatMap(s => s.games).find(g => g.gameId === explainingId) ?? null;
+    return state.shelves.find(s => s.games.some(g => g.gameId === explainingId)) ?? null;
   }, [explainingId, state.shelves]);
+  const whyGame = whyShelf?.games.find(g => g.gameId === explainingId) ?? null;
 
   return (
     <div className="relative h-[calc(100vh-10rem)] overflow-hidden" data-tour="oracle-view-root">
@@ -2451,6 +2468,7 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                       {whyGame ? (
                         <WhyPanelBody
                           game={whyGame}
+                          shelfType={whyShelf?.type}
                           onDismissed={handleDismiss}
                           onClose={closeRightPanel}
                         />

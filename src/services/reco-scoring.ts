@@ -902,19 +902,41 @@ export function computeTimeOfDayBoost(candidate: CandidateGame, ctx: TimeOfDayCo
 // ─── Layer 11: Franchise Detection & Scoring → @/services/franchise ──────────────
 // ─── Layer 12: Studio Loyalty Boost ─────────────────────────────────────────────
 
+/** Display form of the credited name whose split form is `key` ("Devolver Digital" for "devolver digital"). */
+function creditedDisplayName(credit: string | undefined | null, key: string): string {
+  for (const raw of (credit ?? '').split(/\s*[,;/]\s*|\s+&\s+|\s+\+\s+/)) {
+    if (splitCreditedNames(raw)[0] === key) return raw.trim();
+  }
+  return key;
+}
+
+/**
+ * Which loyal studio a game matched, developer first. Roles are not interchangeable: a loyal
+ * developer is matched against developers only, a loyal publisher against publishers only.
+ * Co-credits are split first. `name` is the game's own credited spelling.
+ */
+export function matchedLoyalStudio(
+  candidate: Pick<CandidateGame, 'developer' | 'publisher'>,
+  loyalDevelopers: readonly string[],
+  loyalPublishers: readonly string[],
+): { role: 'developer' | 'publisher'; name: string } | null {
+  const candDevs = splitCreditedNames(candidate.developer);
+  const dev = candDevs.find(d => loyalDevelopers.includes(d));
+  if (dev) return { role: 'developer', name: creditedDisplayName(candidate.developer, dev) };
+  const candPubs = splitCreditedNames(candidate.publisher);
+  const pub = candPubs.find(p => loyalPublishers.includes(p));
+  if (pub) return { role: 'publisher', name: creditedDisplayName(candidate.publisher, pub) };
+  return null;
+}
+
 export function computeStudioLoyaltyBoost(
   candidate: CandidateGame,
   loyalDevelopers: string[],
   profile: TasteProfile,
 ): number {
-  // Roles are not interchangeable: a loyal developer is matched against developers only,
-  // a loyal publisher against publishers only. Co-credits are split first.
-  const candDevs = splitCreditedNames(candidate.developer);
-  const candPubs = splitCreditedNames(candidate.publisher);
-
-  if (loyalDevelopers.some(dev => candDevs.includes(dev))) return 0.35;
-  if (profile.loyalPublishers.some(pub => candPubs.includes(pub))) return 0.25;
-  return 0;
+  const match = matchedLoyalStudio(candidate, loyalDevelopers, profile.loyalPublishers);
+  if (!match) return 0;
+  return match.role === 'developer' ? 0.35 : 0.25;
 }
 
 // ─── Layer 13: Cross-Game Session Sequencing ────────────────────────────────────

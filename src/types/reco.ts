@@ -109,6 +109,11 @@ export interface MatchReasons {
   annDistance?: number;
   /** Label of the taste cluster this game matched best (from cluster centroid scoring). */
   bestClusterLabel?: string;
+  /**
+   * The loyal studio behind studioLoyaltyBoost and its role (a publisher-only match must not be worded as the
+   * developer). Missing on results cached before v1.0.97; the explainer then infers the role from the boost.
+   */
+  loyalStudio?: { role: 'developer' | 'publisher'; name: string };
   /** Natural-language explanation of why this game was recommended. */
   explanation: string;
   /** True when catalog/browse marked the title as unreleased. */

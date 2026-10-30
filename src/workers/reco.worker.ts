@@ -85,6 +85,7 @@ import {
   buildTimeOfDayContext,
   computeTimeOfDayBoost,
   computeStudioLoyaltyBoost,
+  matchedLoyalStudio,
   buildSequencingContext,
   computeSequencingBoost,
   mmrRerank,
@@ -148,9 +149,11 @@ function generateExplanation(
     parts.push(`similar to ${scored.reasons.similarTo[0]}`);
   }
 
-  // Studio loyalty
+  // Studio loyalty: name the studio that actually matched (a loyal publisher is not the developer).
   if (scored.layerScores.studioLoyaltyBoost > 0.1) {
-    parts.push(`from ${scored.developer}, a studio you trust`);
+    const studio = scored.reasons.loyalStudio ?? matchedLoyalStudio(scored, profile.loyalDevelopers, profile.loyalPublishers);
+    if (studio?.role === 'publisher') parts.push(`published by ${studio.name}, a label you trust`);
+    else parts.push(`from ${studio?.name ?? scored.developer}, a studio you trust`);
   }
 
   // Shared genres (canonical display names)
@@ -213,6 +216,14 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     if (!g.perspectives) g.perspectives = [];
   }
 
+  // Classify engagement curves with the shared function BEFORE anything reads them: the taste profile,
+  // graph weights and 'Because you loved' seeds all go through computeEngagementScore (curve multiplier),
+  // and its cache must not hold values from a stale label.
+  progress('Analyzing play patterns...', 4);
+  for (const ug of userGames) {
+    ug.engagementPattern = classifyEngagementCurve(ug);
+  }
+
   // Reset per-run caches
   _engagementCache.clear();
 
@@ -235,14 +246,6 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
   if (filteredCandidates.length === 0) {
     return { tasteProfile, shelves: buildShelvesFromScored([], [], userGames, tasteProfile, [], [], null, now) };
-  }
-
-  // ── 2. Classify engagement curves ──
-  progress('Analyzing play patterns...', 8);
-  // Always classify here with the shared function: the store's snapshot builder keeps its own older
-  // classifier (which ignored completion) and its label must not stick.
-  for (const ug of userGames) {
-    ug.engagementPattern = classifyEngagementCurve(ug);
   }
 
   // ── 3. Build negative / positive taste profiles ──
@@ -375,11 +378,14 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
   // Inverted lookups for the graph pre-pass, built over the sorted order above.
   const graphIndex = buildGraphCandidateIndex(userGames, graphCtx);
 
-  // Pre-compute per-user-game normalized canonical genre sets for engagement curve bonus
-  const ugGenreNorms = new Map<string, Set<string>>();
+  // Engagement curve bonus sources: games with a rewarding curve the user did not reject (a 1-star or removed
+  // game played over months is not a pattern to look for), with their normalized canonical genre sets.
+  const curveGames: Array<{ mult: number; genres: Set<string> }> = [];
   for (const ug of userGames) {
+    const mult = CURVE_MULTIPLIERS[ug.engagementPattern || 'unknown'];
+    if (mult <= 1.1 || computeEngagementWeight(ug) <= 0 || computeNegativeWeight(ug) > 0) continue;
     const canon = ug.genres.map(g => toCanonicalGenre(g)).filter(Boolean) as string[];
-    ugGenreNorms.set(ug.gameId, new Set(canon.map(norm)));
+    curveGames.push({ mult, genres: new Set(canon.map(norm)) });
   }
 
   // Pre-compute profile feature sets (normalized for comparison; profile.genres use canonical display names)
@@ -518,6 +524,9 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
     // Layer 12: Studio loyalty boost
     const studioLoyaltyBoost = computeStudioLoyaltyBoost(c, tasteProfile.loyalDevelopers, tasteProfile);
+    const loyalStudio = studioLoyaltyBoost > 0
+      ? matchedLoyalStudio(c, tasteProfile.loyalDevelopers, tasteProfile.loyalPublishers) ?? undefined
+      : undefined;
 
     // Layer 13: Session sequencing (uses hoisted context)
     const sequencingBoost = computeSequencingBoost(c, seqCtx);
@@ -535,17 +544,13 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     // Engagement curve bonus (uses pre-computed canonical genre norm sets)
     let engagementCurveBonus = 0;
     const cGenresNorm = new Set(c.genres.map(g => toCanonicalGenre(g)).filter((x): x is NonNullable<typeof x> => x !== null).map(x => norm(x)));
-    for (const ug of userGames) {
-      const curveMult = CURVE_MULTIPLIERS[ug.engagementPattern || 'unknown'];
-      if (curveMult > 1.1) {
-        const ugGN = ugGenreNorms.get(ug.gameId)!;
-        let overlap = 0;
-        for (const g of cGenresNorm) {
-          if (ugGN.has(g)) overlap++;
-        }
-        if (overlap > 0) {
-          engagementCurveBonus = Math.max(engagementCurveBonus, (curveMult - 1) * (overlap / Math.max(cGenresNorm.size || 1, 1)));
-        }
+    for (const cg of curveGames) {
+      let overlap = 0;
+      for (const g of cGenresNorm) {
+        if (cg.genres.has(g)) overlap++;
+      }
+      if (overlap > 0) {
+        engagementCurveBonus = Math.max(engagementCurveBonus, (cg.mult - 1) * (overlap / Math.max(cGenresNorm.size || 1, 1)));
       }
     }
     engagementCurveBonus = clamp01(engagementCurveBonus);
@@ -656,6 +661,7 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
         lexicalRetrieved: c.lexicalRetrieved === true,
         annDistance: c.annDistance,
         bestClusterLabel,
+        ...(loyalStudio ? { loyalStudio } : {}),
         explanation: '',
         comingSoon: c.comingSoon === true,
       },
@@ -899,22 +905,41 @@ function buildShelvesFromScored(
     }
   }
 
-  // "For your [mood]" — require the cluster label genre on the candidate
+  // "For your [mood]" — require the cluster label genre on the candidate. Clusters in a genre-heavy library
+  // often share a top genre; two identical "For your Action side" shelves would also share one shelf key
+  // (bandit + interaction tracking), so a repeated label falls back to the cluster's next-strongest unused
+  // genre, then theme, or the cluster gets no shelf.
+  const usedMoodLabels = new Set<string>();
   for (const cluster of clusters) {
     if (!cluster.label || cluster.gameCount < 2) continue;
-    const labelGenre = cluster.profile.topGenre || cluster.label;
-    const clusterGames = reranked
-      .filter(s => !usedGameIds.has(s.gameId) && matchesMoodShelf(s.genres, labelGenre))
-      .slice(0, 10);
+    const primary = cluster.profile.topGenre || cluster.label;
+    type MoodLabel = { title: string; matches: (s: ScoredGame) => boolean };
+    const genreLabel = (g: string): MoodLabel => ({ title: g, matches: s => matchesMoodShelf(s.genres, g) });
+    const options: MoodLabel[] = usedMoodLabels.has(norm(primary))
+      ? [
+          ...cluster.profile.genres.map(g => genreLabel(g.name)),
+          ...cluster.profile.themes.map((t): MoodLabel => ({
+            title: t.name,
+            matches: s => s.themes.some(x => norm(x) === norm(t.name)),
+          })),
+        ].filter(o => !usedMoodLabels.has(norm(o.title)))
+      : [{ title: cluster.label, matches: genreLabel(primary).matches }];
 
-    if (clusterGames.length >= 3) {
+    for (const option of options) {
+      const clusterGames = reranked
+        .filter(s => !usedGameIds.has(s.gameId) && option.matches(s))
+        .slice(0, 10);
+      if (clusterGames.length < 3) continue;
+      const display = option.title.charAt(0).toUpperCase() + option.title.slice(1);
+      usedMoodLabels.add(norm(option.title));
       shelves.push({
         type: 'for-your-mood',
-        title: `For your ${cluster.label} side`,
+        title: `For your ${display} side`,
         subtitle: cluster.topGames.filter(Boolean).length > 0 ? `Based on ${cluster.topGames.filter(Boolean).slice(0, 2).join(' & ')}` : undefined,
         games: clusterGames,
       });
       addToUsed(clusterGames);
+      break;
     }
   }
 
@@ -956,12 +981,14 @@ function buildShelvesFromScored(
   }
 
   // Deals For You — games on sale matching user taste. With gg.deals prices, games at their
-  // all-time low come first (and qualify even when the store discount is small).
+  // all-time low come first (and qualify even when the store discount is small). A full-price game that
+  // was never discounted is trivially "at its low", so an actual discount is always required.
+  const atLow = (s: ScoredGame) => !!s.price?.atHistoricalLow && (s.price.discountPercent ?? 0) > 0;
   const deals = pickDiverse(
     poolByScore
-      .filter(s => s.price?.atHistoricalLow || (s.reasons.isOnSale && s.price?.discountPercent && s.price.discountPercent >= 20))
+      .filter(s => s.reasons.isOnSale && (atLow(s) || (s.price?.discountPercent ?? 0) >= 20))
       .sort((a, b) =>
-        Number(!!b.price?.atHistoricalLow) - Number(!!a.price?.atHistoricalLow)
+        Number(atLow(b)) - Number(atLow(a))
         || (b.price?.discountPercent ?? 0) - (a.price?.discountPercent ?? 0)),
     12,
   );
@@ -1107,7 +1134,8 @@ function buildShelvesFromScored(
   }
 
   // "Finish and Try"
-  const onHoldGames = userGames.filter(g => g.status === 'On Hold' && g.title);
+  // Removed games keep their journey status; they are not the user's to finish (or to pick back up).
+  const onHoldGames = userGames.filter(g => g.status === 'On Hold' && g.title && !g.removedAt);
   if (onHoldGames.length > 0) {
     const topOnHold = onHoldGames.sort((a, b) => b.hoursPlayed - a.hoursPlayed)[0];
     const topOnHoldCanonNorm = new Set(topOnHold.genres.map(g => toCanonicalGenre(g)).filter((c): c is NonNullable<typeof c> => c !== null).map(c => norm(c)));
@@ -1131,7 +1159,7 @@ function buildShelvesFromScored(
 
   // Unfinished Business
   const unfinished = userGames
-    .filter(g => g.title && (g.status === 'Playing' || g.status === 'On Hold' || g.status === 'Playing Now'))
+    .filter(g => g.title && !g.removedAt && (g.status === 'Playing' || g.status === 'On Hold' || g.status === 'Playing Now'))
     .sort((a, b) => {
       const aTime = a.lastSessionDate ? new Date(a.lastSessionDate).getTime() : new Date(a.addedAt).getTime();
       const bTime = b.lastSessionDate ? new Date(b.lastSessionDate).getTime() : new Date(b.addedAt).getTime();
@@ -1184,17 +1212,22 @@ function buildShelvesFromScored(
   // Surface "Want to Play" games, ranked by how well they fit the user's
   // current taste profile — effectively a prioritized play-next queue.
   // Uses the same semantic centroid + content similarity as the main pipeline.
+  const backlogProfileGenres = new Set(profile.genres.map(pg => norm(pg.name)));
   const backlogCandidates = userGames
     .filter(g =>
       g.status === 'Want to Play'
+      && !g.removedAt
       && g.hoursPlayed === 0
       && isReleasedPlayableForBacklog(g.releaseDate, nowMs),
     )
     .map((g): ScoredGame => {
-      const genreOverlapCount = g.genres.filter(gn => {
-        const cn = toCanonicalGenre(gn) ?? gn;
-        return profile.genres.some(pg => pg.name.toLowerCase() === cn.toLowerCase());
-      }).length;
+      // Canonical genres shared with the profile (profile.genres use canonical display names), as in the
+      // main scoring loop; the chips and the "Matches N" reason come from this one list.
+      const sharedGenres = [...new Set(
+        g.genres.map(gn => toCanonicalGenre(gn)).filter((x): x is NonNullable<typeof x> => x !== null)
+          .filter(x => backlogProfileGenres.has(norm(x))),
+      )];
+      const genreOverlapCount = sharedGenres.length;
       const themeOverlapCount = g.themes.filter(t =>
         profile.themes.some(pt => pt.name.toLowerCase() === t.toLowerCase())
       ).length;
@@ -1221,7 +1254,8 @@ function buildShelvesFromScored(
           + ratingBoost * 0.15 + 0.10 + priorityBoost);
 
       const reasons: string[] = [];
-      if (semanticSim > 0.3) reasons.push('Strong semantic match to your taste');
+      // Same rank threshold as the main explanations: a raw cosine above 0.3 was true for nearly every game.
+      if (semanticSim > SEMANTIC_EXPLAIN_MIN) reasons.push('Strong semantic match to your taste');
       if (genreOverlapCount > 0) reasons.push(`Matches ${genreOverlapCount} of your top genres`);
       if (devMatch) reasons.push(`From ${g.developer}, a studio you love`);
       if (themeOverlapCount > 0) reasons.push(`${themeOverlapCount} shared themes with your favourites`);
@@ -1246,11 +1280,13 @@ function buildShelvesFromScored(
           graphSignal: 0, qualitySignal: 0, popularitySignal: 0, recencyBoost: 0,
           diversityBonus: 0, trajectoryMultiplier: 0, negativeSignal: 0,
           timeOfDayBoost: 0, engagementCurveBonus: 0,
-          franchiseBoost: devMatch * 0.2, studioLoyaltyBoost: pubMatch * 0.1, sequencingBoost: 0,
+          // A shared loyal developer is studio loyalty, not a franchise; a publisher-only match is not
+          // credited here (the headline would name the developer).
+          franchiseBoost: 0, studioLoyaltyBoost: devMatch * 0.15, sequencingBoost: 0,
           mlSignal: 0,
         },
         reasons: {
-          sharedGenres: g.genres.filter(gn => profile.genres.some(pg => pg.name.toLowerCase() === gn.toLowerCase())),
+          sharedGenres,
           sharedThemes: g.themes.filter(t => profile.themes.some(pt => pt.name.toLowerCase() === t.toLowerCase())),
           sharedModes: [],
           similarTo: [],
@@ -1261,6 +1297,7 @@ function buildShelvesFromScored(
           isFranchiseEntry: false,
           isOnSale: false,
           semanticRetrieved: false,
+          ...(devMatch ? { loyalStudio: matchedLoyalStudio(g, profile.loyalDevelopers, [])! } : {}),
           explanation: reasons.length > 0 ? reasons.join('. ') : 'In your backlog — matches your current taste',
         },
         explanation: reasons,

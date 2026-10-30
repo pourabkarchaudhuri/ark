@@ -86,6 +86,28 @@ export function weightsFromTelemetry(telemetry: RecoTelemetry | null | undefined
   return out;
 }
 
+/**
+ * Layers stored as a positive magnitude but subtracted from (or multiplied into) the score: they never
+ * raised the match, so the "what drove this" breakdown leaves them out.
+ */
+const PENALTY_LAYERS = new Set(['negativeSignal', 'trajectoryMultiplier']);
+
+/** Studio-loyalty boost a developer match gets in the main scoring loop (a publisher match gets 0.25). */
+const DEVELOPER_LOYALTY_BOOST = 0.35;
+
+/**
+ * Who the studio-loyalty layer matched. The worker records it; results cached before it did fall back to
+ * the boost value (developer 0.35, publisher 0.25).
+ */
+function loyalStudioOf(game: ScoredGame): { role: 'developer' | 'publisher'; name: string } | null {
+  if (!(game.layerScores.studioLoyaltyBoost > 0)) return null;
+  if (game.reasons.loyalStudio) return game.reasons.loyalStudio;
+  if (game.layerScores.studioLoyaltyBoost >= DEVELOPER_LOYALTY_BOOST) {
+    return game.developer ? { role: 'developer', name: game.developer } : null;
+  }
+  return game.publisher ? { role: 'publisher', name: game.publisher } : null;
+}
+
 /** Calibrated "N% match" for display (falls back to the raw score for results cached before calibration). */
 export function matchPercent(game: Pick<ScoredGame, 'matchPct' | 'score'>): number {
   const pct = game.matchPct ?? Math.round(game.score * 100);
@@ -120,8 +142,12 @@ export function explanationHeadline(game: ScoredGame): string {
   if (ls.franchiseBoost > 0) {
     return `A ${pct}% match — it continues a franchise you already follow.`;
   }
-  if (ls.studioLoyaltyBoost > 0 && game.developer) {
-    return `A ${pct}% match — ${game.developer} is a studio you keep coming back to.`;
+  const studio = loyalStudioOf(game);
+  if (studio?.role === 'developer') {
+    return `A ${pct}% match — ${studio.name} is a studio you keep coming back to.`;
+  }
+  if (studio?.role === 'publisher') {
+    return `A ${pct}% match — published by ${studio.name}, a label you keep coming back to.`;
   }
   if (r.bestClusterLabel) {
     return `A ${pct}% match with your ${r.bestClusterLabel} cluster.`;
@@ -143,7 +169,7 @@ export function explanationHeadline(game: ScoredGame): string {
 
 export function normalizeLayerScores(game: ScoredGame, weights?: Record<string, number>): LayerBreakdown[] {
   const entries = Object.entries(game.layerScores)
-    .filter(([, v]) => v !== undefined && v !== 0)
+    .filter(([k, v]) => v !== undefined && v !== 0 && !PENALTY_LAYERS.has(k))
     .map(([key, rawScore]) => {
       // Real per-run weight when known (a layer with weight 0 contributed nothing and is not credited).
       const weight = weights ? (weights[key] ?? 0) : (LAYER_WEIGHTS[key] ?? 0.05);
@@ -270,8 +296,11 @@ export function generateExplanation(game: ScoredGame): string[] {
   if (ls.franchiseBoost > 0) {
     lines.push('Part of a franchise you follow');
   }
-  if (ls.studioLoyaltyBoost > 0) {
-    lines.push(`From a studio you trust (${game.developer})`);
+  const studio = loyalStudioOf(game);
+  if (studio?.role === 'developer') {
+    lines.push(`From a studio you trust (${studio.name})`);
+  } else if (studio?.role === 'publisher') {
+    lines.push(`Published by a label you trust (${studio.name})`);
   }
   if (r.metacriticScore && r.metacriticScore >= 85) {
     lines.push(`Metacritic score: ${r.metacriticScore}`);

@@ -19,5 +19,8 @@
  *  12 — v1.0.93 no weight for feedback layers without feedback; feedback outside the pool is used
  *  13 — v1.0.94 graph neighbours found inside the candidate pool; Epic candidates get stored vectors
  *  14 — v1.0.95 synthesised ML scores for games outside the bundled profile set (weighted 60%)
+ *  15 — v1.0.97 fresh engagement scores and one shared curve classifier; removed games off library shelves;
+ *       no curve bonus from rejected games; auto-held games are not rejections; no partial ML scores;
+ *       unique mood shelves; Backlog Advisor/studio explanations; deals need a real discount
  */
-export const ORACLE_ENGINE_VERSION = 14;
+export const ORACLE_ENGINE_VERSION = 15;

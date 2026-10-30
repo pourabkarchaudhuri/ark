@@ -50,6 +50,14 @@ function isRemovalRejection(game: EngagementWeightInput): boolean {
   return !liked;
 }
 
+/**
+ * The user put the game down early: On Hold with under 2h and no 3+ rating. An automatic idle hold is not
+ * the user's decision, so it is neither a rejection nor a negative signal.
+ */
+export function isBounceOff(game: EngagementWeightInput): boolean {
+  return game.status === 'On Hold' && !game.autoHeld && game.hoursPlayed < 2 && game.rating < 3;
+}
+
 function isUnplayed(game: EngagementWeightInput): boolean {
   return game.rating <= 0 && game.hoursPlayed < MIN_PLAYED_HOURS && game.status !== 'Completed';
 }
@@ -59,14 +67,15 @@ function isUnplayed(game: EngagementWeightInput): boolean {
  * Rejections carry no positive weight (they feed the negative signal instead):
  *   - removed games
  *   - ratings of 1–2 stars, regardless of hours (a hated 80h game must not raise its genres)
- *   - On Hold with under 2h and no 3+ rating (bounced off)
+ *   - On Hold with under 2h and no 3+ rating, put there by the user (bounced off; an automatic idle hold is
+ *     scored like any other entry)
  * Unplayed/unrated entries (Want to Play, never-started) get a small fixed weight.
  * Retrieve weight = shared; worker score may apply temporal decay on top.
  */
 export function computeEngagementWeight(game: EngagementWeightInput): number {
   if (isRemovalRejection(game)) return 0;
   if (game.rating > 0 && game.rating < 3) return 0;
-  if (game.status === 'On Hold' && game.hoursPlayed < 2 && game.rating < 3) return 0;
+  if (isBounceOff(game)) return 0;
   if (isUnplayed(game)) return UNPLAYED_ENGAGEMENT_WEIGHT * clampActiveToIdleRatio(game.activeToIdleRatio);
 
   let w = 1;
@@ -92,7 +101,7 @@ export function computeNegativeWeight(game: EngagementWeightInput): number {
   if (game.rating > 0 && game.rating < 3) n += game.rating === 1 ? 2 : 1;
   if (isRemovalRejection(game)) n += 1;
   // Bouncing off early is the user putting a game down; an automatic idle hold is not.
-  if (game.status === 'On Hold' && !game.autoHeld && game.hoursPlayed < 2 && game.rating < 3) n += 0.7;
+  if (isBounceOff(game)) n += 0.7;
   return Math.min(n, NEGATIVE_WEIGHT_CAP);
 }
 

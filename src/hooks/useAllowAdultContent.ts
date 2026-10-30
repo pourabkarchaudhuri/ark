@@ -18,6 +18,9 @@ function subscribe(fn: () => void) {
   return () => listeners.delete(fn);
 }
 
+/** Called after every setAllowAdultContent (the Oracle re-ranks when the setting really changed). */
+export const subscribeAllowAdultContent = subscribe;
+
 function getSnapshot(): boolean {
   try {
     return localStorage.getItem(LS_KEY) === '1';

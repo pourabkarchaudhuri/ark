@@ -194,8 +194,10 @@ function GameCardComponent({
     e.preventDefault();
     e.stopPropagation();
     window.dispatchEvent(new CustomEvent(CONTEXT_MENU_CLOSE_EVENT, { detail: { gameId: game.id } }));
+    // Not in the library and nothing to add with: the menu would be empty.
+    if (!inLibrary && !onAddToLibrary) return;
     setCtxMenu({ x: e.clientX, y: e.clientY });
-  }, [game.id]);
+  }, [game.id, inLibrary, onAddToLibrary]);
 
   // Close this card's menu when another card opens its context menu
   useEffect(() => {
@@ -440,7 +442,8 @@ function GameCardComponent({
         
         {/* Library Heart Button - Top Left (visible on hover or if in library) */}
         {/* Hidden when hideLibraryBadge is true (e.g., in Library view where all games are already in library) */}
-        {!hideLibraryBadge && (
+        {/* No add handler (e.g. an Oracle card showing the user's own game): no heart to add with. */}
+        {!hideLibraryBadge && (inLibrary || onAddToLibrary) && (
           <button 
             onClick={handleHeartClick}
             className={cn(
@@ -739,15 +742,15 @@ function GameCardComponent({
                 Remove from Library
               </button>
             </>
-          ) : (
+          ) : onAddToLibrary ? (
             <button
               className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-white/10 cursor-pointer"
-              onClick={() => { setCtxMenu(null); if (onAddToLibrary) onAddToLibrary(game.id); }}
+              onClick={() => { setCtxMenu(null); onAddToLibrary(game.id); }}
             >
               <AnimateIcon hover="pulse" className="mr-2"><Plus className="h-4 w-4" /></AnimateIcon>
               Add to Library
             </button>
-          )}
+          ) : null}
         </div>,
         document.body
       )}

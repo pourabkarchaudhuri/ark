@@ -108,7 +108,7 @@ vi.mock('@/hooks/session-tracker-context', () => ({
 }));
 vi.mock('@/hooks/useDevMode', () => ({ useDevMode: () => [false, () => {}] }));
 vi.mock('@/hooks/useBetaFeatures', () => ({ useBetaFeatures: () => [false, () => {}] }));
-vi.mock('@/hooks/useAllowAdultContent', () => ({ useAllowAdultContent: () => [false, () => {}] }));
+vi.mock('@/hooks/useAllowAdultContent', () => ({ useAllowAdultContent: () => [false, () => {}], subscribeAllowAdultContent: () => () => {} }));
 vi.mock('@/hooks/useChatAvailability', () => ({ useChatAvailability: () => ({ available: false, message: '' }) }));
 
 vi.mock('@/services/galaxy-cache', () => ({

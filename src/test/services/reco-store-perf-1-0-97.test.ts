@@ -53,7 +53,7 @@ vi.mock('@/services/resolve-graph-scores', () => ({
   resolveGraphScores: async () => ({ graphScoresMap: undefined, userCommunityCounts: undefined, userCommunityTotal: undefined }),
 }));
 vi.mock('@/services/prefetch-store', () => ({ getPrefetchedGames: () => prefetch.games }));
-vi.mock('@/hooks/useAllowAdultContent', () => ({ isAllowAdultContent: () => false }));
+vi.mock('@/hooks/useAllowAdultContent', () => ({ isAllowAdultContent: () => false, subscribeAllowAdultContent: () => () => {} }));
 vi.mock('@/services/adult-content-filter', () => ({
   isAdultContentByDescription: (g: { summary?: string; longDescription?: string }) =>
     /explicit/i.test(`${g.summary ?? ''} ${g.longDescription ?? ''}`),
