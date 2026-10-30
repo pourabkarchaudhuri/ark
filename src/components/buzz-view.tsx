@@ -160,7 +160,7 @@ function useResizableSplit(containerRef: React.RefObject<HTMLDivElement | null>,
 
 // ─── Webview Panel (Decode Bay) ─────────────────────────────────────────────
 
-const WebviewPanel = memo(function WebviewPanel({
+export const WebviewPanel = memo(function WebviewPanel({
   url, onClose, relaySources, onSelectRelay, focusMode, onToggleFocus,
 }: {
   url: string;
@@ -214,14 +214,21 @@ const WebviewPanel = memo(function WebviewPanel({
     let openTimer: ReturnType<typeof setTimeout> | null = null;
     let openObserver: ResizeObserver | null = null;
 
+    // The observer and the fallback timer can both reach tryOpen; a second
+    // api.open destroyed and reloaded the page (v1.0.97), so open only once.
+    let opened = false;
     const tryOpen = async () => {
-      if (cancelled) return;
+      if (cancelled || opened) return;
       const b = getBounds();
       if (b.width <= 0 || b.height <= 0) return false;
+      opened = true;
       const result = await api.open(url, b);
-      if (!result?.success && !cancelled) {
-        setIsLoading(false);
-        setLoadError('Failed to open page viewer');
+      if (!result?.success) {
+        opened = false;
+        if (!cancelled) {
+          setIsLoading(false);
+          setLoadError('Failed to open page viewer');
+        }
       }
       return result?.success ?? false;
     };
@@ -232,12 +239,13 @@ const WebviewPanel = memo(function WebviewPanel({
         if (b.width > 0 && b.height > 0) {
           openObserver?.disconnect();
           openObserver = null;
+          if (openTimer) { clearTimeout(openTimer); openTimer = null; }
           tryOpen();
         }
       });
       openObserver.observe(el);
       // Fallback: if the observer never fires with valid bounds, try after transition
-      openTimer = setTimeout(() => { openObserver?.disconnect(); openObserver = null; tryOpen(); }, 400);
+      openTimer = setTimeout(() => { openTimer = null; openObserver?.disconnect(); openObserver = null; tryOpen(); }, 400);
     };
 
     const b = getBounds();

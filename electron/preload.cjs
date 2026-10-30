@@ -288,9 +288,9 @@ contextBridge.exposeInMainWorld('aiChat', {
 
 // Expose Settings API to renderer
 contextBridge.exposeInMainWorld('settings', {
-  // Get the Google AI API key
-  getApiKey: () => 
-    ipcRenderer.invoke('settings:getApiKey'),
+  // { has, hint } for the stored Google AI API key — the key itself stays in main
+  getApiKeyHint: () =>
+    ipcRenderer.invoke('settings:getApiKeyHint'),
   
   // Set the Google AI API key
   setApiKey: (key) => 
@@ -655,7 +655,9 @@ contextBridge.exposeInMainWorld('store', {
   clearNamespace: (ns) => ipcRenderer.invoke('store:clearNamespace', ns),
 });
 
-// Only log exposed APIs in development to avoid leaking IPC surface in production
-if (process.env.NODE_ENV !== 'production') {
+// Only log exposed APIs in development to avoid leaking IPC surface in production.
+// Main passes the flag via additionalArguments for dev-server runs (NODE_ENV is not
+// a reliable signal: a packaged build inherits whatever the user's environment has).
+if (process.argv.includes('--ark-dev-server')) {
   console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.ann, window.analytics, window.devlog, window.gameLauncher exposed');
 }

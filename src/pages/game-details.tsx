@@ -2,7 +2,12 @@ import { useState, useEffect, useMemo, useRef, useCallback, memo, lazy, Suspense
 import { formatPlayingNow } from '@/lib/player-count';
 import { useRoute, useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
-import DOMPurify from 'dompurify';
+import {
+  sanitizeStoreHtml,
+  resolveContentLinkHref,
+  EPIC_STORE_ORIGIN,
+  STEAM_STORE_ORIGIN,
+} from '@/lib/content-links';
 import { 
   ArrowLeft, 
   Calendar, 
@@ -416,15 +421,19 @@ function embedDescriptionImages(html: string): string {
   });
 }
 
-// Intercept link clicks in HTML content (description, requirements, etc.) so they open in system browser
-function handleContentLinkClick(e: MouseEvent<HTMLDivElement>): void {
+// Intercept link clicks in HTML content (description, requirements, etc.) so they open in system browser.
+// Every anchor click is cancelled: the resolved `anchor.href` of '/x' or '//x' is a file:// URL in the
+// app window, so the RAW href is resolved against the game's store instead (content-links.ts).
+function handleContentLinkClick(e: MouseEvent<HTMLDivElement>, storeOrigin: string): void {
   const target = e.target as HTMLElement;
   const anchor = target.closest('a');
-  if (anchor?.href && (anchor.href.startsWith('http:') || anchor.href.startsWith('https:'))) {
-    e.preventDefault();
-    openExternalUrl(anchor.href);
-  }
+  if (!anchor || !anchor.hasAttribute('href')) return;
+  e.preventDefault();
+  const url = resolveContentLinkHref(anchor.getAttribute('href'), storeOrigin);
+  if (url) openExternalUrl(url);
 }
+const handleSteamContentLinkClick = (e: MouseEvent<HTMLDivElement>) => handleContentLinkClick(e, STEAM_STORE_ORIGIN);
+const handleEpicContentLinkClick = (e: MouseEvent<HTMLDivElement>) => handleContentLinkClick(e, EPIC_STORE_ORIGIN);
 
 // Extract the first image URL from Steam news BBCode/HTML contents.
 // Supports [img]url[/img], {STEAM_CLAN_IMAGE}/path, and <img src="url"> patterns.
@@ -2307,6 +2316,8 @@ const GameDetailsContent = memo(function GameDetailsContent({
 
   // Determine whether Epic is the primary store for this game
   const isEpicPrimary = !!epicGame;
+  // Description HTML comes from the store of the page's own id (relative links resolve there).
+  const onContentLinkClick = gameId?.startsWith('epic-') ? handleEpicContentLinkClick : handleSteamContentLinkClick;
 
   const { error: toastLaunchError } = useToast();
 
@@ -2599,8 +2610,8 @@ const GameDetailsContent = memo(function GameDetailsContent({
                     "prose prose-invert prose-sm max-w-none prose-img:rounded-lg prose-img:my-4 prose-img:max-w-full",
                     !showFullDescription && "max-h-[10rem] overflow-hidden"
                   )}
-                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(embedDescriptionImages(normalizeDescriptionMediaUrls(details.detailed_description || details.about_the_game))) }}
-                  onClick={handleContentLinkClick}
+                  dangerouslySetInnerHTML={{ __html: sanitizeStoreHtml(embedDescriptionImages(normalizeDescriptionMediaUrls(details.detailed_description || details.about_the_game))) }}
+                  onClick={onContentLinkClick}
                 />
                 {/* Gradient fade at bottom when collapsed */}
                 {!showFullDescription && (details.detailed_description || details.about_the_game)?.length > 300 && (
@@ -2631,8 +2642,8 @@ const GameDetailsContent = memo(function GameDetailsContent({
                       </h3>
                       <div 
                         className="prose prose-invert prose-sm text-white/70"
-                        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(details.pc_requirements.minimum) }}
-                        onClick={handleContentLinkClick}
+                        dangerouslySetInnerHTML={{ __html: sanitizeStoreHtml(details.pc_requirements.minimum) }}
+                        onClick={onContentLinkClick}
                       />
                     </div>
                   )}
@@ -2644,8 +2655,8 @@ const GameDetailsContent = memo(function GameDetailsContent({
                       </h3>
                       <div 
                         className="prose prose-invert prose-sm text-white/70"
-                        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(details.pc_requirements.recommended) }}
-                        onClick={handleContentLinkClick}
+                        dangerouslySetInnerHTML={{ __html: sanitizeStoreHtml(details.pc_requirements.recommended) }}
+                        onClick={onContentLinkClick}
                       />
                     </div>
                   )}

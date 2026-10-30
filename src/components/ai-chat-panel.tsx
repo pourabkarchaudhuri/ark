@@ -24,8 +24,7 @@ import {
   Paperclip,
   AlertTriangle
 } from 'lucide-react';
-import ReactMarkdown, { type Components } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { ChatMarkdown } from '@/components/chat-markdown';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -46,16 +45,6 @@ import { applyAIChatActions, confirmAIChatRemovals } from '@/services/ai-chat-ac
 // Emoji picker + its ~430 KB data load only when the picker is first opened.
 const EmojiPicker = lazy(() => import('@emoji-mart/react'));
 const loadEmojiData = async () => (await import('@emoji-mart/data')).default;
-
-// Module-level so ReactMarkdown gets the same references every render.
-const REMARK_PLUGINS = [remarkGfm];
-const MARKDOWN_COMPONENTS: Components = {
-  a: ({ href, children, ...props }) => (
-    <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-      {children}
-    </a>
-  ),
-};
 
 /** Within this many px of the bottom counts as "following" the conversation. */
 const STICK_TO_BOTTOM_PX = 80;
@@ -429,12 +418,8 @@ const MessageBubble = React.memo(function MessageBubble({
                 "prose-hr:border-white/10",
                 "prose-table:text-xs prose-th:text-white prose-td:text-zinc-300"
               )}>
-                <ReactMarkdown
-                  remarkPlugins={REMARK_PLUGINS}
-                  components={MARKDOWN_COMPONENTS}
-                >
-                  {message.content}
-                </ReactMarkdown>
+                {/* Images render as links and only http(s)/mailto URLs survive (chat-markdown.tsx). */}
+                <ChatMarkdown content={message.content} />
                 {/* Blinking cursor for streaming */}
                 {message.isStreaming && (
                   <span className="inline-block w-2 h-4 bg-fuchsia-400 animate-pulse ml-0.5" />

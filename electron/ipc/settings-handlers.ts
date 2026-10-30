@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
+import { secretHint } from '../secret-hint.js';
 import {
   settingsStore,
   DEFAULT_OLLAMA_RERANK_MODEL,
@@ -23,12 +24,14 @@ import { getActiveSessions, syncOverlayVisibilityLatch } from '../session-tracke
 import { clearIndex, syncAnnDimsFromSettings } from '../ann-index.js';
 
 export function register(): void {
-  ipcMain.handle('settings:getApiKey', async () => {
+  // The decrypted Gemini key never goes to the renderer (v1.0.97): only whether
+  // one is stored plus a first4…last4 hint for the settings field.
+  ipcMain.handle('settings:getApiKeyHint', async () => {
     try {
-      return settingsStore.getGoogleAIKey();
+      return secretHint(settingsStore.getGoogleAIKey());
     } catch (error) {
-      logger.error('[Settings] Error getting API key:', error);
-      return null;
+      logger.error('[Settings] Error reading API key hint:', error);
+      return { has: false, hint: '' };
     }
   });
 

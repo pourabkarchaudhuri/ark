@@ -1,10 +1,22 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import pkg from './package.json';
+import { cspMetaTag } from './electron/csp.js';
+
+// v1.0.97: built pages (loaded from file://) get a Content-Security-Policy; the dev
+// server is left alone so HMR's inline/eval scripts keep working.
+const cspForBuild = (): Plugin => ({
+  name: 'ark-csp-meta',
+  apply: 'build',
+  transformIndexHtml: {
+    order: 'pre',
+    handler: (html) => html.replace(/<head>/i, `<head>\n    ${cspMetaTag()}`),
+  },
+});
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), cspForBuild()],
   define: {
     // Inject the package.json version at build time so the changelog modal
     // and navbar always match — no more manual APP_VERSION bumps.

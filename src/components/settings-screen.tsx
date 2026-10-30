@@ -9,7 +9,7 @@ import { recoStore } from '@/services/reco-store';
 import { memo, useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  ArrowLeft, Settings, Key, Eye, EyeOff, Check, AlertCircle, Trash2,
+  ArrowLeft, Settings, Key, Eye, Check, AlertCircle, Trash2,
   Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2,
   Brain, BookOpen, Info, Users, Scale, ExternalLink,
   Library, Compass, Globe, Newspaper, Calendar, Gamepad2,
@@ -45,6 +45,7 @@ import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { EmbeddingBatchSizeControl } from '@/components/settings/embedding-batch-size';
 import { AboutUpdateButton, useAboutUpdate } from '@/components/settings/about-update';
+import { GeminiKeyInput } from '@/components/settings/gemini-key-input';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
 import {
   OVERLAY_CYCLE_HOTKEY_LABEL,
@@ -56,7 +57,7 @@ export type PreferredChatProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anth
 declare global {
   interface Window {
     settings?: {
-      getApiKey: () => Promise<string | null>;
+      getApiKeyHint: () => Promise<{ has: boolean; hint: string }>;
       setApiKey: (key: string) => Promise<void>;
       removeApiKey: () => Promise<void>;
       hasApiKey: () => Promise<boolean>;
@@ -513,7 +514,7 @@ const AIModelsTab = memo(function AIModelsTab() {
   const [availableProviders, setAvailableProviders] = useState<PreferredChatProvider[]>([]);
 
   const [apiKey, setApiKey] = useState('');
-  const [showApiKey, setShowApiKey] = useState(false);
+  const [apiKeyHint, setApiKeyHint] = useState('');
   const [hasExistingKey, setHasExistingKey] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -554,7 +555,8 @@ const AIModelsTab = memo(function AIModelsTab() {
           window.settings.getPreferredChatProvider(),
         ]);
         setHasExistingKey(exists);
-        if (exists) { const key = await window.settings.getApiKey(); if (key) setApiKey(key); }
+        // Write-only key: the field stays empty, a stored key is shown as a hint.
+        if (exists) { const h = await window.settings.getApiKeyHint(); setApiKeyHint(h?.hint ?? ''); }
         setOllamaUrl(s.url);
         setOllamaModel(s.model);
         setOllamaRerankModel(s.rerankModel ?? DEFAULT_OLLAMA_RERANK_MODEL);
@@ -625,7 +627,7 @@ const AIModelsTab = memo(function AIModelsTab() {
     if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
     setSaveStatus('saving');
     debounceTimeoutRef.current = setTimeout(async () => {
-      try { await window.settings!.setApiKey(apiKey.trim()); setSaveStatus('saved'); setHasExistingKey(true); setError(null); setTimeout(() => setSaveStatus('idle'), 2000); }
+      try { await window.settings!.setApiKey(apiKey.trim()); setSaveStatus('saved'); setHasExistingKey(true); setError(null); window.settings!.getApiKeyHint().then((h) => setApiKeyHint(h?.hint ?? '')).catch(() => {}); setTimeout(() => setSaveStatus('idle'), 2000); }
       catch { setSaveStatus('error'); setError('Failed to save API key'); }
     }, 800);
     return () => { if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current); };
@@ -638,12 +640,11 @@ const AIModelsTab = memo(function AIModelsTab() {
   const handleRemoveApiKey = useCallback(async () => {
     if (!window.settings) return;
     setIsLoading(true); setError(null);
-    try { await window.settings.removeApiKey(); setApiKey(''); setHasExistingKey(false); setSaveStatus('idle'); }
+    try { await window.settings.removeApiKey(); setApiKey(''); setApiKeyHint(''); setHasExistingKey(false); setSaveStatus('idle'); }
     catch { setError('Failed to remove API key'); }
     finally { setIsLoading(false); }
   }, []);
 
-  const getMaskedKey = (key: string) => (!key || key.length < 10) ? key : key.substring(0, 8) + '•'.repeat(16) + key.substring(key.length - 4);
 
   const handlePreferredProviderChange = useCallback(async (value: PreferredChatProvider) => {
     setPreferredChatProviderState(value);
@@ -1210,15 +1211,7 @@ const AIModelsTab = memo(function AIModelsTab() {
           <p className="text-sm font-medium text-white/90">Google Gemini</p>
           <p className="text-xs text-white/35 mt-0.5">Cloud AI with tools and search. Add your API key and select it above as the chat model.</p>
         </div>
-        <div className="relative">
-          <label className="text-xs text-white/40 mb-1 block">Gemini API Key</label>
-          <Input type={showApiKey ? 'text' : 'password'} placeholder="Enter your Google AI API key..."
-            value={showApiKey ? apiKey : (hasExistingKey && apiKey ? getMaskedKey(apiKey) : apiKey)}
-            onChange={(e) => setApiKey(e.target.value)} className="pr-10 bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" disabled={isLoading} />
-          <button type="button" onClick={() => setShowApiKey(!showApiKey)} className="absolute right-3 bottom-2.5 text-white/40 hover:text-white/70 transition-colors">
-            {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </button>
-        </div>
+        <GeminiKeyInput value={apiKey} onChange={setApiKey} hasExistingKey={hasExistingKey} hint={apiKeyHint} disabled={isLoading} />
         {error && <div className="flex items-center gap-2 text-red-400/70 text-xs"><AlertCircle className="h-3 w-3" />{error}</div>}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs">

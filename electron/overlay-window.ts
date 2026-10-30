@@ -22,6 +22,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'path';
 import { logger } from './safe-logger.js';
+import { attachNavigationGuards, devFlagArgs, shouldUseDevServer } from './navigation-guard.js';
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import {
   DEFAULT_OVERLAY_DETAIL_LEVEL,
@@ -113,20 +114,27 @@ let lifecycleHooks: OverlayLifecycleHooks = {};
  * `createWindow()` in main.ts. Both targets are produced by the parallel
  * renderer/build agent (`overlay.html` dev entry, `dist/overlay.html` packaged).
  */
-function loadOverlayContent(win: BrowserWindowType): void {
-  const isDev = process.env.NODE_ENV === 'development';
-  const isTest = process.env.NODE_ENV === 'test';
-  const isProd = process.env.NODE_ENV === 'production';
+function overlayUseDevServer(): boolean {
+  return shouldUseDevServer({ isPackaged: app.isPackaged, nodeEnv: process.env.NODE_ENV });
+}
 
-  if (isDev || (!app.isPackaged && !isProd && !isTest)) {
-    const devBase = (process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173').replace(/\/$/, '');
-    win.loadURL(`${devBase}/overlay.html`).catch((err) => {
+function overlayDevBase(): string {
+  return (process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173').replace(/\/$/, '');
+}
+
+function overlayFilePath(): string {
+  return app.isPackaged
+    ? path.join(app.getAppPath(), 'dist', 'overlay.html')
+    : path.join(__dirname, '../../dist/overlay.html');
+}
+
+function loadOverlayContent(win: BrowserWindowType): void {
+  if (overlayUseDevServer()) {
+    win.loadURL(`${overlayDevBase()}/overlay.html`).catch((err) => {
       logger.error('[Overlay] Failed to load dev overlay URL:', err);
     });
   } else {
-    const overlayPath = app.isPackaged
-      ? path.join(app.getAppPath(), 'dist', 'overlay.html')
-      : path.join(__dirname, '../../dist/overlay.html');
+    const overlayPath = overlayFilePath();
     win.loadFile(overlayPath).catch((err) => {
       logger.error('[Overlay] Failed to load overlay file:', err);
     });
@@ -243,11 +251,22 @@ export function createOverlayWindow(preloadPath?: string): BrowserWindowType {
       preload: resolvedPreload,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       // Start throttled; disable only while the HUD is visible.
       backgroundThrottling: true,
+      additionalArguments: devFlagArgs(overlayUseDevServer()),
     },
   });
+
+  // Same preload bridge as the main window, so the same guard: only its own
+  // page; nothing it shows should navigate, and nothing reaches the OS.
+  overlayWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' as const }));
+  attachNavigationGuards(
+    overlayWindow.webContents,
+    { useDevServer: overlayUseDevServer(), indexPath: overlayFilePath(), devUrl: overlayDevBase() },
+    () => {},
+    (msg) => logger.warn(`[Overlay] ${msg}`),
+  );
 
   // Click-through WITHOUT forward — `{ forward: true }` hit-tests every mouse
   // move into the overlay process and causes in-game mouse lag.
