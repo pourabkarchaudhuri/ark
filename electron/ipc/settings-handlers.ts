@@ -17,6 +17,7 @@ import {
   activateOverlay,
   deactivateOverlay,
   isOverlayCycleHotkeyRegistered,
+  notifyOverlayEnabledChanged,
 } from '../overlay-window.js';
 import { getActiveSessions, syncOverlayVisibilityLatch } from '../session-tracker.js';
 import { clearIndex, syncAnnDimsFromSettings } from '../ann-index.js';
@@ -210,6 +211,8 @@ export function register(): void {
     try {
       if (typeof enabled !== 'boolean') return { success: false, error: 'Invalid value' };
       settingsStore.setOverlayEnabled(enabled);
+      // Register/unregister the global hotkeys (main.ts installs the hook).
+      notifyOverlayEnabledChanged(enabled);
       // Apply live: enable + active sessions → create/show; otherwise destroy HWND.
       if (enabled && getActiveSessions().length > 0) {
         activateOverlay();
