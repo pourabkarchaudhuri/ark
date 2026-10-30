@@ -7,13 +7,17 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
 import type { BrowserWindow as BrowserWindowType } from 'electron';
-const { BrowserWindow, ipcMain, Notification, nativeImage, shell, session, app: electronApp } = electron;
+// `let` so __setUpdaterDepsForTests can swap them: require() bypasses vi.mock.
+let { ipcMain, Notification, nativeImage, shell, session, app: electronApp } = electron;
 import * as fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'node:url';
 import { logger } from './safe-logger.js';
 import { classifyUpdateError } from './updater-diagnostics.js';
-import { resolveInstallerUrl, runFallbackDownload } from './updater-fallback.js';
+import { cleanupStaleUpdateFiles, resolveInstallerUrl, runFallbackDownload } from './updater-fallback.js';
+import { isVersionGreater } from './updater-version.js';
+
+export { isVersionGreater };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,6 +54,72 @@ let lastNotifiedVersion: string | null = null;
 
 // Cached native image for the notification icon (resolved once on first use)
 let notificationIcon: Electron.NativeImage | null = null;
+
+// The live toasts. On Windows a garbage-collected Notification stops delivering clicks, so a
+// local variable is not enough: clicking the toast minutes later would do nothing.
+let availableNotif: Electron.Notification | null = null;
+let readyNotif: Electron.Notification | null = null;
+
+// Temp root for the alternate download (tests point it at a scratch folder).
+let updateTmpDir: string | undefined;
+
+// Old alternate-download installers are removed this long after start, off the startup path.
+const STALE_INSTALLER_CLEANUP_DELAY_MS = 5_000;
+
+/**
+ * Test seam: `require('electron')` is invisible to vi.mock, so tests pass fake Electron APIs here.
+ */
+export function __setUpdaterDepsForTests(deps: {
+  ipcMain?: unknown;
+  Notification?: unknown;
+  nativeImage?: unknown;
+  shell?: unknown;
+  session?: unknown;
+  app?: unknown;
+  tmpDir?: string;
+}) {
+  if (deps.ipcMain) ipcMain = deps.ipcMain;
+  if (deps.Notification) Notification = deps.Notification;
+  if (deps.nativeImage) nativeImage = deps.nativeImage;
+  if (deps.shell) shell = deps.shell;
+  if (deps.session) session = deps.session;
+  if (deps.app) electronApp = deps.app;
+  updateTmpDir = deps.tmpDir;
+}
+
+export function __getUpdaterNotificationsForTests() {
+  return { available: availableNotif, ready: readyNotif };
+}
+
+/**
+ * Show a notification and keep a module-level reference to it until it is clicked or closed.
+ * A previous toast in the same slot is closed first so only the newest one is live.
+ */
+function showRetainedNotification(
+  slot: 'available' | 'ready',
+  options: Electron.NotificationConstructorOptions,
+  onClick: () => void,
+) {
+  const get = () => (slot === 'available' ? availableNotif : readyNotif);
+  const set = (n: Electron.Notification | null) => {
+    if (slot === 'available') availableNotif = n;
+    else readyNotif = n;
+  };
+  get()?.close();
+  const notification: Electron.Notification = new Notification(options);
+  // Release only if this is still the live instance (a replaced toast's late 'close' must not
+  // drop its successor).
+  const release = () => {
+    if (get() === notification) set(null);
+  };
+  notification.on('click', () => {
+    release();
+    onClick();
+  });
+  notification.on('close', release);
+  set(notification);
+  notification.show();
+}
 
 // Polling interval: 30 minutes
 const UPDATE_POLL_INTERVAL_MS = 30 * 60 * 1000;
@@ -154,9 +224,7 @@ export function initAutoUpdater(window: BrowserWindowType) {
           notifOptions.icon = icon;
         }
 
-        const notification = new Notification(notifOptions);
-
-        notification.on('click', () => {
+        showRetainedNotification('available', notifOptions, () => {
           // Show and focus the main window
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.show();
@@ -167,8 +235,6 @@ export function initAutoUpdater(window: BrowserWindowType) {
             sendToRenderer('updater:auto-download', updatePayload);
           }
         });
-
-        notification.show();
         lastNotifiedVersion = info.version;
         logger.log('[AutoUpdater] Native notification shown for update', info.version);
       } catch (err) {
@@ -220,9 +286,7 @@ export function initAutoUpdater(window: BrowserWindowType) {
           notifOptions.icon = icon;
         }
 
-        const notification = new Notification(notifOptions);
-
-        notification.on('click', () => {
+        showRetainedNotification('ready', notifOptions, () => {
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.show();
             mainWindow.focus();
@@ -230,8 +294,6 @@ export function initAutoUpdater(window: BrowserWindowType) {
           // Trigger install
           autoUpdater.quitAndInstall(false, true);
         });
-
-        notification.show();
         logger.log('[AutoUpdater] "Update ready" notification shown for', info.version);
       } catch (err) {
         logger.warn('[AutoUpdater] Failed to show "update ready" notification:', err);
@@ -249,16 +311,18 @@ export function initAutoUpdater(window: BrowserWindowType) {
     });
     if (downloadLoopActive || quietErrorDepth > 0) return; // reported by the IPC call that is running
     isDownloading = false;
-    const diag = classifyUpdateError(error);
-    sendToRenderer('updater:error', {
-      message: error.message || 'Unknown update error',
-      name: error.name,
-      kind: diag.kind,
-      code: diag.code,
-      hint: diag.hint,
-      downloadUrl: resolveInstallerUrl(lastUpdateInfo),
-    });
+    sendUpdateError(error);
   });
+
+  // Old alternate-download installers (this version or older) are dead weight in %TEMP%.
+  setTimeout(() => {
+    try {
+      const removed = cleanupStaleUpdateFiles({ currentVersion: electronApp.getVersion(), tmpDir: updateTmpDir });
+      if (removed.length) logger.log('[AutoUpdater] Removed old update installers:', removed);
+    } catch (err) {
+      logger.warn('[AutoUpdater] Update folder cleanup failed:', err);
+    }
+  }, STALE_INSTALLER_CLEANUP_DELAY_MS);
 
   // NOTE: No initial checkForUpdates() here — the renderer snackbar
   // performs a manual check on mount via the 'updater:check' IPC handler,
@@ -288,6 +352,19 @@ function sendToRenderer(channel: string, data?: unknown) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, data);
   }
+}
+
+/** Broadcast an update failure (with its diagnosis) to every renderer listener. */
+function sendUpdateError(error: Error | null) {
+  const diag = classifyUpdateError(error);
+  sendToRenderer('updater:error', {
+    message: error?.message || 'Unknown update error',
+    name: error?.name,
+    kind: diag.kind,
+    code: diag.code,
+    hint: diag.hint,
+    downloadUrl: resolveInstallerUrl(lastUpdateInfo),
+  });
 }
 
 /**
@@ -324,57 +401,6 @@ async function checkForUpdates() {
 }
 
 /**
- * Parse a semver-like version string into { nums: [major, minor, patch], suffix }.
- * "v1.2.3-beta.1" → { nums: [1, 2, 3], suffix: 'beta.1' }
- * "1.2"           → { nums: [1, 2, 0], suffix: '' }
- * Non-numeric segments are treated as 0.
- */
-function parseVersion(v: string): { nums: number[]; suffix: string } {
-  const cleaned = v.replace(/^v/, '').trim();
-  const dashIdx = cleaned.indexOf('-');
-  const numericPart = dashIdx === -1 ? cleaned : cleaned.slice(0, dashIdx);
-  const suffix = dashIdx === -1 ? '' : cleaned.slice(dashIdx + 1);
-  const segments = numericPart.split('.').map((s) => {
-    const n = parseInt(s, 10);
-    return Number.isFinite(n) ? n : 0;
-  });
-  // Pad to at least 3 segments (major.minor.patch)
-  while (segments.length < 3) segments.push(0);
-  return { nums: segments, suffix };
-}
-
-/**
- * Returns true only when a is a higher version than b (e.g. 1.0.16 > 1.0.15).
- * Semver-aware:
- *   - Compares numeric segments (major.minor.patch) first.
- *   - When numeric segments are equal, a pre-release suffix ("-beta") is LESS
- *     than the same version without a suffix (1.0.0-beta < 1.0.0).
- *   - When both have suffixes, suffixes are compared lexicographically.
- * Exported for unit tests.
- */
-export function isVersionGreater(a: string, b: string): boolean {
-  const pa = parseVersion(a);
-  const pb = parseVersion(b);
-  const len = Math.max(pa.nums.length, pb.nums.length);
-  for (let i = 0; i < len; i++) {
-    const na = pa.nums[i] ?? 0;
-    const nb = pb.nums[i] ?? 0;
-    if (na > nb) return true;
-    if (na < nb) return false;
-  }
-  // Numeric segments are equal — factor in the pre-release suffix.
-  // Rule: pre-release < release. So:
-  //   a has suffix, b does not  → a < b  → return false
-  //   b has suffix, a does not  → a > b  → return true
-  //   both have suffixes        → lexicographic compare
-  //   neither has a suffix      → equal, not greater
-  if (pa.suffix && !pb.suffix) return false;
-  if (!pa.suffix && pb.suffix) return true;
-  if (pa.suffix && pb.suffix) return pa.suffix > pb.suffix;
-  return false;
-}
-
-/**
  * Fetch the latest release tag directly from GitHub.
  * Works regardless of electron-updater state and supports non-sequential versions.
  */
@@ -406,15 +432,20 @@ async function fetchLatestGitHubRelease(): Promise<{ tag: string; url: string } 
 function registerIpcHandlers() {
   // Manual update check — always queries the latest GitHub release tag
   ipcMain.handle('updater:check', async () => {
-    const { app: electronApp } = electron;
     const currentVersion = isInitialized
       ? (autoUpdater.currentVersion?.version || electronApp.getVersion())
       : electronApp.getVersion();
 
-    // Skip full check if download is already in progress or complete
+    // Skip full check if download is already in progress or complete. Report the version being
+    // downloaded (not the installed one) and the status, so About can offer Install.
     if (isDownloading || updateAlreadyDownloaded) {
       logger.log('[AutoUpdater] Check skipped (downloading or already downloaded)');
-      return { updateAvailable: true, currentVersion, latestVersion: currentVersion };
+      return {
+        updateAvailable: true,
+        currentVersion,
+        latestVersion: lastUpdateInfo?.version ?? currentVersion,
+        status: isDownloading ? 'downloading' : 'downloaded',
+      };
     }
 
     let checkError: unknown = null;
@@ -473,13 +504,14 @@ function registerIpcHandlers() {
     if (!isInitialized) {
       return { success: false, error: 'Auto-updater not initialised (dev mode?)' };
     }
+    // `status` tells a caller that started its own download (About) whether it may offer Install.
     if (isDownloading) {
       logger.log('[AutoUpdater] Download already in progress, ignoring duplicate request');
-      return { success: true };
+      return { success: true, status: 'downloading' };
     }
     if (updateAlreadyDownloaded) {
       logger.log('[AutoUpdater] Update already downloaded, skipping re-download');
-      return { success: true };
+      return { success: true, status: 'downloaded' };
     }
     logger.log('[AutoUpdater] Download requested');
     isDownloading = true;
@@ -499,7 +531,7 @@ function registerIpcHandlers() {
         }, 15_000);
         try {
           await autoUpdater.downloadUpdate(token);
-          return { success: true };
+          return { success: true, status: 'downloaded' };
         } catch (error) {
           lastError = error instanceof Error ? error : new Error(String(error));
           logger.error(`[AutoUpdater] Download attempt ${attempt}/${DOWNLOAD_MAX_ATTEMPTS} failed:`, {
@@ -517,6 +549,10 @@ function registerIpcHandlers() {
       downloadLoopActive = false;
     }
     isDownloading = false;
+    // The per-attempt 'error' events were held back; send the final outcome once so every
+    // listener sees it (a download started from Settings > About otherwise leaves the snackbar,
+    // which only saw progress events, spinning).
+    sendUpdateError(lastError);
     const diag = classifyUpdateError(lastError);
     return {
       success: false,
@@ -550,6 +586,7 @@ function registerIpcHandlers() {
       const result = await runFallbackDownload(info, {
         fetchImpl: (u, init) => ses.fetch(u, init),
         openPath: (p) => shell.openPath(p),
+        tmpDir: updateTmpDir,
         onProgress: ({ transferred, total }) => {
           const now = Date.now();
           if (now - lastReport < 250) return;
@@ -598,7 +635,6 @@ function registerIpcHandlers() {
   ipcMain.handle('updater:getVersion', () => {
     if (!isInitialized) {
       // Return version from package.json when updater isn't initialized
-      const { app: electronApp } = electron;
       return electronApp?.getVersion?.() || '0.0.0';
     }
     return autoUpdater.currentVersion?.version || '1.0.0';

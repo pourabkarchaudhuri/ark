@@ -41,6 +41,8 @@ export function UpdateSnackbar() {
   // so we can show a Retry button and auto-dismiss the toast.
   const [isReachabilityError, setIsReachabilityError] = useState(false);
   const autoDismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Last version an update-available event announced (see onUpdateAvailable).
+  const announcedVersionRef = useRef<string | null>(null);
 
   // Check if we're in Electron with updater available
   const hasUpdater = typeof window !== 'undefined' && window.updater;
@@ -145,14 +147,19 @@ export function UpdateSnackbar() {
     // Set up event listeners
     updater.onChecking(() => {
       console.log('[UpdateSnackbar] Event: checking');
-      setState('checking');
+      // The 30-min background poll sends this too. Only leave idle: hiding 'available' or an
+      // error here would lose them for good if that quiet check then fails (no event follows).
+      setState((prev) => (prev === 'idle' ? 'checking' : prev));
     });
 
     updater.onUpdateAvailable((info) => {
       console.log('[UpdateSnackbar] Event: update-available:', info.version);
       setUpdateInfo(info);
+      setIsReachabilityError(false);
       setState('available');
-      setDismissed(false);
+      // Every poll re-announces the same version; only a new one re-opens a dismissed toast.
+      if (info.version !== announcedVersionRef.current) setDismissed(false);
+      announcedVersionRef.current = info.version;
     });
 
     updater.onUpdateNotAvailable((info) => {
@@ -170,10 +177,13 @@ export function UpdateSnackbar() {
       console.log('[UpdateSnackbar] Event: update-downloaded:', info.version);
       setUpdateInfo(info);
       setState('ready');
+      // A download started from Settings > About after "Later" must still offer Install here.
+      setDismissed(false);
     });
 
     updater.onError((error) => {
       console.error('[UpdateSnackbar] Event: error:', error.message);
+      setIsReachabilityError(false);
       setErrorDetail({ kind: error.kind, code: error.code, hint: error.hint, downloadUrl: error.downloadUrl });
       setErrorMessage(error.message);
       setState('error');
@@ -184,6 +194,7 @@ export function UpdateSnackbar() {
       console.log('[UpdateSnackbar] Event: auto-download triggered for version:', info.version);
       setUpdateInfo(info);
       setDismissed(false);
+      setIsReachabilityError(false);
       setErrorMessage(null);
       setErrorDetail({});
       setFallbackNote(null);
@@ -214,6 +225,7 @@ export function UpdateSnackbar() {
     // Guard: don't trigger if already downloading or installed
     if (state === 'downloading' || state === 'ready') return;
     // A new attempt must not keep showing the previous attempt's error.
+    setIsReachabilityError(false);
     setErrorMessage(null);
     setErrorDetail({});
     setFallbackNote(null);
@@ -236,6 +248,7 @@ export function UpdateSnackbar() {
   const handleFallbackDownload = useCallback(async () => {
     const fallback = window.updater?.fallbackDownload;
     if (!fallback) return;
+    setIsReachabilityError(false);
     setErrorMessage(null);
     setFallbackNote(null);
     setProgress(null);

@@ -5,6 +5,7 @@
  * connection one drop fails the entire transfer. This downloads to a `.part` file and, after a
  * transient interruption, continues from the bytes already on disk with a standard HTTP Range
  * request. The file is only moved into place once its sha512 matches the release manifest.
+ * A connection that stops sending data (no bytes for `idleTimeoutMs`) is treated the same way.
  *
  * It is an honest download, not a way around network policy: if the transfer is cut at the same
  * offset twice (a filter blocking the file, not a flaky link) or the request is blocked outright,
@@ -23,6 +24,8 @@ export interface ResumableDownloadOptions {
   /** Expected sha512, base64 (the format used by latest.yml). */
   sha512?: string;
   maxAttempts?: number;
+  /** An attempt that receives no bytes for this long is abandoned and resumed. Default 60s. */
+  idleTimeoutMs?: number;
   onProgress?: (p: { transferred: number; total: number }) => void;
   signal?: AbortSignal;
   fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -79,6 +82,7 @@ function isBlocked(err: unknown): boolean {
 export async function downloadWithResume(opts: ResumableDownloadOptions): Promise<string> {
   const { url, destPath, expectedSize, sha512, onProgress, signal } = opts;
   const maxAttempts = opts.maxAttempts ?? 6;
+  const idleTimeoutMs = opts.idleTimeoutMs ?? 60_000;
   const doFetch = opts.fetchImpl ?? ((u: string, init?: RequestInit) => fetch(u, init));
   const sleep = opts.sleep ?? defaultSleep;
   const partPath = `${destPath}.part`;
@@ -93,6 +97,29 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
   for (let attempt = 1; attempt <= maxAttempts && !completed; attempt++) {
     if (signal?.aborted) throw new DownloadError('Download cancelled', { code: 'ABORTED' });
     let written = 0;
+    // Only an attempt that got a successful response counts toward the same-offset stop:
+    // 5xx/429 and errors before any response say nothing about a filter cutting the file.
+    let responded = false;
+    // reader.read() can wait forever on a stalled connection, so each attempt has its own abort
+    // (linked to the caller's signal) and an idle timer that is reset by every chunk.
+    let stalled = false;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    const attemptAbort = new AbortController();
+    const abortAttempt = () => {
+      attemptAbort.abort();
+      reader?.cancel().catch(() => undefined);
+    };
+    signal?.addEventListener('abort', abortAttempt);
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        stalled = true;
+        abortAttempt();
+      }, idleTimeoutMs);
+    };
+    let fh: number | null = null;
+    let backoffMs = 0;
     try {
       let existing = fileSize(partPath);
       if (expectedSize && existing > expectedSize) {
@@ -107,7 +134,10 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
 
       const headers: Record<string, string> = {};
       if (existing > 0) headers.Range = `bytes=${existing}-`;
-      const res = await doFetch(url, { headers, redirect: 'follow', signal });
+      armIdle();
+      const res = await doFetch(url, { headers, redirect: 'follow', signal: attemptAbort.signal });
+      // Stalled (or cancelled) before the response arrived, from a fetch that ignored the signal.
+      if (attemptAbort.signal.aborted) throw new DownloadError('Download interrupted', { code: 'ABORTED' });
 
       if (res.status === 416) {
         // The partial is not a prefix the server recognises: start over.
@@ -126,30 +156,34 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
         resumeAt = 0;
       }
       written = resumeAt;
+      responded = true;
 
-      const fh = fs.openSync(partPath, resumeAt > 0 ? 'a' : 'w');
-      try {
-        const reader = res.body.getReader();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value && value.length) {
-            fs.writeSync(fh, value);
-            written += value.length;
-            onProgress?.({ transferred: written, total: expectedSize ?? 0 });
-          }
+      fh = fs.openSync(partPath, resumeAt > 0 ? 'a' : 'w');
+      reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.length) {
+          armIdle();
+          fs.writeSync(fh, value);
+          written += value.length;
+          onProgress?.({ transferred: written, total: expectedSize ?? 0 });
         }
-      } finally {
-        fs.closeSync(fh);
       }
+      // A cancelled reader ends with done=true; without a known size that would look complete.
+      if (stalled) throw new DownloadError('Download stalled', { code: 'ETIMEDOUT' });
 
       if (expectedSize && written < expectedSize) {
         throw new DownloadError(`Download ended early (${written}/${expectedSize} bytes)`, { code: 'ECONNRESET' });
       }
       completed = true;
-    } catch (err) {
-      lastError = err;
+    } catch (caught) {
+      // The caller's cancel wins over a stall that fired at the same time.
       if (signal?.aborted) throw new DownloadError('Download cancelled', { code: 'ABORTED' });
+      const err = stalled
+        ? new DownloadError(`Download stalled: no data for ${Math.round(idleTimeoutMs / 1000)}s`, { code: 'ETIMEDOUT' })
+        : caught;
+      lastError = err;
       if (isBlocked(err)) {
         throw new DownloadError('The download was blocked on this computer or network', { code: 'ERR_BLOCKED_BY_CLIENT' });
       }
@@ -157,7 +191,7 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
       const httpStatus = dlErr?.statusCode;
       if (httpStatus && httpStatus !== 416 && httpStatus < 500 && httpStatus !== 429) break; // 4xx: not transient
       const lookupOrTimeout = /ENOTFOUND|EAI_AGAIN|NAME_NOT_RESOLVED|TIMED_OUT|ETIMEDOUT|INTERNET_DISCONNECTED/i.test(errorText(err));
-      if (dlErr?.code !== 'RANGE_RESET' && !lookupOrTimeout) {
+      if (responded && dlErr?.code !== 'RANGE_RESET' && !lookupOrTimeout) {
         // Cut at the same offset twice: a filter, not a flaky link. Stop instead of hammering it.
         if (lastCutOffset !== null && lastCutOffset === written) {
           throw new DownloadError(`The download was cut at the same point twice (${written} bytes)`, { code: 'BLOCKED_AT_OFFSET' });
@@ -165,8 +199,16 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
         lastCutOffset = written;
       }
       if (attempt >= maxAttempts) break;
-      await sleep(Math.min(1000 * 2 ** (attempt - 1), 15000));
+      backoffMs = Math.min(1000 * 2 ** (attempt - 1), 15000);
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      signal?.removeEventListener('abort', abortAttempt);
+      // Releases the connection after a throw mid-transfer (e.g. a failed write); a no-op once done.
+      reader?.cancel().catch(() => undefined);
+      if (fh !== null) fs.closeSync(fh);
     }
+    // Back off only after this attempt's file handle and connection are released.
+    if (backoffMs) await sleep(backoffMs);
   }
 
   if (!completed) {

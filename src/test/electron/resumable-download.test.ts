@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { downloadWithResume, DownloadError } from '../../../electron/resumable-download';
 
 const PAYLOAD = crypto.randomBytes(256 * 1024);
@@ -80,6 +81,9 @@ beforeEach(() => {
 });
 
 const noSleep = async () => {};
+// Under jsdom the per-attempt AbortController is jsdom's, which Node's fetch rejects; the real
+// server tests do not abort mid-request, so the signal is dropped here (Electron's fetch takes it).
+const nodeFetch = (u: string, init?: RequestInit) => fetch(u, { ...init, signal: undefined });
 const run = (over: Partial<Parameters<typeof downloadWithResume>[0]> = {}) =>
   downloadWithResume({
     url: `${base}/Ark-Setup.exe`,
@@ -87,6 +91,7 @@ const run = (over: Partial<Parameters<typeof downloadWithResume>[0]> = {}) =>
     expectedSize: PAYLOAD.length,
     sha512: SHA,
     sleep: noSleep,
+    fetchImpl: nodeFetch,
     ...over,
   });
 
@@ -158,5 +163,135 @@ describe('downloadWithResume', () => {
     ac.abort();
     const err = await run({ signal: ac.signal }).catch((e) => e);
     expect(err.code).toBe('ABORTED');
+  });
+});
+
+/**
+ * Fake-fetch scenarios: stalled bodies (idle timeout), errors before any response, and a failure
+ * inside the write loop. A stalled stream never settles a read on its own, so only the idle timer
+ * (or a cancel) can get the loop out of it.
+ */
+describe('downloadWithResume: stalls and failures that are not a filter', () => {
+  const SMALL = crypto.randomBytes(8 * 1024);
+  const SMALL_SHA = crypto.createHash('sha512').update(SMALL).digest('base64');
+
+  type Call = { range?: string; signal?: AbortSignal };
+  type Step = 'stall-after-half' | 'ok' | '503' | 'refused';
+
+  /** A body that sends `bytes` and then either ends or hangs until cancelled. */
+  function body(bytes: Uint8Array, hang: boolean, onCancel?: () => void) {
+    return new WebReadableStream<Uint8Array>({
+      start(c) {
+        if (bytes.length) c.enqueue(bytes);
+        if (!hang) c.close();
+      },
+      cancel() {
+        onCancel?.();
+      },
+    });
+  }
+
+  /** Fake server for SMALL that honours Range; `plan[n]` decides how request n behaves. */
+  function fakeFetch(plan: Step[], calls: Call[], onCancel?: () => void) {
+    return async (_u: string, init?: RequestInit) => {
+      const range = (init?.headers as Record<string, string> | undefined)?.Range;
+      calls.push({ range, signal: init?.signal ?? undefined });
+      const step = plan[calls.length - 1] ?? 'ok';
+      if (step === 'refused') throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+      if (step === '503') return new Response(null, { status: 503 });
+      const start = Number(/bytes=(\d+)-/.exec(range ?? '')?.[1] ?? 0);
+      const rest = SMALL.subarray(start);
+      const headers: Record<string, string> = start
+        ? { 'content-range': `bytes ${start}-${SMALL.length - 1}/${SMALL.length}` }
+        : {};
+      const chunk = step === 'stall-after-half' ? rest.subarray(0, Math.max(0, SMALL.length / 2 - start)) : rest;
+      return new Response(body(chunk, step === 'stall-after-half', onCancel) as unknown as ReadableStream, {
+        status: start ? 206 : 200,
+        headers,
+      });
+    };
+  }
+
+  const runSmall = (over: Partial<Parameters<typeof downloadWithResume>[0]>) =>
+    downloadWithResume({
+      url: 'https://github.com/x/Ark-Setup.exe',
+      destPath: path.join(dir, 'Ark-Setup.exe'),
+      expectedSize: SMALL.length,
+      sha512: SMALL_SHA,
+      sleep: noSleep,
+      idleTimeoutMs: 60,
+      ...over,
+    });
+
+  it('a body that stops sending is abandoned after idleTimeoutMs and resumed from the .part offset', async () => {
+    const calls: Call[] = [];
+    let cancelled = 0;
+    const out = await runSmall({ fetchImpl: fakeFetch(['stall-after-half', 'ok'], calls, () => cancelled++) });
+    expect(fs.readFileSync(out).equals(SMALL)).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].range).toBe(`bytes=${SMALL.length / 2}-`);
+    expect(cancelled).toBe(1);
+    // The stalled request's own signal was aborted; the caller's signal is untouched.
+    expect(calls[0].signal?.aborted).toBe(true);
+  });
+
+  it('a stall without a known size is not mistaken for a finished download', async () => {
+    const calls: Call[] = [];
+    const out = await runSmall({ expectedSize: undefined, fetchImpl: fakeFetch(['stall-after-half', 'ok'], calls) });
+    expect(fs.readFileSync(out).equals(SMALL)).toBe(true);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('a stall that repeats at the same offset keeps retrying instead of reporting a filter', async () => {
+    const calls: Call[] = [];
+    const out = await runSmall({ fetchImpl: fakeFetch(['stall-after-half', 'stall-after-half', 'stall-after-half', 'ok'], calls) });
+    expect(fs.readFileSync(out).equals(SMALL)).toBe(true);
+    expect(calls).toHaveLength(4);
+  });
+
+  it('a user cancel during a stall is reported as cancelled, not retried', async () => {
+    const calls: Call[] = [];
+    const ac = new AbortController();
+    const p = runSmall({ idleTimeoutMs: 10_000, signal: ac.signal, fetchImpl: fakeFetch(['stall-after-half', 'ok'], calls) });
+    setTimeout(() => ac.abort(), 30);
+    const err = await p.catch((e) => e);
+    expect(err).toBeInstanceOf(DownloadError);
+    expect(err.code).toBe('ABORTED');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('an error thrown inside the write loop cancels the reader', async () => {
+    const calls: Call[] = [];
+    let cancelled = 0;
+    // Same code path as a failing fs.writeSync (disk full): a throw between two reads.
+    const onProgress = () => {
+      throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+    };
+    const err = await runSmall({ maxAttempts: 1, onProgress, fetchImpl: fakeFetch(['stall-after-half'], calls, () => cancelled++) })
+      .catch((e) => e);
+    expect(err.message).toMatch(/ENOSPC/);
+    expect(cancelled).toBe(1);
+  });
+
+  it('repeated 5xx responses at the same offset are retried, not reported as blocked', async () => {
+    const calls: Call[] = [];
+    const out = await runSmall({ fetchImpl: fakeFetch(['503', '503', '503', 'ok'], calls) });
+    expect(fs.readFileSync(out).equals(SMALL)).toBe(true);
+    expect(calls).toHaveLength(4);
+  });
+
+  it('repeated connection-setup errors are retried, not reported as blocked', async () => {
+    const calls: Call[] = [];
+    const out = await runSmall({ fetchImpl: fakeFetch(['refused', 'refused', 'ok'], calls) });
+    expect(fs.readFileSync(out).equals(SMALL)).toBe(true);
+    expect(calls).toHaveLength(3);
+  });
+
+  it('a 5xx on every attempt surfaces as the HTTP error, not BLOCKED_AT_OFFSET', async () => {
+    const calls: Call[] = [];
+    const err = await runSmall({ maxAttempts: 3, fetchImpl: fakeFetch(['503', '503', '503'], calls) }).catch((e) => e);
+    expect(err.statusCode).toBe(503);
+    expect(err.code).not.toBe('BLOCKED_AT_OFFSET');
+    expect(calls).toHaveLength(3);
   });
 });
