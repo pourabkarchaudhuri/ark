@@ -1431,6 +1431,7 @@ export function Dashboard() {
               entries={journeyEntries}
               loading={libraryLoading}
               onSwitchToBrowse={switchToBrowse}
+              suspended={showWrapped}
             />
           </ViewErrorBoundary>
         ) : viewMode === 'buzz' ? (

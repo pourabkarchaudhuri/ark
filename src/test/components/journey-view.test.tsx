@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { JourneyView } from '@/components/journey-view';
 import { JourneyEntry } from '@/types/game';
 import { statusHistoryStore } from '@/services/status-history-store';
+import { steamService } from '@/services/steam-service';
+import { journeyStore } from '@/services/journey-store';
 
 // Mock wouter
 const mockNavigate = vi.fn();
@@ -17,6 +19,13 @@ vi.mock('@/services/library-store', () => ({
     getEntry: vi.fn().mockReturnValue(null),
     getAllEntries: vi.fn().mockReturnValue([]),
     subscribe: vi.fn().mockReturnValue(() => {}),
+  },
+}));
+
+// Mock Steam service (player counts for the Log)
+vi.mock('@/services/steam-service', () => ({
+  steamService: {
+    getMultiplePlayerCounts: vi.fn().mockResolvedValue({}),
   },
 }));
 
@@ -54,8 +63,8 @@ vi.mock('@tanstack/react-virtual', () => ({
 
 // Mock ShowcaseView (uses Three.js which doesn't work in jsdom)
 vi.mock('@/components/showcase-view', () => ({
-  ShowcaseView: ({ entries }: { entries: unknown[] }) => (
-    <div data-testid="showcase-view">Showcase ({(entries as unknown[]).length} entries)</div>
+  ShowcaseView: ({ entries, paused }: { entries: unknown[]; paused?: boolean }) => (
+    <div data-testid="showcase-view" data-paused={String(!!paused)}>Showcase ({(entries as unknown[]).length} entries)</div>
   ),
 }));
 
@@ -448,5 +457,88 @@ describe('JourneyView', () => {
     expect(screen.getByTestId('badge-vault')).toBeInTheDocument();
     expect(screen.queryByText('Overview')).not.toBeInTheDocument();
     expect(screen.queryByText('Play Streaks')).not.toBeInTheDocument();
+  });
+  // ── Ark pause, player counts, Log windowing, store-driven card updates ──
+
+  it('pauses the Ark while suspended (Wrapped open)', () => {
+    const { rerender } = render(<JourneyView entries={[createMockEntry()]} loading={false} />);
+    expect(screen.getByTestId('showcase-view').dataset.paused).toBe('false');
+    rerender(<JourneyView entries={[createMockEntry()]} loading={false} suspended />);
+    expect(screen.getByTestId('showcase-view').dataset.paused).toBe('true');
+  });
+
+  it('fetches player counts only for the Log, and only for games with activity', async () => {
+    const getCounts = steamService.getMultiplePlayerCounts as ReturnType<typeof vi.fn>;
+    getCounts.mockClear();
+    getCounts.mockResolvedValue({ 730: 1234 });
+    const entries = [
+      createMockEntry({ gameId: 'steam-730' }),
+      // Never played: not on the Ark or in the Log.
+      createMockEntry({ gameId: 'steam-999', title: 'Wishlist Only', status: 'Want to Play', firstPlayedAt: undefined, lastPlayedAt: undefined }),
+    ];
+    render(<JourneyView entries={entries} loading={false} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(getCounts).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText('Log'));
+    expect(await screen.findByText(/1.*playing/)).toBeInTheDocument();
+    expect(getCounts).toHaveBeenCalledTimes(1);
+    expect(getCounts).toHaveBeenCalledWith([730]);
+    getCounts.mockResolvedValue({});
+  });
+
+  it('renders only the newest 24 months of the Log until "Show older"', () => {
+    const entries: JourneyEntry[] = [];
+    for (let i = 0; i < 50; i++) {
+      const d = new Date(Date.UTC(2020, i, 15)).toISOString();
+      entries.push(createMockEntry({ gameId: `steam-${1000 + i}`, title: `Month Game ${i}`, addedAt: d, firstPlayedAt: d, lastPlayedAt: d, status: 'Completed' }));
+    }
+    render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
+
+    expect(screen.getAllByText(/^Month Game \d+$/)).toHaveLength(24);
+    expect(screen.getByText('Month Game 49')).toBeInTheDocument();
+    expect(screen.queryByText('Month Game 25')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Show older/i }));
+    expect(screen.getAllByText(/^Month Game \d+$/)).toHaveLength(48);
+
+    fireEvent.click(screen.getByRole('button', { name: /Show older/i }));
+    expect(screen.getAllByText(/^Month Game \d+$/)).toHaveLength(50);
+    expect(screen.queryByRole('button', { name: /Show older/i })).not.toBeInTheDocument();
+  });
+
+  it('Log card follows journey store status changes and removal', async () => {
+    const { libraryStore } = await import('@/services/library-store');
+    (libraryStore.isInLibrary as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    localStorage.clear();
+    journeyStore.clear();
+    journeyStore.record({
+      gameId: 'steam-440',
+      title: 'Team Fortress 2',
+      genre: ['Action'],
+      platform: ['Windows'],
+      status: 'Playing',
+      hoursPlayed: 3,
+      rating: 0,
+      addedAt: '2025-01-01T00:00:00.000Z',
+      firstPlayedAt: '2025-01-01T00:00:00.000Z',
+      lastPlayedAt: '2025-01-02T00:00:00.000Z',
+    });
+    const { rerender } = render(<JourneyView entries={journeyStore.getAllEntries()} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
+    expect(screen.getByText('Playing')).toBeInTheDocument();
+    expect(screen.getByText('In Library')).toBeInTheDocument();
+
+    act(() => { journeyStore.syncProgress('steam-440', { status: 'Completed' }); });
+    rerender(<JourneyView entries={journeyStore.getAllEntries()} loading={false} />);
+    expect(screen.getByText('Completed')).toBeInTheDocument();
+    expect(screen.queryByText('Playing')).not.toBeInTheDocument();
+
+    act(() => { journeyStore.markRemoved('steam-440'); });
+    rerender(<JourneyView entries={journeyStore.getAllEntries()} loading={false} />);
+    expect(screen.getByText('Removed')).toBeInTheDocument();
+    expect(screen.queryByText('In Library')).not.toBeInTheDocument();
+    journeyStore.clear();
   });
 });

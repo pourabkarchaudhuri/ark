@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, screen, act } from '@testing-library/react';
 import { Timeline } from '@/components/ui/timeline';
 
 // Mock framer-motion — Proxy pattern (matches journey-view.test.tsx) so
@@ -81,5 +81,40 @@ describe('Timeline', () => {
     // Each entry has a dot (rounded-full inside the sticky column)
     const dots = container.querySelectorAll('.rounded-full.bg-fuchsia-500\\/30');
     expect(dots.length).toBe(3);
+  });
+  describe('line height', () => {
+    const original = globalThis.ResizeObserver;
+    afterEach(() => {
+      globalThis.ResizeObserver = original;
+    });
+
+    it('follows the observed content when it resizes, and disconnects on unmount', () => {
+      let callback: ResizeObserverCallback | null = null;
+      const observe = vi.fn();
+      const disconnect = vi.fn();
+      globalThis.ResizeObserver = class {
+        constructor(cb: ResizeObserverCallback) { callback = cb; }
+        observe = observe;
+        unobserve = vi.fn();
+        disconnect = disconnect;
+      } as unknown as typeof ResizeObserver;
+
+      const { container, unmount } = render(<Timeline data={[{ title: '2025', content: <p>A</p> }]} />);
+      const content = container.querySelector('.relative.max-w-7xl') as HTMLElement;
+      expect(observe).toHaveBeenCalledWith(content);
+      const line = container.querySelector('.bg-gradient-to-b') as HTMLElement;
+
+      const resize = (h: number) => {
+        content.getBoundingClientRect = () => ({ height: h, width: 100, top: 0, left: 0, right: 100, bottom: h, x: 0, y: 0, toJSON: () => ({}) });
+        act(() => { callback!([{ target: content } as unknown as ResizeObserverEntry], {} as ResizeObserver); });
+      };
+      resize(800);
+      expect(line.style.height).toBe('800px');
+      resize(1300);
+      expect(line.style.height).toBe('1300px');
+
+      unmount();
+      expect(disconnect).toHaveBeenCalled();
+    });
   });
 });

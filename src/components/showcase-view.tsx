@@ -33,6 +33,8 @@ extend(geometry);
 
 export interface ShowcaseViewProps {
   entries: JourneyEntry[];
+  /** Stop the render loop while something covers the Ark (e.g. the full-screen Wrapped overlay). */
+  paused?: boolean;
 }
 
 interface GenreGroup {
@@ -79,6 +81,16 @@ const SPINE_GEOMETRY = (() => {
 // Glossy clearcoat only on the selected case; the others use the cheaper standard material.
 const CASE_MATERIAL = new THREE.MeshStandardMaterial({ color: '#0d0d14', roughness: 0.3, metalness: 0.15 });
 const CASE_MATERIAL_ACTIVE = new THREE.MeshPhysicalMaterial({ color: '#0d0d14', roughness: 0.3, metalness: 0.15, clearcoat: 1, clearcoatRoughness: 0.25 });
+/**
+ * The shared objects above, disposed when the Scene unmounts: three.js registers a per-renderer dispose
+ * listener on each, so leaving them undisposed keeps every past Ark renderer (context, canvas) reachable.
+ * three re-uploads them on the next mount. Exported for tests.
+ */
+export const ARK_SHARED_GPU_RESOURCES: ReadonlyArray<THREE.BufferGeometry | THREE.Material> = [
+  CASE_GEOMETRY, COVER_GEOMETRY, SPINE_GEOMETRY, CASE_MATERIAL, CASE_MATERIAL_ACTIVE,
+];
+/** Largest frame step fed to the damping, so resuming a paused loop does not jump. */
+const MAX_FRAME_DELTA = 0.05;
 
 // Per-frame animation targets, allocated once.
 const COLOR_FRONT_ACTIVE = new THREE.Color('#ffffff');
@@ -117,7 +129,12 @@ function getImageChain(entry: JourneyEntry): string[] {
   return buildGameImageChain(entry.gameId, displayTitle, coverUrl, headerImage);
 }
 
-function buildGenreGroups(entries: JourneyEntry[]): GenreGroup[] {
+/**
+ * Group cards into genre arcs. Deterministic for a given set of entries whatever their order (the
+ * journey list re-sorts on every status change): genre-count ties break by genre name, hours ties by
+ * gameId. Exported for tests.
+ */
+export function buildGenreGroups(entries: JourneyEntry[]): GenreGroup[] {
   const genreMap = new Map<string, JourneyEntry[]>();
   for (const e of entries) {
     const primary = e.genre?.[0] || 'Other';
@@ -126,11 +143,11 @@ function buildGenreGroups(entries: JourneyEntry[]): GenreGroup[] {
   }
 
   for (const group of genreMap.values()) {
-    group.sort((a, b) => (b.hoursPlayed ?? 0) - (a.hoursPlayed ?? 0));
+    group.sort((a, b) => (b.hoursPlayed ?? 0) - (a.hoursPlayed ?? 0) || compareStrings(a.gameId, b.gameId));
   }
 
   const sorted = [...genreMap.entries()]
-    .sort((a, b) => b[1].length - a[1].length)
+    .sort((a, b) => b[1].length - a[1].length || compareStrings(a[0], b[0]))
     .slice(0, MAX_GENRES);
 
   const totalEntries = sorted.reduce((sum, [, g]) => sum + Math.min(g.length, MAX_CARDS_PER_GENRE), 0);
@@ -162,6 +179,11 @@ function flattenCards(groups: GenreGroup[]): FlatCard[] {
     }
   }
   return result;
+}
+
+/** Locale-independent string order (stable across machines, unlike localeCompare). */
+function compareStrings(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /** Normalize an angle difference into [-PI, PI] for shortest-path rotation. */
@@ -227,40 +249,47 @@ function Scene({
   groups,
   flatCards,
   activeIndex,
-  setActiveIndex,
+  onSelect,
 }: {
   groups: GenreGroup[];
   flatCards: FlatCard[];
   activeIndex: number;
-  setActiveIndex: React.Dispatch<React.SetStateAction<number>>;
+  onSelect: (gameId: string) => void;
 }) {
   const wheelRef = useRef<THREE.Group>(null!);
   const total = flatCards.length;
+  // Never index past the end: the card list can shrink between renders.
+  const safeIdx = total ? Math.min(activeIndex, total - 1) : 0;
 
-  const activeEntry = flatCards[activeIndex]?.entry ?? null;
+  const activeEntry = flatCards[safeIdx]?.entry ?? null;
+
+  // The shared case/cover geometries and materials are created once at module level; free them with
+  // the renderer (see ARK_SHARED_GPU_RESOURCES).
+  useEffect(() => () => { for (const res of ARK_SHARED_GPU_RESOURCES) res.dispose(); }, []);
 
   // Initialize wheel rotation so the default active card starts at the front
-  const initialAngle = total > 0 ? -flatCards[activeIndex].angle : 0;
+  const initialAngle = total > 0 ? -flatCards[safeIdx].angle : 0;
   const targetRotation = useRef(initialAngle);
-  const prevIndex = useRef(activeIndex);
+  const prevIndex = useRef(safeIdx);
   const initialized = useRef(false);
 
-  useFrame((state, delta) => {
+  useFrame((state, frameDelta) => {
     if (!wheelRef.current || total === 0) return;
+    const delta = Math.min(frameDelta, MAX_FRAME_DELTA);
 
     // On the very first frame, snap the wheel to the correct rotation (no animation)
     if (!initialized.current) {
-      targetRotation.current = -flatCards[activeIndex].angle;
+      targetRotation.current = -flatCards[safeIdx].angle;
       wheelRef.current.rotation.y = targetRotation.current;
-      prevIndex.current = activeIndex;
+      prevIndex.current = safeIdx;
       initialized.current = true;
     }
 
-    if (activeIndex !== prevIndex.current) {
-      const newAngle = -flatCards[activeIndex].angle;
+    if (safeIdx !== prevIndex.current) {
+      const newAngle = -flatCards[safeIdx].angle;
       const diff = shortestAngleDelta(targetRotation.current, newAngle);
       targetRotation.current += diff;
-      prevIndex.current = activeIndex;
+      prevIndex.current = safeIdx;
     }
 
     easing.damp(wheelRef.current.rotation, 'y', targetRotation.current, WHEEL_DAMP, delta);
@@ -274,14 +303,6 @@ function Scene({
     );
     state.camera.lookAt(0, 0, 0);
   });
-
-  const handleSelect = useCallback(
-    (gameId: string) => {
-      const idx = flatCards.findIndex((c) => c.entry.gameId === gameId);
-      if (idx >= 0) setActiveIndex(idx);
-    },
-    [flatCards, setActiveIndex],
-  );
 
   return (
     <>
@@ -298,7 +319,7 @@ function Scene({
             group={group}
             radius={WHEEL_RADIUS}
             activeGameId={activeEntry?.gameId ?? ''}
-            onSelect={handleSelect}
+            onSelect={onSelect}
           />
         ))}
         <YearMarkers flatCards={flatCards} radius={WHEEL_RADIUS} />
@@ -580,8 +601,9 @@ const Card = memo(function Card({
     setShowLabel(false);
   }, [isActive]);
 
-  useFrame((_state, delta) => {
+  useFrame((_state, frameDelta) => {
     if (!slabRef.current || !groupRef.current) return;
+    const delta = Math.min(frameDelta, MAX_FRAME_DELTA);
 
     if (!mounted.current) {
       groupRef.current.position.set(cardPos[0], cardPos[1], cardPos[2]);
@@ -616,7 +638,8 @@ const Card = memo(function Card({
   return (
     <group ref={groupRef} onClick={onClick}>
       <group ref={slabRef}>
-        {/* Game case: plastic shell, a little larger than the cover — always visible (glossy when selected) */}
+        {/* Game case: plastic shell, a little larger than the cover — always visible (glossy when selected).
+            dispose={null} on the shared geometries/materials: Scene disposes them once on unmount. */}
         <mesh geometry={CASE_GEOMETRY} material={isActive ? CASE_MATERIAL_ACTIVE : CASE_MATERIAL} dispose={null} />
 
         {/* Front cover */}
@@ -815,7 +838,7 @@ function SweepLine() {
 
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
-export function ShowcaseView({ entries }: ShowcaseViewProps) {
+export function ShowcaseView({ entries, paused = false }: ShowcaseViewProps) {
   const groups = useMemo(() => buildGenreGroups(entries), [entries]);
   const flatCards = useMemo(() => flattenCards(groups), [groups]);
   const total = flatCards.length;
@@ -839,12 +862,21 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
     return bestIdx;
   }, [flatCards, total]);
 
-  const [activeIndex, setActiveIndex] = useState(defaultIndex);
+  // The selection is a game, not a position: journey changes (Playing Now on launch, auto-hold)
+  // re-sort the cards, and a stored index would then point at another game (or past the end).
+  const [activeGameId, setActiveGameId] = useState<string | null>(() => flatCards[defaultIndex]?.entry.gameId ?? null);
+  const foundIndex = activeGameId == null ? -1 : flatCards.findIndex((c) => c.entry.gameId === activeGameId);
+  const activeIndex = foundIndex >= 0 ? foundIndex : defaultIndex;
 
-  useEffect(() => {
+  /** Move the selection `dir` cards along the wheel. */
+  const step = useCallback((dir: number) => {
     if (total === 0) return;
-    setActiveIndex(defaultIndex);
-  }, [defaultIndex, total]);
+    setActiveGameId((prev) => {
+      const cur = prev == null ? -1 : flatCards.findIndex((c) => c.entry.gameId === prev);
+      const base = cur >= 0 ? cur : defaultIndex;
+      return flatCards[(base + dir + total) % total].entry.gameId;
+    });
+  }, [flatCards, defaultIndex, total]);
 
   const activeCard = flatCards[activeIndex] ?? null;
   const wheelCooldown = useRef(0);
@@ -852,19 +884,25 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
 
   useEffect(() => {
     if (total === 0) return;
+    // On window (the container is not focusable), so leave keys meant for something else alone:
+    // text fields (AI chat, dialogs), modified presses and keys another handler already took.
+    // Same guard as year-wrapped.tsx.
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName ?? ''))) return;
       if (e.key === 'ArrowRight') {
-        setActiveIndex((p) => (p + 1) % total);
+        step(1);
         e.preventDefault();
       }
       if (e.key === 'ArrowLeft') {
-        setActiveIndex((p) => (p - 1 + total) % total);
+        step(-1);
         e.preventDefault();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [total]);
+  }, [total, step]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -874,12 +912,11 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
       const now = Date.now();
       if (now - wheelCooldown.current < 180) return;
       wheelCooldown.current = now;
-      const dir = e.deltaY > 0 ? 1 : -1;
-      setActiveIndex((p) => (p + dir + total) % total);
+      step(e.deltaY > 0 ? 1 : -1);
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [total]);
+  }, [total, step]);
 
   if (total === 0) {
     return (
@@ -1043,7 +1080,7 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
       <div ref={containerRef} className="flex-1 min-h-0 relative">
         <Canvas
           dpr={[1, 1.5]}
-          frameloop={visible ? 'always' : 'never'}
+          frameloop={visible && !paused ? 'always' : 'never'}
           style={{ background: '#000000' }}
           gl={{ antialias: true, alpha: false }}
           camera={{ fov: 50, near: 0.1, far: 100 }}
@@ -1053,7 +1090,7 @@ export function ShowcaseView({ entries }: ShowcaseViewProps) {
           groups={groups}
           flatCards={flatCards}
           activeIndex={activeIndex}
-          setActiveIndex={setActiveIndex}
+          onSelect={setActiveGameId}
         />
         </Canvas>
 
