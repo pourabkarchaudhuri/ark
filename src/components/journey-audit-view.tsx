@@ -588,15 +588,47 @@ interface AreaScore {
 function AuditRings({ scores }: { scores: AreaScore[] }) {
   const size = 150;
   const center = size / 2;
+  const completeAreas = scores.filter(({ score, checked }) => checked > 0 && score >= 1);
 
   return (
     <div className="relative shrink-0" style={{ width: size, height: size }}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Record quality">
+      {/* Glow for complete rings: its own SVG under an HTML wrapper whose
+          opacity pulses on CSS keyframes, so the loop stays on the compositor
+          instead of framer's JS loop repainting a blurred SVG forever. */}
+      {completeAreas.length > 0 && (
+        <div className="audit-ring-glow pointer-events-none absolute inset-0" aria-hidden>
+          <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+            {completeAreas.map(({ area }) => {
+              const meta = AREA_META[area];
+              return (
+                <circle
+                  key={area}
+                  cx={center}
+                  cy={center}
+                  r={meta.radius}
+                  fill="none"
+                  stroke={meta.color}
+                  strokeWidth={7}
+                  strokeLinecap="round"
+                  style={{ filter: 'blur(5px)' }}
+                />
+              );
+            })}
+          </svg>
+        </div>
+      )}
+      <svg
+        className="relative"
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        role="img"
+        aria-label="Record quality"
+      >
         <g transform={`rotate(-90 ${center} ${center})`}>
           {scores.map(({ area, score, checked }) => {
             const meta = AREA_META[area];
             const circumference = 2 * Math.PI * meta.radius;
-            const complete = checked > 0 && score >= 1;
             return (
               <g key={area}>
                 <circle
@@ -607,21 +639,6 @@ function AuditRings({ scores }: { scores: AreaScore[] }) {
                   stroke="rgba(255,255,255,0.07)"
                   strokeWidth={7}
                 />
-                {complete && (
-                  <motion.circle
-                    cx={center}
-                    cy={center}
-                    r={meta.radius}
-                    fill="none"
-                    stroke={meta.color}
-                    strokeWidth={7}
-                    strokeLinecap="round"
-                    style={{ filter: 'blur(5px)' }}
-                    initial={{ opacity: 0.25 }}
-                    animate={{ opacity: [0.25, 0.7, 0.25] }}
-                    transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
-                  />
-                )}
                 <motion.circle
                   cx={center}
                   cy={center}
@@ -991,19 +1008,58 @@ function RatingPicker({ current, onPick }: { current: number; onPick: (rating: n
 
 // ─── Finding card ────────────────────────────────────────────────────────────
 
+interface FindingCardProps {
+  finding: Finding;
+  rollup: GameRollup | undefined;
+  onResolve: (finding: Finding, detail: string) => void;
+  onSnooze: (finding: Finding, ms: number, label: string) => void;
+  onDismiss: (finding: Finding) => void;
+}
+
+/**
+ * Every library notification (the metadata backfill fires several a second)
+ * rebuilds the rollups and findings as new objects, so reference equality
+ * would re-render every card. Compare what the card actually shows instead:
+ * the finding's own fields and the two rollup fields the pickers read.
+ */
+export function findingCardPropsEqual(prev: FindingCardProps, next: FindingCardProps): boolean {
+  const a = prev.finding;
+  const b = next.finding;
+  if (
+    a.key !== b.key ||
+    a.ruleId !== b.ruleId ||
+    a.area !== b.area ||
+    a.subjectId !== b.subjectId ||
+    a.title !== b.title ||
+    a.question !== b.question ||
+    a.detail !== b.detail ||
+    a.resolution !== b.resolution ||
+    a.partnerId !== b.partnerId
+  ) {
+    return false;
+  }
+  const ma = a.missingTitles ?? [];
+  const mb = b.missingTitles ?? [];
+  if (ma.length !== mb.length || ma.some((t, i) => t !== mb[i])) return false;
+  if ((prev.rollup?.status ?? null) !== (next.rollup?.status ?? null)) return false;
+  if ((prev.rollup?.rating ?? 0) !== (next.rollup?.rating ?? 0)) return false;
+  return (
+    prev.onResolve === next.onResolve &&
+    prev.onSnooze === next.onSnooze &&
+    prev.onDismiss === next.onDismiss
+  );
+}
+
+/** Findings mounted per page of the queue; the rest wait behind 'Show more'. */
+export const QUEUE_PAGE_SIZE = 50;
+
 const FindingCard = memo(function FindingCard({
   finding,
   rollup,
   onResolve,
   onSnooze,
   onDismiss,
-}: {
-  finding: Finding;
-  rollup: GameRollup | undefined;
-  onResolve: (finding: Finding, detail: string) => void;
-  onSnooze: (finding: Finding, ms: number, label: string) => void;
-  onDismiss: (finding: Finding) => void;
-}) {
+}: FindingCardProps) {
   const rule = RULES_BY_ID.get(finding.ruleId)!;
   const meta = AREA_META[finding.area];
 
@@ -1048,6 +1104,7 @@ const FindingCard = memo(function FindingCard({
 
   return (
     <motion.div
+      data-finding-key={finding.key}
       className="rounded-xl border border-white/[0.07] bg-white/[0.015] px-4 py-3 transition-colors hover:border-white/15"
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
@@ -1139,7 +1196,7 @@ const FindingCard = memo(function FindingCard({
       </div>
     </motion.div>
   );
-});
+}, findingCardPropsEqual);
 
 // ─── Main view ───────────────────────────────────────────────────────────────
 
@@ -1154,6 +1211,7 @@ export const JourneyAuditView = memo(function JourneyAuditView({
   const [tab, setTab] = useState<AuditTab>('queue');
   const [persisted, setPersisted] = useState<AuditPersistedState>(loadPersisted);
   const [seriesGaps, setSeriesGaps] = useState<SeriesGapFinding[]>([]);
+  const [visibleCount, setVisibleCount] = useState(QUEUE_PAGE_SIZE);
 
   const update = useCallback((mutate: (prev: AuditPersistedState) => AuditPersistedState) => {
     setPersisted((prev) => {
@@ -1174,6 +1232,13 @@ export const JourneyAuditView = memo(function JourneyAuditView({
     const disabled = new Set(persisted.disabledRules);
     return new Set(RULES.filter((r) => !disabled.has(r.id)).map((r) => r.id));
   }, [persisted.disabledRules]);
+
+  // A different rule set is a different queue, so start it from the top. A
+  // recompute (library change, resolution) keeps how far the user has read.
+  const enabledRulesKey = [...enabledRules].sort().join(',');
+  useEffect(() => {
+    setVisibleCount(QUEUE_PAGE_SIZE);
+  }, [enabledRulesKey]);
 
   const seriesEnabled = enabledRules.has('series-gaps');
   const libraryKey = useMemo(
@@ -1509,16 +1574,31 @@ export const JourneyAuditView = memo(function JourneyAuditView({
               </p>
             </div>
           ) : (
-            queue.map((finding) => (
-              <FindingCard
-                key={finding.key}
-                finding={finding}
-                rollup={rollupById.get(finding.subjectId)}
-                onResolve={handleResolve}
-                onSnooze={handleSnooze}
-                onDismiss={handleDismiss}
-              />
-            ))
+            <>
+              {/* Paged: a fresh Steam import can flag nearly every game, and
+                  mounting thousands of animated cards stalls the tab. Scores
+                  and charts above still read the full open list. */}
+              {queue.slice(0, visibleCount).map((finding) => (
+                <FindingCard
+                  key={finding.key}
+                  finding={finding}
+                  rollup={rollupById.get(finding.subjectId)}
+                  onResolve={handleResolve}
+                  onSnooze={handleSnooze}
+                  onDismiss={handleDismiss}
+                />
+              ))}
+              {visibleCount < queue.length && (
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount((n) => n + QUEUE_PAGE_SIZE)}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] py-3 text-xs font-medium text-white/60 transition-colors hover:border-white/20 hover:text-white"
+                >
+                  Show {Math.min(QUEUE_PAGE_SIZE, queue.length - visibleCount)} more of{' '}
+                  {queue.length - visibleCount}
+                </button>
+              )}
+            </>
           )}
         </div>
       )}

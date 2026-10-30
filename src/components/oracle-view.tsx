@@ -1482,17 +1482,18 @@ function HeroCard({ game, onNavigate }: { game: ScoredGame; onNavigate: (gameId:
     >
       {/* Background image with Ken Burns */}
       {img.src && !img.failed && (
-        <motion.img
+        // Ken Burns on CSS keyframes (.oracle-kenburns): a transform animation
+        // the compositor runs, where framer's infinite scale kept the main
+        // thread busy for as long as Oracle was open.
+        <img
           src={img.src}
           alt={game.title}
           onLoad={img.onLoad}
           onError={img.onError}
           className={cn(
-            'absolute inset-0 w-full h-full object-cover transition-opacity duration-1000',
+            'oracle-kenburns absolute inset-0 w-full h-full object-cover transition-opacity duration-1000',
             img.loaded ? 'opacity-100' : 'opacity-0',
           )}
-          animate={{ scale: [1, 1.05] }}
-          transition={{ duration: 20, ease: 'linear', repeat: Infinity, repeatType: 'reverse' }}
         />
       )}
 

@@ -303,41 +303,54 @@ export interface SceneGap {
 }
 
 /**
- * Silences between consecutive episodes anywhere in the library. Gaps are
- * content in Scenes, so they are returned as first-class rows rather than being
- * implied by whitespace.
+ * Silences between episodes anywhere in the library. Gaps are content in
+ * Scenes, so they are returned as first-class rows rather than being implied
+ * by whitespace. A silence is measured against the latest end seen so far, not
+ * just the previous episode by start time, so a long episode on one game
+ * covers short episodes of other games that started inside it. Returned
+ * newest-first, matching the scene stream.
  */
 export function computeSceneGaps(
   scenesNewestFirst: PlayScene[],
   minGapMs: number = 14 * DAY_MS,
 ): SceneGap[] {
+  const ascending = [...scenesNewestFirst].sort((a, b) => a.startMs - b.startMs);
   const gaps: SceneGap[] = [];
+  if (ascending.length === 0) return gaps;
+
+  let maxEnd = ascending[0].endMs;
+  let maxEndScene = ascending[0];
   let longestIdx = -1;
   let longestMs = 0;
 
-  for (let i = 0; i < scenesNewestFirst.length - 1; i++) {
-    const newer = scenesNewestFirst[i];
-    const older = scenesNewestFirst[i + 1];
-    const ms = newer.startMs - older.endMs;
-    if (ms < minGapMs) continue;
-    if (ms > longestMs) {
-      longestMs = ms;
-      longestIdx = gaps.length;
+  for (let i = 1; i < ascending.length; i++) {
+    const scene = ascending[i];
+    const ms = scene.startMs - maxEnd;
+    if (ms >= minGapMs) {
+      // >= so that, as before, the newest of equally long gaps is the longest.
+      if (ms >= longestMs) {
+        longestMs = ms;
+        longestIdx = gaps.length;
+      }
+      gaps.push({
+        id: `gap:${maxEndScene.id}->${scene.id}`,
+        startMs: maxEnd,
+        endMs: scene.startMs,
+        ms,
+        nextSceneId: scene.id,
+        nextGameId: scene.gameId,
+        nextTitle: scene.title,
+        isLongest: false,
+      });
     }
-    gaps.push({
-      id: `gap:${older.id}->${newer.id}`,
-      startMs: older.endMs,
-      endMs: newer.startMs,
-      ms,
-      nextSceneId: newer.id,
-      nextGameId: newer.gameId,
-      nextTitle: newer.title,
-      isLongest: false,
-    });
+    if (scene.endMs > maxEnd) {
+      maxEnd = scene.endMs;
+      maxEndScene = scene;
+    }
   }
 
   if (longestIdx >= 0) gaps[longestIdx].isLongest = true;
-  return gaps;
+  return gaps.reverse();
 }
 
 // ─── Scenes: ordinal milestones ──────────────────────────────────────────────
@@ -389,6 +402,9 @@ export function deriveMilestones(
   let completionCount = 0;
 
   for (const e of sortedHistory) {
+    // Ark's own rows (a status copied to a store twin, the idle sweep, undo)
+    // are not things the user recorded, matching churn, Wrapped and badges.
+    if (isBookkeepingStatusChange(e)) continue;
     const atMs = parseIsoMs(e.timestamp)!;
 
     if (!seenTitles.has(e.gameId)) {
@@ -944,6 +960,12 @@ export interface RhythmHeatmap {
   /** Busiest weekday / hour, or null when there is no play at all. */
   peakWeekday: number | null;
   peakHour: number | null;
+  /**
+   * Busiest single weekday × daypart cell of `grid` (first in Sun..Sat, Night..
+   * Evening order on ties), or null with no play. Picking weekday and hour
+   * separately can name a cell with no play in it, so labels use this.
+   */
+  peakSlot: { weekday: number; daypart: number } | null;
 }
 
 /**
@@ -972,7 +994,15 @@ export function computeRhythmHeatmap(sessions: GameSession[]): RhythmHeatmap {
   }
 
   let max = 0;
-  for (const row of grid) for (const c of row) if (c > max) max = c;
+  let peakSlot: RhythmHeatmap['peakSlot'] = null;
+  for (let wd = 0; wd < 7; wd++) {
+    for (let dp = 0; dp < 4; dp++) {
+      if (grid[wd][dp] > max) {
+        max = grid[wd][dp];
+        peakSlot = { weekday: wd, daypart: dp };
+      }
+    }
+  }
 
   let peakWeekday: number | null = null;
   let peakHour: number | null = null;
@@ -985,7 +1015,7 @@ export function computeRhythmHeatmap(sessions: GameSession[]): RhythmHeatmap {
     peakHour = bestH;
   }
 
-  return { grid, byWeekday, byDaypart, max, total, peakWeekday, peakHour };
+  return { grid, byWeekday, byDaypart, max, total, peakWeekday, peakHour, peakSlot };
 }
 
 // ─── Audit: data-quality analytics (library-wide, pure) ──────────────────────
@@ -1163,8 +1193,13 @@ export function computeOpenItemsTrend(
 ): DebtMonth[] {
   const n = Math.max(1, Math.floor(months));
 
+  // Added counts only records still in the library, so decisions must too:
+  // otherwise removed games' decisions cancel out undecided library records.
+  // Sync rows stay in: they legitimately decide a store twin's record.
+  const libIds = new Set(rollups.filter((r) => r.inLibrary).map((r) => r.gameId));
   const decidedAt = new Map<string, number>();
   for (const e of statusHistory) {
+    if (!libIds.has(e.gameId)) continue;
     if (!DECIDED_STATUSES.has(e.newStatus)) continue;
     const ms = parseIsoMs(e.timestamp);
     if (ms === null) continue;

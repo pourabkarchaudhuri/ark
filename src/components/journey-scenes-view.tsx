@@ -538,12 +538,14 @@ const PlayRhythmDashboard = memo(function PlayRhythmDashboard({
     [scenes],
   );
 
+  // The busiest heatmap cell, so the tile always names a slot the heatmap next
+  // to it shows play in (weekday and hour picked separately can disagree).
   const peakSlot = useMemo(() => {
-    if (rhythm.peakWeekday === null || rhythm.peakHour === null) return '—';
-    return `${WEEKDAY_LABELS[rhythm.peakWeekday]} ${DAYPART_LABELS[
-      rhythm.peakHour < 6 ? 0 : rhythm.peakHour < 12 ? 1 : rhythm.peakHour < 18 ? 2 : 3
+    if (!rhythm.peakSlot) return '—';
+    return `${WEEKDAY_LABELS[rhythm.peakSlot.weekday]} ${DAYPART_LABELS[
+      rhythm.peakSlot.daypart
     ].toLowerCase()}`;
-  }, [rhythm.peakWeekday, rhythm.peakHour]);
+  }, [rhythm.peakSlot]);
 
   const hasCadence = cadence.some((w) => w.sessions > 0);
 
@@ -771,6 +773,10 @@ export const JourneyScenesView = memo(function JourneyScenesView({
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const spineRef = useRef<HTMLDivElement>(null);
   const pendingScrollRef = useRef<string | null>(null);
+  // Stream rows [from, to) mounted by a spine jump rather than by reading down.
+  // They mount at rest: hundreds of entrance animations at once would stall,
+  // and nobody is watching rows that are scrolled past on the way.
+  const [jumpRange, setJumpRange] = useState<{ from: number; to: number } | null>(null);
 
   const titleFor = useMemo(() => {
     const byId = new Map(journeyEntries.map((e) => [e.gameId, e.title]));
@@ -905,31 +911,55 @@ export const JourneyScenesView = memo(function JourneyScenesView({
     spineVirtualizer.scrollToIndex(activeIndex, { align: 'auto' });
   }, [activeIndex, spineVirtualizer]);
 
-  const scrollToScene = useCallback((id: string) => {
+  const scrollToScene = useCallback((id: string, behavior: ScrollBehavior = 'smooth') => {
     const el = rowRefs.current.get(id);
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.scrollIntoView({ behavior, block: 'center' });
       setActiveSceneId(id);
       return true;
     }
     return false;
   }, []);
 
-  // Spine → stream, including targets past the current reveal window.
+  // Spine → stream, including targets past the current reveal window. The
+  // spine index counts episodes only, but the stream interleaves gaps and
+  // milestones, so the reveal window is sized from the row's position in the
+  // full stream.
   const handleSpineClick = useCallback(
-    (id: string, index: number) => {
-      if (scrollToScene(id)) return;
+    (id: string) => {
+      if (scrollToScene(id)) {
+        pendingScrollRef.current = null;
+        return;
+      }
+      const pos = rows.findIndex((r) => r.key === id);
+      if (pos < 0) {
+        pendingScrollRef.current = null;
+        return;
+      }
       pendingScrollRef.current = id;
-      setVisibleCount((n) => Math.max(n, index + PAGE_SIZE));
+      const next = Math.max(visibleCount, pos + 1 + PAGE_SIZE);
+      if (next > visibleCount) setJumpRange({ from: visibleCount, to: next });
+      setVisibleCount(next);
     },
-    [scrollToScene],
+    [scrollToScene, rows, visibleCount],
   );
 
+  // One attempt per change of the mounted rows: a target that curation removed
+  // or that failed to mount once it was in range is dropped, so a later 'Show
+  // more' never yanks the page back to a stale click.
   useLayoutEffect(() => {
     const pending = pendingScrollRef.current;
     if (!pending) return;
-    if (scrollToScene(pending)) pendingScrollRef.current = null;
-  }, [visibleCount, scrollToScene]);
+    const pos = rows.findIndex((r) => r.key === pending);
+    if (pos < 0) {
+      pendingScrollRef.current = null;
+      return;
+    }
+    if (pos >= visibleRows.length) return;
+    // A jump lands instantly; smooth-scrolling across hundreds of rows reads as lag.
+    scrollToScene(pending, 'auto');
+    pendingScrollRef.current = null;
+  }, [rows, visibleRows, scrollToScene]);
 
   const toggleCuration = useCallback((key: keyof CurationState) => {
     setCuration((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -1068,7 +1098,7 @@ export const JourneyScenesView = memo(function JourneyScenesView({
                     <button
                       key={row.key}
                       type="button"
-                      onClick={() => handleSpineClick(row.key, item.index)}
+                      onClick={() => handleSpineClick(row.key)}
                       className={cn(
                         'absolute left-0 top-0 flex w-full items-center gap-2 rounded-md px-2 text-left transition-colors',
                         isActive ? 'bg-white/[0.07]' : 'hover:bg-white/[0.04]',
@@ -1109,6 +1139,8 @@ export const JourneyScenesView = memo(function JourneyScenesView({
 
         <div className="min-w-0 flex-1 space-y-2">
           {visibleRows.map((row, i) => {
+            const rowReduced =
+              reduced || (jumpRange !== null && i >= jumpRange.from && i < jumpRange.to);
             if (row.kind === 'scene') {
               return (
                 <SceneRow
@@ -1118,17 +1150,17 @@ export const JourneyScenesView = memo(function JourneyScenesView({
                   medianMinutes={medianMinutes}
                   density={density}
                   active={row.key === activeSceneId}
-                  reduced={reduced}
+                  reduced={rowReduced}
                   index={i}
                   registerRef={registerRef}
                 />
               );
             }
             if (row.kind === 'gap') {
-              return <GapRow key={row.key} gap={row.gap} reduced={reduced} index={i} />;
+              return <GapRow key={row.key} gap={row.gap} reduced={rowReduced} index={i} />;
             }
             return (
-              <MilestoneRow key={row.key} milestone={row.milestone} reduced={reduced} index={i} />
+              <MilestoneRow key={row.key} milestone={row.milestone} reduced={rowReduced} index={i} />
             );
           })}
 

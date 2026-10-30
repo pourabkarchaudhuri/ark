@@ -492,10 +492,20 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
       statusHistoryStore.subscribe(() => setVoyageStoreSnap(s => s && { ...s, statusHistory: statusHistoryStore.getAll() })),
       sessionStore.subscribe(() => setVoyageStoreSnap(s => s && { ...s, sessions: sessionStore.getAll() })),
     ];
+    // The metadata backfill notifies the library several times a second; one snapshot per frame is
+    // all Audit can show, and each snapshot rebuilds every rollup and finding.
+    let libraryFrame: number | null = null;
     if (needsLibrarySnapshot) {
-      unsubs.push(libraryStore.subscribe(() => setVoyageStoreSnap(s => s && { ...s, libraryEntries: libraryStore.getAllEntries() })));
+      unsubs.push(libraryStore.subscribe(() => {
+        if (libraryFrame !== null) return;
+        libraryFrame = requestAnimationFrame(() => {
+          libraryFrame = null;
+          setVoyageStoreSnap(s => s && { ...s, libraryEntries: libraryStore.getAllEntries() });
+        });
+      }));
     }
     return () => {
+      if (libraryFrame !== null) cancelAnimationFrame(libraryFrame);
       for (const unsub of unsubs) unsub();
     };
   }, [needsStoreSnapshot, needsLibrarySnapshot, initialStoreSnap]);
