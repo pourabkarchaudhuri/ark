@@ -5,6 +5,7 @@ import {
   CreateLibraryEntry,
   UpdateLibraryEntry,
   migrateGameId,
+  CachedGameMeta,
 } from '@/types/game';
 import type { CustomGameEntry, GameSession, JourneyEntry, StatusChangeEntry } from '@/types/game';
 import { journeyStore } from './journey-store';
@@ -42,6 +43,27 @@ const UNANNOUNCED_MARKERS = ['tba', 'tbd', 'coming soon', 'to be announced', 'un
 // and per this file's ownership rules we don't want to force a helper export.
 // Keep in sync with dedup.ts SENTINEL_YEAR.
 const SENTINEL_YEAR_LOCAL = 2090;
+
+/**
+ * Which storefront a library entry belongs to, for cross-store propagation.
+ * The gameId prefix wins ('epic-' also covers 'epic-fn:'); otherwise the cached
+ * store. Custom games and unknown ids are null, so they are never synced.
+ */
+function storeOf(entry: LibraryGameEntry): 'steam' | 'epic' | null {
+  const id = entry.gameId;
+  if (id.startsWith('steam-')) return 'steam';
+  if (id.startsWith('epic-')) return 'epic';
+  if (id.startsWith('custom-')) return null;
+  const s = entry.cachedMeta?.store;
+  return s === 'steam' || s === 'epic' ? s : null;
+}
+
+/** Four-digit year in a release-date string ("2020-12-10", "10 Dec, 2020", "Q1 2027"), else null. */
+function releaseYearOf(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const m = /\b(19\d{2}|20\d{2})\b/.exec(String(raw));
+  return m ? Number(m[1]) : null;
+}
 
 function resolveJourneyTitleForRecord(
   updated: LibraryGameEntry,
@@ -156,6 +178,16 @@ export class LibraryStore {
   private _sortedCache: LibraryGameEntry[] | null = null;
   /** v1.0.45 — guard so `syncCrossStoreStatusesOnce` only ever sweeps once. */
   private _crossStoreSweepDone = false;
+  /**
+   * Set once this store AND the journey / status-history stores have hydrated.
+   * The sweep writes to all three, so it must not run on the empty boot-window maps.
+   */
+  private _sweepDepsReady = false;
+  /**
+   * Bumped whenever the whole library is cleared or replaced (clear / import), so
+   * module-level helpers such as the cachedMeta backfill can drop their per-session state.
+   */
+  private _replaceEpoch = 0;
 
   /** Gate flag captured once at construction — LevelDB path vs. legacy fallback. */
   private readonly _useLevelDB: boolean;
@@ -202,6 +234,17 @@ export class LibraryStore {
     this._useLevelDB =
       typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
     this.ready = this.initializeAsync();
+    const markSweepReady = () => { this._sweepDepsReady = true; };
+    void this.ready
+      .then(() => {
+        // Read the sibling stores lazily (inside the callback) so a mocked or
+        // not-yet-evaluated module never breaks construction.
+        const journeyReady = (journeyStore as { ready?: Promise<void> } | undefined)?.ready;
+        const history = statusHistoryStore as { ready?: () => Promise<void> } | undefined;
+        const historyReady = typeof history?.ready === 'function' ? history.ready() : undefined;
+        return Promise.all([journeyReady, historyReady]);
+      })
+      .then(markSweepReady, markSweepReady);
     if (typeof window !== 'undefined' && !_libraryBeforeUnloadInstalled) {
       _libraryBeforeUnloadInstalled = true;
       window.addEventListener('beforeunload', () => this.flushSave());
@@ -805,6 +848,11 @@ export class LibraryStore {
    * target. Stamps `crossStoreSyncedFrom` + `autoTransitionedAt` on updated
    * siblings for diagnostic traceability.
    *
+   * 1.0.97: only syncs ACROSS stores (Steam <-> Epic). Same-store titles that
+   * normalise alike (remasters / remakes: "Age of Empires II HD" vs "Definitive
+   * Edition") and pairs whose confirmed release years differ by more than one
+   * are left alone. Custom games are never touched.
+   *
    * Called automatically from `updateEntry` (deferred via `setTimeout(0)` so
    * listeners see a consistent state) and once at startup via
    * `syncCrossStoreStatusesOnce()` to catch pre-existing v1.0.44 mismatches.
@@ -818,11 +866,6 @@ export class LibraryStore {
     const sourceKey = normalizeTitle(sourceTitle);
     if (!sourceKey) return 0;
 
-    const isSourceCompleted = newStatus === 'Completed';
-    const targets = isSourceCompleted
-      ? COMPLETED_OVERWRITE_TARGETS
-      : PLAYING_OVERWRITE_TARGETS;
-
     const nowIso = new Date().toISOString();
     let changed = 0;
 
@@ -832,36 +875,10 @@ export class LibraryStore {
       if (sibling.gameId === sourceEntry.gameId) continue;
       const siblingTitle = sibling.cachedMeta?.title?.trim();
       if (!siblingTitle) continue;
+      // Cheap store check first so same-store siblings skip normalizeTitle.
+      if (!this.isCrossStorePair(sourceEntry, sibling)) continue;
       if (normalizeTitle(siblingTitle) !== sourceKey) continue;
-      if (NEVER_OVERWRITE_STATUSES.has(sibling.status) && !isSourceCompleted) continue;
-      if (!targets.has(sibling.status)) continue;
-      if (sibling.status === newStatus) continue;
-
-      const mutated: LibraryEntryWithStatusStamp = {
-        ...sibling,
-        status: newStatus,
-        autoTransitionedAt: nowIso,
-        crossStoreSyncedFrom: sourceEntry.gameId,
-        statusChangedAt: nowIso,
-        updatedAt: new Date(),
-      };
-      this.entries.set(sibling.gameId, mutated);
-      // Record the transition so status history reflects the sync.
-      const title = sibling.cachedMeta?.title?.trim() || `Game ${sibling.gameId}`;
-      try {
-        statusHistoryStore.record(sibling.gameId, title, sibling.status, newStatus, { source: 'sync' });
-      } catch {
-        // Status history is best-effort — never let its failure block the sync.
-      }
-      // Keep journey history in step with the new status.
-      try {
-        if (journeyStore.has(sibling.gameId)) {
-          journeyStore.syncProgress(sibling.gameId, { status: newStatus });
-        }
-      } catch {
-        // Non-critical
-      }
-      changed++;
+      if (this.applyPropagation(sourceEntry, sibling, newStatus, nowIso)) changed++;
     }
 
     if (changed > 0) {
@@ -872,6 +889,64 @@ export class LibraryStore {
     return changed;
   }
 
+  /** Steam <-> Epic only; never same-store or custom. */
+  private isCrossStorePair(a: LibraryGameEntry, b: LibraryGameEntry): boolean {
+    const sa = storeOf(a);
+    const sb = storeOf(b);
+    return sa !== null && sb !== null && sa !== sb;
+  }
+
+  /**
+   * Apply one sibling's propagation (all the rules, the status-history row and the
+   * journey sync) without saving or notifying — callers batch that. Returns true
+   * when the sibling changed.
+   */
+  private applyPropagation(
+    source: LibraryGameEntry,
+    sibling: LibraryGameEntry,
+    newStatus: GameStatus,
+    nowIso: string,
+  ): boolean {
+    if (!this.isCrossStorePair(source, sibling)) return false;
+    // Same title but release years apart is a remake, not the same game on another store.
+    if (this.isReleaseDateConfirmed(source) && this.isReleaseDateConfirmed(sibling)) {
+      const ya = releaseYearOf(source.cachedMeta?.releaseDate);
+      const yb = releaseYearOf(sibling.cachedMeta?.releaseDate);
+      if (ya !== null && yb !== null && Math.abs(ya - yb) > 1) return false;
+    }
+    const isSourceCompleted = newStatus === 'Completed';
+    const targets = isSourceCompleted ? COMPLETED_OVERWRITE_TARGETS : PLAYING_OVERWRITE_TARGETS;
+    if (NEVER_OVERWRITE_STATUSES.has(sibling.status) && !isSourceCompleted) return false;
+    if (!targets.has(sibling.status)) return false;
+    if (sibling.status === newStatus) return false;
+
+    const mutated: LibraryEntryWithStatusStamp = {
+      ...sibling,
+      status: newStatus,
+      autoTransitionedAt: nowIso,
+      crossStoreSyncedFrom: source.gameId,
+      statusChangedAt: nowIso,
+      updatedAt: new Date(),
+    };
+    this.entries.set(sibling.gameId, mutated);
+    // Record the transition so status history reflects the sync.
+    const title = sibling.cachedMeta?.title?.trim() || `Game ${sibling.gameId}`;
+    try {
+      statusHistoryStore.record(sibling.gameId, title, sibling.status, newStatus, { source: 'sync' });
+    } catch {
+      // Status history is best-effort — never let its failure block the sync.
+    }
+    // Keep journey history in step with the new status.
+    try {
+      if (journeyStore.has(sibling.gameId)) {
+        journeyStore.syncProgress(sibling.gameId, { status: newStatus });
+      }
+    } catch {
+      // Non-critical
+    }
+    return true;
+  }
+
   /**
    * v1.0.45 — one-shot startup sweep to reconcile pre-existing cross-store
    * status mismatches for users upgrading from v1.0.44. Idempotent; safe to
@@ -879,10 +954,15 @@ export class LibraryStore {
    * per process. For each normalized title with at least one Playing /
    * Playing Now / Completed entry, propagates the strongest observed status
    * onto matching siblings using the same rules as `propagateStatusByTitle`.
+   *
+   * 1.0.97: normalises each title once (the buckets ARE the sibling sets), and
+   * saves + notifies once at the end instead of once per bucket. Skipped when
+   * the library is read-only (nothing could be persisted).
    */
   syncCrossStoreStatusesOnce(): void {
     if (this._crossStoreSweepDone) return;
     this._crossStoreSweepDone = true;
+    if (this._readOnly) return;
 
     // Group entries by normalized title. Only keys with a propagatable status
     // among their members can drive propagation.
@@ -901,6 +981,8 @@ export class LibraryStore {
     const rank = (s: GameStatus): number =>
       s === 'Completed' ? 2 : s === 'Playing Now' ? 1.5 : s === 'Playing' ? 1 : 0;
 
+    const nowIso = new Date().toISOString();
+    let changed = 0;
     for (const bucket of byKey.values()) {
       if (bucket.length < 2) continue;
       let best: LibraryGameEntry | null = null;
@@ -909,7 +991,18 @@ export class LibraryStore {
         if (!best || rank(e.status) > rank(best.status)) best = e;
       }
       if (!best) continue;
-      this.propagateStatusByTitle(best, best.status);
+      for (const member of bucket) {
+        if (member.gameId === best.gameId) continue;
+        // Re-read: an earlier write in this sweep may have replaced the entry object.
+        const sibling = this.entries.get(member.gameId) ?? member;
+        if (this.applyPropagation(best, sibling, best.status, nowIso)) changed++;
+      }
+    }
+
+    if (changed > 0) {
+      this.invalidateSortedCache();
+      this.scheduleSave();
+      this.notifyListeners();
     }
   }
 
@@ -972,7 +1065,9 @@ export class LibraryStore {
     // any consumer reads the library. This covers pre-existing v1.0.44
     // mismatches for upgraders without adding a wire-up call at every
     // possible boot site. Guarded internally so it's a no-op after run.
-    if (!this._crossStoreSweepDone) {
+    // 1.0.97: wait for hydration (this store plus journey / status history) —
+    // before it the map is empty and the sweep used to mark itself done on nothing.
+    if (!this._crossStoreSweepDone && this.isInitialized && this._sweepDepsReady) {
       this.syncCrossStoreStatusesOnce();
     }
     if (this._sortedCache) return this._sortedCache;
@@ -1081,6 +1176,35 @@ export class LibraryStore {
     journeyStore.syncProgress(gameId, { hoursPlayed: effectiveHours, lastPlayedAt });
   }
 
+  /**
+   * Bulk cachedMeta write for the backfill: applies ONLY cachedMeta to each id still
+   * in the library, keeps placeholder journey titles in step, then invalidates /
+   * saves / notifies once for the whole batch (updateEntry would notify per game).
+   * Returns how many entries were updated.
+   */
+  setCachedMetaBatch(metaById: Map<string, CachedGameMeta>): number {
+    let changed = 0;
+    for (const [gameId, meta] of metaById) {
+      const existing = this.entries.get(gameId);
+      if (!existing) continue;
+      this.entries.set(gameId, { ...existing, cachedMeta: meta, updatedAt: new Date() });
+      changed++;
+      const t = meta.title?.trim();
+      if (t && journeyStore.has(gameId)) journeyStore.syncTitleIfPlaceholder(gameId, t);
+    }
+    if (changed > 0) {
+      this.invalidateSortedCache();
+      this.scheduleSave();
+      this.notifyListeners();
+    }
+    return changed;
+  }
+
+  /** Changes whenever the whole library is cleared or replaced by an import. */
+  getReplaceEpoch(): number {
+    return this._replaceEpoch;
+  }
+
   // Get all entries that have an executablePath set
   getTrackableEntries(): Array<{ gameId: string; executablePath: string }> {
     return Array.from(this.entries.values())
@@ -1091,6 +1215,7 @@ export class LibraryStore {
   // Clear all library data
   clear() {
     this.entries.clear();
+    this._replaceEpoch++;
     this.invalidateSortedCache();
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
@@ -1218,6 +1343,7 @@ export class LibraryStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
+    this._replaceEpoch++;
     this.entries.clear();
     this._dirtyIds.clear();
     const { count } = this.ingestEntries(plan.entries);
