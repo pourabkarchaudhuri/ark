@@ -146,3 +146,34 @@ describe('IPC input validation', () => {
     expect(parseAppIds('1,2')).toBeNull();
   });
 });
+
+describe('GgDealsClient timeout covers the body (1.0.97)', () => {
+  it('a body that stalls after the headers is aborted; getPrices settles and the in-flight map empties', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      let now = 5_000_000;
+      const fetch = vi.fn(async (_u: string, init?: RequestInit) => {
+        signal = init?.signal ?? undefined;
+        const res = new Response('{}', { status: 200 });
+        Object.defineProperty(res, 'json', {
+          value: () => new Promise((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+          }),
+        });
+        return res;
+      });
+      const c = new GgDealsClient({ fetch, cache: memCache(), getKey: () => KEY, now: () => now, sleep: async (ms) => { now += ms; } });
+      const first = c.getPrices([1], 'us');
+      const joined = c.getPrices([1], 'us'); // joins the in-flight fetch
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect((await first).error).toBe('unavailable');
+      expect((await joined).error).toBe('unavailable');
+      expect(signal?.aborted).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect((c as unknown as { inFlight: Map<string, unknown> }).inFlight.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

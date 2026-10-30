@@ -13,9 +13,52 @@ import { logger } from './safe-logger.js';
 // ---------------------------------------------------------------------------
 // Cache
 // ---------------------------------------------------------------------------
-const reviewsCache = new Map<string, { data: MetacriticGameResponse | null; timestamp: number }>();
+const reviewsCache = new Map<string, { data: MetacriticGameResponse | null; expiresAt: number }>();
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+/** "No data" after a network error / rate limit / 5xx: retried soon instead of for an hour. */
+const TRANSIENT_MISS_TTL = 3 * 60 * 1000;
+/** In-memory only (misses are never persisted); oldest entries go first past this size. */
+const MAX_CACHE_ENTRIES = 200;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5 MB
+/** Lookups in progress, so the details page and the AI tool asking at once share one cascade. */
+const inflight = new Map<string, Promise<MetacriticGameResponse | null>>();
+
+type FetchFn = typeof globalThis.fetch;
+interface MetacriticDeps {
+  fetch: () => FetchFn;
+  now: () => number;
+}
+const defaultDeps: MetacriticDeps = {
+  fetch: () => electron?.net?.fetch ?? globalThis.fetch,
+  now: () => Date.now(),
+};
+let deps: MetacriticDeps = defaultDeps;
+
+/** Test seam: swap the network and clock; call with no argument to restore the defaults. */
+export function __setMetacriticDepsForTests(d?: Partial<MetacriticDeps>): void {
+  deps = d ? { ...defaultDeps, ...d } : defaultDeps;
+  reviewsCache.clear();
+  inflight.clear();
+}
+
+/** An HTTP error answer; `status` tells a real miss (404) from a transient refusal. */
+class HttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+  }
+}
+
+/** Network failure, timeout, rate limit or server error: worth retrying soon. 404 and friends are not. */
+function isTransientError(err: unknown): boolean {
+  if (!(err instanceof HttpStatusError)) return true;
+  return err.status === 403 || err.status === 408 || err.status === 429 || err.status >= 500;
+}
+
+interface FetchOutcome {
+  html: string | null;
+  /** At least one request failed in a way that says nothing about whether the page exists. */
+  transient: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Public types (unchanged — consumed by frontend)
@@ -47,8 +90,7 @@ async function fetchUrl(url: string): Promise<string> {
   const timer = setTimeout(() => controller.abort(), 15000);
 
   try {
-    const fetchFn: typeof globalThis.fetch =
-      electron?.net?.fetch ?? globalThis.fetch;
+    const fetchFn = deps.fetch();
 
     const res = await fetchFn(url, {
       headers: {
@@ -62,7 +104,7 @@ async function fetchUrl(url: string): Promise<string> {
     } as any);
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+      throw new HttpStatusError(res.status);
     }
 
     const text = await res.text();
@@ -178,34 +220,39 @@ function generateSlugCandidates(rawName: string): string[] {
   return candidates;
 }
 
-/** Try fetching a game page directly by slug (multiple platform prefixes). */
-async function trySlug(slug: string): Promise<string | null> {
-  const prefixes = [
-    'game',                   // New Metacritic URL scheme (no platform)
-    'game/pc',
-    'game/playstation-5',
-    'game/playstation-4',
-    'game/xbox-series-x',
-  ];
+/** The current URL scheme first; the legacy per-platform pages are probed only when it misses. */
+const PRIMARY_PREFIX = 'game';
+const LEGACY_PREFIXES = ['game/pc', 'game/playstation-5', 'game/playstation-4', 'game/xbox-series-x'];
 
-  for (const prefix of prefixes) {
-    const url = `https://www.metacritic.com/${prefix}/${slug}/`;
-    try {
-      logger.log(`[Metacritic] Trying: ${url}`);
-      const html = await fetchUrl(url);
-      if (html && html.length > 1000) return html;
-    } catch {
-      // Try next prefix
-    }
+/** One page fetch: the HTML when it looks like a real page, plus whether a failure was transient. */
+async function probe(url: string): Promise<FetchOutcome> {
+  try {
+    logger.log(`[Metacritic] Trying: ${url}`);
+    const html = await fetchUrl(url);
+    return { html: html && html.length > 1000 ? html : null, transient: false };
+  } catch (err) {
+    return { html: null, transient: isTransientError(err) };
   }
-  return null;
+}
+
+/**
+ * Try fetching a game page directly by slug. 'game/' (the current scheme) is tried alone first; on a
+ * miss the four legacy platform prefixes run in parallel and the first hit in priority order wins.
+ */
+async function trySlug(slug: string): Promise<FetchOutcome> {
+  const primary = await probe(`https://www.metacritic.com/${PRIMARY_PREFIX}/${slug}/`);
+  if (primary.html) return primary;
+  const legacy = await Promise.all(LEGACY_PREFIXES.map((prefix) => probe(`https://www.metacritic.com/${prefix}/${slug}/`)));
+  const hit = legacy.find((o) => o.html);
+  if (hit) return hit;
+  return { html: null, transient: primary.transient || legacy.some((o) => o.transient) };
 }
 
 /**
  * Search Metacritic as a last resort and fetch the top game result page.
  * Uses category=13 to restrict results to games.
  */
-async function searchAndFetch(gameName: string): Promise<string | null> {
+async function searchAndFetch(gameName: string): Promise<FetchOutcome> {
   const searchUrl = `https://www.metacritic.com/search/${encodeURIComponent(gameName)}/?page=1&category=13`;
   logger.log(`[Metacritic] Search fallback: ${searchUrl}`);
 
@@ -216,17 +263,18 @@ async function searchAndFetch(gameName: string): Promise<string | null> {
     // Search result links use data-testid="search-result-item" with href like /game/<slug>/
     const firstResult = $('a[data-testid="search-result-item"][href*="/game/"]').first();
     const href = firstResult.attr('href');
-    if (!href || !href.match(/\/game\/[a-z0-9-]+/)) return null;
+    if (!href || !href.match(/\/game\/[a-z0-9-]+/)) return { html: null, transient: false };
 
     const gameUrl = `https://www.metacritic.com${href.endsWith('/') ? href : href + '/'}`;
     logger.log(`[Metacritic] Search hit: ${gameUrl}`);
 
     const gameHtml = await fetchUrl(gameUrl);
-    if (gameHtml && gameHtml.length > 1000) return gameHtml;
+    if (gameHtml && gameHtml.length > 1000) return { html: gameHtml, transient: false };
   } catch (err) {
     logger.warn(`[Metacritic] Search fallback failed:`, err);
+    return { html: null, transient: isTransientError(err) };
   }
-  return null;
+  return { html: null, transient: false };
 }
 
 /**
@@ -234,17 +282,20 @@ async function searchAndFetch(gameName: string): Promise<string | null> {
  * 1. Direct slug variations (normalised, edition-stripped, numeral-converted)
  * 2. Metacritic search as last resort
  */
-async function tryFetchWithPatterns(gameName: string): Promise<string | null> {
+async function tryFetchWithPatterns(gameName: string): Promise<FetchOutcome> {
   const slugs = generateSlugCandidates(gameName);
+  let transient = false;
 
-  // Strategy 1: Direct slug lookups (fast — one HTTP per slug × platform prefix)
+  // Strategy 1: Direct slug lookups ('game/' first, legacy platform pages in parallel on a miss)
   for (const slug of slugs) {
-    const html = await trySlug(slug);
-    if (html) return html;
+    const outcome = await trySlug(slug);
+    if (outcome.html) return outcome;
+    transient ||= outcome.transient;
   }
 
   // Strategy 2: Search fallback (one search request + one game page request)
-  return searchAndFetch(gameName);
+  const searched = await searchAndFetch(gameName);
+  return { html: searched.html, transient: transient || searched.transient };
 }
 
 // ---------------------------------------------------------------------------
@@ -355,23 +406,45 @@ function parseCriticReviews($: cheerio.CheerioAPI): MetacriticReview[] {
  * @param gameName - The name of the game to search for
  * @returns Metacritic review data or null if not found
  */
-export async function fetchMetacriticReviews(gameName: string): Promise<MetacriticGameResponse | null> {
+export function fetchMetacriticReviews(gameName: string): Promise<MetacriticGameResponse | null> {
   const cacheKey = gameName.toLowerCase().trim();
 
-  // Check cache
+  // Check cache (expired entries are dropped on read)
   const cached = reviewsCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    logger.log(`[Metacritic] Using cached reviews for: ${gameName}`);
-    return cached.data;
+  if (cached) {
+    if (deps.now() < cached.expiresAt) {
+      logger.log(`[Metacritic] Using cached reviews for: ${gameName}`);
+      return Promise.resolve(cached.data);
+    }
+    reviewsCache.delete(cacheKey);
   }
 
+  const running = inflight.get(cacheKey);
+  if (running) return running;
+  const p = lookupReviews(gameName, cacheKey).finally(() => inflight.delete(cacheKey));
+  inflight.set(cacheKey, p);
+  return p;
+}
+
+function cacheResult(cacheKey: string, data: MetacriticGameResponse | null, ttl: number): void {
+  reviewsCache.delete(cacheKey);
+  reviewsCache.set(cacheKey, { data, expiresAt: deps.now() + ttl });
+  while (reviewsCache.size > MAX_CACHE_ENTRIES) {
+    const oldest = reviewsCache.keys().next().value;
+    if (oldest === undefined) break;
+    reviewsCache.delete(oldest);
+  }
+}
+
+async function lookupReviews(gameName: string, cacheKey: string): Promise<MetacriticGameResponse | null> {
   try {
     logger.log(`[Metacritic] Fetching reviews for: ${gameName}`);
 
-    const html = await tryFetchWithPatterns(gameName);
+    const { html, transient } = await tryFetchWithPatterns(gameName);
     if (!html) {
-      logger.log(`[Metacritic] Could not find page for: ${gameName}`);
-      reviewsCache.set(cacheKey, { data: null, timestamp: Date.now() });
+      logger.log(`[Metacritic] Could not find page for: ${gameName}${transient ? ' (network trouble; retrying soon)' : ''}`);
+      // A real miss is remembered for an hour; one caused by a timeout / 429 / 5xx only briefly.
+      cacheResult(cacheKey, null, transient ? TRANSIENT_MISS_TTL : CACHE_TTL);
       return null;
     }
 
@@ -386,7 +459,7 @@ export async function fetchMetacriticReviews(gameName: string): Promise<Metacrit
 
     if (ld.score === 0 && reviews.length === 0) {
       logger.log(`[Metacritic] No data found for: ${gameName}`);
-      reviewsCache.set(cacheKey, { data: null, timestamp: Date.now() });
+      cacheResult(cacheKey, null, CACHE_TTL);
       return null;
     }
 
@@ -400,11 +473,11 @@ export async function fetchMetacriticReviews(gameName: string): Promise<Metacrit
     };
 
     logger.log(`[Metacritic] Found score ${ld.score} and ${reviews.length} critic reviews for: ${gameName}`);
-    reviewsCache.set(cacheKey, { data: response, timestamp: Date.now() });
+    cacheResult(cacheKey, response, CACHE_TTL);
     return response;
   } catch (error) {
     logger.error(`[Metacritic] Error fetching reviews for ${gameName}:`, error);
-    reviewsCache.set(cacheKey, { data: null, timestamp: Date.now() });
+    cacheResult(cacheKey, null, TRANSIENT_MISS_TTL);
     return null;
   }
 }
@@ -414,6 +487,7 @@ export async function fetchMetacriticReviews(gameName: string): Promise<Metacrit
  */
 export function clearMetacriticCache(): void {
   reviewsCache.clear();
+  inflight.clear();
   logger.log('[Metacritic] Cache cleared');
 }
 

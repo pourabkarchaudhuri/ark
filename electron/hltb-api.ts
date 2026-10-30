@@ -28,7 +28,9 @@ const REQUEST_SPACING_MS = 500;
 const BREAKER_MS = 30 * 60 * 1000;
 const HIT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MISS_TTL_MS = 24 * 60 * 60 * 1000;
-const CACHE_VERSION = 'v1';
+// v2: keyed by the search terms (roman numerals as written), so 'Mega Man X' and 'Mega Man 10' no
+// longer share an entry; v1 entries may hold the wrong game and are dropped.
+const CACHE_VERSION = 'v2';
 
 export interface HltbQuery {
   title: string;
@@ -186,7 +188,7 @@ export class HltbClient {
 
   /** Times for a game, or null (unknown game, no confident match, or HowLongToBeat unavailable). */
   getTimes(query: HltbQuery): Promise<HltbTimes | null> {
-    const key = `hltb:${CACHE_VERSION}:${normalizeHltbTitle(query.title)}|${query.year ?? ''}`;
+    const key = `hltb:${CACHE_VERSION}:${hltbSearchTerms(query.title).join(' ')}|${query.year ?? ''}`;
     const cached = this.deps.cache.get<{ times: HltbTimes | null }>(key);
     if (cached) return Promise.resolve(cached.times);
     const running = this.inflight.get(key);
@@ -229,11 +231,16 @@ export class HltbClient {
     return run;
   }
 
-  private async request(path: string, init: RequestInit = {}): Promise<Response> {
+  /**
+   * One request with its body read under the same timeout: a server that sends headers and then
+   * stalls mid-body is aborted too, instead of leaving the lookup (and its in-flight entry) hanging.
+   * The body is parsed only for 2xx answers; callers check `ok` / `status` first.
+   */
+  private async request(path: string, init: RequestInit = {}): Promise<{ ok: boolean; status: number; body: unknown }> {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
     try {
-      return await this.deps.fetch(`${HLTB_BASE}${path}`, {
+      const res = await this.deps.fetch(`${HLTB_BASE}${path}`, {
         ...init,
         headers: {
           'User-Agent': this.deps.userAgent,
@@ -243,6 +250,11 @@ export class HltbClient {
         },
         signal: ac.signal,
       });
+      if (!res.ok) {
+        void res.body?.cancel().catch(() => undefined);
+        return { ok: false, status: res.status, body: undefined };
+      }
+      return { ok: true, status: res.status, body: await this.readJson(res) };
     } finally {
       clearTimeout(timer);
     }
@@ -258,7 +270,7 @@ export class HltbClient {
     if (!force && this.token && this.deps.now() - this.token.at < TOKEN_MAX_AGE_MS) return this.token.value;
     const res = await this.serial(() => this.request(`${INIT_PATH}?t=${this.deps.now()}`));
     if (!res.ok) throw new Error(`token request answered HTTP ${res.status}`);
-    const body = (await this.readJson(res)) as { token?: unknown };
+    const body = res.body as { token?: unknown } | undefined;
     if (typeof body?.token !== 'string' || !body.token) throw new Error('token response has an unexpected shape');
     this.token = { value: body.token, at: this.deps.now() };
     return body.token;
@@ -287,7 +299,7 @@ export class HltbClient {
     let res = await post(await this.getToken());
     if (res.status === 403) res = await post(await this.getToken(true)); // token expired: refresh once
     if (!res.ok) throw new Error(`search answered HTTP ${res.status}`);
-    const json = (await this.readJson(res)) as { data?: unknown };
+    const json = res.body as { data?: unknown } | undefined;
     if (!Array.isArray(json?.data)) throw new Error('search response has an unexpected shape');
     return json.data.filter(isRawGame);
   }

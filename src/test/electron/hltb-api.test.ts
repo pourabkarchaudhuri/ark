@@ -139,3 +139,48 @@ describe('parseHltbQuery (IPC input)', () => {
     expect(parseHltbQuery(null)).toBeNull();
   });
 });
+
+describe('HltbClient cache key (1.0.97)', () => {
+  it('keeps "Mega Man X" and "Mega Man 10" apart, while "Final Fantasy X" still matches its entry', async () => {
+    const MEGA = [
+      { game_id: 10, game_name: 'Mega Man X', game_type: 'game', release_world: 1993, comp_main: 3600 * 5 },
+      { game_id: 20, game_name: 'Mega Man 10', game_type: 'game', release_world: 2010, comp_main: 3600 * 3 },
+    ];
+    const { c, cache } = client([json({ token: 'tok' }), json({ data: [MEGA[0]] }), json({ data: [MEGA[1]] })]);
+    expect((await c.getTimes({ title: 'Mega Man X' }))?.hltbId).toBe(10);
+    expect((await c.getTimes({ title: 'Mega Man 10' }))?.hltbId).toBe(20);
+    const keys = [...cache.store.keys()];
+    expect(new Set(keys).size).toBe(2);
+    expect(keys.every((k) => k.startsWith('hltb:v2:'))).toBe(true);
+    expect(pickBestMatch({ title: 'Final Fantasy X' }, [{ game_id: 3, game_name: 'Final Fantasy X', game_type: 'game', release_world: 2001 }])?.game_id).toBe(3);
+  });
+
+  it('an exact title with no year (custom games) still matches at the title-only threshold', () => {
+    expect(pickBestMatch({ title: 'Call of Duty: Modern Warfare' }, [MW[1]])?.game_id).toBe(63110);
+  });
+});
+
+describe('HltbClient timeout covers the body (1.0.97)', () => {
+  it('a body that stalls after the headers is aborted; the lookup settles and the in-flight entry clears', async () => {
+    vi.useFakeTimers();
+    try {
+      // Headers arrive, then the body never finishes unless the request is aborted.
+      const stalled = (_url: string, init?: RequestInit) => {
+        const res = new Response('{}', { status: 200 });
+        Object.defineProperty(res, 'text', {
+          value: () => new Promise<string>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+          }),
+        });
+        return res;
+      };
+      const { c } = client([stalled]);
+      const p = c.getTimes({ title: 'Hades' });
+      await vi.advanceTimersByTimeAsync(12_000);
+      await expect(p).resolves.toBeNull();
+      expect((c as unknown as { inflight: Map<string, unknown> }).inflight.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

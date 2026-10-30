@@ -195,16 +195,20 @@ export class GgDealsClient {
   private async fetchBatch(ids: number[], key: string, region: string): Promise<Record<number, GgDealsPrice | null> | GgDealsError> {
     const url = `${API_BASE}?ids=${ids.join(',')}&key=${encodeURIComponent(key)}&region=${region}`;
     try {
-      const res = await this.serial(async () => {
+      // The body is read before the timer is cleared: a server that stalls mid-body is aborted too
+      // (body = null → the breaker path below) instead of leaving this batch and its in-flight
+      // entries hanging for the rest of the session.
+      const { res, body } = await this.serial(async () => {
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
         try {
-          return await this.deps.fetch(url, { headers: { Accept: 'application/json' }, signal: ac.signal });
+          const r = await this.deps.fetch(url, { headers: { Accept: 'application/json' }, signal: ac.signal });
+          const b = (await r.json().catch(() => null)) as { success?: unknown; data?: unknown } | null;
+          return { res: r, body: b };
         } finally {
           clearTimeout(timer);
         }
       });
-      const body = (await res.json().catch(() => null)) as { success?: unknown; data?: unknown } | null;
       if (res.status === 400 || res.status === 401 || res.status === 403) {
         const message = (body?.data as { message?: unknown } | undefined)?.message;
         if (typeof message === 'string' && /key/i.test(message)) {

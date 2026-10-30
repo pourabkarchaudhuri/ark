@@ -145,8 +145,8 @@ class GgDealsService {
     return this.lastError;
   }
 
-  private key(appId: number) {
-    return `${getGgRegion()}:${appId}`;
+  private key(appId: number, region = getGgRegion()) {
+    return `${region}:${appId}`;
   }
 
   /** Cached price if known: undefined = not looked up yet, null = no deal data. */
@@ -196,15 +196,18 @@ class GgDealsService {
     if (this.pending.size > 0) this.timer = setTimeout(() => this.flush(), BATCH_DELAY_MS);
     if (batch.length === 0) return;
     const ids = batch.map(([id]) => id);
+    // Read once: if the region changes while this request is out, its prices stay filed under the
+    // region they were fetched for instead of landing in the new region's cache.
+    const region = getGgRegion();
     const settle = (prices: Record<string, GgDealsPrice | null>) => {
       const at = Date.now();
       for (const [id, resolvers] of batch) {
         const p = prices[String(id)] ?? null;
-        if (String(id) in prices) this.cache.set(this.key(id), { price: p, at });
+        if (String(id) in prices) this.cache.set(this.key(id, region), { price: p, at });
         resolvers.forEach((r) => r(p));
       }
     };
-    window.ggdeals!.getPrices(ids, getGgRegion())
+    window.ggdeals!.getPrices(ids, region)
       .then((res) => {
         this.lastError = res.error ?? null;
         // gg.deals is down or the key was rejected: let cards stop asking for a minute.

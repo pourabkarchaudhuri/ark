@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
-import { formatDealPrice, headlinePrice, isAtHistoricalLow, ggDealsService, GG_KEYSHOPS_LS_KEY } from '@/services/ggdeals-service';
+import { formatDealPrice, headlinePrice, isAtHistoricalLow, ggDealsService, GG_KEYSHOPS_LS_KEY, GG_REGION_LS_KEY } from '@/services/ggdeals-service';
 import { DealBadge, DealPriceBlock } from '@/components/deal-price';
 import type { GgDealsPrice } from '@/types/ggdeals';
 
@@ -47,6 +47,30 @@ describe('ggDealsService', () => {
     expect(c).toBeNull();
     await ggDealsService.getPrice(1); // cached
     expect(getPrices).toHaveBeenCalledTimes(1);
+  });
+
+  it('a region change mid-request files the answer under the region it was fetched for', async () => {
+    let answer: (v: { prices: Record<string, GgDealsPrice | null> }) => void = () => {};
+    const getPrices = vi.fn((_ids: number[], _region: string) => new Promise<{ prices: Record<string, GgDealsPrice | null> }>((r) => { answer = r; }));
+    (window as unknown as { ggdeals: unknown }).ggdeals = {
+      hasKey: vi.fn(async () => true), setKey: vi.fn(), clearKey: vi.fn(), testKey: vi.fn(), getPrices,
+    };
+    ggDealsService.settingsChanged();
+    localStorage.setItem(GG_REGION_LS_KEY, 'us');
+    try {
+      const pending = ggDealsService.getPrice(1);
+      await waitFor(() => expect(getPrices).toHaveBeenCalledTimes(1));
+      expect(getPrices.mock.calls[0][1]).toBe('us');
+      // The user switches region while the US request is still out.
+      ggDealsService.setRegion('gb');
+      answer({ prices: { 1: HADES } });
+      await pending;
+      expect(ggDealsService.peek(1)).toBeUndefined(); // not cached as a GB price
+      localStorage.setItem(GG_REGION_LS_KEY, 'us');
+      expect(ggDealsService.peek(1)?.title).toBe('Hades');
+    } finally {
+      localStorage.removeItem(GG_REGION_LS_KEY);
+    }
   });
 
   it('asks nothing without a saved key', async () => {
