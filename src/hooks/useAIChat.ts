@@ -14,6 +14,7 @@ import type {
 import { useLibrary, extractCachedMeta } from './useGameStore';
 import { gameService } from '@/services/game-service';
 import { applyAIChatActions, confirmAIChatRemovals } from '@/services/ai-chat-actions';
+import { getGgRegion } from '@/services/ggdeals-service';
 
 interface UseAIChatOptions {
   initialGameContext?: GameContext;
@@ -152,6 +153,7 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
         message: content,
         gameContext,
         libraryData,
+        ggRegion: getGgRegion(),
       };
       try {
         let preferredProvider: string = 'ollama';

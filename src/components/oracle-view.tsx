@@ -383,7 +383,12 @@ const STAGE_DETAILS: Record<string, { label: string; detail: string }> = {
   },
 };
 
-function OracleLoadingOverlay({
+/** Loading-overlay privacy note: scoring is local, but each compute sends game ids to
+ *  Steam (always) and gg.deals (when a key is set), so it never claims nothing leaves. */
+export const ORACLE_PRIVACY_NOTE =
+  'Scoring runs on your machine; only game IDs are sent to Steam (and gg.deals, if configured) for store data';
+
+export function OracleLoadingOverlay({
   stage,
   percent,
   libraryCount,
@@ -621,7 +626,7 @@ function OracleLoadingOverlay({
 
           {/* Bottom note */}
           <p className="text-[11px] text-white/15 mt-4 text-center">
-            Everything runs locally — no data leaves your machine
+            {ORACLE_PRIVACY_NOTE}
           </p>
         </div>
       </div>

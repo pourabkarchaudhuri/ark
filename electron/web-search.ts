@@ -17,8 +17,10 @@ export interface WebSearchResult {
 
 /**
  * Determine whether a user message would benefit from web search grounding.
- * Returns true for questions about current events, prices, reviews, news,
- * comparisons, release info, or anything the model likely needs fresh data for.
+ * Only explicit freshness intents count (search requests, latest/recent news,
+ * prices, release dates, patch notes). Generic words such as "new", "free",
+ * "review", "worth", "mod" or "update" used to trigger a blocking search before
+ * nearly every Ollama message; the chat tools already cover reviews, HLTB and deals.
  */
 export function needsWebSearch(message: string): boolean {
   const lower = message.toLowerCase();
@@ -26,35 +28,39 @@ export function needsWebSearch(message: string): boolean {
   // Explicit web search intent
   if (/\b(search|google|look up|find out|what('s| is) new)\b/.test(lower)) return true;
 
-  // Questions about current/recent things
-  if (/\b(latest|recent|current|upcoming|new|today|this (week|month|year)|202[4-9]|203\d)\b/.test(lower)) return true;
+  // Explicit freshness
+  if (/\b(latest|recent|recently|upcoming|today|this (week|month|year)|202[4-9]|203\d)\b/.test(lower)) return true;
 
   // Price / deal queries (including Steam sale dates)
-  if (/\b(price|cost|deal|discount|sale|free|how much|steam sale|next sale)\b/.test(lower)) return true;
-  if (/\bhow long (is|to beat|does .+ take)\b/.test(lower)) return true;
+  if (/\b(price|prices|cost|deal|deals|discount|on sale|how much|steam sale|next sale)\b/.test(lower)) return true;
 
-  // Review / opinion aggregation
-  if (/\b(review|rating|worth|should i (buy|play|get)|is .+ good|metacritic|opencritic)\b/.test(lower)) return true;
+  // News / announcements / release info
+  if (/\b(news|patch|patch notes|dlc|expansion|announced|announcement|release date|trailer|leak|leaks)\b/.test(lower)) return true;
 
-  // News / announcements
-  if (/\b(news|update|patch|dlc|expansion|announced|release date|trailer|leak)\b/.test(lower)) return true;
-
-  // Comparisons / recommendations that benefit from up-to-date info
-  if (/\b(vs\.?|versus|compare|alternative|similar to|like .+ but|best .+ games?)\b/.test(lower)) return true;
-
-  // Hardware / performance
-  if (/\b(system requirements|can .+ run|fps|performance|steam deck)\b/.test(lower)) return true;
-
-  // Mods / community
-  if (/\b(mod|mods|modding|workshop|nexus)\b/.test(lower)) return true;
-
-  // Awards / events / winners
-  if (/\b(award|awards|won|winner|goty|game of the year|nominee|nominated|event|ceremony)\b/.test(lower)) return true;
-
-  // General factual questions the model might not know
-  if (/\b(how many|who (won|made|created|developed)|when (did|does|will|is)|where (can|do))\b/.test(lower)) return true;
+  // Awards season
+  if (/\b(goty|game of the year|nominee|nominees|nominated|game awards)\b/.test(lower)) return true;
 
   return false;
+}
+
+/** Overall budget for one web search, so a slow network never holds the chat for long. */
+export const WEB_SEARCH_DEADLINE_MS = 2_500;
+const SEARCH_CACHE_TTL_MS = 5 * 60_000;
+const SEARCH_CACHE_MAX = 50;
+const searchCache = new Map<string, { at: number; results: WebSearchResult[] }>();
+
+type FetchOptions = { method?: string; body?: string; headers?: Record<string, string>; signal?: AbortSignal };
+type FetchFn = (url: string, options: FetchOptions) => Promise<{ status: number; data: string }>;
+
+let fetchImpl: FetchFn = (url, options) => fetchUrl(url, options);
+
+/** Test seam: replace the HTTPS fetch (call with no argument to restore). */
+export function __setWebSearchFetchForTests(fn?: FetchFn): void {
+  fetchImpl = fn ?? ((url, options) => fetchUrl(url, options));
+}
+
+export function __clearWebSearchCacheForTests(): void {
+  searchCache.clear();
 }
 
 /**
@@ -85,10 +91,11 @@ export function createBodyCollector(maxBytes: number = MAX_RESPONSE_BYTES): {
  */
 function fetchUrl(
   url: string,
-  options: { method?: string; body?: string; headers?: Record<string, string> } = {},
+  options: FetchOptions = {},
   _redirectDepth = 0,
 ): Promise<{ status: number; data: string }> {
   if (_redirectDepth > 5) return Promise.reject(new Error('Too many redirects'));
+  if (options.signal?.aborted) return Promise.reject(new Error('Request aborted'));
   return new Promise((resolve, reject) => {
     const isPost = options.method === 'POST';
     const urlObj = new URL(url);
@@ -141,6 +148,7 @@ function fetchUrl(
     req.setTimeout(10_000, () => {
       req.destroy(new Error('Request timed out'));
     });
+    options.signal?.addEventListener('abort', () => req.destroy(new Error('Request aborted')), { once: true });
 
     if (isPost && options.body) {
       req.write(options.body);
@@ -209,16 +217,30 @@ export function parseDDGHtml(html: string): WebSearchResult[] {
  */
 export async function webSearch(
   query: string,
-  maxResults: number = 5
+  maxResults: number = 5,
+  deadlineMs: number = WEB_SEARCH_DEADLINE_MS,
 ): Promise<WebSearchResult[]> {
+  const cacheKey = query.trim().toLowerCase().replace(/\s+/g, ' ');
+  const hit = searchCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < SEARCH_CACHE_TTL_MS) return hit.results.slice(0, maxResults);
+
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     logger.log(`[Web Search] Searching DuckDuckGo for: "${query}"`);
 
     const body = `q=${encodeURIComponent(query)}`;
-    const response = await fetchUrl('https://html.duckduckgo.com/html/', {
-      method: 'POST',
-      body,
+    // One overall deadline covers redirects and slow bodies; on expiry the request is destroyed.
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`Search exceeded the ${deadlineMs} ms deadline`));
+      }, deadlineMs);
     });
+    const response = await Promise.race([
+      fetchImpl('https://html.duckduckgo.com/html/', { method: 'POST', body, signal: controller.signal }),
+      deadline,
+    ]);
 
     if (response.status !== 200) {
       logger.error(`[Web Search] DuckDuckGo returned status ${response.status}`);
@@ -226,6 +248,11 @@ export async function webSearch(
     }
 
     const results = parseDDGHtml(response.data).slice(0, maxResults);
+    if (searchCache.size >= SEARCH_CACHE_MAX) {
+      const oldest = searchCache.keys().next().value;
+      if (oldest !== undefined) searchCache.delete(oldest);
+    }
+    searchCache.set(cacheKey, { at: Date.now(), results });
 
     logger.log(`[Web Search] Found ${results.length} results`);
     return results;
@@ -233,6 +260,8 @@ export async function webSearch(
     const errMsg = error instanceof Error ? error.message : String(error);
     logger.error(`[Web Search] Search failed: ${errMsg}`);
     return [];
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

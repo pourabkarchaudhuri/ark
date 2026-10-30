@@ -12,6 +12,7 @@
  *   • Azure OpenAI — cloud, via @langchain/openai (AzureChatOpenAI)
  */
 
+import { createHash } from 'node:crypto';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { ChatOllama } from '@langchain/ollama';
 import { AzureChatOpenAI } from '@langchain/openai';
@@ -29,10 +30,10 @@ import { z } from 'zod';
 import { steamAPI } from './steam-api.js';
 import { epicAPI } from './epic-api.js';
 import { getHltbClient } from './hltb-api.js';
-import { getGgDealsClient } from './ggdeals-api.js';
+import { getGgDealsClient, normalizeRegion } from './ggdeals-api.js';
 import { fetchMetacriticReviews } from './metacritic-api.js';
 import { chatStore } from './chat-store.js';
-import { settingsStore } from './settings-store.js';
+import { settingsStore, DEFAULT_CHAT_NUM_CTX, type PreferredChatProvider } from './settings-store.js';
 import { needsWebSearch, webSearch, formatSearchContext } from './web-search.js';
 import { logger } from './safe-logger.js';
 import { normalizeGameStatus } from '../src/lib/game-status-normalize.js';
@@ -104,11 +105,33 @@ type ChatModel = ChatGoogleGenerativeAI | ChatOllama | AzureChatOpenAI;
 let cachedModel: ChatModel | null = null;
 let cachedModelKey: string | null = null;
 
+/** Short, non-reversible fingerprint of an API key so a rotated key gets a new client
+ *  without the raw key ever sitting in a cache key. */
+function keyFingerprint(apiKey: string): string {
+  return createHash('sha256').update(apiKey).digest('hex').slice(0, 16);
+}
+
+/** Test seam: drop the cached chat and reviewer models. */
+export function __resetAiChatCachesForTests(): void {
+  cachedModel = null;
+  cachedModelKey = null;
+  cachedValidationModel = null;
+  cachedValidationKey = null;
+}
+
+/** True for provider errors that mean the key itself was rejected (401/403). */
+function isAuthError(error: unknown): boolean {
+  const e = error as { status?: unknown; statusCode?: unknown; code?: unknown; response?: { status?: unknown } } | null;
+  const status = Number(e?.status ?? e?.statusCode ?? e?.response?.status ?? NaN);
+  return status === 401 || status === 403;
+}
+
 /**
  * Get the LangChain chat model for the preferred provider from Settings.
- * Provider is always read from the store (single source of truth).
+ * Provider is always read from the store (single source of truth); the returned
+ * `provider` is the effective id the turn actually talks to.
  */
-function getModelForProvider(providerOptions?: ChatProviderOptions): { model: ChatModel; providerName: string } {
+export function getModelForProvider(providerOptions?: ChatProviderOptions): { model: ChatModel; providerName: string; provider: PreferredChatProvider } {
   const effective = settingsStore.getPreferredChatProvider();
 
   if (effective === 'azure-openai') {
@@ -120,9 +143,9 @@ function getModelForProvider(providerOptions?: ChatProviderOptions): { model: Ch
     const { endpoint, apiKey, deployment, apiVersion } = providerOptions.azure;
     const baseUrl = endpoint.replace(/\/+$/, '');
     const version = apiVersion?.trim() || '2024-12-01-preview';
-    const configKey = `azure:${baseUrl}:${deployment}:${version}`;
+    const configKey = `azure:${baseUrl}:${deployment}:${version}:${keyFingerprint(apiKey)}`;
     if (cachedModel && cachedModelKey === configKey) {
-      return { model: cachedModel as AzureChatOpenAI, providerName: `Azure OpenAI (${deployment})` };
+      return { model: cachedModel as AzureChatOpenAI, providerName: `Azure OpenAI (${deployment})`, provider: effective };
     }
     logger.log('[AI Proxy] Creating Azure OpenAI model:', deployment, 'api-version:', version);
     cachedModel = new AzureChatOpenAI({
@@ -135,7 +158,7 @@ function getModelForProvider(providerOptions?: ChatProviderOptions): { model: Ch
       maxCompletionTokens: 2048,
     });
     cachedModelKey = configKey;
-    return { model: cachedModel, providerName: `Azure OpenAI (${deployment})` };
+    return { model: cachedModel, providerName: `Azure OpenAI (${deployment})`, provider: effective };
   }
 
   if (effective === 'anthropic') {
@@ -153,9 +176,9 @@ function getModelForProvider(providerOptions?: ChatProviderOptions): { model: Ch
         'Gemini is selected but no API key is configured. Add your Google AI API key in Settings > AI Models > Google Gemini, or choose another model in the Chat panel.',
       );
     }
-    const configKey = `gemini:${geminiKey}`;
+    const configKey = `gemini:${keyFingerprint(geminiKey)}`;
     if (cachedModel && cachedModelKey === configKey) {
-      return { model: cachedModel as ChatGoogleGenerativeAI, providerName: 'Gemini 2.5 Flash' };
+      return { model: cachedModel as ChatGoogleGenerativeAI, providerName: 'Gemini 2.5 Flash', provider: effective };
     }
     logger.log('[AI Proxy] Creating Gemini model');
     cachedModel = new ChatGoogleGenerativeAI({
@@ -165,24 +188,26 @@ function getModelForProvider(providerOptions?: ChatProviderOptions): { model: Ch
       maxOutputTokens: 2048,
     });
     cachedModelKey = configKey;
-    return { model: cachedModel, providerName: 'Gemini 2.5 Flash' };
+    return { model: cachedModel, providerName: 'Gemini 2.5 Flash', provider: effective };
   }
 
   // ollama or any other → use Ollama from settings
   const ollamaSettings = settingsStore.getOllamaSettings();
   const baseUrl = ollamaSettings.url.replace(/\/$/, '');
-  const configKey = `ollama:${baseUrl}:${ollamaSettings.model}`;
+  const numCtx = ollamaSettings.chatNumCtx || DEFAULT_CHAT_NUM_CTX;
+  const configKey = `ollama:${baseUrl}:${ollamaSettings.model}:${numCtx}`;
   if (cachedModel && cachedModelKey === configKey) {
-    return { model: cachedModel as ChatOllama, providerName: `Ollama ${ollamaSettings.model}` };
+    return { model: cachedModel as ChatOllama, providerName: `Ollama ${ollamaSettings.model}`, provider: 'ollama' };
   }
-  logger.log(`[AI Proxy] Creating Ollama model (${ollamaSettings.model} @ ${baseUrl})`);
+  logger.log(`[AI Proxy] Creating Ollama model (${ollamaSettings.model} @ ${baseUrl}, num_ctx ${numCtx})`);
   cachedModel = new ChatOllama({
     model: ollamaSettings.model,
     baseUrl,
     temperature: 0.7,
+    numCtx,
   });
   cachedModelKey = configKey;
-  return { model: cachedModel, providerName: `Ollama ${ollamaSettings.model}` };
+  return { model: cachedModel, providerName: `Ollama ${ollamaSettings.model}`, provider: 'ollama' };
 }
 
 // Separate validation model (always Gemini — needs an API key)
@@ -191,15 +216,20 @@ let cachedValidationKey: string | null = null;
 
 function getValidationModel(): ChatGoogleGenerativeAI {
   const currentKey = getApiKey();
-  if (cachedValidationModel && cachedValidationKey === currentKey) return cachedValidationModel;
+  const fingerprint = keyFingerprint(currentKey);
+  if (cachedValidationModel && cachedValidationKey === fingerprint) return cachedValidationModel;
 
+  // 512 tokens cut rewrites off mid-list; a full answer plus follow-ups needs room.
+  // Thinking is off: the reviewer only checks format, and thought tokens count
+  // against maxOutputTokens on 2.5 Flash.
   cachedValidationModel = new ChatGoogleGenerativeAI({
     apiKey: currentKey,
     model: 'gemini-2.5-flash',
     temperature: 0.1,
-    maxOutputTokens: 512,
+    maxOutputTokens: 4096,
+    thinkingConfig: { thinkingBudget: 0 },
   });
-  cachedValidationKey = currentKey;
+  cachedValidationKey = fingerprint;
   return cachedValidationModel;
 }
 
@@ -286,25 +316,93 @@ const getGameDetailsTool = tool(
   },
 );
 
+/**
+ * Parse a Steam app id the model passed: a positive integer, a numeric string or
+ * 'steam-<digits>'. Anything else (epic/custom ids, 0, junk) is null, so the
+ * add/remove tools can refuse instead of coercing to app 0.
+ */
+export function parseSteamAppId(v: unknown): number | null {
+  let n: number;
+  if (typeof v === 'number') n = v;
+  else if (typeof v === 'string') {
+    const m = v.trim().match(/^(?:steam-)?(\d{1,10})$/);
+    if (!m) return null;
+    n = Number(m[1]);
+  } else return null;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+/** getLibraryGames output cap (characters of JSON), so a big library never floods the context. */
+export const LIBRARY_TOOL_MAX_CHARS = 10_000;
+const LIBRARY_TOOL_DEFAULT_PER_STATUS = 50;
+const LIBRARY_TOOL_MAX_MATCHES = 25;
+
+/**
+ * Build the getLibraryGames tool result: names grouped by status (no ids, dates or
+ * priorities), at most `limit` per status plus a '+N more' marker, hard-capped at
+ * LIBRARY_TOOL_MAX_CHARS. `nameQuery` instead returns matching entries with their
+ * gameId / steamAppId so removals can target the exact entry.
+ */
+export function buildLibraryToolPayload(
+  entries: LibraryEntry[],
+  opts: { status?: string; limit?: number; nameQuery?: string },
+): string {
+  const statusFilter = opts.status?.trim().toLowerCase();
+  const pool = statusFilter ? entries.filter(e => e.status.toLowerCase() === statusFilter) : entries;
+
+  const query = opts.nameQuery?.trim().toLowerCase();
+  if (query) {
+    const matches = pool
+      .filter(e => (e.name || '').toLowerCase().includes(query))
+      .slice(0, LIBRARY_TOOL_MAX_MATCHES)
+      .map(e => ({
+        name: (e.name || 'Unknown').slice(0, 120),
+        gameId: e.gameId,
+        steamAppId: e.gameId.startsWith('steam-') ? parseSteamAppId(e.gameId) : null,
+        status: e.status,
+      }));
+    return JSON.stringify({ totalGames: entries.length, query: opts.nameQuery, matches });
+  }
+
+  const groups = new Map<string, string[]>();
+  for (const e of pool) {
+    const list = groups.get(e.status) ?? [];
+    list.push((e.name || 'Unknown').slice(0, 120));
+    groups.set(e.status, list);
+  }
+
+  const build = (perStatus: number) => {
+    const byStatus: Record<string, { count: number; games: string[]; more?: string }> = {};
+    for (const [status, names] of groups) {
+      const games = names.slice(0, perStatus);
+      byStatus[status] = { count: names.length, games, ...(names.length > games.length && { more: `+${names.length - games.length} more` }) };
+    }
+    return JSON.stringify({ totalGames: entries.length, byStatus });
+  };
+
+  let perStatus = Math.max(1, Math.min(opts.limit && opts.limit > 0 ? opts.limit : LIBRARY_TOOL_DEFAULT_PER_STATUS, 200));
+  let out = build(perStatus);
+  while (out.length > LIBRARY_TOOL_MAX_CHARS && perStatus > 1) {
+    perStatus = Math.max(1, Math.floor(perStatus * 0.7));
+    out = build(perStatus);
+  }
+  return out;
+}
+
 const getLibraryGamesTool = tool(
-  async () => {
+  async ({ status, limit, nameQuery }: { status?: string; limit?: number; nameQuery?: string }) => {
     logger.log('[AI Tool] getLibraryGames');
     if (currentLibraryData.length === 0) return 'The library is empty.';
-    return JSON.stringify({
-      totalGames: currentLibraryData.length,
-      games: currentLibraryData.map(entry => ({
-        appId: entry.gameId,
-        name: entry.name || 'Unknown',
-        status: entry.status,
-        priority: entry.priority,
-        addedAt: entry.addedAt,
-      })),
-    });
+    return buildLibraryToolPayload(currentLibraryData, { status, limit, nameQuery });
   },
   {
     name: 'getLibraryGames',
-    description: "Get all games in the user's library with name, status, and priority. When you reply to the user, format as clean Markdown: one header per status (e.g. ### Playing), then bullets with game name only. Do not paste store IDs (steam-xxx, epic-xxx) in your reply—only game titles.",
-    schema: z.object({}),
+    description: "Get the user's library: game names grouped by status (count, up to `limit` names per status, '+N more' when truncated). Pass `status` to list one status, or `nameQuery` to find specific games — matches include the gameId needed by removeGameFromLibrary. When you reply, use one ### header per status and bullets with game names only; never paste store IDs.",
+    schema: z.object({
+      status: z.string().optional().describe('Only this status: Want to Play, Playing, Completed, or On Hold'),
+      limit: z.number().optional().describe('Max names per status (default 50)'),
+      nameQuery: z.string().optional().describe('Find library games whose name contains this text; returns gameId and steamAppId'),
+    }),
   },
 );
 
@@ -314,12 +412,14 @@ const addToLibraryTool = tool(
     const status = normalizeGameStatus(rawStatus);
     logger.log(`[AI Tool] addToLibrary: ${appId} with status "${status}"`);
     try {
+      if (!Number.isSafeInteger(appId) || appId <= 0) return 'Invalid appId; call searchSteamGames first.';
       const stringId = `steam-${appId}`;
       const existing = currentLibraryData.find(e => e.gameId === stringId || e.gameId === String(appId));
       if (existing) return `Game ${appId} is already in the library with status "${existing.status}"`;
 
       const details = await steamAPI.getAppDetails(appId);
-      const gameName = details?.name || `Game ${appId}`;
+      if (!details) return `Steam app ${appId} was not found; call searchSteamGames to get a valid appId. Nothing was added.`;
+      const gameName = details.name || `Game ${appId}`;
       pendingActions.push({ type: 'add', appId, gameId: stringId, status, gameName });
       return `Successfully queued "${gameName}" to be added to the library with status "${status}".`;
     } catch (error) {
@@ -337,16 +437,19 @@ const addToLibraryTool = tool(
 );
 
 const removeFromLibraryTool = tool(
-  async ({ appId }: { appId: number }) => {
-    logger.log(`[AI Tool] removeFromLibrary: ${appId}`);
+  async ({ appId, gameId }: { appId?: number; gameId?: string }) => {
+    logger.log(`[AI Tool] removeFromLibrary: ${gameId ?? appId}`);
     try {
-      const stringId = `steam-${appId}`;
-      const existing = currentLibraryData.find(e => e.gameId === stringId || e.gameId === String(appId));
-      if (!existing) return `Game ${appId} is not in the library`;
+      const existing = gameId
+        ? currentLibraryData.find(e => e.gameId === gameId)
+        : appId
+          ? currentLibraryData.find(e => e.gameId === `steam-${appId}` || e.gameId === String(appId))
+          : undefined;
+      if (!existing) return `Game ${gameId ?? appId} is not in the library`;
 
-      const details = await steamAPI.getAppDetails(appId);
-      const gameName = details?.name || `Game ${appId}`;
-      pendingActions.push({ type: 'remove', appId, gameId: stringId, gameName });
+      const steamAppId = existing.gameId.startsWith('steam-') ? parseSteamAppId(existing.gameId) : null;
+      const gameName = existing.name || `Game ${existing.gameId}`;
+      pendingActions.push({ type: 'remove', appId: steamAppId ?? 0, gameId: existing.gameId, gameName });
       return `Successfully queued "${gameName}" to be removed from the library.`;
     } catch (error) {
       return `Error removing game from library: ${error}`;
@@ -354,9 +457,10 @@ const removeFromLibraryTool = tool(
   },
   {
     name: 'removeGameFromLibrary',
-    description: "Remove a game from the user's library. Get the Steam App ID via searchSteamGames when the user names a game (e.g. 'Remove Hollow Knight'), or from getLibraryGames if they refer to a game already in the library.",
+    description: "Remove a game from the user's library. Prefer `gameId` from getLibraryGames (call it with nameQuery, e.g. 'Remove Hollow Knight' → nameQuery 'hollow knight'); this works for Steam, Epic and custom entries. A Steam `appId` from searchSteamGames also works for Steam games.",
     schema: z.object({
-      appId: z.number().describe('The Steam App ID from searchSteamGames or getLibraryGames'),
+      gameId: z.string().optional().describe('The library gameId from getLibraryGames (nameQuery matches)'),
+      appId: z.number().optional().describe('A Steam App ID, for Steam games only'),
     }),
   },
 );
@@ -549,11 +653,16 @@ const getHowLongToBeatTool = tool(
   },
 );
 
-const getGameDealsTool = tool(
+/**
+ * The deals tool is built per request so the user's gg.deals region (Settings →
+ * Prices) reaches getPrices without a module global; the default instance is only
+ * used for tool binding (same schema).
+ */
+const makeGameDealsTool = (region: string) => tool(
   async ({ appId }: { appId: number }) => {
-    logger.log(`[AI Tool] getGameDeals: ${appId}`);
+    logger.log(`[AI Tool] getGameDeals: ${appId} (${region})`);
     try {
-      const { prices, error } = await (await getGgDealsClient()).getPrices([appId], 'us');
+      const { prices, error } = await (await getGgDealsClient()).getPrices([appId], region);
       const p = prices[appId];
       if (!p) {
         return error === 'no-key'
@@ -582,6 +691,8 @@ const getGameDealsTool = tool(
   },
 );
 
+const getGameDealsTool = makeGameDealsTool('us');
+
 const allTools = [
   searchGamesTool,
   getGameDetailsTool,
@@ -602,153 +713,102 @@ for (const t of allTools) toolMap[t.name] = t;
 
 // ── System Prompt (production: exhaustive for well-formatted, reasoned, contextual answers) ─
 
-const SYSTEM_PROMPT = `You are the primary assistant for "Ark", a game library and discovery app. Your answers must be well-formatted, reasoned, and contextual.
+export const SYSTEM_PROMPT = `You are the assistant for "Ark", a game library and discovery app. Your answers must be well-formatted, reasoned, and grounded in context.
 
 **Your role**
-1. **Discover**: Search Steam/Epic, give recommendations from the user's library, and provide accurate game info.
-2. **Manage library**: Add/remove games by name; always confirm actions clearly.
-3. **Answer gaming questions**: Genres, developers, release dates, reviews, walkthroughs, NPCs, puzzles, and in-game help. Use tools for scores and reviews; use your knowledge for walkthroughs and codes.
+1. **Discover**: Search Steam/Epic, recommend from the user's library, and give accurate game info.
+2. **Manage the library**: Add/remove games by name and confirm every action clearly (e.g. "Added Elden Ring to your library with status Want to Play").
+3. **Answer gaming questions**: Genres, developers, release dates, reviews, walkthroughs, NPCs, puzzles, and in-game help. Use tools for scores, reviews and prices; use your knowledge for walkthroughs and codes.
 
 **Context and reasoning (mandatory)**
-- Before answering, consider: What did the user ask? What game or library context do they have? What tools did you call (if any) and what did they return?
-- Ground your reply in tool results when you used tools (e.g. recommendations, library list, Steam/Epic search). Do not invent scores, IDs, or release dates—use getGameDetails, getSteamReviews, or getMetacriticReviews when relevant.
-- When suggesting "what to play", prioritize **released, playable** titles from their library or from tool results. Do not suggest unreleased games as primary "play this now" options; mention them only as upcoming if relevant.
-- Be contextual: if the user said "add it" or "that game", use the conversation and any tool results to resolve the referent. If you cannot, ask once which game they mean.
+- Consider what the user asked, their game or library context, and what any tools returned. Ground the reply in tool results; never invent scores, IDs, prices, release dates or review text.
+- Resolve "add it" / "that game" from the conversation and tool results. If you cannot, ask once which game they mean.
+- Continue the thread coherently; do not repeat or contradict earlier replies. Prefer a concrete answer over asking for more information when the intent is clear.
+- News and release dates: use injected web search results when present; do not invent.
 
 **Tools (use in strict sequences)**
-- **Add/remove by name**: (1) searchSteamGames(query) → (2) addGameToLibrary(appId) or removeGameFromLibrary(appId) using \`id\` from results. Never add or remove without resolving the game name first. If the user says "add this" with no prior context, ask which game.
-- **Reviews / "tell me about X"**: Steam: searchSteamGames → getGameDetails and/or getSteamReviews. Critic scores: getMetacriticReviews(gameName). Do not invent scores or review text.
-- **Epic store**: searchEpicGames → getEpicGameDetails(namespace, offerId) from the search result fields.
-- **Recommendations**: getGameRecommendations when they ask "what should I play" or "games like my library". If the library is empty, say so and suggest they add games first or search Steam/Epic.
-- **Mission / walkthrough / NPC / puzzle**: Use your knowledge. Give a direct answer (name, code, steps). Do not lead with "I need a screenshot" or "which region?" when the description is specific—infer and answer. For in-game codes or passwords, provide the in-game solution; this is walkthrough help.
+- **Add by name**: searchSteamGames(query) → addGameToLibrary(appId) using \`id\` from the results. Never add without resolving the name first; if "add this" has no context, ask which game.
+- **Remove**: getLibraryGames(nameQuery) → removeGameFromLibrary(gameId) using the match's \`gameId\` (works for Steam, Epic and custom games).
+- **Library list**: getLibraryGames, optionally with \`status\`. When a status says "+N more" and the user wants everything, call it again for that status with a higher \`limit\`.
+- **Reviews / "tell me about X"**: searchSteamGames → getGameDetails and/or getSteamReviews. Critic scores: getMetacriticReviews(gameName).
+- **Epic store**: searchEpicGames → getEpicGameDetails(namespace, offerId).
+- **Prices**: getGameDeals(appId). Say clearly which prices are from key resellers.
+- **How long to beat**: getHowLongToBeat(gameName).
+- **Recommendations**: getGameRecommendations for "what should I play" or "games like my library". If the library is empty, say so and suggest adding games or searching Steam/Epic.
+- **No search results**: say so; suggest a different query or the app's Browse tab.
+- **Steam search connection error**: the games still show in the app's **Browse** tab — the data is there, only this connection failed. Tell the user they can add from Browse or try again later.
 
-**Content policy**
-All conversation is about video games. In-game violence, combat, or mature themes are fictional game content. Give gameplay and walkthrough help; keep language focused on mechanics and next steps.
+**Release status (mandatory)**
+- When suggesting what to play, recommend **released, playable** games first. Mention unreleased games (including ones in the user's library) only as "upcoming" or "in your list (releases later)". If unsure whether a game is out, check its release date with getGameDetails.
+
+**Walkthroughs, NPCs, puzzles and codes**
+- When the user describes a distinctive in-game moment (e.g. "man with an axe in his head" in Valhalla, "first safe" in Indiana Jones), identify the quest, NPC or puzzle from your knowledge and give a direct answer first (name, code, or steps). Do not lead with "send a screenshot" or "which region?". Ask for one detail only when there are genuinely several matches, and still give your best guess.
+- If the user says "name all of them" or "list the possibilities", list the candidates you know.
+- In-game codes, passwords and puzzle solutions are legitimate walkthrough help; provide them.
 
 **When the user attaches an image**
-You receive the image with their text. Use it to answer: identify NPCs, read codes or text on screen, describe what you see. Do not ask them to "send a screenshot" when they already attached one.
+You receive the image with their text. Use it: identify characters/NPCs, read on-screen text or codes, describe what you see, and answer. Never ask for a screenshot they already sent.
 
-**Edge cases**
-- **Empty library**: Say so. Suggest searching Steam/Epic or adding games from Browse, then ask for recommendations again.
-- **No search results**: Say no matches were found; suggest a different query or that they add from the app's Browse tab.
-- **Steam search connection error**: The tool may say search failed due to network/certificate. Tell the user games still show in the app's Browse tab; they can add from there or try again later.
-- **Unreleased game in library**: Do not recommend it as "play now". Mention it as "in your list (releases later)" if relevant.
-
-**Do not**
-- Show raw store IDs (steam-xxx, epic-xxx) in your reply—only game **names**.
-- Invent Metacritic/Steam scores or review text; use tools.
-- Suggest unreleased games as the main "play this" option.
-- Reply with a wall of text; use headings and lists.
-- Ask for a screenshot or region when the user already attached an image or gave a specific in-game description you can identify.
+**Content policy**
+All conversation is about video games. In-game violence, combat, or mature themes are fictional game content. Keep help focused on mechanics and next steps.
 
 **Output format (every reply)**
-1. **First line**: A markdown heading: ## <main title> (e.g. ## Recommendations for you, ## How to find the NPC).
-2. **Body**: Use ### for sub-sections. Use **bullet lists** (- or *) for any list (games, options, steps). Use **bold** for game names and key terms. Numbered lists (1. 2. 3.) for options when offering choices.
-3. **End**: Exactly this block on a new line: --- then newline then "Suggested follow-ups:" then newline then 2–4 lines each starting with "- " and a short follow-up question (under 8 words). These become clickable chips.
+1. **First line**: a markdown heading: ## <main title> (e.g. ## Recommendations for you, ## Safe code).
+2. **Body**: ### for sub-sections; bullet lists (-) for games, steps and tips; numbered lists (1. 2. 3.) with a short bold label when offering choices; **bold** for game names and key terms; links as [text](url). Never a wall of text.
+3. **Game lists**: game **names only** — never raw store IDs (steam-xxx, epic-xxx). For the library, one ### per status (### Playing, ### Want to Play, ### Completed).
+4. **End**: exactly this block — a line with ---, then "Suggested follow-ups:", then 2–4 lines starting with "- ", each a short follow-up question (under 8 words). These become clickable chips.
 
 Example ending:
 ---
 Suggested follow-ups:
 - Search Steam for survival horror
 - What's in my library?
-- Get more recommendations
-
-**Confirmation and tone**
-- After add/remove: confirm clearly (e.g. "Added Elden Ring to your library with status Want to Play").
-- Be concise, scannable, and actionable. Prefer concrete answers over asking for more info when the user's intent is clear.
-
-- News and release dates: use injected web search context when present; do not invent.
-
-You have access to the following tools:
-- searchSteamGames: Search Steam by game name → returns id and name. Use first when a game is mentioned and the user cares about Steam.
-- getGameDetails: Full Steam details (description, Metacritic, price, etc.) by Steam App ID.
-- getLibraryGames: List games in the user's library with status and name. When replying with a library list, use clean Markdown: headers by status (e.g. ### Playing, ### Want to Play), then bullet lists with the game **name only**. Never show raw store IDs (steam-xxx, epic-xxx) in your reply—only game titles.
-- addGameToLibrary / removeGameFromLibrary: By Steam App ID (from searchSteamGames or getLibraryGames).
-- getGameRecommendations: Recommendations based on the user's library.
-- searchEpicGames: Search the Epic Games Store by name → returns title, namespace, offerId. Use for "Epic", "on Epic", or Epic store questions.
-- getEpicGameDetails: Full Epic game details by namespace and offerId (from searchEpicGames).
-- getSteamReviews: Steam user reviews by Steam App ID (from searchSteamGames). Use for "what do players think", "Steam reviews", "worth it".
-- getMetacriticReviews: Critic and user scores plus critic reviews by game name. Use for "Metacritic", "critic reviews", "what do critics say".
-- getGameDeals: Current best and all-time low prices (official stores and key resellers) from gg.deals by Steam App ID. Use for "is X on sale", "best price". Say clearly which prices are from key resellers.
-- getHowLongToBeat: How long a game takes to beat (main story / main + extras / completionist hours) by game name. Use for "how long is X", "how long to beat".
-
-**Workflow (follow strictly):**
-1. **Add/remove by name**: searchSteamGames → use \`id\` as appId for addGameToLibrary or removeGameFromLibrary. If "add this game" with no context, ask which game.
-2. **Reviews / "tell me about X"**: For Steam: searchSteamGames → getGameDetails and/or getSteamReviews. For critic scores/reviews: getMetacriticReviews(gameName). Do not invent scores.
-3. **Epic store**: Use searchEpicGames then getEpicGameDetails with namespace and offerId when the user asks about Epic games.
-4. **Recommendations**: getGameRecommendations when they ask "what should I play" or "games like my library". If library empty, say so.
-5. **News, release dates**: Rely on injected web search context; do not invent dates or news.
-6. **Mission help / walkthroughs / NPC names / puzzle answers**: When the user describes a specific in-game moment (e.g. "man with axe in his head" in Valhalla, "first safe" in a game), use your knowledge to identify the quest, NPC, or puzzle and **give a direct answer first** (name, code, or steps). Do not lead with "I need more info" or "send region/screenshot"—infer from distinctive details and answer. Only ask for one clarifying detail if there are genuinely multiple different matches; in that case still give your best guess and the most likely answer.
-
-**Release status and context (mandatory):**
-- When the user asks for suggestions, "what should I play", or "games like X", recommend games that are **released and playable now**. Do not suggest unreleased or upcoming games as primary "play this" options.
-- If a game in the user's library (or in tool results) is **not yet released**, do not present it as a suggestion to play now. You may mention it as "also in your list (releases later)" or "upcoming" only if relevant, and prioritize **released** titles first.
-- When you are not sure whether a game is released, prefer games you know are out (or use getGameDetails for release_date when needed). Do not blindly list titles from the library or tools without considering release status—give contextual, actionable answers (things they can actually play now).
-
-**When Steam search fails with a connection/network error:** The tool may return a message that the search failed due to connection or certificate issues. In the app, when users search in the **Browse** tab, games do show up — the catalog data is there. So if the user says "I can see it in Browse" or similar, the game exists; the issue is only this connection. Tell them they can add the game from the Browse tab or try again later.
-
-**Formatting (mandatory — every reply must be well-structured):**
-- Start with a **main heading** (##) that summarizes the answer (e.g. ## RPGs in your library, ## How to find the NPC, ## Safe code).
-- Use **subheadings** (###) for distinct sections (e.g. ### From your library, ### On Steam, ### Recommendations).
-- When offering **options or choices**, use a **numbered list** (1. 2. 3.) with a short bold label per option, then a line or bullet under each (e.g. **1. From your library** — then bullets of games).
-- Use **bullet lists** for any list of items (games, steps, tips). Use **bold** for game names and key terms.
-- For links use [text](url). Do not reply with a wall of text—break content into clear blocks with headings and lists so it is easy to scan.
-- When listing the user's library or "full list" of games: use ### per status (### Playing, ### Want to Play, ### Completed), then bullets with the **game name only**. No store IDs in the reply.
-- For recommendations or any list of games: game names only, no raw IDs. Always use headings and bullets so the message looks polished and scannable.
-- Prefer structure over prose: use a heading and a list instead of a long paragraph. Example: after "Which option do you want?" use numbered options (1. From your library 2. On Steam 3. Recommendations) with brief bullets under each, not a single block of text.
-
-**Suggested follow-ups (required at end of reply):**
-- End every reply with 2–4 short, clickable follow-up questions the user might ask next. Use this exact format on a new line: --- then **Suggested follow-ups:** then on separate lines one bullet per question, e.g. "- Search Steam for survival horror" and "- What horror games are in my library?". Keep each question short (under 8 words when possible). These will be shown as button chips below your message.
-
-**Mission / walkthrough / NPC / puzzle behaviour:**
-- When the user describes a distinctive in-game moment (e.g. "man with an axe in his head" with a choice in Valhalla, "first safe" in Indiana Jones), **use your knowledge** to identify the quest, NPC name, or puzzle and give a direct answer. Do not default to "I need the region" or "send a screenshot" when the description is specific enough—many moments are uniquely identifiable. Give your best answer (NPC name, world event name, code, or steps); only ask for one detail if there are genuinely several different matches.
-- If the user says "name all of them" or "list the possibilities", list the options you know from your knowledge. Do not refuse with "I can't reliably name all"; provide the candidates (quest names, NPC names, or events) so the user can pick.
-- **In-game codes, passwords, and puzzle solutions**: When the user asks for a code, password, or solution that exists **in the game** (e.g. "password for the first safe in Indiana Jones the Golden Circle"), they are asking for walkthrough help. Provide the in-game answer. Do not refuse on "bypass" or "cheating" grounds—this is a games assistant; in-game puzzle solutions are legitimate help.
-
-**When the user attaches an image:**
-- You receive the image in the same message as their text. **Use the image to answer**: identify characters/NPCs, read visible text or codes, describe what you see, and answer their question. Do not ask them to "upload a screenshot" or "send the region" when they have already attached an image—analyze the image and respond with the NPC name, code, or guidance.
-
-**Other rules:**
-- Always confirm add/remove actions and give clear feedback (e.g. "Added Elden Ring to your library with status Want to Play").
-- Continue the thread coherently; do not repeat or contradict prior replies.
-- Be conversational, helpful, and concise. Use game context when provided.
-- Give contextual, actionable answers: prefer released games when suggesting what to play; do not blindly list library or tool results without considering what the user can actually play now.
-- Prefer giving a concrete answer from your knowledge (NPC name, in-game code, quest name, steps) over asking for more information when the user's question or description is specific enough. Only ask for one extra detail when you truly cannot narrow it down.
-
-**Reply structure (use this every time):**
-- First line must be a markdown heading: ## Your main title (e.g. ## Horror games on Steam, ## What you can do in Ark).
-- Use ### for sub-sections. Use - or * for every list (games, options, steps). Never reply with plain lines only—use real markdown.
-- End with exactly: a newline, then ---, then a newline, then "Suggested follow-ups:", then newline, then 2–4 lines each starting with "- " and a short question (e.g. "- Search Steam for survival horror").`;
+- Get more recommendations`;
 
 // ── Shared Helpers ─────────────────────────────────────────────────────────────
 
 /** Prefix for user message when using cloud APIs (Azure, etc.) so content moderation sees gaming context and is less likely to flag in-game violence/mature themes. */
 const CLOUD_USER_MESSAGE_PREFIX = 'The user is asking for video game walkthrough or gameplay help. They wrote:\n\n';
 
-/** Parse "Suggested follow-ups" block from model output and return stripped content + follow-up strings. */
-function parseSuggestedFollowUps(content: string): { content: string; suggestedFollowUps: string[] } {
-  const marker = '\n---\n';
-  let idx = content.lastIndexOf(marker);
-  if (idx === -1) idx = content.lastIndexOf('\n--- ');
-  if (idx === -1) idx = content.lastIndexOf('---\n');
-  if (idx === -1) return { content: content.trim(), suggestedFollowUps: [] };
-  const fromMarker = content.slice(idx);
-  const block = fromMarker.includes('\n') ? fromMarker.split('\n').slice(1).join('\n').trim() : '';
-  const lower = block.toLowerCase();
-  const hasFollowUpLabel = lower.includes('suggested follow-up') || lower.includes('suggested follow up') || lower.includes('follow-up') || lower.includes('follow up');
-  if (!hasFollowUpLabel) return { content: content.slice(0, idx).trim(), suggestedFollowUps: [] };
-  const lines = block.split(/\n/);
+const isFollowUpLabel = (line: string): boolean => {
+  const l = line.toLowerCase();
+  return l.includes('suggested follow') || l.includes('follow-up') || l.includes('follow up');
+};
+
+/**
+ * Parse the "Suggested follow-ups" block from model output and return stripped content +
+ * follow-up strings. The marker is the last line that starts with '---' (never a table row
+ * such as '|---|'); content is only cut when a follow-up label follows that marker AND at
+ * least one follow-up line was collected, so a plain '---' section divider never eats the
+ * section after it.
+ */
+export function parseSuggestedFollowUps(content: string): { content: string; suggestedFollowUps: string[] } {
+  const intact = { content: content.trim(), suggestedFollowUps: [] as string[] };
+  const lines = content.split(/\r?\n/);
+  let markerIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (/^-{3,}/.test(t) && !t.includes('|')) { markerIdx = i; break; }
+  }
+  if (markerIdx === -1) return intact;
+
+  // The label may sit on the marker line itself ("--- Suggested follow-ups:").
+  const block = [lines[markerIdx].trim().replace(/^-{3,}\s*/, ''), ...lines.slice(markerIdx + 1)];
   const followUps: string[] = [];
   let collecting = false;
-  for (const line of lines) {
+  for (const line of block) {
     const t = line.trim();
-    if (hasFollowUpLabel && (t.toLowerCase().includes('suggested follow') || t.toLowerCase().includes('follow-up') || t.toLowerCase().includes('follow up'))) { collecting = true; continue; }
-    if (collecting && (/^\s*[-*]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line))) {
+    if (!collecting) {
+      if (isFollowUpLabel(t)) collecting = true;
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)) {
       const text = t.replace(/^\s*[-*]\s+/, '').replace(/^\s*\d+[.)]\s+/, '').trim();
       if (text.length > 0 && text.length < 120) followUps.push(text);
-    } else if (collecting && t.length > 0) break;
+    } else if (t.length > 0) break;
   }
-  return { content: content.slice(0, idx).trim(), suggestedFollowUps: followUps.slice(0, 6) };
+  if (followUps.length === 0) return intact;
+  return { content: lines.slice(0, markerIdx).join('\n').trim(), suggestedFollowUps: followUps.slice(0, 6) };
 }
 
 /** Generate 2–4 fallback follow-up questions when the model did not output a follow-ups block. */
@@ -884,7 +944,11 @@ async function addWebSearchContext(userMessage: string, gameContext: GameContext
   const results = await webSearch(query, 5);
   if (results.length > 0) {
     const contextBlock = formatSearchContext(query, results);
-    messages.splice(1, 0, new SystemMessage(contextBlock));
+    // After the stable system prefix (prompt + game/library context), not at index 1,
+    // so the long system prompt stays a reusable prefix for the provider's prompt cache.
+    let insertAt = 0;
+    while (insertAt < messages.length && messages[insertAt] instanceof SystemMessage) insertAt++;
+    messages.splice(insertAt, 0, new SystemMessage(contextBlock));
     chainOfThought.push({ type: 'tool_result', content: `Web search: ${results.length} results`, toolName: 'webSearch', toolResult: results.map(r => r.title).join(', '), timestamp: new Date() });
   } else {
     chainOfThought.push({ type: 'tool_result', content: 'Web search: no results', toolName: 'webSearch', toolResult: 'No results', timestamp: new Date() });
@@ -924,18 +988,45 @@ const safeInt = (v: unknown, fallback = 0): number => {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 };
 
-async function executeTool(name: string, args: Record<string, unknown>): Promise<string> {
+const INVALID_APP_ID_MESSAGE = 'Invalid appId; call searchSteamGames first.';
+
+/** Per-request values the tools need that must not live in module globals. */
+interface ToolContext {
+  ggRegion: string;
+}
+
+/** Tools that change the library; they run one at a time, after the read-only ones, in call order. */
+const MUTATING_TOOLS = new Set(['addGameToLibrary', 'removeGameFromLibrary']);
+
+async function executeTool(name: string, args: Record<string, unknown>, ctx: ToolContext = { ggRegion: 'us' }): Promise<string> {
   switch (name) {
     case 'searchSteamGames':
       return searchGamesTool.invoke({ query: safeString(args.query), limit: safeInt(args.limit, 10) });
     case 'getGameDetails':
       return getGameDetailsTool.invoke({ appId: safeInt(args.appId) });
     case 'getLibraryGames':
-      return getLibraryGamesTool.invoke({});
-    case 'addGameToLibrary':
-      return addToLibraryTool.invoke({ appId: safeInt(args.appId), status: safeString(args.status, 50) || undefined });
-    case 'removeGameFromLibrary':
-      return removeFromLibraryTool.invoke({ appId: safeInt(args.appId) });
+      return getLibraryGamesTool.invoke({
+        status: safeString(args.status, 50) || undefined,
+        limit: safeInt(args.limit) || undefined,
+        nameQuery: safeString(args.nameQuery, 200) || undefined,
+      });
+    case 'addGameToLibrary': {
+      const appId = parseSteamAppId(args.appId);
+      if (appId === null) return INVALID_APP_ID_MESSAGE;
+      return addToLibraryTool.invoke({ appId, status: safeString(args.status, 50) || undefined });
+    }
+    case 'removeGameFromLibrary': {
+      // A gameId (any store) wins when it names a library entry; else fall back to a Steam app id.
+      const gameId = safeString(args.gameId, 300);
+      if (gameId && currentLibraryData.some(e => e.gameId === gameId)) return removeFromLibraryTool.invoke({ gameId });
+      const appId = parseSteamAppId(args.appId ?? args.gameId);
+      if (appId === null) {
+        return gameId
+          ? `Game ${gameId} is not in the library; call getLibraryGames with nameQuery to get its gameId.`
+          : INVALID_APP_ID_MESSAGE;
+      }
+      return removeFromLibraryTool.invoke({ appId });
+    }
     case 'getGameRecommendations':
       return getRecommendationsTool.invoke({ limit: safeInt(args.limit, 10) });
     case 'searchEpicGames':
@@ -947,7 +1038,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     case 'getMetacriticReviews':
       return getMetacriticReviewsTool.invoke({ gameName: safeString(args.gameName) });
     case 'getGameDeals':
-      return getGameDealsTool.invoke({ appId: safeInt(args.appId) });
+      return makeGameDealsTool(ctx.ggRegion).invoke({ appId: safeInt(args.appId) });
     case 'getHowLongToBeat':
       return getHowLongToBeatTool.invoke({ gameName: safeString(args.gameName, 200), year: safeInt(args.year) || undefined });
     default:
@@ -979,6 +1070,34 @@ Review the assistant's response against the user's question. Decide if it is pro
 - Do not add raw store IDs (steam-xxx, epic-xxx). Use game names only.
 - Keep the improved reply as a single block of text the user will see. Do not add meta-commentary like "I added headings."`;
 
+const FOLLOW_UPS_LABEL = 'suggested follow-ups:';
+
+/** Cheap local check: a reply that already has a ## heading and a parsed follow-ups block
+ *  needs no reviewer round trip. */
+export function passesLocalFormatChecks(content: string): boolean {
+  return /^##\s/.test(content.trim()) && parseSuggestedFollowUps(content).suggestedFollowUps.length > 0;
+}
+
+/**
+ * Accept a reviewer rewrite only when it is complete: not cut off by MAX_TOKENS, at least
+ * ~70% of the original length, starts with '## ', and keeps the follow-ups block when the
+ * original had one. Otherwise the original answer stands.
+ */
+export function acceptReviewerRewrite(original: string, rewrite: string, finishReason?: string): boolean {
+  if (finishReason && /max_tokens|length/i.test(finishReason)) return false;
+  const r = rewrite.trim();
+  if (r.length < original.trim().length * 0.7) return false;
+  if (!r.startsWith('## ')) return false;
+  if (original.toLowerCase().includes(FOLLOW_UPS_LABEL) && !r.toLowerCase().includes(FOLLOW_UPS_LABEL)) return false;
+  return true;
+}
+
+function finishReasonOf(msg: AIMessage | AIMessageChunk): string | undefined {
+  const meta = (msg as { response_metadata?: Record<string, unknown> }).response_metadata ?? {};
+  const r = meta.finishReason ?? meta.finish_reason;
+  return typeof r === 'string' ? r : undefined;
+}
+
 async function validateResponse(userMessage: string, aiResponse: string): Promise<{ isValid: boolean; improvedResponse?: string }> {
   try {
     const userPrompt = `User asked: ${JSON.stringify(userMessage)}
@@ -994,7 +1113,12 @@ Reply with VALID or IMPROVE: [full improved version].`;
     const content = typeof result.content === 'string' ? result.content : '';
 
     if (content.startsWith('VALID')) return { isValid: true };
-    if (content.startsWith('IMPROVE:')) return { isValid: false, improvedResponse: content.substring(8).trim() };
+    if (content.startsWith('IMPROVE:')) {
+      const improved = content.substring(8).trim();
+      if (acceptReviewerRewrite(aiResponse, improved, finishReasonOf(result))) return { isValid: false, improvedResponse: improved };
+      logger.log('[Reviewer] Rewrite rejected (truncated, too short or missing heading/follow-ups) — keeping original');
+      return { isValid: true };
+    }
     return { isValid: true };
   } catch (error) {
     logger.error('[Reviewer] Error:', error);
@@ -1008,8 +1132,8 @@ Reply with VALID or IMPROVE: [full improved version].`;
 //   1. Build messages  (system prompt + context + history)
 //   2. Web search grounding  (if the question benefits from current data)
 //   3. Invoke model with tools  (streaming when requested)
-//   4. Tool-calling loop  (iterative, max 5 rounds)
-//   5. Reviewer agent  (when Gemini API key is available: checks format, accuracy, follow-ups; can rewrite)
+//   4. Tool-calling loop  (iterative, max 5 rounds; read-only tools run in parallel)
+//   5. Reviewer agent  (Gemini provider only, and only when the answer fails local format checks)
 
 const MAX_TOOL_ITERATIONS = 5;
 
@@ -1062,6 +1186,8 @@ export async function processMessage(
   _provider?: string,
   providerOptions?: ChatProviderOptions,
   imageAttachment?: string,
+  /** gg.deals region from Settings → Prices (renderer `getGgRegion()`); normalised, default 'us'. */
+  ggRegion?: string,
 ): Promise<{
   content: string;
   suggestedFollowUps: string[];
@@ -1079,8 +1205,9 @@ export async function processMessage(
   pendingActions = [];
   chainOfThought = [];
 
-  const { model, providerName } = getModelForProvider(providerOptions);
-  const usedOllama = provider === 'ollama';
+  const { model, providerName, provider: effectiveProvider } = getModelForProvider(providerOptions);
+  const usedOllama = effectiveProvider === 'ollama';
+  const toolCtx: ToolContext = { ggRegion: normalizeRegion(ggRegion) };
   const ollamaSettings = settingsStore.getOllamaSettings();
 
   chainOfThought.push({ type: 'thinking', content: `Provider: ${providerName}`, timestamp: new Date() });
@@ -1115,24 +1242,43 @@ export async function processMessage(
 
       messages.push(response as AIMessage);
 
-      for (const tc of response.tool_calls) {
-        const name = tc.name;
-        const args = tc.args as Record<string, unknown>;
-        toolsUsed.push(name);
+      const calls = response.tool_calls;
+      for (const tc of calls) {
+        toolsUsed.push(tc.name);
+        chainOfThought.push({ type: 'tool_call', content: `Calling: ${tc.name}`, toolName: tc.name, toolArgs: tc.args as Record<string, unknown>, timestamp: new Date() });
+      }
 
-        chainOfThought.push({ type: 'tool_call', content: `Calling: ${name}`, toolName: name, toolArgs: args, timestamp: new Date() });
-
+      // Read-only tools run concurrently; add/remove run afterwards one at a time in call
+      // order so pendingActions stays deterministic. Results are reported in call order.
+      const runOne = (tc: (typeof calls)[number]) => executeTool(tc.name, tc.args as Record<string, unknown>, toolCtx);
+      const settled: PromiseSettledResult<string>[] = new Array(calls.length);
+      const readOnly = calls.map((tc, i) => ({ tc, i })).filter(({ tc }) => !MUTATING_TOOLS.has(tc.name));
+      const readResults = await Promise.allSettled(readOnly.map(({ tc }) => runOne(tc)));
+      readOnly.forEach(({ i }, k) => { settled[i] = readResults[k]; });
+      for (let i = 0; i < calls.length; i++) {
+        if (!MUTATING_TOOLS.has(calls[i].name)) continue;
         try {
-          const result = await executeTool(name, args);
+          settled[i] = { status: 'fulfilled', value: await runOne(calls[i]) };
+        } catch (reason) {
+          settled[i] = { status: 'rejected', reason };
+        }
+      }
+
+      calls.forEach((tc, i) => {
+        const name = tc.name;
+        const outcome = settled[i];
+        if (outcome.status === 'fulfilled') {
+          const result = outcome.value;
           logger.log(`[AI Proxy] Tool ${name} →`, result.substring(0, 100));
           chainOfThought.push({ type: 'tool_result', content: `${name}: OK`, toolName: name, toolResult: result.length > 500 ? result.substring(0, 500) + '...' : result, timestamp: new Date() });
           messages.push(new ToolMessage({ content: result, tool_call_id: tc.id || '' }));
-        } catch (error) {
+        } else {
+          const error = outcome.reason;
           logger.error(`[AI Proxy] Tool ${name} error:`, error);
           chainOfThought.push({ type: 'tool_result', content: `${name}: FAILED`, toolName: name, toolResult: `Error: ${error}`, timestamp: new Date() });
           messages.push(new ToolMessage({ content: `Error executing tool: ${error}`, tool_call_id: tc.id || '' }));
         }
-      }
+      });
 
       // Next round — stream the response (text tokens arrive here for the final iteration)
       response = await invokeModel(modelWithTools, messages, onStreamChunk);
@@ -1141,23 +1287,29 @@ export async function processMessage(
     // 6. Extract content
     let content = extractContent(response);
 
-    // 6b. If model used tools but returned no text (e.g. some reasoning models), ask once for a user-facing summary
+    // 6b. If model used tools but returned no text (e.g. some reasoning models, or the
+    // tool-iteration cap was hit), ask once for a user-facing summary.
     if (content.length === 0 && toolsUsed.length > 0) {
       logger.log('[AI Proxy] Final response was empty after tool use — requesting summary');
-      messages.push(response as AIMessage);
+      // A capped turn still carries tool_calls with no results; Azure/Gemini reject a
+      // history with unanswered tool_calls, so that message is left out.
+      if (!response.tool_calls?.length) messages.push(response as AIMessage);
       messages.push(new HumanMessage(
         'Based on the tool results above, write a short, user-friendly reply. Summarize what you found (e.g. recommendations or library list) in clear Markdown. Use headers and bullet lists. Do not include raw JSON or store IDs (steam-xxx, epic-xxx) in the reply—only game names and your message.',
       ));
-      const summaryResponse = await invokeModel(modelWithTools, messages, onStreamChunk);
+      // Unbound model: the summary must be text, not another tool round.
+      const summaryResponse = await invokeModel(model as BaseChatModel, messages, onStreamChunk);
       content = extractContent(summaryResponse);
       if (content.length > 0) {
         response = summaryResponse;
       }
     }
 
-    // 7. Validation (requires a Gemini API key)
-    const hasGeminiKey = !!settingsStore.getGoogleAIKey();
-    if (hasGeminiKey) {
+    // 7. Reviewer — only when Gemini itself is the chosen provider (user decision
+    // 2026-10-30: no other provider is ever called behind the user's back), and only
+    // when the answer fails the cheap local format checks.
+    const runReviewer = effectiveProvider === 'gemini' && !!settingsStore.getGoogleAIKey() && !passesLocalFormatChecks(content);
+    if (runReviewer) {
       chainOfThought.push({ type: 'validation', content: 'Running reviewer agent...', timestamp: new Date() });
       const validation = await validateResponse(userMessage, content);
       if (!validation.isValid && validation.improvedResponse) {
@@ -1178,6 +1330,13 @@ export async function processMessage(
     return { content: formatted, suggestedFollowUps, toolsUsed, actions: pendingActions, chainOfThought, model: providerName, ...(usage && { usage }) };
   } catch (error: any) {
     chainOfThought.push({ type: 'thinking', content: `Error: ${error}`, timestamp: new Date() });
+
+    // A rejected key must not stay cached: the next call rebuilds the client with
+    // whatever key Settings holds by then.
+    if (isAuthError(error)) {
+      cachedModel = null;
+      cachedModelKey = null;
+    }
 
     // Friendly error only when we actually used Ollama and it's a connection failure
     if (usedOllama && (error?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed') || error?.cause?.code === 'ECONNREFUSED')) {

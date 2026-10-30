@@ -15,7 +15,7 @@ export function register(): void {
    * Supports streaming responses via 'ai:streamChunk' event
    */
   ipcMain.handle('ai:sendMessage', async (event: any, payload: any) => {
-    const { message, gameContext, libraryData, azureEndpoint, azureKey, azureDeployment, azureApiVersion, imageAttachment } = payload || {};
+    const { message, gameContext, libraryData, azureEndpoint, azureKey, azureDeployment, azureApiVersion, imageAttachment, ggRegion } = payload || {};
     try {
       const MAX_MSG_LEN = 4000;
       if (typeof message !== 'string' || message.length > MAX_MSG_LEN) {
@@ -58,7 +58,8 @@ export function register(): void {
         event.sender.send('ai:streamChunk', { chunk, fullContent });
       };
       
-      const result = await processMessage(message, gameContext, safeLibraryData, onStreamChunk, undefined, providerOptions, safeImageAttachment);
+      // ggRegion is validated (normalizeRegion) inside processMessage; unknown values become 'us'.
+      const result = await processMessage(message, gameContext, safeLibraryData, onStreamChunk, undefined, providerOptions, safeImageAttachment, typeof ggRegion === 'string' ? ggRegion : undefined);
       
       // Persist to the same conversation regardless of provider so context survives model switches
       const storedContent = message + (safeImageAttachment ? ' [Image attached]' : '');

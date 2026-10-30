@@ -97,7 +97,23 @@ interface Settings {
      * Default off until rebuild smoke is green.
      */
     embeddingMrl256Enabled?: boolean;
+    /**
+     * Context window (num_ctx) for AI chat on Ollama (v1.0.97). Ollama's own 2-4k
+     * default cut off the system prompt or the question. Clamped by clampChatNumCtx.
+     */
+    chatNumCtx?: number;
   };
+}
+
+export const DEFAULT_CHAT_NUM_CTX = 8192;
+const CHAT_NUM_CTX_MIN = 2048;
+const CHAT_NUM_CTX_MAX = 131072;
+
+/** Clamp an Ollama chat num_ctx value; anything unusable falls back to the 8192 default. */
+export function clampChatNumCtx(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_CHAT_NUM_CTX;
+  return Math.min(CHAT_NUM_CTX_MAX, Math.max(CHAT_NUM_CTX_MIN, Math.round(n)));
 }
 
 /** Default rerank model — keep string in sync with `src/services/ollama-rerank.ts` `DEFAULT_OLLAMA_RERANK_MODEL`. */
@@ -354,6 +370,7 @@ class SettingsStore {
     chunkAnnMaxSimEnabled: boolean;
     embeddingMrl256Enabled: boolean;
     embeddingBatchSize: number;
+    chatNumCtx: number;
   } {
     const defaults = {
       enabled: true,
@@ -369,6 +386,7 @@ class SettingsStore {
       chunkAnnMaxSimEnabled: true,
       embeddingMrl256Enabled: false,
       embeddingBatchSize: 0,
+      chatNumCtx: DEFAULT_CHAT_NUM_CTX,
     };
     const o = this.settings.ollama;
     let blend =
@@ -388,6 +406,7 @@ class SettingsStore {
       chunkAnnMaxSimEnabled: o?.chunkAnnMaxSimEnabled !== false,
       embeddingMrl256Enabled: o?.embeddingMrl256Enabled === true,
       embeddingBatchSize: clampEmbeddingBatchSize(o?.embeddingBatchSize),
+      chatNumCtx: clampChatNumCtx(o?.chatNumCtx),
     };
   }
 
@@ -405,6 +424,7 @@ class SettingsStore {
     chunkAnnMaxSimEnabled?: boolean;
     embeddingMrl256Enabled?: boolean;
     embeddingBatchSize?: number;
+    chatNumCtx?: number;
   }): void {
     const next = { ...settings };
     if (next.rerankModel !== undefined) {
@@ -420,6 +440,7 @@ class SettingsStore {
       next.oracleRerankBlend = Number.isFinite(b) ? Math.min(1, Math.max(0, b)) : 0.6;
     }
     if (next.embeddingBatchSize !== undefined) next.embeddingBatchSize = clampEmbeddingBatchSize(next.embeddingBatchSize);
+    if (next.chatNumCtx !== undefined) next.chatNumCtx = clampChatNumCtx(next.chatNumCtx);
     this.settings.ollama = {
       ...this.settings.ollama,
       ...next,

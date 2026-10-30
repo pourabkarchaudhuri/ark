@@ -30,6 +30,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+import { getGgRegion } from '@/services/ggdeals-service';
 import { AnimateIcon } from '@/components/ui/animate-icon';
 import type { 
   ChatMessage, 
@@ -748,6 +749,7 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
         message: text,
         gameContext,
         libraryData,
+        ggRegion: getGgRegion(),
         ...(attachedImage ? { imageAttachment: attachedImage } : {}),
       };
       if (preferredProvider === 'azure-openai') {
