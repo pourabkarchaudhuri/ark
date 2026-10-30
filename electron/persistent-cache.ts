@@ -49,6 +49,12 @@ const LONG_LIVED_TTL = 60 * 60 * 1000;
 const SAVE_DEBOUNCE_MS = 15_000;
 
 /**
+ * Max time a dirty cache waits for a save. A trailing-only debounce never fired
+ * during a long burst of sets, so a crash lost the whole burst.
+ */
+const SAVE_MAX_WAIT_MS = 60_000;
+
+/**
  * Hard expiry: STALE_TTL, or the entry's own TTL when longer. Using STALE_TTL alone
  * threw away the 7-day tag list (and similar) after a day, forcing refetches.
  */
@@ -74,20 +80,39 @@ function entriesToPersist(store: Map<string, CacheEntry<unknown>>): Array<[strin
 export class PersistentCache {
   private memoryStore: Map<string, CacheEntry<unknown>> = new Map();
   private cacheFilePath: string;
-  private isDirty: boolean = false;
+  /**
+   * Bumped by every mutation; `savedVersion` is the newest version known to be on disk.
+   * A plain isDirty flag was cleared by an async save that finished after a newer set(),
+   * so that set was never written (and flushSync couldn't skip clean caches safely).
+   */
+  private version = 0;
+  private savedVersion = 0;
   private saveTimeout: NodeJS.Timeout | null = null;
+  /** When the pending debounced save was first armed (for SAVE_MAX_WAIT_MS). */
+  private firstDirtyAt = 0;
+  private loaded = false;
   private label: string;
 
   constructor(filename: string = 'cache.json') {
     const userDataPath = app?.getPath('userData') || './cache';
     this.cacheFilePath = path.join(userDataPath, filename);
     this.label = filename.replace('.json', '');
-    this.loadFromDisk();
+  }
+
+  private get isDirty(): boolean {
+    return this.version !== this.savedVersion;
   }
 
   /**
-   * Load cache from disk on startup
+   * Load from disk on first use rather than at construction: the caches are created at
+   * module import, before the window exists, and the sync read + parse blocked startup.
    */
+  private ensureLoaded(): void {
+    if (this.loaded) return;
+    this.loaded = true;
+    this.loadFromDisk();
+  }
+
   private loadFromDisk(): void {
     try {
       if (fs.existsSync(this.cacheFilePath)) {
@@ -109,57 +134,96 @@ export class PersistentCache {
     }
   }
 
+  private serialize(): { json: string; count: number } {
+    const entries = entriesToPersist(this.memoryStore);
+    const obj: Record<string, CacheEntry<unknown>> = {};
+    for (const [key, value] of entries) obj[key] = value;
+    return { json: JSON.stringify(obj), count: entries.length };
+  }
+
   /**
-   * Save cache to disk (debounced by SAVE_DEBOUNCE_MS)
+   * Schedule a disk save: debounced by SAVE_DEBOUNCE_MS, but never later than
+   * SAVE_MAX_WAIT_MS after the first unsaved change.
    */
   private saveToDisk(): void {
+    let delay = SAVE_DEBOUNCE_MS;
     if (this.saveTimeout) {
+      const elapsed = Date.now() - this.firstDirtyAt;
+      if (elapsed >= SAVE_MAX_WAIT_MS) return; // overdue save is about to fire — don't push it back
       clearTimeout(this.saveTimeout);
+      delay = Math.min(SAVE_DEBOUNCE_MS, SAVE_MAX_WAIT_MS - elapsed);
+    } else {
+      this.firstDirtyAt = Date.now();
     }
 
     this.saveTimeout = setTimeout(() => {
+      this.saveTimeout = null;
+      this.firstDirtyAt = 0;
       try {
-        const entries = entriesToPersist(this.memoryStore);
-
-        const obj: Record<string, CacheEntry<unknown>> = {};
-        for (const [key, value] of entries) {
-          obj[key] = value;
-        }
-
-        const json = JSON.stringify(obj);
-        atomicWriteFile(this.cacheFilePath, json, (err) => {
-          if (err) {
-            logger.error(`[Cache:${this.label}] Failed to save disk cache:`, err);
-            this.isDirty = true; // Ensure retry on next saveToDisk call
-          } else {
-            this.isDirty = false;
-            logger.log(`[Cache:${this.label}] Saved ${entries.length} entries to disk`);
-          }
-        });
+        const v = this.version;
+        const { json, count } = this.serialize();
+        atomicWriteFile(
+          this.cacheFilePath,
+          json,
+          (err) => {
+            if (err) {
+              // Stays dirty: the next save (or the quit flush) retries
+              logger.error(`[Cache:${this.label}] Failed to save disk cache:`, err);
+            } else {
+              this.savedVersion = Math.max(this.savedVersion, v);
+              logger.log(`[Cache:${this.label}] Saved ${count} entries to disk`);
+            }
+          },
+          // A flushSync that ran while this write was in flight already put newer data on disk
+          () => this.savedVersion < v,
+        );
       } catch (error) {
         logger.error(`[Cache:${this.label}] Failed to save disk cache:`, error);
       }
-    }, SAVE_DEBOUNCE_MS);
+    }, delay);
+  }
+
+  private markChanged(): void {
+    this.version++;
+    this.saveToDisk();
+  }
+
+  /**
+   * Bring the store back under MAX_MEMORY_SIZE. Fully expired entries go first, then the
+   * oldest short-lived ones; long-lived entries (app list, tag list, catalog crawls) are
+   * only evicted when they alone exceed the cap. Plain write-order eviction dropped the
+   * long-lived entries after a long browsing session, forcing big re-downloads.
+   */
+  private evictOverCap(): void {
+    const store = this.memoryStore;
+    if (store.size <= MAX_MEMORY_SIZE) return;
+    const now = Date.now();
+    for (const [k, e] of store) {
+      if (now - e.timestamp > expiresAfter(e)) store.delete(k);
+    }
+    for (const [k, e] of store) {
+      if (store.size <= MAX_MEMORY_SIZE) return;
+      if (e.ttl < LONG_LIVED_TTL) store.delete(k);
+    }
+    for (const k of store.keys()) {
+      if (store.size <= MAX_MEMORY_SIZE) return;
+      store.delete(k);
+    }
   }
 
   set<T>(key: string, data: T, ttl: number = DEFAULT_TTL): void {
+    this.ensureLoaded();
     // Re-insert so Map order tracks recency (Map.set on an existing key keeps its old slot)
     this.memoryStore.delete(key);
     this.memoryStore.set(key, { data, timestamp: Date.now(), ttl });
+    this.evictOverCap();
+    this.markChanged();
+  }
 
-    // Evict oldest in-memory entries when over the cap
-    if (this.memoryStore.size > MAX_MEMORY_SIZE) {
-      const excess = this.memoryStore.size - MAX_MEMORY_SIZE;
-      let removed = 0;
-      for (const k of this.memoryStore.keys()) {
-        if (removed >= excess) break;
-        this.memoryStore.delete(k);
-        removed++;
-      }
-    }
-
-    this.isDirty = true;
-    this.saveToDisk();
+  /** Remove one entry. */
+  delete(key: string): void {
+    this.ensureLoaded();
+    if (this.memoryStore.delete(key)) this.markChanged();
   }
 
   /**
@@ -167,6 +231,7 @@ export class PersistentCache {
    * @param allowStale — If true, returns stale data (useful for stale-while-revalidate)
    */
   get<T>(key: string, allowStale: boolean = false): T | null {
+    this.ensureLoaded();
     const entry = this.memoryStore.get(key);
     if (!entry) return null;
 
@@ -192,6 +257,7 @@ export class PersistentCache {
 
   /** Check if key exists and is fresh (within normal TTL) */
   has(key: string): boolean {
+    this.ensureLoaded();
     const entry = this.memoryStore.get(key);
     if (!entry) return false;
     return Date.now() - entry.timestamp <= entry.ttl;
@@ -199,6 +265,7 @@ export class PersistentCache {
 
   /** Check if key exists (even if stale, within STALE_TTL) */
   hasStale(key: string): boolean {
+    this.ensureLoaded();
     const entry = this.memoryStore.get(key);
     if (!entry) return false;
     if (Date.now() - entry.timestamp > expiresAfter(entry)) {
@@ -210,34 +277,37 @@ export class PersistentCache {
 
   /** Check if cached data is stale (exists but beyond normal TTL) */
   isStale(key: string): boolean {
+    this.ensureLoaded();
     const entry = this.memoryStore.get(key);
     if (!entry) return true;
     return Date.now() - entry.timestamp > entry.ttl;
   }
 
   clear(): void {
+    this.loaded = true; // nothing on disk is wanted any more
     this.memoryStore.clear();
-    this.isDirty = true;
-    this.saveToDisk();
+    this.markChanged();
   }
 
   /**
    * Synchronously flush dirty cache to disk (for use in before-quit).
-   * Bypasses the debounce timer so nothing is lost on shutdown.
+   * Bypasses the debounce timer so nothing is lost on shutdown; a clean cache is
+   * not rewritten (re-serializing the big Steam/Epic caches slowed every quit).
    */
   flushSync(): void {
     if (this.saveTimeout) {
       clearTimeout(this.saveTimeout);
       this.saveTimeout = null;
+      this.firstDirtyAt = 0;
     }
-    if (!this.isDirty && this.memoryStore.size === 0) return;
+    this.ensureLoaded(); // never write an unloaded (empty) map over the file
+    if (!this.isDirty) return;
     try {
-      const entries = entriesToPersist(this.memoryStore);
-      const obj: Record<string, CacheEntry<unknown>> = {};
-      for (const [key, value] of entries) obj[key] = value;
-      atomicWriteFileSync(this.cacheFilePath, JSON.stringify(obj));
-      this.isDirty = false;
-      logger.log(`[Cache:${this.label}] flushSync — saved ${entries.length} entries`);
+      const v = this.version;
+      const { json, count } = this.serialize();
+      atomicWriteFileSync(this.cacheFilePath, json);
+      this.savedVersion = v;
+      logger.log(`[Cache:${this.label}] flushSync — saved ${count} entries`);
     } catch (err) {
       logger.error(`[Cache:${this.label}] flushSync failed:`, err);
     }
@@ -245,6 +315,7 @@ export class PersistentCache {
 
   /** Get cache statistics */
   getStats(): { total: number; fresh: number; stale: number } {
+    this.ensureLoaded();
     let fresh = 0;
     let stale = 0;
 

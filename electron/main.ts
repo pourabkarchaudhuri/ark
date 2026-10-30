@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { config as loadEnv } from 'dotenv';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { app, BrowserWindow, shell, session, Tray, Menu, nativeImage, dialog, ipcMain } = electron;
+const { app, BrowserWindow, shell, session, Tray, Menu, nativeImage, dialog, ipcMain, powerMonitor } = electron;
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import * as fs from 'fs';
 import path from 'path';
@@ -11,7 +11,7 @@ import https from 'node:https';
 
 let tray: any = null;
 let isQuitting = false;
-import { FiltersEngine, Request } from '@ghostery/adblocker';
+import { FiltersEngine, Request, ENGINE_VERSION } from '@ghostery/adblocker';
 import fetch from 'cross-fetch';
 
 // ESM has no __dirname; required for loadFile/preload paths when run as module
@@ -95,20 +95,14 @@ process.on('unhandledRejection', (reason) => {
   // Don't quit — just log. The rejection is already "handled" once this listener exists.
 });
 
-// ---------------------------------------------------------------------------
 // Startup timeout helper — wraps a promise with a max-wait, returning null on timeout
-// ---------------------------------------------------------------------------
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | null> {
-  let timer: ReturnType<typeof setTimeout>;
-  return Promise.race([
-    promise.then((v) => { clearTimeout(timer); return v; }),
-    new Promise<null>((resolve) => {
-      timer = setTimeout(() => { logger.warn(`[Startup] ${label} timed out after ${ms}ms`); resolve(null); }, ms);
-    }),
-  ]);
-}
+import { withTimeout } from './with-timeout.js';
 
 import { steamAPI } from './steam-api.js';
+import { flushHltbCache } from './hltb-api.js';
+import { flushGgDealsCache } from './ggdeals-api.js';
+import { initAdblockEngine } from './adblock-engine.js';
+import { createShutdownFinalizer, createSessionEndHandler } from './shutdown.js';
 import { epicAPI } from './epic-api.js';
 import { chatStore, processMessage } from './ai-chat.js';
 import { settingsStore } from './settings-store.js';
@@ -545,6 +539,10 @@ function createWindow() {
     }
   });
 
+  // Windows shutdown / restart / log-off: before-quit and will-quit never fire,
+  // only this. Finalize synchronously while the OS still lets us run.
+  mainWindow.on('session-end', handleOsSessionEnd);
+
   mainWindow.on('closed', () => {
     destroyWebContentsView();
     mainWindow = null;
@@ -974,6 +972,8 @@ app.whenReady().then(async () => {
   // and decide whether this launch runs in safe mode. Only the instance that
   // owns the single-instance lock gets here (CLI modes returned above).
   initBootHealth();
+  // macOS / Linux equivalent of the window's Windows-only `session-end`.
+  try { powerMonitor?.on?.('shutdown', handleOsSessionEnd); } catch (err) { logger.warn('[Shutdown] powerMonitor unavailable:', err); }
   ipcMain.handle('app:getSafeMode', () => ({ ...safeModeState }));
   // Bring Ark forward (also from the tray) — e.g. clicking the Ark Wrapped notification.
   ipcMain.handle('app:showAndFocus', () => {
@@ -996,64 +996,67 @@ app.whenReady().then(async () => {
   // (e.g. a hung first paint) so runtime exceptions don't hard-exit.
   setTimeout(() => { startupComplete = true; }, 60_000).unref?.();
 
-  // Initialize ad blocker in the background (non-blocking — runs after window is shown)
+  // Initialize ad blocker in the background (non-blocking — runs after window is shown).
+  // The request handler is registered once and reads the current engine, which a
+  // successful background refresh of a week-old cache swaps in place.
   (async () => {
-  try {
-    const cachePath = path.join(app.getPath('userData'), 'adblocker-engine.bin');
-    let engine: FiltersEngine;
-
-    // Try loading from cache first for fast startup
-    if (fs.existsSync(cachePath)) {
-      const buf = await fs.promises.readFile(cachePath);
-      engine = FiltersEngine.deserialize(buf);
-        logger.log('[AdBlocker] Loaded engine from cache');
-    } else {
-        // Download filter lists (EasyList + EasyPrivacy) with a 15 s timeout
-        const lists = await withTimeout(
-          Promise.all([
-        fetch('https://easylist.to/easylist/easylist.txt').then((r: any) => r.text()),
-        fetch('https://easylist.to/easylist/easyprivacy.txt').then((r: any) => r.text()),
-          ]),
-          15000,
-          'Ad blocker filter download',
-        );
-        if (!lists) {
-          logger.warn('[AdBlocker] Skipping — filter download timed out');
-          return;
-        }
-      engine = FiltersEngine.parse(lists.join('\n'));
-      // Cache for faster startup next time
-      await fs.promises.writeFile(cachePath, Buffer.from(engine.serialize()));
-        logger.log('[AdBlocker] Downloaded filter lists and cached engine');
-    }
-
-    // Block matching network requests via session.webRequest
+    let engine: FiltersEngine | null = null;
+    let handlerRegistered = false;
     // Allow-list: connectivity probes must never be blocked, even if a filter list matches.
     // HowLongToBeat: Ark's own API lookups (electron/hltb-api.ts) use the default session too.
     const ALLOWED_PROBE_HOSTS = ['connectivitycheck.gstatic.com', 'www.gstatic.com', 'howlongtobeat.com', 'api.gg.deals'];
-    session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
+    const registerHandler = () => {
+      if (handlerRegistered) return;
+      handlerRegistered = true;
+      // Block matching network requests via session.webRequest
+      session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
         try {
-      const { url, resourceType, referrer } = details;
-      if (resourceType === 'mainFrame') {
-        callback({ cancel: false });
-        return;
-      }
-      const host = new URL(url).host.toLowerCase();
-      if (ALLOWED_PROBE_HOSTS.includes(host)) {
-        callback({});
-        return;
-      }
-      const request = Request.fromRawDetails({ url, type: resourceType || 'other', sourceUrl: referrer || '' });
-      const { match } = engine.match(request);
+          const { url, resourceType, referrer } = details;
+          if (resourceType === 'mainFrame' || !engine) {
+            callback({ cancel: false });
+            return;
+          }
+          const host = new URL(url).host.toLowerCase();
+          if (ALLOWED_PROBE_HOSTS.includes(host)) {
+            callback({});
+            return;
+          }
+          const request = Request.fromRawDetails({ url, type: resourceType || 'other', sourceUrl: referrer || '' });
+          const { match } = engine.match(request);
           callback({ cancel: !!match });
         } catch {
           // Never hang a request — allow it through if matching throws
-        callback({ cancel: false });
-      }
-    });
-
+          callback({ cancel: false });
+        }
+      });
       logger.log('[AdBlocker] Initialized and enabled');
-  } catch (err) {
+    };
+    try {
+      await initAdblockEngine<FiltersEngine>({
+        dir: app.getPath('userData'),
+        engineVersion: ENGINE_VERSION,
+        fs: {
+          readFile: (p) => fs.promises.readFile(p),
+          writeFile: (p, d) => fs.promises.writeFile(p, d),
+          rename: (a, b) => fs.promises.rename(a, b),
+          unlink: (p) => fs.promises.unlink(p),
+          stat: (p) => fs.promises.stat(p),
+          readdir: (d) => fs.promises.readdir(d),
+        },
+        fetch: (url) => fetch(url),
+        parse: (lists) => FiltersEngine.parse(lists),
+        deserialize: (buf) => FiltersEngine.deserialize(buf),
+        serialize: (e) => e.serialize(),
+        now: () => Date.now(),
+        withTimeout,
+        schedule: (fn, ms) => {
+          setTimeout(() => { fn().catch((err) => logger.warn('[AdBlocker] Refresh failed (non-fatal):', err)); }, ms).unref?.();
+        },
+      }, (next) => {
+        engine = next;
+        registerHandler();
+      });
+    } catch (err) {
       logger.warn('[AdBlocker] Failed to initialize (non-fatal):', err);
     }
   })();
@@ -1148,22 +1151,40 @@ app.whenReady().then(async () => {
   }
 });
 
+/**
+ * Synchronous, run-once quit finalisation shared by before-quit, will-quit and the
+ * OS session-end paths (see shutdown.ts). Session finalisation goes first: app.quit()
+ * from the tray skips window-all-closed (window close is intercepted to hide-to-tray),
+ * so stopSessionTracker used to never run on quit. Finalized sessions land in the
+ * persisted pending queue and are recorded by the renderer (now, or on the next
+ * launch if it's already gone).
+ */
+const finalizeShutdownSync = createShutdownFinalizer([
+  { label: 'Session tracker stop', run: () => stopSessionTracker() },
+  { label: 'Steam cache flush', run: () => steamAPI.flushCache() },
+  { label: 'Epic cache flush', run: () => epicAPI.flushCache() },
+  { label: 'HLTB cache flush', run: () => flushHltbCache() },
+  { label: 'gg.deals cache flush', run: () => flushGgDealsCache() },
+  { label: 'Chat store flush', run: () => chatStore.flushSync() },
+  { label: 'Clean-exit marker', run: () => markCleanExit() },
+]);
+
+/** OS shutdown / restart / log-off: sync work only, no overlay teardown, DB close not awaited. */
+const handleOsSessionEnd = createSessionEndHandler({
+  setQuitting: () => { isQuitting = true; },
+  finalize: finalizeShutdownSync,
+  closeDb: () => getLevelStore().close(),
+  quit: () => app.quit(),
+});
+
 // Set isQuitting flag before quit so close interceptor lets through
 // Also flush caches synchronously so no data is lost on shutdown
 app.on('before-quit', () => {
   isQuitting = true;
-  // Finalize in-progress play sessions NOW. app.quit() from the tray skips
-  // window-all-closed (window close is intercepted to hide-to-tray), so
-  // stopSessionTracker used to never run on quit. Finalized sessions land in
-  // the persisted pending queue and are recorded by the renderer (now, or on
-  // the next launch if it's already gone). Idempotent.
-  try { stopSessionTracker(); } catch (e) { logger.error('[Shutdown] Session tracker stop failed:', e); }
+  finalizeShutdownSync();
   // Tear down the overlay HUD and release its global hotkey.
   try { unregisterOverlayHotkey(); } catch (e) { logger.error('[Shutdown] Overlay hotkey unregister failed:', e); }
   try { destroyOverlay(); } catch (e) { logger.error('[Shutdown] Overlay destroy failed:', e); }
-  try { steamAPI.flushCache(); } catch (e) { logger.error('[Shutdown] Steam cache flush failed:', e); }
-  try { epicAPI.flushCache(); } catch (e) { logger.error('[Shutdown] Epic cache flush failed:', e); }
-  try { chatStore.flushSync(); } catch (e) { logger.error('[Shutdown] Chat store flush failed:', e); }
 });
 
 // Flush LevelDB on shutdown. Fires after all windows have closed but before
@@ -1177,7 +1198,7 @@ app.on('will-quit', (event: any) => {
   if (shutdownFinalized) return;
   shutdownFinalized = true;
   event.preventDefault();
-  markCleanExit();
+  finalizeShutdownSync(); // no-op when before-quit already ran it
   // One macrotask lets already-dispatched store:* IPC handlers enqueue their
   // writes before we start closing.
   const closeDb = new Promise<void>((resolve) => setImmediate(resolve))

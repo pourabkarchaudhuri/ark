@@ -1,11 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
 
 // Mock fs before any imports that use it
 vi.mock('fs', () => ({
   existsSync: vi.fn(() => false),
   readFileSync: vi.fn(() => '{}'),
   writeFileSync: vi.fn(),
+  renameSync: vi.fn(),
+  unlinkSync: vi.fn(),
   writeFile: vi.fn((_p: string, _d: string, _e: string, cb?: (err: Error | null) => void) => cb?.(null)),
+  rename: vi.fn((_a: string, _b: string, cb?: (err: Error | null) => void) => cb?.(null)),
+  unlink: vi.fn((_p: string, cb?: (err: Error | null) => void) => cb?.(null)),
   promises: { readFile: vi.fn(), writeFile: vi.fn() },
 }));
 
@@ -136,6 +141,140 @@ describe('PersistentCache', () => {
       cache.clear();
       expect(cache.get('key1')).toBeNull();
       expect(cache.get('key2')).toBeNull();
+    });
+  });
+
+  describe('eviction (over the 2,000-entry memory cap)', () => {
+    it('keeps a long-lived entry through 2,001 short-lived sets', () => {
+      cache.set('app-list', [1, 2, 3], 24 * 60 * 60 * 1000);
+      for (let i = 0; i < 2_001; i++) cache.set(`d${i}`, i);
+      expect(cache.get('app-list')).toEqual([1, 2, 3]);
+      expect(cache.getStats().total).toBe(2_000);
+      expect(cache.get('d0')).toBeNull(); // oldest short-lived went first
+      expect(cache.get('d2000')).toBe(2000);
+    });
+
+    it('sweeps fully expired entries before evicting live ones', () => {
+      cache.set('old', 'x', 100);
+      vi.advanceTimersByTime(25 * 60 * 60 * 1000); // past the 24h hard expiry
+      for (let i = 0; i < 2_000; i++) cache.set(`d${i}`, i);
+      expect(cache.getStats().total).toBe(2_000);
+      expect(cache.get('d0')).toBe(0); // the expired entry made room, not d0
+    });
+
+    it('falls back to evicting long-lived entries when they alone exceed the cap', () => {
+      for (let i = 0; i < 2_001; i++) cache.set(`l${i}`, i, 2 * 60 * 60 * 1000);
+      expect(cache.getStats().total).toBe(2_000);
+      expect(cache.get('l0')).toBeNull();
+      expect(cache.get('l2000')).toBe(2000);
+    });
+  });
+
+  describe('disk save policy', () => {
+    const writes = () => vi.mocked(fs.writeFile).mock.calls.length;
+
+    beforeEach(() => {
+      vi.mocked(fs.writeFile).mockClear();
+      vi.mocked(fs.writeFileSync).mockClear();
+    });
+
+    it('debounces a single set by 15 s', () => {
+      cache.set('a', 1);
+      vi.advanceTimersByTime(14_999);
+      expect(writes()).toBe(0);
+      vi.advanceTimersByTime(1);
+      expect(writes()).toBe(1);
+    });
+
+    it('still saves by 60 s when sets keep arriving every 5 s', () => {
+      for (let t = 0; t < 60_000; t += 5_000) {
+        cache.set(`k${t}`, t);
+        vi.advanceTimersByTime(5_000);
+      }
+      expect(writes()).toBeGreaterThanOrEqual(1);
+    });
+
+    it('a set during an in-flight async save stays dirty and is written by flushSync', () => {
+      let finishWrite: (() => void) | null = null;
+      vi.mocked(fs.writeFile).mockImplementationOnce(((_p: string, _d: string, _e: string, cb: (err: Error | null) => void) => {
+        finishWrite = () => cb(null);
+      }) as never);
+      cache.set('a', 1);
+      vi.advanceTimersByTime(15_000); // async save starts, write not finished
+      cache.set('b', 2); // arrives mid-save
+      finishWrite!();
+      cache.flushSync();
+      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+      const written = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(Object.keys(written).sort()).toEqual(['a', 'b']);
+    });
+
+    it('an async save finishing after a newer flushSync does not replace the file', () => {
+      let finishWrite: (() => void) | null = null;
+      vi.mocked(fs.writeFile).mockImplementationOnce(((_p: string, _d: string, _e: string, cb: (err: Error | null) => void) => {
+        finishWrite = () => cb(null);
+      }) as never);
+      vi.mocked(fs.rename).mockClear();
+      cache.set('a', 1);
+      vi.advanceTimersByTime(15_000);
+      cache.set('b', 2);
+      cache.flushSync();
+      finishWrite!();
+      expect(fs.rename).not.toHaveBeenCalled();
+    });
+
+    it('flushSync is a no-op on a clean, non-empty cache', () => {
+      cache.set('a', 1);
+      vi.advanceTimersByTime(15_000); // async save completes
+      expect(writes()).toBe(1);
+      cache.flushSync();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('flushSync writes pending changes and cancels the debounced save', () => {
+      cache.set('a', 1);
+      cache.flushSync();
+      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(60_000);
+      expect(writes()).toBe(0);
+      cache.flushSync();
+      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+    });
+
+    it('delete removes an entry and marks the cache dirty', () => {
+      cache.set('a', 1);
+      cache.set('b', 2);
+      cache.flushSync();
+      cache.delete('a');
+      expect(cache.get('a')).toBeNull();
+      cache.flushSync();
+      const written = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[1][1] as string);
+      expect(Object.keys(written)).toEqual(['b']);
+    });
+  });
+
+  describe('lazy loading', () => {
+    it('does not read the file until first use', () => {
+      vi.mocked(fs.existsSync).mockClear();
+      const c = new PersistentCache('lazy.json');
+      expect(fs.existsSync).not.toHaveBeenCalled();
+      c.get('x');
+      expect(fs.existsSync).toHaveBeenCalledTimes(1);
+      c.get('y');
+      expect(fs.existsSync).toHaveBeenCalledTimes(1);
+    });
+
+    it('flushSync loads first so it never writes an empty map over the file', () => {
+      vi.mocked(fs.existsSync).mockReturnValueOnce(true);
+      vi.mocked(fs.readFileSync).mockReturnValueOnce(JSON.stringify({ keep: { data: 1, timestamp: Date.now(), ttl: 60_000 } }));
+      vi.mocked(fs.writeFileSync).mockClear();
+      const c = new PersistentCache('lazy2.json');
+      c.flushSync(); // clean after load -> nothing to write
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+      c.set('new', 2);
+      c.flushSync();
+      const written = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(Object.keys(written).sort()).toEqual(['keep', 'new']);
     });
   });
 });
