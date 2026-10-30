@@ -7,7 +7,6 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
 import { steamAPI } from '../steam-api.js';
 import { epicAPI } from '../epic-api.js';
@@ -44,10 +43,36 @@ function isEpicExcluded(item: { tags?: Array<{ name?: string }> }): boolean {
   return false;
 }
 
-function getDocsDir(): string {
-  const cwd = process.cwd();
-  const docs = path.join(cwd, 'docs');
-  return docs;
+interface CatalogHandlerDeps {
+  isPackaged: () => boolean;
+  userDataDir: () => string;
+  cwd: () => string;
+  handle: (channel: string, listener: (...args: any[]) => unknown) => void;
+}
+
+// Test-only injectable seam: `require('electron')` via createRequire isn't
+// visible to vi.mock('electron', ...), same pattern as launch-handlers.ts.
+const realDeps = (): CatalogHandlerDeps => ({
+  isPackaged: () => electron.app?.isPackaged === true,
+  userDataDir: () => electron.app.getPath('userData'),
+  cwd: () => process.cwd(),
+  handle: (channel, listener) => electron.ipcMain.handle(channel, listener),
+});
+let deps: CatalogHandlerDeps = realDeps();
+
+export function __setCatalogHandlerDepsForTests(d?: Partial<CatalogHandlerDeps>): void {
+  deps = { ...realDeps(), ...d };
+}
+
+/**
+ * Output folder for the crawl's JSON files: the repo's docs/ in a dev run, userData/docs when
+ * packaged (cwd is then usually the install directory, which may not be writable and must not
+ * collect stray files).
+ */
+export function getDocsDir(): string {
+  return deps.isPackaged()
+    ? path.join(deps.userDataDir(), 'docs')
+    : path.join(deps.cwd(), 'docs');
 }
 
 export type FullCatalogAdultFilterResult = {
@@ -204,6 +229,12 @@ export async function runFullCatalogAdultFilterTest(): Promise<FullCatalogAdultF
     }
 }
 
+/**
+ * The full-catalog crawl (~150k Steam apps, about an hour, shares the Steam rate limiter) is a
+ * developer tool: the channel exists only in unpacked dev runs. The CLI path
+ * (`--run-adult-filter-test` in main.ts) calls runFullCatalogAdultFilterTest directly.
+ */
 export function register(): void {
-  ipcMain.handle('catalog:runFullCatalogAdultFilterTest', async () => runFullCatalogAdultFilterTest());
+  if (deps.isPackaged()) return;
+  deps.handle('catalog:runFullCatalogAdultFilterTest', async () => runFullCatalogAdultFilterTest());
 }

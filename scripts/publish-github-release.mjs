@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { CURL_STATUS_ARGS, parseCurlUpload, isUploadSuccess, staleAssetIds } from './lib/release-upload.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -49,11 +50,28 @@ async function api(method, url, json) {
   return { ok: res.ok, status: res.status, data: text ? JSON.parse(text) : null };
 }
 
+// A reset upload leaves a same-name asset that is not "uploaded"; GitHub then answers 422 to the
+// next upload of that name, so every attempt first deletes any such leftover.
+async function deleteStaleAssets(releaseId, name) {
+  const rel = await api('GET', `https://api.github.com/repos/${repo}/releases/${releaseId}`);
+  if (!rel.ok) throw new Error(`Could not re-read release before upload (${rel.status})`);
+  for (const id of staleAssetIds(rel.data.assets, name)) {
+    const del = await api('DELETE', `https://api.github.com/repos/${repo}/releases/assets/${id}`);
+    if (!del.ok && del.status !== 404) throw new Error(`Could not delete half-uploaded ${name} (${del.status})`);
+    console.log('Deleted half-uploaded asset', name, id);
+  }
+}
+
 // Uploads of the 200+ MB installer can be reset mid-transfer on some networks; retry a few times.
-function uploadAssetWithRetry(releaseId, name, attempts = 4) {
+async function uploadAssetWithRetry(releaseId, name, attempts = 4) {
   for (let i = 1; ; i++) {
     try {
-      return uploadAsset(releaseId, name);
+      await deleteStaleAssets(releaseId, name);
+      const res = uploadAsset(releaseId, name);
+      if (!isUploadSuccess(res)) {
+        throw new Error(`HTTP ${res.status}: ${JSON.stringify(res.body).slice(0, 300)}`);
+      }
+      return res.body;
     } catch (err) {
       if (i >= attempts) throw err;
       console.warn(`Upload of ${name} failed (attempt ${i}/${attempts}): ${String(err.stderr ?? err.message).trim()}; retrying`);
@@ -67,12 +85,13 @@ function uploadAsset(releaseId, name) {
   const hdrFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ark-pub-')), 'h.txt');
   fs.writeFileSync(hdrFile, `Authorization: Bearer ${token}\nContent-Type: application/octet-stream\n`, { mode: 0o600 });
   try {
+    // -w appends the HTTP status: a 4xx/5xx response (curl still exits 0) must count as a failure.
     const out = execFileSync('curl', [
-      '-sS', '-X', 'POST', '-H', `@${hdrFile}`,
+      '-sS', ...CURL_STATUS_ARGS, '-X', 'POST', '-H', `@${hdrFile}`,
       `https://uploads.github.com/repos/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`,
       '--data-binary', `@${filePath}`,
     ], { maxBuffer: 64 * 1024 * 1024 }).toString();
-    return JSON.parse(out);
+    return parseCurlUpload(out);
   } finally {
     fs.rmSync(path.dirname(hdrFile), { recursive: true, force: true });
   }
@@ -118,8 +137,8 @@ async function main() {
       console.log('Already uploaded', name);
       continue;
     }
-    const out = uploadAssetWithRetry(release.id, name);
-    if (out.state !== 'uploaded') fail(`Upload failed for ${name}: ${JSON.stringify(out).slice(0, 300)}`);
+    const out = await uploadAssetWithRetry(release.id, name);
+    if (out?.state !== 'uploaded') fail(`Upload failed for ${name}: ${JSON.stringify(out).slice(0, 300)}`);
     console.log('Uploaded', name, out.size);
   }
 
