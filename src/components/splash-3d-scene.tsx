@@ -6,7 +6,7 @@
  * to parse and execute (~700KB).
  */
 
-import { useRef, Suspense, memo } from 'react';
+import { useRef, useEffect, Suspense, memo } from 'react';
 import type { MutableRefObject } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { useGLTF, OrbitControls, PerspectiveCamera, Stars } from '@react-three/drei';
@@ -127,9 +127,16 @@ function SceneLights({ progressRef }: { progressRef: MutableRefObject<number> })
 }
 
 const assetUrl = (name: string) => `${import.meta.env.BASE_URL}${name}`;
+const SCENE_URL = assetUrl('scene.glb');
+
+// scene.glb is stored uncompressed (no Draco): no decoder workers, no WASM heaps and no
+// remote decoder fetch, so the splash also renders offline. Keep both loader flags off
+// here and in preload so drei never wires up a Draco or Meshopt decoder.
+const USE_DRACO = false;
+const USE_MESHOPT = false;
 
 function Planet({ url }: { url: string }) {
-  const { nodes } = useGLTF(url) as any;
+  const { nodes } = useGLTF(url, USE_DRACO, USE_MESHOPT) as any;
   const groupRef = useRef<Group>(null);
 
   useFrame(({ clock }) => {
@@ -153,13 +160,16 @@ export const Splash3DScene = memo(function Splash3DScene({
 }: {
   progressRef: MutableRefObject<number>;
 }) {
+  // The splash runs once per session: drop the cached model when it closes instead of
+  // holding its geometry and textures for the rest of the session.
+  useEffect(() => () => useGLTF.clear(SCENE_URL), []);
   return (
     <Canvas dpr={[1.5, 2]} linear shadows>
       <fog attach="fog" args={['#0a0010', 16, 30]} />
       <SceneLights progressRef={progressRef} />
       <PerspectiveCamera makeDefault position={[0, 0, 16]} fov={75} />
       <Suspense fallback={null}>
-        <Planet url={assetUrl('scene.glb')} />
+        <Planet url={SCENE_URL} />
       </Suspense>
       <OrbitControls
         autoRotate
@@ -175,7 +185,7 @@ export const Splash3DScene = memo(function Splash3DScene({
 });
 
 try {
-  useGLTF.preload(assetUrl('scene.glb'));
+  useGLTF.preload(SCENE_URL, USE_DRACO, USE_MESHOPT);
 } catch {
   // CanvasErrorBoundary in splash-screen.tsx handles runtime failures
 }

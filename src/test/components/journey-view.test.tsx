@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { JourneyView, readStoredVoyageTab, VOYAGE_TAB_STORAGE_KEY } from '@/components/journey-view';
+import { getTourSteps, resolveStepsWithExistingTargets, waitForTourDomReady } from '@/components/guided-tour';
 import { JourneyEntry } from '@/types/game';
 import { statusHistoryStore } from '@/services/status-history-store';
 import { steamService } from '@/services/steam-service';
@@ -368,6 +369,26 @@ describe('JourneyView', () => {
   it('gives the tutorial a header anchor that fits on screen', () => {
     const { container } = render(<JourneyView entries={[createMockEntry()]} loading={false} />);
     expect(container.querySelector('[data-tour="journey-header"]')).not.toBeNull();
+  });
+
+  it.each([
+    ['empty', false],
+    ['loading', true],
+  ])('keeps the tour header anchor in the %s state, so the Voyage tour does not wait out its timeout', async (_label, loading) => {
+    // Dashboard-chrome targets the Voyage tour also points at (outside JourneyView).
+    const chrome = ['app-logo', 'journey-button'].map((id) => {
+      const el = document.createElement('div');
+      el.setAttribute('data-tour', id);
+      document.body.appendChild(el);
+      return el;
+    });
+    const { container } = render(<JourneyView entries={[]} loading={loading} />);
+    expect(container.querySelector('[data-tour="journey-header"]')).not.toBeNull();
+    const t0 = Date.now();
+    await waitForTourDomReady('journey', { timeoutMs: 3000, intervalMs: 10 });
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(resolveStepsWithExistingTargets(getTourSteps('journey'))).toHaveLength(getTourSteps('journey').length);
+    chrome.forEach((el) => el.remove());
   });
 
   it('renders Log, Scenes, Audit, and Medals tab buttons', () => {

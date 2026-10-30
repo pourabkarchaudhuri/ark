@@ -13,6 +13,21 @@ vi.mock('canvas-confetti', () => {
   return { default: Object.assign(vi.fn(), { create: vi.fn(() => fire) }) };
 });
 
+// Export libraries: count runs instead of rasterising (jsdom can't).
+const exportSpy = vi.hoisted(() => ({ zips: 0, saves: 0 }));
+vi.mock('html-to-image', () => ({
+  toBlob: vi.fn(async () => new Blob(['png'])),
+  getFontEmbedCSS: vi.fn(async () => ''),
+}));
+vi.mock('jszip', () => ({
+  default: class {
+    constructor() { exportSpy.zips++; }
+    file() {}
+    async generateAsync() { return new Blob(['zip']); }
+  },
+}));
+vi.mock('file-saver', () => ({ saveAs: vi.fn(() => { exportSpy.saves++; }) }));
+
 // Feed the overlay deterministic data instead of the live stores.
 const fixture: { inputs: WrappedInputs } = { inputs: { journey: [], sessions: [], statusChanges: [] } };
 vi.mock('@/components/year-wrapped/data', async () => {
@@ -28,6 +43,7 @@ vi.mock('@/components/year-wrapped/data', async () => {
 });
 
 import { YearWrapped, WrappedSnackbar } from '@/components/year-wrapped';
+import { requestWrappedOpen } from '@/components/year-wrapped/banner';
 import { WRAPPED_FORCE_SEASON_KEY, wrappedNotifiedKey, wrappedSeenKey } from '@/lib/wrapped-season';
 
 const YEAR = new Date().getMonth() === 0 ? new Date().getFullYear() - 1 : new Date().getFullYear();
@@ -101,6 +117,23 @@ describe('YearWrapped overlay', () => {
     expect(pending.year).toBe(YEAR);
     expect(pending.keyframes.length).toBeGreaterThanOrEqual(2);
     expect(pending.keyframes[0]).toEqual(expect.objectContaining({ gameId: expect.any(String), title: expect.any(String), subtitle: expect.any(String) }));
+  });
+
+  it('runs a single export when "Save as images" is double-clicked', async () => {
+    exportSpy.zips = 0;
+    exportSpy.saves = 0;
+    render(<YearWrapped isOpen onClose={() => {}} />);
+    await screen.findByText('Your year in games');
+    await act(async () => { fireEvent.keyDown(window, { key: 'End' }); });
+    const btn = await screen.findByRole('button', { name: /save as images/i });
+
+    // Two clicks in one batch: no re-render (and no disabled button) between them.
+    act(() => { btn.click(); btn.click(); });
+    expect(btn).toBeDisabled();
+    await waitFor(() => expect(exportSpy.saves).toBe(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: /save as images/i })).not.toBeDisabled());
+    expect(exportSpy.zips).toBe(1);
+    expect(exportSpy.saves).toBe(1);
   });
 
   it('shows a gentle empty state when the year has no activity', async () => {
@@ -185,5 +218,27 @@ describe('WrappedSnackbar (seasonal banner + notification)', () => {
     focus.mockRestore();
 
     Object.defineProperty(window, 'Notification', { value: original, configurable: true, writable: true });
+  });
+
+  it('a notification click with no snackbar mounted opens Wrapped on the next mount, once', async () => {
+    window.location.hash = '#/game/steam-1';
+    requestWrappedOpen();
+    expect(window.location.hash).toBe('#/');
+
+    const onLaunch = vi.fn();
+    const { unmount } = render(<WrappedSnackbar onLaunch={onLaunch} />);
+    expect(onLaunch).toHaveBeenCalledTimes(1);
+    unmount();
+
+    render(<WrappedSnackbar onLaunch={onLaunch} />);
+    expect(onLaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a notification click with a snackbar mounted opens Wrapped immediately', () => {
+    const onLaunch = vi.fn();
+    render(<WrappedSnackbar onLaunch={onLaunch} />);
+    expect(onLaunch).not.toHaveBeenCalled();
+    act(() => { requestWrappedOpen(); });
+    expect(onLaunch).toHaveBeenCalledTimes(1);
   });
 });

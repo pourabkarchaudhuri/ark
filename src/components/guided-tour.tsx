@@ -845,6 +845,9 @@ export function getTourSteps(tourId: TourId): Step[] {
   return TOUR_STEPS[tourId] ?? welcomeSteps;
 }
 
+/** A tour with no step activity for this long is closed (without marking it completed). */
+export const TOUR_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+
 interface GuidedTourProps {
   run: boolean;
   tourKey: number;
@@ -1055,14 +1058,22 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
     };
   }, [run, tourKey]);
 
-  useEffect(() => {
-    if (!run || !effectiveSteps?.length) return;
+  /**
+   * Inactivity watchdog (re-armed on every step change): closes a tour nobody has touched
+   * for 5 minutes. Not a completion — the tour may auto-start again next launch.
+   */
+  const resetSafetyTimer = useCallback(() => {
     clearTimeout(safetyTimerRef.current);
     safetyTimerRef.current = setTimeout(() => {
-      if (!finishedRef.current) endTour({ persistCompletion: true });
-    }, 5 * 60 * 1000);
+      if (!finishedRef.current) endTourRef.current({ persistCompletion: false });
+    }, TOUR_IDLE_TIMEOUT_MS);
+  }, []);
+
+  useEffect(() => {
+    if (!run || !effectiveSteps?.length) return;
+    resetSafetyTimer();
     return () => clearTimeout(safetyTimerRef.current);
-  }, [run, tourKey, effectiveSteps, endTour]);
+  }, [run, tourKey, effectiveSteps, resetSafetyTimer]);
 
   useEffect(() => {
     return () => {
@@ -1106,6 +1117,8 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
     (data: CallBackProps) => {
       const { status, action, type } = data;
 
+      if (type === EVENTS.STEP_AFTER || type === EVENTS.TOOLTIP) resetSafetyTimer();
+
       if (status === STATUS.ERROR || type === EVENTS.ERROR) {
         endTour({ persistCompletion: false });
         return;
@@ -1135,7 +1148,7 @@ export function GuidedTour({ run, tourKey, tourId, steps, onFinish }: GuidedTour
         }
       }
     },
-    [endTour],
+    [endTour, resetSafetyTimer],
   );
 
   if (!run || !effectiveSteps?.length) return null;
