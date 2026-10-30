@@ -680,6 +680,10 @@ async function storeBatch(ops) {
 contextBridge.exposeInMainWorld('store', {
   get: (ns, key) => ipcRenderer.invoke('store:get', ns, key),
   getMany: (ns, keys) => ipcRenderer.invoke('store:getMany', ns, keys),
+  // Count-only existence check (v1.0.97): { count } for up to 10k keys, no rows returned.
+  countExisting: (ns, keys) => ipcRenderer.invoke('store:countExisting', ns, keys),
+  // Storage panel (v1.0.97): { stats: [{ namespace, count, sizeBytes }] }.
+  namespaceStats: (namespaces) => ipcRenderer.invoke('store:namespaceStats', namespaces),
   getAll: (ns) => ipcRenderer.invoke('store:getAll', ns),
   // Paginated chunk read (v1.0.65+) for large namespaces (catalog, epic-catalog).
   // opts = { startAfter?: string, limit: number }

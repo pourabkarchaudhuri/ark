@@ -1155,11 +1155,11 @@ export const AIModelsTab = memo(function AIModelsTab() {
                 libraryGames: () => recoStore.getLibraryEmbeddingInputs(),
                 resume: reindexResumable,
                 steam: {
-                  iterate: (onBatch) => catalogStore.getAllEntries(onBatch),
+                  iterate: (onBatch) => catalogStore.scanAllEntries(onBatch),
                   lastSyncTimestamp: () => catalogStore.getLastSyncTimestamp(),
                 },
                 epic: {
-                  iterate: (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+                  iterate: (onBatch) => epicCatalogStore.scanAllEntries(onBatch),
                   lastSyncTimestamp: () => epicCatalogStore.getLastSyncTimestamp(),
                 },
               });

@@ -26,9 +26,17 @@ const CACHE_STALE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days stale-usable (hourly 
 // game objects that are missing new cross-store fields (epicSlug, availableOn, etc.)
 const CACHE_FORMAT_VERSION = 2;
 
-// Heavy fields that are only needed on the detail page (not browse cards)
-// Heavy fields stripped from browse cache (summary kept for reco engine embeddings)
-const STRIP_KEYS = ['screenshots', 'videos', 'movies', 'detailedDescription', 'aboutTheGame'];
+// Heavy fields stripped from browse cache (summary kept for reco engine embeddings).
+// Only fields browse games actually carry: `detailedDescription` / `aboutTheGame` were listed
+// here but no Game object has them, while the Steam `longDescription` HTML went through whole.
+const STRIP_KEYS = ['screenshots', 'videos', 'movies'];
+
+/**
+ * Cap on the cached `longDescription`: the adult-content filter reads only the first 1500
+ * characters (`getCombinedText`), and browse cards never show it. The detail page fetches
+ * the full description itself.
+ */
+export const LONG_DESCRIPTION_CACHE_CHARS = 1500;
 
 interface BrowseCacheEntry {
   key: string;
@@ -44,15 +52,35 @@ interface BrowseCacheEntry {
 let dbInstance: IDBDatabase | null = null;
 let dbPromise: Promise<IDBDatabase> | null = null;
 
+/** Drop the cached connection so the next call reopens (failed open, closed or stale handle). */
+function resetDB(): void {
+  dbInstance = null;
+  dbPromise = null;
+}
+
+/** Test hook — module state otherwise outlives individual tests. */
+export function __resetIdbCacheWorkerForTests(): void {
+  try { dbInstance?.close(); } catch { /* ignore */ }
+  resetDB();
+}
+
+/**
+ * Same reset pattern as catalog-store's getDB: a failed open used to stay
+ * cached as a rejected promise, so every later save/load failed for the rest
+ * of the session and the next launch re-fetched everything.
+ */
 function openDB(): Promise<IDBDatabase> {
   if (dbInstance) return Promise.resolve(dbInstance);
   if (dbPromise) return dbPromise;
 
   dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open(BROWSE_DB_NAME, BROWSE_DB_VERSION);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => { dbPromise = null; reject(req.error); };
+    req.onblocked = () => { dbPromise = null; reject(new Error('IDB blocked')); };
     req.onsuccess = () => {
       dbInstance = req.result;
+      dbInstance.onclose = () => { resetDB(); };
+      dbInstance.onversionchange = () => { dbInstance?.close(); resetDB(); };
       resolve(dbInstance);
     };
     req.onupgradeneeded = (e) => {
@@ -70,13 +98,31 @@ function openDB(): Promise<IDBDatabase> {
 // Slim game objects — strip heavy detail fields before caching
 // ---------------------------------------------------------------------------
 
-function slimGames(games: any[]): any[] {
+/**
+ * Plain-text, capped `longDescription` for the cache. Truncates the raw text to the same
+ * window the adult filter reads (trim + first 1500 chars) BEFORE stripping tags, so the
+ * filter never sees text from further in than it did on the raw HTML, and replaces each
+ * tag with a space so words on either side of a tag stay separate.
+ */
+export function slimLongDescription(raw: string): string {
+  if (!raw) return raw;
+  const window = raw.trim().slice(0, LONG_DESCRIPTION_CACHE_CHARS);
+  return window
+    .replace(/<[^>]*>?/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function slimGames(games: any[]): any[] {
   return games.map((game) => {
     const slim: any = {};
     for (const key of Object.keys(game)) {
       if (!STRIP_KEYS.includes(key)) {
         slim[key] = game[key];
       }
+    }
+    if (typeof slim.longDescription === 'string' && slim.longDescription) {
+      slim.longDescription = slimLongDescription(slim.longDescription);
     }
     return slim;
   });
@@ -85,6 +131,11 @@ function slimGames(games: any[]): any[] {
 // ---------------------------------------------------------------------------
 // Message handler
 // ---------------------------------------------------------------------------
+
+/** `db.transaction()` on a connection the browser already closed throws InvalidStateError: reopen next time. */
+function dropIfStale(err: unknown): void {
+  if ((err as { name?: string } | null)?.name === 'InvalidStateError') resetDB();
+}
 
 self.onmessage = async (e: MessageEvent) => {
   const { type } = e.data;
@@ -108,6 +159,7 @@ self.onmessage = async (e: MessageEvent) => {
       });
       self.postMessage({ type: 'save-done' });
     } catch (err) {
+      dropIfStale(err);
       console.warn('[IDB Worker] Failed to save:', err);
       self.postMessage({ type: 'save-done', error: true });
     }
@@ -139,7 +191,8 @@ self.onmessage = async (e: MessageEvent) => {
         req.onerror = () => resolve(null);
       });
       self.postMessage({ type: 'load-result', data: result });
-    } catch {
+    } catch (err) {
+      dropIfStale(err);
       self.postMessage({ type: 'load-result', data: null });
     }
   } else if (type === 'clear') {
@@ -153,7 +206,8 @@ self.onmessage = async (e: MessageEvent) => {
         tx.onerror = () => reject(tx.error);
       });
       self.postMessage({ type: 'clear-done' });
-    } catch {
+    } catch (err) {
+      dropIfStale(err);
       self.postMessage({ type: 'clear-done', error: true });
     }
   }

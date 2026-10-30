@@ -15,6 +15,8 @@
  */
 
 import type { EpicCatalogItem } from '@/types/epic';
+import { idbStreamStoreBatches } from './idb-stream';
+import { levelStreamNamespace, type LevelScanResult } from './level-stream';
 
 // ─── Dummy-page predicate ───────────────────────────────────────────────────────
 // Mirrors electron/epic-api.ts and epic-service.ts.  A page is "dummy" when
@@ -202,47 +204,8 @@ async function idbStreamAllEntries(
   size = 500,
 ): Promise<number> {
   const db = await getDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(ENTRIES_STORE, 'readonly');
-    const store = tx.objectStore(ENTRIES_STORE);
-    const req = store.openCursor();
-    let count = 0;
-    let batch: EpicCatalogEntry[] = [];
-    // Buffer for `onBatch` calls that outlive a cursor tick — the cursor
-    // keeps advancing without awaiting each write (awaiting here would let
-    // the IDB transaction go inactive between ticks); `pending` chains the
-    // writes so the final empty-cursor branch can await full completion.
-    let pending: Promise<void> = Promise.resolve();
-    let failed: unknown = null;
-
-    req.onsuccess = async () => {
-      const cursor = req.result;
-      if (failed) return; // a previous batch write already failed — stop reading further rows
-      if (!cursor) {
-        try {
-          await pending;
-          if (batch.length > 0) await onBatch(batch);
-          resolve(count);
-        } catch (err) {
-          reject(err);
-        }
-        return;
-      }
-      batch.push(cursor.value as EpicCatalogEntry);
-      count++;
-      if (batch.length >= size) {
-        const drain = batch;
-        batch = [];
-        pending = pending.then(() => onBatch(drain)).catch((err) => {
-          failed = err;
-          throw err;
-        });
-      }
-      if (failed) return;
-      cursor.continue();
-    };
-    req.onerror = () => reject(req.error ?? new Error('[EpicCatalogStore] IDB cursor error during migration stream'));
-  });
+  // Rejects on the first failed batch write instead of hanging (see idb-stream.ts).
+  return idbStreamStoreBatches<EpicCatalogEntry>(db, ENTRIES_STORE, onBatch, size, '[EpicCatalogStore]');
 }
 
 // ─── LevelDB Helpers ────────────────────────────────────────────────────────────
@@ -294,29 +257,14 @@ async function levelSetMeta<T>(key: string, value: T): Promise<void> {
   }
 }
 
+/** Chunked walk of every entry row; a hop that fails twice ends it with `complete: false`. */
 async function levelStreamAllEntries(
   onEntry: (entry: EpicCatalogEntry) => void,
-): Promise<number> {
-  let startAfter: string | undefined;
-  let total = 0;
-  while (true) {
-    const res = await window.store!.getChunk<EpicCatalogEntry>(LEVEL_ENTRIES_NAMESPACE, {
-      startAfter,
-      limit: LEVEL_CHUNK_SIZE,
-    });
-    if (res.error) {
-      console.error('[EpicCatalogStore] getChunk failed:', res.error);
-      break;
-    }
-    const rows = res.rows ?? [];
-    for (const row of rows) {
-      onEntry(row.value);
-      total++;
-    }
-    if (res.done || !res.nextKey) break;
-    startAfter = res.nextKey;
-  }
-  return total;
+): Promise<LevelScanResult> {
+  return levelStreamNamespace<EpicCatalogEntry>(LEVEL_ENTRIES_NAMESPACE, (row) => { onEntry(row.value); }, {
+    pageSize: LEVEL_CHUNK_SIZE,
+    label: '[EpicCatalogStore]',
+  });
 }
 
 async function putEntriesBatch(entries: EpicCatalogEntry[]): Promise<void> {
@@ -640,20 +588,25 @@ export class EpicCatalogStore {
    * the Steam catalog pattern).
    */
   async getAllEntries(onBatch: (entries: EpicCatalogEntry[]) => void): Promise<number> {
+    const scan = await this.scanAllEntries(onBatch);
+    if (!scan.complete) console.warn(`[EpicCatalogStore] Catalog scan stopped early — ${scan.count} entries read (partial)`);
+    return scan.count;
+  }
+
+  /** `getAllEntries` plus whether the walk reached the end (embedding passes gate their watermark on it). */
+  async scanAllEntries(onBatch: (entries: EpicCatalogEntry[]) => void): Promise<LevelScanResult> {
     await this.migrateFromIdbIfNeeded();
     if (useLevelDB()) {
-      let count = 0;
       let buffer: EpicCatalogEntry[] = [];
-      await levelStreamAllEntries((entry) => {
+      const scan = await levelStreamAllEntries((entry) => {
         buffer.push(entry);
-        count++;
         if (buffer.length >= 500) {
           onBatch(buffer);
           buffer = [];
         }
       });
       if (buffer.length > 0) onBatch(buffer);
-      return count;
+      return scan;
     }
     const db = await getDB();
     return new Promise((resolve) => {
@@ -667,7 +620,7 @@ export class EpicCatalogStore {
         const cursor = req.result;
         if (!cursor) {
           if (batch.length > 0) onBatch(batch);
-          resolve(count);
+          resolve({ count, complete: true });
           return;
         }
         batch.push(cursor.value);
@@ -678,7 +631,10 @@ export class EpicCatalogStore {
         }
         cursor.continue();
       };
-      req.onerror = () => resolve(count);
+      req.onerror = () => {
+        if (batch.length > 0) onBatch(batch);
+        resolve({ count, complete: false });
+      };
     });
   }
 }

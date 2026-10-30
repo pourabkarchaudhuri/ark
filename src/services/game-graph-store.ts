@@ -15,6 +15,7 @@
 
 import { annIndex } from './ann-index';
 import { embeddingService, getAllPooledEmbeddingsForGraph, isRendererHeapPressureHigh } from './embedding-service';
+import { IncompleteScanError } from './level-stream';
 
 export interface GraphScores {
   pageRank: number;
@@ -338,10 +339,12 @@ interface GraphEmbeddingRow { gameId: string; embedding: Float32Array | number[]
  * `getAllPooledEmbeddingsForGraph()` so this file never needs to know which
  * storage backend (IndexedDB or LevelDB) actually holds the data.
  */
-async function readAllEmbeddings(): Promise<GraphEmbeddingRow[]> {
+async function readAllEmbeddings(): Promise<GraphEmbeddingRow[] | 'incomplete'> {
   try {
     return await getAllPooledEmbeddingsForGraph();
-  } catch {
+  } catch (err) {
+    // A read cut short must not be built into (and persisted as) the graph.
+    if (err instanceof IncompleteScanError) return 'incomplete';
     return [];
   }
 }
@@ -714,7 +717,12 @@ export class GameGraphStore {
     this._state = { phase: 'building', stage: 'Reading embeddings...', percent: 0 };
     this._notify();
 
-    let embeddings: GraphEmbeddingRow[] = await readAllEmbeddings();
+    const read = await readAllEmbeddings();
+    if (read === 'incomplete') {
+      this._failBuild('Embedding read incomplete — graph not rebuilt', { cooldown: true });
+      return false;
+    }
+    let embeddings: GraphEmbeddingRow[] = read;
     if (embeddings.length === 0) {
       this._failBuild('No embeddings cached', { cooldown: true });
       return false;

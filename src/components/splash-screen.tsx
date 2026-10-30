@@ -547,7 +547,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
             console.log(`[Splash] Starting catalog embedding pipeline (${count.toLocaleString()} entries)`);
             const steamSyncTs = await catalogStore.getLastSyncTimestamp();
             await embeddingService.generateCatalogEmbeddings(
-              (onBatch) => catalogStore.getAllEntries(onBatch),
+              (onBatch) => catalogStore.scanAllEntries(onBatch),
               { storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs },
             );
           }
@@ -559,7 +559,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
             console.log(`[Splash] Starting Epic catalog embeddings (${epicCount.toLocaleString()} entries)`);
             const epicSyncTs = await epicCatalogStore.getLastSyncTimestamp();
             await embeddingService.generateEpicCatalogEmbeddings(
-              (onBatch) => epicCatalogStore.getAllEntries(onBatch),
+              (onBatch) => epicCatalogStore.scanAllEntries(onBatch),
               { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs },
             );
           }
