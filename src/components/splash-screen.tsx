@@ -19,6 +19,7 @@ import { annIndex } from '@/services/ann-index';
 import { bm25Index } from '@/services/bm25-index';
 import { scheduleBackgroundPrecompute } from '@/services/galaxy-cache';
 import { ensureArkBackfill } from '@/hooks/useGameStore';
+import { repairJourneyRemovedFlags } from '@/services/library-store';
 import {
   systemStatus,
   reportPrefetchStart,
@@ -338,11 +339,18 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
     }, 1500);
 
     // Prewarm Voyage: backfill journey store so Your Ark / Logs are ready when user opens Voyage.
-    // Deferred to avoid blocking the splash animation.
+    // Deferred to avoid blocking the splash animation. Waits for the stores to
+    // hydrate (an earlier read sees an empty library) and runs the one-time
+    // journey removedAt repair first, behind the same readiness gate.
+    const runArkBackfill = () => {
+      void repairJourneyRemovedFlags()
+        .catch(() => 0)
+        .then(() => ensureArkBackfill());
+    };
     if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(() => ensureArkBackfill());
+      requestIdleCallback(runArkBackfill);
     } else {
-      setTimeout(() => ensureArkBackfill(), 500);
+      setTimeout(runArkBackfill, 500);
     }
 
     // Kick off embedding cache load immediately — the promise is awaited

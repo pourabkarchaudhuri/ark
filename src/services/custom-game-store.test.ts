@@ -6,6 +6,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CustomGameStore } from './custom-game-store';
 import { CustomGameEntry } from '@/types/game';
+import { sessionStore } from './session-store';
+import { statusHistoryStore } from './status-history-store';
+import { journeyStore } from './journey-store';
 
 const STORAGE_KEY = 'ark-custom-games';
 const MIGRATION_MARKER = 'ark-custom-games-migrated-v1';
@@ -84,6 +87,10 @@ function installFakeStore(opts: FakeStoreOpts = {}) {
 }
 
 beforeEach(() => {
+  // addGame bumps the counter past ids in these shared stores (v1.0.97) — start each test clean.
+  sessionStore.clear();
+  statusHistoryStore.clear();
+  journeyStore.clear();
   localStorage.clear();
   Object.defineProperty(window, 'store', {
     value: undefined,
@@ -242,7 +249,7 @@ describe('CustomGameStore — one-shot migration', () => {
 });
 
 describe('CustomGameStore — clear()', () => {
-  it('wipes LevelDB namespace + resets counter + clears marker', async () => {
+  it('wipes LevelDB entries + keeps the counter + clears marker', async () => {
     const { calls, db } = installFakeStore({
       seedEntries: [makeEntry({ id: 'custom-1' })],
       seedCounter: 2,
@@ -251,18 +258,66 @@ describe('CustomGameStore — clear()', () => {
     const store = new CustomGameStore();
     await store.ready;
     store.clear();
-    await Promise.resolve();
-    await Promise.resolve();
+    await store.whenPersisted();
     expect(calls.clearNamespace).toBe(1);
-    expect(db.size).toBe(0);
+    // Only the counter meta row survives the wipe (v1.0.97: ids are never reused).
+    expect(Array.from(db.keys())).toEqual(['custom-game::m:nextCounter']);
     expect(store.getCount()).toBe(0);
     expect(localStorage.getItem(MIGRATION_MARKER)).toBeNull();
-    // Next add uses fresh counter starting at 1
     const created = store.addGame({
       title: 'Fresh',
       platform: ['Windows'],
       status: 'Want to Play',
     });
-    expect(created.id).toBe('custom-1');
+    expect(created.id).toBe('custom-2');
+  });
+});
+
+describe('CustomGameStore — counter survives clear + restart (v1.0.97)', () => {
+  it('a re-initialised store after clear() keeps handing out new ids', async () => {
+    const { db } = installFakeStore({
+      seedEntries: [makeEntry({ id: 'custom-1' }), makeEntry({ id: 'custom-2' })],
+      seedCounter: 3,
+    });
+    const store = new CustomGameStore();
+    await store.ready;
+    store.clear();
+    await store.whenPersisted();
+    expect(db.get('custom-game::m:nextCounter')).toEqual({ nextCounter: 3 });
+
+    // Restart: a fresh store hydrating from the same LevelDB.
+    const restarted = new CustomGameStore();
+    await restarted.ready;
+    expect(restarted.getCount()).toBe(0);
+    const created = restarted.addGame({ title: 'After restart', platform: ['Windows'], status: 'Want to Play' });
+    expect(created.id).toBe('custom-3');
+  });
+
+  it('ensureCounterAbove moves the counter past the highest custom-N only', async () => {
+    const store = new CustomGameStore();
+    await store.ready;
+    expect(store.ensureCounterAbove(['steam-9', 'custom-5', 'custom-x', 'custom-2'])).toBe(true);
+    expect(store.ensureCounterAbove(['custom-3'])).toBe(false);
+    const created = store.addGame({ title: 'N', platform: ['Windows'], status: 'Want to Play' });
+    expect(created.id).toBe('custom-6');
+  });
+});
+
+describe('CustomGameStore — importData (v1.0.97)', () => {
+  it('replaces entries, keeps ids, and never moves the counter backwards', async () => {
+    const { db } = installFakeStore({ seedEntries: [makeEntry({ id: 'custom-9', title: 'Old' })], seedCounter: 10 });
+    const store = new CustomGameStore();
+    await store.ready;
+    const res = store.importData(
+      [makeEntry({ id: 'custom-1', title: 'A' }), makeEntry({ id: 'custom-4', title: 'B' })],
+      2,
+    );
+    expect(res).toEqual({ success: true, count: 2 });
+    await store.whenPersisted();
+    expect(store.getAllGames().map((g) => g.id).sort()).toEqual(['custom-1', 'custom-4']);
+    expect(db.has('custom-game::e:custom-9')).toBe(false);
+    expect(db.has('custom-game::e:custom-4')).toBe(true);
+    // max(payload 2, highest id + 1 = 5, current 10)
+    expect(store.addGame({ title: 'C', platform: ['Windows'], status: 'Want to Play' }).id).toBe('custom-10');
   });
 });

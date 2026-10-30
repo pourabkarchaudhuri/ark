@@ -581,6 +581,57 @@ export class JourneyStore {
   }
 
   /**
+   * Mark many games as removed with one shared timestamp (Clear library).
+   * Rows that already carry a removedAt keep it. One save + notify.
+   */
+  markRemovedBatch(gameIds: Iterable<string>): number {
+    const nowIso = new Date().toISOString();
+    let changed = 0;
+    for (const gameId of gameIds) {
+      const existing = this.entries.get(gameId);
+      if (!existing || existing.removedAt) continue;
+      existing.removedAt = nowIso;
+      this.markDirty(gameId);
+      changed++;
+    }
+    if (changed > 0) {
+      this.invalidateSortedCache();
+      this.scheduleSave();
+      this.notifyListeners();
+    }
+    return changed;
+  }
+
+  /**
+   * The game is (back) in the library: drop its removedAt flag. No-op when
+   * there is no row or it is not flagged. Unlike record(), touches nothing else.
+   */
+  clearRemoved(gameId: string): boolean {
+    return this.clearRemovedFor([gameId]) > 0;
+  }
+
+  /** Batch form of clearRemoved (import / boot repair). One save + notify. */
+  clearRemovedFor(gameIds: Iterable<string>): number {
+    let changed = 0;
+    for (const gameId of gameIds) {
+      const existing = this.entries.get(gameId);
+      if (!existing || !existing.removedAt) continue;
+      // Replace the row so identity-based consumers see the change.
+      const next: JourneyEntry = { ...existing };
+      delete next.removedAt;
+      this.entries.set(gameId, next);
+      this.markDirty(gameId);
+      changed++;
+    }
+    if (changed > 0) {
+      this.invalidateSortedCache();
+      this.scheduleSave();
+      this.notifyListeners();
+    }
+    return changed;
+  }
+
+  /**
    * Sync status / hours / rating / lastPlayedAt for a game already in the journey.
    */
   syncProgress(gameId: string, fields: { status?: GameStatus; hoursPlayed?: number; rating?: number; firstPlayedAt?: string; lastPlayedAt?: string }) {
@@ -730,6 +781,7 @@ export class JourneyStore {
     let skipped = 0;
 
     for (const incoming of entries) {
+      if (!incoming || typeof incoming !== 'object') { skipped++; continue; }
       const migratedId = migrateGameId(incoming as any);
       if (!migratedId) { skipped++; continue; }
       // Sanitize date fields on the incoming record so imports never carry

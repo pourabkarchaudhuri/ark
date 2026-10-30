@@ -270,6 +270,12 @@ export class CustomGameStore {
         return;
       }
       const migrated = await this.tryMigrateFromLocalStorage();
+      if (storedCounter !== null && storedCounter > this.nextCounter) {
+        // No custom games left (e.g. after Clear library) but the counter row
+        // survives: keep it, so old ids and their history are never reused.
+        this.nextCounter = storedCounter;
+        this._lastPersistedCounter = storedCounter;
+      }
       if (!migrated) {
         this.notifyListeners();
       }
@@ -344,8 +350,11 @@ export class CustomGameStore {
       const res = await window.store!.batch(ops);
       if (res.error) {
         console.error('[CustomGameStore] Migration batch failed:', res.error);
+        // Never move the counter backwards: ids already handed out (and their
+        // sessions / history) must not be reused by the retry next boot.
+        const keepCounter = Math.max(this.nextCounter, this.recomputeCounterFromEntries());
         this.entries.clear();
-        this.nextCounter = 1;
+        this.nextCounter = keepCounter;
         return false;
       }
 
@@ -488,9 +497,44 @@ export class CustomGameStore {
     return this._version;
   }
 
+  /**
+   * Make sure the next id handed out is above every custom-N in `ids`.
+   * Returns true when the counter moved (and schedules a save).
+   */
+  ensureCounterAbove(ids: Iterable<string>): boolean {
+    let max = 0;
+    for (const id of ids) {
+      if (typeof id !== 'string' || !id.startsWith('custom-')) continue;
+      const num = parseInt(id.slice('custom-'.length), 10);
+      if (Number.isFinite(num) && num > max) max = num;
+    }
+    if (max + 1 <= this.nextCounter) return false;
+    this.nextCounter = max + 1;
+    this.scheduleSave();
+    return true;
+  }
+
+  /**
+   * Safety net for users hit by the old Clear-library counter reset: never
+   * hand out an id that already has sessions, status history or a journey row.
+   * Run lazily at add time because those stores may hydrate after this one.
+   */
+  private bumpCounterPastHistory(): void {
+    const ids: string[] = [];
+    try {
+      for (const s of sessionStore.getAll()) ids.push(s.gameId);
+      for (const s of statusHistoryStore.getAll()) ids.push(s.gameId);
+      for (const j of journeyStore.getAllEntries()) ids.push(j.gameId);
+    } catch {
+      // Best effort — a store that cannot be read just contributes nothing.
+    }
+    this.ensureCounterAbove(ids);
+  }
+
   // Add a custom game
   addGame(input: CreateCustomGameEntry): CustomGameEntry {
     const now = new Date();
+    this.bumpCounterPastHistory();
     const id = `custom-${this.nextCounter++}`;
     const hoursPlayed = input.hoursPlayed ?? 0;
 
@@ -512,6 +556,8 @@ export class CustomGameStore {
     this.entries.set(id, entry);
     this.scheduleSave();
     this.notifyListeners();
+    // A journey row for this id is from an earlier life of the game: it is back now.
+    journeyStore.clearRemoved(id);
 
     // Status history, like library games (custom games had none before v1.0.87).
     statusHistoryStore.record(id, entry.title, null, entry.status, { source: 'user' });
@@ -714,6 +760,11 @@ export class CustomGameStore {
     );
   }
 
+  /** Backup payload for the library export: every custom game plus the id counter. */
+  exportData(): { entries: CustomGameEntry[]; nextCounter: number } {
+    return { entries: Array.from(this.entries.values()), nextCounter: this.nextCounter };
+  }
+
   // Get count
   getCount(): number {
     return this.entries.size;
@@ -757,25 +808,73 @@ export class CustomGameStore {
     return this.getAllGames().map((entry) => this.toGame(entry));
   }
 
-  // Clear all custom games
+  /**
+   * Queue a namespace wipe that keeps the id counter: the counter is written
+   * back right after the wipe so a restart never hands out an old id again.
+   */
+  private queueClearNamespace(): void {
+    void this._writeQueue.run(async () => {
+      const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
+      if (res.error) {
+        console.error('[CustomGameStore] clearNamespace failed:', res.error);
+        return; // keep _persisted so the next save emits explicit deletes
+      }
+      this._persisted = new Map();
+      const counter = this.nextCounter;
+      const put = await window.store!.put(LEVEL_NAMESPACE, KEY_META_NEXT_COUNTER, { nextCounter: counter });
+      if (put.error) {
+        console.error('[CustomGameStore] counter write after clear failed:', put.error);
+        this._lastPersistedCounter = 0; // next save retries the meta row
+        return;
+      }
+      this._lastPersistedCounter = counter;
+    });
+  }
+
+  /**
+   * Replace every custom game with a backup's (library import). Refused when
+   * read-only. The counter never moves backwards: max(payload, highest id + 1, current).
+   */
+  importData(entries: CustomGameEntry[], nextCounter?: number): { success: boolean; count: number; error?: string } {
+    if (this._readOnly) {
+      return { success: false, count: 0, error: 'Custom games are read-only this session' };
+    }
+    const valid = (Array.isArray(entries) ? entries : []).filter(
+      (e): e is CustomGameEntry =>
+        !!e && typeof e === 'object' &&
+        ((typeof e.id === 'string' && e.id.length > 0) ||
+          (typeof (e.id as unknown) === 'number' && Number.isFinite(e.id as unknown as number))) &&
+        typeof e.title === 'string',
+    );
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    this.entries.clear();
+    const count = this.ingestEntries(valid);
+    const payloadCounter = typeof nextCounter === 'number' && Number.isFinite(nextCounter) ? nextCounter : 1;
+    this.nextCounter = Math.max(payloadCounter, this.recomputeCounterFromEntries(), this.nextCounter);
+    if (this._useLevelDB) {
+      this.queueClearNamespace();
+      this.saveNow(); // queued behind the wipe
+    } else {
+      this.saveToStorage();
+    }
+    this.notifyListeners();
+    return { success: true, count };
+  }
+
+  // Clear all custom games. The id counter is kept: sessions, status history
+  // and journey rows of cleared games survive, so their ids must never be reused.
   clear() {
     this.entries.clear();
-    this.nextCounter = 1;
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
     if (this._useLevelDB && !this._readOnly) {
       // Queued so any later save lands strictly after the namespace wipe.
-      void this._writeQueue.run(async () => {
-        const res = await window.store!.clearNamespace(LEVEL_NAMESPACE);
-        if (res.error) {
-          console.error('[CustomGameStore] clearNamespace failed:', res.error);
-          return; // keep _persisted so the next save emits explicit deletes
-        }
-        this._persisted = new Map();
-        this._lastPersistedCounter = 1;
-      });
+      this.queueClearNamespace();
     }
     if (!this._readOnly) {
       localStorage.removeItem(STORAGE_KEY);
