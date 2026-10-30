@@ -5,10 +5,11 @@ import {
   Search, 
   Filter,
   Plus,
+  Compass,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-type EmptyStateType = 'no-results' | 'no-games' | 'no-filter-results';
+export type EmptyStateType = 'no-results' | 'no-games' | 'no-filter-results' | 'no-browse-results';
 
 interface EmptyStateProps {
   type: EmptyStateType;
@@ -39,6 +40,15 @@ const emptyStateConfig: Record<EmptyStateType, {
     actionLabel: "Clear Filters",
     iconColor: "text-yellow-500",
     glowColor: "shadow-yellow-500/20",
+  },
+  // Browse category came back empty without an error (not the library).
+  'no-browse-results': {
+    icon: Compass,
+    title: "Nothing to Show Here",
+    description: "This category didn't return any games right now. Try again in a moment or pick another category from the filters.",
+    actionLabel: "Retry",
+    iconColor: "text-cyan-500",
+    glowColor: "shadow-cyan-500/20",
   },
   'no-games': {
     icon: Search, // Not used for 'no-games' (caveman GIF is used instead)

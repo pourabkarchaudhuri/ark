@@ -15,6 +15,7 @@ import { CustomGameDialog } from '@/components/custom-game-dialog';
 import { GameCard } from '@/components/game-card';
 import { SkeletonGrid } from '@/components/game-card-skeleton';
 import { VirtualGameGrid, useBreakpointColumns } from '@/components/virtual-game-grid';
+import { VirtualLibrarySections } from '@/components/virtual-library-sections';
 // GameDetailPanel removed - now using dedicated /game/:id route
 import { FilterTrigger, FilterPanel } from '@/components/filter-sidebar';
 import { SearchSuggestions } from '@/components/search-suggestions';
@@ -33,8 +34,8 @@ const DevLogView = lazy(() => import('@/components/devlog-view').then(m => ({ de
 import { useToast } from '@/components/ui/toast';
 
 import { cn } from '@/lib/utils';
+import { countActiveFilters } from '@/lib/active-filters';
 import { setNavigatingGame } from '@/services/prefetch-store';
-import { AnimatePresence, motion } from 'framer-motion';
 import {
   Gamepad2,
   Search,
@@ -57,7 +58,6 @@ import {
   HelpCircle,
   Workflow,
   ScrollText,
-  ChevronDown,
   Play,
   Pause,
   CheckCircle2,
@@ -176,7 +176,7 @@ export function Dashboard() {
   }, [viewMode]);
   
   // Steam Games (games for browsing) - pass category filter
-  const { games: steamGames, loading: steamLoading, hasMore: browseHasMore, loadMore: browseLoadMore, error: steamError, loadingMore, catalogLetter, jumpToLetter: rawJumpToLetter, enrichGames, allGamesRef, enrichmentMapRef, catalogTotalCount } = useSteamGames(filters.category);
+  const { games: steamGames, loading: steamLoading, hasMore: browseHasMore, loadMore: browseLoadMore, error: steamError, refresh: refreshBrowse, loadingMore, catalogLetter, jumpToLetter: rawJumpToLetter, enrichGames, allGamesRef, enrichmentMapRef, catalogTotalCount } = useSteamGames(filters.category);
 
   // Wire up the detail enricher — lazily fetches metadata for visible catalog cards
   useDetailEnricher(enrichGames, allGamesRef, enrichmentMapRef);
@@ -198,10 +198,15 @@ export function Dashboard() {
   const debouncedTyping = useDebounce(typingQuery, 400);
   useEffect(() => { setCommittedQuery(debouncedTyping); }, [debouncedTyping]);
   const clearSearch = useCallback(() => { setTypingQuery(''); setCommittedQuery(''); }, []);
+  // Store searches only run in Browse: Library search is done locally by
+  // useDeferredFilterSort, so Steam/Epic results there would be thrown away.
+  const isBrowseView = viewMode === 'browse';
   // Dropdown reads live typing — useGameSearch has ~300ms internal debounce.
-  const { results: searchResults, loading: searchLoading } = useGameSearch(typingQuery);
+  const { results: searchResults, loading: searchLoading } = useGameSearch(isBrowseView ? typingQuery : '');
   // Grid reads the committed query — its own snapshot, only recomputes on commit.
-  const { results: gridSearchResults, loading: gridSearchLoading, isSearching } = useGameSearch(committedQuery);
+  const { results: gridSearchResults, loading: gridSearchLoading } = useGameSearch(isBrowseView ? committedQuery : '');
+  // Independent of the store search so Library 'no-results' still works.
+  const isSearching = committedQuery.trim().length > 0;
   // "Pending" reflects the uncommitted gap between typing and grid commit.
   const browseSearchPending = viewMode === 'browse' && typingQuery.trim() !== '' && committedQuery !== typingQuery;
   const librarySearchPending = viewMode === 'library' && typingQuery.trim() !== '' && committedQuery !== typingQuery;
@@ -310,7 +315,8 @@ export function Dashboard() {
   currentGamesRef.current = currentGames;
 
   const currentLoading = viewMode === 'browse' ? steamLoading : libraryLoading;
-  const currentError = steamError;
+  // Browse fetch errors only belong to Browse — Library is fully local.
+  const currentError = viewMode === 'browse' ? steamError : null;
 
   // Epic store filter: Epic data is a finite curated set (new releases + coming
   // soon + free games), not backed by the 155k+ Steam catalog.  The catalog
@@ -757,9 +763,10 @@ export function Dashboard() {
   // Helper: find a game across ALL sources (browse + library + custom).
   // allGamesRef has Steam/Epic browse games; currentGamesRef has the active
   // view's data (library + custom games in library mode, browse in browse mode).
+  // The active view's (merged) copy wins so actions see what the card shows.
   const resolveGame = useCallback((gameId: string): Game | undefined => {
-    return allGamesRef.current.find(g => g.id === gameId)
-      || currentGamesRef.current.find(g => g.id === gameId);
+    return currentGamesRef.current.find(g => g.id === gameId)
+      || allGamesRef.current.find(g => g.id === gameId);
   }, [allGamesRef]);
 
   const handleCardEdit = useCallback((gameId: string) => {
@@ -805,8 +812,12 @@ export function Dashboard() {
   }, [handleStatusChange, resolveGame]);
 
   const handleCardPlay = useCallback(async (gameId: string) => {
-    const game = resolveGame(gameId);
-    const exePath = game?.executablePath;
+    // Read from the stores (like handleCardEdit): the raw browse object never
+    // has the library data merged in, so it has no executablePath.
+    const exePath =
+      libraryStore.getEntry(gameId)?.executablePath
+      ?? (gameId.startsWith('custom-') ? customGameStore.getGame(gameId)?.executablePath : undefined)
+      ?? resolveGame(gameId)?.executablePath;
     if (!exePath) {
       showError('No executable set for this game — add one via Edit Entry.');
       return;
@@ -956,19 +967,15 @@ export function Dashboard() {
     filters.genre !== 'All' ||
     filters.platform !== 'All' ||
     filters.category !== 'trending' ||
+    filters.releaseYear !== 'All' ||
     filters.store.length > 0),
-  [committedQuery, filters.status, filters.priority, filters.genre, filters.platform, filters.category, filters.store.length]);
+  [committedQuery, filters.status, filters.priority, filters.genre, filters.platform, filters.category, filters.releaseYear, filters.store.length]);
 
-  const activeFilterCount = useMemo(() => {
-    let count = 0;
-    if (filters.status !== 'All' && viewMode === 'library') count++;
-    if (filters.priority !== 'All' && viewMode === 'library') count++;
-    if (filters.genre !== 'All') count++;
-    if (filters.platform !== 'All') count++;
-    if (filters.category !== 'trending' && viewMode === 'browse') count++;
-    if (filters.store.length > 0) count++;
-    return count;
-  }, [filters.status, filters.priority, filters.genre, filters.platform, filters.category, filters.store.length, viewMode]);
+  // Same counter as FilterTrigger so the header badge and the button agree.
+  const activeFilterCount = useMemo(
+    () => countActiveFilters(filters, viewMode),
+    [filters, viewMode],
+  );
 
   const guidedTourSteps = useMemo(() => getTourSteps(activeTourId), [activeTourId]);
 
@@ -1031,7 +1038,9 @@ export function Dashboard() {
       </header>
 
       <main className={cn(
-        "px-3 lg:px-6 py-4 lg:py-6 transition-all duration-300 relative z-10",
+        // No padding transition: animating it re-lays out the whole grid every
+        // frame while the side panel slides in. The panel keeps its own animation.
+        "px-3 lg:px-6 py-4 lg:py-6 relative z-10",
         (isFilterOpen || (betaFeatures && isAIChatOpen)) && "lg:pr-[424px]"
       )}>
         {/* Results Header */}
@@ -1478,7 +1487,7 @@ export function Dashboard() {
             {currentError && (
               <div className="flex flex-col items-center justify-center py-20">
                 <p className="text-red-400 mb-4">{currentError}</p>
-                <Button onClick={() => window.location.reload()} variant="outline">
+                <Button onClick={refreshBrowse} variant="outline">
                   Retry
                 </Button>
               </div>
@@ -1570,69 +1579,25 @@ export function Dashboard() {
                     />
                   );
                 }
+                // Browse category returned nothing (and no error): offer a refetch.
                 return (
-                  <EmptyState 
-                    type="no-games" 
-                    onAction={() => {}} 
-                />
+                  <EmptyState
+                    type="no-browse-results"
+                    onAction={refreshBrowse}
+                  />
                 );
               })()
             ) : libraryGroups ? (
-              /* ── Grouped Library (status sections) ──────────────── */
-              <div className="space-y-2">
-                {STATUS_SECTIONS.map(section => {
-                  const games = libraryGroups[section.key];
-                  if (!games || games.length === 0) return null;
-                  const isCollapsed = collapsedSections.has(section.key);
-                  const SectionIcon = section.icon;
-
-                  return (
-                    <div key={section.key}>
-                      <button
-                        type="button"
-                        onClick={() => toggleSection(section.key)}
-                        className="w-full flex items-center gap-2 py-2.5 px-3 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] transition-colors cursor-pointer group"
-                      >
-                        <SectionIcon className={cn('w-3.5 h-3.5 flex-shrink-0', section.color)} />
-                        <span className="text-sm font-semibold text-white/90 font-mono tracking-wide">// {section.label}</span>
-                        <Badge variant="outline" className="text-[11px] px-2 py-0 h-5 border-white/20 text-white/50 font-mono tabular-nums">{games.length}</Badge>
-                        <div className="flex-1" />
-                        <ChevronDown className={cn(
-                          'w-4 h-4 text-white/20 group-hover:text-white/40 transition-transform duration-200',
-                          isCollapsed && '-rotate-90',
-                        )} />
-                      </button>
-
-                      <AnimatePresence initial={false}>
-                        {!isCollapsed && (
-                          <motion.div
-                            initial={{ height: 0, opacity: 0 }}
-                            animate={{ height: 'auto', opacity: 1 }}
-                            exit={{ height: 0, opacity: 0 }}
-                            transition={{ duration: 0.2, ease: 'easeInOut' }}
-                            className="overflow-hidden"
-                          >
-                            <div
-                              className="pt-3 pb-1"
-                              style={{
-                                display: 'grid',
-                                gridTemplateColumns: `repeat(${libColumns}, minmax(0, 1fr))`,
-                                gap: '16px',
-                              }}
-                            >
-                              {games.map(game => (
-                                <div key={game.id} className="min-w-0">
-                                  {renderGameCard(game)}
-                                </div>
-                              ))}
-                            </div>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  );
-                })}
-              </div>
+              /* ── Grouped Library (status sections, virtualized) ── */
+              <VirtualLibrarySections
+                sections={STATUS_SECTIONS}
+                groups={libraryGroups}
+                collapsedSections={collapsedSections}
+                onToggleSection={toggleSection}
+                columns={libColumns}
+                renderCard={renderGameCard}
+                gap={16}
+              />
             ) : (
               <VirtualGameGrid
                 games={viewMode === 'library' ? libraryDisplayGames : browseDisplayGames}
