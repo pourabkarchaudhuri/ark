@@ -501,6 +501,8 @@ export class SessionStore {
   /**
    * Import session entries (merges, skipping exact duplicates).
    * Duplicates are detected by matching session id.
+   * Rows get the same gameId migration hydrate applies (old numeric ids → "steam-N"),
+   * and rows with a non-finite duration or an unparseable start time are skipped.
    */
   importData(entries: GameSession[]): { added: number; skipped: number } {
     let added = 0;
@@ -508,8 +510,18 @@ export class SessionStore {
 
     const existingIds = new Set(this.entries.map((e) => e.id));
 
-    for (const incoming of entries) {
-      if (!incoming.id || !incoming.gameId) {
+    for (const raw of entries) {
+      if (!raw || typeof raw !== 'object') {
+        skipped++;
+        continue;
+      }
+      const rawGameId = (raw as { gameId?: unknown }).gameId;
+      if (!raw.id || rawGameId == null || rawGameId === '') {
+        skipped++;
+        continue;
+      }
+      const incoming: GameSession = { ...raw, gameId: migrateGameId(raw as any) };
+      if (!Number.isFinite(incoming.durationMinutes) || !Number.isFinite(new Date(incoming.startTime).getTime())) {
         skipped++;
         continue;
       }

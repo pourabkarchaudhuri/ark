@@ -10,7 +10,7 @@ import { memo, useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Settings, Key, Eye, Check, AlertCircle, Trash2,
-  Loader2, Bot, Download, Upload, Database, Power, Sparkles, Code2,
+  Loader2, Bot, Database, Power, Sparkles, Code2,
   Brain, BookOpen, Info, Users, Scale, ExternalLink,
   Library, Compass, Globe, Newspaper, Calendar, Gamepad2,
   Zap, Search, Star, Trophy, Map, MessageCircle, Shield,
@@ -21,8 +21,6 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { libraryStore } from '@/services/library-store';
-import { gameService } from '@/services/game-service';
 import { useDevMode } from '@/hooks/useDevMode';
 import {
   getAutoOnHoldEnabled,
@@ -46,6 +44,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { EmbeddingBatchSizeControl } from '@/components/settings/embedding-batch-size';
 import { AboutUpdateButton, useAboutUpdate } from '@/components/settings/about-update';
 import { GeminiKeyInput } from '@/components/settings/gemini-key-input';
+import { LibraryDataSection } from '@/components/settings/library-data-section';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
 import {
   OVERLAY_CYCLE_HOTKEY_LABEL,
@@ -172,9 +171,6 @@ const GeneralTab = memo(function GeneralTab() {
   const [autoPlaying, setAutoPlaying] = useState(getAutoStatusTransitionEnabled);
   const [hltbOn, setHltbOn] = useState(isHltbEnabled);
   const [allowAdultContent, setAllowAdultContent] = useAllowAdultContent();
-  const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
-  const [importMessage, setImportMessage] = useState<string | null>(null);
-  const [exportStatus, setExportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [showWrapped, setShowWrapped] = useState(false);
 
   useEffect(() => {
@@ -218,63 +214,6 @@ const GeneralTab = memo(function GeneralTab() {
       setAnalyticsEnabledState(!newValue);
     }
   }, [analyticsEnabled]);
-
-  const handleExportLibrary = useCallback(async () => {
-    setExportStatus('loading');
-    try {
-      const data = libraryStore.exportData();
-      const librarySize = libraryStore.getSize();
-      if (window.fileDialog) {
-        const result = await window.fileDialog.saveFile({
-          content: data,
-          defaultName: `ark-library-${new Date().toISOString().split('T')[0]}.json`,
-          filters: [{ name: 'JSON Files', extensions: ['json'] }],
-        });
-        if (result.success) { setExportStatus('success'); setImportMessage(`Exported ${librarySize} games`); }
-        else if (result.canceled) { setExportStatus('idle'); return; }
-        else { setExportStatus('error'); setImportMessage(result.error || 'Failed'); }
-      } else {
-        const blob = new Blob([data], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = `ark-library-${new Date().toISOString().split('T')[0]}.json`;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-        setExportStatus('success'); setImportMessage(`Exported ${librarySize} games`);
-      }
-      setTimeout(() => { setExportStatus('idle'); setImportMessage(null); }, 3000);
-    } catch { setExportStatus('error'); setImportMessage('Failed to export'); setTimeout(() => { setExportStatus('idle'); setImportMessage(null); }, 3000); }
-  }, []);
-
-  const handleImportLibrary = useCallback(async () => {
-    setImportStatus('loading'); setImportMessage(null);
-    const processContent = (content: string) => {
-      const result = libraryStore.importData(content);
-      if (result.success) {
-        setImportStatus('success');
-        setImportMessage(`Imported ${result.count} games`);
-        gameService.backfillLibraryMissingCachedMeta().catch(() => { /* non-blocking */ });
-      } else {
-        setImportStatus('error');
-        setImportMessage(result.error || 'Failed');
-      }
-    };
-    try {
-      if (window.fileDialog) {
-        const result = await window.fileDialog.openFile({ filters: [{ name: 'JSON Files', extensions: ['json'] }] });
-        if (result.canceled) { setImportStatus('idle'); return; }
-        if (!result.success || !result.content) { setImportStatus('error'); setImportMessage(result.error || 'Failed'); }
-        else processContent(result.content);
-      } else {
-        const input = document.createElement('input'); input.type = 'file'; input.accept = '.json';
-        input.onchange = async (e) => {
-          const file = (e.target as HTMLInputElement).files?.[0];
-          if (!file) { setImportStatus('idle'); return; }
-          try { processContent(await file.text()); } catch { setImportStatus('error'); setImportMessage('Failed'); }
-        };
-        input.click();
-      }
-    } catch { setImportStatus('error'); setImportMessage('Failed'); }
-    setTimeout(() => { setImportStatus('idle'); setImportMessage(null); }, 3000);
-  }, []);
 
   return (
     <>
@@ -398,29 +337,7 @@ const GeneralTab = memo(function GeneralTab() {
 
         <SectionHeading icon={Database}>Library Data</SectionHeading>
         <SectionCard>
-          <div>
-            <p className="text-sm font-medium text-white/90">Export & Import</p>
-            <p className="text-xs text-white/35 mt-0.5">Backup or restore your library data as JSON</p>
-          </div>
-          <div className="flex gap-3">
-            <Button variant="ghost" size="sm" onClick={handleExportLibrary} disabled={exportStatus === 'loading'}
-              className="flex-1 h-10 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-white/70">
-              {exportStatus === 'loading' ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Download className="h-4 w-4 mr-2" />}
-              Export Library
-            </Button>
-            <Button variant="ghost" size="sm" onClick={handleImportLibrary} disabled={importStatus === 'loading'}
-              className="flex-1 h-10 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-white/70">
-              {importStatus === 'loading' ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Upload className="h-4 w-4 mr-2" />}
-              Import Library
-            </Button>
-          </div>
-          {importMessage && (
-            <div className={cn('flex items-center gap-2 text-xs', (importStatus === 'success' || exportStatus === 'success') ? 'text-emerald-400/70' : 'text-red-400/70')}>
-              {(importStatus === 'success' || exportStatus === 'success') ? <Check className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
-              {importMessage}
-            </div>
-          )}
-          <p className="text-xs text-white/25">Import merges with existing data: new games are added, changed games are updated.</p>
+          <LibraryDataSection />
         </SectionCard>
 
         <SectionHeading icon={Sparkles}>Year in Review</SectionHeading>

@@ -917,10 +917,8 @@ export function Dashboard() {
 
   const handleClearLibraryFinalConfirm = useCallback(() => {
     try {
-      const libraryCount = libraryStore.getSize();
-      const customCount = customGameStore.getCount();
-      libraryStore.clear();
-      customGameStore.clear();
+      // clearAll flags the journey rows removed before wiping both stores.
+      const { libraryCount, customCount } = libraryStore.clearAll();
       const total = libraryCount + customCount;
       success(`Cleared ${total} game${total !== 1 ? 's' : ''} from your library`);
     } catch (err) {

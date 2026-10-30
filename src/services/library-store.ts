@@ -6,7 +6,9 @@ import {
   UpdateLibraryEntry,
   migrateGameId,
 } from '@/types/game';
+import type { CustomGameEntry, GameSession, JourneyEntry, StatusChangeEntry } from '@/types/game';
 import { journeyStore } from './journey-store';
+import { customGameStore } from './custom-game-store';
 import { oracleEventLog } from './oracle-event-log';
 import { recoHistoryStore } from './reco-history-store';
 import { normalizeTitle } from '@/services/dedup';
@@ -89,6 +91,38 @@ interface StoredData {
   lastUpdated: string;
 }
 
+/** LevelDB namespace + key holding the automatic pre-import snapshot (userData). */
+const IMPORT_SNAPSHOT_NAMESPACE = 'library-import-backup';
+const IMPORT_SNAPSHOT_KEY = 'latest';
+
+/**
+ * A parsed, validated backup file (parseImport) — nothing applied yet. The
+ * optional arrays are present only when the file carries them.
+ */
+export interface LibraryImportPlan {
+  entries: LibraryGameEntry[];
+  journeyHistory?: JourneyEntry[];
+  statusHistory?: StatusChangeEntry[];
+  sessionHistory?: GameSession[];
+  customGames?: { entries: CustomGameEntry[]; nextCounter?: number };
+  /** For the confirmation dialog. fileCustomGames is null for files without custom games. */
+  counts: {
+    currentGames: number;
+    fileGames: number;
+    currentCustomGames: number;
+    fileCustomGames: number | null;
+  };
+}
+
+export interface LibraryImportResult {
+  success: boolean;
+  /** Library (Steam/Epic) games now in the library. */
+  count: number;
+  /** Custom games now in the library. */
+  customCount: number;
+  error?: string;
+}
+
 // Module-level guard so HMR doesn't stack duplicate beforeunload listeners.
 let _libraryBeforeUnloadInstalled = false;
 
@@ -154,6 +188,9 @@ export class LibraryStore {
 
   /** Backoff retry for a failed LevelDB save (also forces the unload flush). */
   private readonly _saveRetry = new SaveRetry('LibraryStore', () => this.saveNow());
+
+  /** Export JSON of the state right before the last import this session (undo). */
+  private _lastImportSnapshot: string | null = null;
 
   /**
    * Resolves when the async LevelDB hydration finishes. Public reads are safe
@@ -288,6 +325,8 @@ export class LibraryStore {
       this.initializeFromLocalStorage();
     }
     this.isInitialized = true;
+    // Any sorted list built during the boot window saw a partial library.
+    this.invalidateSortedCache();
   }
 
   /**
@@ -328,6 +367,7 @@ export class LibraryStore {
       if (!rewritten) cleanIds.push(id);
       count++;
     });
+    this.invalidateSortedCache();
     return { count, migratedStatus, cleanIds };
   }
 
@@ -576,6 +616,8 @@ export class LibraryStore {
     this.invalidateSortedCache();
     this.scheduleSave();
     this.notifyListeners();
+    // Re-added after a removal: the journey row must stop counting it as removed.
+    journeyStore.clearRemoved(gameId);
 
     // Record initial status in status history
     const journeyEntry = journeyStore.getEntry(gameId);
@@ -654,7 +696,7 @@ export class LibraryStore {
     }
 
     const hasJourney = journeyStore.has(gameId);
-    const addedAtIso = (updated.addedAt instanceof Date ? updated.addedAt : new Date(updated.addedAt)).toISOString();
+    const addedAtIso = LibraryStore.toValidDate(updated.addedAt, new Date()).toISOString();
     const nowIso = new Date().toISOString();
 
     // Create journey entry when game first reaches Playing (or Playing Now) so it appears in Your Ark / Logs
@@ -934,9 +976,13 @@ export class LibraryStore {
       this.syncCrossStoreStatusesOnce();
     }
     if (this._sortedCache) return this._sortedCache;
-    this._sortedCache = Array.from(this.entries.values()).sort(
+    const sorted = Array.from(this.entries.values()).sort(
       (a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime()
     );
+    // Before hydration finishes the library is partial (often empty): never
+    // cache that view, or early readers pin it for the whole session.
+    if (!this.isInitialized) return sorted;
+    this._sortedCache = sorted;
     return this._sortedCache;
   }
 
@@ -1070,11 +1116,28 @@ export class LibraryStore {
     this.notifyListeners();
   }
 
-  // Export library data (includes journey history, status history, and session history)
+  /**
+   * Clear library (Dashboard "Clear library"): Steam/Epic entries AND custom
+   * games. Their journey rows are flagged removed first, with one shared
+   * timestamp, so Voyage and Oracle stop counting them as owned. The ids must
+   * be collected before the clears or they are lost. Generic clear() stays
+   * side-effect free.
+   */
+  clearAll(): { libraryCount: number; customCount: number } {
+    const libraryIds = Array.from(this.entries.keys());
+    const customIds = customGameStore.getAllGames().map((g) => g.id);
+    journeyStore.markRemovedBatch([...libraryIds, ...customIds]);
+    this.clear();
+    customGameStore.clear();
+    return { libraryCount: libraryIds.length, customCount: customIds.length };
+  }
+
+  // Export library data (includes custom games, journey history, status history, and session history)
   exportData(): string {
     return JSON.stringify(
       {
         entries: Array.from(this.entries.values()),
+        customGames: customGameStore.exportData(),
         journeyHistory: journeyStore.exportData(),
         statusHistory: statusHistoryStore.exportData(),
         sessionHistory: sessionStore.exportData(),
@@ -1085,132 +1148,192 @@ export class LibraryStore {
     );
   }
 
-  // Import library data — wipes all existing data and replaces with the import
-  importData(jsonData: string): { success: boolean; count: number; error?: string } {
+  /**
+   * Parse + validate a backup file without touching any store, so the UI can
+   * show what an import will replace before the user confirms.
+   */
+  parseImport(jsonData: string): { success: true; plan: LibraryImportPlan } | { success: false; error: string } {
+    let parsed: any;
     try {
-      const parsed = JSON.parse(jsonData);
-      const entries = parsed.entries as LibraryGameEntry[];
+      parsed = JSON.parse(jsonData);
+    } catch {
+      return { success: false, error: 'Failed to parse import data' };
+    }
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.entries)) {
+      return { success: false, error: 'Invalid data format' };
+    }
+    const entries = (parsed.entries as unknown[]).filter(
+      (e): e is LibraryGameEntry => !!e && typeof e === 'object',
+    );
+    const rawCustom = parsed.customGames;
+    const customGames =
+      rawCustom && typeof rawCustom === 'object' && Array.isArray(rawCustom.entries)
+        ? {
+            entries: rawCustom.entries as CustomGameEntry[],
+            nextCounter: typeof rawCustom.nextCounter === 'number' ? rawCustom.nextCounter : undefined,
+          }
+        : undefined;
+    return {
+      success: true,
+      plan: {
+        entries,
+        ...(Array.isArray(parsed.journeyHistory) ? { journeyHistory: parsed.journeyHistory as JourneyEntry[] } : {}),
+        ...(Array.isArray(parsed.statusHistory) ? { statusHistory: parsed.statusHistory as StatusChangeEntry[] } : {}),
+        ...(Array.isArray(parsed.sessionHistory) ? { sessionHistory: parsed.sessionHistory as GameSession[] } : {}),
+        ...(customGames ? { customGames } : {}),
+        counts: {
+          currentGames: this.entries.size,
+          fileGames: entries.length,
+          currentCustomGames: customGameStore.getCount(),
+          fileCustomGames: customGames ? customGames.entries.length : null,
+        },
+      },
+    };
+  }
 
-      if (!Array.isArray(entries)) {
-        return { success: false, count: 0, error: 'Invalid data format' };
-      }
+  /**
+   * Apply a parsed backup. REPLACES the library; custom games, status history,
+   * sessions and journey are replaced only when the file carries them (an old
+   * or partial backup keeps the existing data for what it lacks). Before
+   * anything is cleared, the current state is snapshotted (memory + LevelDB)
+   * so "Restore previous library" can undo the import.
+   */
+  applyImport(plan: LibraryImportPlan, opts: { snapshot?: boolean } = {}): LibraryImportResult {
+    if (opts.snapshot !== false) {
+      const snapshot = this.exportData();
+      this._lastImportSnapshot = snapshot;
+      this.persistImportSnapshot(snapshot);
+    }
 
-      // Clear all existing data across all stores
-      this.entries.clear();
-      journeyStore.clear();
-      sessionStore.clear();
+    // Custom games first: the history replay below may reference their ids.
+    let customCount = customGameStore.getCount();
+    if (plan.customGames) {
+      const res = customGameStore.importData(plan.customGames.entries, plan.customGames.nextCounter);
+      if (res.success) customCount = res.count;
+    }
+
+    // Library rows go through the same sanitising as hydrate (gameId migration,
+    // Dropped → On Hold, valid dates) and the sorted-cache invalidation.
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    this.entries.clear();
+    this._dirtyIds.clear();
+    const { count } = this.ingestEntries(plan.entries);
+
+    // Status history and sessions before the journey: its first-played
+    // backfill looks up first sessions and first Playing transitions.
+    if (plan.statusHistory) {
       statusHistoryStore.clear();
+      statusHistoryStore.importData(plan.statusHistory);
+    }
+    if (plan.sessionHistory) {
+      sessionStore.clear();
+      sessionStore.importData(plan.sessionHistory);
+    }
+    if (plan.journeyHistory) {
+      journeyStore.clear();
+      journeyStore.importData(plan.journeyHistory);
+    }
 
-      let importCount = 0;
-      entries.forEach((entry) => {
-        const id = migrateGameId(entry as any);
-        if (id) {
-          this.entries.set(id, {
-            ...entry,
-            gameId: id,
-            hoursPlayed: entry.hoursPlayed ?? 0,
-            rating: entry.rating ?? 0,
-            addedAt: new Date(entry.addedAt || new Date()),
-            updatedAt: new Date(entry.updatedAt || new Date()),
-          });
-          importCount++;
-        }
-      });
+    if (!plan.customGames) {
+      // Old file without custom games: existing ones stay, but the counter
+      // must still clear every custom-N the imported history mentions.
+      const ids: string[] = [];
+      for (const s of plan.sessionHistory ?? []) if (s && typeof s.gameId === 'string') ids.push(s.gameId);
+      for (const s of plan.statusHistory ?? []) if (s && typeof s.gameId === 'string') ids.push(s.gameId);
+      for (const j of plan.journeyHistory ?? []) if (j && typeof j.gameId === 'string') ids.push(j.gameId);
+      customGameStore.ensureCounterAbove(ids);
+    }
 
-      this.saveNow();
-      this.notifyListeners();
+    // Everything now owned is not "removed", whatever the file's journey says.
+    journeyStore.clearRemovedFor([
+      ...this.entries.keys(),
+      ...customGameStore.getAllGames().map((g) => g.id),
+    ]);
 
-      // Import journey history if present
-      if (Array.isArray(parsed.journeyHistory)) {
-        journeyStore.importData(parsed.journeyHistory);
-      }
+    // Imported Playing games get a fresh 4 weeks before the idle sweep may put them On Hold.
+    try {
+      localStorage.setItem('ark:libraryImportedAt', new Date().toISOString());
+    } catch {
+      /* non-critical */
+    }
 
-      // Import status history if present
-      if (Array.isArray(parsed.statusHistory)) {
-        statusHistoryStore.importData(parsed.statusHistory);
-      }
+    this.saveNow();
+    this.notifyListeners();
+    return { success: true, count, customCount };
+  }
 
-      // Imported Playing games get a fresh 4 weeks before the idle sweep may put them On Hold.
-      try {
-        localStorage.setItem('ark:libraryImportedAt', new Date().toISOString());
-      } catch {
-        /* non-critical */
-      }
-
-      // Import session history if present
-      if (Array.isArray(parsed.sessionHistory)) {
-        sessionStore.importData(parsed.sessionHistory);
-      }
-
-      return { success: true, count: importCount };
+  // Import library data — REPLACES the library (see applyImport for what else is replaced)
+  importData(jsonData: string): LibraryImportResult {
+    try {
+      const parsed = this.parseImport(jsonData);
+      if (!parsed.success) return { success: false, count: 0, customCount: 0, error: parsed.error };
+      return this.applyImport(parsed.plan);
     } catch (error) {
-      return { success: false, count: 0, error: 'Failed to parse import data' };
+      console.error('[LibraryStore] import failed:', error);
+      return { success: false, count: 0, customCount: 0, error: 'Failed to import data' };
     }
   }
 
 
-  // Import library data — wipes all existing data and replaces with the import
-  importDataWithDelta(jsonData: string): { 
-    success: boolean; 
-    added: number; 
-    updated: number; 
-    skipped: number; 
-    error?: string 
-  } {
+  /** The library as it was right before the last import this session (export JSON), if any. */
+  getLastImportSnapshot(): string | null {
+    return this._lastImportSnapshot;
+  }
+
+  /** Undo the last import: re-apply the pre-import snapshot (without snapshotting again). */
+  restoreLastImportSnapshot(): LibraryImportResult {
+    const snapshot = this._lastImportSnapshot;
+    if (!snapshot) return { success: false, count: 0, customCount: 0, error: 'Nothing to restore' };
+    const parsed = this.parseImport(snapshot);
+    if (!parsed.success) return { success: false, count: 0, customCount: 0, error: parsed.error };
+    const result = this.applyImport(parsed.plan, { snapshot: false });
+    if (result.success) this._lastImportSnapshot = null;
+    return result;
+  }
+
+  /** Best-effort on-disk copy (userData LevelDB) of the pre-import snapshot. */
+  private persistImportSnapshot(snapshot: string): void {
+    const store = typeof window !== 'undefined' ? window.store : undefined;
+    if (!store) return;
     try {
-      const parsed = JSON.parse(jsonData);
-      const entries = parsed.entries as LibraryGameEntry[];
-
-      if (!Array.isArray(entries)) {
-        return { success: false, added: 0, updated: 0, skipped: 0, error: 'Invalid data format' };
-      }
-
-      // Clear all existing data across all stores
-      this.entries.clear();
-      journeyStore.clear();
-      sessionStore.clear();
-      statusHistoryStore.clear();
-
-      let added = 0;
-
-      entries.forEach((entry) => {
-        const id = migrateGameId(entry as any);
-        if (!id) return;
-
-        this.entries.set(id, {
-          ...entry,
-          gameId: id,
-          hoursPlayed: entry.hoursPlayed ?? 0,
-          rating: entry.rating ?? 0,
-          addedAt: new Date(entry.addedAt || new Date()),
-          updatedAt: new Date(entry.updatedAt || new Date()),
-        });
-        added++;
-      });
-
-      this.saveNow();
-      this.notifyListeners();
-
-      // Import journey history if present
-      if (Array.isArray(parsed.journeyHistory)) {
-        journeyStore.importData(parsed.journeyHistory);
-      }
-
-      // Import status history if present
-      if (Array.isArray(parsed.statusHistory)) {
-        statusHistoryStore.importData(parsed.statusHistory);
-      }
-
-      // Import session history if present
-      if (Array.isArray(parsed.sessionHistory)) {
-        sessionStore.importData(parsed.sessionHistory);
-      }
-
-      return { success: true, added, updated: 0, skipped: 0 };
-    } catch (error) {
-      return { success: false, added: 0, updated: 0, skipped: 0, error: 'Failed to parse import data' };
+      void Promise.resolve(
+        store.put(IMPORT_SNAPSHOT_NAMESPACE, IMPORT_SNAPSHOT_KEY, {
+          takenAt: new Date().toISOString(),
+          data: snapshot,
+        }),
+      )
+        .then((res) => {
+          if (res && res.error) console.error('[LibraryStore] import snapshot write failed:', res.error);
+        })
+        .catch((err) => console.error('[LibraryStore] import snapshot write failed:', err));
+    } catch (err) {
+      console.error('[LibraryStore] import snapshot write failed:', err);
     }
   }
+}
+
+/**
+ * One-time boot repair: before v1.0.97 re-adding a removed game never cleared
+ * its journey removedAt, so it stayed "Removed" in Voyage and near-zero in
+ * Oracle. Once the library, custom-game and journey stores have hydrated,
+ * clear the flag for every id that is owned again. Idempotent.
+ */
+let _removedRepairDone = false;
+export async function repairJourneyRemovedFlags(): Promise<number> {
+  if (_removedRepairDone) return 0;
+  _removedRepairDone = true;
+  await Promise.all([
+    libraryStore.ready.catch(() => undefined),
+    customGameStore.ready.catch(() => undefined),
+    journeyStore.ready.catch(() => undefined),
+  ]);
+  return journeyStore.clearRemovedFor([
+    ...libraryStore.getAllGameIds(),
+    ...customGameStore.getAllGames().map((g) => g.id),
+  ]);
 }
 
 // Singleton instance

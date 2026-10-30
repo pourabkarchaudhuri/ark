@@ -488,23 +488,33 @@ class StatusHistoryStore {
   /**
    * Import status history entries (merges, skipping exact duplicates).
    * Duplicates are detected by matching gameId + timestamp + newStatus.
+   * Rows get the same gameId migration and validation hydrate applies; rows
+   * with an unknown status or a bad timestamp are skipped.
    */
   importData(entries: StatusChangeEntry[]): { added: number; skipped: number } {
     let added = 0;
     let skipped = 0;
 
     // Build a set of existing entries for fast duplicate detection
-    const existingKeys = new Set(
-      this.entries.map((e) => `${e.gameId}|${e.timestamp}|${e.newStatus}`),
-    );
+    const existingKeys = new Set(this.entries.map(entryKey));
 
-    for (const incoming of entries) {
-      if (!incoming.gameId || !incoming.newStatus || !incoming.timestamp) {
+    for (const raw of entries) {
+      if (!raw || typeof raw !== 'object') {
+        skipped++;
+        continue;
+      }
+      const rawGameId = (raw as { gameId?: unknown }).gameId;
+      if (rawGameId == null || rawGameId === '') {
+        skipped++;
+        continue;
+      }
+      const incoming: StatusChangeEntry = { ...raw, gameId: migrateGameId(raw as any) };
+      if (!isValidStatusEntry(incoming)) {
         skipped++;
         continue;
       }
 
-      const key = `${incoming.gameId}|${incoming.timestamp}|${incoming.newStatus}`;
+      const key = entryKey(incoming);
       if (existingKeys.has(key)) {
         skipped++;
       } else {

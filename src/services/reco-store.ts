@@ -1125,7 +1125,9 @@ export class RecoStore {
         hoursPlayed: libEntry?.hoursPlayed ?? entry.hoursPlayed,
         rating: libEntry?.rating ?? entry.rating,
         addedAt: entry.addedAt,
-        removedAt: entry.removedAt,
+        // A game that is in the library (or a custom game) right now is owned,
+        // whatever a stale journey removedAt says.
+        removedAt: libEntry || customGameStore.getGame(entry.gameId) ? undefined : entry.removedAt,
         sessionCount: sessions.length,
         avgSessionMinutes,
         lastSessionDate: lastSession?.endTime || null,
