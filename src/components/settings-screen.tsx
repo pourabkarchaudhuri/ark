@@ -44,6 +44,7 @@ import { catalogStore } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { EmbeddingBatchSizeControl } from '@/components/settings/embedding-batch-size';
+import { AboutUpdateButton, useAboutUpdate } from '@/components/settings/about-update';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
 import {
   OVERLAY_CYCLE_HOTKEY_LABEL,
@@ -1638,59 +1639,11 @@ const GgDealsSection = memo(function GgDealsSection() {
   );
 });
 
-type UpdateCheckState = 'idle' | 'checking' | 'latest' | 'available' | 'error';
-
 const AboutTab = memo(function AboutTab() {
   const [showTerms, setShowTerms] = useState(false);
-  const [updateState, setUpdateState] = useState<UpdateCheckState>('idle');
-  const [latestVersion, setLatestVersion] = useState<string | null>(null);
-  const [updateError, setUpdateError] = useState<string | null>(null);
+  const update = useAboutUpdate();
+  const { state: updateState, error: updateError } = update;
   const latestNotes = getLatestChangelog();
-
-  const handleCheckForUpdates = useCallback(async () => {
-    if (!window.updater) {
-      setUpdateState('error');
-      setUpdateError('Updater unavailable in this build.');
-      return;
-    }
-    setUpdateState('checking');
-    setUpdateError(null);
-    try {
-      const result = await window.updater.checkForUpdates();
-      if (result.error) {
-        setUpdateError(result.hint ?? "Couldn't reach GitHub.");
-        setUpdateState('error');
-        return;
-      }
-      if (result.updateAvailable) {
-        setLatestVersion(result.latestVersion);
-        setUpdateState('available');
-      } else {
-        setLatestVersion(result.latestVersion);
-        setUpdateState('latest');
-      }
-    } catch (err) {
-      console.error('[Settings] Update check failed:', err);
-      setUpdateError("Couldn't reach GitHub.");
-      setUpdateState('error');
-    }
-  }, []);
-
-  const handleDownloadUpdate = useCallback(async () => {
-    if (!window.updater) return;
-    try {
-      const result = await window.updater.downloadUpdate();
-      // Post-download install progress is handled by <UpdateSnackbar/>.
-      if (result && !result.success) {
-        setUpdateError(result.hint ?? result.error ?? 'Download failed.');
-        setUpdateState('error');
-      }
-    } catch (err) {
-      console.error('[Settings] Update download failed:', err);
-      setUpdateError('Download failed.');
-      setUpdateState('error');
-    }
-  }, []);
 
   const hasUpdater = typeof window !== 'undefined' && !!window.updater;
 
@@ -1725,28 +1678,7 @@ const AboutTab = memo(function AboutTab() {
           </div>
           <div className="flex items-center gap-2">
             <span className="font-mono text-sm text-fuchsia-400/70 bg-fuchsia-500/10 px-3 py-1 rounded-lg border border-fuchsia-500/20">v{APP_VERSION}</span>
-            {hasUpdater && updateState !== 'available' && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleCheckForUpdates}
-                disabled={updateState === 'checking'}
-                className="h-8 gap-1.5 text-xs"
-              >
-                <RefreshCw className={cn('h-3.5 w-3.5', updateState === 'checking' && 'animate-spin')} />
-                {updateState === 'checking' ? 'Checking…' : 'Check for Updates'}
-              </Button>
-            )}
-            {hasUpdater && updateState === 'available' && latestVersion && (
-              <Button
-                size="sm"
-                onClick={handleDownloadUpdate}
-                className="h-8 gap-1.5 text-xs bg-blue-500 hover:bg-blue-600 text-white"
-              >
-                <Download className="h-3.5 w-3.5" />
-                Download v{latestVersion}
-              </Button>
-            )}
+            {hasUpdater && <AboutUpdateButton update={update} />}
           </div>
         </div>
         {updateState === 'latest' && (

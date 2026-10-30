@@ -62,6 +62,8 @@ interface UpdaterDownloadResult extends UpdateErrorDetail {
   /** Alternate download only: the verified installer was opened (Ark is about to quit). */
   launched?: boolean;
   path?: string;
+  /** Regular download only: 'downloading' when another download was already running. */
+  status?: 'downloading' | 'downloaded';
 }
 
 interface UpdaterAPI {
@@ -73,6 +75,8 @@ interface UpdaterAPI {
     error?: string;
     kind?: string;
     hint?: string;
+    /** Set when the check was skipped because an update is downloading or already downloaded. */
+    status?: 'downloading' | 'downloaded';
   }>;
   downloadUpdate: () => Promise<UpdaterDownloadResult | undefined>;
   /** Resumable, sha512-verified download of the installer (absent in older preloads). */

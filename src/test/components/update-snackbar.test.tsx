@@ -246,6 +246,100 @@ describe('UpdateSnackbar', () => {
     expect(screen.getByText('Could not reach github.com.')).toBeInTheDocument();
   });
 
+  describe('background poll and state transitions', () => {
+    const cb = <K extends keyof typeof mockUpdater>(k: K) =>
+      (mockUpdater[k] as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0] as (arg?: unknown) => void;
+
+    it('a background "checking" event leaves "Update Available" showing', async () => {
+      render(<UpdateSnackbar />);
+      await act(async () => cb('onUpdateAvailable')({ version: '2.0.0' }));
+      await act(async () => cb('onChecking')());
+      expect(screen.getByText('Update Available')).toBeInTheDocument();
+      expect(screen.getByText('Download Now')).toBeInTheDocument();
+    });
+
+    it('a background "checking" event leaves an error and its recovery actions showing', async () => {
+      render(<UpdateSnackbar />);
+      await act(async () => cb('onError')({ message: 'Network error', kind: 'network-reset' }));
+      await act(async () => cb('onChecking')());
+      expect(screen.getByText('Update Error')).toBeInTheDocument();
+      expect(screen.getByText('Download from GitHub')).toBeInTheDocument();
+    });
+
+    it('"checking" from idle still renders nothing', async () => {
+      const { container } = render(<UpdateSnackbar />);
+      await act(async () => cb('onChecking')());
+      expect(container.firstChild).toBeNull();
+    });
+
+    it('Retry now on a reachability error re-checks and hides the toast while checking', async () => {
+      mockUpdater.checkForUpdates
+        .mockResolvedValueOnce({ updateAvailable: false, currentVersion: '1', latestVersion: '1', error: 'x', hint: 'Could not reach github.com.' })
+        .mockReturnValueOnce(new Promise(() => undefined));
+      render(<UpdateSnackbar />);
+      await waitFor(() => expect(screen.getByText('Retry now')).toBeInTheDocument());
+      await act(async () => {
+        fireEvent.click(screen.getByText('Retry now'));
+      });
+      expect(mockUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText("Couldn't reach GitHub")).not.toBeInTheDocument();
+    });
+
+    it('a dismissed snackbar comes back as "Ready to Install" when the download finishes', async () => {
+      render(<UpdateSnackbar />);
+      await act(async () => cb('onUpdateAvailable')({ version: '2.0.0' }));
+      await act(async () => {
+        fireEvent.click(screen.getByText('Later'));
+      });
+      // Download started elsewhere (Settings > About): progress alone does not re-show it.
+      await act(async () => cb('onDownloadProgress')({ percent: 50, bytesPerSecond: 1, transferred: 1, total: 2 }));
+      expect(screen.queryByText('Downloading Update')).not.toBeInTheDocument();
+      await act(async () => cb('onUpdateDownloaded')({ version: '2.0.0' }));
+      expect(screen.getByText('Ready to Install')).toBeInTheDocument();
+      // Later on "ready" still dismisses.
+      await act(async () => {
+        fireEvent.click(screen.getByText('Later'));
+      });
+      expect(screen.queryByText('Ready to Install')).not.toBeInTheDocument();
+    });
+
+    it('a repeat "update available" for the same version does not re-show a dismissed toast; a newer one does', async () => {
+      render(<UpdateSnackbar />);
+      await act(async () => cb('onUpdateAvailable')({ version: '2.0.0' }));
+      await act(async () => {
+        fireEvent.click(screen.getByText('Later'));
+      });
+      await act(async () => cb('onUpdateAvailable')({ version: '2.0.0' }));
+      expect(screen.queryByText('Update Available')).not.toBeInTheDocument();
+      await act(async () => cb('onUpdateAvailable')({ version: '2.0.1' }));
+      expect(screen.getByText(/Version 2.0.1 is available/)).toBeInTheDocument();
+    });
+
+    it('a later download error uses the regular error layout, not the startup "Couldn\'t reach GitHub" one', async () => {
+      mockUpdater.checkForUpdates.mockResolvedValueOnce({ updateAvailable: false, currentVersion: '1', latestVersion: '1', error: 'x', hint: 'Could not reach github.com.' });
+      render(<UpdateSnackbar />);
+      await waitFor(() => expect(screen.getByText("Couldn't reach GitHub")).toBeInTheDocument());
+      await act(async () => cb('onError')({ message: 'net::ERR_CONNECTION_RESET', kind: 'network-reset' }));
+      expect(screen.getByText('Update Error')).toBeInTheDocument();
+      expect(screen.getByText('Download from GitHub')).toBeInTheDocument();
+      expect(screen.queryByText('Retry now')).not.toBeInTheDocument();
+    });
+
+    it('update-available after a reachability error shows the normal "Update Available" layout', async () => {
+      mockUpdater.checkForUpdates.mockResolvedValueOnce({ updateAvailable: false, currentVersion: '1', latestVersion: '1', error: 'x', hint: 'Could not reach github.com.' });
+      render(<UpdateSnackbar />);
+      await waitFor(() => expect(screen.getByText("Couldn't reach GitHub")).toBeInTheDocument());
+      await act(async () => cb('onUpdateAvailable')({ version: '2.0.0' }));
+      expect(screen.getByText('Update Available')).toBeInTheDocument();
+      // A download that then fails is a download error, not a reachability one.
+      mockUpdater.downloadUpdate.mockResolvedValueOnce({ success: false, error: 'boom' });
+      await act(async () => {
+        fireEvent.click(screen.getByText('Download Now'));
+      });
+      expect(screen.getByText('Update Error')).toBeInTheDocument();
+    });
+  });
+
   it('does not render when updater API is not available', () => {
     // Remove the updater
     delete (window as unknown as { updater?: typeof mockUpdater }).updater;

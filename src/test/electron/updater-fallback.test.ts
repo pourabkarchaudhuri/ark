@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { resolveInstallerUrl, runFallbackDownload } from '../../../electron/updater-fallback';
+import { resolveInstallerUrl, runFallbackDownload, cleanupStaleUpdateFiles } from '../../../electron/updater-fallback';
 
 describe('resolveInstallerUrl', () => {
   it('builds the GitHub release URL from a relative manifest path', () => {
@@ -50,7 +50,8 @@ describe('runFallbackDownload', () => {
   afterAll(() => new Promise<void>((r) => server.close(() => r())));
 
   // The real URL is a GitHub URL; route it to the local server.
-  const fetchImpl = (_u: string, init?: RequestInit) => fetch(`${base}/x.exe`, init);
+  // (The signal is dropped: under jsdom it is jsdom's AbortSignal, which Node's fetch rejects.)
+  const fetchImpl = (_u: string, init?: RequestInit) => fetch(`${base}/x.exe`, { ...init, signal: undefined });
   const info = (sha512?: string) => ({ version: '1.0.84', files: [{ url: 'Ark-Setup-1.0.84.exe', size: PAYLOAD.length, sha512 }] });
 
   it('downloads, verifies, then opens the installer', async () => {
@@ -79,5 +80,66 @@ describe('runFallbackDownload', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-fb-'));
     const res = await runFallbackDownload(info(SHA), { fetchImpl, openPath: async () => 'No application', tmpDir });
     expect(res).toMatchObject({ launched: false, openError: 'No application' });
+  });
+
+  it('clears older installers and abandoned partials before downloading, keeping this version\'s .part', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-fb-'));
+    const dir = path.join(tmpDir, 'ark-update');
+    fs.mkdirSync(dir, { recursive: true });
+    for (const f of ['Ark-Setup-1.0.80.exe', 'Ark-Setup-1.0.82.exe.part', 'stray.tmp']) fs.writeFileSync(path.join(dir, f), 'x');
+    // A valid prefix of this version's installer: the download must resume from it, not delete it.
+    fs.writeFileSync(path.join(dir, 'Ark-Setup-1.0.84.exe.part'), PAYLOAD.subarray(0, 1024));
+    const seenRanges: Array<string | undefined> = [];
+    const rangeFetch = async (_u: string, init?: RequestInit) => {
+      const range = (init?.headers as Record<string, string> | undefined)?.Range;
+      seenRanges.push(range);
+      const start = Number(/bytes=(\d+)-/.exec(range ?? '')?.[1] ?? 0);
+      return new Response(PAYLOAD.subarray(start), {
+        status: start ? 206 : 200,
+        headers: start ? { 'content-range': `bytes ${start}-${PAYLOAD.length - 1}/${PAYLOAD.length}` } : {},
+      });
+    };
+    const res = await runFallbackDownload(info(SHA), { fetchImpl: rangeFetch, openPath: async () => '', tmpDir });
+    expect(seenRanges[0]).toBe('bytes=1024-');
+    expect(fs.readFileSync(res.path).equals(PAYLOAD)).toBe(true);
+    expect(fs.readdirSync(dir).sort()).toEqual(['Ark-Setup-1.0.84.exe']);
+  });
+});
+
+describe('cleanupStaleUpdateFiles', () => {
+  const mk = () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-fb-'));
+    const dir = path.join(tmpDir, 'ark-update');
+    fs.mkdirSync(dir, { recursive: true });
+    return { tmpDir, dir };
+  };
+
+  it('removes installers and partials for the running version or older, keeps newer ones and other files', () => {
+    const { tmpDir, dir } = mk();
+    const names = [
+      'Ark-Setup-1.0.9.exe', 'Ark-Setup-1.0.95.exe.part', 'Ark-Setup-1.0.96.exe',
+      'Ark-Setup-1.0.97.exe', 'Ark-Setup-1.0.97.exe.part', 'notes.txt',
+    ];
+    for (const f of names) fs.writeFileSync(path.join(dir, f), 'x');
+    const removed = cleanupStaleUpdateFiles({ currentVersion: '1.0.96', tmpDir });
+    expect(removed.sort()).toEqual(['Ark-Setup-1.0.9.exe', 'Ark-Setup-1.0.95.exe.part', 'Ark-Setup-1.0.96.exe']);
+    expect(fs.readdirSync(dir).sort()).toEqual(['Ark-Setup-1.0.97.exe', 'Ark-Setup-1.0.97.exe.part', 'notes.txt']);
+  });
+
+  it('skips a locked file quietly and still removes the rest', () => {
+    const { tmpDir, dir } = mk();
+    for (const f of ['Ark-Setup-1.0.90.exe', 'Ark-Setup-1.0.91.exe']) fs.writeFileSync(path.join(dir, f), 'x');
+    const rm = vi.fn((p: string) => {
+      if (p.endsWith('1.0.90.exe')) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+      fs.rmSync(p, { force: true });
+    });
+    expect(() => cleanupStaleUpdateFiles({ currentVersion: '1.0.96', tmpDir, rm })).not.toThrow();
+    expect(rm).toHaveBeenCalledTimes(2);
+    expect(fs.readdirSync(dir)).toEqual(['Ark-Setup-1.0.90.exe']);
+  });
+
+  it('does nothing when the folder does not exist', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-fb-'));
+    expect(cleanupStaleUpdateFiles({ currentVersion: '1.0.96', tmpDir })).toEqual([]);
   });
 });
