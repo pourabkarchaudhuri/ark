@@ -6,11 +6,12 @@
  * engage with most appear earlier.
  *
  * v1.0.61: Primary persistence moved from `localStorage` to LevelDB via the
- * `window.store` IPC surface. The public sync API is unchanged — the
- * constructor still hydrates synchronously from localStorage so callers
- * that reorder shelves on the very first render still get their learned
- * ordering. The async LevelDB layer either migrates or overrides that
- * cache once ready. When `window.store` is unavailable (unit tests,
+ * `window.store` IPC surface. The public sync API is unchanged — before the
+ * one-shot migration the constructor still hydrates synchronously from
+ * localStorage so callers that reorder shelves on the very first render
+ * still get their learned ordering. The async LevelDB layer either migrates
+ * or overrides that cache once ready; after the migration LevelDB alone is
+ * read. When `window.store` is unavailable (unit tests,
  * jsdom, pre-preload boot window) the store transparently falls back to
  * the previous localStorage path.
  *
@@ -26,6 +27,7 @@
  */
 
 import type { RecoShelf } from '@/types/reco';
+import { readWithRetry } from '@/services/storage-health';
 
 const LS_KEY = 'ark-shelf-bandit-v1';
 
@@ -82,6 +84,12 @@ class ShelfBanditStore {
    */
   private _knownKeys: Set<string> = new Set();
 
+  /**
+   * LevelDB unreadable after retries: arms still learn in memory this
+   * session, but nothing is written over the real rows.
+   */
+  private _readOnly = false;
+
   /** Arm keys written before the async LevelDB hydrate finished — merged back over the hydrated rows. */
   private _touched: Set<string> = new Set();
   private _hydrated = false;
@@ -101,8 +109,12 @@ class ShelfBanditStore {
       typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
 
     // Sync hydrate from localStorage so `reorderShelves` on the first
-    // render already sees the learned arm state.
-    this.hydrateFromLocalStorage();
+    // render already sees the learned arm state — but only while it is still
+    // the source of truth. After the migration the key is frozen at v1.0.61
+    // and a failed boot read used to save it over months of learned rows.
+    if (!this._useLevelDB || !ShelfBanditStore.migrationMarked()) {
+      this.hydrateFromLocalStorage();
+    }
 
     this.ready = this._useLevelDB
       ? this.initializeFromLevelDB().finally(() => { this._hydrated = true; this._touched.clear(); })
@@ -116,6 +128,15 @@ class ShelfBanditStore {
   }
 
   // ── Persistence: sync load ──
+
+  /** One-shot migration marker stamped (LevelDB is authoritative). */
+  private static migrationMarked(): boolean {
+    try {
+      return localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes';
+    } catch {
+      return false;
+    }
+  }
 
   private hydrateFromLocalStorage() {
     try {
@@ -143,26 +164,46 @@ class ShelfBanditStore {
    *      current in-memory arms (already hydrated from localStorage)
    *      into LevelDB and stamp the marker. Legacy localStorage key stays
    *      intact for one-release rollback.
-   *   3. On any hard IPC failure, keep the localStorage-hydrated cache;
-   *      subsequent writes will still fall back through `saveNow()`.
+   *   3. If the read still fails after retries (or throws), go read-only:
+   *      arms keep learning in memory but nothing is written this session.
    */
   private async initializeFromLevelDB(): Promise<void> {
     try {
-      const res = await window.store!.getAll<ArmState>(LEVEL_NAMESPACE);
-      if (res.error) {
-        console.error('[ShelfBanditStore] getAll IPC error:', res.error);
+      const outcome = await readWithRetry('ShelfBanditStore', () =>
+        window.store!.getAll<ArmState>(LEVEL_NAMESPACE),
+      );
+      if (!outcome.ok) {
+        this.enterReadOnly(outcome.error);
         return;
       }
-      const rows = res.rows ?? [];
-      if (rows.length > 0) {
+      const rows = outcome.value.rows ?? [];
+      // Marker stamped + empty namespace = really empty: rebuild from the
+      // (zero) rows so only arms touched this boot survive.
+      if (rows.length > 0 || ShelfBanditStore.migrationMarked()) {
         this.hydrateFromRows(rows);
         return;
       }
       // LevelDB empty — attempt one-shot migration from localStorage.
       await this.tryMigrateFromLocalStorage();
     } catch (err) {
-      console.error('[ShelfBanditStore] Failed to init from LevelDB, falling back:', err);
+      this.enterReadOnly(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  private enterReadOnly(error: string): void {
+    this._readOnly = true;
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    console.error(
+      `[ShelfBanditStore] LevelDB read failed after retries — READ-ONLY for this session (no writes). ${error}`,
+    );
+  }
+
+  /** True when LevelDB could not be read this session — nothing is persisted. */
+  isReadOnly(): boolean {
+    return this._readOnly;
   }
 
   private hydrateFromRows(rows: Array<{ key: string; value: ArmState }>) {
@@ -230,6 +271,7 @@ class ShelfBanditStore {
   // ── Persistence: debounced save ──
 
   private save() {
+    if (this._readOnly) return;
     if (this._saveTimer) clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
       this._saveTimer = null;
@@ -238,6 +280,7 @@ class ShelfBanditStore {
   }
 
   private flushSave() {
+    if (this._readOnly) return;
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
@@ -266,6 +309,7 @@ class ShelfBanditStore {
   }
 
   private async saveNowLevelDB(): Promise<void> {
+    if (this._readOnly) return;
     try {
       const currentKeys = new Set<string>();
       const ops: Array<
@@ -511,6 +555,8 @@ class ShelfBanditStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
+    // Read-only session: in-memory reset only, nothing on disk is touched.
+    if (this._readOnly) return;
     if (this._useLevelDB) {
       // Fire-and-forget: also nuke the LevelDB namespace so subsequent
       // hydrates see an empty store. Errors are logged.

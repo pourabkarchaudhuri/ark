@@ -180,25 +180,53 @@ class StatusHistoryStore {
 
     if (!migrated) {
       // First-time migration. `this.entries` already reflects localStorage
-      // plus anything recorded while the copy was pending.
+      // plus anything recorded while the copy was pending. The flag lives in
+      // localStorage, so a missing flag does NOT prove LevelDB is empty (the
+      // flag write may have failed once, or localStorage was wiped while
+      // LevelDB survived) — read the row first and union with it rather than
+      // overwriting the whole saved log with this boot's rows.
+      const existing = await readWithRetry('StatusHistoryStore', () =>
+        store.get<StoredStatusHistoryData>(LEVEL_NAMESPACE, LEVEL_DATA_KEY),
+      );
+      if (!existing.ok) {
+        this.fallBackToLocal(existing.error);
+        return;
+      }
+      const stored = this._clearedBeforeHydrate ? null : (existing.value?.value ?? null);
+      let added = 0;
+      if (stored && Array.isArray(stored.entries)) {
+        const union = this.entries.slice();
+        const seen = new Set(union.map(entryKey));
+        for (const raw of stored.entries) {
+          const e = { ...raw, gameId: migrateGameId(raw as any) };
+          if (!isValidStatusEntry(e)) continue;
+          const k = entryKey(e);
+          if (seen.has(k)) continue;
+          seen.add(k);
+          union.push(e);
+          added++;
+        }
+        union.sort(byTimestamp);
+        this.entries = union;
+      }
       const outcome = await readWithRetry('StatusHistoryStore', () =>
         store.put(LEVEL_NAMESPACE, LEVEL_DATA_KEY, this.buildPayload()),
       );
       this._preHydration = [];
       if (!outcome.ok) {
-        // Pre-migration, localStorage is still the real source of truth (the
-        // flag is not stamped, so the next launch re-reads it) — keep using it.
-        console.error('[StatusHistoryStore] LevelDB migration put failed:', outcome.error);
-        this._mode = 'local';
-        if (this._saveAfterHydrate) this.writeLocalStorageSnapshot();
-        this._saveAfterHydrate = false;
+        this.fallBackToLocal(outcome.error);
         return;
       }
-      try { localStorage.setItem(MIGRATION_FLAG_KEY, 'yes'); } catch { /* ignore */ }
+      try {
+        localStorage.setItem(MIGRATION_FLAG_KEY, 'yes');
+      } catch (err) {
+        console.error('[StatusHistoryStore] Failed to stamp migration flag:', err);
+      }
       this._mode = 'leveldb';
       console.log(
         `[StatusHistoryStore] Migrated ${this.entries.length} entries to LevelDB (${LEVEL_NAMESPACE})`,
       );
+      if (added > 0) this.notifyListeners();
       if (this._saveAfterHydrate) {
         this._saveAfterHydrate = false;
         this.saveNow();
@@ -249,6 +277,19 @@ class StatusHistoryStore {
       this.saveNow();
     }
     this.notifyListeners();
+  }
+
+  /**
+   * Pre-migration LevelDB failure. localStorage is still the real source of
+   * truth (the flag is not stamped, so the next launch re-reads it) — keep
+   * using it.
+   */
+  private fallBackToLocal(error: string): void {
+    console.error('[StatusHistoryStore] LevelDB migration failed:', error);
+    this._preHydration = [];
+    this._mode = 'local';
+    if (this._saveAfterHydrate) this.writeLocalStorageSnapshot();
+    this._saveAfterHydrate = false;
   }
 
   /** Test / consumer hook — resolves after LevelDB hydrate + migrate. */

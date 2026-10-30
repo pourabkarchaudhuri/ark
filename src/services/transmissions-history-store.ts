@@ -23,7 +23,11 @@ const MAX_IDS = 2000;
 const _useLevelDB =
   typeof window !== 'undefined' && typeof (window as any).store !== 'undefined';
 
-/** In-memory cache (insertion order preserved by Set). */
+/**
+ * In-memory cache. Insertion order = decode age (oldest first), which is what
+ * `_trimCache` evicts by. Each LevelDB row stores its decode time as the
+ * value so that order survives a restart (rows come back in key order).
+ */
 let _cache: Set<string> = new Set();
 /**
  * Set of ids currently persisted in LevelDB. On every write we diff `_cache`
@@ -54,7 +58,7 @@ function initFromLocalStorage(): void {
     if (raw) {
       const parsed = JSON.parse(raw) as string[];
       if (Array.isArray(parsed)) {
-        _cache = new Set(parsed);
+        _cache = mergePreReady(parsed);
         _trimCache();
       }
     }
@@ -94,11 +98,14 @@ async function tryMigrateFromLocalStorage(): Promise<boolean> {
       return false;
     }
 
-    const ops = capped.map((id) => ({
+    // Legacy array is oldest -> newest; give each id an increasing decode
+    // time (all in the past) so hydrate can rebuild that order.
+    const base = Date.now() - capped.length;
+    const ops = capped.map((id, i) => ({
       type: 'put' as const,
       namespace: LEVEL_NAMESPACE,
       key: id,
-      value: 1,
+      value: base + i,
     }));
 
     const res = await store.batch(ops);
@@ -109,8 +116,8 @@ async function tryMigrateFromLocalStorage(): Promise<boolean> {
 
     // Preserve the legacy STORAGE_KEY for one release as rollback insurance.
     localStorage.setItem(MIGRATION_MARKER_KEY, 'yes');
-    _cache = new Set(capped);
-    _knownKeys = new Set(_cache);
+    _cache = mergePreReady(capped);
+    _knownKeys = new Set(capped);
     console.log(
       `[TransmissionsHistoryStore] Migrated ${capped.length} decoded ids from localStorage -> LevelDB`,
     );
@@ -119,6 +126,23 @@ async function tryMigrateFromLocalStorage(): Promise<boolean> {
     console.error('[TransmissionsHistoryStore] Migration failed:', err);
     return false;
   }
+}
+
+/**
+ * `ordered` (oldest first) followed by any id `markDecoded` added before the
+ * hydrate finished — those are newer than every stored row and must not be
+ * dropped by the hydrate replacing the cache.
+ */
+function mergePreReady(ordered: string[]): Set<string> {
+  const merged = new Set(ordered);
+  for (const id of _cache) merged.add(id);
+  return merged;
+}
+
+/** Stored decode time of a row; legacy rows (value 1) and junk sort oldest. */
+function decodedAt(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 }
 
 async function initFromLevelDB(): Promise<void> {
@@ -136,9 +160,16 @@ async function initFromLevelDB(): Promise<void> {
     }
     const rows = res?.rows ?? [];
     if (rows.length > 0) {
-      _cache = new Set(rows.map((r) => r.key));
+      // getAll returns key order; rebuild decode-age order so eviction drops
+      // the oldest decode, not the alphabetically first id.
+      const ordered = rows
+        .slice()
+        .sort((a, b) => decodedAt(a.value) - decodedAt(b.value) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+        .map((r) => r.key);
+      _cache = mergePreReady(ordered);
       _trimCache();
-      _knownKeys = new Set(_cache);
+      // Every stored key: rows trimmed above are deleted by the next persist.
+      _knownKeys = new Set(ordered);
       return;
     }
     // LevelDB empty — attempt one-shot migration from localStorage.
@@ -183,9 +214,11 @@ async function persistLevelDB(): Promise<void> {
       | { type: 'del'; namespace: string; key: string }
     > = [];
 
+    const now = Date.now();
     for (const id of currentIds) {
       if (!_knownKeys.has(id)) {
-        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: id, value: 1 });
+        // Value = decode time, so the next boot can evict by age.
+        ops.push({ type: 'put', namespace: LEVEL_NAMESPACE, key: id, value: now });
       }
     }
     for (const oldKey of _knownKeys) {

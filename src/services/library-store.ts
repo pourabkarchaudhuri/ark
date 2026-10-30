@@ -54,6 +54,7 @@ function resolveJourneyTitleForRecord(
 import { statusHistoryStore } from './status-history-store';
 import { sessionStore } from './session-store';
 import {
+  SaveRetry,
   SerialWriteQueue,
   readWithRetry,
   reportStorageReadOnly,
@@ -151,6 +152,9 @@ export class LibraryStore {
    */
   private _readOnly = false;
 
+  /** Backoff retry for a failed LevelDB save (also forces the unload flush). */
+  private readonly _saveRetry = new SaveRetry('LibraryStore', () => this.saveNow());
+
   /**
    * Resolves when the async LevelDB hydration finishes. Public reads are safe
    * before it resolves — they just see an empty cache during the boot window.
@@ -176,17 +180,22 @@ export class LibraryStore {
   }
 
   private flushSave() {
+    // A failed save (or a pending retry) also counts as unsaved work, not
+    // only a pending debounce — otherwise a lone failed save is lost on quit.
+    const retryPending = this._useLevelDB && this._saveRetry.needsFlush;
+    if (!this._saveTimer && !retryPending) return;
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
-      if (this._useLevelDB && !this._readOnly) {
-        // Page is unloading — we can't wait behind an in-flight batch, so issue
-        // the diff now (puts are idempotent; IPC preserves send order).
-        void this.saveNowLevelDB();
-        return;
-      }
-      this.saveNow();
     }
+    this._saveRetry.cancel();
+    if (this._useLevelDB && !this._readOnly) {
+      // Page is unloading — we can't wait behind an in-flight batch, so issue
+      // the diff now (puts are idempotent; IPC preserves send order).
+      void this.saveNowLevelDB();
+      return;
+    }
+    this.saveNow();
   }
 
   private saveNow(): void {
@@ -238,21 +247,25 @@ export class LibraryStore {
         }
       }
 
-      if (ops.length === 0) return;
+      if (ops.length === 0) {
+        this._saveRetry.success();
+        return;
+      }
 
       const res = await window.store!.batch(ops);
       if (res.error) {
-        console.error('[LibraryStore] batch save failed:', res.error);
-        for (const id of dirty) this._dirtyIds.add(id); // retry next save
+        for (const id of dirty) this._dirtyIds.add(id); // retried below
+        this._saveRetry.failure(res.error);
         return;
       }
       // Record exactly what this batch wrote (not the live map — it may have
       // changed while the batch was in flight; the next save picks that up).
       for (const [id, entry] of written) this._persisted.set(id, entry);
       for (const id of deleted) this._persisted.delete(id);
+      this._saveRetry.success();
     } catch (err) {
       for (const id of dirty) this._dirtyIds.add(id);
-      console.error('[LibraryStore] Failed to save (LevelDB):', err);
+      this._saveRetry.failure(err);
     }
   }
 
@@ -368,6 +381,7 @@ export class LibraryStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
+    this._saveRetry.cancel();
     let migrated = true;
     try { migrated = localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes'; } catch { /* assume migrated */ }
     if (!migrated) {
@@ -403,12 +417,20 @@ export class LibraryStore {
         value: entry,
       }));
 
-      const res = await window.store!.batch(ops);
+      let res: { error?: string };
+      try {
+        res = await window.store!.batch(ops);
+      } catch (err) {
+        res = { error: err instanceof Error ? err.message : String(err) };
+      }
       if (res.error) {
         console.error('[LibraryStore] Migration batch failed:', res.error);
-        // Wipe cache to avoid presenting un-persisted data — retry next boot.
-        this.entries.clear();
-        return false;
+        // Read-only, not an empty writable library: the legacy entries stay
+        // visible and no add can write a row this session, so the namespace
+        // stays empty and the next boot retries the migration (enterReadOnly
+        // notifies listeners).
+        this.enterReadOnly(res.error);
+        return true;
       }
 
       this.markPersisted(this.entries.keys());

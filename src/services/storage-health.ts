@@ -143,3 +143,63 @@ export class SerialWriteQueue {
     return this.tail;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Save retry
+// ---------------------------------------------------------------------------
+
+/** Backoff for a failed debounced save: 3 retries, then wait for the next edit. */
+export const SAVE_RETRY_DELAYS_MS: readonly number[] = [2000, 5000, 15000];
+
+/**
+ * Retry bookkeeping for a store's LevelDB save. A failed batch used to be
+ * retried only by the NEXT edit, and the beforeunload flush only wrote when a
+ * debounce timer was pending — so a single failed save with no follow-up
+ * edit was lost on quit. `failure()` schedules `retry` on its own timer with
+ * backoff (logging once per failure streak); `success()` resets the streak.
+ * `needsFlush` tells the store's beforeunload flush to write anyway.
+ */
+export class SaveRetry {
+  private _timer: ReturnType<typeof setTimeout> | null = null;
+  private _attempts = 0;
+  private _failed = false;
+
+  constructor(
+    private readonly label: string,
+    private readonly retry: () => void,
+  ) {}
+
+  /** A save failed: log once per streak and schedule the next retry (max 3). */
+  failure(error: unknown): void {
+    if (!this._failed) {
+      console.error(`[${this.label}] batch save failed (will retry):`, error);
+    }
+    this._failed = true;
+    if (this._timer || this._attempts >= SAVE_RETRY_DELAYS_MS.length) return;
+    const delay = SAVE_RETRY_DELAYS_MS[this._attempts++];
+    this._timer = setTimeout(() => {
+      this._timer = null;
+      this.retry();
+    }, delay);
+  }
+
+  /** A save succeeded (or had nothing to write): clear the streak. */
+  success(): void {
+    this._failed = false;
+    this._attempts = 0;
+    this.cancel();
+  }
+
+  /** Drop a pending retry timer (unload flush, read-only, clear). */
+  cancel(): void {
+    if (this._timer) {
+      clearTimeout(this._timer);
+      this._timer = null;
+    }
+  }
+
+  /** True when unsaved changes remain from a failed save or a pending retry. */
+  get needsFlush(): boolean {
+    return this._failed || this._timer !== null;
+  }
+}

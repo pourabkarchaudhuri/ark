@@ -8,7 +8,7 @@ import type { StatusChangeSource } from '@/types/game';
 import { journeyStore } from '@/services/journey-store';
 import { sessionStore } from '@/services/session-store';
 import { statusHistoryStore } from '@/services/status-history-store';
-import { SerialWriteQueue, readWithRetry, reportStorageReadOnly } from '@/services/storage-health';
+import { SaveRetry, SerialWriteQueue, readWithRetry, reportStorageReadOnly } from '@/services/storage-health';
 import { firstPlayEvidenceIso, resolveFirstPlayedAt } from '@/services/first-played';
 
 const STORAGE_KEY = 'ark-custom-games';
@@ -83,6 +83,9 @@ export class CustomGameStore {
   /** LevelDB unreadable this session → no writes at all (see storage-health). */
   private _readOnly = false;
 
+  /** Backoff retry for a failed LevelDB save (also forces the unload flush). */
+  private readonly _saveRetry = new SaveRetry('CustomGameStore', () => this.saveNow());
+
   /** Last persisted nextCounter; skip meta-write if unchanged. */
   private _lastPersistedCounter: number = 1;
 
@@ -108,16 +111,21 @@ export class CustomGameStore {
   }
 
   private flushSave() {
+    // A failed save (or a pending retry) is unsaved work too, not only a
+    // pending debounce.
+    const retryPending = this._useLevelDB && this._saveRetry.needsFlush;
+    if (!this._saveTimer && !retryPending) return;
     if (this._saveTimer) {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
-      if (this._useLevelDB && !this._readOnly) {
-        // Unloading — can't wait behind an in-flight batch; send the delta now.
-        void this.saveNowLevelDB();
-        return;
-      }
-      this.saveNow();
     }
+    this._saveRetry.cancel();
+    if (this._useLevelDB && !this._readOnly) {
+      // Unloading — can't wait behind an in-flight batch; send the delta now.
+      void this.saveNowLevelDB();
+      return;
+    }
+    this.saveNow();
   }
 
   private saveNow(): void {
@@ -182,18 +190,24 @@ export class CustomGameStore {
         });
       }
 
-      if (ops.length === 0) return;
+      if (ops.length === 0) {
+        this._saveRetry.success();
+        return;
+      }
 
       const res = await window.store!.batch(ops);
       if (res.error) {
-        console.error('[CustomGameStore] batch save failed:', res.error);
+        // The identity/counter diff still holds the unwritten rows; the retry
+        // re-derives them.
+        this._saveRetry.failure(res.error);
         return;
       }
       for (const [id, entry] of written) this._persisted.set(id, entry);
       for (const id of deleted) this._persisted.delete(id);
       this._lastPersistedCounter = counter;
+      this._saveRetry.success();
     } catch (err) {
-      console.error('[CustomGameStore] Failed to save (LevelDB):', err);
+      this._saveRetry.failure(err);
     }
   }
 
@@ -290,6 +304,7 @@ export class CustomGameStore {
       clearTimeout(this._saveTimer);
       this._saveTimer = null;
     }
+    this._saveRetry.cancel();
     let migrated = true;
     try { migrated = localStorage.getItem(MIGRATION_MARKER_KEY) === 'yes'; } catch { /* assume migrated */ }
     if (!migrated) {
@@ -341,12 +356,19 @@ export class CustomGameStore {
         value: { nextCounter: this.nextCounter },
       });
 
-      const res = await window.store!.batch(ops);
+      let res: { error?: string };
+      try {
+        res = await window.store!.batch(ops);
+      } catch (err) {
+        res = { error: err instanceof Error ? err.message : String(err) };
+      }
       if (res.error) {
         console.error('[CustomGameStore] Migration batch failed:', res.error);
-        this.entries.clear();
-        this.nextCounter = 1;
-        return false;
+        // Read-only with the legacy entries visible: no add can write a row
+        // this session, so the next boot still finds an empty namespace and
+        // retries. enterReadOnly notifies listeners.
+        this.enterReadOnly(res.error);
+        return true;
       }
 
       for (const [id, entry] of this.entries) this._persisted.set(id, entry);
