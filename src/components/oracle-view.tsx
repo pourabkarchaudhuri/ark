@@ -933,11 +933,11 @@ const WhyPanelBody = memo(function WhyPanelBody({
     recoHistoryStore.recordThumbs(game.gameId, 1, game.title);
     oracleEventLog.record({ type: 'thumbs', gameId: game.gameId, data: { value: 1 } });
     setThumbs(1);
-    // Invalidate + (debounced) refresh so positive profile re-ranks shelves;
-    // keep drawer open. Several ups in a row coalesce into one recompute, and
-    // current shelves stay visible while it runs.
+    // Invalidate + (debounced) worker-only re-run so the positive profile re-ranks shelves (only the
+    // worker's feedback inputs changed; falls back to a full refresh when it cannot). Keep the drawer
+    // open; several ups in a row coalesce into one run, and current shelves stay visible while it runs.
     recoStore.invalidateCacheOnly();
-    recoStore.scheduleRefresh();
+    recoStore.scheduleThumbsUpRefresh();
   }, [game.gameId, game.title]);
 
   const onThumbDown = useCallback(() => {

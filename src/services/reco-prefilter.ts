@@ -76,12 +76,12 @@ const ADULT_HINT_TAGS = /\b(sexual content|nudity|mature|adult)\b/i;
 
 /** Unambiguous tag/genre rule (candidates carry no description text). */
 export function isLikelyAdultByTags(c: Pick<CandidateGame, 'genres' | 'themes'>): boolean {
-  return [...c.genres, ...c.themes].some(t => ADULT_TAGS.test(t));
+  return c.genres.some(t => ADULT_TAGS.test(t)) || c.themes.some(t => ADULT_TAGS.test(t));
 }
 
 /** True when ambiguous mature tags are present, so the description classifier is worth running. */
 export function hasAdultHintTags(c: Pick<CandidateGame, 'genres' | 'themes'>): boolean {
-  return [...c.genres, ...c.themes].some(t => ADULT_HINT_TAGS.test(t));
+  return c.genres.some(t => ADULT_HINT_TAGS.test(t)) || c.themes.some(t => ADULT_HINT_TAGS.test(t));
 }
 
 /** Windows (or platform-unknown) — Ark launches/tracks Windows games. */
@@ -101,20 +101,27 @@ export function dedupeCandidatesByTitle(
 ): CandidateGame[] {
   const best = new Map<string, CandidateGame>();
   const losers = new Map<string, CandidateGame[]>();
+  // normalizeTitleKey is the expensive part: once per candidate, reused by the final filter.
+  const keys = candidates.map(c => normalizeTitleKey(c.title));
   const better = (a: CandidateGame, b: CandidateGame): boolean => {
     const ka = reviewQualityKey(a) + (a.metacriticScore ?? 0) / 100;
     const kb = reviewQualityKey(b) + (b.metacriticScore ?? 0) / 100;
     if (ka !== kb) return ka > kb;
     return a.gameId.startsWith('steam-') && !b.gameId.startsWith('steam-');
   };
-  for (const c of candidates) {
-    const key = normalizeTitleKey(c.title);
+  const addLoser = (key: string, c: CandidateGame) => {
+    const list = losers.get(key);
+    if (list) list.push(c); else losers.set(key, [c]);
+  };
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const key = keys[i];
     if (!key) continue;
     if (ownedTitleKeys.has(key)) continue;
     const prev = best.get(key);
     if (!prev) { best.set(key, c); continue; }
-    if (better(c, prev)) { best.set(key, c); losers.set(key, [...(losers.get(key) ?? []), prev]); }
-    else losers.set(key, [...(losers.get(key) ?? []), c]);
+    if (better(c, prev)) { best.set(key, c); addLoser(key, prev); }
+    else addLoser(key, c);
   }
   // The winner stands for its duplicates: keep a link to a twin (so dismissals still apply when a later
   // run picks the other copy) and the retrieval flags that protect it from the pre-filter quotas.
@@ -128,10 +135,7 @@ export function dedupeCandidatesByTitle(
   }
   const kept = new Set(best.values());
   // Preserve original ordering.
-  return candidates.filter(c => {
-    const key = normalizeTitleKey(c.title);
-    return !key || kept.has(c);
-  });
+  return candidates.filter((c, i) => !keys[i] || kept.has(c));
 }
 
 /** Dismissed/thumbs-down ids plus their cross-store twins (via candidates' secondaryGameId). */

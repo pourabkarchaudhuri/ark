@@ -638,6 +638,8 @@ contextBridge.exposeInMainWorld('store', {
   getChunk: (ns, opts) => ipcRenderer.invoke('store:getChunk', ns, opts),
   // Upcoming-calendar rows filtered in main (v1.0.96): { rows } with at most ~700 entries.
   queryUpcoming: (ns, opts) => ipcRenderer.invoke('catalog:queryUpcoming', ns, opts),
+  // Oracle candidate rows selected in main (v1.0.97): { rows } with at most 25K entries.
+  queryCandidates: (ns, opts) => ipcRenderer.invoke('catalog:queryCandidates', ns, opts),
   put: (ns, key, value) => ipcRenderer.invoke('store:put', ns, key, value),
   del: (ns, key) => ipcRenderer.invoke('store:del', ns, key),
   batch: (ops) => ipcRenderer.invoke('store:batch', ops),

@@ -514,6 +514,26 @@ export function computeSemanticSimilarity(
   return dot / (Math.sqrt(magA) * Math.sqrt(magB));
 }
 
+/**
+ * Taste-centroid cosine for the library games the worker's Backlog Advisor ranks (Want to Play, unplayed),
+ * with the same values and arithmetic the worker would use (its centroid is a Float64Array copy of this one).
+ * Undefined when the worker would not score semantics at all (no centroid / zero coverage).
+ */
+export function computeBacklogSemanticScores(
+  userGames: ReadonlyArray<Pick<UserGameSnapshot, 'gameId' | 'status' | 'hoursPlayed' | 'embedding'>>,
+  tasteCentroid: ArrayLike<number> | null,
+  embeddingCoverage: number,
+): Record<string, number> | undefined {
+  if (!tasteCentroid || !(embeddingCoverage > 0)) return undefined;
+  const centroid = new Float64Array(tasteCentroid);
+  const out: Record<string, number> = {};
+  for (const g of userGames) {
+    if (g.status !== 'Want to Play' || g.hoursPlayed !== 0 || !g.embedding || g.embedding.length === 0) continue;
+    out[g.gameId] = computeSemanticSimilarity(centroid, g.embedding);
+  }
+  return out;
+}
+
 // ─── Layer 7: Library-similarity graph signal ────────────────────────────────────
 //
 // How strongly is this candidate related to games the user actually engaged
@@ -583,11 +603,50 @@ export function buildGraphUserContext(userGames: UserGameSnapshot[], now: number
   return { ugSimilarKeySets, ugTitleKeys, ugWeights, massRef };
 }
 
+/**
+ * Inverted lookups over one ORDER of userGames (positions are indexes into that array), so the graph
+ * signal costs O(candidate similar keys) per candidate instead of a scan of the whole library and its
+ * similar-title sets. Only games with weight > 0 are indexed (the others never contribute). Build it
+ * after any re-sort of userGames: the positions must match the array computeGraphSignal is given.
+ */
+export interface GraphCandidateIndex {
+  /** userGames.length at build time (a cheap guard against a mismatched array). */
+  size: number;
+  /** similar-title key -> positions of the library games whose similar list contains it */
+  similarIdx: Map<string, number[]>;
+  /** library title key -> positions */
+  titleIdx: Map<string, number[]>;
+  /** gameId -> positions (embedding-neighbour hits are keyed by library game id) */
+  idIdx: Map<string, number[]>;
+  /** Per-position scratch strengths, all 0 between calls (reset after each candidate). */
+  scratch: Float64Array;
+}
+
+export function buildGraphCandidateIndex(userGames: UserGameSnapshot[], gCtx: GraphUserContext): GraphCandidateIndex {
+  const similarIdx = new Map<string, number[]>();
+  const titleIdx = new Map<string, number[]>();
+  const idIdx = new Map<string, number[]>();
+  const push = (m: Map<string, number[]>, k: string, i: number) => {
+    const list = m.get(k);
+    if (list) list.push(i); else m.set(k, [i]);
+  };
+  for (let i = 0; i < userGames.length; i++) {
+    const id = userGames[i].gameId;
+    if ((gCtx.ugWeights.get(id) ?? 0) <= 0) continue;
+    for (const k of gCtx.ugSimilarKeySets.get(id) ?? []) push(similarIdx, k, i);
+    const t = gCtx.ugTitleKeys.get(id) ?? '';
+    if (t !== '') push(titleIdx, t, i);
+    push(idIdx, id, i);
+  }
+  return { size: userGames.length, similarIdx, titleIdx, idIdx, scratch: new Float64Array(userGames.length) };
+}
+
 export function computeGraphSignal(
   candidate: CandidateGame,
   userGames: UserGameSnapshot[],
   neighborHits: GraphNeighborHit[] | undefined,
   gCtx: GraphUserContext,
+  index?: GraphCandidateIndex,
 ): { score: number; similarTo: string[] } {
   const candidateKey = normalizeTitleKey(candidate.title);
   const candidateSimilarKeys = new Set(candidate.similarGameTitles.map(normalizeTitleKey).filter(k => k !== ''));
@@ -604,28 +663,58 @@ export function computeGraphSignal(
   let matchedMass = 0;
   const contributions: Array<{ title: string; value: number }> = [];
 
-  for (const ug of userGames) {
-    const weight = gCtx.ugWeights.get(ug.gameId) ?? 0;
-    if (weight <= 0) continue;
-
-    let strength = 0;
-    const ugSimilar = gCtx.ugSimilarKeySets.get(ug.gameId)!;
-    const ugTitleKey = gCtx.ugTitleKeys.get(ug.gameId)!;
-    if (candidateKey !== '' && ugSimilar.has(candidateKey)) {
-      strength = 1.0;
-    } else if (ugTitleKey !== '' && candidateSimilarKeys.has(ugTitleKey)) {
-      strength = 0.8;
-    } else {
-      for (const st of ugSimilar) {
-        if (candidateSimilarKeys.has(st)) { strength = 0.4; break; }
+  if (index && index.size === userGames.length) {
+    // Each evidence path is a fixed strength (1.0 > 0.8 > 0.4), so "first path that matches, then the
+    // neighbour if stronger" is the max over every path that matches.
+    const strengthAt = index.scratch;
+    const touched: number[] = [];
+    const raise = (positions: number[] | undefined, v: number) => {
+      if (!positions) return;
+      for (const i of positions) {
+        if (strengthAt[i] === 0) touched.push(i);
+        if (v > strengthAt[i]) strengthAt[i] = v;
       }
+    };
+    if (candidateKey !== '') raise(index.similarIdx.get(candidateKey), 1.0);
+    for (const k of candidateSimilarKeys) {
+      raise(index.titleIdx.get(k), 0.8);
+      raise(index.similarIdx.get(k), 0.4);
     }
-    const viaNeighbor = neighborStrength.get(ug.gameId);
-    if (viaNeighbor !== undefined && viaNeighbor > strength) strength = viaNeighbor;
+    for (const [u, v] of neighborStrength) raise(index.idIdx.get(u), v);
+    // Ascending library order, as the full scan visits them: the mass sum and the stable sort's ties
+    // (and so similarTo) come out identical.
+    touched.sort((a, b) => a - b);
+    for (const i of touched) {
+      const ug = userGames[i];
+      const value = (gCtx.ugWeights.get(ug.gameId) ?? 0) * strengthAt[i];
+      strengthAt[i] = 0;
+      matchedMass += value;
+      contributions.push({ title: ug.title, value });
+    }
+  } else {
+    for (const ug of userGames) {
+      const weight = gCtx.ugWeights.get(ug.gameId) ?? 0;
+      if (weight <= 0) continue;
 
-    if (strength > 0) {
-      matchedMass += weight * strength;
-      contributions.push({ title: ug.title, value: weight * strength });
+      let strength = 0;
+      const ugSimilar = gCtx.ugSimilarKeySets.get(ug.gameId)!;
+      const ugTitleKey = gCtx.ugTitleKeys.get(ug.gameId)!;
+      if (candidateKey !== '' && ugSimilar.has(candidateKey)) {
+        strength = 1.0;
+      } else if (ugTitleKey !== '' && candidateSimilarKeys.has(ugTitleKey)) {
+        strength = 0.8;
+      } else {
+        for (const st of ugSimilar) {
+          if (candidateSimilarKeys.has(st)) { strength = 0.4; break; }
+        }
+      }
+      const viaNeighbor = neighborStrength.get(ug.gameId);
+      if (viaNeighbor !== undefined && viaNeighbor > strength) strength = viaNeighbor;
+
+      if (strength > 0) {
+        matchedMass += weight * strength;
+        contributions.push({ title: ug.title, value: weight * strength });
+      }
     }
   }
 
@@ -1376,7 +1465,20 @@ export function computePoolNeighbors(
   const neighbors: Record<string, Array<{ u: string; d: number }>> = {};
   if (sources.length === 0) return { neighbors, hits: 0 };
   const dim = sources[0].vector.length;
-  const pool: Array<{ id: string; v: ArrayLike<number>; norm: number }> = [];
+  const pool = buildNeighborPool(candidates, dim);
+  let hits = 0;
+  for (const src of sources) hits += neighborsForSource(src, pool, dim, opts, neighbors);
+  return { neighbors, hits };
+}
+
+type NeighborPoolEntry = { id: string; v: ArrayLike<number>; norm: number };
+
+/** Candidates with a `dim`-long, non-zero vector, in pool order, with their norms computed once. */
+function buildNeighborPool(
+  candidates: ReadonlyArray<{ gameId: string; embedding?: ArrayLike<number> }>,
+  dim: number,
+): NeighborPoolEntry[] {
+  const pool: NeighborPoolEntry[] = [];
   for (const c of candidates) {
     const v = c.embedding;
     if (!v || v.length !== dim) continue;
@@ -1384,51 +1486,70 @@ export function computePoolNeighbors(
     for (let i = 0; i < dim; i++) n += v[i] * v[i];
     if (n > 0) pool.push({ id: c.gameId, v, norm: Math.sqrt(n) });
   }
-  let hits = 0;
-  for (const src of sources) {
-    if (src.vector.length !== dim) continue;
-    let sn = 0;
-    for (let i = 0; i < dim; i++) sn += src.vector[i] * src.vector[i];
-    if (sn <= 0) continue;
-    const srcNorm = Math.sqrt(sn);
-    const near: Array<{ id: string; d: number }> = [];
-    for (const p of pool) {
-      if (p.id === src.gameId) continue;
-      let dot = 0;
-      for (let i = 0; i < dim; i++) dot += src.vector[i] * p.v[i];
-      const d = 1 - dot / (srcNorm * p.norm);
-      if (d <= opts.ceiling) near.push({ id: p.id, d });
-    }
-    near.sort((a, b) => a.d - b.d);
-    for (const n of near.slice(0, opts.k)) {
-      (neighbors[n.id] ??= []).push({ u: src.gameId, d: n.d });
-      hits++;
-    }
-  }
-  return { neighbors, hits };
+  return pool;
 }
 
+/** One source's `k` nearest pool entries within the ceiling, appended to `out`. Returns the hit count. */
+function neighborsForSource(
+  src: { gameId: string; vector: ArrayLike<number> },
+  pool: NeighborPoolEntry[],
+  dim: number,
+  opts: { k: number; ceiling: number },
+  out: Record<string, Array<{ u: string; d: number }>>,
+): number {
+  if (src.vector.length !== dim) return 0;
+  let sn = 0;
+  for (let i = 0; i < dim; i++) sn += src.vector[i] * src.vector[i];
+  if (sn <= 0) return 0;
+  const srcNorm = Math.sqrt(sn);
+  const near: Array<{ id: string; d: number }> = [];
+  for (const p of pool) {
+    if (p.id === src.gameId) continue;
+    let dot = 0;
+    for (let i = 0; i < dim; i++) dot += src.vector[i] * p.v[i];
+    const d = 1 - dot / (srcNorm * p.norm);
+    if (d <= opts.ceiling) near.push({ id: p.id, d });
+  }
+  near.sort((a, b) => a.d - b.d);
+  let hits = 0;
+  for (const n of near.slice(0, opts.k)) {
+    (out[n.id] ??= []).push({ u: src.gameId, d: n.d });
+    hits++;
+  }
+  return hits;
+}
+
+/** Work slice between event-loop yields in computePoolNeighborsAsync. */
+const POOL_NEIGHBOR_SLICE_MS = 8;
+
 /**
- * computePoolNeighbors with the same arithmetic in the same order, but yielding to the event loop
- * after each source (~5-15 ms of work each) so a full Oracle compute never freezes the window for the
- * 150-450 ms the one-shot version takes. `shouldStop` lets a superseded compute bail out early.
+ * computePoolNeighbors with the same arithmetic in the same order (pool built once, sources in order),
+ * yielding to the event loop whenever a slice has run ~8 ms, so a full Oracle compute never freezes the
+ * window for the 150-450 ms the one-shot version takes. Yielding by elapsed time, not once per source:
+ * a hidden window throttles each setTimeout to ~1 s, and 32 per-source yields overran the step's deadline.
+ * `shouldStop` lets a superseded compute bail out at the next source boundary.
  */
 export async function computePoolNeighborsAsync(
   sources: ReadonlyArray<{ gameId: string; vector: ArrayLike<number> }>,
   candidates: ReadonlyArray<{ gameId: string; embedding?: ArrayLike<number> }>,
-  opts: { k: number; ceiling: number; shouldStop?: () => boolean },
+  opts: { k: number; ceiling: number; shouldStop?: () => boolean; now?: () => number },
 ): Promise<{ neighbors: Record<string, Array<{ u: string; d: number }>>; hits: number }> {
-  const merged: Record<string, Array<{ u: string; d: number }>> = {};
+  const neighbors: Record<string, Array<{ u: string; d: number }>> = {};
+  if (sources.length === 0 || opts.shouldStop?.()) return { neighbors, hits: 0 };
+  const now = opts.now ?? (() => performance.now());
+  const dim = sources[0].vector.length;
+  const pool = buildNeighborPool(candidates, dim);
   let hits = 0;
+  let sliceStart = now();
   for (const src of sources) {
     if (opts.shouldStop?.()) break;
-    // One source at a time through the exact same routine (pool order, ceiling, stable sort, k cap).
-    const part = computePoolNeighbors([src], candidates, opts);
-    for (const [id, list] of Object.entries(part.neighbors)) (merged[id] ??= []).push(...list);
-    hits += part.hits;
-    await new Promise<void>((r) => setTimeout(r, 0));
+    hits += neighborsForSource(src, pool, dim, opts, neighbors);
+    if (now() - sliceStart > POOL_NEIGHBOR_SLICE_MS) {
+      await new Promise<void>((r) => setTimeout(r, 0));
+      sliceStart = now();
+    }
   }
-  return { neighbors: merged, hits };
+  return { neighbors, hits };
 }
 
 /** Map a raw score onto 0–100 across the pool's [lo, hi] range (raw scores sit in a narrow low band). */

@@ -17,6 +17,7 @@
     "electron/**/*",
     "src/overlay/detail-level.ts",
     "src/lib/upcoming-select.ts",
+    "src/lib/candidate-selector.ts",
     "package.json"
   ]
 }
