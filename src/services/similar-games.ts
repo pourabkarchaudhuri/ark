@@ -237,18 +237,14 @@ export function formatNeighborDistance(distance: number): string {
   return s.replace(/\.?0+$/, '') || '0';
 }
 
-async function enrichNeighborRows(
+/**
+ * Local pass: titles and art from prefetch / library / custom stores, then ONE batched
+ * cached-name lookup for Steam rows still showing an "App N" placeholder. No store requests.
+ */
+async function resolveLocalNeighborCards(
   rows: Array<{ gameId: string; distance: number }>,
 ): Promise<SimilarGameCard[]> {
-  type Row = {
-    gameId: string;
-    distance: number;
-    title: string;
-    imageChain: string[];
-    genreTags: string[];
-  };
-
-  const base: Row[] = rows.map((r) => {
+  const base: SimilarGameCard[] = rows.map((r) => {
     const meta = resolveNeighborMeta(r.gameId);
     return {
       gameId: r.gameId,
@@ -259,59 +255,16 @@ async function enrichNeighborRows(
     };
   });
 
-  const steamAppIds = [
-    ...new Set(
-      base
-        .map((b) => {
-          const m = b.gameId.match(/^steam-(\d+)$/);
-          return m ? Number(m[1]) : null;
-        })
-        .filter((x): x is number => x != null),
-    ),
-  ];
-
-  const steamDetailsByApp = new Map<number, SteamAppDetails>();
-  if (steamAppIds.length > 0 && typeof window !== 'undefined' && window.steam?.getMultipleAppDetails) {
-    try {
-      // Shares the Steam rate limiter with Oracle hydrate / library sync — cap
-      // the wait; local meta + cached names below fill in what didn't arrive.
-      const arr = await raceWithTimeout(
-        window.steam.getMultipleAppDetails(steamAppIds),
-        NEIGHBOR_DETAILS_TIMEOUT_MS,
-        [],
-        'getMultipleAppDetails',
-      );
-      for (const { appId, details } of arr) {
-        if (details) steamDetailsByApp.set(appId, details as SteamAppDetails);
-      }
-    } catch (e) {
-      console.warn('[similar-games] getMultipleAppDetails:', e);
-    }
-  }
-
-  for (const b of base) {
-    const m = b.gameId.match(/^steam-(\d+)$/);
-    if (!m) continue;
-    const aid = Number(m[1]);
-    const det = steamDetailsByApp.get(aid);
-    if (det) {
-      const merged = metaFromSteamDetails(b.gameId, det);
-      b.title = merged.title;
-      b.imageChain = merged.imageChain;
-      b.genreTags = merged.genreTags;
-    }
-  }
-
-  const stillPlaceholderSteamIds = [
+  const placeholderSteamIds = [
     ...new Set(
       base
         .filter((b) => /^steam-\d+$/.test(b.gameId) && isAppPlaceholderTitle(b.title))
         .map((b) => Number(b.gameId.replace('steam-', ''))),
     ),
   ];
-  if (stillPlaceholderSteamIds.length > 0 && typeof window !== 'undefined' && window.steam?.getCachedGameNames) {
+  if (placeholderSteamIds.length > 0 && typeof window !== 'undefined' && window.steam?.getCachedGameNames) {
     try {
-      const nameMap = await window.steam.getCachedGameNames(stillPlaceholderSteamIds);
+      const nameMap = await window.steam.getCachedGameNames(placeholderSteamIds);
       for (const b of base) {
         const m = b.gameId.match(/^steam-(\d+)$/);
         if (!m || !isAppPlaceholderTitle(b.title)) continue;
@@ -326,9 +279,58 @@ async function enrichNeighborRows(
       /* ignore */
     }
   }
+  return base;
+}
+
+/**
+ * Store pass for a small slice of cards: Steam appdetails (shared rate limiter) and Epic
+ * catalog details overwrite the local title / art / genres in place.
+ */
+async function enrichCardsFromStores(cards: SimilarGameCard[]): Promise<void> {
+  const steamAppIds = [
+    ...new Set(
+      cards
+        .map((b) => {
+          const m = b.gameId.match(/^steam-(\d+)$/);
+          return m ? Number(m[1]) : null;
+        })
+        .filter((x): x is number => x != null),
+    ),
+  ];
+
+  const steamDetailsByApp = new Map<number, SteamAppDetails>();
+  if (steamAppIds.length > 0 && typeof window !== 'undefined' && window.steam?.getMultipleAppDetails) {
+    try {
+      // Shares the Steam rate limiter with Oracle hydrate / library sync — cap
+      // the wait; local meta + cached names fill in what didn't arrive.
+      const arr = await raceWithTimeout(
+        window.steam.getMultipleAppDetails(steamAppIds),
+        NEIGHBOR_DETAILS_TIMEOUT_MS,
+        [],
+        'getMultipleAppDetails',
+      );
+      for (const { appId, details } of arr) {
+        if (details) steamDetailsByApp.set(appId, details as SteamAppDetails);
+      }
+    } catch (e) {
+      console.warn('[similar-games] getMultipleAppDetails:', e);
+    }
+  }
+
+  for (const b of cards) {
+    const m = b.gameId.match(/^steam-(\d+)$/);
+    if (!m) continue;
+    const det = steamDetailsByApp.get(Number(m[1]));
+    if (det) {
+      const merged = metaFromSteamDetails(b.gameId, det);
+      b.title = merged.title;
+      b.imageChain = merged.imageChain;
+      b.genreTags = merged.genreTags;
+    }
+  }
 
   const epicKeys = new Map<string, { ns: string; offerId: string }>();
-  for (const b of base) {
+  for (const b of cards) {
     const p = parseEpicGameId(b.gameId);
     if (p) epicKeys.set(`${p.ns}:${p.offerId}`, p);
   }
@@ -352,7 +354,7 @@ async function enrichNeighborRows(
     );
   }
 
-  for (const b of base) {
+  for (const b of cards) {
     const p = parseEpicGameId(b.gameId);
     if (!p) continue;
     const item = epicByKey.get(`${p.ns}:${p.offerId}`);
@@ -369,19 +371,28 @@ async function enrichNeighborRows(
     b.genreTags = g.genre.filter(Boolean).slice(0, 2);
   }
 
-  const out: SimilarGameCard[] = [];
-  for (const b of base) {
-    if (isAppPlaceholderTitle(b.title)) continue;
-    out.push({
-      gameId: b.gameId,
-      distance: b.distance,
-      title: b.title,
-      imageChain: b.imageChain.length > 0 ? b.imageChain : buildGameImageChain(b.gameId, b.title, undefined, undefined),
-      genreTags: b.genreTags,
-    });
+  for (const b of cards) {
+    if (b.imageChain.length === 0) b.imageChain = buildGameImageChain(b.gameId, b.title, undefined, undefined);
   }
+}
 
-  return out;
+/** Session cache of finished strips per source (small LRU; Map keeps insertion order). */
+const SIMILAR_CACHE_MAX = 50;
+const similarResultCache = new Map<string, SimilarGamesResult>();
+
+function cacheSimilarResult(key: string, result: SimilarGamesResult): void {
+  similarResultCache.delete(key);
+  similarResultCache.set(key, result);
+  while (similarResultCache.size > SIMILAR_CACHE_MAX) {
+    const oldest = similarResultCache.keys().next().value;
+    if (oldest === undefined) break;
+    similarResultCache.delete(oldest);
+  }
+}
+
+/** Drop cached similar-games strips (tests, index rebuilds). */
+export function clearSimilarGamesCache(): void {
+  similarResultCache.clear();
 }
 
 const DEFAULT_K = 8;
@@ -519,8 +530,12 @@ export async function getAnnNeighborsForRecoBatch(
 
 /**
  * Nearest neighbors in the persisted ANN index for the given game's embedding.
- * Enriches Steam/Epic rows via IPC so titles and art match the store.
  * Dedupes cross-store twins (same product) and duplicate display titles among neighbors.
+ *
+ * Neighbours are distance-gated and titled from local data first; only the best ~2k
+ * survivors go to Steam / Epic for store details (each id is a rate-limited request that
+ * keeps running in main after the page closes), and further slices only when dedupe after
+ * enrichment leaves fewer than k. Finished strips are cached per source for the session.
  */
 export async function getSimilarGamesForDetails(
   sourceGameId: string,
@@ -531,6 +546,13 @@ export async function getSimilarGamesForDetails(
     return { status: 'ann_unavailable', items: [] };
   }
 
+  const cacheKey = `${sourceGameId}|${k}`;
+  const cached = similarResultCache.get(cacheKey);
+  if (cached) {
+    cacheSimilarResult(cacheKey, cached); // refresh LRU position
+    return cached;
+  }
+
   const vec = await getEmbeddingById(sourceGameId);
   if (!vec) {
     return { status: 'no_embedding', items: [] };
@@ -538,25 +560,38 @@ export async function getSimilarGamesForDetails(
 
   const maxSim = await isChunkAnnMaxSimEnabled();
   const overFetch = Math.max(annNeighborOverFetch(k, maxSim), k + 24);
-  const filtered = await queryAnnNeighborGames(vec, overFetch, sourceGameId);
+  const neighbors = (await queryAnnNeighborGames(vec, overFetch, sourceGameId))
+    .filter((r) => r.distance <= SIMILAR_TITLES_DISTANCE_CEILING);
 
-  if (filtered.length === 0) {
-    return { status: 'empty', items: [] };
-  }
+  const finish = (items: SimilarGameCard[]): SimilarGamesResult => {
+    const result: SimilarGamesResult = items.length > 0 ? { status: 'ok', items } : { status: 'empty', items: [] };
+    cacheSimilarResult(cacheKey, result);
+    return result;
+  };
 
-  const enriched = await enrichNeighborRows(
-    filtered.map((r) => ({ gameId: r.id, distance: r.distance })),
+  if (neighbors.length === 0) return finish([]);
+
+  const local = await resolveLocalNeighborCards(
+    neighbors.map((r) => ({ gameId: r.id, distance: r.distance })),
   );
+  // Ordered, locally-deduped candidates (no k cap yet).
+  const candidates = dedupeSimilarNeighbors(sourceGameId, opts?.sourceDisplayTitle, local, local.length);
 
-  if (enriched.length === 0) {
-    return { status: 'empty', items: [] };
+  const sliceSize = Math.max(1, 2 * k);
+  const enriched: SimilarGameCard[] = [];
+  let picked: SimilarGameCard[] = [];
+  for (let i = 0; i < candidates.length; i += sliceSize) {
+    const slice = candidates.slice(i, i + sliceSize);
+    await enrichCardsFromStores(slice);
+    enriched.push(...slice);
+    picked = dedupeSimilarNeighbors(
+      sourceGameId,
+      opts?.sourceDisplayTitle,
+      enriched.filter((c) => !isAppPlaceholderTitle(c.title)),
+      k,
+    );
+    if (picked.length >= k) break;
   }
 
-  const deduped = dedupeSimilarNeighbors(sourceGameId, opts?.sourceDisplayTitle, enriched, k);
-
-  if (deduped.length === 0) {
-    return { status: 'empty', items: [] };
-  }
-
-  return { status: 'ok', items: deduped };
+  return finish(picked);
 }

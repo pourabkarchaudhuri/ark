@@ -648,9 +648,10 @@ export class CustomGameStore {
       ...input,
       updatedAt: new Date(), // Always app-managed (last save time)
     };
-    if (input.addedAt !== undefined) {
-      updated.addedAt = CustomGameStore.toValidDate(input.addedAt, existing.addedAt);
-    }
+    // App-managed: an explicit `addedAt: undefined` must not wipe the stored date.
+    updated.addedAt = input.addedAt !== undefined
+      ? CustomGameStore.toValidDate(input.addedAt, existing.addedAt)
+      : existing.addedAt;
 
     // When user edits hours, set baseline so session updates add on top instead of overwriting
     if (input.hoursPlayed !== undefined) {
@@ -663,7 +664,7 @@ export class CustomGameStore {
     this.notifyListeners();
 
     const hasJourney = journeyStore.has(id);
-    const addedAtIso = (updated.addedAt instanceof Date ? updated.addedAt : new Date(updated.addedAt)).toISOString();
+    const addedAtIso = CustomGameStore.toValidDate(updated.addedAt, new Date()).toISOString();
     const nowIso = new Date().toISOString();
 
     // Create journey entry when status first becomes Playing, Playing Now, or Completed (so they appear in Your Ark / Logs)
