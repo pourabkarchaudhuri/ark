@@ -135,7 +135,25 @@ import {
 import { logger } from './safe-logger.js';
 import { setEmbeddingBackgroundMode } from './ipc/ollama-handlers.js';
 import { atomicWriteFileSync } from './safe-write.js';
+import { attachNavigationGuards, devFlagArgs, isExternalOpenable, shouldUseDevServer } from './navigation-guard.js';
+import { attachRendererRecovery, revealMainWindow, type RendererRecoveryState } from './renderer-recovery.js';
+import { DECODE_BAY_PARTITION } from './webview-policy.js';
 let mainWindow: BrowserWindowType | null = null;
+/** Crash-breaker state of the current main window (see renderer-recovery.ts). */
+let rendererRecovery: RendererRecoveryState = { isRendererDead: () => false };
+
+/**
+ * Every show/focus path (tray, second instance, showAndFocus, activate). A
+ * window whose renderer is dead gets a Restart/Quit prompt instead of show().
+ */
+function showMainWindow(): Promise<boolean> {
+  return revealMainWindow(mainWindow, rendererRecovery, {
+    showMessageBox: (opts) => dialog.showMessageBox(opts),
+    relaunch: () => app.relaunch(),
+    exit: (code) => app.exit(code),
+    quit: () => { isQuitting = true; app.quit(); },
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Crash-loop breaker (boot health)
@@ -326,11 +344,7 @@ if (!gotTheLock && !isChatPromptsTest) {
 } else if (gotTheLock) {
   app.on('second-instance', () => {
     // A second instance was attempted — bring the existing window to front
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    void showMainWindow();
   });
 }
 
@@ -405,6 +419,11 @@ function createWindow() {
     if (found) windowIcon = nativeImage.createFromPath(found);
   }
 
+  // Dev server + DevTools only for unpackaged runs (NODE_ENV=development in a
+  // user's environment used to switch a packaged build to localhost:5173).
+  const useDevServer = shouldUseDevServer({ isPackaged: app.isPackaged, nodeEnv: process.env.NODE_ENV });
+  const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -415,9 +434,11 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false,
+      // The preload only uses contextBridge/ipcRenderer, which work sandboxed.
+      sandbox: true,
       preload: preloadPath,
       backgroundThrottling: true,
+      additionalArguments: devFlagArgs(useDevServer),
     },
     frame: false,
     titleBarStyle: 'hidden',
@@ -429,12 +450,7 @@ function createWindow() {
   mainWindow.maximize();
 
   // In development, load from Vite dev server
-  const isDev = process.env.NODE_ENV === 'development';
-  const isTest = process.env.NODE_ENV === 'test';
-  const isProd = process.env.NODE_ENV === 'production';
-  
-  if (isDev || (!app.isPackaged && !isProd && !isTest)) {
-    const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
+  if (useDevServer) {
     mainWindow.loadURL(devUrl);
     mainWindow.webContents.openDevTools();
   } else {
@@ -445,59 +461,36 @@ function createWindow() {
   // Redirect any link that tries to open a NEW window (target="_blank", window.open, etc.)
   // to the default OS browser instead of spawning an Electron BrowserWindow.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http:') || url.startsWith('https:') || url.startsWith('mailto:')) {
+    if (isExternalOpenable(url)) {
       shell.openExternal(url);
       logger.log(`[Navigation] Redirected new-window request to OS browser: ${url}`);
     }
     return { action: 'deny' }; // Never open a child Electron window
   });
 
-  // Prevent the main window from navigating away from the app.
-  // Any external http(s) URL is opened in the OS browser instead.
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    // Allow navigation to the Vite dev server or the local file in production
-    const currentUrl = mainWindow?.webContents.getURL() || '';
-    const isInternalNav =
-      url.startsWith('file://') ||
-      url.startsWith('http://localhost') ||
-      url.startsWith(currentUrl.split('#')[0]); // hash-based routing
-
-    if (!isInternalNav) {
-      event.preventDefault();
-      shell.openExternal(url);
-      logger.log(`[Navigation] Blocked in-window navigation, opened in OS browser: ${url}`);
-    }
-  });
+  // The window may only show its own page (index.html, any hash route) or the
+  // dev-server origin; everything else is blocked (will-navigate + will-redirect)
+  // and only http(s)/mailto are handed to the OS browser.
+  attachNavigationGuards(
+    mainWindow.webContents,
+    { useDevServer, indexPath, devUrl },
+    (url) => { void shell.openExternal(url); },
+    (msg) => logger.log(msg),
+  );
 
   // ---- Renderer crash recovery (with circuit breaker) ----
   // Every crash is also recorded in the persisted boot-health counter: after
   // repeated crashes the reload (and the next launch) runs in SAFE MODE, so we
   // don't reload straight back into the same crash. Completed sessions are
   // safe across the reload — main keeps them queued until the renderer acks.
-  const crashTimestamps: number[] = [];
-  const CRASH_WINDOW_MS = 30_000;
-  const MAX_CRASHES_IN_WINDOW = 3;
-
-  mainWindow.webContents.on('render-process-gone', (_event: any, details: any) => {
-    logger.error('[Ark] Renderer process gone:', details.reason, details.exitCode);
-    if (details.reason === 'clean-exit') return;
-
-    recordRendererCrash(String(details.reason));
-
-    const now = Date.now();
-    crashTimestamps.push(now);
-    // Keep only crashes within the rolling window
-    while (crashTimestamps.length > 0 && crashTimestamps[0] < now - CRASH_WINDOW_MS) {
-      crashTimestamps.shift();
-    }
-
-    if (crashTimestamps.length >= MAX_CRASHES_IN_WINDOW) {
-      logger.error(`[Ark] ${MAX_CRASHES_IN_WINDOW} crashes in ${CRASH_WINDOW_MS / 1000}s — stopping reload loop`);
-      return;
-    }
-
-    logger.log(`[Ark] Attempting renderer reload…${safeModeState.safeMode ? ' (safe mode)' : ''}`);
-    mainWindow?.webContents.reload();
+  // A crash or full reload also tears down the Buzz web view (its React
+  // cleanup never runs), and a tripped breaker marks the window dead so
+  // showMainWindow offers Restart instead of a black window.
+  rendererRecovery = attachRendererRecovery(mainWindow, {
+    destroyWebContentsView,
+    recordCrash: recordRendererCrash,
+    isSafeMode: () => safeModeState.safeMode,
+    log: (level, msg) => (level === 'error' ? logger.error(msg) : logger.log(msg)),
   });
 
   mainWindow.webContents.on('console-message', (_ev: any, level: number, message: string) => {
@@ -976,13 +969,7 @@ app.whenReady().then(async () => {
   initBootHealth();
   ipcMain.handle('app:getSafeMode', () => ({ ...safeModeState }));
   // Bring Ark forward (also from the tray) — e.g. clicking the Ark Wrapped notification.
-  ipcMain.handle('app:showAndFocus', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return false;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    if (!mainWindow.isVisible()) mainWindow.show();
-    mainWindow.focus();
-    return true;
-  });
+  ipcMain.handle('app:showAndFocus', () => showMainWindow());
 
   // Show window as early as possible — don't block on ad blocker
   try {
@@ -1031,7 +1018,7 @@ app.whenReady().then(async () => {
     // Allow-list: connectivity probes must never be blocked, even if a filter list matches.
     // HowLongToBeat: Ark's own API lookups (electron/hltb-api.ts) use the default session too.
     const ALLOWED_PROBE_HOSTS = ['connectivitycheck.gstatic.com', 'www.gstatic.com', 'howlongtobeat.com', 'api.gg.deals'];
-    session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details: any, callback: any) => {
+    const blockAds = (details: any, callback: any) => {
         try {
       const { url, resourceType, referrer } = details;
       if (resourceType === 'mainFrame') {
@@ -1050,7 +1037,10 @@ app.whenReady().then(async () => {
           // Never hang a request — allow it through if matching throws
         callback({ cancel: false });
       }
-    });
+    };
+    session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, blockAds);
+    // The Buzz / Decode Bay web view has its own session (webview-policy.ts).
+    session.fromPartition(DECODE_BAY_PARTITION).webRequest.onBeforeRequest({ urls: ['*://*/*'] }, blockAds);
 
       logger.log('[AdBlocker] Initialized and enabled');
   } catch (err) {
@@ -1115,12 +1105,7 @@ app.whenReady().then(async () => {
     const contextMenu = Menu.buildFromTemplate([
       {
         label: 'Show Ark',
-        click: () => {
-          if (mainWindow) {
-            mainWindow.show();
-            mainWindow.focus();
-          }
-        },
+        click: () => { void showMainWindow(); },
       },
       { type: 'separator' },
       {
@@ -1135,12 +1120,7 @@ app.whenReady().then(async () => {
     tray.setContextMenu(contextMenu);
 
     // Double-click to show window
-    tray.on('double-click', () => {
-      if (mainWindow) {
-        mainWindow.show();
-        mainWindow.focus();
-      }
-    });
+    tray.on('double-click', () => { void showMainWindow(); });
 
     logger.log('[Tray] System tray initialized');
   } catch (err) {
@@ -1201,6 +1181,6 @@ app.on('activate', () => {
   if (mainWindow === null) {
     createWindow();
   } else {
-    mainWindow.show();
+    void showMainWindow();
   }
 });

@@ -4,9 +4,15 @@
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { ipcMain, WebContentsView, shell } = electron;
+const { ipcMain, WebContentsView, shell, session } = electron;
 import type { BrowserWindow as BrowserWindowType } from 'electron';
 import { logger } from '../safe-logger.js';
+import {
+  createPopupGate,
+  installDecodeBaySessionGuards,
+  isUserInputEvent,
+  DECODE_BAY_PARTITION,
+} from '../webview-policy.js';
 
 let activeWebContentsView: any = null;
 
@@ -30,6 +36,20 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
   // Expose destroyWebContentsView for use in main.ts window cleanup
   (register as any).destroyWebContentsView = () => destroyWebContentsView(getMainWindow());
 
+  // The view's own session: downloads and permission prompts refused (once, here).
+  try {
+    installDecodeBaySessionGuards((p) => session.fromPartition(p));
+  } catch (err) {
+    logger.warn('[Webview] Failed to install Decode Bay session guards:', err);
+  }
+
+  const popupGate = createPopupGate({
+    isMainWindowFocused: () => {
+      const win = getMainWindow();
+      try { return !!win && !win.isDestroyed() && win.isFocused(); } catch { return false; }
+    },
+  });
+
   ipcMain.handle('webview:open', async (_event: any, url: string, bounds: { x: number; y: number; width: number; height: number }) => {
     const mainWindow = getMainWindow();
     if (!mainWindow) return { success: false };
@@ -51,12 +71,14 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
     }
 
     destroyWebContentsView(mainWindow);
+    popupGate.reset();
 
     activeWebContentsView = new WebContentsView({
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
+        partition: DECODE_BAY_PARTITION,
       },
     });
     mainWindow.contentView.addChildView(activeWebContentsView);
@@ -89,10 +111,18 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
     };
     wc.on('dom-ready', hideScrollbars);
 
-    // External links open in OS browser
-    wc.setWindowOpenHandler(({ url: target }: { url: string }) => {
-      if (target.startsWith('http:') || target.startsWith('https:')) {
+    // Gestures inside the view, for the popup gate below.
+    wc.on('input-event', (_e: any, input: { type?: string }) => {
+      if (isUserInputEvent(input)) popupGate.noteInput();
+    });
+
+    // window.open / target=_blank: never a child window; the OS browser only
+    // right after a user gesture (ad scripts used to open tabs at will).
+    wc.setWindowOpenHandler(({ url: target, disposition }: { url: string; disposition?: string }) => {
+      if (popupGate.shouldOpenExternal(target, disposition)) {
         shell.openExternal(target);
+      } else {
+        logger.log(`[Webview] Denied window.open (${disposition ?? 'unknown'}): ${target}`);
       }
       return { action: 'deny' as const };
     });

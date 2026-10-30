@@ -25,8 +25,7 @@ import {
 } from 'lucide-react';
 import Picker from '@emoji-mart/react';
 import data from '@emoji-mart/data';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { ChatMarkdown } from '@/components/chat-markdown';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -341,18 +340,8 @@ const MessageBubble = React.memo(function MessageBubble({ message, onFollowUpCli
                 "prose-hr:border-white/10",
                 "prose-table:text-xs prose-th:text-white prose-td:text-zinc-300"
               )}>
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    a: ({ href, children, ...props }) => (
-                      <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-                        {children}
-                      </a>
-                    ),
-                  }}
-                >
-                  {message.content}
-                </ReactMarkdown>
+                {/* Images render as links and only http(s)/mailto URLs survive (chat-markdown.tsx). */}
+                <ChatMarkdown content={message.content} />
                 {/* Blinking cursor for streaming */}
                 {message.isStreaming && (
                   <span className="inline-block w-2 h-4 bg-fuchsia-400 animate-pulse ml-0.5" />
