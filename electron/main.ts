@@ -124,11 +124,10 @@ import {
 import {
   setOverlayPreloadPath,
   setOverlayLifecycleHooks,
-  activateOverlay,
-  deactivateOverlay,
-  isOverlayVisible,
-  registerOverlayHotkey,
-  registerOverlayCycleHotkey,
+  applyOverlayHotkeys,
+  setOverlayEnabledChangedHook,
+  handleOverlayVisibilityChange,
+  handleOverlayToggleHotkey,
   unregisterOverlayHotkey,
   destroyOverlay,
 } from './overlay-window.js';
@@ -602,34 +601,28 @@ function setupOverlay() {
     setOverlayLifecycleHooks({
       onCreated: (win) => registerOverlayWindow(win),
       onDestroyed: () => registerOverlayWindow(null),
+      // Crash recovery gave up (or HUD was hidden): let the next show edge re-show.
+      onCrashLatchReset: () => syncOverlayVisibilityLatch(false),
     });
+
+    const gate = {
+      isEnabled: () => settingsStore.getOverlayEnabled(),
+      getActiveSessionCount: () => getActiveSessions().length,
+      syncLatch: syncOverlayVisibilityLatch,
+    };
 
     // Tracker calls back when sessions exist / clear. Activate only when
     // enabled; deactivate always destroys the HWND (not a mere hide).
-    registerOverlayWindow(null, (shouldShow) => {
-      if (shouldShow && settingsStore.getOverlayEnabled()) {
-        activateOverlay();
-        syncOverlayVisibilityLatch(true);
-      } else {
-        deactivateOverlay();
-        syncOverlayVisibilityLatch(false);
-      }
-    });
+    registerOverlayWindow(null, (shouldShow) => handleOverlayVisibilityChange(shouldShow, gate));
 
     // Hotkey toggles visibility. Never show an empty topmost window — require
-    // an active tracked session in addition to the opt-in setting.
-    registerOverlayHotkey(() => {
-      if (isOverlayVisible()) {
-        deactivateOverlay();
-        syncOverlayVisibilityLatch(false);
-      } else if (settingsStore.getOverlayEnabled() && getActiveSessions().length > 0) {
-        activateOverlay();
-        syncOverlayVisibilityLatch(true);
-      }
-    });
-    // Cycle collapsed ↔ compact even when HWND is down so the next
-    // activate opens at the chosen level (Super+Shift+D / Shift+Win+D).
-    registerOverlayCycleHotkey();
+    // an active tracked session in addition to the opt-in setting. Dismiss is
+    // sticky for the current session (latch stays set).
+    const onToggle = () => handleOverlayToggleHotkey(gate);
+    // Hotkeys (toggle + Super+Shift+D cycle) are only grabbed while the overlay
+    // is enabled; settings:setOverlayEnabled re-applies via the hook.
+    applyOverlayHotkeys(settingsStore.getOverlayEnabled(), onToggle);
+    setOverlayEnabledChangedHook((enabled) => applyOverlayHotkeys(enabled, onToggle));
   } catch (err) {
     logger.warn('[Overlay] Failed to set up in-game overlay (non-fatal):', err);
   }

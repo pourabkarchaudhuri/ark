@@ -35,7 +35,22 @@ import {
 
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { app, BrowserWindow, screen, globalShortcut } = electron;
+
+// `require('electron')` via createRequire bypasses vi.mock, so tests swap these
+// through __setOverlayElectronForTests instead (same seam style as launch-handlers).
+type OverlayElectronDeps = {
+  app: any;
+  BrowserWindow: any;
+  screen: any;
+  globalShortcut: any;
+};
+const realElectronDeps: OverlayElectronDeps = {
+  app: electron?.app,
+  BrowserWindow: electron?.BrowserWindow,
+  screen: electron?.screen,
+  globalShortcut: electron?.globalShortcut,
+};
+let { app, BrowserWindow, screen, globalShortcut } = realElectronDeps;
 
 // ESM has no __dirname; required for loadFile/preload paths when run as a module.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -48,6 +63,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OVERLAY_MARGIN = 24;
 /** Debounce for display-metrics-changed (DPI / resolution / layout churn). */
 const DISPLAY_METRICS_DEBOUNCE_MS = 150;
+/**
+ * Overlay renderer crash recovery budget: at most this many recreates per
+ * rolling window. Separate from the main window's safe-mode counter.
+ */
+const OVERLAY_CRASH_RECREATE_LIMIT = 3;
+const OVERLAY_CRASH_WINDOW_MS = 60_000;
 
 export { OVERLAY_TOGGLE_HOTKEY, OVERLAY_CYCLE_HOTKEY };
 
@@ -59,6 +80,12 @@ let overlayWindow: BrowserWindowType | null = null;
 let overlayPreloadPath: string | null = null;
 let toggleHotkeyRegistered = false;
 let cycleHotkeyRegistered = false;
+/** True only after a cycle-hotkey register attempt failed (not when merely unregistered). */
+let cycleHotkeyBindFailed = false;
+/** Timestamps of recent crash-driven recreates (rolling OVERLAY_CRASH_WINDOW_MS). */
+let crashRecreateTimes: number[] = [];
+/** Called by settings:setOverlayEnabled after saving, so main can (un)register hotkeys. */
+let overlayEnabledChangedHook: ((enabled: boolean) => void) | null = null;
 /** Kept so we can detach the screen listener on destroy (avoids leaks). */
 let displayMetricsHandler: (() => void) | null = null;
 let displayMetricsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -68,6 +95,11 @@ let detailLevel: OverlayDetailLevel = DEFAULT_OVERLAY_DETAIL_LEVEL;
 export type OverlayLifecycleHooks = {
   onCreated?: (win: BrowserWindowType) => void;
   onDestroyed?: () => void;
+  /**
+   * Crash recovery ended without a recreate (HUD was hidden, or the crash
+   * budget is spent) — main resets the session-tracker show latch.
+   */
+  onCrashLatchReset?: () => void;
 };
 
 let lifecycleHooks: OverlayLifecycleHooks = {};
@@ -165,9 +197,13 @@ export function cycleOverlayDetailLevel(): OverlayDetailLevel {
   return detailLevel;
 }
 
-/** Whether Super+Shift+D (Shift+Win+D) registered successfully this session. */
+/**
+ * False only when a Super+Shift+D (Shift+Win+D) registration was attempted and
+ * failed. With the overlay disabled the hotkey is intentionally unregistered,
+ * which is not a bind failure (Settings would otherwise warn "already in use").
+ */
 export function isOverlayCycleHotkeyRegistered(): boolean {
-  return cycleHotkeyRegistered;
+  return !cycleHotkeyBindFailed;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,18 +272,58 @@ export function createOverlayWindow(preloadPath?: string): BrowserWindowType {
   };
   screen.on('display-metrics-changed', displayMetricsHandler);
 
-  overlayWindow.on('closed', () => {
-    overlayWindow = null;
+  const win = overlayWindow;
+  win.on('closed', () => {
+    // A stale window's late 'closed' must not null a newer overlay.
+    if (overlayWindow === win) overlayWindow = null;
+  });
+
+  // Crash recovery: with renderer-process-limit=1 the HUD can share a process
+  // with the main UI, so a main-UI crash leaves this window blank while
+  // isOverlayVisible() stays true. Recreate (bounded) instead.
+  win.webContents.on('render-process-gone', (_e: unknown, details: { reason?: string } | undefined) => {
+    if (details?.reason === 'clean-exit') return;
+    logger.warn(`[Overlay] Overlay renderer gone (${details?.reason ?? 'unknown'})`);
+    setImmediate(() => {
+      if (win !== overlayWindow) return;
+      const wasVisible = isOverlayVisible();
+      destroyOverlay();
+      if (wasVisible && takeCrashRecreateBudget()) {
+        try {
+          activateOverlay();
+          logger.log('[Overlay] Overlay recreated after renderer crash');
+          return;
+        } catch (err) {
+          logger.error('[Overlay] Failed to recreate overlay after crash:', err);
+        }
+      } else if (wasVisible) {
+        logger.warn('[Overlay] Overlay crash budget exhausted — leaving HUD down');
+      }
+      try {
+        lifecycleHooks.onCrashLatchReset?.();
+      } catch (err) {
+        logger.error('[Overlay] onCrashLatchReset hook failed:', err);
+      }
+    });
   });
 
   try {
-    lifecycleHooks.onCreated?.(overlayWindow);
+    lifecycleHooks.onCreated?.(win);
   } catch (err) {
     logger.error('[Overlay] onCreated hook failed:', err);
   }
 
   logger.log('[Overlay] Overlay window created');
-  return overlayWindow;
+  return win;
+}
+
+/** Consume one crash-recreate slot if the rolling budget allows it. */
+function takeCrashRecreateBudget(): boolean {
+  const now = Date.now();
+  crashRecreateTimes = crashRecreateTimes.filter((t) => now - t < OVERLAY_CRASH_WINDOW_MS);
+  if (crashRecreateTimes.length >= OVERLAY_CRASH_RECREATE_LIMIT) return false;
+  crashRecreateTimes.push(now);
+  return true;
 }
 
 /**
@@ -348,11 +424,14 @@ export function registerOverlayCycleHotkey(onCycle?: () => void): void {
     const ok = globalShortcut.register(OVERLAY_CYCLE_HOTKEY, handler);
     if (ok) {
       cycleHotkeyRegistered = true;
+      cycleHotkeyBindFailed = false;
       logger.log(`[Overlay] Registered cycle hotkey ${OVERLAY_CYCLE_HOTKEY}`);
     } else {
+      cycleHotkeyBindFailed = true;
       logger.warn(`[Overlay] Failed to register hotkey ${OVERLAY_CYCLE_HOTKEY} (already in use?)`);
     }
   } catch (err) {
+    cycleHotkeyBindFailed = true;
     logger.error('[Overlay] Error registering cycle hotkey:', err);
   }
 }
@@ -414,4 +493,88 @@ export function destroyOverlay(): void {
       logger.error('[Overlay] onDestroyed hook failed:', err);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Public API — enable/disable wiring (main.ts owns the policy; these are seams)
+// ---------------------------------------------------------------------------
+
+/**
+ * Register the global hotkeys only while the overlay is enabled. The overlay
+ * is opt-in, so grabbing Ctrl+Shift+O / Win+Shift+D system-wide with it off
+ * would break those shortcuts in every other app while Ark runs.
+ */
+export function applyOverlayHotkeys(enabled: boolean, onToggle: () => void): void {
+  if (enabled) {
+    registerOverlayHotkey(onToggle);
+    registerOverlayCycleHotkey();
+  } else {
+    unregisterOverlayHotkey();
+  }
+}
+
+/** main.ts installs this once; settings:setOverlayEnabled notifies after saving. */
+export function setOverlayEnabledChangedHook(hook: ((enabled: boolean) => void) | null): void {
+  overlayEnabledChangedHook = hook;
+}
+
+export function notifyOverlayEnabledChanged(enabled: boolean): void {
+  try {
+    overlayEnabledChangedHook?.(enabled);
+  } catch (err) {
+    logger.error('[Overlay] overlayEnabledChanged hook failed:', err);
+  }
+}
+
+export type OverlayGateDeps = {
+  isEnabled: () => boolean;
+  getActiveSessionCount: () => number;
+  syncLatch: (shouldShow: boolean) => void;
+};
+
+/**
+ * Session-tracker visibility callback. Show is edge-triggered upstream; with
+ * the overlay disabled a show edge is a no-op so the latch keeps meaning
+ * "show edge already handled" for this session.
+ */
+export function handleOverlayVisibilityChange(shouldShow: boolean, deps: OverlayGateDeps): void {
+  if (shouldShow) {
+    if (!deps.isEnabled()) return;
+    activateOverlay();
+    deps.syncLatch(true);
+  } else {
+    deactivateOverlay();
+    deps.syncLatch(false);
+  }
+}
+
+/**
+ * Ctrl+Shift+O handler. Dismiss leaves the latch set so the next poll does not
+ * immediately re-show (and rebuild) the HUD; the level-triggered hide when all
+ * sessions end resets it, so the next game shows the HUD again.
+ */
+export function handleOverlayToggleHotkey(deps: OverlayGateDeps): void {
+  if (isOverlayVisible()) {
+    deactivateOverlay();
+  } else if (deps.isEnabled() && deps.getActiveSessionCount() > 0) {
+    activateOverlay();
+    deps.syncLatch(true);
+  }
+}
+
+/** Test seam — swap electron deps and reset module state. Omit deps to restore real. */
+export function __setOverlayElectronForTests(deps?: Partial<OverlayElectronDeps>): void {
+  ({ app, BrowserWindow, screen, globalShortcut } = { ...realElectronDeps, ...(deps ?? {}) });
+  if (displayMetricsTimer) clearTimeout(displayMetricsTimer);
+  displayMetricsTimer = null;
+  displayMetricsHandler = null;
+  overlayWindow = null;
+  overlayPreloadPath = null;
+  toggleHotkeyRegistered = false;
+  cycleHotkeyRegistered = false;
+  cycleHotkeyBindFailed = false;
+  crashRecreateTimes = [];
+  detailLevel = DEFAULT_OVERLAY_DETAIL_LEVEL;
+  lifecycleHooks = {};
+  overlayEnabledChangedHook = null;
 }
