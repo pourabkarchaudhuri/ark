@@ -7,6 +7,7 @@ import { Game, LibraryGameEntry } from '@/types/game';
 import { sanitizePlayerCount } from '@/lib/player-count';
 import { SteamMostPlayedGame, SteamAppDetails, SteamSearchItem, SteamNewsItem, SteamAppListItem, getSteamCoverUrl } from '@/types/steam';
 import { libraryStore } from './library-store';
+import { parseSteamReleaseDate } from './dedup';
 
 // Check if running in Electron
 function isElectron(): boolean {
@@ -54,21 +55,11 @@ export function transformSteamGame(
   // Extract movies/videos
   const videos = details.movies?.map(m => m.mp4?.max || m.webm?.max || '').filter(Boolean) || [];
 
-  // Parse release date
-  let releaseDate = '';
-  if (details.release_date?.date) {
-    // Steam date format is usually "Jan 15, 2025" or similar
-    try {
-      const parsed = new Date(details.release_date.date);
-      if (!isNaN(parsed.getTime())) {
-        releaseDate = parsed.toISOString();
-      } else {
-        releaseDate = details.release_date.date;
-      }
-    } catch {
-      releaseDate = details.release_date.date;
-    }
-  }
+  // Parse release date (Steam display text: "Jan 15, 2025", "Q1 2027", "Coming soon")
+  const { releaseDate, releaseDateText } = parseSteamReleaseDate(
+    details.release_date?.date,
+    details.release_date?.coming_soon,
+  );
 
   // Use proper cover URL: prefer library_600x900.jpg (vertical), fallback to header_image
   // The library_600x900.jpg is Steam's vertical cover art used in the Steam library
@@ -108,7 +99,8 @@ export function transformSteamGame(
     achievements: details.achievements?.total,
     recommendations: details.recommendations?.total,
     comingSoon: details.release_date?.coming_soon,
-    
+    ...(releaseDateText ? { releaseDateText } : {}),
+
     // Library fields
     status: libraryEntry?.status || 'Want to Play',
     priority: libraryEntry?.priority || 'Medium',
@@ -122,6 +114,25 @@ export function transformSteamGame(
   };
 
   return game;
+}
+
+/**
+ * Game for the details page's add/edit library dialog: the shared transform
+ * (ISO release date, store 'steam', header image) with fresh library fields.
+ * It used to be hand-built and stored Steam's display date ('Oct 25, 2019'),
+ * which never matched a Release Year filter.
+ */
+export function steamDetailsToDialogGame(details: SteamAppDetails, isInLibrary: boolean): Game {
+  return {
+    ...transformSteamGame(details),
+    status: 'Want to Play',
+    priority: 'Medium',
+    publicReviews: '',
+    recommendationSource: 'Personal Discovery',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    isInLibrary,
+  };
 }
 
 /**

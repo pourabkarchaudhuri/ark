@@ -13,6 +13,7 @@
 
 import { Game } from '@/types/game';
 import { SteamAppDetails, getSteamCoverUrl } from '@/types/steam';
+import { parseSteamReleaseDate } from './dedup';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,15 +40,10 @@ function detailsToPartialGame(details: SteamAppDetails): Partial<Game> {
   const screenshots = details.screenshots?.map(s => s.path_full) || [];
   const videos = details.movies?.map(m => m.mp4?.max || m.webm?.max || '').filter(Boolean) || [];
 
-  let releaseDate = '';
-  if (details.release_date?.date) {
-    try {
-      const parsed = new Date(details.release_date.date);
-      releaseDate = !isNaN(parsed.getTime()) ? parsed.toISOString() : details.release_date.date;
-    } catch {
-      releaseDate = details.release_date.date;
-    }
-  }
+  const { releaseDate, releaseDateText } = parseSteamReleaseDate(
+    details.release_date?.date,
+    details.release_date?.coming_soon,
+  );
 
   const coverUrl = getSteamCoverUrl(details.steam_appid);
   const allScreenshots = details.header_image
@@ -75,6 +71,7 @@ function detailsToPartialGame(details: SteamAppDetails): Partial<Game> {
     achievements: details.achievements?.total,
     recommendations: details.recommendations?.total,
     comingSoon: details.release_date?.coming_soon,
+    ...(releaseDateText ? { releaseDateText } : {}),
     // Bump updatedAt so the GameCard memo detects the change
     updatedAt: new Date(),
   };

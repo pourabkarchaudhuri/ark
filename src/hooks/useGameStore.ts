@@ -3,6 +3,7 @@ import { steamService } from '@/services/steam-service';
 import { epicService } from '@/services/epic-service';
 import { gameService } from '@/services/game-service';
 import { dedupSortInWorker } from '@/workers/use-dedup-worker';
+import { releaseTsOf } from '@/services/dedup';
 import { libraryStore } from '@/services/library-store';
 import { journeyStore } from '@/services/journey-store';
 import { customGameStore } from '@/services/custom-game-store';
@@ -558,7 +559,7 @@ export function useSteamGames(category: GameCategory = 'trending') {
       
       // Pre-compute numeric release timestamps + sort by release date (newest first)
       for (const g of fetchedGames) {
-        (g as any)._releaseTs = g.releaseDate ? new Date(g.releaseDate).getTime() : 0;
+        (g as any)._releaseTs = releaseTsOf(g.releaseDate);
       }
       fetchedGames.sort((a, b) => ((b as any)._releaseTs ?? 0) - ((a as any)._releaseTs ?? 0));
       
@@ -585,7 +586,7 @@ export function useSteamGames(category: GameCategory = 'trending') {
               if (!isMountedRef.current || categoryRef.current !== 'trending') return priorCount;
               if (retryGames.length > priorCount) {
                 const sorted = [...retryGames];
-                for (const g of sorted) (g as any)._releaseTs = g.releaseDate ? new Date(g.releaseDate).getTime() : 0;
+                for (const g of sorted) (g as any)._releaseTs = releaseTsOf(g.releaseDate);
                 sorted.sort((a, b) => ((b as any)._releaseTs ?? 0) - ((a as any)._releaseTs ?? 0));
                 finiteCategoryListRef.current = sorted;
                 setAllGames(sorted);

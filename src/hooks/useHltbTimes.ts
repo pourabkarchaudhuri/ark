@@ -20,11 +20,8 @@ export function setHltbEnabled(enabled: boolean): void {
   }
 }
 
-/** First 4-digit year in a release-date string ("Oct 25, 2019", "2019-10-25"), if any. */
-export function releaseYearOf(date: string | undefined | null): number | undefined {
-  const m = /\b(19[7-9]\d|20\d\d)\b/.exec(date ?? '');
-  return m ? Number(m[1]) : undefined;
-}
+/** First 4-digit year in a release-date string — shared with the Browse filters (dedup.ts). */
+export { releaseYearOf } from '@/services/dedup';
 
 export type HltbState =
   | { status: 'idle' }

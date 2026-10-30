@@ -28,6 +28,7 @@ import type { Game, GameFilters } from '@/types/game';
 import { scoreGame, buildSingleSearchIndex, type SearchIndexEntry } from '@/services/prefetch-store';
 import { isAdultContentByDescription } from '@/services/adult-content-filter';
 import { titleCollator } from '@/lib/title-collator';
+import { releaseYearOf, SENTINEL_YEAR, COMING_SOON_DATE } from '@/services/dedup';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -104,6 +105,40 @@ export function getAdjustedRatingForSort(game: Game | null | undefined): number 
   if (score <= 0) return 0;
   const adjusted = (score * n + RATING_PRIOR * RATING_MIN_WEIGHT) / (n + RATING_MIN_WEIGHT);
   return Number.isFinite(adjusted) ? adjusted : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Release-date helpers
+// ---------------------------------------------------------------------------
+
+// Release dates can be Steam display text ('Coming soon', 'Q1 2027'). The
+// filters used to compare the first four characters with '2099' as text;
+// letters sort after digits, so every such game was hidden and never matched
+// a year filter. Years are now parsed numerically.
+
+/** Release year from the date, else from Steam's raw text behind a 'Coming Soon' placeholder. */
+function gameReleaseYear(game: Game): number | undefined {
+  return releaseYearOf(game.releaseDate) ?? releaseYearOf(game.releaseDateText);
+}
+
+/** Far-future placeholder year (Epic's 2099-01-01 style). */
+function isSentinelYear(game: Game): boolean {
+  const y = releaseYearOf(game.releaseDate);
+  return y != null && y >= SENTINEL_YEAR;
+}
+
+/**
+ * 'Coming Soon' placeholder from dedup's sentinel normalisation. A Steam
+ * upcoming game with only a year/quarter (releaseDateText set) is a real
+ * announced release and stays visible.
+ */
+function isPlaceholderComingSoon(game: Game): boolean {
+  return !!game.comingSoon && game.releaseDate === COMING_SOON_DATE && !game.releaseDateText;
+}
+
+/** Sort backstop: a NaN timestamp would make the comparator inconsistent. */
+function finiteTs(ts: unknown): number {
+  return typeof ts === 'number' && Number.isFinite(ts) ? ts : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,11 +229,7 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
           }
         }
         if (hasPriority && !(game.isInLibrary && game.priority === filters.priority)) return false;
-        if (hasYear) {
-          if (!game.releaseDate) return false;
-          const year = game.releaseDate.slice(0, 4);
-          if (year !== filters.releaseYear) return false;
-        }
+        if (hasYear && gameReleaseYear(game) !== Number(filters.releaseYear)) return false;
         if (storeSet) {
           const isBothStores = storeSet.has('steam') && storeSet.has('epic');
           if (isBothStores) {
@@ -217,11 +248,8 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
             if (!directMatch && !availMatch && !inferredMatch) return false;
           }
         }
-        if (hideSentinel && game.comingSoon && game.releaseDate === 'Coming Soon') return false;
-        if (hideSentinel && filters.category !== 'award-winning' && game.releaseDate) {
-          const y = game.releaseDate.slice(0, 4);
-          if (y >= '2099') return false;
-        }
+        if (hideSentinel && isPlaceholderComingSoon(game)) return false;
+        if (hideSentinel && filters.category !== 'award-winning' && isSentinelYear(game)) return false;
         return true;
       });
     }
@@ -299,11 +327,8 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
             if (!directMatch && !availMatch && !inferredMatch) return false;
           }
         }
-        if (hideSentinel2 && game.comingSoon && game.releaseDate === 'Coming Soon') return false;
-        if (hideSentinel2 && filters.category !== 'award-winning' && game.releaseDate) {
-          const y = game.releaseDate.slice(0, 4);
-          if (y >= '2099') return false;
-        }
+        if (hideSentinel2 && isPlaceholderComingSoon(game)) return false;
+        if (hideSentinel2 && filters.category !== 'award-winning' && isSentinelYear(game)) return false;
         return true;
       });
     }
@@ -328,9 +353,9 @@ function computeFilterAndDynamic(input: FilterSortInput): FilterAndDynamicResult
 
       const matchesPlatform = !hasPlatformFilter ||
         g.platform.some(p => p.toLowerCase().includes(platformFilterLower));
-      if (matchesPlatform && g.releaseDate && g.releaseDate !== 'Coming Soon') {
-        const y = g.releaseDate.slice(0, 4);
-        if (y && y >= '1970' && y <= '2099') yearSet.add(y);
+      if (matchesPlatform) {
+        const y = gameReleaseYear(g);
+        if (y != null && y < SENTINEL_YEAR) yearSet.add(String(y));
       }
     }
   }
@@ -395,7 +420,7 @@ function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
         break;
       }
       case 'releaseDate':
-        comparison = ((a as any)._releaseTs ?? 0) - ((b as any)._releaseTs ?? 0);
+        comparison = finiteTs((a as any)._releaseTs) - finiteTs((b as any)._releaseTs);
         break;
       default:
         comparison = (indexMap.get(a.id) ?? 0) - (indexMap.get(b.id) ?? 0);
@@ -411,7 +436,8 @@ function computeSort(displayedGames: Game[], input: FilterSortInput): Game[] {
   });
 }
 
-function computeAll(input: FilterSortInput): FilterSortOutput {
+/** Exported for tests: the full filter + options + sort pass. */
+export function computeAll(input: FilterSortInput): FilterSortOutput {
   const phase1 = computeFilterAndDynamic(input);
   const sortedGames = computeSort(phase1.displayedGames, input);
   return { ...phase1, sortedGames };

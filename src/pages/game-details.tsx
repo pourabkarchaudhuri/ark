@@ -34,6 +34,7 @@ import { Badge } from '@/components/ui/badge';
 import { HltbBadge } from '@/components/hltb-chip';
 import { DealPriceBlock } from '@/components/deal-price';
 import { releaseYearOf } from '@/hooks/useHltbTimes';
+import { newsDateLabel, newsDateSeconds } from '@/lib/release-date-display';
 import { GameDialog } from '@/components/game-dialog';
 import { cn, buildGameImageChain, formatDisplayDate } from '@/lib/utils';
 import { annIndex } from '@/services/ann-index';
@@ -54,7 +55,7 @@ import { customGameStore } from '@/services/custom-game-store';
 import { sessionStore } from '@/services/session-store';
 import { GameDialogInitialEntry } from '@/components/game-dialog';
 import { useToast } from '@/components/ui/toast';
-import { steamService } from '@/services/steam-service';
+import { steamService, steamDetailsToDialogGame } from '@/services/steam-service';
 import { epicService } from '@/services/epic-service';
 import { gameService } from '@/services/game-service';
 import { findGameById, searchPrefetchedGames, getPrefetchedGames } from '@/services/prefetch-store';
@@ -563,6 +564,8 @@ function NewsCard({
   fallbackImage: string;
 }) {
   const [imgSrc, setImgSrc] = useState(card.src);
+  // Undated (or unparseable) items used to print 'Jan 1, 1970' / 'Invalid Date'.
+  const dateLabel = newsDateLabel(newsItem.date);
 
   const handleClick = () => {
     const url = newsItem.url;
@@ -583,9 +586,11 @@ function NewsCard({
         <p className="text-left text-xs font-semibold leading-snug text-white line-clamp-2 md:text-sm">
           {card.title}
         </p>
-        <p className="text-left text-[10px] text-white/50 mt-1 md:text-xs">
-          {formatDisplayDate(newsItem.date * 1000)}
-        </p>
+        {dateLabel && (
+          <p className="text-left text-[10px] text-white/50 mt-1 md:text-xs">
+            {formatDisplayDate(newsItem.date * 1000)}
+          </p>
+        )}
         {newsItem.feedlabel && (
           <p className="text-left text-[9px] text-white/30 mt-0.5 md:text-[10px] truncate">
             {newsItem.feedlabel}
@@ -871,32 +876,10 @@ export function GameDetailsPage() {
     }
 
     if (!details || !appId) return null;
-    
-    const platforms: string[] = [];
-    if (details.platforms?.windows) platforms.push('Windows');
-    if (details.platforms?.mac) platforms.push('Mac');
-    if (details.platforms?.linux) platforms.push('Linux');
-    
-    return {
-      id: `steam-${appId}`,
-      steamAppId: appId,
-      title: details.name,
-      developer: details.developers?.join(', ') || 'Unknown',
-      publisher: details.publishers?.join(', ') || 'Unknown',
-      genre: details.genres?.map(g => g.description) || [],
-      platform: platforms,
-      metacriticScore: details.metacritic?.score || null,
-      releaseDate: details.release_date?.date || '',
-      summary: details.short_description,
-      coverUrl: details.header_image,
-      status: 'Want to Play',
-      priority: 'Medium',
-      publicReviews: '',
-      recommendationSource: 'Personal Discovery',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      isInLibrary: gameInLibrary,
-    };
+
+    // Keep the route's id: library entries are keyed by it even when Steam
+    // answers with a redirected steam_appid.
+    return { ...steamDetailsToDialogGame(details, gameInLibrary), id: `steam-${appId}`, steamAppId: appId };
   }, [details, appId, epicGame, gameInLibrary, isCustomGame, gameId]);
   
   // Handle opening the add to library dialog
@@ -2432,7 +2415,7 @@ const GameDetailsContent = memo(function GameDetailsContent({
           url: article.url,
           author: '',
           feedlabel: article.source || 'Epic Games Store',
-          date: article.date ? Math.floor(new Date(article.date).getTime() / 1000) : 0,
+          date: newsDateSeconds(article.date),
         };
         return (
           <NewsCard
