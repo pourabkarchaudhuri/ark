@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { JourneyView } from '@/components/journey-view';
+import { JourneyView, readStoredVoyageTab, VOYAGE_TAB_STORAGE_KEY } from '@/components/journey-view';
 import { JourneyEntry } from '@/types/game';
 import { statusHistoryStore } from '@/services/status-history-store';
 
@@ -141,6 +141,8 @@ function createMockEntry(overrides: Partial<JourneyEntry> = {}): JourneyEntry {
 describe('JourneyView', () => {
   beforeEach(() => {
     mockNavigate.mockClear();
+    // The Voyage tab persists per session; every test starts on Ark.
+    sessionStorage.clear();
   });
 
   it('renders loading state', () => {
@@ -448,5 +450,41 @@ describe('JourneyView', () => {
     expect(screen.getByTestId('badge-vault')).toBeInTheDocument();
     expect(screen.queryByText('Overview')).not.toBeInTheDocument();
     expect(screen.queryByText('Play Streaks')).not.toBeInTheDocument();
+  });
+});
+
+// 1.0.97 B22 (ui-voyage#10): Back from game details reopens the last Voyage tab.
+describe('JourneyView tab persistence', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+  });
+
+  it('remembers the tab across a remount', () => {
+    const entries = [createMockEntry({ addedAt: '2025-01-01T00:00:00.000Z' })];
+    const first = render(<JourneyView entries={entries} loading={false} />);
+    expect(screen.getByTestId('showcase-view')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Log'));
+    expect(sessionStorage.getItem(VOYAGE_TAB_STORAGE_KEY)).toBe('log');
+    first.unmount();
+
+    render(<JourneyView entries={entries} loading={false} />);
+    expect(screen.queryByTestId('showcase-view')).not.toBeInTheDocument();
+    expect(screen.getByText('Counter-Strike 2')).toBeInTheDocument();
+  });
+
+  it('falls back to Ark for an invalid stored value', () => {
+    sessionStorage.setItem(VOYAGE_TAB_STORAGE_KEY, 'ocd');
+    expect(readStoredVoyageTab()).toBe('ark');
+    render(<JourneyView entries={[createMockEntry()]} loading={false} />);
+    expect(screen.getByTestId('showcase-view')).toBeInTheDocument();
+  });
+
+  it('falls back to Ark when storage throws', () => {
+    const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    try {
+      expect(readStoredVoyageTab()).toBe('ark');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

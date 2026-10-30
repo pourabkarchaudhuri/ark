@@ -302,6 +302,20 @@ const VIEW_PILLS: Array<{
   { id: 'medals', label: 'Medals', icon: Award, tour: 'journey-medals-tab' },
 ];
 
+/** sessionStorage key for the last Voyage tab, so Back from game details reopens it. */
+export const VOYAGE_TAB_STORAGE_KEY = 'ark-voyage-tab';
+
+/** The Voyage tab stored for this session, or 'ark' when missing, invalid or unreadable. */
+export function readStoredVoyageTab(): JourneyViewStyle {
+  try {
+    const saved = sessionStorage.getItem(VOYAGE_TAB_STORAGE_KEY);
+    if (saved && VIEW_PILLS.some((pill) => pill.id === saved)) return saved as JourneyViewStyle;
+  } catch {
+    /* storage unavailable */
+  }
+  return 'ark';
+}
+
 // ─── Captain's Log status events ────────────────────────────────────────────
 
 type LogEventKind = 'started' | 'resumed' | 'paused' | 'completed';
@@ -394,7 +408,15 @@ function LogEventMarkers({ events, estimated }: { events: LogEvent[]; estimated:
 }
 
 export const JourneyView = memo(function JourneyView({ entries, loading, onSwitchToBrowse }: JourneyViewProps) {
-  const [viewStyle, setViewStyle] = useState<JourneyViewStyle>('ark');
+  // Opening a game unmounts the Dashboard, so the tab lives in sessionStorage to survive Back.
+  const [viewStyle, setViewStyle] = useState<JourneyViewStyle>(readStoredVoyageTab);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(VOYAGE_TAB_STORAGE_KEY, viewStyle);
+    } catch {
+      /* storage unavailable */
+    }
+  }, [viewStyle]);
 
   // Fetch live player counts for journey entries in the background.
   // Keys are gameId strings ("steam-730") — values are player counts.

@@ -113,3 +113,62 @@ describe('buildGameFromLocalEntry', () => {
     expect(game!.developer).toBe('Studio');
   });
 });
+
+// 1.0.97 B22 (hooks#9): entries without cachedMeta keep the exe path and derived store ids.
+describe('buildGameFromLocalEntry derived fields', () => {
+  beforeEach(() => {
+    localStorageMock.clear();
+    libraryStore.clear();
+  });
+
+  function add(gameId: string, extra: Record<string, unknown> = {}) {
+    libraryStore.addToLibrary({
+      gameId,
+      status: 'Playing',
+      priority: 'Medium',
+      publicReviews: '',
+      recommendationSource: '',
+      ...extra,
+    });
+    libraryStore.updateEntry(gameId, { executablePath: 'C:\\Games\\game.exe' });
+    return libraryStore.getEntry(gameId);
+  }
+
+  it('placeholder branch: keeps executablePath and parses steamAppId from the id', () => {
+    const game = buildGameFromLocalEntry('steam-123', add('steam-123'));
+    expect(game!.title).toBe('Unknown Game');
+    expect(game!.executablePath).toBe('C:\\Games\\game.exe');
+    expect(game!.steamAppId).toBe(123);
+  });
+
+  it('placeholder branch: epic-ns:offer yields both Epic fields', () => {
+    const game = buildGameFromLocalEntry('epic-ns:offer', add('epic-ns:offer'));
+    expect(game!.epicNamespace).toBe('ns');
+    expect(game!.epicOfferId).toBe('offer');
+    expect(game!.steamAppId).toBeUndefined();
+  });
+
+  it('placeholder branch: a malformed Epic id yields no Epic fields', () => {
+    const game = buildGameFromLocalEntry('epic-nocolon', add('epic-nocolon'));
+    expect(game!.epicNamespace).toBeUndefined();
+    expect(game!.epicOfferId).toBeUndefined();
+  });
+
+  it('journey branch: keeps executablePath and steamAppId', async () => {
+    const { journeyStore } = await import('@/services/journey-store');
+    const entry = add('steam-456');
+    vi.mocked(journeyStore.getEntry).mockReturnValueOnce({ gameId: 'steam-456', title: 'From Journey' } as never);
+    const game = buildGameFromLocalEntry('steam-456', entry);
+    expect(game!.title).toBe('From Journey');
+    expect(game!.executablePath).toBe('C:\\Games\\game.exe');
+    expect(game!.steamAppId).toBe(456);
+  });
+
+  it('cachedMeta branch: falls back to the entry-derived steamAppId when meta has none', () => {
+    const entry = add('steam-789', { cachedMeta: { title: 'Meta Title', store: 'steam' } });
+    const game = buildGameFromLocalEntry('steam-789', entry);
+    expect(game!.title).toBe('Meta Title');
+    expect(game!.steamAppId).toBe(789);
+    expect(game!.executablePath).toBe('C:\\Games\\game.exe');
+  });
+});
