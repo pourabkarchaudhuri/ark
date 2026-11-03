@@ -235,7 +235,10 @@ describe('transmissionsHistoryStore — write path', () => {
 
     expect(calls.batch.length).toBe(1);
     const ops = calls.batch[0] as Array<{ type: string; key: string }>;
-    expect(ops).toEqual([{ type: 'put', namespace: LEVEL_NAMESPACE, key: 'w1', value: 1 }]);
+    // Rows store the decode time (B17) so hydrate can restore age order.
+    expect(ops).toEqual([
+      { type: 'put', namespace: LEVEL_NAMESPACE, key: 'w1', value: expect.any(Number) },
+    ]);
     expect(state.rows.get(LEVEL_NAMESPACE)?.has('w1')).toBe(true);
   });
 });

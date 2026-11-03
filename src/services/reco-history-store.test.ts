@@ -282,9 +282,9 @@ describe('RecoHistoryStore — one-shot migration', () => {
     await store.ready;
 
     expect(calls.batch.length).toBe(0);
-    // In-memory state comes from localStorage sync hydrate; LevelDB was empty.
-    // (The store trusts LevelDB when marker is set, so no override happens.)
-    expect(store.isDismissed('should-not-migrate')).toBe(true);
+    // Post-migration the frozen localStorage snapshot is never loaded; LevelDB
+    // (empty here) is the sole source of truth.
+    expect(store.isDismissed('should-not-migrate')).toBe(false);
   });
 
   it('skips migration when the LevelDB namespace already has rows', async () => {
