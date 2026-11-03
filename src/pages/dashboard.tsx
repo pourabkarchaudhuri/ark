@@ -1335,7 +1335,7 @@ export function Dashboard() {
               return (
                 <TooltipCard content={
                   noOllama
-                    ? "Requires the built-in local AI models to generate game embeddings. They download in the background; see Settings, AI Models."
+                    ? "Requires the built-in local AI models to generate game embeddings. They download in the background; see Settings, AI providers."
                     : galaxyBuilding
                       ? "The Galaxy Map is being computed — embedding your library games into a 3D similarity space. This runs once in the background."
                       : "Enter the Galaxy Map — a 3D visualization of game similarity powered by AI embeddings. Explore how your library games relate to each other."

@@ -14,6 +14,8 @@
   },
   "include": [
     "vite.config.ts",
+    "config/**/*",
+    "src/lib/built-with-packages.ts",
     "electron/**/*",
     "src/overlay/detail-level.ts",
     "src/lib/upcoming-select.ts",

@@ -30,12 +30,25 @@ describe('applyLegacyChatProvider', () => {
     expect(t.store.route('chat').connectorId).toBe('builtin');
   });
 
-  it('Anthropic takes the model from Settings and keeps a previously chosen one', () => {
+  it('the default "ollama" selector does not undo a chat route to Ollama, OpenAI or an OpenAI-compatible server', () => {
+    const t = makeStore({ legacy: { googleAI: 'AIza-abcdefghijkl' } });
+    t.store.upsertConnector({ id: 'ollama', kind: 'ollama', name: 'Ollama', baseUrl: 'http://x:11434' });
+    t.store.recordTest('ollama', { ok: true, at: 1, latencyMs: 5, role: 'chat', model: 'gemma3:12b', message: 'ok' });
+    t.store.setRoute('chat', 'ollama', 'gemma3:12b');
+    expect(applyLegacyChatProvider(t.store, 'ollama')).toBeNull();
+    expect(t.store.route('chat').connectorId).toBe('ollama');
+    // An explicit pick of another old-style provider still switches.
+    expect(applyLegacyChatProvider(t.store, 'gemini')).toMatchObject({ ok: true });
+    expect(t.store.route('chat').connectorId).toBe('gemini');
+  });
+
+  it('Anthropic takes the model from Settings the first time and then keeps the one chosen on the route', () => {
     const t = makeStore({ legacy: { anthropic: 'sk-ant-api03-abcdefg' } });
     applyLegacyChatProvider(t.store, 'anthropic', { anthropicModel: 'claude-opus-9' });
     expect(t.store.route('chat')).toEqual({ connectorId: 'anthropic', model: 'claude-opus-9' });
-    applyLegacyChatProvider(t.store, 'anthropic', { anthropicModel: 'claude-sonnet-5-5' });
-    expect(t.store.route('chat').model).toBe('claude-sonnet-5-5');
+    // The AI providers screen (B37) owns the model now: a stale Settings value does not undo it.
+    expect(applyLegacyChatProvider(t.store, 'anthropic', { anthropicModel: 'claude-sonnet-5-5' })).toBeNull();
+    expect(t.store.route('chat').model).toBe('claude-opus-9');
     expect(applyLegacyChatProvider(t.store, 'anthropic')).toBeNull();
     const fresh = makeStore({ legacy: { anthropic: 'sk-ant-api03-abcdefg' } });
     applyLegacyChatProvider(fresh.store, 'anthropic');

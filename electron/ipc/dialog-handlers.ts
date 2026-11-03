@@ -11,11 +11,43 @@ import type { BrowserWindow as BrowserWindowType } from 'electron';
 import { logger } from '../safe-logger.js';
 import { isValidExePath } from './exe-path.js';
 
+/**
+ * Files this session saved through the save dialog. "Show file" on the Settings export toast may
+ * reveal only these, so the renderer cannot ask Explorer to open an arbitrary path.
+ */
+export function createSavedFileRegistry(max = 20) {
+  const saved: string[] = [];
+  return {
+    add(filePath: string): void {
+      const i = saved.indexOf(filePath);
+      if (i >= 0) saved.splice(i, 1);
+      saved.push(filePath);
+      if (saved.length > max) saved.shift();
+    },
+    has(filePath: unknown): filePath is string {
+      return typeof filePath === 'string' && saved.includes(filePath);
+    },
+  };
+}
+
 export function register(getMainWindow: () => BrowserWindowType | null): void {
   /**
    * Show save file dialog and write content to file
    */
   const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+  const savedFiles = createSavedFileRegistry();
+
+  /** Reveal a file this session just saved (the Settings export toast's "Show file"). */
+  ipcMain.handle('dialog:showFile', (_event: any, filePath: unknown) => {
+    if (!savedFiles.has(filePath)) return { success: false, error: 'Only a file saved in this session can be shown.' };
+    try {
+      electron.shell.showItemInFolder(filePath);
+      return { success: true };
+    } catch (error) {
+      logger.error('[Dialog] Error showing file:', error);
+      return { success: false, error: 'Could not show the file.' };
+    }
+  });
 
   ipcMain.handle('dialog:saveFile', async (_event: any, options: { 
     content: string; 
@@ -39,6 +71,7 @@ export function register(getMainWindow: () => BrowserWindowType | null): void {
       }
       
       fs.writeFileSync(result.filePath, options.content, 'utf-8');
+      savedFiles.add(result.filePath);
       return { success: true, filePath: result.filePath };
     } catch (error) {
       logger.error('[Dialog] Error saving file:', error);

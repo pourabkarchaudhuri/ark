@@ -130,7 +130,7 @@ async function prepareBuiltinChat(): Promise<void> {
   const backend = getBuiltinBackend();
   if (!backend.isModelReady('chat')) {
     const err = new Error(
-      'The local chat model is not downloaded yet. Open Settings > AI Models > Built-in local AI and choose Download chat model, or pick another model in the Chat panel.',
+      'The local chat model is not downloaded yet. Open Settings > AI providers > Built-in and choose Download chat model, or pick another model in the Chat panel.',
     );
     (err as Error & { code?: string }).code = LOCAL_CHAT_MODEL_MISSING;
     throw err;
@@ -213,7 +213,7 @@ export function getModelForProvider(providerOptions?: ChatProviderOptions): { mo
   if (effective === 'azure-openai') {
     if (!providerOptions?.azure?.endpoint || !providerOptions?.azure?.apiKey || !providerOptions?.azure?.deployment) {
       throw new Error(
-        'Azure OpenAI is selected but credentials were not provided. Add Endpoint, API Key, and Deployment in Settings > AI Models > Azure OpenAI, then try again.',
+        'Azure OpenAI is selected but credentials were not provided. Add Endpoint, API Key, and Deployment in Settings > AI providers > Azure OpenAI, then try again.',
       );
     }
     const { endpoint, apiKey, deployment, apiVersion } = providerOptions.azure;
@@ -250,7 +250,7 @@ export function getModelForProvider(providerOptions?: ChatProviderOptions): { mo
       geminiKey = getApiKey();
     } catch {
       throw new Error(
-        'Gemini is selected but no API key is configured. Add your Google AI API key in Settings > AI Models > Google Gemini, or choose another model in the Chat panel.',
+        'Gemini is selected but no API key is configured. Add your Google AI API key in Settings > AI providers > Google Gemini, or choose another model in the Chat panel.',
       );
     }
     const configKey = `gemini:${keyFingerprint(geminiKey)}`;

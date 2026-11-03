@@ -41,6 +41,8 @@ interface FileDialogSaveImageOptions {
 interface FileDialogAPI {
   saveFile: (options: FileDialogSaveOptions) => Promise<FileDialogSaveResult>;
   openFile: (options?: FileDialogOpenOptions) => Promise<FileDialogOpenResult>;
+  /** Reveal a file saved earlier in this session (main refuses any other path). */
+  showFile?: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   selectExecutable: () => Promise<FileDialogSelectExecutableResult>;
   saveImage: (options: FileDialogSaveImageOptions) => Promise<FileDialogSaveResult>;
 }
@@ -362,6 +364,8 @@ interface StoreAPI {
 declare global {
   // Build-time constant injected by Vite from package.json (see vite.config.ts `define`)
   const __APP_VERSION__: string;
+  // Installed library versions for the About page (see config/built-with.ts)
+  const __BUILT_WITH__: Record<string, string>;
 
   interface Window {
     fileDialog?: FileDialogAPI;

@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import pkg from './package.json';
 import { cspMetaTag } from './electron/csp.js';
+import { readBuiltWithVersions } from './config/built-with.js';
 
 // v1.0.97: built pages (loaded from file://) get a Content-Security-Policy; the dev
 // server is left alone so HMR's inline/eval scripts keep working.
@@ -21,6 +22,8 @@ export default defineConfig({
     // Inject the package.json version at build time so the changelog modal
     // and navbar always match — no more manual APP_VERSION bumps.
     __APP_VERSION__: JSON.stringify(pkg.version),
+    // Installed versions of the libraries the About page lists (read from node_modules and the runtime manifests).
+    __BUILT_WITH__: JSON.stringify(readBuiltWithVersions(__dirname)),
   },
   resolve: {
     alias: {

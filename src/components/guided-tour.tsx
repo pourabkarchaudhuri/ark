@@ -732,7 +732,7 @@ const annGraphSteps: Step[] = [
 const settingsSteps: Step[] = [
   {
     target: '[data-tour="app-logo"]',
-    content: 'Settings cover integrations, AI providers, feature toggles, and data export.',
+    content: 'Settings cover how Ark behaves, the AI providers behind chat and recommendations, how games are read, a guide and the build you run.',
     placement: 'bottom',
     disableBeacon: true,
     title: 'Preferences',
@@ -745,13 +745,19 @@ const settingsSteps: Step[] = [
   },
   {
     target: '[data-tour="settings-sidebar"]',
-    content: 'Switch between General, AI Models, Guide, Features, and About — each tab groups related controls.',
+    content: 'Switch between General, AI providers, Game understanding, Guide and About. The bottom of the sidebar shows the AI route chat uses and the version you run.',
     placement: 'right',
     title: 'Settings areas',
   },
   {
+    target: '[data-tour="settings-nav-providers"]',
+    content: 'AI providers is the router: pick which connector serves chat, embeddings and reranking, add keys, and test each connection. The built-in local AI is the default.',
+    placement: 'right',
+    title: 'AI providers',
+  },
+  {
     target: '[data-tour="settings-content"]',
-    content: 'Scroll the pane to manage the built-in local AI, API keys, rerank options, adult content, import/export, and more.',
+    content: 'Press Ctrl K to search every setting, switch between Roomy and Dense rows, and manage backups, prices and the in-game overlay on General.',
     placement: 'left',
     title: 'Preferences',
   },

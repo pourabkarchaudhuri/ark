@@ -96,10 +96,10 @@ describe('VramMeter', () => {
     vi.useRealTimers();
   });
 
-  it('asks the user to start Ollama when there is no reading', async () => {
+  it('says there is no reading yet when the runtime reports nothing', async () => {
     win.ollama = { gpuStats: vi.fn().mockResolvedValue(null) };
     render(<VramMeter />);
-    await waitFor(() => expect(screen.getByText(/start ollama to see graphics memory/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/no graphics memory reading yet/i)).toBeInTheDocument());
   });
 
   it('shows status and polls every 2s until unmounted', async () => {

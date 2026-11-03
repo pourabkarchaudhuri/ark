@@ -54,8 +54,9 @@ describe('describeImportPlan', () => {
 
 describe('LibraryDataSection import', () => {
   it('opens a confirm dialog and applies only after confirm', async () => {
-    render(<LibraryDataSection />);
-    fireEvent.click(screen.getByText('Import Library'));
+    const onToast = vi.fn();
+    render(<LibraryDataSection onToast={onToast} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await screen.findByText('Replace your library?');
     expect(libraryStore.parseImport).toHaveBeenCalledWith('{"entries":[]}');
     expect(libraryStore.applyImport).not.toHaveBeenCalled();
@@ -63,12 +64,12 @@ describe('LibraryDataSection import', () => {
 
     fireEvent.click(screen.getByText('Replace library'));
     await waitFor(() => expect(libraryStore.applyImport).toHaveBeenCalledTimes(1));
-    await screen.findByText('Imported 2 games and 1 custom game');
+    expect(onToast).toHaveBeenCalledWith({ text: 'Imported 2 games and 1 custom game' });
   });
 
   it('cancel leaves the store untouched', async () => {
-    render(<LibraryDataSection />);
-    fireEvent.click(screen.getByText('Import Library'));
+    render(<LibraryDataSection onToast={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await screen.findByText('Replace your library?');
     fireEvent.click(screen.getByText('Cancel'));
     await waitFor(() => expect(screen.queryByText('Replace your library?')).toBeNull());
@@ -77,8 +78,51 @@ describe('LibraryDataSection import', () => {
   });
 
   it('the help text no longer claims import merges', () => {
-    render(<LibraryDataSection />);
+    render(<LibraryDataSection onToast={vi.fn()} />);
     expect(screen.queryByText(/merges/i)).toBeNull();
     expect(screen.getByText(/Import replaces your library/)).toBeTruthy();
+  });
+
+  it('a file that is not a backup reports a failure toast with Try another, which opens the picker again', async () => {
+    (libraryStore.parseImport as ReturnType<typeof vi.fn>).mockReturnValueOnce({ success: false, error: 'That file isn’t an Ark backup. Nothing changed.' });
+    const onToast = vi.fn();
+    render(<LibraryDataSection onToast={onToast} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await waitFor(() => expect(onToast).toHaveBeenCalledTimes(1));
+    const toast = onToast.mock.calls[0][0];
+    expect(toast).toMatchObject({ tone: 'fault', text: expect.stringContaining('isn') });
+    expect(libraryStore.applyImport).not.toHaveBeenCalled();
+    toast.action.run();
+    await waitFor(() => expect(window.fileDialog!.openFile).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe('LibraryDataSection export', () => {
+  it('reports the saved file with a Show file action that reveals only that path', async () => {
+    const showFile = vi.fn(async () => ({ success: true }));
+    Object.defineProperty(window, 'fileDialog', {
+      value: { saveFile: vi.fn(async () => ({ success: true, filePath: 'C:/Users/me/ark-library-2026-11-03.json' })), openFile: vi.fn(), showFile },
+      writable: true, configurable: true,
+    });
+    const onToast = vi.fn();
+    render(<LibraryDataSection onToast={onToast} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+    await waitFor(() => expect(onToast).toHaveBeenCalledTimes(1));
+    const toast = onToast.mock.calls[0][0];
+    expect(toast.text).toBe('Saved ark-library-2026-11-03.json · 4 games');
+    toast.action.run();
+    expect(showFile).toHaveBeenCalledWith('C:/Users/me/ark-library-2026-11-03.json');
+  });
+
+  it('a cancelled save says nothing, and a failed one is a failure toast', async () => {
+    const saveFile = vi.fn().mockResolvedValueOnce({ success: false, canceled: true }).mockResolvedValueOnce({ success: false, error: 'disk full' });
+    Object.defineProperty(window, 'fileDialog', { value: { saveFile, openFile: vi.fn() }, writable: true, configurable: true });
+    const onToast = vi.fn();
+    render(<LibraryDataSection onToast={onToast} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+    await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
+    expect(onToast).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith({ text: 'disk full', tone: 'fault' }));
   });
 });

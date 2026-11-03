@@ -25,6 +25,8 @@ export interface AiConnector {
   deployment?: string;
   apiVersion?: string;
   roles?: AiRole[];
+  /** False = switched off (kept, but on no route). Absent = on. */
+  enabled?: boolean;
   test?: AiConnectorTest;
   testModel?: { role: AiRole; model: string };
   hasKey: boolean;
@@ -60,6 +62,8 @@ type Ok<T = object> = ({ success: true } & T) | { success: false; error: string 
 
 export interface AiRouterApi {
   getState: () => Promise<AiRouterState>;
+  /** Ask an Ollama or OpenAI-compatible server which models it serves. */
+  fetchModels: (id: string) => Promise<Ok<{ models: string[] }>>;
   saveConnector: (input: Partial<AiConnector> & { kind: ConnectorKind }) => Promise<Ok>;
   removeConnector: (id: string) => Promise<Ok>;
   setKey: (input: { connectorId: string; key: string }) => Promise<Ok<{ test?: AiConnectorTest }>>;

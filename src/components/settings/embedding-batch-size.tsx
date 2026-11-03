@@ -1,6 +1,6 @@
 /**
  * Embedding batch-size slider + live graphics-memory (VRAM) meter for the
- * AI Models settings tab.
+ * Game understanding page (design: Reading → Batch size, and the Graphics memory tile).
  *
  * The slider maps to the `embeddingBatchSize` Ollama setting (0 = Auto; the main
  * process clamps manual values to 16–512). The meter polls `window.ollama.gpuStats()`
@@ -9,8 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, Cpu, AlertTriangle } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Chip, Icon, ICON, type Tone } from '@/components/settings/ui';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -125,8 +124,8 @@ function getGpuStatsFn(): GpuStatsFn | undefined {
   return (window.ollama as unknown as { gpuStats?: GpuStatsFn } | undefined)?.gpuStats;
 }
 
-export function VramMeter() {
-  // undefined = first read pending; null = Ollama not running / no readout.
+/** Polls the graphics-memory reading while the window is visible. undefined = first read pending; null = no reading. */
+export function useGpuStats(): GpuStats | null | undefined {
   const [stats, setStats] = useState<GpuStats | null | undefined>(undefined);
   const inFlight = useRef(false);
 
@@ -158,71 +157,97 @@ export function VramMeter() {
     };
   }, []);
 
-  if (stats === undefined) {
-    return <p className="text-[11px] text-white/25" data-testid="vram-meter">Reading graphics memory…</p>;
-  }
-  if (stats === null) {
-    return <p className="text-[11px] text-white/25" data-testid="vram-meter">Start Ollama to see graphics memory</p>;
-  }
+  return stats;
+}
 
-  const status = classifyVramStatus(stats);
+const LEVEL_TONE: Record<VramLevel, Tone> = { ok: 'live', tight: 'warn', 'too-high': 'fault', unknown: 'off' };
+const LEVEL_COLOR: Record<VramLevel, string> = {
+  ok: 'var(--color-live)', tight: 'var(--color-warn)', 'too-high': 'var(--color-fault)', unknown: 'var(--color-live)',
+};
+
+/** The two meter segments: all graphics memory in use, and the part that is Ark's AI. */
+function vramBars(stats: GpuStats, status: VramStatus) {
   const hasTotals = status.freeMB !== null && typeof stats.vramTotalMB === 'number' && typeof stats.vramUsedMB === 'number';
   const total = stats.vramTotalMB ?? 0;
   const used = stats.vramUsedMB ?? 0;
   const usedPct = hasTotals && total > 0 ? Math.min(100, (used / total) * 100) : 0;
   const modelPct = hasTotals && total > 0 ? Math.min(usedPct, (stats.modelVramMB / total) * 100) : 0;
+  return { hasTotals, total, used, usedPct, modelPct };
+}
 
-  const tone =
-    status.level === 'too-high' ? 'text-red-400/80'
-      : status.level === 'tight' ? 'text-amber-400/80'
-        : status.level === 'ok' ? 'text-emerald-400/80'
-          : 'text-white/40';
-  const barTone =
-    status.level === 'too-high' ? 'bg-red-400/50'
-      : status.level === 'tight' ? 'bg-amber-400/50'
-        : 'bg-emerald-400/40';
-  const StatusIcon = status.level === 'too-high' ? AlertCircle : status.level === 'tight' ? AlertTriangle : CheckCircle2;
+/** The "Graphics memory" status tile. */
+export function GraphicsMemoryTile({ stats }: { stats: GpuStats | null | undefined }) {
+  if (stats === undefined || stats === null) {
+    return (
+      <div data-testid="vram-tile">
+        <div className="inline" style={{ justifyContent: 'space-between' }}><p className="t">Graphics memory</p><Chip tone="off">{stats === undefined ? 'Reading' : 'No reading'}</Chip></div>
+        <p className="d">{stats === undefined ? 'Reading graphics memory…' : 'Shown while the AI is running.'}</p>
+      </div>
+    );
+  }
+  const status = classifyVramStatus(stats);
+  const bars = vramBars(stats, status);
+  return (
+    <div data-testid="vram-tile">
+      <div className="inline" style={{ justifyContent: 'space-between' }}>
+        <p className="t">Graphics memory</p>
+        {status.level !== 'unknown' && <Chip tone={LEVEL_TONE[status.level]}>{LEVEL_LABEL[status.level]}</Chip>}
+      </div>
+      {bars.hasTotals && (
+        <div className="meter" style={{ marginTop: 'var(--space-2)' }} role="meter" aria-label="Graphics memory in use" aria-valuemin={0} aria-valuemax={bars.total} aria-valuenow={bars.used}>
+          <i style={{ width: `${bars.usedPct}%`, background: LEVEL_COLOR[status.level] }} />
+          {stats.modelVramMB > 0 && <i style={{ width: `${bars.modelPct}%`, background: 'var(--color-accent)' }} />}
+        </div>
+      )}
+      <p className="d" style={{ fontVariantNumeric: 'tabular-nums' }}>
+        {stats.gpuName ?? 'Graphics card'}
+        {bars.hasTotals ? ` · ${formatMB(bars.used)} of ${formatMB(bars.total)}` : ''}
+        {stats.modelVramMB > 0 ? ` · Ark ${formatMB(stats.modelVramMB)}` : ''}
+      </p>
+    </div>
+  );
+}
+
+/** Self-polling readout (the page itself shares one poll with its tile through VramReadout). */
+export function VramMeter() {
+  return <VramReadout stats={useGpuStats()} />;
+}
+
+/** The graphics-memory readout under the batch slider, with the tight / too-high advice. */
+export function VramReadout({ stats }: { stats: GpuStats | null | undefined }) {
+  if (stats === undefined) {
+    return <p className="d" data-testid="vram-meter">Reading graphics memory…</p>;
+  }
+  if (stats === null) {
+    return <p className="d" data-testid="vram-meter">No graphics memory reading yet. It appears while the AI is running.</p>;
+  }
+
+  const status = classifyVramStatus(stats);
+  const bars = vramBars(stats, status);
 
   return (
-    <div className="rounded-lg bg-white/[0.02] border border-white/[0.05] p-3 space-y-2" data-testid="vram-meter">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <Cpu className="h-3.5 w-3.5 text-white/40 shrink-0" />
-          <span className="text-xs text-white/60 truncate">{stats.gpuName ?? 'Graphics card'}</span>
-        </div>
-        {status.level !== 'unknown' && (
-          <span className={cn('flex items-center gap-1 text-[11px] font-medium shrink-0', tone)}>
-            <StatusIcon className="h-3 w-3" />
-            {LEVEL_LABEL[status.level]}
-          </span>
-        )}
+    <div className="stack" style={{ gap: 'var(--space-2)' }} data-testid="vram-meter">
+      <div className="inline" style={{ justifyContent: 'space-between' }}>
+        <span className="inline"><Icon d={ICON.layers} />{stats.gpuName ?? 'Graphics card'}</span>
+        {status.level !== 'unknown' && <Chip tone={LEVEL_TONE[status.level]}>{LEVEL_LABEL[status.level]}</Chip>}
       </div>
 
-      {hasTotals ? (
+      {bars.hasTotals ? (
         <>
-          <div
-            className="relative h-2 w-full rounded-full bg-white/[0.06] overflow-hidden"
-            role="meter"
-            aria-label="Graphics memory used"
-            aria-valuemin={0}
-            aria-valuemax={total}
-            aria-valuenow={used}
-          >
-            <div className={cn('absolute inset-y-0 left-0 rounded-full', barTone)} style={{ width: `${usedPct}%` }} />
-            {stats.modelVramMB > 0 && (
-              <div className="absolute inset-y-0 left-0 rounded-full bg-fuchsia-400/60" style={{ width: `${modelPct}%` }} />
-            )}
+          <div className="meter" role="meter" aria-label="Graphics memory used" aria-valuemin={0} aria-valuemax={bars.total} aria-valuenow={bars.used}>
+            <i style={{ width: `${bars.usedPct}%`, background: LEVEL_COLOR[status.level] }} />
+            {stats.modelVramMB > 0 && <i style={{ width: `${bars.modelPct}%`, background: 'var(--color-accent)' }} />}
           </div>
-          <div className="flex items-center justify-between text-[11px] text-white/35">
+          <div className="inline d" style={{ justifyContent: 'space-between', margin: 0 }}>
             <span>
-              {formatMB(used)} of {formatMB(total)} used
-              {stats.modelVramMB > 0 && <> · <span className="text-fuchsia-300/70">Ark&apos;s AI: {formatMB(stats.modelVramMB)}</span></>}
+              {formatMB(bars.used)} of {formatMB(bars.total)} used
+              {stats.modelVramMB > 0 && <> · <span style={{ color: 'var(--color-accent-ink)' }}>Ark&apos;s AI: {formatMB(stats.modelVramMB)}</span></>}
             </span>
             <span>{formatMB(status.freeMB ?? 0)} free</span>
           </div>
         </>
       ) : (
-        <p className="text-[11px] text-white/35">
+        <p className="d">
           {stats.modelLoaded
             ? <>Ark&apos;s AI is using {formatMB(stats.modelVramMB)} of graphics memory.</>
             : <>Ark&apos;s AI isn&apos;t loaded right now.</>}{' '}
@@ -231,11 +256,9 @@ export function VramMeter() {
       )}
 
       {status.level !== 'unknown' && (
-        <p className={cn('text-[11px]', status.level === 'ok' ? 'text-white/30' : tone)}>{vramAdvice(status)}</p>
+        <p className="d" style={status.level === 'ok' ? undefined : { color: LEVEL_COLOR[status.level] }}>{vramAdvice(status)}</p>
       )}
-      {hasTotals && (
-        <p className="text-[10px] text-white/20">Includes everything on the graphics card, games too. Updates every 2 seconds.</p>
-      )}
+      {bars.hasTotals && <p className="d">Includes everything on the graphics card, games too. Updates every 2 seconds.</p>}
     </div>
   );
 }
@@ -246,24 +269,24 @@ export function EmbeddingBatchSizeControl({
   value,
   onChange,
   disabled,
+  stats,
 }: {
   value: number;
   onChange: (next: number) => void;
   disabled?: boolean;
+  /** The page's shared graphics-memory reading (one poll feeds the tile and this readout). */
+  stats: GpuStats | null | undefined;
 }) {
   const index = batchSizeToSliderIndex(value);
   const current = sliderIndexToBatchSize(index);
   const label = current === 0 ? 'Auto' : `${current} at a time`;
 
   return (
-    <div className="space-y-2" data-testid="embedding-batch-size">
-      <div className="flex items-center justify-between gap-3">
-        <label htmlFor="embedding-batch-size-slider" className="text-sm text-white/70">Embedding batch size</label>
-        <span className="text-xs font-mono text-white/50">{label}</span>
+    <div className="sect" data-testid="embedding-batch-size" data-setting-id="u-batch">
+      <div className="inline" style={{ justifyContent: 'space-between' }}>
+        <label htmlFor="embedding-batch-size-slider" className="t">Batch size</label>
+        <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-accent-ink)', fontVariantNumeric: 'tabular-nums' }}>{label}</span>
       </div>
-      <p className="text-[11px] text-white/30">
-        How many game descriptions are sent to the AI at once. Bigger is faster but uses more graphics memory.
-      </p>
       <input
         id="embedding-batch-size-slider"
         type="range"
@@ -274,18 +297,14 @@ export function EmbeddingBatchSizeControl({
         disabled={disabled}
         onChange={(e) => onChange(sliderIndexToBatchSize(Number(e.target.value)))}
         aria-valuetext={label}
-        className="w-full accent-fuchsia-500 disabled:opacity-40"
+        style={{ ['--v' as string]: `${Math.round((index / BATCH_SIZE_STEPS.length) * 100)}%` }}
       />
-      <div className="flex justify-between text-[10px] text-white/20 font-mono">
-        <span>Auto</span>
-        {BATCH_SIZE_STEPS.map((s) => <span key={s}>{s}</span>)}
-      </div>
-      <p className="text-[11px] text-white/25">
-        {current === 0
-          ? 'Auto sends 256 at a time on a graphics card, 100 on the processor. Background work always uses 64 or fewer.'
-          : 'Background work always uses 64 or fewer. Applies from the next batch, no restart needed.'}
+      <div className="scale"><span>Auto</span><span>16</span><span>64</span><span>192</span><span>512</span></div>
+      <p className="d">
+        How many game descriptions go to the AI at once. Bigger is faster but uses more graphics memory. Background work stays at 64 or fewer.
+        {current === 0 ? ' Auto sends 256 at a time on a graphics card, 100 on the processor.' : ' Applies from the next batch, no restart needed.'}
       </p>
-      <VramMeter />
+      <VramReadout stats={stats} />
     </div>
   );
 }

@@ -58,7 +58,7 @@ export interface Connector {
   id: string;
   kind: ConnectorKind;
   name: string;
-  /** Ollama / OpenAI-compatible server address. */
+  /** Ollama / OpenAI-compatible server address; for Gemini, Anthropic and OpenAI an optional base URL override (proxy or gateway). */
   baseUrl?: string;
   /** Azure OpenAI resource endpoint, deployment and API version. */
   endpoint?: string;
@@ -66,6 +66,8 @@ export interface Connector {
   apiVersion?: string;
   /** OpenAI-compatible server: the roles it serves. */
   roles?: AiRole[];
+  /** False = switched off in Settings: kept with its key, but on no route and never tested. Absent = on. */
+  enabled?: boolean;
   /** Most recent connection test, if any. */
   test?: ConnectorTestResult;
   /** Role and model the user asked the connection test to use (servers with no default model need one). */
@@ -168,8 +170,15 @@ export function validateConnectorInput(input: unknown): Validated<Omit<Connector
   if (!fixed && id && !(isConnectorId(id) && id.startsWith('compat-'))) return { ok: false, error: 'Invalid connector id.' };
   const name = typeof o.name === 'string' ? o.name.trim().slice(0, 60) : '';
   const out: Omit<Connector, 'test'> = { id, kind, name: name || defaultConnectorName(kind) };
+  if (typeof o.enabled === 'boolean') out.enabled = o.enabled;
   if (kind === 'ollama' || kind === 'openai-compatible') {
     const url = validateHttpUrl(o.baseUrl, 'The server address');
+    if (failed(url)) return url;
+    out.baseUrl = url.value;
+  }
+  if ((kind === 'gemini' || kind === 'anthropic' || kind === 'openai') && typeof o.baseUrl === 'string' && o.baseUrl.trim()) {
+    // Optional "Base URL override" (a proxy or self-hosted gateway for a hosted provider).
+    const url = validateHttpUrl(o.baseUrl, 'The base URL');
     if (failed(url)) return url;
     out.baseUrl = url.value;
   }

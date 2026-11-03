@@ -285,7 +285,7 @@ export class RouterStore {
 
   /** "Armed": configured, key present when needed, and its last test passed. Re-checked on a schedule. */
   isArmed(c: Connector): boolean {
-    if (c.kind === 'builtin') return false;
+    if (c.kind === 'builtin' || c.enabled === false) return false;
     return c.test?.ok === true && (!KIND_NEEDS_KEY[c.kind] || this.hasKey(c.id));
   }
 
@@ -306,11 +306,14 @@ export class RouterStore {
     const existing = this.data.connectors.find((c) => c.id === id);
     if (existing && existing.kind !== input.kind) throw new Error('A connector cannot change its type');
     const next: Connector = { ...input, id };
+    // Callers that do not mention the switch (the legacy chat bridge) leave a switched-off connector off.
+    if (next.enabled === undefined && existing?.enabled === false) next.enabled = false;
+    if (next.enabled !== false) delete next.enabled;
     if (existing) {
       const same = (['baseUrl', 'endpoint', 'deployment', 'apiVersion'] as const).every((k) => existing[k] === next[k])
         && JSON.stringify(existing.roles ?? []) === JSON.stringify(next.roles ?? []);
       if (same && existing.test) next.test = existing.test;
-      if (same && existing.name === next.name) return { ...existing }; // nothing changed: no write, no restart
+      if (same && existing.name === next.name && existing.enabled === next.enabled) return { ...existing }; // nothing changed: no write, no restart
       this.data.connectors[this.data.connectors.indexOf(existing)] = next;
       // A kept route must still be servable.
       for (const role of AI_ROLES) {
@@ -318,6 +321,8 @@ export class RouterStore {
         if (r?.connectorId === id && !connectorServes(next, role)) this.unroute(role);
       }
       if (!same) this.unrouteConnector(id, false);
+      // Switching a connector off takes it off every route at once; its settings, key and last test stay.
+      else if (next.enabled === false && existing.enabled !== false) this.unrouteConnector(id, true);
     } else {
       this.data.connectors.push(next);
     }
@@ -375,6 +380,7 @@ export class RouterStore {
     const c = this.data.connectors.find((x) => x.id === connectorId);
     if (!c) return { ok: false, error: 'Unknown connector.' };
     if (!connectorServes(c, role)) return { ok: false, error: `${c.name} cannot serve ${role}.` };
+    if (c.enabled === false) return { ok: false, error: `${c.name} is switched off.` };
     let chosen = model.trim();
     if (c.kind !== 'builtin') {
       if (KIND_NEEDS_KEY[c.kind] && !this.hasKey(c.id)) return { ok: false, error: `Save a key for ${c.name} first.` };

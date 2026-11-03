@@ -423,6 +423,10 @@ contextBridge.exposeInMainWorld('fileDialog', {
   saveFile: (options) => 
     ipcRenderer.invoke('dialog:saveFile', options),
   
+  // Reveal a file saved earlier in this session (main refuses any other path)
+  showFile: (filePath) =>
+    ipcRenderer.invoke('dialog:showFile', filePath),
+
   // Open and read file with native dialog
   openFile: (options) => 
     ipcRenderer.invoke('dialog:openFile', options),
@@ -647,6 +651,7 @@ contextBridge.exposeInMainWorld('localAi', {
 // or cleared here but never read back.
 contextBridge.exposeInMainWorld('aiRouter', {
   getState: () => ipcRenderer.invoke('aiRouter:getState'),
+  fetchModels: (id) => ipcRenderer.invoke('aiRouter:fetchModels', id),
   saveConnector: (input) => ipcRenderer.invoke('aiRouter:saveConnector', input),
   removeConnector: (id) => ipcRenderer.invoke('aiRouter:removeConnector', id),
   setKey: (input) => ipcRenderer.invoke('aiRouter:setKey', input),

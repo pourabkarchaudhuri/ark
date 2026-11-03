@@ -68,14 +68,14 @@ function litellmParams(c: Connector, role: AiRole, model: string, keyRef: string
       if (!c.baseUrl) return null;
       return withKey({ model: `${role === 'chat' ? 'ollama_chat' : 'ollama'}/${model}`, api_base: c.baseUrl });
     case 'gemini':
-      return withKey({ model: `gemini/${model}` });
+      return withKey({ model: `gemini/${model}`, ...(c.baseUrl ? { api_base: c.baseUrl } : {}) });
     case 'azure-openai':
       if (!c.endpoint) return null;
       return withKey({ model: `azure/${model || c.deployment || ''}`, api_base: c.endpoint, api_version: c.apiVersion || '2024-12-01-preview' });
     case 'anthropic':
-      return withKey({ model: `anthropic/${model}` });
+      return withKey({ model: `anthropic/${model}`, ...(c.baseUrl ? { api_base: c.baseUrl } : {}) });
     case 'openai':
-      return withKey({ model: `openai/${model}` });
+      return withKey({ model: `openai/${model}`, ...(c.baseUrl ? { api_base: c.baseUrl } : {}) });
     case 'openai-compatible':
       if (!c.baseUrl) return null;
       // An OpenAI-compatible server may need no key; LiteLLM's OpenAI client wants some value.

@@ -20,8 +20,55 @@ const require = createRequire(import.meta.url);
 
 type Result<T = object> = ({ success: true } & T) | { success: false; error: string };
 
+type FetchLike = (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+/** Models a server reports about itself. Anything that does not look like a model name is left out. */
+export function parseServedModels(kind: 'ollama' | 'openai-compatible', body: unknown): string[] {
+  const o = (body && typeof body === 'object' ? body : {}) as { models?: unknown; data?: unknown };
+  const rows = kind === 'ollama' ? o.models : o.data;
+  if (!Array.isArray(rows)) return [];
+  const names = rows.map((r) => {
+    const row = (r && typeof r === 'object' ? r : {}) as { name?: unknown; id?: unknown };
+    return kind === 'ollama' ? row.name : row.id;
+  });
+  const out: string[] = [];
+  for (const n of names) {
+    const v = validateModelName(n);
+    if (!failed(v) && !out.includes(v.value)) out.push(v.value);
+    if (out.length >= 200) break;
+  }
+  return out;
+}
+
 export class AiRouterController {
-  constructor(private readonly router: () => AiRouter) {}
+  constructor(
+    private readonly router: () => AiRouter,
+    private readonly fetchImpl: FetchLike = (url, init) => fetch(url, init) as ReturnType<FetchLike>,
+  ) {}
+
+  /** "Fetch from server": ask an Ollama or OpenAI-compatible server which models it serves. */
+  async fetchModels(id: unknown): Promise<Result<{ models: string[] }>> {
+    if (!isConnectorId(id)) return { success: false, error: 'Unknown connector.' };
+    const store = this.router().store;
+    const c = store.connector(id);
+    if (!c) return { success: false, error: 'Unknown connector.' };
+    if ((c.kind !== 'ollama' && c.kind !== 'openai-compatible') || !c.baseUrl) return { success: false, error: 'This connector has no server to ask.' };
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    const key = c.kind === 'openai-compatible' ? store.getKey(c.id) : null;
+    if (key) headers.Authorization = `Bearer ${key}`;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const res = await this.fetchImpl(c.kind === 'ollama' ? `${c.baseUrl}/api/tags` : `${c.baseUrl}/models`, { headers, signal: ctl.signal });
+      if (!res.ok) return { success: false, error: `The server answered ${res.status}.` };
+      const models = parseServedModels(c.kind, await res.json());
+      return models.length > 0 ? { success: true, models } : { success: false, error: 'The server did not list any models.' };
+    } catch {
+      return { success: false, error: 'Could not reach the server.' };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   getState() {
     return this.router().state();
@@ -131,6 +178,7 @@ export function register(
       throw err instanceof Error ? err : new Error(String(err));
     }
   };
+  ipcMain.handle('aiRouter:fetchModels', wrap('fetchModels', (id: unknown) => controller.fetchModels(id)));
   ipcMain.handle('aiRouter:getState', wrap('getState', () => controller.getState()));
   ipcMain.handle('aiRouter:saveConnector', wrap('saveConnector', (input: unknown) => controller.saveConnector(input)));
   ipcMain.handle('aiRouter:removeConnector', wrap('removeConnector', (id: unknown) => controller.removeConnector(id)));

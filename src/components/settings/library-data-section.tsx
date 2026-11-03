@@ -1,17 +1,14 @@
 /**
- * Settings → General → Library Data: export, import (with a confirmation that
+ * Settings → General → Library data: export, import (with a confirmation that
  * states what will be replaced) and "Restore previous library" after an import.
+ * Results are reported through the page's toast (design: "Saved ark-library-[date].json").
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
-import { Check, AlertCircle, Download, Upload, Loader2, RotateCcw } from 'lucide-react';
-import { cn } from '@/lib/utils';
-import { Button } from '@/components/ui/button';
+import { useState, useCallback, useRef } from 'react';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { libraryStore, type LibraryImportPlan, type LibraryImportResult } from '@/services/library-store';
 import { gameService } from '@/services/game-service';
-
-type Status = 'idle' | 'loading' | 'success' | 'error';
+import { Icon, ICON, Row, Spinner, type ToastMessage } from '@/components/settings/ui';
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
@@ -42,29 +39,18 @@ function describeResult(result: LibraryImportResult, verb: string): string {
   return `${verb} ${plural(result.count, 'game')}${custom}`;
 }
 
-export function LibraryDataSection() {
-  const [importStatus, setImportStatus] = useState<Status>('idle');
-  const [exportStatus, setExportStatus] = useState<Status>('idle');
-  const [message, setMessage] = useState<string | null>(null);
+export type ToastInput = Omit<ToastMessage, 'id'>;
+
+export function LibraryDataSection({ onToast }: { onToast: (toast: ToastInput) => void }) {
+  const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [pendingPlan, setPendingPlan] = useState<LibraryImportPlan | null>(null);
   const [canRestore, setCanRestore] = useState(() => libraryStore.getLastImportSnapshot() !== null);
-  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => () => {
-    if (resetTimer.current) clearTimeout(resetTimer.current);
-  }, []);
-
-  const scheduleReset = useCallback(() => {
-    if (resetTimer.current) clearTimeout(resetTimer.current);
-    resetTimer.current = setTimeout(() => {
-      setImportStatus('idle');
-      setExportStatus('idle');
-      setMessage(null);
-    }, 3000);
-  }, []);
+  /** "Try another" on a failed import runs the same picker again. */
+  const importAgain = useRef<() => void>(() => undefined);
 
   const handleExport = useCallback(async () => {
-    setExportStatus('loading');
+    setExporting(true);
     try {
       const data = libraryStore.exportData();
       const librarySize = libraryStore.getSize();
@@ -75,59 +61,69 @@ export function LibraryDataSection() {
           defaultName,
           filters: [{ name: 'JSON Files', extensions: ['json'] }],
         });
-        if (result.success) { setExportStatus('success'); setMessage(`Exported ${librarySize} games`); }
-        else if (result.canceled) { setExportStatus('idle'); return; }
-        else { setExportStatus('error'); setMessage(result.error || 'Failed'); }
+        if (result.success) {
+          const filePath = result.filePath;
+          const show = window.fileDialog?.showFile;
+          onToast({
+            text: `Saved ${filePath ? filePath.split(/[\\/]/).pop() : defaultName} · ${plural(librarySize, 'game')}`,
+            action: filePath && show ? { label: 'Show file', run: () => { void show(filePath); } } : undefined,
+          });
+        } else if (!result.canceled) {
+          onToast({ text: result.error || 'Failed', tone: 'fault' });
+        }
       } else {
         const blob = new Blob([data], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a'); a.href = url; a.download = defaultName;
         document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-        setExportStatus('success'); setMessage(`Exported ${librarySize} games`);
+        onToast({ text: `Saved ${defaultName} · ${plural(librarySize, 'game')}` });
       }
     } catch {
-      setExportStatus('error'); setMessage('Failed to export');
+      onToast({ text: 'Failed to export', tone: 'fault' });
+    } finally {
+      setExporting(false);
     }
-    scheduleReset();
-  }, [scheduleReset]);
+  }, [onToast]);
+
+  const failImport = useCallback((text: string) => {
+    onToast({ text, tone: 'fault', action: { label: 'Try another', run: () => importAgain.current() } });
+  }, [onToast]);
 
   /** Step 1: parse the picked file and ask before anything is replaced. */
   const reviewContent = useCallback((content: string) => {
     const parsed = libraryStore.parseImport(content);
     if (!parsed.success) {
-      setImportStatus('error');
-      setMessage(parsed.error);
-      scheduleReset();
+      failImport(parsed.error);
       return;
     }
     setPendingPlan(parsed.plan);
-  }, [scheduleReset]);
+  }, [failImport]);
 
   const handleImport = useCallback(async () => {
-    setImportStatus('loading'); setMessage(null);
+    setImporting(true);
     try {
       if (window.fileDialog) {
         const result = await window.fileDialog.openFile({ filters: [{ name: 'JSON Files', extensions: ['json'] }] });
-        if (result.canceled) { setImportStatus('idle'); return; }
-        if (!result.success || !result.content) {
-          setImportStatus('error'); setMessage(result.error || 'Failed'); scheduleReset();
-        } else {
-          reviewContent(result.content);
-        }
+        if (result.canceled) return;
+        if (!result.success || !result.content) failImport(result.error || 'Failed');
+        else reviewContent(result.content);
       } else {
         const input = document.createElement('input'); input.type = 'file'; input.accept = '.json';
         input.onchange = async (e) => {
           const file = (e.target as HTMLInputElement).files?.[0];
-          if (!file) { setImportStatus('idle'); return; }
+          if (!file) return;
           try { reviewContent(await file.text()); }
-          catch { setImportStatus('error'); setMessage('Failed'); scheduleReset(); }
+          catch { failImport('Failed'); }
         };
         input.click();
       }
     } catch {
-      setImportStatus('error'); setMessage('Failed'); scheduleReset();
+      failImport('Failed');
+    } finally {
+      setImporting(false);
     }
-  }, [reviewContent, scheduleReset]);
+  }, [reviewContent, failImport]);
+  importAgain.current = () => { void handleImport(); };
 
   /** Step 2 (confirmed): apply the plan. */
   const confirmImport = useCallback(() => {
@@ -136,74 +132,51 @@ export function LibraryDataSection() {
     if (!plan) return;
     const result = libraryStore.applyImport(plan);
     if (result.success) {
-      setImportStatus('success');
-      setMessage(describeResult(result, 'Imported'));
+      onToast({ text: describeResult(result, 'Imported') });
       setCanRestore(libraryStore.getLastImportSnapshot() !== null);
       gameService.backfillLibraryMissingCachedMeta().catch(() => { /* non-blocking */ });
     } else {
-      setImportStatus('error');
-      setMessage(result.error || 'Failed');
+      onToast({ text: result.error || 'Failed', tone: 'fault' });
     }
-    scheduleReset();
-  }, [pendingPlan, scheduleReset]);
+  }, [pendingPlan, onToast]);
 
-  // Runs on Cancel, Escape and after Confirm (the dialog always closes itself):
-  // only a still-pending import goes back to idle, a confirmed one keeps its result.
-  const cancelImport = useCallback(() => {
-    setPendingPlan(null);
-    setImportStatus((s) => (s === 'loading' ? 'idle' : s));
-  }, []);
+  const cancelImport = useCallback(() => setPendingPlan(null), []);
 
   const handleRestore = useCallback(() => {
     const result = libraryStore.restoreLastImportSnapshot();
     if (result.success) {
-      setImportStatus('success');
-      setMessage(describeResult(result, 'Restored'));
+      onToast({ text: describeResult(result, 'Restored') });
       gameService.backfillLibraryMissingCachedMeta().catch(() => { /* non-blocking */ });
     } else {
-      setImportStatus('error');
-      setMessage(result.error || 'Failed');
+      onToast({ text: result.error || 'Failed', tone: 'fault' });
     }
     setCanRestore(libraryStore.getLastImportSnapshot() !== null);
-    scheduleReset();
-  }, [scheduleReset]);
-
-  const ok = importStatus === 'success' || exportStatus === 'success';
+  }, [onToast]);
 
   return (
     <>
-      <div>
-        <p className="text-sm font-medium text-white/90">Export & Import</p>
-        <p className="text-xs text-white/35 mt-0.5">Backup or restore your library data as JSON</p>
-      </div>
-      <div className="flex gap-3">
-        <Button variant="ghost" size="sm" onClick={handleExport} disabled={exportStatus === 'loading'}
-          className="flex-1 h-10 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-white/70">
-          {exportStatus === 'loading' ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Download className="h-4 w-4 mr-2" />}
-          Export Library
-        </Button>
-        <Button variant="ghost" size="sm" onClick={handleImport} disabled={importStatus === 'loading'}
-          className="flex-1 h-10 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-white/70">
-          {importStatus === 'loading' ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Upload className="h-4 w-4 mr-2" />}
-          Import Library
-        </Button>
-      </div>
+      <Row
+        settingId="backup"
+        label="Backup"
+        desc="A JSON file. Import replaces your library with the file's games, plus the journey, sessions and status history it contains. You are asked first, and a copy of the current library is kept so you can restore it."
+        control={(
+          <div className="inline">
+            <button type="button" className="btn" onClick={() => void handleExport()} disabled={exporting}>
+              {exporting ? <Spinner /> : <Icon d={ICON.download} />}Export
+            </button>
+            <button type="button" className="btn" onClick={() => void handleImport()} disabled={importing}>
+              {importing ? <Spinner /> : <Icon d={ICON.upload} />}Import
+            </button>
+          </div>
+        )}
+      />
       {canRestore && (
-        <Button variant="ghost" size="sm" onClick={handleRestore}
-          className="w-full h-9 bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.06] text-white/60">
-          <RotateCcw className="h-4 w-4 mr-2" />
-          Restore previous library
-        </Button>
+        <Row
+          label="Restore previous library"
+          desc="Puts back the copy kept before your last import."
+          control={<button type="button" className="btn" onClick={handleRestore}><Icon d={ICON.replay} />Restore</button>}
+        />
       )}
-      {message && (
-        <div className={cn('flex items-center gap-2 text-xs', ok ? 'text-emerald-400/70' : 'text-red-400/70')}>
-          {ok ? <Check className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
-          {message}
-        </div>
-      )}
-      <p className="text-xs text-white/25">
-        Import replaces your library with the file's games, plus the journey, sessions and status history it contains. You are asked first, and a copy of the current library is kept so you can restore it.
-      </p>
       <ConfirmDialog
         open={pendingPlan !== null}
         onOpenChange={(open) => { if (!open) cancelImport(); }}

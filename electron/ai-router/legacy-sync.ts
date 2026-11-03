@@ -57,8 +57,12 @@ export function applyLegacyChatProvider(
   opts: { anthropicModel?: string } = {},
 ): SetRouteResult | null {
   const current = store.route('chat');
+  const currentKind = store.connector(current.connectorId)?.kind;
   if (provider === 'ollama') {
     if (current.connectorId === BUILTIN_CONNECTOR_ID) return null;
+    // The AI providers screen (B37) can route chat to Ollama, OpenAI or an OpenAI-compatible server,
+    // which the old selector cannot name: its default "ollama" must not undo that choice.
+    if (currentKind === 'ollama' || currentKind === 'openai' || currentKind === 'openai-compatible') return null;
     return store.setRoute('chat', BUILTIN_CONNECTOR_ID, '');
   }
   const kind = KIND_BY_PROVIDER[provider];
@@ -66,6 +70,8 @@ export function applyLegacyChatProvider(
     if (kind === 'azure-openai') return null; // needs endpoint + deployment first (syncAzureConnector)
     store.upsertConnector({ id: kind, kind, name: kind === 'gemini' ? 'Google Gemini' : 'Anthropic' });
   }
+  // A route already on this provider keeps the model chosen on the AI providers screen.
+  if (current.connectorId === kind) return null;
   const model = kind === 'anthropic'
     ? (opts.anthropicModel?.trim() || (current.connectorId === 'anthropic' ? current.model : '') || DEFAULT_MODELS.anthropic.chat!)
     : kind === 'azure-openai'
