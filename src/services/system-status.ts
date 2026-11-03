@@ -342,7 +342,7 @@ async function measureIdbStore(dbName: string, version: number, stores: string[]
 
 // ─── Ollama setup progress tracking ─────────────────────────────────────────────
 
-let _ollamaSetupStatus: SyncStatus = { label: 'Ollama Setup', stage: 'idle', detail: '', percent: 0, elapsed: 0, itemsDone: 0, itemsTotal: 0 };
+let _ollamaSetupStatus: SyncStatus = { label: 'Local AI Setup', stage: 'idle', detail: '', percent: 0, elapsed: 0, itemsDone: 0, itemsTotal: 0 };
 let _ollamaSetupStartTime = 0;
 
 /** A setup timer restarts on the first event after a finished run (a later pull is its own run). */

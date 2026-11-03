@@ -1328,14 +1328,14 @@ export function Dashboard() {
               const liveDisabled = galaxyBuilding || noOllama;
               const galaxyReady = !liveDisabled;
               const label = noOllama
-                ? 'Install Ollama to unlock'
+                ? 'Local AI models needed'
                 : galaxyBuilding
                   ? 'Processing Galaxy'
                   : 'Enter Embedding Space';
               return (
                 <TooltipCard content={
                   noOllama
-                    ? "Requires Ollama to generate game embeddings. Install it from Settings to unlock the Galaxy Map."
+                    ? "Requires the built-in local AI models to generate game embeddings. They download in the background; see Settings, AI Models."
                     : galaxyBuilding
                       ? "The Galaxy Map is being computed — embedding your library games into a 3D similarity space. This runs once in the background."
                       : "Enter the Galaxy Map — a 3D visualization of game similarity powered by AI embeddings. Explore how your library games relate to each other."

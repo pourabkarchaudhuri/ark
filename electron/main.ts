@@ -135,6 +135,7 @@ import {
   setEmbeddingGameRunning,
 } from './ipc/ollama-handlers.js';
 import { unloadArkModels } from './ollama-setup.js';
+import { shutdownLocalAi } from './local-ai/service.js';
 import { setGameActivityListener } from './game-activity.js';
 import { atomicWriteFileSync } from './safe-write.js';
 import { attachNavigationGuards, devFlagArgs, isExternalOpenable, shouldUseDevServer } from './navigation-guard.js';
@@ -1184,6 +1185,9 @@ app.on('before-quit', () => {
   // after Ark is gone. Bounded (~1 s) and awaited alongside the LevelDB close
   // in will-quit, so it never holds the quit beyond that.
   if (!ollamaUnloadOnQuit) ollamaUnloadOnQuit = unloadArkModels().then(() => undefined, () => undefined);
+  // Built-in llama-server processes: killed now, synchronously. (A crash of Ark itself is covered by
+  // the kill-on-close job object they run in.)
+  shutdownLocalAi();
 });
 
 // Flush LevelDB on shutdown. Fires after all windows have closed but before

@@ -23,6 +23,9 @@ import {
 } from './settings-store.js';
 import http from 'http';
 import os from 'os';
+import { useBuiltinBackend, getBuiltinBackend } from './local-ai/backend.js';
+import { getLocalAiService } from './local-ai/service.js';
+import { getAutoModels } from './local-ai/manifest.js';
 import { StringDecoder } from 'string_decoder';
 // Type-only — the runtime import of rerank-engine.ts is dynamic (see
 // settleRerankModelStatus) because that module imports this one.
@@ -169,6 +172,8 @@ export function isRerankModelInstalled(
  * Check if Ollama is running at the configured URL.
  */
 export async function isOllamaRunning(): Promise<{ running: boolean; version: string | null }> {
+  // Built-in runtime (default): "running" means the packaged llama-server is there to start on demand.
+  if (useBuiltinBackend()) return getBuiltinBackend().health();
   const settings = settingsStore.getOllamaSettings();
   const url = settings.url || 'http://localhost:11434';
 
@@ -433,6 +438,7 @@ export function ensureRerankModelPull(
   modelName?: string,
   onProgress?: (status: string, pct: number) => void,
 ): Promise<boolean> {
+  if (useBuiltinBackend()) return ensureBuiltinRerankModels(onProgress);
   const model = modelName?.trim() || getRerankQwenModelTag();
   const inFlight = _rerankPullsInFlight.get(model);
   if (inFlight) return inFlight;
@@ -534,6 +540,7 @@ export function getEmbedOomStepDowns(): number {
 
 /** Last /api/ps reading for the embedding model, refreshed by readEmbedModelVram. */
 export async function readEmbedModelVram(): Promise<{ loaded: boolean; sizeBytes: number; vramBytes: number }> {
+  if (useBuiltinBackend()) return getBuiltinBackend().gpuReading();
   const settings = settingsStore.getOllamaSettings();
   const urlObj = new URL(settings.url || 'http://localhost:11434');
   const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
@@ -629,6 +636,11 @@ export async function generateEmbeddingsBatchDetailed(
 ): Promise<{ embeddings: (number[] | null)[]; error: EmbedBatchError | null }> {
   if (texts.length === 0) return { embeddings: [], error: null };
   const effectiveOpts = opts ?? getSessionEmbedOptions();
+
+  // Built-in runtime: llama-server's /v1/embeddings. numBatch becomes -b/-ub (a change restarts the server).
+  if (useBuiltinBackend()) {
+    return getBuiltinBackend().embed(texts, { numThread: effectiveOpts.numThread, numBatch: effectiveOpts.numBatch });
+  }
 
   const settings = settingsStore.getOllamaSettings();
   const url = settings.url || 'http://localhost:11434';
@@ -764,6 +776,20 @@ export async function detectGpuMode(): Promise<boolean> {
   if (Date.now() - _gpuLastInconclusiveAt < GPU_REPROBE_INTERVAL_MS) return false;
 
   _gpuDetectInFlight = (async () => {
+    if (useBuiltinBackend()) {
+      // The embed server reports where its weights landed in its own log (-ngl forces all layers on
+      // the GPU, so there is no partial-offload case to repair).
+      const reading = getBuiltinBackend().gpuReading();
+      if (!reading.loaded) {
+        _gpuLastInconclusiveAt = Date.now();
+        return false;
+      }
+      _gpuModeChecked = true;
+      _gpuModeAvailable = reading.vramBytes > 0;
+      _gpuPartialOffload = false;
+      logger.log(`[Local AI] Embedding model GPU mode: ${_gpuModeAvailable ? 'yes' : 'no (CPU)'}`);
+      return _gpuModeAvailable;
+    }
     const settings = settingsStore.getOllamaSettings();
     const url = settings.url || 'http://localhost:11434';
     const urlObj = new URL(url);
@@ -846,6 +872,12 @@ function isArkModelName(name: string): 'embed' | 'rerank' | null {
  */
 export async function unloadArkModels(opts?: { timeoutMs?: number }): Promise<string[]> {
   const timeoutMs = opts?.timeoutMs ?? UNLOAD_TIMEOUT_MS;
+  if (useBuiltinBackend()) {
+    // Stopping the servers frees their VRAM/RAM at once; they start again on the next request.
+    const stopped = await getBuiltinBackend().unloadAll().catch(() => [] as string[]);
+    if (stopped.length > 0) logger.log(`[Local AI] Stopped built-in servers: ${stopped.join(', ')}`);
+    return stopped;
+  }
   const settings = settingsStore.getOllamaSettings();
   const baseUrl = (settings.url || 'http://localhost:11434').replace(/\/$/, '');
   const ac = new AbortController();
@@ -946,6 +978,36 @@ async function settleRerankModelStatus(
   const detection = await detectRerankTier();
   ollamaUp = detection.ollamaUp;
 
+  if (useBuiltinBackend()) {
+    // The rerank models come from the same background download as the embedder; the setup
+    // flow (runBuiltinSetup) starts it and re-detects when it finishes.
+    if (detection.tier !== 'embed_fallback') {
+      settle(detection.tier, true, rerankTierLabel(detection.tier));
+    } else if (!detection.ollamaUp) {
+      settle('embed_fallback', false, 'Built-in AI runtime not found', detection.reason);
+    } else {
+      result.rerankModelReady = false;
+      result.rerankTier = 'embed_fallback';
+      result.rerankTierLabel = rerankTierLabel('embed_fallback');
+      emit({ status: 'Reranker models downloading', pct: 0, ollamaUp: true });
+      void (async () => {
+        await ensureBuiltinRerankModels((status, pct) => emit({ status, pct, ollamaUp: true }));
+        resetRerankTierCache();
+        const after = await detectRerankTier({ force: true });
+        emit({
+          status: rerankTierLabel(after.tier),
+          pct: 100,
+          done: true,
+          tier: after.tier,
+          tierLabel: rerankTierLabel(after.tier),
+          error: after.tier === 'embed_fallback' ? after.reason : null,
+          ollamaUp: after.ollamaUp,
+        });
+      })().catch((err) => logger.warn('[Local AI] Reranker setup failed:', err));
+    }
+    return;
+  }
+
   if (detection.tier !== 'embed_fallback') {
     settle(detection.tier, true, rerankTierLabel(detection.tier));
     logger.log(`[Ollama Setup] Reranker ready: ${detection.reason}`);
@@ -1024,6 +1086,10 @@ export async function runOllamaSetup(
     rerankTierLabel: null,
     error: null,
   };
+
+  if (useBuiltinBackend()) {
+    return runBuiltinSetup(result, onProgress, onRerankProgress, warmUp);
+  }
 
   try {
     // Step 1: Health check
@@ -1161,6 +1227,10 @@ export interface OllamaModelInfo {
  * Returns null if Ollama is unavailable or the model isn't installed.
  */
 export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
+  if (useBuiltinBackend()) {
+    const info = getBuiltinBackend().embeddingModelInfo();
+    return info.installed ? info : null;
+  }
   const settings = settingsStore.getOllamaSettings();
   const url = settings.url || 'http://localhost:11434';
   const urlObj = new URL(url);
@@ -1221,6 +1291,7 @@ export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
  * Get on-disk size of the embedding model from the model list.
  */
 export async function getEmbeddingModelSize(): Promise<number> {
+  if (useBuiltinBackend()) return getBuiltinBackend().embeddingModelInfo().sizeBytes;
   const settings = settingsStore.getOllamaSettings();
   const url = settings.url || 'http://localhost:11434';
   const urlObj = new URL(url);
@@ -1252,4 +1323,121 @@ export async function getEmbeddingModelSize(): Promise<number> {
     req.on('error', () => resolve(0));
     req.on('timeout', () => { req.destroy(); resolve(0); });
   });
+}
+
+
+// ─── Built-in local AI (1.0.97 B36) ─────────────────────────────────────────
+
+/** Set when the user chose "Continue without local AI": no automatic downloads until Retry. */
+let _autoDownloadDeclined = false;
+
+export function declineBuiltinAutoDownload(): void {
+  _autoDownloadDeclined = true;
+  getLocalAiService().store.cancelAll();
+}
+
+export function allowBuiltinAutoDownload(): void {
+  _autoDownloadDeclined = false;
+}
+
+export function isBuiltinAutoDownloadDeclined(): boolean {
+  return _autoDownloadDeclined;
+}
+
+/** Callbacks run once after a background model download queue drains (any outcome). */
+const _modelsSettledHooks = new Set<(embeddingReady: boolean) => void>();
+
+export function onBuiltinModelsSettled(fn: (embeddingReady: boolean) => void): () => void {
+  _modelsSettledHooks.add(fn);
+  return () => _modelsSettledHooks.delete(fn);
+}
+
+/** Download the Oracle models in the background; never throws. Resolves when the queue drains. */
+export function startBuiltinModelDownloads(): Promise<void> {
+  const { store } = getLocalAiService();
+  const ids = getAutoModels().map((m) => m.id);
+  return store.ensure(ids).catch((err) => {
+    logger.warn('[Local AI] Model download queue failed:', err);
+  });
+}
+
+/**
+ * Download the reranker models (the cross-encoder and the Qwen3 fallback) and report progress as
+ * (status, pct). Resolves true when at least one reranker is usable afterwards.
+ */
+export async function ensureBuiltinRerankModels(
+  onProgress?: (status: string, pct: number) => void,
+): Promise<boolean> {
+  const { store } = getLocalAiService();
+  const rerankIds = getAutoModels().filter((m) => m.role === 'rerank' || m.role === 'rerank-qwen').map((m) => m.id);
+  if (!_autoDownloadDeclined) {
+    const off = store.onChange((all) => {
+      const cur = all.find((m) => rerankIds.includes(m.id) && m.state === 'downloading');
+      if (cur) onProgress?.(`Downloading ${cur.label}`, cur.pct);
+    });
+    try {
+      await store.ensure(rerankIds);
+    } finally {
+      off();
+    }
+  }
+  return store.isReady('rerank') || store.isReady('rerank-qwen');
+}
+
+async function runBuiltinSetup(
+  result: OllamaSetupStatus,
+  onProgress: ((status: string, pct: number) => void) | undefined,
+  onRerankProgress: RerankProgressCallback | undefined,
+  warmUp: () => void,
+): Promise<OllamaSetupStatus> {
+  try {
+    onProgress?.('Checking the built-in AI runtime...', 0);
+    const backend = getBuiltinBackend();
+    const health = backend.health();
+    if (!health.running) {
+      logger.warn('[Local AI] llama-server not found — recommendation engine will run without embeddings');
+      result.error = 'Built-in AI runtime not found';
+      await settleRerankModelStatus(result, onRerankProgress);
+      return result;
+    }
+    result.ollamaDetected = true;
+    result.ollamaVersion = health.version;
+
+    onProgress?.('Checking models...', 20);
+    const { store } = getLocalAiService();
+    await store.refresh();
+    const missing = store.statuses().filter((m) => m.auto && m.state !== 'ready');
+
+    if (missing.length === 0) {
+      result.embeddingModelReady = true;
+      warmUp();
+      await settleRerankModelStatus(result, onRerankProgress);
+      onProgress?.('Embedding model ready', 100);
+      return result;
+    }
+
+    // Models missing: Ark keeps running without embeddings (the usual degraded path) while they
+    // download in the background. The renderer re-checks after its retry window and on the
+    // models-ready push, and then finds them ready.
+    result.embeddingModelReady = store.isReady('embed');
+    if (_autoDownloadDeclined) {
+      result.error = 'Built-in AI models are not downloaded (local AI was declined)';
+    } else {
+      onProgress?.('Downloading AI models in the background...', 30);
+      void startBuiltinModelDownloads().then(() => {
+        const embedReady = store.isReady('embed');
+        if (embedReady) warmUp();
+        for (const hook of _modelsSettledHooks) {
+          try { hook(embedReady); } catch { /* a hook must not break the queue */ }
+        }
+      });
+      result.error = result.embeddingModelReady ? null : 'Built-in AI models are downloading';
+    }
+    await settleRerankModelStatus(result, onRerankProgress);
+    if (result.embeddingModelReady) onProgress?.('Embedding model ready', 100);
+  } catch (err) {
+    logger.error('[Local AI] Unexpected setup error:', err);
+    result.error = err instanceof Error ? err.message : String(err);
+  }
+  return result;
 }

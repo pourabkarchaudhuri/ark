@@ -18,9 +18,9 @@ const BETA_OFF_MESSAGE =
   'Turn on Beta features in Settings → General to use AI Chat.';
 
 const UNAVAILABLE_MESSAGE =
-  'No AI provider configured. Add at least one in Settings → AI Models: Ollama (local), Google Gemini, or Azure OpenAI.';
+  'No AI provider configured. Add at least one in Settings → AI Models: built-in local AI, Google Gemini, or Azure OpenAI.';
 const OLLAMA_ONLY_MESSAGE =
-  'Chat uses Ollama by default. Ensure Ollama is running, or add another provider in Settings → AI Models.';
+  'Chat uses the built-in local AI by default. Download the chat model in Settings → AI Models, or add another provider.';
 
 /**
  * @param refreshKey Re-check when this changes. The dashboard passes its view mode, so

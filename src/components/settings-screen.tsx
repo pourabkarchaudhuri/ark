@@ -42,6 +42,8 @@ import { catalogStore } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { EmbeddingBatchSizeControl } from '@/components/settings/embedding-batch-size';
+import { BuiltInLocalAiPanel } from '@/components/settings/built-in-local-ai';
+import type { LocalAiStatus } from '@/services/local-ai-types';
 import { AboutUpdateButton, useAboutUpdate } from '@/components/settings/about-update';
 import { GeminiKeyInput, KEY_SAVED_PLACEHOLDER } from '@/components/settings/gemini-key-input';
 import { LibraryDataSection } from '@/components/settings/library-data-section';
@@ -391,7 +393,7 @@ export const GeneralTab = memo(function GeneralTab() {
 // ─── AI Models Tab ────────────────────────────────────────────────────────────
 
 const CHAT_PROVIDER_LABELS: Record<PreferredChatProvider, string> = {
-  'ollama': 'Ollama (local)',
+  'ollama': 'Local AI (built-in)',
   'gemini': 'Google Gemini',
   'azure-openai': 'Azure OpenAI',
   'anthropic': 'Anthropic (Claude)',
@@ -421,6 +423,22 @@ function KeySaveStatusLine({ status, hasKey }: { status: KeySaveStatus; hasKey: 
 export const AIModelsTab = memo(function AIModelsTab() {
   const [betaFeatures] = useBetaFeatures();
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
+  // null until the built-in local AI reports (or when there is no desktop bridge): the Ollama fields stay visible then.
+  const [useExternalOllama, setUseExternalOllama] = useState<boolean | null>(null);
+  const handleLocalAiStatus = useCallback((s: LocalAiStatus | null) => {
+    setUseExternalOllama(s ? s.externalOllama.enabled : null);
+  }, []);
+  const handleExternalOllamaToggle = useCallback(async () => {
+    const next = !useExternalOllama;
+    setUseExternalOllama(next);
+    try {
+      const s = await window.localAi?.setExternalOllama({ enabled: next });
+      if (s) setUseExternalOllama(s.externalOllama.enabled);
+      embeddingService.resetAvailability();
+    } catch {
+      setUseExternalOllama(!next);
+    }
+  }, [useExternalOllama]);
   const [ollamaModel, setOllamaModel] = useState('gemma3:12b');
   const [ollamaRerankModel, setOllamaRerankModel] = useState(DEFAULT_OLLAMA_RERANK_MODEL);
   const [neighborRerankEnabled, setNeighborRerankEnabled] = useState(true);
@@ -709,8 +727,8 @@ export const AIModelsTab = memo(function AIModelsTab() {
       <SectionCard>
         <p className="text-xs text-white/35 mb-3">
           {betaFeatures
-            ? 'Choose which provider to use for AI Chat. Only configured providers are listed. Ollama (local) is the default when others are not set up.'
-            : 'With Beta features off, only Ollama is used for AI. Turn on Beta features in General to pick Gemini, Azure OpenAI, or Anthropic and to show the AI Chat button in the toolbar.'}
+            ? 'Choose which provider to use for AI Chat. Only configured providers are listed. Built-in local AI is the default when others are not set up.'
+            : 'With Beta features off, only the built-in local AI is used. Turn on Beta features in General to pick Gemini, Azure OpenAI, or Anthropic and to show the AI Chat button in the toolbar.'}
         </p>
         {availableProviders.length > 0 ? (
           <Select value={effectivePreferred} onValueChange={handlePreferredProviderChange}>
@@ -726,17 +744,31 @@ export const AIModelsTab = memo(function AIModelsTab() {
             </SelectContent>
           </Select>
         ) : (
-          <p className="text-xs text-amber-400/80">Set an Ollama address below to use local AI. Enable Beta features in General for cloud providers and the chat toolbar button.</p>
+          <p className="text-xs text-amber-400/80">Local AI is built in; no setup needed. Enable Beta features in General for cloud providers and the chat toolbar button.</p>
         )}
       </SectionCard>
 
-      {/* Local AI (Ollama) */}
-      <SectionHeading icon={Bot}>Local AI (Ollama)</SectionHeading>
+      {/* Built-in local AI (llama.cpp) */}
+      <SectionHeading icon={Bot}>Built-in local AI</SectionHeading>
       <SectionCard>
-        <div>
-          <p className="text-sm font-medium text-white/90">Local AI with Ollama</p>
-          <p className="text-xs text-white/35 mt-0.5">Runs on your own computer, so nothing leaves your PC. Make sure Ollama is running.</p>
+        <BuiltInLocalAiPanel onStatus={handleLocalAiStatus} />
+      </SectionCard>
+
+      {/* Advanced: the user's own Ollama */}
+      <SectionHeading icon={Bot}>Advanced: use my own Ollama</SectionHeading>
+      <SectionCard>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-white/90">Use my own Ollama</p>
+            <p className="text-xs text-white/35 mt-0.5">
+              Off by default: Ark uses its built-in AI and never touches Ollama or its models folder. Turn this on only if you want Ark to talk to an Ollama you already run.
+            </p>
+          </div>
+          {useExternalOllama !== null && (
+            <Toggle value={useExternalOllama} onChange={handleExternalOllamaToggle} label="Use my own Ollama" />
+          )}
         </div>
+        {(useExternalOllama === null || useExternalOllama) && (<>
         <div>
           <label className="text-xs text-white/40 mb-1 block">Ollama address</label>
           <Input type="text" value={ollamaUrl} onChange={(e) => setOllamaUrl(e.target.value)} placeholder="http://localhost:11434"
@@ -760,6 +792,9 @@ export const AIModelsTab = memo(function AIModelsTab() {
             A small helper AI that puts the best matches first. Install it with{' '}
             <code className="text-white/35">ollama pull {DEFAULT_OLLAMA_RERANK_MODEL}</code>
           </p>
+        </div>
+        </>)}
+        <div>
           <div className="mt-2 flex items-center gap-2">
             <Button
               size="sm"
@@ -802,14 +837,13 @@ export const AIModelsTab = memo(function AIModelsTab() {
             {rerankDiag.state === 'fail' && (
               <span className="text-[11px] text-amber-400/80 flex items-center gap-1">
                 <AlertCircle className="h-3 w-3" />
-                {!rerankDiag.ollamaUp ? 'Ollama not running' :
+                {!rerankDiag.ollamaUp ? 'Local AI not running' :
                  rerankDiag.modelInstalled === false ? `Model not pulled — ${rerankDiag.error}` :
                  rerankDiag.error || 'Probe failed'}
               </span>
             )}
           </div>
         </div>
-        <p className="text-xs text-white/25">Don&apos;t have Ollama? <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Download Ollama</a></p>
       </SectionCard>
 
       {/* Smarter ordering (rerank) */}
@@ -1481,7 +1515,7 @@ const CORE_FEATURES: FeatureBlock[] = [
 const AI_EXPLAINER: { title: string; what: string; icon: React.ElementType }[] = [
   { title: 'How does the AI find games I\'ll like?', what: 'Ark looks at every game you\'ve played, rated, and spent time with. It builds a "taste profile" from your favorite genres, themes, and developers. Then it searches through thousands of games to find ones that match your profile — like a friend who knows your taste perfectly.', icon: Heart },
   { title: 'What is the Galaxy Map?', what: 'Imagine every game as a star in the sky. Games that are similar (same genres, themes, style) are placed close together. The galaxy map lets you fly through this space and discover clusters of games you might love, just by exploring the neighborhood of a game you already enjoy.', icon: Star },
-  { title: 'Is my data private?', what: 'Yes. By default, everything runs locally on your computer using Ollama (a local AI). Your game library, ratings, and play history never leave your machine. Cloud AI (Gemini, Azure, Anthropic) is optional and only activated if you explicitly configure it.', icon: Shield },
+  { title: 'Is my data private?', what: 'Yes. By default, everything runs locally on your computer using the built-in local AI. Your game library, ratings, and play history never leave your machine. Cloud AI (Gemini, Azure, Anthropic) is optional and only activated if you explicitly configure it.', icon: Shield },
   { title: 'What does the AI chat assistant do?', what: 'You can ask the assistant questions like "find me a game like Hollow Knight" or "what should I play next?" It searches the catalog, looks at your library, and gives personalized suggestions with explanations. It can even add games to your library for you.', icon: MessageCircle },
   { title: 'How accurate are recommendations?', what: 'The recommendation engine uses a machine learning model trained on 41 million real player reviews. Combined with genre analysis and your personal history, it gets smarter the more games you rate. Think of it as learning your taste over time.', icon: TrendingUp },
 ];

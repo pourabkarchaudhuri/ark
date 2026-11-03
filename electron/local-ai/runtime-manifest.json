@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "runtime": {
+    "build": "b11780",
+    "asset": "llama-b11780-bin-win-vulkan-x64.zip",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11780/llama-b11780-bin-win-vulkan-x64.zip",
+    "sha256": "186951a062d92108ba6ec9dbb051657dc273b5e6e9aaf33b1cf465f026800fdc",
+    "size": 36793217,
+    "license": {
+      "file": "LICENSE-llama.cpp.txt",
+      "url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/b11780/LICENSE"
+    },
+    "files": {}
+  },
+  "models": [
+    {
+      "id": "arctic-embed2",
+      "role": "embed",
+      "label": "snowflake-arctic-embed2 (embeddings)",
+      "file": "snowflake-arctic-embed2-568m-f16.gguf",
+      "auto": true,
+      "sources": [
+        {
+          "kind": "ollama",
+          "url": "https://registry.ollama.ai/v2/library/snowflake-arctic-embed2/blobs/sha256:8c625c9569c3c799f5f9595b5a141f91d224233055608189d66746347c14e613",
+          "sha256": "8c625c9569c3c799f5f9595b5a141f91d224233055608189d66746347c14e613",
+          "size": 1160285024
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/Casual-Autopsy/snowflake-arctic-embed-l-v2.0-gguf/resolve/0995861dc0b106ddd5152bc753718d4e34d1e68b/snowflake-arctic-embed-l-v2.0-f16.gguf",
+          "sha256": "745f544edc8421b9398684282b25cc933fbc766467fc9eedba96ed12440206aa",
+          "size": 1157672192
+        }
+      ]
+    },
+    {
+      "id": "bge-reranker-v2-m3",
+      "role": "rerank",
+      "label": "bge-reranker-v2-m3 (reranker)",
+      "file": "bge-reranker-v2-m3-f16.gguf",
+      "auto": true,
+      "sources": [
+        {
+          "kind": "ollama",
+          "url": "https://registry.ollama.ai/v2/dengcao/bge-reranker-v2-m3/blobs/sha256:5df93be121c09c43432102ad2b9569d369ccb85c209ca7583e8ccd28f0e41b88",
+          "sha256": "5df93be121c09c43432102ad2b9569d369ccb85c209ca7583e8ccd28f0e41b88",
+          "size": 1159776896
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/3093af03b1a635e67b084b1d8c03c5f5e020fd05/bge-reranker-v2-m3-FP16.gguf",
+          "sha256": "5df93be121c09c43432102ad2b9569d369ccb85c209ca7583e8ccd28f0e41b88",
+          "size": 1159776896
+        }
+      ]
+    },
+    {
+      "id": "qwen3-reranker-0.6b",
+      "role": "rerank-qwen",
+      "label": "Qwen3-Reranker-0.6B Q8_0 (reranker fallback)",
+      "file": "qwen3-reranker-0.6b-q8_0.gguf",
+      "auto": true,
+      "sources": [
+        {
+          "kind": "ollama",
+          "url": "https://registry.ollama.ai/v2/dengcao/Qwen3-Reranker-0.6B/blobs/sha256:ad693e485b0b193e1fa84c92c1fc195c05958d7b836fcb201c3828a31a3eb8ea",
+          "sha256": "ad693e485b0b193e1fa84c92c1fc195c05958d7b836fcb201c3828a31a3eb8ea",
+          "size": 639150816
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/mradermacher/Qwen3-Reranker-0.6B-GGUF/resolve/6727da811d2cc45b078b744bffaaab122a0691da/Qwen3-Reranker-0.6B.Q8_0.gguf",
+          "sha256": "c525a7449243f690a7062e6377d6cf5adbb289354bd4316312367cd20e187ab7",
+          "size": 639150752
+        }
+      ]
+    },
+    {
+      "id": "gemma3-12b",
+      "role": "chat",
+      "label": "gemma3:12b Q4_K_M (local chat)",
+      "file": "gemma3-12b-it-q4_k_m.gguf",
+      "auto": false,
+      "sources": [
+        {
+          "kind": "ollama",
+          "url": "https://registry.ollama.ai/v2/library/gemma3/blobs/sha256:13576eb6dd8d9d04b4da04d015ff343968628d3c2984195569d9d3585651d4f1",
+          "sha256": "13576eb6dd8d9d04b4da04d015ff343968628d3c2984195569d9d3585651d4f1",
+          "size": 7309830496
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/ggml-org/gemma-3-12b-it-GGUF/resolve/ec0cbabd8dbff316f659876a50202295c3c4a314/gemma-3-12b-it-Q4_K_M.gguf",
+          "sha256": "7bb69bff3f48a7b642355d64a90e481182a7794707b3133890646b1efa778ff5",
+          "size": 7300574976
+        }
+      ]
+    }
+  ]
+}

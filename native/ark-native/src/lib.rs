@@ -9,6 +9,12 @@
 //! so the JS side no longer needs `tasklist` for basenames (1.0.97). When the
 //! snapshot itself fails we fall back to `EnumProcesses` (psapi) with no
 //! basenames.
+//!
+//! `job_assign_kill_on_close(pid)` (1.0.97) puts a child process (the built-in
+//! llama.cpp servers) into one process-wide Windows job object created with
+//! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The job handle is never closed, so
+//! when Ark exits for any reason (quit, crash, Task Manager) Windows closes it
+//! and kills every assigned child: no orphaned servers holding VRAM or ports.
 //! No subprocess spawn, no shell, no PowerShell startup cost, and no
 //! dependency on PowerShell's availability/reliability under load (the root
 //! cause class of the v1.0.60 tracker-never-ends bug — see session-tracker.ts
@@ -162,6 +168,81 @@ mod windows_impl {
             })
             .collect()
     }
+}
+
+#[cfg(windows)]
+mod job_impl {
+    use std::mem;
+    use std::sync::Mutex;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+
+    /// The one job for this Ark process. Stored as an integer so the static is
+    /// `Send`; 0 = not created yet. Deliberately never closed (see module doc).
+    static JOB: Mutex<isize> = Mutex::new(0);
+
+    fn job_handle() -> Option<HANDLE> {
+        let mut guard = JOB.lock().ok()?;
+        if *guard != 0 {
+            return Some(*guard as HANDLE);
+        }
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job == 0 {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                CloseHandle(job);
+                return None;
+            }
+            *guard = job as isize;
+            Some(job)
+        }
+    }
+
+    pub fn assign(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+        let Some(job) = job_handle() else { return false };
+        unsafe {
+            let proc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            if proc == 0 {
+                return false;
+            }
+            let ok = AssignProcessToJobObject(job, proc);
+            CloseHandle(proc);
+            ok != 0
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod job_impl {
+    pub fn assign(_pid: u32) -> bool {
+        false
+    }
+}
+
+/// Put `pid` into Ark's kill-on-close job object, so Windows kills it when Ark
+/// exits, even on a crash. Returns false when the job or the assignment failed
+/// (the caller then relies on its own kill-on-quit and orphan cleanup).
+#[napi]
+pub fn job_assign_kill_on_close(pid: u32) -> bool {
+    job_impl::assign(pid)
 }
 
 #[cfg(not(windows))]

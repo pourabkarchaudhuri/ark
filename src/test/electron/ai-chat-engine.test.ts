@@ -8,7 +8,7 @@
  * @langchain/core message classes are used so the message list the engine
  * builds is the one a provider would receive.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AIMessage, ToolMessage, type BaseMessage } from '@langchain/core/messages';
 
 type Responder = (info: { kind: string; opts: Record<string, unknown>; bound: boolean; messages: BaseMessage[] }) => Promise<AIMessage> | AIMessage;
@@ -21,6 +21,8 @@ const h = vi.hoisted(() => ({
     provider: 'ollama' as string,
     googleKey: null as string | null,
     ollama: { url: 'http://localhost:11434', model: 'gemma3:12b', chatNumCtx: 8192 } as Record<string, unknown>,
+    /** The existing tests exercise the user's-own-Ollama path; the built-in describe flips this. */
+    local: { useExternalOllama: true, modelsDir: null as string | null },
   },
   steam: {
     getAppDetails: null as null | ((id: number) => Promise<unknown>),
@@ -48,7 +50,7 @@ function fakeModelClass(kind: string) {
   };
 }
 
-vi.mock('@langchain/openai', () => ({ AzureChatOpenAI: fakeModelClass('azure') }));
+vi.mock('@langchain/openai', () => ({ AzureChatOpenAI: fakeModelClass('azure'), ChatOpenAI: fakeModelClass('openai') }));
 vi.mock('@langchain/google-genai', () => ({ ChatGoogleGenerativeAI: fakeModelClass('gemini') }));
 vi.mock('@langchain/ollama', () => ({ ChatOllama: fakeModelClass('ollama') }));
 
@@ -61,6 +63,7 @@ vi.mock('../../../electron/settings-store.js', () => ({
     getPreferredChatProvider: () => h.settings.provider,
     getGoogleAIKey: () => h.settings.googleKey,
     getOllamaSettings: () => h.settings.ollama,
+    getLocalAiSettings: () => h.settings.local,
   },
 }));
 vi.mock('../../../electron/chat-store.js', () => ({
@@ -100,7 +103,10 @@ import {
   SYSTEM_PROMPT,
   LIBRARY_TOOL_MAX_CHARS,
   __resetAiChatCachesForTests,
+  LOCAL_CHAT_MODEL_MISSING,
 } from '../../../electron/ai-chat';
+import { __setBuiltinBackendForTests } from '../../../electron/local-ai/backend';
+import type { BuiltinBackend } from '../../../electron/local-ai/builtin-backend';
 
 const GOOD_ANSWER = '## Answer\n\n- **Hades** is great\n\n---\nSuggested follow-ups:\n- What else is good?\n- Show my library';
 
@@ -134,6 +140,7 @@ beforeEach(() => {
   h.settings.provider = 'ollama';
   h.settings.googleKey = null;
   h.settings.ollama = { url: 'http://localhost:11434', model: 'gemma3:12b', chatNumCtx: 8192 };
+  h.settings.local = { useExternalOllama: true, modelsDir: null };
   h.steam.getAppDetails = null;
   h.steam.getGameReviews = null;
   h.getPrices = null;
@@ -477,5 +484,74 @@ describe('gg.deals region', () => {
     scriptChat([aiWithTools([toolCall('getGameDeals', { appId: 620 }, 't1')]), new AIMessage(GOOD_ANSWER)]);
     await processMessage('price?', undefined, [], undefined, undefined, undefined, undefined, 'zz');
     expect(getPrices).toHaveBeenCalledWith([620], 'us');
+  });
+});
+
+
+describe('built-in local chat (1.0.97 B36)', () => {
+  function fakeBuiltin(over: Partial<{ chatReady: boolean; ensure: () => Promise<{ baseUrl: string; apiKey: string }> }> = {}) {
+    const chatEndpoint = vi.fn(over.ensure ?? (async () => ({ baseUrl: 'http://127.0.0.1:47411/v1', apiKey: 'per-launch-key' })));
+    const markChatUsed = vi.fn();
+    __setBuiltinBackendForTests({
+      isModelReady: (role: string) => role !== 'chat' || over.chatReady !== false,
+      chatEndpoint,
+      markChatUsed,
+    } as unknown as BuiltinBackend);
+    return { chatEndpoint, markChatUsed };
+  }
+
+  beforeEach(() => {
+    h.settings.local = { useExternalOllama: false, modelsDir: null };
+    h.settings.provider = 'ollama';
+  });
+  afterEach(() => { __setBuiltinBackendForTests(null); });
+
+  it('talks to the built-in chat server through ChatOpenAI with the per-launch key, not to Ollama', async () => {
+    const f = fakeBuiltin();
+    scriptChat([new AIMessage(GOOD_ANSWER)]);
+    const res = await processMessage('hello', undefined, []);
+    expect(f.chatEndpoint).toHaveBeenCalledWith(8192);
+    const ctor = h.ctor.find((c) => c.kind === 'openai');
+    expect(ctor).toBeDefined();
+    expect(ctor!.opts.apiKey).toBe('per-launch-key');
+    expect((ctor!.opts.configuration as { baseURL: string }).baseURL).toBe('http://127.0.0.1:47411/v1');
+    expect(h.ctor.some((c) => c.kind === 'ollama')).toBe(false);
+    expect(res.model).toMatch(/^Local /);
+    expect(f.markChatUsed).toHaveBeenCalled();
+  });
+
+  it('reuses the client between turns and rebuilds it when the server key changes', async () => {
+    let n = 0;
+    fakeBuiltin({ ensure: async () => ({ baseUrl: 'http://127.0.0.1:47411/v1', apiKey: n++ < 2 ? 'key-a' : 'key-b' }) });
+    scriptChat([new AIMessage(GOOD_ANSWER)]);
+    await processMessage('one', undefined, []);
+    await processMessage('two', undefined, []);
+    expect(h.ctor.filter((c) => c.kind === 'openai')).toHaveLength(1);
+    await processMessage('three', undefined, []);
+    expect(h.ctor.filter((c) => c.kind === 'openai')).toHaveLength(2);
+  });
+
+  it('asks for the download when the chat model is not on disk', async () => {
+    const f = fakeBuiltin({ chatReady: false });
+    await expect(processMessage('hello', undefined, [])).rejects.toMatchObject({ code: LOCAL_CHAT_MODEL_MISSING });
+    expect(f.chatEndpoint).not.toHaveBeenCalled();
+    expect(h.ctor.some((c) => c.kind === 'openai')).toBe(false);
+  });
+
+  it('with "use my own Ollama" on, chat still goes to ChatOllama', async () => {
+    h.settings.local = { useExternalOllama: true, modelsDir: null };
+    const f = fakeBuiltin();
+    scriptChat([new AIMessage(GOOD_ANSWER)]);
+    await processMessage('hello', undefined, []);
+    expect(h.ctor.some((c) => c.kind === 'ollama')).toBe(true);
+    expect(f.chatEndpoint).not.toHaveBeenCalled();
+  });
+
+  it('cloud providers never start the local chat server', async () => {
+    h.settings.provider = 'azure-openai';
+    const f = fakeBuiltin();
+    scriptChat([new AIMessage(GOOD_ANSWER)]);
+    await processMessage('hello', undefined, [], undefined, undefined, azureOpts());
+    expect(f.chatEndpoint).not.toHaveBeenCalled();
   });
 });

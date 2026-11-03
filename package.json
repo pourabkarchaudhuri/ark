@@ -9,8 +9,8 @@
     "clean": "rm -rf dist dist-electron",
     "rust:build": "cd native/ark-native && napi build --platform --release",
     "dev": "vite",
-    "build": "npm run clean && tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && node scripts/build-release-env.mjs && electron-builder",
-    "build:app": "npm run clean && tsc -p tsconfig.node.json && tsc && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && node scripts/build-release-env.mjs",
+    "build": "npm run clean && tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && node scripts/build-release-env.mjs && node scripts/build-llama-runtime.mjs && electron-builder",
+    "build:app": "npm run clean && tsc -p tsconfig.node.json && tsc && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && node scripts/build-release-env.mjs && node scripts/build-llama-runtime.mjs",
     "preview": "vite preview",
     "electron:compile": "tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs",
     "electron:dev": "npm run electron:compile && concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
@@ -211,6 +211,10 @@
       {
         "from": "docs/dev-journal.json",
         "to": "docs/dev-journal.json"
+      },
+      {
+        "from": "build/llama-runtime",
+        "to": "llama-runtime"
       }
     ],
     "publish": {
@@ -234,8 +238,7 @@
       "shortcutName": "Ark",
       "uninstallDisplayName": "Ark",
       "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
-      "include": "build/installer/ollama-install.nsh"
+      "uninstallerIcon": "build/icon.ico"
     },
     "mac": {
       "target": "dmg",

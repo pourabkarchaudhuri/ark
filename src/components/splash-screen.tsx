@@ -11,6 +11,8 @@ import {
   startTopSellersPreload,
 } from '@/services/prefetch-store';
 import { embeddingService } from '@/services/embedding-service';
+import { registerCatalogPipelineStarter, initLocalAiFillIn } from '@/services/local-ai-fill-in';
+import { LocalAiSplashStatus } from '@/components/local-ai-splash-status';
 import { buildRechunkJobDeps } from '@/services/rechunk-job-deps';
 import { catalogStore } from '@/services/catalog-store';
 import { epicCatalogStore } from '@/services/epic-catalog-store';
@@ -221,7 +223,7 @@ const BOOT_LINES: BootLine[] = [
   // ── Section 5: Ollama / Embedding check (88→95%) ──────────────────
   { variants: [
     '> Scanning for local AI accelerator...',
-    '> Probing for Ollama embedding node...',
+    '> Probing for the built-in AI embedding node...',
     '> Checking for neural embedding subsystem...',
   ], delay: 130, light: 0.88 },
   { variants: [
@@ -316,6 +318,8 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
 
     // Rerank progress outlives splash — wire the status panel before deferred init.
     initRerankProgressListener();
+    // Built-in local AI: start the embedding pipeline once its models finish downloading.
+    initLocalAiFillIn();
 
     // Crash-loop breaker: when main reports safe mode, skip every heavy
     // background job below (catalog sync + embedding pipeline, galaxy
@@ -517,10 +521,74 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
       whenNotSafe(() => bm25Index.scheduleIdleRebuild()),
     );
 
+    // Starts the catalog embedding pipeline once per session. Called when the embedder is available at
+    // boot, and again by the local-AI fill-in once the built-in models finished downloading.
+    let pipelineStarted = false;
+    const startCatalogPipeline = () => {
+      if (pipelineStarted) return;
+      pipelineStarted = true;
+      (async () => {
+        // Safe mode: no catalog embedding pipeline / re-chunk this launch.
+        if ((await safeModePromise).safeMode) {
+          console.warn('[Splash] Safe mode — skipping catalog embedding pipeline and idle re-chunk');
+          return;
+        }
+        // Wait for Steam catalog sync to finish — sync writes new entries to
+        // IDB while embedding gen reads them. Running concurrent risks
+        // scanning a partial catalog and re-scanning the rest on next launch.
+        await steamSyncDone;
+
+        const count = await catalogStore.getEntryCount();
+        if (count > 0) {
+          console.log(`[Splash] Starting catalog embedding pipeline (${count.toLocaleString()} entries)`);
+          const steamSyncTs = await catalogStore.getLastSyncTimestamp();
+          await embeddingService.generateCatalogEmbeddings(
+            (onBatch) => catalogStore.scanAllEntries(onBatch),
+            { storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs },
+          );
+        }
+
+        // Same gate for Epic.
+        await epicSyncDone;
+        const epicCount = await epicCatalogStore.getEntryCount();
+        if (epicCount > 0) {
+          console.log(`[Splash] Starting Epic catalog embeddings (${epicCount.toLocaleString()} entries)`);
+          const epicSyncTs = await epicCatalogStore.getLastSyncTimestamp();
+          await embeddingService.generateEpicCatalogEmbeddings(
+            (onBatch) => epicCatalogStore.scanAllEntries(onBatch),
+            { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs },
+          );
+        }
+
+        // Wave 3.1 — idle resume of library→catalog facet re-chunk (watermarked).
+        try {
+          const deps = await buildRechunkJobDeps();
+          const result = await embeddingService.maybeStartIdleRechunk(deps);
+          if (result) {
+            console.log(
+              `[Splash] Idle re-chunk: ${result.status}` +
+              ` (written=${result.successCount}, skipped=${result.skippedCount})`,
+            );
+          }
+        } catch (err) {
+          console.warn('[Splash] Idle re-chunk:', err);
+        }
+      })()
+        // embedding-service.ts's generate* functions are now self-healing on
+        // every exit path (they always leave _steamCatalogProgress /
+        // _epicCatalogProgress / annIndex._building in a coherent terminal
+        // state, even on throw) — this catch is just to stop a rejection
+        // here from becoming an unhandled promise rejection; there's no
+        // state left to reset on this side.
+        .catch(err => console.warn('[Splash] Catalog embeddings:', err));
+
+    };
+    registerCatalogPipelineStarter(startCatalogPipeline);
+
     embeddingLoadPromise.then(() => {
       return embeddingService.isAvailable();
     }).then(available => {
-      console.log(`[Splash] Embedding engine: ${available ? 'Ollama detected' : 'running without embeddings'}`);
+      console.log(`[Splash] Embedding engine: ${available ? 'built-in AI ready' : 'running without embeddings'}`);
       setOllamaLine(null);
       reportOllamaDone(available);
       // Unblock the "Enter Ark" button — setup is fully resolved (success or
@@ -530,62 +598,7 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
       unsubOllamaRef.current?.();
       unsubOllamaRef.current = null;
 
-      if (available) {
-        (async () => {
-          // Safe mode: no catalog embedding pipeline / re-chunk this launch.
-          if ((await safeModePromise).safeMode) {
-            console.warn('[Splash] Safe mode — skipping catalog embedding pipeline and idle re-chunk');
-            return;
-          }
-          // Wait for Steam catalog sync to finish — sync writes new entries to
-          // IDB while embedding gen reads them. Running concurrent risks
-          // scanning a partial catalog and re-scanning the rest on next launch.
-          await steamSyncDone;
-
-          const count = await catalogStore.getEntryCount();
-          if (count > 0) {
-            console.log(`[Splash] Starting catalog embedding pipeline (${count.toLocaleString()} entries)`);
-            const steamSyncTs = await catalogStore.getLastSyncTimestamp();
-            await embeddingService.generateCatalogEmbeddings(
-              (onBatch) => catalogStore.scanAllEntries(onBatch),
-              { storeKey: 'steam-catalog', lastSyncTimestamp: steamSyncTs },
-            );
-          }
-
-          // Same gate for Epic.
-          await epicSyncDone;
-          const epicCount = await epicCatalogStore.getEntryCount();
-          if (epicCount > 0) {
-            console.log(`[Splash] Starting Epic catalog embeddings (${epicCount.toLocaleString()} entries)`);
-            const epicSyncTs = await epicCatalogStore.getLastSyncTimestamp();
-            await embeddingService.generateEpicCatalogEmbeddings(
-              (onBatch) => epicCatalogStore.scanAllEntries(onBatch),
-              { storeKey: 'epic-catalog', lastSyncTimestamp: epicSyncTs },
-            );
-          }
-
-          // Wave 3.1 — idle resume of library→catalog facet re-chunk (watermarked).
-          try {
-            const deps = await buildRechunkJobDeps();
-            const result = await embeddingService.maybeStartIdleRechunk(deps);
-            if (result) {
-              console.log(
-                `[Splash] Idle re-chunk: ${result.status}` +
-                ` (written=${result.successCount}, skipped=${result.skippedCount})`,
-              );
-            }
-          } catch (err) {
-            console.warn('[Splash] Idle re-chunk:', err);
-          }
-        })()
-          // embedding-service.ts's generate* functions are now self-healing on
-          // every exit path (they always leave _steamCatalogProgress /
-          // _epicCatalogProgress / annIndex._building in a coherent terminal
-          // state, even on throw) — this catch is just to stop a rejection
-          // here from becoming an unhandled promise rejection; there's no
-          // state left to reset on this side.
-          .catch(err => console.warn('[Splash] Catalog embeddings:', err));
-      }
+      if (available) startCatalogPipeline();
     }).catch((err) => {
       console.warn('[Splash] Embedding check:', err);
       setOllamaLine(null);
@@ -818,6 +831,9 @@ export function SplashScreen({ onEnter }: SplashScreenProps) {
                     {renderTextLine(ollamaLine)}
                   </div>
                 )}
+
+                {/* Built-in local AI model downloads (never blocks Enter Ark) */}
+                <LocalAiSplashStatus />
 
                 {/* Reranker tier detection / Qwen3 download — separate row, its
                     own channel, so the embedding bar hitting 100% is never

@@ -14,6 +14,7 @@ import { downloadWithResume, DownloadError } from '../../../electron/resumable-d
 
 const PAYLOAD = crypto.randomBytes(256 * 1024);
 const SHA = crypto.createHash('sha512').update(PAYLOAD).digest('base64');
+const SHA256 = crypto.createHash('sha256').update(PAYLOAD).digest('hex');
 
 type Mode = {
   /** Destroy the socket after sending this many body bytes, for the first `dropTimes` requests. */
@@ -130,6 +131,21 @@ describe('downloadWithResume', () => {
   it('discards the file on a checksum mismatch', async () => {
     const err = await run({ sha512: 'not-the-hash' }).catch((e) => e);
     expect(err.message).toMatch(/sha512/);
+    expect(fs.existsSync(path.join(dir, 'Ark-Setup.exe'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'Ark-Setup.exe.part'))).toBe(false);
+  });
+
+  it('verifies a pinned sha256 (model files) and accepts a matching one, upper or lower case', async () => {
+    const ok = await run({ sha512: undefined, sha256: SHA256 });
+    expect(fs.readFileSync(ok).equals(PAYLOAD)).toBe(true);
+    const upper = await run({ sha512: undefined, sha256: SHA256.toUpperCase() });
+    expect(fs.readFileSync(upper).equals(PAYLOAD)).toBe(true);
+  });
+
+  it('discards the file on a sha256 mismatch with the CHECKSUM code', async () => {
+    const err = await run({ sha512: undefined, sha256: '0'.repeat(64) }).catch((e) => e);
+    expect(err.code).toBe('CHECKSUM');
+    expect(err.message).toMatch(/sha256/);
     expect(fs.existsSync(path.join(dir, 'Ark-Setup.exe'))).toBe(false);
     expect(fs.existsSync(path.join(dir, 'Ark-Setup.exe.part'))).toBe(false);
   });

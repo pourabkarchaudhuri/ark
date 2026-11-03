@@ -30,6 +30,7 @@ import {
   OLLAMA_KEEP_ALIVE,
 } from './ollama-setup.js';
 import { normalizeOllamaRerankRows, type RerankResultRow } from './ollama-rerank-normalize.js';
+import { useBuiltinBackend, getBuiltinBackend } from './local-ai/backend.js';
 
 export type RerankTier = 'native' | 'qwen_graded' | 'qwen_binary' | 'embed_fallback';
 
@@ -269,7 +270,58 @@ function probeRow(
   };
 }
 
+/**
+ * Tier detection for the built-in runtime. Nothing is started to find out (loading a 1.2 GB
+ * reranker at boot would take memory the user may need): the answer is which model files are
+ * downloaded and verified, minus a role whose server has failed too often this session.
+ * Both rerankers answer through llama-server, so the Qwen3 tier is always the graded one.
+ */
+function runBuiltinTierDetection(): RerankTierDetection {
+  const backend = getBuiltinBackend();
+  const health = backend.health();
+  const probes: RerankTierProbe[] = [];
+  const detectedAt = Date.now();
+  const nativeModel = getRerankModelTag();
+  const qwenModel = getRerankQwenModelTag();
+  if (!health.running) {
+    const detail = 'The built-in AI runtime was not found';
+    probes.push(probeRow('native', nativeModel, false, detail));
+    probes.push(probeRow('qwen_graded', qwenModel, false, detail));
+    probes.push(probeRow('embed_fallback', '', false, detail));
+    return { tier: 'embed_fallback', model: '', ollamaUp: false, ollamaVersion: null, reason: detail, probes, detectedAt };
+  }
+  const version = health.version;
+  const failed = (role: 'rerank' | 'rerank-qwen') => backend.runtime.roleStatus(role).state === 'failed';
+
+  const nativeReady = backend.isModelReady('rerank') && !failed('rerank');
+  probes.push(probeRow('native', nativeModel, nativeReady,
+    nativeReady ? 'bge-reranker-v2-m3 is downloaded (llama-server /v1/rerank)' : `${nativeModel} is not available`));
+  if (nativeReady) {
+    return {
+      tier: 'native', model: nativeModel, ollamaUp: true, ollamaVersion: version,
+      reason: `Built-in llama.cpp ${version} serves ${nativeModel} through /v1/rerank`, probes, detectedAt,
+    };
+  }
+
+  const qwenReady = backend.isModelReady('rerank-qwen') && !failed('rerank-qwen');
+  probes.push(probeRow('qwen_graded', qwenModel, qwenReady,
+    qwenReady ? 'Qwen3-Reranker is downloaded (llama-server /completion with token probabilities)' : `${qwenModel} is not available`));
+  if (qwenReady) {
+    return {
+      tier: 'qwen_graded', model: qwenModel, ollamaUp: true, ollamaVersion: version,
+      reason: `Built-in llama.cpp ${version} scores P(yes) vs P(no) with ${qwenModel}`, probes, detectedAt,
+    };
+  }
+
+  probes.push(probeRow('embed_fallback', '', true, 'arctic-embed2 cosine similarity'));
+  return {
+    tier: 'embed_fallback', model: '', ollamaUp: true, ollamaVersion: version,
+    reason: 'No reranker model is downloaded yet', probes, detectedAt,
+  };
+}
+
 async function runTierDetection(): Promise<RerankTierDetection> {
+  if (useBuiltinBackend()) return runBuiltinTierDetection();
   const probes: RerankTierProbe[] = [];
   const nativeModel = getRerankModelTag();
   const qwenModel = getRerankQwenModelTag();
@@ -542,7 +594,8 @@ export async function scoreWithQwen3(
 ): Promise<QwenScoreResult | null> {
   if (documents.length === 0) return null;
 
-  const baseUrl = resolveBaseUrl();
+  const builtin = useBuiltinBackend();
+  const baseUrl = builtin ? '' : resolveBaseUrl();
   const instruction = opts.instruction?.trim() || QWEN_DEFAULT_INSTRUCTION;
   const budgetMs =
     opts.budgetMs ?? QWEN_BUDGET_BASE_MS + documents.length * QWEN_BUDGET_PER_DOC_MS;
@@ -566,7 +619,10 @@ export async function scoreWithQwen3(
     }
 
     const doc = (documents[i] ?? '').slice(0, QWEN_DOC_MAX_CHARS);
-    const data = await generateOnce(baseUrl, opts.model, buildQwenPrompt(instruction, query, doc), graded);
+    const prompt = buildQwenPrompt(instruction, query, doc);
+    const data = builtin
+      ? await getBuiltinBackend().generateScore(prompt, graded)
+      : await generateOnce(baseUrl, opts.model, prompt, graded);
     if (!data) continue;
 
     const top = data.logprobs?.[0]?.top_logprobs;
@@ -624,7 +680,7 @@ function downgradeCachedTierToBinary(): void {
     _tierCache = {
       ..._tierCache,
       tier: 'qwen_binary',
-      reason: `Ollama reported v${_tierCache.ollamaVersion ?? 'unknown'} but returned no logprobs — yes/no only`,
+      reason: `${useBuiltinBackend() ? 'The built-in runtime' : `Ollama v${_tierCache.ollamaVersion ?? 'unknown'}`} returned no logprobs — yes/no only`,
     };
   }
 }

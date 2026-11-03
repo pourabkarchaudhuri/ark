@@ -3,12 +3,18 @@
  *
  * Checks the unpacked app directory (release/builds/<v>/win-unpacked) before the installer is made:
  *  - the packaged .env holds only RELEASE_ENV_KEYS;
- *  - no text file outside app.asar assigns a forbidden name (AZURE_*=...).
+ *  - no text file outside app.asar assigns a forbidden name (AZURE_*=...);
+ *  - resources/llama-runtime holds exactly the built-in llama.cpp files pinned in
+ *    electron/local-ai/runtime-manifest.json, and no model weights were packaged (1.0.97 B36).
  * Compiled JS that merely reads process.env.AZURE_* is not an assignment and is not flagged.
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { RELEASE_ENV_KEYS, envKeyNames, findForbiddenEnvNames } from './lib/release-env.mjs';
+import { checkPackagedRuntime, readManifest } from './lib/llama-runtime.mjs';
+
+const RUNTIME_MANIFEST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'electron', 'local-ai', 'runtime-manifest.json');
 
 const SKIP_EXT = new Set(['.asar', '.node', '.dll', '.exe', '.pak', '.dat', '.bin', '.onnx', '.png', '.ico', '.jpg', '.webp', '.so', '.dylib']);
 const MAX_SCAN_BYTES = 5 * 1024 * 1024;
@@ -37,10 +43,20 @@ export function checkPackagedDir(appOutDir) {
   return problems;
 }
 
+/** Problems with the packaged built-in AI runtime (missing/changed files, packaged model weights). */
+export function checkPackagedLocalAi(appOutDir) {
+  return checkPackagedRuntime(appOutDir, readManifest(RUNTIME_MANIFEST));
+}
+
 export default async function afterPack(context) {
   const problems = checkPackagedDir(context.appOutDir);
   if (problems.length) {
     throw new Error(`[after-pack-check] secrets packaged, build stopped:\n  ${problems.join('\n  ')}`);
   }
   console.log('[after-pack-check] packaged files carry no forbidden env keys');
+  const runtimeProblems = checkPackagedLocalAi(context.appOutDir);
+  if (runtimeProblems.length) {
+    throw new Error(`[after-pack-check] built-in AI runtime is wrong, build stopped:\n  ${runtimeProblems.join('\n  ')}`);
+  }
+  console.log('[after-pack-check] llama-runtime matches the manifest and no model files are packaged');
 }

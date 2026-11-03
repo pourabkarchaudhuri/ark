@@ -18,6 +18,7 @@ import { register as registerDialogHandlers } from './dialog-handlers.js';
 import { register as registerSessionHandlers } from './session-handlers.js';
 import { register as registerWebviewHandlers } from './webview-handlers.js';
 import { register as registerOllamaHandlers } from './ollama-handlers.js';
+import { register as registerLocalAiHandlers } from './local-ai-handlers.js';
 import { register as registerAnnHandlers } from './ann-handlers.js';
 import { register as registerAnalyticsHandlers } from './analytics-handlers.js';
 import { register as registerMlHandlers } from './ml-handlers.js';
@@ -47,6 +48,7 @@ export function registerAllHandlers(getMainWindow: () => BrowserWindowType | nul
   registerExeInfoHandlers();
   registerWebviewHandlers(getMainWindow);
   registerOllamaHandlers();
+  registerLocalAiHandlers(getMainWindow);
   registerAnnHandlers();
   registerAnalyticsHandlers();
   registerMlHandlers();

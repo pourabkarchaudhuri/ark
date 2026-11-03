@@ -490,7 +490,7 @@ const MessageBubble = React.memo(function MessageBubble({
 });
 
 const CHAT_PROVIDER_LABELS: Record<string, string> = {
-  'ollama': 'Ollama',
+  'ollama': 'Local AI',
   'gemini': 'Gemini',
   'azure-openai': 'Azure OpenAI',
   'anthropic': 'Claude',

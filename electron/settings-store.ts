@@ -63,8 +63,18 @@ interface Settings {
      */
     analyticsEnabled?: boolean;
   };
+  /**
+   * Built-in local AI (1.0.97 B36). Ark runs its own llama.cpp servers by default; the user can
+   * point it at their own Ollama instead (`useExternalOllama`, Settings, Advanced). `modelsDir`
+   * overrides the default `%LOCALAPPDATA%/Ark/models` folder.
+   */
+  localAi?: {
+    useExternalOllama?: boolean;
+    modelsDir?: string | null;
+  };
   ollama: {
     enabled: boolean;
+    /** The user's own Ollama address; only used when localAi.useExternalOllama is on. */
     url: string;
     model: string;
     useGeminiInstead: boolean; // Deprecated: use preferences.preferredChatProvider instead
@@ -607,6 +617,23 @@ export class SettingsStore {
     };
     this.saveSettings();
     logger.log('[SettingsStore] Ollama settings updated');
+  }
+
+  /** Built-in local AI settings. Every install starts on the built-in runtime. */
+  getLocalAiSettings(): { useExternalOllama: boolean; modelsDir: string | null } {
+    const l = this.settings.localAi;
+    const dir = typeof l?.modelsDir === 'string' && l.modelsDir.trim() ? l.modelsDir.trim() : null;
+    return { useExternalOllama: l?.useExternalOllama === true, modelsDir: dir };
+  }
+
+  setLocalAiSettings(next: { useExternalOllama?: boolean; modelsDir?: string | null }): void {
+    const cur = this.getLocalAiSettings();
+    this.settings.localAi = {
+      useExternalOllama: typeof next.useExternalOllama === 'boolean' ? next.useExternalOllama : cur.useExternalOllama,
+      modelsDir: next.modelsDir === undefined ? cur.modelsDir : (next.modelsDir?.trim() || null),
+    };
+    this.saveSettings();
+    logger.log(`[SettingsStore] Local AI settings updated (external Ollama: ${this.settings.localAi.useExternalOllama})`);
   }
 
   isOllamaEnabled(): boolean {

@@ -23,6 +23,8 @@ export interface ResumableDownloadOptions {
   expectedSize?: number;
   /** Expected sha512, base64 (the format used by latest.yml). */
   sha512?: string;
+  /** Expected sha256, lower-case hex (model files pinned in the local-AI manifest). */
+  sha256?: string;
   maxAttempts?: number;
   /** An attempt that receives no bytes for this long is abandoned and resumed. Default 60s. */
   idleTimeoutMs?: number;
@@ -53,14 +55,22 @@ function fileSize(p: string): number {
   }
 }
 
-export function sha512OfFile(filePath: string): Promise<string> {
+function hashOfFile(filePath: string, algo: 'sha512' | 'sha256', encoding: 'base64' | 'hex'): Promise<string> {
   return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha512');
+    const hash = crypto.createHash(algo);
     const stream = fs.createReadStream(filePath);
     stream.on('data', (d) => hash.update(d));
     stream.on('error', reject);
-    stream.on('end', () => resolve(hash.digest('base64')));
+    stream.on('end', () => resolve(hash.digest(encoding)));
   });
+}
+
+export function sha512OfFile(filePath: string): Promise<string> {
+  return hashOfFile(filePath, 'sha512', 'base64');
+}
+
+export function sha256OfFile(filePath: string): Promise<string> {
+  return hashOfFile(filePath, 'sha256', 'hex');
 }
 
 /** Start byte of a "Content-Range: bytes 100-199/200" header, or null. */
@@ -80,7 +90,7 @@ function isBlocked(err: unknown): boolean {
 }
 
 export async function downloadWithResume(opts: ResumableDownloadOptions): Promise<string> {
-  const { url, destPath, expectedSize, sha512, onProgress, signal } = opts;
+  const { url, destPath, expectedSize, sha512, sha256, onProgress, signal } = opts;
   const maxAttempts = opts.maxAttempts ?? 6;
   const idleTimeoutMs = opts.idleTimeoutMs ?? 60_000;
   const doFetch = opts.fetchImpl ?? ((u: string, init?: RequestInit) => fetch(u, init));
@@ -220,6 +230,13 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
     if (actual !== sha512) {
       fs.rmSync(partPath, { force: true });
       throw new DownloadError('sha512 checksum mismatch: the downloaded installer was discarded', { code: 'CHECKSUM' });
+    }
+  }
+  if (sha256) {
+    const actual = await sha256OfFile(partPath);
+    if (actual !== sha256.toLowerCase()) {
+      fs.rmSync(partPath, { force: true });
+      throw new DownloadError('sha256 checksum mismatch: the downloaded file was discarded', { code: 'CHECKSUM' });
     }
   }
 

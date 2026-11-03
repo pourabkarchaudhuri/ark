@@ -7,7 +7,8 @@
  * raw provider APIs — it only talks to `processMessage()`.
  *
  * Supported providers:
- *   • Ollama   — local, via @langchain/ollama   (ChatOllama)
+ *   • Local    — built-in llama.cpp server via @langchain/openai (ChatOpenAI), or the user's own
+ *                Ollama via @langchain/ollama (ChatOllama) when "Use my own Ollama" is on
  *   • Gemini   — cloud, via @langchain/google-genai (ChatGoogleGenerativeAI)
  *   • Azure OpenAI — cloud, via @langchain/openai (AzureChatOpenAI)
  */
@@ -15,7 +16,7 @@
 import { createHash } from 'node:crypto';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { ChatOllama } from '@langchain/ollama';
-import { AzureChatOpenAI } from '@langchain/openai';
+import { AzureChatOpenAI, ChatOpenAI } from '@langchain/openai';
 import {
   HumanMessage,
   AIMessage,
@@ -36,6 +37,8 @@ import { chatStore } from './chat-store.js';
 import { settingsStore, DEFAULT_CHAT_NUM_CTX, type PreferredChatProvider } from './settings-store.js';
 import { needsWebSearch, webSearch, formatSearchContext } from './web-search.js';
 import { logger } from './safe-logger.js';
+import { useBuiltinBackend, getBuiltinBackend } from './local-ai/backend.js';
+import { getModelForRole } from './local-ai/manifest.js';
 import { normalizeGameStatus } from '../src/lib/game-status-normalize.js';
 import { pickRecommendationSeed, librarySignature, steamAppIdOf } from './ai-reco-seed.js';
 
@@ -104,7 +107,32 @@ export interface AzureProviderOptions {
 
 export type ChatProviderOptions = { azure?: AzureProviderOptions };
 
-type ChatModel = ChatGoogleGenerativeAI | ChatOllama | AzureChatOpenAI;
+type ChatModel = ChatGoogleGenerativeAI | ChatOllama | AzureChatOpenAI | ChatOpenAI;
+
+/** Thrown when local chat is picked but its model is not on disk yet; the UI offers the download. */
+export const LOCAL_CHAT_MODEL_MISSING = 'LOCAL_CHAT_MODEL_MISSING';
+
+/** Chat server of the built-in runtime, filled by `prepareBuiltinChat` before each local turn. */
+let builtinChat: { baseUrl: string; apiKey: string; numCtx: number } | null = null;
+
+/**
+ * Start (or reuse) the built-in chat server for this turn. getModelForProvider is synchronous, so
+ * the endpoint is resolved here, once, and read from `builtinChat` there.
+ */
+async function prepareBuiltinChat(): Promise<void> {
+  const numCtx = settingsStore.getOllamaSettings().chatNumCtx || DEFAULT_CHAT_NUM_CTX;
+  const backend = getBuiltinBackend();
+  if (!backend.isModelReady('chat')) {
+    const err = new Error(
+      'The local chat model is not downloaded yet. Open Settings > AI Models > Built-in local AI and choose Download chat model, or pick another model in the Chat panel.',
+    );
+    (err as Error & { code?: string }).code = LOCAL_CHAT_MODEL_MISSING;
+    throw err;
+  }
+  const endpoint = await backend.chatEndpoint(numCtx);
+  builtinChat = { ...endpoint, numCtx };
+  backend.markChatUsed();
+}
 
 let cachedModel: ChatModel | null = null;
 let cachedModelKey: string | null = null;
@@ -117,6 +145,7 @@ function keyFingerprint(apiKey: string): string {
 
 /** Test seam: drop the cached chat and reviewer models. */
 export function __resetAiChatCachesForTests(): void {
+  builtinChat = null;
   cachedModel = null;
   cachedModelKey = null;
   cachedValidationModel = null;
@@ -193,6 +222,28 @@ export function getModelForProvider(providerOptions?: ChatProviderOptions): { mo
     });
     cachedModelKey = configKey;
     return { model: cachedModel, providerName: 'Gemini 2.5 Flash', provider: effective };
+  }
+
+  // Built-in local chat: ChatOpenAI against the llama-server started by prepareBuiltinChat.
+  if (useBuiltinBackend()) {
+    if (!builtinChat) {
+      throw new Error('The built-in local chat server is not running. Try again, or pick another model in the Chat panel.');
+    }
+    const { baseUrl, apiKey, numCtx } = builtinChat;
+    const label = getModelForRole('chat')?.id ?? 'local chat';
+    const configKey = `builtin:${baseUrl}:${numCtx}:${keyFingerprint(apiKey)}`;
+    if (cachedModel && cachedModelKey === configKey) {
+      return { model: cachedModel as ChatOpenAI, providerName: `Local ${label}`, provider: 'ollama' };
+    }
+    logger.log(`[AI Proxy] Creating built-in local chat model (${label}, ctx ${numCtx})`);
+    cachedModel = new ChatOpenAI({
+      model: label,
+      apiKey,
+      configuration: { baseURL: baseUrl },
+      temperature: 0.7,
+    });
+    cachedModelKey = configKey;
+    return { model: cachedModel, providerName: `Local ${label}`, provider: 'ollama' };
   }
 
   // ollama or any other → use Ollama from settings
@@ -1226,6 +1277,7 @@ export async function processMessage(
   pendingActions = [];
   chainOfThought = [];
 
+  if (provider === 'ollama' && useBuiltinBackend()) await prepareBuiltinChat();
   const { model, providerName, provider: effectiveProvider } = getModelForProvider(providerOptions);
   const usedOllama = effectiveProvider === 'ollama';
   const toolCtx: ToolContext = { ggRegion: normalizeRegion(ggRegion) };
@@ -1360,6 +1412,14 @@ export async function processMessage(
     }
 
     // Friendly error only when we actually used Ollama and it's a connection failure
+    if (usedOllama && useBuiltinBackend() && (error?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed') || error?.cause?.code === 'ECONNREFUSED')) {
+      builtinChat = null;
+      cachedModel = null;
+      cachedModelKey = null;
+      throw new Error(
+        'The built-in local chat server stopped answering. Try again, or select a different model (e.g. Azure OpenAI or Gemini) in the Chat panel.',
+      );
+    }
     if (usedOllama && (error?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed') || error?.cause?.code === 'ECONNREFUSED')) {
       throw new Error(
         `Could not connect to Ollama at ${ollamaSettings.url}. ` +

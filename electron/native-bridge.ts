@@ -30,6 +30,8 @@ export interface NativeProcessInfo {
 
 interface ArkNativeModule {
   sessionEnumerate: () => NativeProcessInfo[];
+  /** Added in 1.0.97; absent from older binaries. */
+  jobAssignKillOnClose?: (pid: number) => boolean;
 }
 
 let _native: ArkNativeModule | null = null;
@@ -94,6 +96,22 @@ export function nativeSessionEnumerate(): NativeProcessInfo[] | null {
   } catch (err) {
     logger.warn('[NativeBridge] sessionEnumerate call failed, falling back:', err);
     return null;
+  }
+}
+
+/**
+ * Put a child process (a built-in llama-server) into Ark's kill-on-close Windows job object, so
+ * Windows kills it when Ark exits for any reason, a crash included. Returns false when the native
+ * module or the job is unavailable; the caller keeps its own kill-on-quit as the fallback.
+ */
+export function nativeJobAssignKillOnClose(pid: number): boolean {
+  const native = loadNative();
+  if (!native || typeof native.jobAssignKillOnClose !== 'function') return false;
+  try {
+    return native.jobAssignKillOnClose(pid) === true;
+  } catch (err) {
+    logger.warn('[NativeBridge] jobAssignKillOnClose failed:', err);
+    return false;
   }
 }
 

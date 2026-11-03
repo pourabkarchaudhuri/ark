@@ -617,6 +617,32 @@ contextBridge.exposeInMainWorld('ollama', {
     ipcRenderer.invoke('ollama:gpuStats'),
 });
 
+// Built-in local AI (llama.cpp runtime + runtime model downloads): status and the few user actions.
+contextBridge.exposeInMainWorld('localAi', {
+  status: () => ipcRenderer.invoke('localAi:status'),
+  downloadChat: (payload) => ipcRenderer.invoke('localAi:downloadChat', payload),
+  recheck: () => ipcRenderer.invoke('localAi:recheck'),
+  retry: () => ipcRenderer.invoke('localAi:retry'),
+  pause: () => ipcRenderer.invoke('localAi:pause'),
+  continueWithout: () => ipcRenderer.invoke('localAi:continueWithout'),
+  removeModels: () => ipcRenderer.invoke('localAi:removeModels'),
+  changeFolder: () => ipcRenderer.invoke('localAi:changeFolder'),
+  resetFolder: () => ipcRenderer.invoke('localAi:resetFolder'),
+  setExternalOllama: (payload) => ipcRenderer.invoke('localAi:setExternalOllama', payload),
+  // Status pushes while models download or servers start/stop. Returns unsubscribe.
+  onStatusChanged: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('localAi:status-changed', handler);
+    return () => ipcRenderer.removeListener('localAi:status-changed', handler);
+  },
+  // The background download queue drained: the renderer re-checks embedding availability.
+  onModelsSettled: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('localAi:models-settled', handler);
+    return () => ipcRenderer.removeListener('localAi:models-settled', handler);
+  },
+});
+
 // Expose ANN Index API to renderer (HNSW nearest-neighbor search)
 contextBridge.exposeInMainWorld('ann', {
   load: () => ipcRenderer.invoke('ann:load'),
@@ -705,5 +731,5 @@ contextBridge.exposeInMainWorld('store', {
 // Main passes the flag via additionalArguments for dev-server runs (NODE_ENV is not
 // a reliable signal: a packaged build inherits whatever the user's environment has).
 if (process.argv.includes('--ark-dev-server')) {
-  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.ann, window.analytics, window.devlog, window.gameLauncher exposed');
+  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.localAi, window.ann, window.analytics, window.devlog, window.gameLauncher exposed');
 }

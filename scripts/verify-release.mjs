@@ -7,7 +7,8 @@
  * latest.yml, all uploaded; latest.yml names this version's installer and its size matches.
  * Local (release/builds/<version>, when present): latest.yml sha512 matches the installer on disk;
  * the packaged .env holds only allow-listed key names; no token file was packaged; unused
- * onnxruntime platform binaries were excluded.
+ * onnxruntime platform binaries were excluded; the built-in llama.cpp runtime folder is present with
+ * file hashes matching electron/local-ai/runtime-manifest.json, and no model files are packaged.
  * --download also streams the published installer and compares its sha512 (off by default: some
  * networks reset executable downloads).
  * Exits non-zero on any failure.
@@ -17,7 +18,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { RELEASE_ENV_KEYS } from './lib/release-env.mjs';
-import { checkPackagedDir } from './after-pack-check.mjs';
+import { checkPackagedDir, checkPackagedLocalAi } from './after-pack-check.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -114,6 +115,8 @@ if (fs.existsSync(buildDir)) {
     }
     const leaks = checkPackagedDir(unpacked);
     leaks.length ? bad(`forbidden env keys packaged: ${leaks.join('; ')}`) : ok('no AZURE_* assignment in any packaged file');
+    const runtimeProblems = checkPackagedLocalAi(unpacked);
+    runtimeProblems.length ? bad(`built-in AI runtime: ${runtimeProblems.join('; ')}`) : ok('llama-runtime present, hashes match the manifest, no model files packaged');
     const found = [];
     const walk = (d, depth) => {
       if (depth > 6) return;

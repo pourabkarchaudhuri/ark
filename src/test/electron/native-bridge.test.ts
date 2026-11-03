@@ -15,6 +15,7 @@ vi.mock('../../../electron/safe-logger.js', () => ({
 
 import {
   nativeSessionEnumerate,
+  nativeJobAssignKillOnClose,
   nativeBridgeStatus,
   __resetNativeBridgeForTests,
 } from '../../../electron/native-bridge';
@@ -108,5 +109,37 @@ describe('nativeSessionEnumerate — successful load', () => {
   it('nativeBridgeStatus reports available with no error', () => {
     const status = nativeBridgeStatus();
     expect(status).toEqual({ nativeAvailable: true, source: 'ark-native' });
+  });
+});
+
+
+describe('nativeJobAssignKillOnClose (1.0.97 built-in llama-server)', () => {
+  it('returns false when the module failed to load, never throws', () => {
+    __resetNativeBridgeForTests(() => { throw new Error('missing'); });
+    expect(nativeJobAssignKillOnClose(1234)).toBe(false);
+  });
+
+  it('returns false for a binary built before the export existed', () => {
+    __resetNativeBridgeForTests(() => ({ sessionEnumerate: () => [] }));
+    expect(nativeJobAssignKillOnClose(1234)).toBe(false);
+  });
+
+  it('passes the pid to the native job object and reports its answer', () => {
+    const calls: number[] = [];
+    __resetNativeBridgeForTests(() => ({
+      sessionEnumerate: () => [],
+      jobAssignKillOnClose: (pid: number) => { calls.push(pid); return pid === 1234; },
+    }));
+    expect(nativeJobAssignKillOnClose(1234)).toBe(true);
+    expect(nativeJobAssignKillOnClose(99)).toBe(false);
+    expect(calls).toEqual([1234, 99]);
+  });
+
+  it('a throwing native call degrades to false', () => {
+    __resetNativeBridgeForTests(() => ({
+      sessionEnumerate: () => [],
+      jobAssignKillOnClose: () => { throw new Error('access denied'); },
+    }));
+    expect(nativeJobAssignKillOnClose(1)).toBe(false);
   });
 });

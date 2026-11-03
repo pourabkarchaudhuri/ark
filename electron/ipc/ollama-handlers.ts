@@ -33,6 +33,7 @@ import {
 } from '../ollama-setup.js';
 import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
 import { getGpuStats } from '../gpu-stats.js';
+import { useBuiltinBackend, getBuiltinBackend } from '../local-ai/backend.js';
 import {
   normalizeOllamaRerankRows,
   summarizeRerankScores,
@@ -134,6 +135,14 @@ async function rerankViaNativeEndpoint(
   model: string,
   opts?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<NativeRerankOutcome> {
+  if (useBuiltinBackend()) {
+    // Built-in runtime: llama-server's /v1/rerank on the bge-reranker model.
+    const out = await getBuiltinBackend().rerank(query, documents, { timeoutMs: opts?.timeoutMs ?? RERANK_TIMEOUT_MS, signal: opts?.signal });
+    if (!out.rows) return { results: null, code: out.code, message: out.message, httpStatus: out.httpStatus };
+    const results = normalizeOllamaRerankRows(out.rows, documents.length);
+    if (!results) return { results: null, code: 'empty_results', message: 'Rerank returned no usable rows', httpStatus: out.httpStatus };
+    return { results, code: 'ok', message: 'ok', httpStatus: out.httpStatus };
+  }
   const ollama = settingsStore.getOllamaSettings();
   const baseUrl = (ollama.url || 'http://localhost:11434').replace(/\/$/, '');
 
@@ -656,12 +665,21 @@ export function register(ipc: OllamaIpcRegistrar = ipcMain): void {
         return result;
       }
 
-      // /api/ps probe
+      // /api/ps probe (built-in runtime: what the embed server's own log reported)
       const ollama = settingsStore.getOllamaSettings();
       const baseUrl = (ollama.url || 'http://localhost:11434').replace(/\/$/, '');
       try {
-        const psRes = await fetch(`${baseUrl}/api/ps`);
-        if (psRes.ok) {
+        if (useBuiltinBackend()) {
+          const reading = getBuiltinBackend().gpuReading();
+          if (reading.loaded) {
+            result.modelLoaded = true;
+            result.sizeBytes = reading.sizeBytes;
+            result.sizeVramBytes = reading.vramBytes;
+            result.onGpu = reading.vramBytes > 0;
+          }
+        }
+        const psRes = useBuiltinBackend() ? null : await fetch(`${baseUrl}/api/ps`);
+        if (psRes?.ok) {
           const ps = (await psRes.json()) as {
             models?: Array<{ name?: string; size?: number; size_vram?: number }>;
           };
@@ -989,7 +1007,9 @@ export function register(ipc: OllamaIpcRegistrar = ipcMain): void {
       status.tiers = detection.probes;
 
       if (!detection.ollamaUp) {
-        status.error = 'Ollama is not reachable at ' + baseUrl;
+        status.error = useBuiltinBackend()
+          ? 'The built-in AI runtime was not found in this install'
+          : 'Ollama is not reachable at ' + baseUrl;
         return status;
       }
 

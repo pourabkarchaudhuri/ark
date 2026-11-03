@@ -25,6 +25,7 @@ const emb = vi.hoisted(() => {
     refreshMigrationState: vi.fn(async () => {}),
     subscribe: vi.fn((fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; }),
     clearUnavailableVerdict: vi.fn(),
+    resetAvailability: vi.fn(),
     clearRechunkSuggestRebuildAnn: vi.fn(),
     cancelRechunkJob: vi.fn(),
     startRechunkJob: vi.fn(async () => {}),
@@ -276,5 +277,68 @@ describe('General → Launch on startup', () => {
     await act(async () => { fireEvent.click(sw); });
     expect(s.setAutoLaunch).toHaveBeenCalledWith(false);
     await waitFor(() => expect(sw).toHaveAttribute('aria-checked', 'true'));
+  });
+});
+
+
+describe('AI Models → built-in local AI and "use my own Ollama" (1.0.97 B36)', () => {
+  const localAiStatus = (enabled: boolean) => ({
+    backend: enabled ? 'ollama' : 'builtin',
+    runtime: { available: true, build: 'b11780', roles: [] },
+    models: [],
+    modelsDir: 'C:\models',
+    diskUsedBytes: 0,
+    diskFreeBytes: null,
+    paused: false,
+    declined: false,
+    compute: null,
+    chatModel: { id: 'gemma3-12b', label: 'gemma3', sizeBytes: 7e9 },
+    externalOllama: { enabled, url: 'http://localhost:11434' },
+  });
+
+  afterEach(() => { delete (window as unknown as { localAi?: unknown }).localAi; });
+
+  it('shows the built-in section and hides the Ollama fields while the switch is off', async () => {
+    installSettings();
+    (window as unknown as { localAi?: unknown }).localAi = {
+      status: vi.fn(async () => localAiStatus(false)),
+      onStatusChanged: vi.fn(() => () => {}),
+      setExternalOllama: vi.fn(),
+    };
+    await renderLoaded();
+    expect(await screen.findByTestId('built-in-local-ai')).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Use my own Ollama' })).toHaveAttribute('aria-checked', 'false');
+    expect(screen.queryByText('Ollama address')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Download Ollama/)).not.toBeInTheDocument();
+  });
+
+  it('turning the switch on saves it in main and reveals the Ollama address', async () => {
+    installSettings();
+    const setExternalOllama = vi.fn(async () => localAiStatus(true));
+    (window as unknown as { localAi?: unknown }).localAi = {
+      status: vi.fn(async () => localAiStatus(false)),
+      onStatusChanged: vi.fn(() => () => {}),
+      setExternalOllama,
+    };
+    await renderLoaded();
+    const sw = await screen.findByRole('switch', { name: 'Use my own Ollama' });
+    await act(async () => { fireEvent.click(sw); });
+    expect(setExternalOllama).toHaveBeenCalledWith({ enabled: true });
+    expect(await screen.findByText('Ollama address')).toBeInTheDocument();
+    expect(emb.resetAvailability).toHaveBeenCalled();
+  });
+
+  it('puts the switch back when main refuses', async () => {
+    installSettings();
+    (window as unknown as { localAi?: unknown }).localAi = {
+      status: vi.fn(async () => localAiStatus(false)),
+      onStatusChanged: vi.fn(() => () => {}),
+      setExternalOllama: vi.fn(async () => { throw new Error('nope'); }),
+    };
+    await renderLoaded();
+    const sw = await screen.findByRole('switch', { name: 'Use my own Ollama' });
+    await act(async () => { fireEvent.click(sw); });
+    await waitFor(() => expect(sw).toHaveAttribute('aria-checked', 'false'));
+    expect(screen.queryByText('Ollama address')).not.toBeInTheDocument();
   });
 });

@@ -195,3 +195,35 @@ describe('unreadable settings.json', () => {
     expect(io.copyFile).not.toHaveBeenCalled();
   });
 });
+
+
+describe('local AI settings (1.0.97 built-in runtime)', () => {
+  it('every install starts on the built-in runtime with the default models folder', () => {
+    const store = new SettingsStore(memIo());
+    expect(store.getLocalAiSettings()).toEqual({ useExternalOllama: false, modelsDir: null });
+  });
+
+  it('saves "use my own Ollama" and a custom models folder, and keeps what it was not asked to change', () => {
+    const io = memIo();
+    const store = new SettingsStore(io);
+    store.setLocalAiSettings({ useExternalOllama: true });
+    store.setLocalAiSettings({ modelsDir: '  D:\AI models  ' });
+    expect(store.getLocalAiSettings()).toEqual({ useExternalOllama: true, modelsDir: 'D:\AI models' });
+    expect(saved(io).localAi).toEqual({ useExternalOllama: true, modelsDir: 'D:\AI models' });
+    store.setLocalAiSettings({ modelsDir: null });
+    expect(store.getLocalAiSettings().modelsDir).toBeNull();
+    expect(store.getLocalAiSettings().useExternalOllama).toBe(true);
+  });
+
+  it('ignores a non-boolean toggle and a blank folder', () => {
+    const store = new SettingsStore(memIo());
+    store.setLocalAiSettings({ useExternalOllama: 'yes' as unknown as boolean, modelsDir: '   ' });
+    expect(store.getLocalAiSettings()).toEqual({ useExternalOllama: false, modelsDir: null });
+  });
+
+  it('reads back from disk on the next launch', () => {
+    const io = memIo();
+    new SettingsStore(io).setLocalAiSettings({ useExternalOllama: true, modelsDir: 'E:\models' });
+    expect(new SettingsStore(io).getLocalAiSettings()).toEqual({ useExternalOllama: true, modelsDir: 'E:\models' });
+  });
+});

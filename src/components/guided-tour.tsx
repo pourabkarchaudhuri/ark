@@ -449,7 +449,7 @@ const welcomeSteps: Step[] = [
   {
     target: '[data-tour="settings-button"]',
     content:
-      'Settings cover AI providers (Ollama, cloud keys), data import/export, adult-content rules, startup behaviour, and Year in Review.',
+      'Settings cover AI providers (built-in local AI, cloud keys), data import/export, adult-content rules, startup behaviour, and Year in Review.',
     placement: 'left',
     title: 'Settings',
   },
@@ -503,7 +503,7 @@ const browseSteps: Step[] = [
   {
     target: '[data-tour="embedding-space"]',
     content:
-      '**Embedding Space** builds a 3D galaxy from game similarity (needs Ollama). Fly between neighbours, inspect paths, and see how titles cluster by taste.',
+      '**Embedding Space** builds a 3D galaxy from game similarity (needs the built-in local AI models). Fly between neighbours, inspect paths, and see how titles cluster by taste.',
     placement: 'bottom',
     title: 'Embedding Space',
   },
@@ -751,7 +751,7 @@ const settingsSteps: Step[] = [
   },
   {
     target: '[data-tour="settings-content"]',
-    content: 'Scroll the pane to configure Ollama, API keys, rerank options, adult content, import/export, and more.',
+    content: 'Scroll the pane to manage the built-in local AI, API keys, rerank options, adult content, import/export, and more.',
     placement: 'left',
     title: 'Preferences',
   },
