@@ -576,23 +576,25 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
 
     const loadProviders = async () => {
       // Keys live encrypted in main (1.0.97): ask main what is saved. Only providers with a
-      // chat backend are listed (CHAT_IMPLEMENTED_PROVIDERS), so Anthropic is not offered yet.
+      // chat backend are listed (CHAT_IMPLEMENTED_PROVIDERS; Anthropic runs through the AI router).
       let list: string[] = [];
       try {
         await ensureLegacyAiKeysMigrated();
         const azureEndpoint = localStorage.getItem('ark-azure-endpoint')?.trim();
         const azureDeployment = localStorage.getItem('ark-azure-deployment')?.trim();
         if (window.settings) {
-          const [hasGemini, ollamaSettings, hasAzureKey] = await Promise.all([
+          const [hasGemini, ollamaSettings, hasAzureKey, hasAnthropic] = await Promise.all([
             window.settings.hasApiKey(),
             window.settings.getOllamaSettings(),
             window.settings.hasAzureKey?.() ?? Promise.resolve(false),
+            window.settings.hasAnthropicKey?.() ?? Promise.resolve(false),
           ]);
           list = listConfiguredChatProviders({
             ollamaUrl: ollamaSettings?.url,
             betaFeatures: true, // the chat panel only exists with Beta on
             hasGeminiKey: !!hasGemini,
             azureConfigured: !!(azureEndpoint && azureDeployment && hasAzureKey),
+            hasAnthropicKey: !!hasAnthropic,
           });
         }
       } catch {
@@ -743,6 +745,14 @@ export const AIChatPanel = React.memo(function AIChatPanel({ isOpen, onClose, in
         ggRegion: getGgRegion(),
         ...(attachedImage ? { imageAttachment: attachedImage } : {}),
       };
+      if (preferredProvider === 'anthropic') {
+        try {
+          const model = localStorage.getItem('ark-anthropic-model')?.trim();
+          if (model) payload.anthropicModel = model;
+        } catch {
+          // ignore
+        }
+      }
       if (preferredProvider === 'azure-openai') {
         try {
           // The key is added by main from its encrypted store; only endpoint/deployment go from here.

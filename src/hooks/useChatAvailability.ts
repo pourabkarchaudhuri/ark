@@ -18,7 +18,7 @@ const BETA_OFF_MESSAGE =
   'Turn on Beta features in Settings → General to use AI Chat.';
 
 const UNAVAILABLE_MESSAGE =
-  'No AI provider configured. Add at least one in Settings → AI Models: built-in local AI, Google Gemini, or Azure OpenAI.';
+  'No AI provider configured. Add at least one in Settings → AI Models: built-in local AI, Google Gemini, Azure OpenAI, or Anthropic.';
 const OLLAMA_ONLY_MESSAGE =
   'Chat uses the built-in local AI by default. Download the chat model in Settings → AI Models, or add another provider.';
 
@@ -49,17 +49,18 @@ export function useChatAvailability(refreshKey?: unknown): ChatAvailability {
         const azureDeployment = localStorage.getItem('ark-azure-deployment')?.trim();
 
         if (window.settings) {
-          const [hasGemini, ollamaSettings, hasAzureKey] = await Promise.all([
+          const [hasGemini, ollamaSettings, hasAzureKey, hasAnthropic] = await Promise.all([
             window.settings.hasApiKey(),
             window.settings.getOllamaSettings(),
             window.settings.hasAzureKey?.() ?? Promise.resolve(false),
+            window.settings.hasAnthropicKey?.() ?? Promise.resolve(false),
           ]);
-          // Anthropic is never counted: there is no chat backend for it.
           list = listConfiguredChatProviders({
             ollamaUrl: ollamaSettings?.url,
             betaFeatures: true,
             hasGeminiKey: !!hasGemini,
             azureConfigured: !!(azureEndpoint && azureDeployment && hasAzureKey),
+            hasAnthropicKey: !!hasAnthropic,
           });
         }
       } catch {

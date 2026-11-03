@@ -1,12 +1,16 @@
 /**
- * settings IPC (v1.0.97): key validation, Anthropic rejection as a chat provider (until
- * the AI router serves it), the main-only Azure and Anthropic key slots, and the Azure
+ * settings IPC (v1.0.97): key validation, Anthropic as a chat provider (served by the
+ * AI router), the main-only Azure and Anthropic key slots, and the Azure
  * "Test connection" request that now runs in main.
  * The handler bodies are exported functions; ipcMain wiring is not exercised.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const router = vi.hoisted(() => ({ followChatProvider: vi.fn(), onLegacyKeysChanged: vi.fn() }));
+vi.mock('../../../electron/ai-router/service.js', () => router);
+
 const store = vi.hoisted(() => ({
+  getPreferredChatProvider: vi.fn(() => 'gemini'),
   setGoogleAIKey: vi.fn(),
   setPreferredChatProvider: vi.fn(),
   setAzureOpenAIKey: vi.fn(),
@@ -60,12 +64,19 @@ describe('settings:setApiKey', () => {
 });
 
 describe('settings:setPreferredChatProvider', () => {
-  it('rejects anthropic and unknown values', async () => {
-    expect(await setPreferredChatProviderIpc('anthropic')).toMatchObject({ success: false });
+  it('rejects unknown values and makes the AI router follow an accepted one', async () => {
     expect(await setPreferredChatProviderIpc('nope')).toMatchObject({ success: false });
     expect(store.setPreferredChatProvider).not.toHaveBeenCalled();
     expect(await setPreferredChatProviderIpc('gemini')).toEqual({ success: true });
     expect(store.setPreferredChatProvider).toHaveBeenCalledWith('gemini');
+    expect(await setPreferredChatProviderIpc('anthropic')).toEqual({ success: true });
+    expect(store.setPreferredChatProvider).toHaveBeenCalledWith('anthropic');
+    expect(router.followChatProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it('saving a key tells the router so its connector row appears', async () => {
+    await setAnthropicKeyIpc('sk-ant-api03-AbC_d-9');
+    expect(router.onLegacyKeysChanged).toHaveBeenCalled();
   });
 });
 

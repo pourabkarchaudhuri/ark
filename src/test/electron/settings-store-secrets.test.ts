@@ -134,19 +134,19 @@ describe('Anthropic key slot', () => {
   });
 });
 
-describe('Anthropic is not a chat provider', () => {
-  it('getPreferredChatProvider falls back from a stored anthropic value', () => {
+describe('Anthropic is a chat provider (served by the AI router)', () => {
+  it('getPreferredChatProvider returns a stored anthropic value with Beta features on', () => {
     const io = memIo({ file: JSON.stringify({ version: 1, apiKeys: {}, preferences: { autoLaunch: true, betaFeatures: true, preferredChatProvider: 'anthropic' }, ollama: {} }) });
     const s = new SettingsStore(io);
-    expect(s.getPreferredChatProvider()).toBe('ollama');
+    expect(s.getPreferredChatProvider()).toBe('anthropic');
   });
 
-  it('setPreferredChatProvider does not store anthropic', () => {
+  it('setPreferredChatProvider stores anthropic', () => {
     const io = memIo();
     const s = new SettingsStore(io);
     s.setBetaFeatures(true);
     s.setPreferredChatProvider('anthropic');
-    expect(saved(io).preferences.preferredChatProvider).toBe('ollama');
+    expect(saved(io).preferences.preferredChatProvider).toBe('anthropic');
   });
 });
 

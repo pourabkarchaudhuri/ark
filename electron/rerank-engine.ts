@@ -31,6 +31,7 @@ import {
 } from './ollama-setup.js';
 import { normalizeOllamaRerankRows, type RerankResultRow } from './ollama-rerank-normalize.js';
 import { useBuiltinBackend, getBuiltinBackend } from './local-ai/backend.js';
+import { routeFor } from './ai-router/service.js';
 
 export type RerankTier = 'native' | 'qwen_graded' | 'qwen_binary' | 'embed_fallback';
 
@@ -320,7 +321,25 @@ function runBuiltinTierDetection(): RerankTierDetection {
   };
 }
 
+/**
+ * Tier detection when the reranker route is a connector served through the AI router (B35). Nothing
+ * is probed (that would start Python and spend a provider call at boot): the route is the native
+ * tier by definition, and a failing route reports through the router's failure policy.
+ */
+function runRouterTierDetection(): RerankTierDetection {
+  const route = routeFor('reranker');
+  const label = route.via === 'router' ? `${route.connector.name} (${route.model})` : 'AI router';
+  const model = route.via === 'router' ? route.model : '';
+  return {
+    tier: 'native', model, ollamaUp: true, ollamaVersion: null,
+    reason: `The AI router sends reranking to ${label} through LiteLLM /v1/rerank`,
+    probes: [probeRow('native', model, true, `Routed to ${label}`)],
+    detectedAt: Date.now(),
+  };
+}
+
 async function runTierDetection(): Promise<RerankTierDetection> {
+  if (routeFor('reranker').via === 'router') return runRouterTierDetection();
   if (useBuiltinBackend()) return runBuiltinTierDetection();
   const probes: RerankTierProbe[] = [];
   const nativeModel = getRerankModelTag();

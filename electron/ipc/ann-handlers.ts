@@ -21,10 +21,16 @@ import {
   setAnnModelTag,
 } from '../ann-index.js';
 import { getEmbeddingModelTag } from '../ollama-setup.js';
+import { routeFor, getAiRouter } from '../ai-router/service.js';
+
+/** The model tag of the vectors: the local tag, or the routed model's identity (e.g. openai:text-embedding-3-small). */
+function routerEmbeddingTag(localTag: string): string {
+  return routeFor('embeddings').via === 'router' ? getAiRouter().embeddingIdentity() : localTag;
+}
 
 export function register(): void {
   // Resolve the embedding model tag once, before any index load: a persisted index built with another model is discarded.
-  try { setAnnModelTag(getEmbeddingModelTag()); } catch { /* tag stays unknown → no model-mismatch guard */ }
+  try { setAnnModelTag(routerEmbeddingTag(getEmbeddingModelTag())); } catch { /* tag stays unknown → no model-mismatch guard */ }
 
   ipcMain.handle('ann:load', async () => {
     try {

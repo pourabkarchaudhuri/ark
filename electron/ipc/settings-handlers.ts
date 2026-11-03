@@ -23,6 +23,7 @@ import {
 import { getActiveSessions, syncOverlayVisibilityLatch } from '../session-tracker.js';
 import { clearIndex, syncAnnDimsFromSettings } from '../ann-index.js';
 import { isImplementedChatProvider } from '../../src/lib/chat-providers.js';
+import { followChatProvider, onLegacyKeysChanged } from '../ai-router/service.js';
 
 /**
  * Cloud API keys are URL-safe tokens. Rejecting anything else is the backstop that
@@ -44,6 +45,7 @@ export async function setGeminiApiKey(key: unknown): Promise<SaveResult> {
   if (!clean) return { success: false, error: 'That does not look like an API key.' };
   try {
     settingsStore.setGoogleAIKey(clean);
+    onLegacyKeysChanged();
     return { success: true };
   } catch (error) {
     logger.error('[Settings] Error setting API key:', error);
@@ -56,6 +58,7 @@ export async function setAzureKeyIpc(key: unknown): Promise<SaveResult> {
   if (!clean) return { success: false, error: 'That does not look like an Azure OpenAI key.' };
   try {
     settingsStore.setAzureOpenAIKey(clean);
+    onLegacyKeysChanged();
     return { success: true };
   } catch (error) {
     logger.error('[Settings] Error setting Azure OpenAI key:', error);
@@ -68,6 +71,7 @@ export async function setAnthropicKeyIpc(key: unknown): Promise<SaveResult> {
   if (!clean) return { success: false, error: 'That does not look like an Anthropic key.' };
   try {
     settingsStore.setAnthropicKey(clean);
+    onLegacyKeysChanged();
     return { success: true };
   } catch (error) {
     logger.error('[Settings] Error setting Anthropic key:', error);
@@ -76,11 +80,12 @@ export async function setAnthropicKeyIpc(key: unknown): Promise<SaveResult> {
 }
 
 export async function setPreferredChatProviderIpc(provider: unknown): Promise<SaveResult> {
-  // Only providers with a chat backend (CHAT_IMPLEMENTED_PROVIDERS) are accepted; Anthropic
-  // joins that list when the AI router (B35) serves it.
+  // Only providers with a chat backend (CHAT_IMPLEMENTED_PROVIDERS) are accepted; the chat
+  // route of the AI router follows the selection (Anthropic is served by it).
   if (!isImplementedChatProvider(provider)) return { success: false, error: 'Invalid provider' };
   try {
     settingsStore.setPreferredChatProvider(provider);
+    followChatProvider(settingsStore.getPreferredChatProvider());
     return { success: true };
   } catch (error) {
     logger.error('[Settings] Error setting preferred chat provider:', error);
@@ -148,6 +153,7 @@ export function register(): void {
   ipcMain.handle('settings:removeApiKey', async () => {
     try {
       settingsStore.removeGoogleAIKey();
+      onLegacyKeysChanged();
       return { success: true };
     } catch (error) {
       logger.error('[Settings] Error removing API key:', error);
@@ -177,6 +183,7 @@ export function register(): void {
   ipcMain.handle('settings:clearAzureKey', async () => {
     try {
       settingsStore.clearAzureOpenAIKey();
+      onLegacyKeysChanged();
       return { success: true };
     } catch (error) {
       logger.error('[Settings] Error removing Azure OpenAI key:', error);
@@ -199,6 +206,7 @@ export function register(): void {
   ipcMain.handle('settings:clearAnthropicKey', async () => {
     try {
       settingsStore.clearAnthropicKey();
+      onLegacyKeysChanged();
       return { success: true };
     } catch (error) {
       logger.error('[Settings] Error removing Anthropic key:', error);

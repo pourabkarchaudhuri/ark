@@ -34,6 +34,7 @@ import {
 import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
 import { getGpuStats } from '../gpu-stats.js';
 import { useBuiltinBackend, getBuiltinBackend } from '../local-ai/backend.js';
+import { getAiRouter, routeFor } from '../ai-router/service.js';
 import {
   normalizeOllamaRerankRows,
   summarizeRerankScores,
@@ -128,7 +129,30 @@ type NativeRerankOutcome = {
 };
 
 /** POST /api/rerank against a cross-encoder. Only reached when the native tier won detection. */
-async function rerankViaNativeEndpoint(
+export async function rerankViaNativeEndpoint(
+  query: string,
+  documents: string[],
+  topN: number,
+  model: string,
+  opts?: { timeoutMs?: number; signal?: AbortSignal },
+): Promise<NativeRerankOutcome> {
+  // AI router (1.0.97 B35): a reranker route on a connector other than Built-in goes through LiteLLM,
+  // which falls back to the local reranker itself when its policy says so.
+  if (routeFor('reranker').via === 'router') {
+    const out = await getAiRouter().rerank(query, documents, opts, async () => {
+      const local = await rerankLocal(query, documents, topN, model, opts);
+      return { rows: local.results, code: local.code, message: local.message, httpStatus: local.httpStatus };
+    });
+    if (!out.rows) return { results: null, code: out.code, message: out.message, httpStatus: out.httpStatus };
+    const results = normalizeOllamaRerankRows(out.rows, documents.length);
+    if (!results) return { results: null, code: 'empty_results', message: 'Rerank returned no usable rows', httpStatus: out.httpStatus };
+    return { results, code: 'ok', message: 'ok', httpStatus: out.httpStatus };
+  }
+  return rerankLocal(query, documents, topN, model, opts);
+}
+
+/** The local rerank path: the built-in llama-server, or the user's own Ollama. */
+async function rerankLocal(
   query: string,
   documents: string[],
   topN: number,

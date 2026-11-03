@@ -24,6 +24,7 @@ import {
 import http from 'http';
 import os from 'os';
 import { useBuiltinBackend, getBuiltinBackend } from './local-ai/backend.js';
+import { getAiRouter, routeFor } from './ai-router/service.js';
 import { getLocalAiService } from './local-ai/service.js';
 import { getAutoModels } from './local-ai/manifest.js';
 import { StringDecoder } from 'string_decoder';
@@ -635,6 +636,19 @@ export async function generateEmbeddingsBatchDetailed(
   opts?: EmbedBatchOptions,
 ): Promise<{ embeddings: (number[] | null)[]; error: EmbedBatchError | null }> {
   if (texts.length === 0) return { embeddings: [], error: null };
+  // AI router (1.0.97 B35): an embeddings route on a connector other than Built-in goes through LiteLLM.
+  // The router falls back to this local path itself when its policy says so and the vectors allow it.
+  if (routeFor('embeddings').via === 'router') {
+    return getAiRouter().embed(texts, () => generateEmbeddingsLocalDetailed(texts, opts));
+  }
+  return generateEmbeddingsLocalDetailed(texts, opts);
+}
+
+/** The local embedding path: the built-in llama.cpp server, or the user's own Ollama. */
+async function generateEmbeddingsLocalDetailed(
+  texts: string[],
+  opts?: EmbedBatchOptions,
+): Promise<{ embeddings: (number[] | null)[]; error: EmbedBatchError | null }> {
   const effectiveOpts = opts ?? getSessionEmbedOptions();
 
   // Built-in runtime: llama-server's /v1/embeddings. numBatch becomes -b/-ub (a change restarts the server).

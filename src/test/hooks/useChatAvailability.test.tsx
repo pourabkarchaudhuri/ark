@@ -1,5 +1,5 @@
 /**
- * useChatAvailability (v1.0.97): Anthropic never makes chat available, Azure counts
+ * useChatAvailability (v1.0.97): an Anthropic key makes chat available (AI router, B35), Azure counts
  * via the main-process key check, and a refresh key re-checks after Settings.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -29,16 +29,14 @@ beforeEach(() => {
 afterEach(() => { delete win.settings; });
 
 describe('useChatAvailability', () => {
-  it('is unavailable with only an Anthropic key', async () => {
+  it('counts an Anthropic key as a provider (chat runs through the AI router)', async () => {
     const s = installSettings();
     (s as Record<string, unknown>).hasAnthropicKey = vi.fn(async () => true);
     (s as Record<string, unknown>).setAnthropicKey = vi.fn(async () => ({ success: true }));
     localStorage.setItem('ark-anthropic-key', 'sk-ant-xyz');
     const { result } = renderHook(() => useChatAvailability());
     await waitFor(() => expect(s.hasApiKey).toHaveBeenCalled());
-    await waitFor(() => expect(result.current.message).toMatch(/No AI provider configured/));
-    expect(result.current.available).toBe(false);
-    expect(result.current.message).not.toMatch(/Anthropic/);
+    await waitFor(() => expect(result.current.available).toBe(true));
   });
 
   it('reports Azure available from hasAzureKey plus endpoint and deployment', async () => {

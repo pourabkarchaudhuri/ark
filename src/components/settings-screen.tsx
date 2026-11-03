@@ -539,11 +539,11 @@ export const AIModelsTab = memo(function AIModelsTab() {
   const [azureTestStatus, setAzureTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [azureTestMessage, setAzureTestMessage] = useState('');
 
-  // Anthropic state: key encrypted in main (served by the AI router, B35); model name stays here
+  // Anthropic state: key encrypted in main (chat runs through the AI router, B35); model name stays here
   const [hasAnthropicKey, setHasAnthropicKey] = useState(false);
   const anthropicKey = useDebouncedKeySave(window.settings?.setAnthropicKey, () => setHasAnthropicKey(true));
   const [anthropicModel, setAnthropicModel] = useState(() => {
-    try { return localStorage.getItem('ark-anthropic-model') || 'claude-sonnet-4-20250514'; } catch { return 'claude-sonnet-4-20250514'; }
+    try { return localStorage.getItem('ark-anthropic-model') || 'claude-sonnet-5-5'; } catch { return 'claude-sonnet-5-5'; }
   });
 
   useEffect(() => {
@@ -608,8 +608,9 @@ export const AIModelsTab = memo(function AIModelsTab() {
       betaFeatures,
       hasGeminiKey: hasExistingKey,
       azureConfigured: !!(azureEndpoint.trim() && hasAzureKey && azureDeployment.trim()),
+      hasAnthropicKey,
     }));
-  }, [azureEndpoint, hasAzureKey, azureDeployment, hasExistingKey, ollamaUrl, betaFeatures]);
+  }, [azureEndpoint, hasAzureKey, azureDeployment, hasExistingKey, hasAnthropicKey, ollamaUrl, betaFeatures]);
 
   // Empty is allowed (no local AI); anything else must be an http(s) address, as main requires.
   const ollamaUrlValid = !ollamaUrl.trim() || isHttpUrl(ollamaUrl);
@@ -1291,7 +1292,7 @@ export const AIModelsTab = memo(function AIModelsTab() {
         <p className="text-xs text-white/25">Configure your Azure OpenAI resource in the <a href="https://portal.azure.com/" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Azure Portal</a>.</p>
       </SectionCard>
 
-      {/* Anthropic: key stored encrypted in main; chat through it arrives with the AI router */}
+      {/* Anthropic: key stored encrypted in main; chat runs through the AI router (bundled LiteLLM) */}
       <SectionHeading icon={MessageCircle}>Anthropic (Claude)</SectionHeading>
       <SectionCard>
         <div>
@@ -1318,7 +1319,7 @@ export const AIModelsTab = memo(function AIModelsTab() {
         </div>
         <div>
           <label className="text-xs text-white/40 mb-1 block">Model</label>
-          <Input type="text" value={anthropicModel} onChange={(e) => setAnthropicModel(e.target.value)} placeholder="claude-sonnet-4-20250514"
+          <Input type="text" value={anthropicModel} onChange={(e) => setAnthropicModel(e.target.value)} placeholder="claude-sonnet-5-5"
             className="bg-white/[0.03] border-white/[0.06] focus:border-white/[0.12]" />
         </div>
         <p className="text-xs text-white/25">Get API keys from <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-white/50 hover:text-white/70 underline">Anthropic Console</a>.</p>

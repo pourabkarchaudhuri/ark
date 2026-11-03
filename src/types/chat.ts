@@ -137,6 +137,8 @@ export interface SendMessagePayload {
   azureDeployment?: string;
   /** Optional API version (e.g. 2025-04-01-preview). From Settings > Azure OpenAI. */
   azureApiVersion?: string;
+  /** Model name for Anthropic chat (Settings field); the key is added by main. */
+  anthropicModel?: string;
   /** Image attachment as data URL (e.g. data:image/png;base64,...). Only used when provider is Azure OpenAI (vision). */
   imageAttachment?: string;
   /** gg.deals region from Settings → Prices (`getGgRegion()`), so chat prices match the details page. */

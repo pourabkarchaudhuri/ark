@@ -9,8 +9,8 @@
     "clean": "rm -rf dist dist-electron",
     "rust:build": "cd native/ark-native && napi build --platform --release",
     "dev": "vite",
-    "build": "npm run clean && tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && node scripts/build-release-env.mjs && node scripts/build-llama-runtime.mjs && electron-builder",
-    "build:app": "npm run clean && tsc -p tsconfig.node.json && tsc && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && node scripts/build-release-env.mjs && node scripts/build-llama-runtime.mjs",
+    "build": "npm run clean && tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && node scripts/build-release-env.mjs && node scripts/build-llama-runtime.mjs && node scripts/build-litellm-runtime.mjs && electron-builder",
+    "build:app": "npm run clean && tsc -p tsconfig.node.json && tsc && cp electron/preload.cjs dist-electron/electron/preload.cjs && vite build && node scripts/build-release-env.mjs && node scripts/build-llama-runtime.mjs && node scripts/build-litellm-runtime.mjs",
     "preview": "vite preview",
     "electron:compile": "tsc -p tsconfig.node.json && cp electron/preload.cjs dist-electron/electron/preload.cjs",
     "electron:dev": "npm run electron:compile && concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
@@ -215,6 +215,10 @@
       {
         "from": "build/llama-runtime",
         "to": "llama-runtime"
+      },
+      {
+        "from": "build/litellm-runtime",
+        "to": "litellm-runtime"
       }
     ],
     "publish": {

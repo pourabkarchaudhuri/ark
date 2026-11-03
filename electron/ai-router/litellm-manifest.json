@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "litellm": {
+    "version": "1.105.7",
+    "lockFile": "scripts/litellm/requirements.lock.txt",
+    "lockSha256": "bcabeff5d93b8a6dca9c681b5b7473a2c1af9bdea44aaa21701a54d19dca41f6",
+    "advisoryCheckedAt": "2026-11-03",
+    "neverUse": [
+      "1.82.7",
+      "1.82.8",
+      "1.107.0"
+    ]
+  },
+  "launcher": {
+    "file": "ark_litellm.py",
+    "sha256": "931ac4a12df77388147966930c3d222845e572afff97a5e9b013cdf61cdee27d"
+  },
+  "python": {
+    "minor": "3.12",
+    "sources": [
+      {
+        "kind": "pbs",
+        "version": "3.12.16",
+        "asset": "cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "sha256": "1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149",
+        "size": 22014416
+      },
+      {
+        "kind": "nuget",
+        "version": "3.12.10",
+        "asset": "python.3.12.10.nupkg",
+        "url": "https://api.nuget.org/v3-flatcontainer/python/3.12.10/python.3.12.10.nupkg",
+        "sha256": "0eb85c2dfccccf1b17352de4c397f69194035b7d37149eacc16f1147d93de3b8",
+        "size": 14515433
+      }
+    ],
+    "allowedPth": [
+      "pywin32.pth"
+    ]
+  }
+}

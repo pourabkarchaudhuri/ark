@@ -9,8 +9,11 @@
  * Supported providers:
  *   • Local    — built-in llama.cpp server via @langchain/openai (ChatOpenAI), or the user's own
  *                Ollama via @langchain/ollama (ChatOllama) when "Use my own Ollama" is on
- *   • Gemini   — cloud, via @langchain/google-genai (ChatGoogleGenerativeAI)
- *   • Azure OpenAI — cloud, via @langchain/openai (AzureChatOpenAI)
+ *   • AI router — when the chat route is a connector other than Built-in (Gemini, Azure OpenAI,
+ *                Anthropic, OpenAI, Ollama URL, OpenAI-compatible): the bundled LiteLLM sidecar,
+ *                reached as an OpenAI-compatible endpoint through ChatOpenAI (1.0.97 B35)
+ *   • Gemini   — cloud, via @langchain/google-genai (ChatGoogleGenerativeAI), when no router route is set
+ *   • Azure OpenAI — cloud, via @langchain/openai (AzureChatOpenAI), when no router route is set
  */
 
 import { createHash } from 'node:crypto';
@@ -38,6 +41,9 @@ import { settingsStore, DEFAULT_CHAT_NUM_CTX, type PreferredChatProvider } from 
 import { needsWebSearch, webSearch, formatSearchContext } from './web-search.js';
 import { logger } from './safe-logger.js';
 import { useBuiltinBackend, getBuiltinBackend } from './local-ai/backend.js';
+import { getAiRouter } from './ai-router/service.js';
+import { providerForKind } from './ai-router/legacy-sync.js';
+import type { ChatTarget } from './ai-router/router.js';
 import { getModelForRole } from './local-ai/manifest.js';
 import { normalizeGameStatus } from '../src/lib/game-status-normalize.js';
 import { pickRecommendationSeed, librarySignature, steamAppIdOf } from './ai-reco-seed.js';
@@ -134,6 +140,22 @@ async function prepareBuiltinChat(): Promise<void> {
   backend.markChatUsed();
 }
 
+/** Chat endpoint of the AI router (LiteLLM), filled by `prepareRouterChat` before each turn that uses it. */
+let routerChat: ChatTarget | null = null;
+
+/**
+ * Resolve the router endpoint for this turn when the chat route is a connector other than Built-in.
+ * Starting the sidecar can fail (Python missing, bad config): that error is shown to the user as it
+ * is, because chat has no fallback; embeddings and reranking do.
+ */
+async function prepareRouterChat(): Promise<void> {
+  routerChat = null;
+  let router: ReturnType<typeof getAiRouter>;
+  try { router = getAiRouter(); } catch { return; } // no Electron (unit tests): local chat only
+  if (!router.chatUsesRouter()) return;
+  routerChat = await router.chatTarget();
+}
+
 let cachedModel: ChatModel | null = null;
 let cachedModelKey: string | null = null;
 
@@ -146,6 +168,7 @@ function keyFingerprint(apiKey: string): string {
 /** Test seam: drop the cached chat and reviewer models. */
 export function __resetAiChatCachesForTests(): void {
   builtinChat = null;
+  routerChat = null;
   cachedModel = null;
   cachedModelKey = null;
   cachedValidationModel = null;
@@ -166,6 +189,26 @@ function isAuthError(error: unknown): boolean {
  */
 export function getModelForProvider(providerOptions?: ChatProviderOptions): { model: ChatModel; providerName: string; provider: PreferredChatProvider } {
   const effective = settingsStore.getPreferredChatProvider();
+
+  // AI router: the chat route names a connector other than Built-in, so ChatOpenAI talks to LiteLLM.
+  // `provider` only decides local-versus-cloud behaviour below (web search grounding, message wrapping).
+  if (routerChat) {
+    const t = routerChat;
+    const configKey = `router:${t.baseUrl}:${t.connector.id}:${t.model}:${t.providerName}:${keyFingerprint(t.apiKey)}`;
+    const provider = providerForKind(t.connector.kind);
+    if (cachedModel && cachedModelKey === configKey) {
+      return { model: cachedModel as ChatOpenAI, providerName: t.providerName, provider };
+    }
+    logger.log(`[AI Proxy] Creating AI router chat model (${t.providerName})`);
+    cachedModel = new ChatOpenAI({
+      model: t.model,
+      apiKey: t.apiKey,
+      configuration: { baseURL: t.baseUrl },
+      temperature: 0.7,
+    });
+    cachedModelKey = configKey;
+    return { model: cachedModel, providerName: t.providerName, provider };
+  }
 
   if (effective === 'azure-openai') {
     if (!providerOptions?.azure?.endpoint || !providerOptions?.azure?.apiKey || !providerOptions?.azure?.deployment) {
@@ -195,8 +238,9 @@ export function getModelForProvider(providerOptions?: ChatProviderOptions): { mo
   }
 
   if (effective === 'anthropic') {
+    // Anthropic chat only runs through the AI router: reaching here means its connector is not routed.
     throw new Error(
-      'Anthropic (Claude) is not yet supported for chat. Please select Azure OpenAI, Gemini, or Ollama in the Chat panel.',
+      'Anthropic (Claude) is selected but not ready. Save your Anthropic key in Settings and try again.',
     );
   }
 
@@ -1277,7 +1321,8 @@ export async function processMessage(
   pendingActions = [];
   chainOfThought = [];
 
-  if (provider === 'ollama' && useBuiltinBackend()) await prepareBuiltinChat();
+  await prepareRouterChat();
+  if (!routerChat && provider === 'ollama' && useBuiltinBackend()) await prepareBuiltinChat();
   const { model, providerName, provider: effectiveProvider } = getModelForProvider(providerOptions);
   const usedOllama = effectiveProvider === 'ollama';
   const toolCtx: ToolContext = { ggRegion: normalizeRegion(ggRegion) };
@@ -1411,8 +1456,18 @@ export async function processMessage(
       cachedModelKey = null;
     }
 
+    // The router's own endpoint stopped answering (LiteLLM crashed or was restarted mid-turn).
+    if (routerChat && (error?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed') || error?.cause?.code === 'ECONNREFUSED')) {
+      routerChat = null;
+      cachedModel = null;
+      cachedModelKey = null;
+      throw new Error(
+        'The AI router stopped answering. Try again, or check the router status in Settings > AI providers.',
+      );
+    }
+
     // Friendly error only when we actually used Ollama and it's a connection failure
-    if (usedOllama && useBuiltinBackend() && (error?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed') || error?.cause?.code === 'ECONNREFUSED')) {
+    if (!routerChat && usedOllama && useBuiltinBackend() && (error?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed') || error?.cause?.code === 'ECONNREFUSED')) {
       builtinChat = null;
       cachedModel = null;
       cachedModelKey = null;
@@ -1420,7 +1475,7 @@ export async function processMessage(
         'The built-in local chat server stopped answering. Try again, or select a different model (e.g. Azure OpenAI or Gemini) in the Chat panel.',
       );
     }
-    if (usedOllama && (error?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed') || error?.cause?.code === 'ECONNREFUSED')) {
+    if (!routerChat && usedOllama && (error?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed') || error?.cause?.code === 'ECONNREFUSED')) {
       throw new Error(
         `Could not connect to Ollama at ${ollamaSettings.url}. ` +
         `Please ensure Ollama is running, or select a different model (e.g. Azure OpenAI or Gemini) in the Chat panel.`,

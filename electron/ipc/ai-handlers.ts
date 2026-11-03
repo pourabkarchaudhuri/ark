@@ -8,6 +8,7 @@ const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
 import { processMessage, searchGamesForContext, chatStore, type ChatProviderOptions } from '../ai-chat.js';
 import { settingsStore } from '../settings-store.js';
+import { syncChatConnectorsFromPayload } from '../ai-router/service.js';
 
 /**
  * Azure OpenAI options for one chat request. The key is read from the encrypted store
@@ -52,6 +53,8 @@ export function register(): void {
         : undefined;
 
       const preferredProvider = settingsStore.getPreferredChatProvider();
+      // The AI router follows the provider the user selected (Azure endpoint, Anthropic model ride along).
+      syncChatConnectorsFromPayload(preferredProvider, payload);
       const providerOptions = buildAzureProviderOptions(
         payload,
         preferredProvider,

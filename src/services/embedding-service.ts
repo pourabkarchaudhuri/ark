@@ -4633,6 +4633,11 @@ class EmbeddingService {
           ? completeMigration(rec, this._migrationTarget())
           : interruptMigration(rec, Date.now());
         await this._persistMigration(final);
+        // The AI router keeps the old vectors recorded as current until a full rebuild finished (B35):
+        // now the cached vectors match the embeddings route, so its "model changed" flag can clear.
+        if (result.complete && typeof window !== 'undefined') {
+          void Promise.resolve(window.aiRouter?.acknowledgeEmbeddingRebuild?.()).catch(() => undefined);
+        }
       }
     })();
     this._forceReindexAllPromise = run;

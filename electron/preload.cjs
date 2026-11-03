@@ -643,6 +643,28 @@ contextBridge.exposeInMainWorld('localAi', {
   },
 });
 
+// AI router (bundled LiteLLM): connectors, routes, failure policy, connection tests. Keys can be set
+// or cleared here but never read back.
+contextBridge.exposeInMainWorld('aiRouter', {
+  getState: () => ipcRenderer.invoke('aiRouter:getState'),
+  saveConnector: (input) => ipcRenderer.invoke('aiRouter:saveConnector', input),
+  removeConnector: (id) => ipcRenderer.invoke('aiRouter:removeConnector', id),
+  setKey: (input) => ipcRenderer.invoke('aiRouter:setKey', input),
+  clearKey: (id) => ipcRenderer.invoke('aiRouter:clearKey', id),
+  test: (input) => ipcRenderer.invoke('aiRouter:test', input),
+  testAll: () => ipcRenderer.invoke('aiRouter:testAll'),
+  setRoute: (input) => ipcRenderer.invoke('aiRouter:setRoute', input),
+  setPolicy: (input) => ipcRenderer.invoke('aiRouter:setPolicy', input),
+  acknowledgeEmbeddingRebuild: () => ipcRenderer.invoke('aiRouter:acknowledgeEmbeddingRebuild'),
+  recheckRuntime: () => ipcRenderer.invoke('aiRouter:recheckRuntime'),
+  // State pushes while a test runs, a route changes or the router starts/stops. Returns unsubscribe.
+  onStateChanged: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('aiRouter:state-changed', handler);
+    return () => ipcRenderer.removeListener('aiRouter:state-changed', handler);
+  },
+});
+
 // Expose ANN Index API to renderer (HNSW nearest-neighbor search)
 contextBridge.exposeInMainWorld('ann', {
   load: () => ipcRenderer.invoke('ann:load'),
@@ -731,5 +753,5 @@ contextBridge.exposeInMainWorld('store', {
 // Main passes the flag via additionalArguments for dev-server runs (NODE_ENV is not
 // a reliable signal: a packaged build inherits whatever the user's environment has).
 if (process.argv.includes('--ark-dev-server')) {
-  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.localAi, window.ann, window.analytics, window.devlog, window.gameLauncher exposed');
+  console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.localAi, window.aiRouter, window.ann, window.analytics, window.devlog, window.gameLauncher exposed');
 }

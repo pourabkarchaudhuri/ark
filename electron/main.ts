@@ -136,6 +136,7 @@ import {
 } from './ipc/ollama-handlers.js';
 import { unloadArkModels } from './ollama-setup.js';
 import { shutdownLocalAi } from './local-ai/service.js';
+import { initAiRouter, shutdownAiRouter } from './ai-router/service.js';
 import { setGameActivityListener } from './game-activity.js';
 import { atomicWriteFileSync } from './safe-write.js';
 import { attachNavigationGuards, devFlagArgs, isExternalOpenable, shouldUseDevServer } from './navigation-guard.js';
@@ -665,6 +666,8 @@ function destroyWebContentsView() {
 app.whenReady().then(async () => {
   // Register IPC handlers first so renderer can call them as soon as the window loads
   registerAllHandlers(() => mainWindow);
+  // AI router: adopt saved keys, follow the chat-provider selector, schedule connector re-checks.
+  initAiRouter();
 
   // CLI: run chat prompts test (Azure OpenAI) then exit. Keep one hidden window so the app doesn't exit on some platforms.
   if (process.argv.includes('--run-chat-prompts')) {
@@ -1188,6 +1191,8 @@ app.on('before-quit', () => {
   // Built-in llama-server processes: killed now, synchronously. (A crash of Ark itself is covered by
   // the kill-on-close job object they run in.)
   shutdownLocalAi();
+  // The LiteLLM sidecar (python.exe) too, and its private config folder.
+  shutdownAiRouter();
 });
 
 // Flush LevelDB on shutdown. Fires after all windows have closed but before

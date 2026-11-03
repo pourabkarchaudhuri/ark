@@ -165,6 +165,14 @@ export function useAIChat(options: UseAIChatOptions = {}): UseAIChatReturn {
         } catch {
           preferredProvider = localStorage.getItem('ark-preferred-chat-provider') ?? 'ollama';
         }
+        if (preferredProvider === 'anthropic') {
+          try {
+            const model = localStorage.getItem('ark-anthropic-model')?.trim();
+            if (model) payload.anthropicModel = model;
+          } catch {
+            // ignore
+          }
+        }
         if (preferredProvider === 'azure-openai') {
           // The key is added by main from its encrypted store; only endpoint/deployment go from here.
           const endpoint = localStorage.getItem('ark-azure-endpoint')?.trim();

@@ -80,3 +80,7 @@ build/.env.release
 # Built-in llama.cpp runtime (scripts/build-llama-runtime.mjs): release zip cache and unpacked copy
 .llama-cache/
 build/llama-runtime/
+
+# Bundled LiteLLM runtime (scripts/build-litellm-runtime.mjs): python archive + wheel cache and the built copy
+.litellm-cache/
+build/litellm-runtime/
