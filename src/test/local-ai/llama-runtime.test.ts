@@ -175,6 +175,31 @@ describe('LlamaRuntime GPU fallback', () => {
     expect(t.runtime.roleStatus('embed').cpuFallback).toBe(true);
   });
 
+  it('asks for the log lines the status panel reads and keeps Vulkan out of the CPU relaunch', async () => {
+    const t = makeRuntime();
+    t.setOnSpawn((s) => {
+      if (argOf(s, '-ngl') !== '0') { s.child.stderr.emit('data', 'ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory
+'); s.child.crash(3); }
+    });
+    t.setHealthy((s) => argOf(s, '-ngl') === '0');
+    await t.runtime.ensure('embed');
+    const [gpuLaunch, cpuLaunch] = t.spawned;
+    expect(argOf(gpuLaunch, '-lv')).toBe('4');
+    expect(gpuLaunch.args).not.toContain('--device');
+    expect(argOf(cpuLaunch, '--device')).toBe('none');
+  });
+
+  it('treats a server that starts with no Vulkan device as a plain CPU server, not a failure', async () => {
+    const t = makeRuntime();
+    t.setOnSpawn((s) => { s.child.stderr.emit('data', 'load_tensors:   CPU_Mapped model buffer size =   201.80 MiB
+'); });
+    const info = await t.runtime.ensure('embed');
+    expect(t.spawned).toHaveLength(1);
+    expect(info.cpuFallback).toBe(false);
+    expect(info.gpu.gpuBytes).toBe(0);
+    expect(info.gpu.deviceName).toBeNull();
+  });
+
   it('keeps the CPU choice for later starts in the session', async () => {
     const t = makeRuntime();
     t.setOnSpawn((s) => {
@@ -196,13 +221,16 @@ describe('LlamaRuntime GPU fallback', () => {
   });
 
   it('parses the offload and buffer lines of the server log', () => {
-    const gpu = { device: null, layersOffloaded: null, layersTotal: null, gpuBytes: 0, cpuBytes: 0 } as Parameters<typeof parseGpuLogLine>[1];
+    const gpu = { device: null, deviceName: null, layersOffloaded: null, layersTotal: null, gpuBytes: 0, cpuBytes: 0 } as Parameters<typeof parseGpuLogLine>[1];
     parseGpuLogLine('load_tensors: offloaded 25/25 layers to GPU', gpu);
     parseGpuLogLine('load_tensors:      Vulkan0 model buffer size =  1024.00 MiB', gpu);
     parseGpuLogLine('load_tensors:  CPU_Mapped model buffer size =   100.00 MiB', gpu);
     expect(gpu.layersOffloaded).toBe(25);
     expect(gpu.layersTotal).toBe(25);
     expect(gpu.device).toBe('Vulkan0');
+    parseGpuLogLine('llama_prepare_model_devices: using device Vulkan1 (NVIDIA GeForce RTX 3070 Ti Laptop GPU) (0000:01:00.0) - 7246 MiB free', gpu);
+    expect(gpu.device).toBe('Vulkan1');
+    expect(gpu.deviceName).toBe('NVIDIA GeForce RTX 3070 Ti Laptop GPU');
     expect(gpu.gpuBytes).toBe(1024 * 1024 * 1024);
     expect(gpu.cpuBytes).toBe(100 * 1024 * 1024);
   });

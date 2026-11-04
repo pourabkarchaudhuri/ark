@@ -42,6 +42,10 @@ export interface LocalAiStatus {
   declined: boolean;
   /** GPU or CPU, from the embed server's log; null until a server has started. */
   compute: 'gpu' | 'cpu' | null;
+  /** GPU name from the embed server's log when it runs on a GPU ("NVIDIA GeForce RTX 3070 Ti Laptop GPU"). */
+  computeDevice: string | null;
+  /** VRAM the embed model occupies, in bytes (0 on the CPU). */
+  computeVramBytes: number;
   chatModel: { id: string; label: string; sizeBytes: number };
   externalOllama: { enabled: boolean; url: string };
 }
@@ -109,6 +113,10 @@ export class LocalAiController {
       compute: embedRole.state === 'ready' && embedRole.gpu
         ? (embedRole.gpu.gpuBytes > 0 ? 'gpu' : 'cpu')
         : null,
+      computeDevice: embedRole.state === 'ready' && embedRole.gpu && embedRole.gpu.gpuBytes > 0
+        ? (embedRole.gpu.deviceName ?? embedRole.gpu.device)
+        : null,
+      computeVramBytes: embedRole.state === 'ready' && embedRole.gpu ? embedRole.gpu.gpuBytes : 0,
       chatModel: { id: chat?.id ?? '', label: chat?.label ?? '', sizeBytes: chat?.sources[0]?.size ?? 0 },
       externalOllama: { enabled: settings.useExternalOllama, url: settings.ollamaUrl },
     };

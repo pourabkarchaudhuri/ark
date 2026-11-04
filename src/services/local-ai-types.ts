@@ -34,6 +34,8 @@ export interface LocalAiStatus {
   paused: boolean;
   declined: boolean;
   compute: 'gpu' | 'cpu' | null;
+  computeDevice: string | null;
+  computeVramBytes: number;
   chatModel: { id: string; label: string; sizeBytes: number };
   externalOllama: { enabled: boolean; url: string };
 }

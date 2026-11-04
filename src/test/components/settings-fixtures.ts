@@ -92,7 +92,7 @@ export function localAiStatus(over: Partial<LocalAiStatus> = {}): LocalAiStatus 
     backend: 'builtin',
     runtime: { available: true, build: 'b11780', roles: [] },
     models: [model('arctic-embed2', 'embed', true), model('bge-reranker', 'rerank', true), model('gemma3-12b', 'chat', false, 'missing')],
-    modelsDir: 'C:/models', diskUsedBytes: 0, diskFreeBytes: null, paused: false, declined: false, compute: 'gpu',
+    modelsDir: 'C:/models', diskUsedBytes: 0, diskFreeBytes: null, paused: false, declined: false, compute: 'gpu', computeDevice: 'NVIDIA GeForce RTX 3070 Ti Laptop GPU', computeVramBytes: 1e9,
     chatModel: { id: 'gemma3-12b', label: 'gemma3', sizeBytes: 7e9 },
     externalOllama: { enabled: false, url: 'http://localhost:11434' },
     ...over,

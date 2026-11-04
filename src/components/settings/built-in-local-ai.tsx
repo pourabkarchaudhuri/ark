@@ -69,7 +69,12 @@ export function BuiltInLocalAiPanel({ onStatus }: { onStatus?: (s: LocalAiStatus
   const chat = status.models.find((m) => m.role === 'chat');
   const anyBusy = status.models.some((m) => m.state === 'downloading' || m.state === 'queued');
   const anyFailed = status.models.some((m) => m.state === 'error' || m.state === 'paused');
-  const compute = status.compute === 'gpu' ? 'GPU (Vulkan)' : status.compute === 'cpu' ? 'CPU' : 'GPU if available, else CPU';
+  const fellBack = status.runtime.roles.some((r) => r.cpuFallback);
+  const compute = status.compute === 'gpu'
+    ? `GPU (Vulkan)${status.computeDevice ? `: ${status.computeDevice}` : ''}${status.computeVramBytes > 0 ? `, ${formatBytes(status.computeVramBytes)} in use` : ''}`
+    : status.compute === 'cpu'
+      ? (fellBack ? 'CPU (the GPU could not be used)' : 'CPU (no usable GPU found)')
+      : 'GPU if available, else CPU';
 
   return (
     <div className="stack" style={{ gap: 'var(--space-3)' }} data-testid="built-in-local-ai">

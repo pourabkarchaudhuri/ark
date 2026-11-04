@@ -43,7 +43,7 @@ function status(over: Partial<LocalAiStatus> = {}): LocalAiStatus {
     diskFreeBytes: 120_000_000_000,
     paused: false,
     declined: false,
-    compute: 'gpu',
+    compute: 'gpu', computeDevice: 'NVIDIA GeForce RTX 3070 Ti Laptop GPU', computeVramBytes: 1024 * 1024 * 1024,
     chatModel: { id: 'gemma3-12b', label: 'gemma3:12b Q4_K_M (local chat)', sizeBytes: 7_309_830_496 },
     externalOllama: { enabled: false, url: 'http://localhost:11434' },
     ...over,
@@ -114,12 +114,19 @@ describe('BuiltInLocalAiPanel', () => {
     render(<BuiltInLocalAiPanel />);
     await flush();
     expect(screen.getByText('llama.cpp b11780')).toBeInTheDocument();
-    expect(screen.getByText('GPU (Vulkan)')).toBeInTheDocument();
+    expect(screen.getByText(/GPU \(Vulkan\): NVIDIA GeForce RTX 3070 Ti Laptop GPU/)).toBeInTheDocument();
     expect(screen.getByText(/Ark\\models/)).toBeInTheDocument();
     expect(screen.getByTestId('model-state-arctic-embed2')).toHaveTextContent('Ready');
     expect(screen.getByTestId('model-state-bge-reranker-v2-m3')).toHaveTextContent('Downloading 40%');
     expect(screen.getByTestId('model-state-gemma3-12b')).toHaveTextContent('Not downloaded');
     expect(screen.getByText(/Ollama no longer needs installing/)).toBeInTheDocument();
+  });
+
+  it('says CPU, and why, when no GPU is in use', async () => {
+    installApi(status({ compute: 'cpu', computeDevice: null, computeVramBytes: 0 }));
+    render(<BuiltInLocalAiPanel />);
+    await flush();
+    expect(screen.getByText('CPU (no usable GPU found)')).toBeInTheDocument();
   });
 
   it('updates live from status pushes', async () => {

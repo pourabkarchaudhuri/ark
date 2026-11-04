@@ -42,6 +42,8 @@ export type RuntimeState = 'stopped' | 'starting' | 'ready' | 'failed';
 export interface GpuInfo {
   /** Device the weights landed on, from the server log ("Vulkan0", "CPU"). */
   device: string | null;
+  /** Marketing name of the GPU the weights landed on ("NVIDIA GeForce RTX 3070 Ti Laptop GPU"). */
+  deviceName: string | null;
   layersOffloaded: number | null;
   layersTotal: number | null;
   gpuBytes: number;
@@ -121,7 +123,7 @@ const DEFAULT_BACKOFF_MS = [500, 2_000, 5_000];
 const DEFAULT_STABLE_MS = MIN;
 const GPU_LAYERS_ALL = 99;
 /** A log line like this means the GPU path is not usable: retry on the CPU. */
-const GPU_FAILURE_RE = /out of memory|ErrorOutOfDeviceMemory|ErrorOutOfHostMemory|vk::|vulkan.*(fail|error)|failed to allocate|ggml_vulkan.*error|device lost/i;
+const GPU_FAILURE_RE = /out of memory|ErrorOutOfDeviceMemory|ErrorOutOfHostMemory|ErrorDeviceLost|ErrorInitializationFailed|vk::|vulkan.*(fail|error)|failed to allocate|ggml_vulkan.*error|device lost/i;
 const LOG_TAIL_LINES = 40;
 
 /** A signal that aborts after `ms` (AbortSignal.timeout is missing from some environments). */
@@ -159,7 +161,7 @@ interface Slot {
 }
 
 function emptyGpu(): GpuInfo {
-  return { device: null, layersOffloaded: null, layersTotal: null, gpuBytes: 0, cpuBytes: 0 };
+  return { device: null, deviceName: null, layersOffloaded: null, layersTotal: null, gpuBytes: 0, cpuBytes: 0 };
 }
 
 /** Fold one llama-server log line into the GPU summary. Exported for tests. */
@@ -169,6 +171,9 @@ export function parseGpuLogLine(line: string, gpu: GpuInfo): void {
     gpu.layersOffloaded = Number(off[1]);
     gpu.layersTotal = Number(off[2]);
   }
+  // "llama_prepare_model_devices: using device Vulkan1 (NVIDIA GeForce RTX 3070 Ti Laptop GPU) (0000:01:00.0) - 7246 MiB free"
+  const dev = /using device\s+(\S+)\s+\((.+?)\)(?:\s+\(|\s+-|\s*$)/i.exec(line);
+  if (dev && !/^CPU/i.test(dev[1]!)) { gpu.device = dev[1]!; gpu.deviceName = dev[2]!; }
   const buf = /\b([A-Za-z_]+\d*(?:_Mapped|_Host)?)\s+model buffer size\s*=\s*([\d.]+)\s*MiB/i.exec(line);
   if (buf) {
     const bytes = Math.round(Number(buf[2]) * 1024 * 1024);
@@ -321,7 +326,11 @@ export class LlamaRuntime {
 
   private buildArgs(s: Slot, port: number, apiKey: string, model: string, gpuLayers: number): string[] {
     const l = s.launch;
-    const args = ['-m', model, '--host', '127.0.0.1', '--port', String(port), '--api-key', apiKey, '--no-webui', '-np', '1', '-ngl', String(gpuLayers)];
+    // `-lv 4` makes b11780 print the device / offload / buffer lines parseGpuLogLine reads (the default
+    // level hides them, which would report every server as CPU). Prompts are not logged at that level.
+    const args = ['-m', model, '--host', '127.0.0.1', '--port', String(port), '--api-key', apiKey, '--no-webui', '-np', '1', '-lv', '4', '-ngl', String(gpuLayers)];
+    // CPU launch: do not even initialise Vulkan, so a broken driver cannot take the fallback down too.
+    if (gpuLayers === 0) args.push('--device', 'none');
     if (l.numThread && l.numThread > 0) args.push('-t', String(l.numThread));
     if (s.role === 'embed' || s.role === 'rerank') {
       const batch = l.numBatch && l.numBatch > 0 ? l.numBatch : 2048;
