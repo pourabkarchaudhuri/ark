@@ -41,20 +41,23 @@ function djb2(s: string): string {
   return h.toString(36);
 }
 
-describe('this release is a no-op for existing vectors', () => {
-  it('derived prefixes equal the literals that shipped before the layout module', () => {
-    expect(WHOLE_HASH_PREFIX).toBe('t10m1');
-    expect(CHUNK_HASH_PREFIX).toBe('c1');
-    expect(EMBEDDING_LAYOUT_STAMP).toBe('t10m1c1p1');
-    expect(EMBEDDING_LAYOUT_STAMP).toBe(LEGACY_LAYOUT_STAMP);
-    expect(EMBEDDING_LAYOUT_ID).toBe(LEGACY_LAYOUT_ID);
+describe('1.0.97 model bump (built-in llama.cpp vector space): everything cached before is stale', () => {
+  it('derived prefixes carry model version 2; the layout is no longer the legacy one', () => {
+    expect(EMBEDDING_MODEL_VERSION).toBe(2);
+    expect(WHOLE_HASH_PREFIX).toBe('t10m2');
+    expect(CHUNK_HASH_PREFIX).toBe('c1m2');
+    expect(EMBEDDING_LAYOUT_STAMP).toBe('t10m2c1p1');
+    expect(EMBEDDING_LAYOUT_STAMP).not.toBe(LEGACY_LAYOUT_STAMP);
+    expect(EMBEDDING_LAYOUT_ID).not.toBe(LEGACY_LAYOUT_ID);
     expect(EMBEDDING_LAYOUT_GENERATION).toBe(1);
   });
 
-  it('whole and chunk hashes are byte-identical to the pre-module formulas', () => {
+  it('whole and chunk hashes use the new prefixes, so no old vector is ever skipped as unchanged', () => {
     for (const text of ['', 'Hades. gameplay: Action', 'ü é 日本語']) {
-      expect(hashWholeEmbeddingText(text)).toBe(djb2(`t10m1:${text}`));
-      expect(hashChunkText(text)).toBe(djb2(`c1:${text}`));
+      expect(hashWholeEmbeddingText(text)).toBe(djb2(`t10m2:${text}`));
+      expect(hashChunkText(text)).toBe(djb2(`c1m2:${text}`));
+      expect(hashWholeEmbeddingText(text)).not.toBe(djb2(`t10m1:${text}`));
+      expect(hashChunkText(text)).not.toBe(djb2(`c1:${text}`));
     }
   });
 
@@ -66,16 +69,19 @@ describe('this release is a no-op for existing vectors', () => {
     expect(`t${EMBEDDING_TEXT_VERSION}m${EMBEDDING_MODEL_VERSION}`).toBe(HASH_VERSION_PREFIX);
   });
 
-  it('unstamped rows, old-format watermarks and key suffixes stay valid', () => {
+  it('unstamped rows and old watermarks read as stale; only the new stamp is current', () => {
     expect(rowLayoutOf({})).toBe(LEGACY_LAYOUT_STAMP);
-    expect(isCurrentLayout({})).toBe(true);
+    expect(isCurrentLayout({})).toBe(false);
+    expect(isCurrentLayout({ layout: LEGACY_LAYOUT_STAMP })).toBe(false);
     expect(isCurrentLayout({ layout: EMBEDDING_LAYOUT_STAMP })).toBe(true);
-    expect(watermarkStampIsCurrent('t10m1')).toBe(true); // old watermarks (bare whole-hash prefix)
+    expect(watermarkStampIsCurrent('t10m1')).toBe(false); // old watermarks (bare whole-hash prefix)
+    expect(watermarkStampIsCurrent(LEGACY_LAYOUT_STAMP)).toBe(false);
     expect(watermarkStampIsCurrent(EMBEDDING_LAYOUT_STAMP)).toBe(true);
-    expect(layoutKeySuffix()).toBe('');
-    expect(layoutIdIsCurrent(undefined)).toBe(true); // caches saved before layout ids existed
+    expect(layoutIdIsCurrent(undefined)).toBe(false); // caches saved before layout ids existed
+    expect(layoutIdIsCurrent(LEGACY_LAYOUT_ID)).toBe(false);
     expect(layoutIdIsCurrent(EMBEDDING_LAYOUT_ID)).toBe(true);
-    expect(annGraphSignature(1234)).toBe('ann-1234-c1-p1'); // unchanged → no forced graph rebuild
+    expect(layoutKeySuffix()).toBe(''); // the generation (derived caches) did not change
+    expect(annGraphSignature(1234)).toBe('ann-1234-c1-p1');
   });
 });
 
@@ -111,8 +117,9 @@ describe('a future bump invalidates what it should (the old no-op bug)', () => {
   it('rows from another layout are not skipped even when the text hash matches', () => {
     const wholeHash = hashWholeEmbeddingText('x');
     expect(shouldSkipPooled({ textHash: wholeHash, layout: EMBEDDING_LAYOUT_STAMP }, wholeHash)).toBe(true);
-    expect(shouldSkipPooled({ textHash: wholeHash }, wholeHash)).toBe(true); // legacy row, legacy layout
-    expect(shouldSkipPooled({ textHash: wholeHash, layout: 't10m2c1p1' }, wholeHash)).toBe(false);
+    expect(shouldSkipPooled({ textHash: wholeHash }, wholeHash)).toBe(false); // legacy row: Ollama-space vector
+    expect(shouldSkipPooled({ textHash: wholeHash, layout: 't10m1c1p1' }, wholeHash)).toBe(false);
+    expect(shouldSkipPooled({ textHash: wholeHash, layout: 't10m3c1p1' }, wholeHash)).toBe(false);
     expect(shouldSkipPooled({ textHash: wholeHash, poolVersion: 99 }, wholeHash)).toBe(false);
     expect(shouldSkipPooled(null, wholeHash)).toBe(false);
   });

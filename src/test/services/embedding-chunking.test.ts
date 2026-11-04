@@ -21,6 +21,7 @@ import {
   cosineSimilarity,
   EMBEDDING_DIM,
 } from '@/services/embedding-quant';
+import { EMBEDDING_LAYOUT_STAMP } from '@/services/embedding-layout';
 import {
   EMBEDDING_CHUNK_VERSION,
   CURRENT_POOL_VERSION,
@@ -236,8 +237,10 @@ describe('poolChunkVectors', () => {
 
 describe('shouldSkipPooled', () => {
   it('skips when hash matches and poolVersion compatible', () => {
-    expect(shouldSkipPooled({ textHash: 'abc', poolVersion: undefined }, 'abc')).toBe(true);
-    expect(shouldSkipPooled({ textHash: 'abc', poolVersion: CURRENT_POOL_VERSION }, 'abc')).toBe(true);
+    expect(shouldSkipPooled({ textHash: 'abc', poolVersion: undefined, layout: EMBEDDING_LAYOUT_STAMP }, 'abc')).toBe(true);
+    expect(shouldSkipPooled({ textHash: 'abc', poolVersion: CURRENT_POOL_VERSION, layout: EMBEDDING_LAYOUT_STAMP }, 'abc')).toBe(true);
+    // A row from before the 1.0.97 model bump (unstamped = Ollama-space vector) is never skipped.
+    expect(shouldSkipPooled({ textHash: 'abc', poolVersion: CURRENT_POOL_VERSION }, 'abc')).toBe(false);
     expect(shouldSkipPooled({ textHash: 'abc', poolVersion: 99 }, 'abc')).toBe(false);
     expect(shouldSkipPooled({ textHash: 'abc' }, 'xyz')).toBe(false);
     expect(shouldSkipPooled(null, 'abc')).toBe(false);
@@ -245,7 +248,7 @@ describe('shouldSkipPooled', () => {
 });
 
 describe('whole-text hash compatibility', () => {
-  it('hashWholeEmbeddingText matches production buildEmbeddingText (t10m1)', () => {
+  it('hashWholeEmbeddingText matches production buildEmbeddingText (t10m2)', () => {
     const game = {
       title: 'Celeste',
       genres: ['Platformer', 'Indie'],
@@ -373,6 +376,7 @@ describe('readPooledVector decode boundary', () => {
     const entry: CachedEmbedding = {
       gameId: 'x',
       textHash: 'abc',
+      layout: EMBEDDING_LAYOUT_STAMP,
       timestamp: Date.now(),
     };
     expect(shouldSkipPooled(entry, 'abc')).toBe(true);
@@ -396,7 +400,7 @@ describe('Ollama mock: skip / first materialization / notes-only', () => {
   it('skips Ollama when pooled whole-hash matches', () => {
     const text = buildEmbeddingText({ title: 'Hades', genres: ['Action'], userNotes: 'A' });
     const hash = hashWholeEmbeddingText(text);
-    expect(shouldSkipPooled({ textHash: hash, poolVersion: 1 }, hash)).toBe(true);
+    expect(shouldSkipPooled({ textHash: hash, poolVersion: 1, layout: EMBEDDING_LAYOUT_STAMP }, hash)).toBe(true);
     expect(embedMock).not.toHaveBeenCalled();
   });
 

@@ -10,16 +10,24 @@
  *
  * Everything that derives a hash, a stamp, a cache key or an index generation imports from here.
  *
- * COMPATIBILITY: with today's version numbers every derived string is byte-identical to what was
- * shipped before (`t10m1`, `c1`, poolVersion 1), so introducing this module re-embeds nothing.
+ * COMPATIBILITY: this module was introduced with versions that left every derived string byte-identical
+ * to what was shipped before (`t10m1`, `c1`, poolVersion 1). 1.0.97 bumped the MODEL version to 2
+ * (`t10m2`, `c1m2`, stamp `t10m2c1p1`): every row written before is stale and is re-embedded once.
  * Rows written before per-row stamps existed carry no `layout` and are read as LEGACY_LAYOUT_STAMP.
  * A future bump of any version changes the stamp, and unstamped/older rows then read as stale.
  */
 
 /** Whole-text builder version (not for chunk-layout changes — those use EMBEDDING_CHUNK_VERSION). */
 export const EMBEDDING_TEXT_VERSION = 10;
-/** Bump on a model swap / quant change (the Ollama tag itself is tracked separately, see embedding-migration.ts). */
-export const EMBEDDING_MODEL_VERSION = 1;
+/**
+ * Bump on a model swap / quant change (the Ollama tag itself is tracked separately, see embedding-migration.ts).
+ * 2 (1.0.97): the built-in llama.cpp runtime loads the Hugging Face arctic-embed2 GGUF, whose vectors differ from
+ * Ollama's (cosine 0.966..1.0): llama.cpp applies the sentencepiece normalisation table that Ollama's tokenizer
+ * skips, so text with curly quotes, trade marks, full-width punctuation or newlines lands elsewhere. One re-embed
+ * of every cached vector on first launch of 1.0.97 (see embedding-migration.ts); fixture and numbers in
+ * src/test/local-ai/embedding-parity.test.ts.
+ */
+export const EMBEDDING_MODEL_VERSION = 2;
 /** Chunk text/layout version. */
 export const EMBEDDING_CHUNK_VERSION = 1;
 /** Pooling recipe version (weights, pooling math). */
@@ -30,7 +38,7 @@ export const EMBEDDING_POOL_VERSION = 1;
  */
 export const EMBEDDING_LAYOUT_GENERATION = 1;
 
-/** Whole-text pooled skip-hash prefix for given versions (`t10m1` for today's). */
+/** Whole-text pooled skip-hash prefix for given versions (`t10m2` for today's). */
 export function buildWholeHashPrefix(textVersion: number, modelVersion: number): string {
   return `t${textVersion}m${modelVersion}`;
 }
@@ -49,10 +57,10 @@ export function buildLayoutStamp(v: { text: number; model: number; chunk: number
   return `t${v.text}m${v.model}c${v.chunk}p${v.pool}`;
 }
 
-/** Whole-text pooled skip-hash prefix. `t10m1` today — identical to the pre-module literal. */
+/** Whole-text pooled skip-hash prefix. `t10m2` today (`t10m1` before the 1.0.97 model bump). */
 export const WHOLE_HASH_PREFIX = buildWholeHashPrefix(EMBEDDING_TEXT_VERSION, EMBEDDING_MODEL_VERSION);
 
-/** Chunk skip-hash prefix (`c1` today). */
+/** Chunk skip-hash prefix (`c1m2` today; the historical `c1` was model version 1). */
 export const CHUNK_HASH_PREFIX = buildChunkHashPrefix(EMBEDDING_CHUNK_VERSION, EMBEDDING_MODEL_VERSION);
 
 /** Stamp written on every pooled and chunk row. */

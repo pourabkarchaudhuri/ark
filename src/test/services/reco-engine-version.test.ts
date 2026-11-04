@@ -57,6 +57,7 @@ import { oracleEventLog } from '@/services/oracle-event-log';
 import { TELEMETRY_LAYERS } from '@/services/reco-scoring';
 import type { RecoShelf, RecoTelemetry, RecoWorkerResult, TasteProfile } from '@/types/reco';
 import { makeScored } from '@/test/oracle/fixtures';
+import { EMBEDDING_LAYOUT_ID } from '@/services/embedding-layout';
 
 const CACHE_KEY = 'ark-oracle-results';
 
@@ -70,6 +71,7 @@ function cachePayload(over: Record<string, unknown> = {}) {
     candidateCount: 0,
     librarySignature: buildOracleLibrarySignature(),
     pipelineStages: currentOraclePipelineStages(),
+    layoutId: EMBEDDING_LAYOUT_ID,
     ...over,
   };
 }

@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed - built-in local AI models (1.0.97 B36)
+- **Only models that really load in the bundled llama.cpp b11780 are downloaded.** Checked against the real runtime on an RTX 3070 Ti: Ollama's snowflake-arctic-embed2 blob does not load (`invalid gguf type for tokenizer.ggml.precompiled_charsmap`) and Ollama's Qwen3-Reranker-0.6B blob loads but answers with uniform garbage logits, so both now come from their pinned Hugging Face files (sha256 and size checked). bge-reranker-v2-m3 (same bytes on both sources) and gemma3-12b (header and tensor table checked) keep both sources. The manifest stamps every source with the runtime build it was verified with and a test refuses a source without it.
+- **Embedding and rerank servers launch with a 8192-token physical batch** (`-c 8192 -b 8192 -ub 8192`, `--embedding --pooling cls` / `--reranking --pooling rank`). A llama-server encoder needs the whole input in one physical batch, so the old 2048 rejected long texts (about 3000 CJK characters) that Ollama silently truncates. The embed batch step-down ladder can no longer shrink that limit.
+
+### Changed - embeddings re-embed once (EMBEDDING_MODEL_VERSION 1 to 2)
+- The built-in runtime's vectors are not identical to Ollama's. On 34 fixed game texts, plain descriptions agree at cosine >= 0.99994 (GPU vs CPU >= 0.99994), but llama.cpp applies the sentencepiece normalisation table that Ollama's tokenizer skips, so text with curly quotes, trade marks, full-width punctuation or tabs/newlines lands elsewhere (min cosine 0.966, mean 0.998). The model version is therefore bumped: layout stamp `t10m2c1p1`, hash prefixes `t10m2` / `c1m2`. On first launch of 1.0.97 every cached pooled and chunk vector reads as stale (a normal pass re-embeds them as it meets them, the migration banner offers a full re-index), and the Oracle and galaxy caches built from the old vectors are discarded.
+- The vector parity test now records and checks both spaces (`src/test/fixtures/embedding-parity.json`, `scripts/record-embedding-parity.mjs --llama-url=...`).
+
 ## [1.0.96] - 2026-10-29
 
 Performance release. A read-only audit of everything shipped in 1.0.84–1.0.95 (five areas, each re-checked by a second reviewer) found what made the app stutter; every fix below keeps results identical.

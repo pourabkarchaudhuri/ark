@@ -38,18 +38,17 @@
       "label": "snowflake-arctic-embed2 (embeddings)",
       "file": "snowflake-arctic-embed2-568m-f16.gguf",
       "auto": true,
+      "note": "Only the Hugging Face GGUF is listed. The Ollama registry blob (sha256:8c625c95...e613, 1160285024 bytes) is written by Ollama's own engine and stock llama.cpp b11780 rejects it (invalid gguf type for tokenizer.ggml.precompiled_charsmap). Pooling is cls; vectors are L2-normalised.",
       "sources": [
-        {
-          "kind": "ollama",
-          "url": "https://registry.ollama.ai/v2/library/snowflake-arctic-embed2/blobs/sha256:8c625c9569c3c799f5f9595b5a141f91d224233055608189d66746347c14e613",
-          "sha256": "8c625c9569c3c799f5f9595b5a141f91d224233055608189d66746347c14e613",
-          "size": 1160285024
-        },
         {
           "kind": "huggingface",
           "url": "https://huggingface.co/Casual-Autopsy/snowflake-arctic-embed-l-v2.0-gguf/resolve/0995861dc0b106ddd5152bc753718d4e34d1e68b/snowflake-arctic-embed-l-v2.0-f16.gguf",
           "sha256": "745f544edc8421b9398684282b25cc933fbc766467fc9eedba96ed12440206aa",
-          "size": 1157672192
+          "size": 1157672192,
+          "verifiedWith": {
+            "build": "b11780",
+            "check": "inference"
+          }
         }
       ]
     },
@@ -59,18 +58,27 @@
       "label": "bge-reranker-v2-m3 (reranker)",
       "file": "bge-reranker-v2-m3-f16.gguf",
       "auto": true,
+      "note": "Both sources are the same bytes (same sha256) and load in llama-server b11780 with --reranking --pooling rank.",
       "sources": [
         {
           "kind": "ollama",
           "url": "https://registry.ollama.ai/v2/dengcao/bge-reranker-v2-m3/blobs/sha256:5df93be121c09c43432102ad2b9569d369ccb85c209ca7583e8ccd28f0e41b88",
           "sha256": "5df93be121c09c43432102ad2b9569d369ccb85c209ca7583e8ccd28f0e41b88",
-          "size": 1159776896
+          "size": 1159776896,
+          "verifiedWith": {
+            "build": "b11780",
+            "check": "inference"
+          }
         },
         {
           "kind": "huggingface",
           "url": "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/3093af03b1a635e67b084b1d8c03c5f5e020fd05/bge-reranker-v2-m3-FP16.gguf",
           "sha256": "5df93be121c09c43432102ad2b9569d369ccb85c209ca7583e8ccd28f0e41b88",
-          "size": 1159776896
+          "size": 1159776896,
+          "verifiedWith": {
+            "build": "b11780",
+            "check": "inference"
+          }
         }
       ]
     },
@@ -80,18 +88,17 @@
       "label": "Qwen3-Reranker-0.6B Q8_0 (reranker fallback)",
       "file": "qwen3-reranker-0.6b-q8_0.gguf",
       "auto": true,
+      "note": "Only the Hugging Face GGUF is listed. The Ollama blob (dengcao/Qwen3-Reranker-0.6B, sha256:ad693e48...) loads in b11780 but returns uniform garbage logits, so it is not usable.",
       "sources": [
-        {
-          "kind": "ollama",
-          "url": "https://registry.ollama.ai/v2/dengcao/Qwen3-Reranker-0.6B/blobs/sha256:ad693e485b0b193e1fa84c92c1fc195c05958d7b836fcb201c3828a31a3eb8ea",
-          "sha256": "ad693e485b0b193e1fa84c92c1fc195c05958d7b836fcb201c3828a31a3eb8ea",
-          "size": 639150816
-        },
         {
           "kind": "huggingface",
           "url": "https://huggingface.co/mradermacher/Qwen3-Reranker-0.6B-GGUF/resolve/6727da811d2cc45b078b744bffaaab122a0691da/Qwen3-Reranker-0.6B.Q8_0.gguf",
           "sha256": "c525a7449243f690a7062e6377d6cf5adbb289354bd4316312367cd20e187ab7",
-          "size": 639150752
+          "size": 639150752,
+          "verifiedWith": {
+            "build": "b11780",
+            "check": "inference"
+          }
         }
       ]
     },
@@ -101,18 +108,27 @@
       "label": "gemma3:12b Q4_K_M (local chat)",
       "file": "gemma3-12b-it-q4_k_m.gguf",
       "auto": false,
+      "note": "Both sources load in b11780 (metadata and tensor table checked via ranged header reads, weights not downloaded); Hugging Face first because it is the plain llama.cpp conversion.",
       "sources": [
-        {
-          "kind": "ollama",
-          "url": "https://registry.ollama.ai/v2/library/gemma3/blobs/sha256:13576eb6dd8d9d04b4da04d015ff343968628d3c2984195569d9d3585651d4f1",
-          "sha256": "13576eb6dd8d9d04b4da04d015ff343968628d3c2984195569d9d3585651d4f1",
-          "size": 7309830496
-        },
         {
           "kind": "huggingface",
           "url": "https://huggingface.co/ggml-org/gemma-3-12b-it-GGUF/resolve/ec0cbabd8dbff316f659876a50202295c3c4a314/gemma-3-12b-it-Q4_K_M.gguf",
           "sha256": "7bb69bff3f48a7b642355d64a90e481182a7794707b3133890646b1efa778ff5",
-          "size": 7300574976
+          "size": 7300574976,
+          "verifiedWith": {
+            "build": "b11780",
+            "check": "metadata"
+          }
+        },
+        {
+          "kind": "ollama",
+          "url": "https://registry.ollama.ai/v2/library/gemma3/blobs/sha256:13576eb6dd8d9d04b4da04d015ff343968628d3c2984195569d9d3585651d4f1",
+          "sha256": "13576eb6dd8d9d04b4da04d015ff343968628d3c2984195569d9d3585651d4f1",
+          "size": 7309830496,
+          "verifiedWith": {
+            "build": "b11780",
+            "check": "metadata"
+          }
         }
       ]
     }

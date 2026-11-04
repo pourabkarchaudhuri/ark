@@ -26,7 +26,7 @@ export { EMBEDDING_CHUNK_VERSION };
 /** Writers stamp poolVersion; legacy rows without one are compatible with skip. */
 export const CURRENT_POOL_VERSION = EMBEDDING_POOL_VERSION;
 
-/** Whole-text hash prefix (`t10m1` today) — derived, not a second copy of the literal. */
+/** Whole-text hash prefix (`t10m2` today) — derived, not a second copy of the literal. */
 export const HASH_VERSION_PREFIX = WHOLE_HASH_PREFIX;
 
 export const CHUNK_WEIGHTS: Record<ChunkKind, number> = {

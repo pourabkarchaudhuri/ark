@@ -98,6 +98,14 @@ describe('LlamaRuntime start', () => {
     const [embed, rerank, qwen, chat] = t.spawned;
     expect(embed.args).toEqual(expect.arrayContaining(['--embedding', '--pooling', 'cls']));
     expect(rerank.args).toEqual(expect.arrayContaining(['--reranking', '--pooling', 'rank']));
+    expect(embed.args).not.toContain('--reranking');
+    expect(rerank.args).not.toContain('--embedding');
+    // Encoder models take a whole input in one physical batch: -ub (and -b) must cover the context.
+    for (const enc of [embed, rerank]) {
+      expect(argOf(enc, '-c')).toBe('8192');
+      expect(argOf(enc, '-b')).toBe('8192');
+      expect(argOf(enc, '-ub')).toBe('8192');
+    }
     expect(qwen.args).not.toContain('--embedding');
     expect(qwen.args).not.toContain('--reranking');
     expect(chat.args).toContain('--jinja');
@@ -146,16 +154,27 @@ describe('LlamaRuntime start', () => {
     expect(t.runtime.roleStatus('embed').state).toBe('stopped');
   });
 
-  it('restarts the server when the launch options change (num_batch step-down)', async () => {
+  it('never lets num_batch push the encoder -ub below the context; only a larger value restarts', async () => {
     const t = makeRuntime();
     await t.runtime.ensure('embed', { numBatch: 2048 });
+    expect(argOf(t.spawned[0], '-ub')).toBe('8192');
+    // The OOM step-down ladder (1024, 512...) cannot shrink the per-input token limit, so it is a no-op here.
+    await t.runtime.ensure('embed', { numBatch: 1024 });
     await t.runtime.ensure('embed', { numBatch: 2048 });
     expect(t.spawned).toHaveLength(1);
-    await t.runtime.ensure('embed', { numBatch: 1024 });
+    await t.runtime.ensure('embed', { numBatch: 16384 });
     expect(t.spawned).toHaveLength(2);
     expect(t.spawned[0].child.killed).toBe(true);
-    expect(argOf(t.spawned[1], '-b')).toBe('1024');
-    expect(argOf(t.spawned[1], '-ub')).toBe('1024');
+    expect(argOf(t.spawned[1], '-b')).toBe('16384');
+    expect(argOf(t.spawned[1], '-ub')).toBe('16384');
+  });
+
+  it('restarts a chat server when its context changes', async () => {
+    const t = makeRuntime();
+    await t.runtime.ensure('chat', { numCtx: 8192 });
+    await t.runtime.ensure('chat', { numCtx: 16384 });
+    expect(t.spawned).toHaveLength(2);
+    expect(argOf(t.spawned[1], '-c')).toBe('16384');
   });
 });
 
@@ -178,8 +197,7 @@ describe('LlamaRuntime GPU fallback', () => {
   it('asks for the log lines the status panel reads and keeps Vulkan out of the CPU relaunch', async () => {
     const t = makeRuntime();
     t.setOnSpawn((s) => {
-      if (argOf(s, '-ngl') !== '0') { s.child.stderr.emit('data', 'ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory
-'); s.child.crash(3); }
+      if (argOf(s, '-ngl') !== '0') { s.child.stderr.emit('data', 'ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory\n'); s.child.crash(3); }
     });
     t.setHealthy((s) => argOf(s, '-ngl') === '0');
     await t.runtime.ensure('embed');
@@ -191,8 +209,7 @@ describe('LlamaRuntime GPU fallback', () => {
 
   it('treats a server that starts with no Vulkan device as a plain CPU server, not a failure', async () => {
     const t = makeRuntime();
-    t.setOnSpawn((s) => { s.child.stderr.emit('data', 'load_tensors:   CPU_Mapped model buffer size =   201.80 MiB
-'); });
+    t.setOnSpawn((s) => { s.child.stderr.emit('data', 'load_tensors:   CPU_Mapped model buffer size =   201.80 MiB\n'); });
     const info = await t.runtime.ensure('embed');
     expect(t.spawned).toHaveLength(1);
     expect(info.cpuFallback).toBe(false);

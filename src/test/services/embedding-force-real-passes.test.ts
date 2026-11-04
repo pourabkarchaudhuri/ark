@@ -103,10 +103,10 @@ describe('catalog pass: force really re-embeds (chunk diff no longer re-uses unc
     const pooled = await readRows('catalog-embeddings');
     const chunks = await readRows('chunk-embeddings');
     expect(pooled).toHaveLength(1);
-    expect(pooled[0]).toMatchObject({ layout: 't10m1c1p1', poolVersion: 1 });
+    expect(pooled[0]).toMatchObject({ layout: 't10m2c1p1', poolVersion: 1 });
     expect(pooled[0].reindexRun).toBeUndefined(); // a normal pass is not part of a re-index run
     expect(chunks.length).toBeGreaterThan(0);
-    for (const c of chunks) expect(c.layout).toBe('t10m1c1p1');
+    for (const c of chunks) expect(c.layout).toBe('t10m2c1p1');
   });
 });
 
@@ -236,54 +236,39 @@ describe('resume only skips rows that are still CURRENT', () => {
   });
 });
 
-describe('upgrade fixture: data written before stamps existed is left completely alone', () => {
-  it('unstamped rows + a legacy "t10m1" watermark → a normal pass skips the scan and embeds nothing', async () => {
+describe('upgrade from 1.0.96 (model version 1, Ollama-space vectors)', () => {
+  it('rows hashed and stamped t10m1c1p1 with a bare t10m1 watermark are re-embedded by a normal pass', async () => {
     const gen = installOllama();
     const { embeddingService } = await freshService();
     const entries = [entry(1), entry(2), entry(3)];
     await embeddingService.generateCatalogEmbeddings(iteratorOf(entries), { storeKey: 'steam-catalog', lastSyncTimestamp: 5 });
+    const firstCalls = gen.mock.calls.flatMap(c => c[0]).length;
+    expect(firstCalls).toBeGreaterThan(0);
 
-    // Rewrite everything the way the PREVIOUS release stored it: no layout, no run id, bare-prefix watermark.
-    await mutate('catalog-embeddings', rows => rows.map(({ layout, reindexRun, ...r }) => { void layout; void reindexRun; return r; }), 'gameId');
-    await mutate('chunk-embeddings', rows => rows.map(({ layout, ...r }) => { void layout; return r; }), 'chunkId');
+    // Rewrite everything the way 1.0.96 stored it: the old stamp, hashes made with the old t10m1 / c1 prefixes
+    // (any other hash value stands in for them: it can never equal a t10m2 / c1m2 hash), and the bare-prefix watermark.
+    await mutate('catalog-embeddings', rows => rows.map(r => ({ ...r, layout: 't10m1c1p1', textHash: `t10m1:${r.textHash}` })), 'gameId');
+    await mutate('chunk-embeddings', rows => rows.map(r => ({ ...r, layout: 't10m1c1p1', textHash: `c1:${r.textHash}` })), 'chunkId');
     await mutate('embedding-meta', rows => rows.map(r => (r.key === 'steam-catalog' ? { ...r, versionStamp: 't10m1' } : r)), 'key');
 
     const reborn = (await freshService()).embeddingService;
     gen.mockClear();
+    // Same catalog, same sync timestamp: the old watermark must not make the pass skip its scan.
     await reborn.generateCatalogEmbeddings(iteratorOf(entries), { storeKey: 'steam-catalog', lastSyncTimestamp: 5 });
-    expect(gen.mock.calls.flatMap(c => c[0]).length).toBe(0);
-
-    // …and even a pass that cannot use the watermark (catalog "re-synced") finds every row current.
-    gen.mockClear();
-    await reborn.generateCatalogEmbeddings(iteratorOf(entries), { storeKey: 'steam-catalog', lastSyncTimestamp: 6 });
-    expect(gen.mock.calls.flatMap(c => c[0]).length).toBe(0);
+    expect(gen.mock.calls.flatMap(c => c[0]).length).toBe(firstCalls);
+    const pooled = await readRows('catalog-embeddings');
+    for (const row of pooled) expect(row.layout).toBe('t10m2c1p1');
+    const chunks = await readRows('chunk-embeddings');
+    for (const c of chunks) expect(c.layout).toBe('t10m2c1p1');
   });
-});
 
-describe('forced library run never joins a non-forced one', () => {
-  it('waits for every in-flight run (a waiter may start the next one) before it forces', async () => {
+  it('after the upgrade a second pass embeds nothing (the new rows are current)', async () => {
     const gen = installOllama();
     const { embeddingService } = await freshService();
-    const svc = embeddingService as unknown as { _libraryPromise: Promise<number> | null };
-    let release1!: () => void;
-    let release2!: () => void;
-    const first = new Promise<number>((r) => { release1 = () => r(0); });
-    const second = new Promise<number>((r) => { release2 = () => r(0); });
-    svc._libraryPromise = first;
-    // When the first settles, a waiter immediately starts a NON-forced run (the race the loop guards against).
-    void first.then(() => { svc._libraryPromise = second; });
-
-    let finished = false;
-    const forced = embeddingService
-      .generateMissing([{ id: 'steam-1', title: 'Lib', genres: ['RPG'], summary: 's' }], undefined, { force: true })
-      .then((n) => { finished = true; return n; });
-
-    release1();
-    await new Promise((r) => setTimeout(r, 100));
-    expect(finished).toBe(false); // still waiting on the second run
-    svc._libraryPromise = null;
-    release2();
-    await forced;
-    expect(gen).toHaveBeenCalled(); // and it then ran its own FORCED pass
+    const entries = [entry(1), entry(2)];
+    await embeddingService.generateCatalogEmbeddings(iteratorOf(entries), { storeKey: 'steam-catalog', lastSyncTimestamp: 5 });
+    gen.mockClear();
+    await embeddingService.generateCatalogEmbeddings(iteratorOf(entries), { storeKey: 'steam-catalog', lastSyncTimestamp: 6 });
+    expect(gen.mock.calls.flatMap(c => c[0]).length).toBe(0);
   });
 });

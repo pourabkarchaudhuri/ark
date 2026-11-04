@@ -14,6 +14,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EMBEDDING_DIM } from '@/services/embedding-service';
+import { EMBEDDING_LAYOUT_STAMP } from '@/services/embedding-layout';
 
 const MIGRATION_MARKER = 'ark-embeddings-migrated-v1';
 
@@ -237,6 +238,7 @@ describe('generateCatalogEmbeddings — force option bypasses the content-hash s
       gameId: 'steam-42',
       embedding: new Array(EMBEDDING_DIM).fill(0.02),
       textHash: hash,
+      layout: EMBEDDING_LAYOUT_STAMP,
       timestamp: Date.now(),
       format: 'f32',
     });

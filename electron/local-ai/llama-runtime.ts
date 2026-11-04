@@ -60,8 +60,20 @@ export interface ServerInfo {
   cpuFallback: boolean;
 }
 
+/** Context (and minimum physical batch) of the embedding and cross-encoder servers. */
+export const ENCODER_CTX = 8192;
+
+function isEncoderRole(role: LocalAiRole): boolean {
+  return role === 'embed' || role === 'rerank';
+}
+
+/** -b/-ub of an encoder server: never below the context, so no input is rejected for its length. */
+function encoderBatch(l: { numBatch?: number }): number {
+  return Math.max(ENCODER_CTX, l.numBatch && l.numBatch > 0 ? l.numBatch : 0);
+}
+
 export interface LaunchOptions {
-  /** Embed/rerank: tokens per pass (`-b`/`-ub`). Changing it restarts the server. */
+  /** Embed/rerank: tokens per pass (`-b`/`-ub`), never below ENCODER_CTX. Changing the effective value restarts the server. */
   numBatch?: number;
   /** CPU threads (`-t`). */
   numThread?: number;
@@ -291,7 +303,7 @@ export class LlamaRuntime {
       throw new RuntimeError(s.lastError ?? `The ${role} server failed too often; use Re-check to try again`, 'failed_too_often');
     }
     const wanted: LaunchOptions = { ...s.launch, ...launch };
-    if (s.state === 'ready' && !this.sameLaunch(s.launch, wanted)) {
+    if (s.state === 'ready' && !this.sameLaunch(role, s.launch, wanted)) {
       this.deps.log(`[LocalAI] ${role}: launch options changed, restarting`);
       await this.stop(role);
     }
@@ -305,8 +317,9 @@ export class LlamaRuntime {
     return s.starting;
   }
 
-  private sameLaunch(a: LaunchOptions, b: LaunchOptions): boolean {
-    return a.numBatch === b.numBatch && a.numThread === b.numThread && a.numCtx === b.numCtx;
+  private sameLaunch(role: LocalAiRole, a: LaunchOptions, b: LaunchOptions): boolean {
+    const batch = (l: LaunchOptions) => (isEncoderRole(role) ? encoderBatch(l) : l.numBatch);
+    return batch(a) === batch(b) && a.numThread === b.numThread && a.numCtx === b.numCtx;
   }
 
   private touch(s: Slot): void {
@@ -332,9 +345,12 @@ export class LlamaRuntime {
     // CPU launch: do not even initialise Vulkan, so a broken driver cannot take the fallback down too.
     if (gpuLayers === 0) args.push('--device', 'none');
     if (l.numThread && l.numThread > 0) args.push('-t', String(l.numThread));
-    if (s.role === 'embed' || s.role === 'rerank') {
-      const batch = l.numBatch && l.numBatch > 0 ? l.numBatch : 2048;
-      args.push('-c', '8192', '-b', String(batch), '-ub', String(batch));
+    if (isEncoderRole(s.role)) {
+      // Encoder models (arctic-embed2, bge-reranker) see a whole input in ONE physical batch, so -ub is a hard
+      // per-input token limit (unlike Ollama's num_batch, which only sizes the work chunks and truncates at
+      // num_ctx instead of failing). 8192 = the models' trained context; texts up to ~3000 CJK characters fit.
+      const batch = encoderBatch(l);
+      args.push('-c', String(ENCODER_CTX), '-b', String(batch), '-ub', String(batch));
       if (s.role === 'embed') args.push('--embedding', '--pooling', 'cls');
       else args.push('--reranking', '--pooling', 'rank');
     } else if (s.role === 'rerank-qwen') {

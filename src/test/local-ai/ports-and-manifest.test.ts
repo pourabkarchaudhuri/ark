@@ -84,8 +84,42 @@ describe('runtime manifest', () => {
     for (const role of LOCAL_AI_ROLES) expect(getModelForRole(role)).toBeDefined();
   });
 
-  it('puts the Ollama registry before Hugging Face (same vector space as cached vectors)', () => {
-    expect(getModelForRole('embed')?.sources.map((s) => s.kind)).toEqual(['ollama', 'huggingface']);
+  it('lists only sources that load in the bundled llama-server (Ollama own-engine blobs do not)', () => {
+    // arctic-embed2's Ollama blob fails to load (tokenizer.ggml.precompiled_charsmap) and the Ollama
+    // Qwen3 reranker blob answers with garbage logits; both models ship from Hugging Face only.
+    expect(getModelForRole('embed')?.sources.map((s) => s.kind)).toEqual(['huggingface']);
+    expect(getModelForRole('rerank-qwen')?.sources.map((s) => s.kind)).toEqual(['huggingface']);
+    expect(getModelForRole('embed')?.sources[0].sha256).toBe('745f544edc8421b9398684282b25cc933fbc766467fc9eedba96ed12440206aa');
+    expect(getModelForRole('embed')?.sources[0].size).toBe(1157672192);
+    expect(getModelForRole('rerank-qwen')?.sources[0].sha256).toBe('c525a7449243f690a7062e6377d6cf5adbb289354bd4316312367cd20e187ab7');
+  });
+
+  it('every source is stamped as verified with the shipped runtime build; encoders by real inference', () => {
+    const m = getManifest();
+    for (const model of m.models) {
+      for (const src of model.sources) {
+        expect(src.verifiedWith.build).toBe(m.runtime.build);
+        if (model.role !== 'chat') expect(src.verifiedWith.check).toBe('inference');
+      }
+    }
+  });
+
+  it('pins every Hugging Face source to a 40-hex commit (the exact revision URL, not a branch)', () => {
+    for (const model of getManifest().models) {
+      for (const src of model.sources.filter((s) => s.kind === 'huggingface')) {
+        expect(src.url).toMatch(/^https:\/\/huggingface\.co\/[^/]+\/[^/]+\/resolve\/[0-9a-f]{40}\/[^/?#]+\.gguf$/);
+      }
+    }
+  });
+
+  it('rejects a source verified with another runtime build, or an encoder verified by metadata only', () => {
+    const base = getManifest();
+    const stale = JSON.parse(JSON.stringify(base)) as RuntimeManifest;
+    stale.models[0].sources[0].verifiedWith.build = 'b1';
+    expect(validateManifest(stale).join(' ')).toMatch(/not verified with runtime/);
+    const weak = JSON.parse(JSON.stringify(base)) as RuntimeManifest;
+    weak.models[0].sources[0].verifiedWith.check = 'metadata';
+    expect(validateManifest(weak).join(' ')).toMatch(/verified by inference/);
   });
 
   it('rejects a bad manifest: unknown host, short hash, duplicate role', () => {

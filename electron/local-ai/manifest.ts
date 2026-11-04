@@ -3,10 +3,14 @@
  *
  * `runtime-manifest.json` pins the llama.cpp release that ships in the installer (build tag, zip
  * sha256, per-file sha256 checked by scripts/build-llama-runtime.mjs and verify-release.mjs) and
- * every model Ark downloads at runtime. Each model lists its sources in order: the Ollama model
- * registry first (the exact GGUF blob Ollama users already have, so vectors stay in the same
- * space), then a Hugging Face repo pinned to a commit. Every source carries its own sha256 and
- * size; a file is only used after its hash matched.
+ * every model Ark downloads at runtime. Each model lists its sources in download order: an Ollama
+ * registry blob and/or a Hugging Face file pinned to a commit. Every source carries its own sha256
+ * and size (a file is only used after its hash matched) and a `verifiedWith` stamp: the llama.cpp
+ * build it was actually loaded with and how far that check went. Only sources that load in the
+ * bundled llama-server are listed: Ollama's own-engine blobs often do not (arctic-embed2 fails to
+ * load, the Qwen3 reranker blob loads but answers garbage), so those models list Hugging Face only.
+ * validateManifest rejects a source whose stamp is for another build, so a runtime bump forces a
+ * re-verification of every model.
  */
 import { createRequire } from 'node:module';
 
@@ -17,12 +21,17 @@ export type LocalAiRole = 'embed' | 'rerank' | 'rerank-qwen' | 'chat';
 
 export const LOCAL_AI_ROLES: readonly LocalAiRole[] = ['embed', 'rerank', 'rerank-qwen', 'chat'];
 
+/** `inference`: real embeddings / rerank scores were produced and sane. `metadata`: GGUF header and tensor table loaded only. */
+export type SourceCheck = 'inference' | 'metadata';
+
 export interface ModelSource {
   kind: 'ollama' | 'huggingface';
   url: string;
   /** Lower-case hex. */
   sha256: string;
   size: number;
+  /** The runtime build this exact file was loaded with, and how thoroughly. */
+  verifiedWith: { build: string; check: SourceCheck };
 }
 
 export interface ModelEntry {
@@ -82,6 +91,14 @@ export function validateManifest(m: unknown): string[] {
     if (!/^[\w.-]+\.gguf$/.test(String(model?.file))) problems.push(`${model?.id}: file must be a plain .gguf name`);
     if (!Array.isArray(model?.sources) || model.sources.length === 0) problems.push(`${model?.id}: no sources`);
     for (const src of model?.sources ?? []) {
+      const vw = src?.verifiedWith;
+      if (!vw || vw.build !== rt?.build) {
+        problems.push(`${model.id}: source ${String(src?.kind)} was not verified with runtime ${String(rt?.build)}`);
+      } else if (vw.check !== 'inference' && vw.check !== 'metadata') {
+        problems.push(`${model.id}: source ${String(src?.kind)} has an unknown check ${String(vw.check)}`);
+      } else if (vw.check !== 'inference' && model.role !== 'chat') {
+        problems.push(`${model.id}: ${model.role} sources must be verified by inference, not only by metadata`);
+      }
       if (!HEX64.test(String(src?.sha256))) problems.push(`${model.id}: source sha256 invalid`);
       if (!(Number.isSafeInteger(src?.size) && src.size > 0)) problems.push(`${model.id}: source size invalid`);
       if (!/^https:\/\/(registry\.ollama\.ai|huggingface\.co)\//.test(String(src?.url))) {

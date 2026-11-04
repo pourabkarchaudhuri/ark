@@ -69,7 +69,7 @@ describe('forceReindexAll', () => {
     const result = await run(svc);
     expect(calls).toEqual(['cancel', 'library:force', 'steam:force', 'epic:force', 'ann']);
     expect(result).toMatchObject({ complete: true, libraryOk: true, ann: true, library: 10, steam: 100, epic: 7 });
-    expect(svc.migrationState).toMatchObject({ state: 'done', dataStamp: 't10m1c1p1' });
+    expect(svc.migrationState).toMatchObject({ state: 'done', dataStamp: 't10m2c1p1' });
     expect(svc.isReindexRecommended).toBe(false);
     expect(svc.isForceReindexAllRunning).toBe(false);
   });
@@ -172,7 +172,7 @@ describe('forceReindexAll', () => {
   it('first run on a profile reports done without doing anything', async () => {
     const svc = await freshService();
     const rec = await svc.refreshMigrationState();
-    expect(rec).toMatchObject({ state: 'done', dataStamp: 't10m1c1p1' });
+    expect(rec).toMatchObject({ state: 'done', dataStamp: 't10m2c1p1' });
     expect(svc.isReindexRecommended).toBe(false);
   });
 });

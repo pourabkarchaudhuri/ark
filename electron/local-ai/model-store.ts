@@ -2,8 +2,8 @@
  * Model downloads for the built-in local AI (1.0.97 B36).
  *
  * Models live in `%LOCALAPPDATA%\Ark\models` (not roaming, survives updates) or a folder the
- * user picked. Each file is fetched from its manifest sources in order (Ollama registry blob,
- * then a pinned Hugging Face file) through `downloadWithResume`: `.part` + HTTP Range resume,
+ * user picked. Each file is fetched from its manifest sources in order (only sources verified to load in the
+ * bundled llama-server are listed: an Ollama registry blob and/or a pinned Hugging Face file) through `downloadWithResume`: `.part` + HTTP Range resume,
  * sha256 checked before the file is moved into place. A small `<file>.verified.json` marker
  * records the hash, size and mtime, so later launches trust the file without re-hashing 1+ GB;
  * a file whose size or mtime changed is hashed again before use.
