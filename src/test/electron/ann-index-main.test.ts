@@ -62,9 +62,11 @@ class FakeIndex {
     }).sort((a, b) => a.distance - b.distance || Number(a.key - b.key)).slice(0, k);
   }
   /** Mirrors usearch: one vector → Matches; a flat matrix → BatchMatches padded to `k` per row. */
-  search(vecs: Float32Array, k: number) {
+  static searchThreads: Array<number | undefined> = [];
+  search(vecs: Float32Array, k: number, threads?: number) {
     const rows = vecs.length / this.dims;
     FakeIndex.searchCalls.push(rows);
+    FakeIndex.searchThreads.push(threads);
     if (rows === 1) {
       const scored = this.searchOne(vecs, k);
       return { keys: scored.map((s) => s.key), distances: scored.map((s) => s.distance) };
@@ -338,6 +340,14 @@ describe('queryBatch — batched native search instead of a per-vector loop (1.0
     await queryBatch(entries, 3);
     expect(FakeIndex.searchCalls.length).toBe(Math.ceil(200 / QUERY_SLICE));
     expect(Math.max(...FakeIndex.searchCalls)).toBeLessThanOrEqual(QUERY_SLICE);
+  });
+
+  it('searches on ONE native thread (threads>1 aborts usearch.node with 0xC0000409)', async () => {
+    await seed(40);
+    FakeIndex.searchThreads = [];
+    await queryBatch(Array.from({ length: 70 }, (_, i) => ({ id: `q${i}`, vector: mixed(i) })), 3);
+    expect(FakeIndex.searchThreads.length).toBeGreaterThan(1);
+    expect(new Set(FakeIndex.searchThreads)).toEqual(new Set([1]));
   });
 
   it('filters padding (sentinel keys / non-finite distances) and vacated slots', async () => {

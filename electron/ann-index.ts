@@ -637,13 +637,15 @@ export function getStatus(): {
   };
 }
 
-let searchThreadsCache = 0;
-
-/** Native threads for a batch search: all cores but one, so main keeps a core for IPC and windows. */
+/**
+ * Native threads for a batch search: always 1. Every add uses threads=1, so usearch only allocates one
+ * search context per index; a multi-threaded `search(matrix, k, N>1)` then runs past that and aborts the
+ * whole process with STATUS_STACK_BUFFER_OVERRUN (0xC0000409 in usearch.node) as soon as the Oracle
+ * queries more than one vector at once. Found by the 1.0.97 packaged-app smoke test; a 32-vector slice
+ * on one thread is still one native call per slice and is fast enough.
+ */
 function batchSearchThreads(): number {
-  if (searchThreadsCache > 0) return searchThreadsCache;
-  try { searchThreadsCache = Math.max(1, os.cpus().length - 1); } catch { searchThreadsCache = 1; }
-  return searchThreadsCache;
+  return 1;
 }
 
 interface SearchResultLike {
