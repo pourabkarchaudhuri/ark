@@ -119,6 +119,9 @@ describe('ModelStore download', () => {
     const st = store.statuses()[0];
     expect(st.state).toBe('error');
     expect(st.error?.code).toBe('checksum');
+    // The discarded partial must not leave a stale 100% bar on the error row.
+    expect(st.pct).toBe(0);
+    expect(st.transferred).toBe(0);
     expect(fs.existsSync(path.join(dir, 'embed-test.gguf'))).toBe(false);
     expect(fs.readdirSync(dir).filter((n) => n.endsWith('.part'))).toEqual([]);
     expect(store.modelPath('embed')).toBeNull();

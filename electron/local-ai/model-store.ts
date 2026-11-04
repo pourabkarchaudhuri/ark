@@ -315,7 +315,13 @@ export class ModelStore {
         this.current = null;
       }
     }
-    this.set(m.id, { state: 'error', error: lastErr ?? { code: 'unknown', message: 'Download failed' } });
+    // Show what is really on disk: a discarded (checksum) or never-started partial is 0, not the stale 100%.
+    const lastSrc = m.sources[m.sources.length - 1];
+    const kept = lastSrc ? (() => { try { return fs.statSync(`${this.partBase(m, lastSrc)}.part`).size; } catch { return 0; } })() : 0;
+    this.set(m.id, {
+      state: 'error', transferred: kept, pct: pct(kept, lastSrc?.size ?? 0),
+      error: lastErr ?? { code: 'unknown', message: 'Download failed' },
+    });
     return lastErr && (lastErr.code === 'offline' || lastErr.code === 'disk_full' || lastErr.code === 'blocked') ? 'stop' : 'next';
   }
 
