@@ -1363,7 +1363,9 @@ export function Dashboard() {
                         disabled
                         className="h-9 px-3 border rounded-lg transition-all gap-1.5 text-white/25 border-white/5 cursor-not-allowed"
                       >
-                        <Network className={cn("h-4 w-4 opacity-40", galaxyBuilding && "animate-pulse")} />
+                        {/* Pulses twice when the build starts, then rests: the label already says "Processing", and an infinite
+              loop keeps the window compositing at 60 fps for as long as the build (or the model download behind it) lasts. */}
+                        <Network className={cn("h-4 w-4 opacity-40", galaxyBuilding && "galaxy-building-pulse")} />
                         <span className="text-xs font-medium hidden lg:inline">
                           {label}
                         </span>

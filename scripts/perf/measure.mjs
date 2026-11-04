@@ -15,6 +15,7 @@
  *   --heap-snapshots     snapshots at cycle 2 and the last cycle, constructor diff + retainer paths in the result
  *   --seed-dir DIR       generated profile (created when missing; reused across builds)
  *   --skip-applist       skip the Steam app-list refresh phase
+ *   --hidden-settle-s N  visible wait on Browse before hiding the window (default 45)
  *
  * Always runs on a COPIED test profile (--user-data-dir), with every variable named in the checkout's .env
  * blanked so no real key reaches the app. Never touches the real userData.
@@ -72,6 +73,7 @@ const cfg = {
   heapSnapshots: flag('--heap-snapshots'),
   seedDir: path.resolve(opt('--seed-dir', path.join(os.tmpdir(), 'ark-perf-seed'))),
   skipApplist: flag('--skip-applist'),
+  hiddenSettleS: Number(opt('--hidden-settle-s', quick ? 5 : 45)),
 };
 
 const pkg = JSON.parse(fs.readFileSync(path.join(cfg.appDir, 'package.json'), 'utf8'));
@@ -226,17 +228,22 @@ async function run() {
     }
     result.skippedSteps.push(...[...runner.skipped.entries()].map(([k, v]) => `${k} (x${v})`));
 
-    // hidden idle (window hidden to tray)
+    // hidden idle (window hidden to tray). Back on Browse, the offline Top Sellers fetch chain (egdata / Epic retries with
+    // 4 s and 6 s waits, started by every Browse visit) needs ~45 s to run out; hiding earlier measured that burst, not idle.
     await runner.toBrowseTop();
+    await sleep(cfg.hiddenSettleS * 1000);
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.hide()));
     await sleep(5000);
-    await probes.eventLoop(true);
+    // The probe's own 10 ms event-loop sampler costs ~2% of a core in the main process (a blank Electron window under
+    // Playwright idles at 0.07%), which would be charged to the app: stop it while hidden idle is measured.
+    const sampler = await probes.mainProbe('eventLoopMonitor', false).then(() => true, () => false);
     const h0 = await probes.processes();
     const h0t = Date.now();
     await sleep(cfg.hiddenIdleS * 1000);
-    const eldH = await probes.eventLoop(true);
     const h1 = await probes.processes();
     const h1t = Date.now();
+    if (sampler) await probes.mainProbe('eventLoopMonitor', true).catch(() => {});
+    const eldH = null;
     result.hiddenIdle = {
       cpuPct: cpuPct({ t: h0t, procs: h0 }, { t: h1t, procs: h1 }),
       eld: eldH,

@@ -58,6 +58,32 @@ describe('perf harness analysis', () => {
     );
   });
 
+  it('GPU rule: compares the settled reading with the warm pre-Ark reading and with the warm-up visit', () => {
+    const gpuRule = (r) => leakRules(r).find((x) => x.name.startsWith('GPU memory'));
+    const withGpu = (before, after2, afterN) => {
+      const r = run();
+      r.baselineSample.gpuWorkingSetMB = 170; // cold start reading, before any screen has cached anything
+      r.cycles.find((c) => c.n === 2).extra.gpuBeforeArk = before;
+      r.cycles.find((c) => c.n === 2).extra.gpuAfterArk = after2;
+      r.cycles[r.cycles.length - 1].extra.gpuAfterArk = afterN;
+      return r;
+    };
+    expect(gpuRule(withGpu(280, 182, 190)).pass).toBe(true);
+    // memory that creeps up from one Ark visit to the next is a leak even while it stays under the pre-Ark level
+    expect(gpuRule(withGpu(280, 182, 230)).pass).toBe(false);
+    // and memory that never comes back down fails
+    expect(gpuRule(withGpu(200, 330, 330)).pass).toBe(false);
+  });
+
+  it('event-loop max budget uses the median of the per-cycle maxima, not the one worst spike', () => {
+    const base = run();
+    const cur = run();
+    cur.cycles[2].eld.max = 400; // one GC / compaction spike in a 10-cycle run
+    expect(budgets(cur, base).find((r) => r.name.startsWith('Main event-loop max per cycle')).pass).toBe(true);
+    cur.cycles.forEach((c) => (c.eld.max = 400)); // every cycle stalls
+    expect(budgets(cur, base).find((r) => r.name.startsWith('Main event-loop max per cycle')).pass).toBe(false);
+  });
+
   it('enforces the absolute budgets and the 10% relative budget', () => {
     const base = run();
     const bad = run();

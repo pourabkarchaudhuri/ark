@@ -113,11 +113,14 @@ function getSourceDir(): string {
   return path.join(appPath, 'dataset', 'ml');
 }
 
-/** onnxruntime intra-op threads: half the cores, so a fold run never takes every core from main. */
+/** Upper bound on intra-op threads: each session builds its own pool, 8 folds x 10 threads cost seconds at boot. */
+const MAX_INTRA_OP_THREADS = 4;
+
+/** onnxruntime intra-op threads: half the cores (never more than MAX_INTRA_OP_THREADS), so a fold run never takes every core from main. */
 function intraOpThreads(): number {
   let cores = testHooks.cpuCount ?? 0;
   if (!cores) { try { cores = os.cpus().length; } catch { cores = 2; } }
-  return Math.max(1, Math.floor(cores / 2));
+  return Math.min(MAX_INTRA_OP_THREADS, Math.max(1, Math.floor(cores / 2)));
 }
 
 /**
@@ -254,7 +257,15 @@ async function _doLoadModel(): Promise<boolean> {
     // though the input has dynamic batch [None, n_features]. onnxruntime
     // logs a noisy warning on every batch inference. Level 3 = errors only.
     // intraOpNumThreads: onnxruntime's default takes every core, starving main's IPC during a run.
-    const sessOpts = { executionProviders: ['cpu'], logSeverityLevel: 3 as const, intraOpNumThreads: intraOpThreads() };
+    // graphOptimizationLevel 'disabled': these are LightGBM TreeEnsemble graphs with nothing to fuse, but the default
+    // level re-optimises every fold synchronously on the main thread (8 folds: ~2.6-5 s at boot, up to ~700 ms blocks).
+    // Disabled loads them in ~1 s with the same scores (max difference 1e-6).
+    const sessOpts = {
+      executionProviders: ['cpu'],
+      logSeverityLevel: 3 as const,
+      intraOpNumThreads: intraOpThreads(),
+      graphOptimizationLevel: 'disabled' as const,
+    };
 
     // Load ensemble ONNX sessions
     const ensembleDir = path.join(dataDir, 'onnx_ensemble');

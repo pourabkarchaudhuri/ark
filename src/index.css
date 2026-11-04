@@ -251,18 +251,38 @@
   0%, 100% { transform: scale(1); opacity: 0.2; }
   50%      { transform: scale(1.4); opacity: 0.05; }
 }
+/* The empty-state decoration plays once and then rests: even compositor-only keyframes keep the whole
+   window drawing at 60 fps for as long as they run (each second of it costs the GPU process ~15% of a core), and an offline Browse sits on this screen indefinitely
+   (the 1.0.97 perf gate measured ~17% GPU-process CPU, and the same while the window was hidden, until the
+   loops were finite). The keyframes end on the resting values set below. */
 .empty-state-ring-a {
   opacity: 0.3;
-  animation: empty-state-ring-a 3s ease-in-out infinite;
+  animation: empty-state-ring-a 3s ease-in-out 1;
 }
 .empty-state-ring-b {
   opacity: 0.2;
-  animation: empty-state-ring-b 3s ease-in-out 0.5s infinite;
+  animation: empty-state-ring-b 3s ease-in-out 0.5s 1;
+}
+@keyframes galaxy-building-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 0.15; }
+}
+.galaxy-building-pulse {
+  animation: galaxy-building-pulse 2s ease-in-out 2;
+}
+@keyframes empty-state-twinkle {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+.empty-state-twinkle {
+  animation: empty-state-twinkle 2s ease-in-out 1;
 }
 @media (prefers-reduced-motion: reduce) {
   .oracle-kenburns,
   .empty-state-ring-a,
-  .empty-state-ring-b {
+  .empty-state-ring-b,
+  .empty-state-twinkle,
+  .galaxy-building-pulse {
     animation: none;
   }
   .audit-ring-glow {

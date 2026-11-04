@@ -131,6 +131,10 @@ export function makeRunner(probes, log) {
       await sleep(800);
     }, steps);
 
+    // GPU working set just before this cycle's Voyage visit: what "back to baseline" means once the app has warmed up
+    // (the cold start reading predates every image and 3D asset the other screens keep cached)
+    extra.gpuBeforeArk = (await probes.processes()).electron.filter((p) => p.type === 'GPU').reduce((acc, p) => acc + p.workingSetMB, 0);
+
     // --- Voyage tabs
     await step(n, 'voyage', async () => {
       await click(T('journey-button'));
@@ -148,7 +152,25 @@ export function makeRunner(probes, log) {
       await click(T('library-button'));
       await sleep(4000);
     }, steps);
-    extra.gpuAfterArk = (await probes.processes()).electron.filter((p) => p.type === 'GPU').reduce((a, p) => a + p.workingSetMB, 0);
+    // Chromium hands the GPU process's memory back about 10 s after the WebGL context is gone (measured: 4 s after
+    // leaving Ark 3D it is still ~440 MB, 15 s after it is back at the pre-Ark level, in v1.0.96 and 1.0.97 alike), so
+    // reading at +4 s only measures that delay. Poll until the reading stops falling (two reads within 5 MB, at least
+    // 12 s in, at most 40 s) and record both numbers.
+    const gpuNow = async () => (await probes.processes()).electron.filter((p) => p.type === 'GPU').reduce((acc, p) => acc + p.workingSetMB, 0);
+    extra.gpuAfterArk4s = await gpuNow();
+    {
+      let prev = extra.gpuAfterArk4s;
+      let cur = prev;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 40_000) {
+        await sleep(3000);
+        cur = await gpuNow();
+        if (Date.now() - t0 >= 12_000 && Math.abs(cur - prev) < 5) break;
+        prev = cur;
+      }
+      extra.gpuAfterArk = cur;
+      extra.gpuSettleS = Math.round((Date.now() - t0) / 1000);
+    }
 
     // --- Oracle compute
     await step(n, 'oracle', async () => {

@@ -13,6 +13,17 @@ const DB_VERSION = 1;
 const STORE_NAME = 'appList';
 const META_KEY = 'catalog-sync';
 
+/**
+ * Apps per stored row. The list used to be one IndexedDB row per app: 155k `put` calls, each a round trip to
+ * the browser process, blocked the renderer for ~6 s on every launch that had to rewrite the cache (the
+ * 1.0.97 perf gate measured it as most of "Enter Ark" to interactive). A few dozen chunk rows hold the same
+ * data and are written/read in a fraction of the time. Chunk rows use negative keys that ascend in chunk order, so the
+ * store keeps its `appid` key path and DB version (the status panel opens it by version); rows from older
+ * builds (one app per row, positive appid) are still read.
+ */
+const CHUNK_SIZE = 5000;
+const CHUNK_KEY_BASE = 1_000_000;
+
 /** 6 hours in milliseconds */
 const STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
 
@@ -20,6 +31,26 @@ interface CatalogMeta {
   key: string;
   syncedAt: number; // epoch ms
   count: number;
+}
+
+interface ChunkRow {
+  appid: number; // negative: chunk marker
+  apps: SteamAppListItem[];
+}
+
+/** Flatten rows read from the store: chunk rows expand, legacy one-app rows pass through. */
+function flattenRows(rows: Array<SteamAppListItem | ChunkRow>): SteamAppListItem[] {
+  let out: SteamAppListItem[] | null = null;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] as Partial<ChunkRow>;
+    if (Array.isArray(row.apps)) {
+      if (!out) out = rows.slice(0, i) as SteamAppListItem[];
+      for (const app of row.apps) out.push(app);
+    } else if (out) {
+      out.push(rows[i] as SteamAppListItem);
+    }
+  }
+  return out ?? (rows as SteamAppListItem[]);
 }
 
 // ─── Module-level singleton DB handle ────────────────────────────────────────
@@ -106,7 +137,7 @@ export async function getCachedCatalog(opts?: { sorted?: boolean }): Promise<Ste
       const tx = db.transaction(STORE_NAME, 'readonly');
       const req = tx.objectStore(STORE_NAME).getAll();
       req.onsuccess = () => {
-        const items = req.result as SteamAppListItem[];
+        const items = flattenRows(req.result as Array<SteamAppListItem | ChunkRow>);
         if (opts?.sorted) {
           sortCatalogAZ(items);
         }
@@ -156,8 +187,9 @@ export async function setCachedCatalog(apps: SteamAppListItem[]): Promise<void> 
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       store.clear();
-      for (const app of apps) {
-        store.put(app);
+      for (let i = 0, n = 0; i < apps.length; i += CHUNK_SIZE) {
+        const row: ChunkRow = { appid: ++n - CHUNK_KEY_BASE, apps: apps.slice(i, i + CHUNK_SIZE) };
+        store.put(row);
       }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);

@@ -517,12 +517,43 @@ export class JourneyStore {
     return () => this.hoursListeners.delete(listener);
   }
 
+  /** > 0 while runBatched() is collecting mutations: listeners are told once when the outermost batch ends. */
+  private _batchDepth = 0;
+  private _batchDirty = false;
+
+  /**
+   * Run several mutations as one change: subscribers (useJourney re-sorts every entry on each notification) hear
+   * about it once at the end. The auto On Hold sweep syncs ~230 games' progress here one at a time, and each
+   * notification made the Voyage hook re-read and re-sort the whole journey (part of a ~2.6 s renderer freeze).
+   * Nests; notifies even if `fn` throws part-way.
+   */
+  runBatched<T>(fn: () => T): T {
+    this._batchDepth++;
+    try {
+      return fn();
+    } finally {
+      this._batchDepth--;
+      if (this._batchDepth === 0 && this._batchDirty) {
+        this._batchDirty = false;
+        this.notifyListeners();
+      }
+    }
+  }
+
   private notifyListeners() {
+    if (this._batchDepth > 0) {
+      this._batchDirty = true;
+      return;
+    }
     this.listeners.forEach((fn) => fn());
     this.hoursListeners.forEach((fn) => fn());
   }
 
   private notifyHoursListeners() {
+    if (this._batchDepth > 0) {
+      this._batchDirty = true; // the end-of-batch notification is a superset of the hours channel
+      return;
+    }
     this.hoursListeners.forEach((fn) => fn());
   }
 

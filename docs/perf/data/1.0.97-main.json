@@ -2,10 +2,10 @@
   "meta": {
     "label": "main",
     "version": "1.0.96",
-    "commit": "4df8107",
+    "commit": "28f96a3",
     "appDir": "C:\\Projects\\Tracker",
     "machine": "12th Gen Intel(R) Core(TM) i9-12900H x20, 32 GB, win32 10.0.26200",
-    "startedAt": "2026-11-04T08:31:24.639Z",
+    "startedAt": "2026-11-04T15:45:13.671Z",
     "profile": {
       "dir": "C:\\Users\\100003~1\\AppData\\Local\\Temp\\ark-perf-seed",
       "games": 2000,
@@ -15,29 +15,28 @@
     },
     "cycles": 10,
     "idleS": 60,
-    "hiddenIdleS": 300,
+    "hiddenIdleS": 120,
     "heapSnapshots": false,
-    "finishedAt": "2026-11-04T09:15:25.652Z",
-    "note": "Run-to-run variance: this build was run three times with the final harness. Run 2 (this table) blew up in Voyage from cycle 2 (DOM nodes 3.9k -> 173k -> 360k -> 561k, event listeners 3.3k -> 43k, heap 38.9 -> 106 MB, Voyage tab switches freezing the renderer for 13-53 s). Runs 1 and 3 stayed flat: run 1 (10 cycles) heap cycle 2 39.53 MB -> cycle 10 41.30 MB (+4.5%), DOM nodes 3846 -> 3846, listeners 3345 -> 3345; run 3 (4 cycles) heap 39.52 -> 40.53 MB, nodes 3853 -> 3853. So the leak is intermittent; a leak rule that only holds some of the time is a failure. Root cause not yet identified (needs a snapshot from a blown-up run: re-run with --heap-snapshots until it reproduces)."
+    "finishedAt": "2026-11-04T16:08:07.639Z"
   },
   "coldStart": {
     "runs": [
       {
-        "enterReadyMs": 9796.2258,
-        "interactiveMs": 16570.0924,
-        "eldMax": 630.19,
-        "eldP99": 320.86
+        "enterReadyMs": 7138.397500000001,
+        "interactiveMs": 9491.263,
+        "eldMax": 570.43,
+        "eldP99": 194.51
       },
       {
-        "enterReadyMs": 9033.87079999999,
-        "interactiveMs": 13015.2506,
-        "eldMax": 684.2,
-        "eldP99": 342.88
+        "enterReadyMs": 7330.780599999998,
+        "interactiveMs": 9688.892100000001,
+        "eldMax": 544.21,
+        "eldP99": 194.38
       },
       {
-        "enterReadyMs": 9552.968800000002,
-        "interactiveMs": 13647.299799999993,
-        "eldMax": 665.85
+        "enterReadyMs": 7473.035499999998,
+        "interactiveMs": 9379.9464,
+        "eldMax": 547.88
       }
     ]
   },
@@ -46,252 +45,199 @@
       "n": 1,
       "steps": {
         "to-library": {
-          "ms": 320,
-          "t0": 85843.5,
-          "t1": 86157.29999999702,
+          "ms": 294,
+          "t0": 80133.5,
+          "t1": 80423.5,
           "error": null
         },
         "browse-load": {
-          "ms": 3714,
-          "t0": 87190.79999999702,
-          "t1": 90905.39999999106,
+          "ms": 3674,
+          "t0": 81452.60000000894,
+          "t1": 85125.40000000596,
           "error": null
         },
         "browse-scroll": {
-          "ms": 3310,
-          "t0": 90913,
-          "t1": 94222.79999999702,
+          "ms": 3249,
+          "t0": 85129.60000000894,
+          "t1": 88377.90000000596,
           "error": null
         },
         "browse-filter": {
-          "ms": 2024,
-          "t0": 94231.09999999404,
-          "t1": 96253.39999999106,
+          "ms": 1946,
+          "t0": 88383.29999999702,
+          "t1": 90328.29999999702,
           "error": null
         },
         "browse-search": {
-          "ms": 1658,
-          "t0": 96257.89999999106,
-          "t1": 97916.09999999404,
+          "ms": 1671,
+          "t0": 90330.5,
+          "t1": 92001.5,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2087,
-          "t0": 97918.39999999106,
-          "t1": 100005.29999999702,
+          "ms": 2091,
+          "t0": 92003.40000000596,
+          "t1": 94094.20000000298,
           "error": null
         },
         "game-details-x5": {
-          "ms": 13777,
-          "t0": 100007.70000000298,
-          "t1": 113783.89999999106,
+          "ms": 13739,
+          "t0": 94097.20000000298,
+          "t1": 107835.79999999702,
           "error": null
         },
         "library-status-change": {
-          "ms": 2674,
-          "t0": 113807.39999999106,
-          "t1": 116481.29999999702,
+          "ms": 2640,
+          "t0": 107846.5,
+          "t1": 110487.40000000596,
           "error": null
         },
         "voyage": {
-          "ms": 3148,
-          "t0": 116484.70000000298,
-          "t1": 119633.29999999702,
+          "ms": 3037,
+          "t0": 112876.10000000894,
+          "t1": 115913.20000000298,
           "error": null
         },
         "voyage-Log": {
-          "ms": 6656,
-          "t0": 119636.39999999106,
-          "t1": 126292.59999999404,
+          "ms": 1933,
+          "t0": 115914.70000000298,
+          "t1": 117847.20000000298,
           "error": null
         },
         "voyage-Scenes": {
-          "ms": 18877,
-          "t0": 126294.70000000298,
-          "t1": 145172.09999999404,
+          "ms": 2104,
+          "t0": 117850,
+          "t1": 119954.20000000298,
           "error": null
         },
         "voyage-Audit": {
-          "ms": 2208,
-          "t0": 145178.70000000298,
-          "t1": 147386.29999999702,
+          "ms": 1976,
+          "t0": 119955.90000000596,
+          "t1": 121932.5,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 1847,
-          "t0": 147393.5,
-          "t1": 149240.29999999702,
+          "ms": 1761,
+          "t0": 121934.29999999702,
+          "t1": 123694.79999999702,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4370,
-          "t0": 149243.5,
-          "t1": 153613,
+          "ms": 4230,
+          "t0": 123696.60000000894,
+          "t1": 127926.10000000894,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 21623,
-          "t0": 153616.5,
-          "t1": 175240.09999999404,
+          "ms": 4656,
+          "t0": 127928.29999999702,
+          "t1": 132583.10000000894,
           "error": null
         },
         "oracle": {
-          "ms": 3850,
-          "t0": 180566.20000000298,
-          "t1": 184421.20000000298,
+          "ms": 3202,
+          "t0": 156659.90000000596,
+          "t1": 159862.5,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8392,
-          "t0": 184423.59999999404,
-          "t1": 192815.70000000298,
+          "ms": 8244,
+          "t0": 159864.29999999702,
+          "t1": 168108.5,
           "error": null
         },
         "upcoming": {
-          "ms": 2752,
-          "t0": 192817.89999999106,
-          "t1": 195568.39999999106,
+          "ms": 2695,
+          "t0": 168109.90000000596,
+          "t1": 170804.40000000596,
           "error": null
         },
         "settings": {
-          "ms": 8436,
-          "t0": 195572.59999999404,
-          "t1": 204009.39999999106,
+          "ms": 8048,
+          "t0": 170805.5,
+          "t1": 178853.29999999702,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4378,
-          "t0": 204016.09999999404,
-          "t1": 208387.39999999106,
+          "ms": 4167,
+          "t0": 178854.60000000894,
+          "t1": 183021.29999999702,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 11224,
-              "resultBytes": 0,
-              "totalMs": 16109.704999999973,
-              "maxMs": 2018.80799999999
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.1
+          "probeMs": 0
         },
         "browseScrollFrames": {
-          "n": 198,
+          "n": 195,
           "p50": 16.60000000000582,
           "p95": 16.80000000000291,
-          "max": 17.09999999999127,
+          "max": 16.90000000000873,
           "over50": 0,
           "over100": 0
         },
         "browseScrollIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 11224,
-              "resultBytes": 0,
-              "totalMs": 16111.767499999987,
-              "maxMs": 2019.2088999999978
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.07
+          "probeMs": 0
         },
-        "gpuAfterArk": 439
+        "gpuBeforeArk": 238.6,
+        "gpuAfterArk4s": 447,
+        "gpuAfterArk": 177.9,
+        "gpuSettleS": 22
       },
       "eld": {
-        "count": 7818,
-        "min": 8.01,
-        "mean": 15.68,
-        "p50": 15.56,
-        "p99": 22.95,
-        "max": 252.97
+        "count": 6595,
+        "min": 8.78,
+        "mean": 15.6,
+        "p50": 15.57,
+        "p99": 21.46,
+        "max": 104.66
       },
       "longTasks": {
         "all": [
-          59,
-          56,
-          129,
-          119,
-          203,
-          4766,
-          84,
-          68,
-          86,
-          82,
-          62,
-          83,
-          78,
-          77,
-          78,
-          58,
-          78,
-          59,
-          78,
-          15953,
-          804,
-          201,
-          50,
-          53,
-          55,
           54,
-          66,
-          267,
-          92,
-          126,
-          57,
-          12807,
-          89,
-          352,
-          65,
-          378,
-          266,
-          93,
-          71,
-          67,
-          77,
-          60,
-          113,
+          114,
+          103,
+          171,
+          206,
+          239,
+          138,
+          51,
           124,
-          830,
-          71
+          55,
+          70,
+          221
         ],
         "browse-scroll": [],
-        "oracle": [
-          71
-        ],
+        "oracle": [],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 59,
-          "voyage": 203,
-          "voyage-Log": 4766,
-          "voyage-Scenes": 15953,
-          "voyage-Audit": 267,
-          "voyage-Medals": 126,
-          "voyage-Your Ark": 57,
-          "voyage-leave-ark": 12807,
-          "oracle": 71
+          "to-library": 54,
+          "voyage": 171,
+          "voyage-Log": 206,
+          "voyage-Scenes": 239,
+          "voyage-Audit": 124,
+          "voyage-Medals": 70,
+          "voyage-leave-ark": 221
         }
       },
       "sample": {
         "label": "cycle-1",
-        "t": 1793781391074,
+        "t": 1793807335988,
         "renderer": {
-          "jsHeapUsedMB": 38.89,
-          "jsHeapTotalMB": 41.45,
-          "domNodes": 3853,
-          "jsEventListeners": 3347,
+          "jsHeapUsedMB": 37.67,
+          "jsHeapTotalMB": 39.92,
+          "domNodes": 3846,
+          "jsEventListeners": 3341,
           "documents": 2,
-          "layoutCount": 741,
-          "recalcStyleCount": 3458,
-          "taskDurationS": 63.846,
-          "scriptDurationS": 19.005
+          "layoutCount": 737,
+          "recalcStyleCount": 2024,
+          "taskDurationS": 9.982,
+          "scriptDurationS": 3.832
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -311,53 +257,53 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 246.5,
-        "gpuPrivateMB": 207.8,
-        "totalWorkingSetMB": 927.4,
-        "mainHeapMB": 46.4,
-        "mainRssMB": 420.3,
+        "gpuWorkingSetMB": 237.4,
+        "gpuPrivateMB": 206.2,
+        "totalWorkingSetMB": 877,
+        "mainHeapMB": 43.7,
+        "mainRssMB": 370.6,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 420.3,
-              "privateMB": 420.4,
-              "cpuSec": 112.958
+              "workingSetMB": 370.6,
+              "privateMB": 366.4,
+              "cpuSec": 35.848
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 246.5,
-              "privateMB": 207.8,
-              "cpuSec": 44.969
+              "workingSetMB": 237.4,
+              "privateMB": 206.2,
+              "cpuSec": 17.702
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
               "workingSetMB": 59.8,
               "privateMB": 15,
-              "cpuSec": 10.489
+              "cpuSec": 5.357
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 232.5,
-              "privateMB": 1097.5,
-              "cpuSec": 104.759
+              "workingSetMB": 201.4,
+              "privateMB": 283.3,
+              "cpuSec": 25.029
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 927.4,
-          "totalCpuSec": 282.77,
-          "mainHeapMB": 46.4,
-          "mainRssMB": 420.3
+          "totalWorkingSetMB": 877,
+          "totalCpuSec": 82.56,
+          "mainHeapMB": 43.7,
+          "mainRssMB": 370.6
         }
       }
     },
@@ -365,300 +311,214 @@
       "n": 2,
       "steps": {
         "to-library": {
-          "ms": 711,
-          "t0": 220357.39999999106,
-          "t1": 221020.39999999106,
+          "ms": 275,
+          "t0": 186041.40000000596,
+          "t1": 186311.20000000298,
           "error": null
         },
         "browse-load": {
-          "ms": 4053,
-          "t0": 222136.59999999404,
-          "t1": 226214.89999999106,
+          "ms": 3672,
+          "t0": 187333.29999999702,
+          "t1": 191006.90000000596,
           "error": null
         },
         "browse-scroll": {
-          "ms": 3710,
-          "t0": 226236.70000000298,
-          "t1": 229946.70000000298,
+          "ms": 3255,
+          "t0": 191012.40000000596,
+          "t1": 194267.20000000298,
           "error": null
         },
         "browse-filter": {
-          "ms": 2219,
-          "t0": 229960.89999999106,
-          "t1": 232180.20000000298,
+          "ms": 1929,
+          "t0": 194270.79999999702,
+          "t1": 196200.20000000298,
           "error": null
         },
         "browse-search": {
-          "ms": 1708,
-          "t0": 232188.89999999106,
-          "t1": 233897.79999999702,
+          "ms": 1651,
+          "t0": 196201.29999999702,
+          "t1": 197852.20000000298,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2182,
-          "t0": 233902.5,
-          "t1": 236082,
+          "ms": 2084,
+          "t0": 197855,
+          "t1": 199939.70000000298,
           "error": null
         },
         "game-details-x5": {
-          "ms": 13846,
-          "t0": 236093.20000000298,
-          "t1": 249936.89999999106,
+          "ms": 13766,
+          "t0": 199941.29999999702,
+          "t1": 213707,
           "error": null
         },
         "library-status-change": {
-          "ms": 2996,
-          "t0": 250003.70000000298,
-          "t1": 253000.89999999106,
+          "ms": 2662,
+          "t0": 213723,
+          "t1": 216384.20000000298,
           "error": null
         },
         "voyage": {
-          "ms": 26716,
-          "t0": 253006.09999999404,
-          "t1": 279558.5,
+          "ms": 2932,
+          "t0": 218837.20000000298,
+          "t1": 221767.79999999702,
           "error": null
         },
         "voyage-Log": {
-          "ms": 35824,
-          "t0": 279883.700000003,
-          "t1": 315756,
-          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Log$/i }).first()"
+          "ms": 1697,
+          "t0": 221770.79999999702,
+          "t1": 223467.40000000596,
+          "error": null
         },
         "voyage-Scenes": {
-          "ms": 34174,
-          "t0": 315997.799999997,
-          "t1": 350020.59999999404,
-          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Scenes$/i }).first()"
+          "ms": 2019,
+          "t0": 223468.79999999702,
+          "t1": 225487.40000000596,
+          "error": null
         },
         "voyage-Audit": {
-          "ms": 6428,
-          "t0": 350182.59999999404,
-          "t1": 356629.59999999404,
+          "ms": 1920,
+          "t0": 225489.5,
+          "t1": 227409.60000000894,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 2365,
-          "t0": 356643,
-          "t1": 359004.39999999106,
+          "ms": 1732,
+          "t0": 227411.60000000894,
+          "t1": 229142.79999999702,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4939,
-          "t0": 359015.09999999404,
-          "t1": 363953.39999999106,
+          "ms": 4289,
+          "t0": 229144.79999999702,
+          "t1": 233433.60000000894,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 64798,
-          "t0": 363966.09999999404,
-          "t1": 428705.799999997,
-          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+          "ms": 4574,
+          "t0": 233435.40000000596,
+          "t1": 238009.5,
+          "error": null
         },
         "oracle": {
-          "ms": 5470,
-          "t0": 436630.89999999106,
-          "t1": 442101.299999997,
+          "ms": 3281,
+          "t0": 262268.700000003,
+          "t1": 265550.299999997,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8428,
-          "t0": 442104.89999999106,
-          "t1": 450530.799999997,
+          "ms": 8238,
+          "t0": 265551.799999997,
+          "t1": 273789.10000000894,
           "error": null
         },
         "upcoming": {
-          "ms": 2830,
-          "t0": 450537.09999999404,
-          "t1": 453367.5,
+          "ms": 2722,
+          "t0": 273790.90000000596,
+          "t1": 276513.200000003,
           "error": null
         },
         "settings": {
-          "ms": 8788,
-          "t0": 453371.200000003,
-          "t1": 462158.700000003,
+          "ms": 8060,
+          "t0": 276515.299999997,
+          "t1": 284575.5,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4498,
-          "t0": 462165,
-          "t1": 466658.89999999106,
+          "ms": 4158,
+          "t0": 284577,
+          "t1": 288735.5,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 11224,
+          "invoke": {},
+          "send": {
+            "localAi:status-changed": {
+              "calls": 3,
+              "errors": 0,
+              "argBytes": 4338,
               "resultBytes": 0,
-              "totalMs": 21801.70259999996,
-              "maxMs": 2886.300199999998
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "localAi:models-settled": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 26,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "ollama:rerank-progress": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 168,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
             }
           },
-          "send": {},
-          "probeMs": 0.15
+          "probeMs": 0.05
         },
         "browseScrollFrames": {
-          "n": 223,
+          "n": 195,
           "p50": 16.60000000000582,
-          "p95": 17.10000000000582,
-          "max": 19.10000000000582,
+          "p95": 16.800000000017462,
+          "max": 17.10000000000582,
           "over50": 0,
           "over100": 0
         },
         "browseScrollIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 11224,
-              "resultBytes": 0,
-              "totalMs": 16214.380200000043,
-              "maxMs": 2037.3277000000235
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.16
+          "probeMs": 0
         },
-        "gpuAfterArk": 445.4
+        "gpuBeforeArk": 280.1,
+        "gpuAfterArk4s": 484.6,
+        "gpuAfterArk": 182.5,
+        "gpuSettleS": 22
       },
       "eld": {
-        "count": 15474,
-        "min": 7.37,
-        "mean": 15.92,
-        "p50": 15.55,
-        "p99": 27.51,
-        "max": 182.58
+        "count": 6591,
+        "min": 9.05,
+        "mean": 15.58,
+        "p50": 15.59,
+        "p99": 21.23,
+        "max": 81
       },
       "longTasks": {
         "all": [
-          64,
-          204,
-          55,
-          81,
-          117,
-          58,
-          100,
-          57,
-          70,
-          65,
-          79,
-          64,
-          78,
-          71,
-          150,
-          133,
-          60,
-          23029,
-          240,
-          185,
+          199,
           206,
-          244,
-          268,
-          240,
-          249,
-          193,
-          260,
-          72,
-          167,
-          83,
-          167,
-          223,
-          307,
-          210,
-          242,
-          34692,
-          276,
-          70,
-          154,
-          167,
-          57,
-          207,
-          220,
-          33091,
-          104,
-          1400,
-          88,
-          85,
-          1757,
-          827,
-          139,
-          233,
-          379,
-          71,
-          146,
-          139,
-          104,
-          73,
-          53037,
-          244,
-          1338,
-          415,
-          64,
-          113,
-          1455,
-          1069,
-          50,
-          232,
-          204,
-          383,
-          253,
-          262,
-          431,
-          53,
-          724,
-          314,
-          198,
-          228,
-          72,
-          166,
-          327,
-          63,
-          248,
-          195,
-          217,
-          278,
-          146,
-          82,
-          1276
+          94,
+          100,
+          170
         ],
         "browse-scroll": [],
-        "oracle": [
-          146,
-          82,
-          1276
-        ],
+        "oracle": [],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 204,
-          "browse-filter": 55,
-          "game-details-x5": 117,
-          "library-status-change": 150,
-          "voyage": 23029,
-          "voyage-Log": 34692,
-          "voyage-Scenes": 33091,
-          "voyage-Audit": 1757,
-          "voyage-Medals": 379,
-          "voyage-Your Ark": 146,
-          "voyage-leave-ark": 53037,
-          "oracle": 1276
+          "voyage": 199,
+          "voyage-Scenes": 206,
+          "voyage-Audit": 100,
+          "voyage-leave-ark": 170
         }
       },
       "sample": {
         "label": "cycle-2",
-        "t": 1793781654662,
+        "t": 1793807441833,
         "renderer": {
-          "jsHeapUsedMB": 61.21,
-          "jsHeapTotalMB": 63.95,
-          "domNodes": 173115,
-          "jsEventListeners": 16741,
+          "jsHeapUsedMB": 38.36,
+          "jsHeapTotalMB": 40.92,
+          "domNodes": 3846,
+          "jsEventListeners": 3345,
           "documents": 2,
-          "layoutCount": 1182,
-          "recalcStyleCount": 8744,
-          "taskDurationS": 268.295,
-          "scriptDurationS": 84.007
+          "layoutCount": 1198,
+          "recalcStyleCount": 3547,
+          "taskDurationS": 17.18,
+          "scriptDurationS": 6.441
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -678,53 +538,53 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 230.2,
-        "gpuPrivateMB": 190.5,
-        "totalWorkingSetMB": 1274.1,
-        "mainHeapMB": 47,
-        "mainRssMB": 423,
+        "gpuWorkingSetMB": 239,
+        "gpuPrivateMB": 208.3,
+        "totalWorkingSetMB": 878.7,
+        "mainHeapMB": 38.3,
+        "mainRssMB": 371.3,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 423,
-              "privateMB": 422.5,
-              "cpuSec": 146.379
+              "workingSetMB": 371.3,
+              "privateMB": 366.3,
+              "cpuSec": 43.185
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 230.2,
-              "privateMB": 190.5,
-              "cpuSec": 128.568
+              "workingSetMB": 239,
+              "privateMB": 208.3,
+              "cpuSec": 25.884
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
-              "workingSetMB": 60,
-              "privateMB": 15,
-              "cpuSec": 35.778
+              "workingSetMB": 59.4,
+              "privateMB": 14.6,
+              "cpuSec": 9.017
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 588.3,
-              "privateMB": 1168,
-              "cpuSec": 353.076
+              "workingSetMB": 206.4,
+              "privateMB": 284.3,
+              "cpuSec": 40.084
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 1274.1,
-          "totalCpuSec": 677.14,
-          "mainHeapMB": 47,
-          "mainRssMB": 423
+          "totalWorkingSetMB": 878.7,
+          "totalCpuSec": 116.17,
+          "mainHeapMB": 38.3,
+          "mainRssMB": 371.3
         }
       }
     },
@@ -732,303 +592,217 @@
       "n": 3,
       "steps": {
         "to-library": {
-          "ms": 757,
-          "t0": 483935.299999997,
-          "t1": 484676.799999997,
+          "ms": 235,
+          "t0": 291887.799999997,
+          "t1": 292117.5,
           "error": null
         },
         "browse-load": {
-          "ms": 3965,
-          "t0": 485769.700000003,
-          "t1": 489746.39999999106,
+          "ms": 3695,
+          "t0": 293144.60000000894,
+          "t1": 296839.299999997,
           "error": null
         },
         "browse-scroll": {
-          "ms": 3713,
-          "t0": 489764.39999999106,
-          "t1": 493473,
+          "ms": 3252,
+          "t0": 296845.40000000596,
+          "t1": 300097.700000003,
           "error": null
         },
         "browse-filter": {
-          "ms": 2195,
-          "t0": 493490,
-          "t1": 495682.299999997,
+          "ms": 1936,
+          "t0": 300105.200000003,
+          "t1": 302040.90000000596,
           "error": null
         },
         "browse-search": {
-          "ms": 1712,
-          "t0": 495688.89999999106,
-          "t1": 497398.39999999106,
+          "ms": 1669,
+          "t0": 302043.200000003,
+          "t1": 303712,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2219,
-          "t0": 497405,
-          "t1": 499624.5,
+          "ms": 2090,
+          "t0": 303714.10000000894,
+          "t1": 305804.299999997,
           "error": null
         },
         "game-details-x5": {
-          "ms": 13820,
-          "t0": 499635.200000003,
-          "t1": 513447.799999997,
+          "ms": 13762,
+          "t0": 305805.700000003,
+          "t1": 319566.700000003,
           "error": null
         },
         "library-status-change": {
-          "ms": 2924,
-          "t0": 513504.5,
-          "t1": 516426.59999999404,
+          "ms": 2644,
+          "t0": 319580,
+          "t1": 322224.299999997,
           "error": null
         },
         "voyage": {
-          "ms": 27815,
-          "t0": 516432.700000003,
-          "t1": 544243.5,
+          "ms": 2953,
+          "t0": 324740.299999997,
+          "t1": 327692.799999997,
           "error": null
         },
         "voyage-Log": {
-          "ms": 37889,
-          "t0": 544589,
-          "t1": 582468.299999997,
-          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Log$/i }).first()"
+          "ms": 1708,
+          "t0": 327695,
+          "t1": 329402.700000003,
+          "error": null
         },
         "voyage-Scenes": {
-          "ms": 34530,
-          "t0": 582514.799999997,
-          "t1": 617054.799999997,
-          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Scenes$/i }).first()"
+          "ms": 2009,
+          "t0": 329404.5,
+          "t1": 331413.10000000894,
+          "error": null
         },
         "voyage-Audit": {
-          "ms": 4465,
-          "t0": 617060.700000003,
-          "t1": 621526.200000003,
+          "ms": 1963,
+          "t0": 331414.799999997,
+          "t1": 333377.60000000894,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 2092,
-          "t0": 621532.3999999911,
-          "t1": 623624.3999999911,
+          "ms": 1734,
+          "t0": 333379.10000000894,
+          "t1": 335113.10000000894,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4462,
-          "t0": 623627.200000003,
-          "t1": 628089.8999999911,
+          "ms": 4291,
+          "t0": 335114.90000000596,
+          "t1": 339405.299999997,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 57527,
-          "t0": 628091.700000003,
-          "t1": 685618.799999997,
-          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+          "ms": 4615,
+          "t0": 339407.5,
+          "t1": 344021.799999997,
+          "error": null
         },
         "oracle": {
-          "ms": 8739,
-          "t0": 694423.200000003,
-          "t1": 703163.5,
+          "ms": 3241,
+          "t0": 368378.299999997,
+          "t1": 371618.90000000596,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8319,
-          "t0": 703166.299999997,
-          "t1": 711485.599999994,
+          "ms": 8246,
+          "t0": 371621.5,
+          "t1": 379868.299999997,
           "error": null
         },
         "upcoming": {
-          "ms": 2833,
-          "t0": 711488.700000003,
-          "t1": 714321.8999999911,
+          "ms": 2719,
+          "t0": 379870.299999997,
+          "t1": 382589.40000000596,
           "error": null
         },
         "settings": {
-          "ms": 8532,
-          "t0": 714323.599999994,
-          "t1": 722855.700000003,
+          "ms": 8098,
+          "t0": 382590.799999997,
+          "t1": 390688.700000003,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4217,
-          "t0": 722859.5,
-          "t1": 727076.700000003,
+          "ms": 4156,
+          "t0": 390691.40000000596,
+          "t1": 394847.700000003,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 7,
-              "errors": 7,
-              "argBytes": 11221,
+          "invoke": {},
+          "send": {
+            "localAi:status-changed": {
+              "calls": 3,
+              "errors": 0,
+              "argBytes": 4338,
               "resultBytes": 0,
-              "totalMs": 16405.01680000004,
-              "maxMs": 2406.2680999999866
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "localAi:models-settled": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 26,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "ollama:rerank-progress": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 168,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
             }
           },
-          "send": {},
-          "probeMs": 0.15
+          "probeMs": 0.04
         },
         "browseScrollFrames": {
-          "n": 222,
+          "n": 195,
           "p50": 16.600000000034925,
-          "p95": 17.5,
-          "max": 17.70000000001164,
+          "p95": 16.79999999998836,
+          "max": 16.900000000023283,
           "over50": 0,
           "over100": 0
         },
         "browseScrollIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 12824,
-              "resultBytes": 0,
-              "totalMs": 16297.090800000005,
-              "maxMs": 2046.053600000043
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.17
+          "probeMs": 0
         },
-        "gpuAfterArk": 443.7
+        "gpuBeforeArk": 257.5,
+        "gpuAfterArk4s": 449.1,
+        "gpuAfterArk": 185.8,
+        "gpuSettleS": 22
       },
       "eld": {
-        "count": 15447,
-        "min": 7.9,
-        "mean": 15.74,
-        "p50": 15.54,
-        "p99": 25.2,
-        "max": 144.31
+        "count": 6581,
+        "min": 8.68,
+        "mean": 15.64,
+        "p50": 15.58,
+        "p99": 21.4,
+        "max": 352.06
       },
       "longTasks": {
         "all": [
-          99,
-          218,
-          51,
-          66,
-          64,
-          81,
-          80,
-          57,
-          76,
-          68,
-          76,
-          58,
-          146,
-          139,
-          62,
-          87,
-          22704,
-          289,
-          375,
-          87,
-          175,
-          218,
-          487,
-          210,
-          270,
-          277,
-          221,
-          139,
-          232,
-          78,
-          241,
-          268,
-          230,
-          171,
-          324,
-          56,
-          169,
-          202,
-          36701,
-          288,
+          216,
+          208,
           92,
-          168,
-          34150,
-          89,
-          885,
-          67,
-          60,
-          1003,
-          532,
-          90,
-          148,
-          71,
-          289,
-          60,
-          87,
-          66,
-          61,
-          49915,
-          179,
-          1064,
-          151,
-          77,
-          1746,
-          741,
-          726,
-          185,
-          1288,
-          673,
-          156,
-          180,
-          141,
-          227,
-          131,
-          79,
-          183,
-          125,
-          84,
-          1388,
-          55,
-          51,
-          58
+          58,
+          103,
+          53,
+          197
         ],
         "browse-scroll": [],
-        "oracle": [
-          1288,
-          673,
-          156,
-          180,
-          141,
-          227,
-          131,
-          79,
-          183,
-          125,
-          84,
-          1388
-        ],
+        "oracle": [],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 218,
-          "browse-filter": 66,
-          "game-details-x5": 81,
-          "library-status-change": 146,
-          "voyage": 22704,
-          "voyage-Log": 36701,
-          "voyage-Scenes": 34150,
-          "voyage-Audit": 1003,
-          "voyage-Medals": 289,
-          "voyage-Your Ark": 87,
-          "voyage-leave-ark": 49915,
-          "oracle": 1388,
-          "upcoming": 55,
-          "settings": 58
+          "voyage": 216,
+          "voyage-Scenes": 208,
+          "voyage-Audit": 103,
+          "voyage-Medals": 53,
+          "voyage-leave-ark": 197
         }
       },
       "sample": {
         "label": "cycle-3",
-        "t": 1793781907457,
+        "t": 1793807548091,
         "renderer": {
-          "jsHeapUsedMB": 83.24,
-          "jsHeapTotalMB": 86.2,
-          "domNodes": 358797,
-          "jsEventListeners": 30135,
+          "jsHeapUsedMB": 38.89,
+          "jsHeapTotalMB": 41.67,
+          "domNodes": 3846,
+          "jsEventListeners": 3345,
           "documents": 2,
-          "layoutCount": 1592,
-          "recalcStyleCount": 13703,
-          "taskDurationS": 469.821,
-          "scriptDurationS": 150.225
+          "layoutCount": 1662,
+          "recalcStyleCount": 5067,
+          "taskDurationS": 25.006,
+          "scriptDurationS": 9.105
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -1048,53 +822,53 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 206.2,
-        "gpuPrivateMB": 173.9,
-        "totalWorkingSetMB": 1550,
-        "mainHeapMB": 52.2,
-        "mainRssMB": 419.2,
+        "gpuWorkingSetMB": 241.2,
+        "gpuPrivateMB": 209.7,
+        "totalWorkingSetMB": 893.2,
+        "mainHeapMB": 44.8,
+        "mainRssMB": 373.2,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 419.2,
-              "privateMB": 417.5,
-              "cpuSec": 176.58
+              "workingSetMB": 373.2,
+              "privateMB": 369.5,
+              "cpuSec": 51.801
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 206.2,
-              "privateMB": 173.9,
-              "cpuSec": 201.216
+              "workingSetMB": 241.2,
+              "privateMB": 209.7,
+              "cpuSec": 34.34
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
-              "workingSetMB": 60.6,
-              "privateMB": 15.6,
-              "cpuSec": 58.28
+              "workingSetMB": 59.5,
+              "privateMB": 14.6,
+              "cpuSec": 12.893
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 865,
-              "privateMB": 1451.5,
-              "cpuSec": 591.191
+              "workingSetMB": 213.9,
+              "privateMB": 287.7,
+              "cpuSec": 55.819
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 1550,
-          "totalCpuSec": 1031.75,
-          "mainHeapMB": 52.2,
-          "mainRssMB": 419.2
+          "totalWorkingSetMB": 893.2,
+          "totalCpuSec": 152.3,
+          "mainHeapMB": 44.8,
+          "mainRssMB": 373.2
         }
       }
     },
@@ -1102,280 +876,214 @@
       "n": 4,
       "steps": {
         "to-library": {
-          "ms": 386,
-          "t0": 736701.799999997,
-          "t1": 737088.200000003,
+          "ms": 235,
+          "t0": 398145.299999997,
+          "t1": 398376,
           "error": null
         },
         "browse-load": {
-          "ms": 3747,
-          "t0": 738116.299999997,
-          "t1": 741863.700000003,
+          "ms": 3677,
+          "t0": 399400.40000000596,
+          "t1": 403077.299999997,
           "error": null
         },
         "browse-scroll": {
-          "ms": 3588,
-          "t0": 741871.700000003,
-          "t1": 745459.599999994,
+          "ms": 3250,
+          "t0": 403081.60000000894,
+          "t1": 406331,
           "error": null
         },
         "browse-filter": {
-          "ms": 2026,
-          "t0": 745469.700000003,
-          "t1": 747496.299999997,
+          "ms": 1959,
+          "t0": 406335.299999997,
+          "t1": 408293.5,
           "error": null
         },
         "browse-search": {
-          "ms": 1683,
-          "t0": 747498.5,
-          "t1": 749180.099999994,
+          "ms": 1657,
+          "t0": 408295.60000000894,
+          "t1": 409952.200000003,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2143,
-          "t0": 749183.700000003,
-          "t1": 751326.599999994,
+          "ms": 2088,
+          "t0": 409953.40000000596,
+          "t1": 412040.60000000894,
           "error": null
         },
         "game-details-x5": {
-          "ms": 13822,
-          "t0": 751333.8999999911,
-          "t1": 765155.5,
+          "ms": 13742,
+          "t0": 412042.299999997,
+          "t1": 425784.60000000894,
           "error": null
         },
         "library-status-change": {
-          "ms": 2725,
-          "t0": 765185.3999999911,
-          "t1": 767910.299999997,
+          "ms": 2642,
+          "t0": 425794.799999997,
+          "t1": 428436.60000000894,
           "error": null
         },
         "voyage": {
-          "ms": 16139,
-          "t0": 767913.5,
-          "t1": 784052.799999997,
+          "ms": 2935,
+          "t0": 430890.10000000894,
+          "t1": 433824.5,
           "error": null
         },
         "voyage-Log": {
-          "ms": 30049,
-          "t0": 784055,
-          "t1": 814104.299999997,
+          "ms": 1714,
+          "t0": 433826.60000000894,
+          "t1": 435539.700000003,
           "error": null
         },
         "voyage-Scenes": {
-          "ms": 30657,
-          "t0": 814107,
-          "t1": 844764.3999999911,
+          "ms": 2018,
+          "t0": 435541.799999997,
+          "t1": 437560.299999997,
           "error": null
         },
         "voyage-Audit": {
-          "ms": 2573,
-          "t0": 844766.200000003,
-          "t1": 847340.099999994,
+          "ms": 1898,
+          "t0": 437561.60000000894,
+          "t1": 439459.700000003,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 1982,
-          "t0": 847342,
-          "t1": 849323.200000003,
+          "ms": 1737,
+          "t0": 439460.90000000596,
+          "t1": 441196.90000000596,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4511,
-          "t0": 849325.700000003,
-          "t1": 853835.8999999911,
+          "ms": 4288,
+          "t0": 441199.299999997,
+          "t1": 445487,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 42477,
-          "t0": 853842,
-          "t1": 896315.799999997,
-          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+          "ms": 4530,
+          "t0": 445489.40000000596,
+          "t1": 450018.60000000894,
+          "error": null
         },
         "oracle": {
-          "ms": 5053,
-          "t0": 898989.3999999911,
-          "t1": 904043.599999994,
+          "ms": 3264,
+          "t0": 473370.5,
+          "t1": 476634.799999997,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8337,
-          "t0": 904046,
-          "t1": 912383.700000003,
+          "ms": 8234,
+          "t0": 476636.5,
+          "t1": 484871.200000003,
           "error": null
         },
         "upcoming": {
-          "ms": 2812,
-          "t0": 912385.799999997,
-          "t1": 915196.700000003,
+          "ms": 2709,
+          "t0": 484872.700000003,
+          "t1": 487581.799999997,
           "error": null
         },
         "settings": {
-          "ms": 8451,
-          "t0": 915199.8999999911,
-          "t1": 923651.799999997,
+          "ms": 8021,
+          "t0": 487583.40000000596,
+          "t1": 495604.700000003,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4245,
-          "t0": 923654.799999997,
-          "t1": 927900,
+          "ms": 4138,
+          "t0": 495606.60000000894,
+          "t1": 499744.799999997,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 12824,
+          "invoke": {},
+          "send": {
+            "localAi:status-changed": {
+              "calls": 3,
+              "errors": 0,
+              "argBytes": 4338,
               "resultBytes": 0,
-              "totalMs": 16234.572900000028,
-              "maxMs": 2032.7388999999966
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "localAi:models-settled": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 26,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "ollama:rerank-progress": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 168,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
             }
           },
-          "send": {},
-          "probeMs": 0.14
+          "probeMs": 0.04
         },
         "browseScrollFrames": {
-          "n": 215,
-          "p50": 16.600000000093132,
+          "n": 194,
+          "p50": 16.600000000034925,
           "p95": 16.800000000046566,
-          "max": 17,
+          "max": 16.900000000023283,
           "over50": 0,
           "over100": 0
         },
         "browseScrollIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 4,
-              "errors": 4,
-              "argBytes": 6412,
-              "resultBytes": 0,
-              "totalMs": 8078.187099999981,
-              "maxMs": 2020.1180999999633
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.06
+          "probeMs": 0
         },
-        "gpuAfterArk": 440.9
+        "gpuBeforeArk": 278.9,
+        "gpuAfterArk4s": 449.8,
+        "gpuAfterArk": 187.5,
+        "gpuSettleS": 21
       },
       "eld": {
-        "count": 12275,
-        "min": 7.59,
-        "mean": 15.58,
-        "p50": 15.48,
-        "p99": 21.82,
-        "max": 216.27
+        "count": 6519,
+        "min": 8.45,
+        "mean": 15.59,
+        "p50": 15.56,
+        "p99": 21.35,
+        "max": 78.38
       },
       "longTasks": {
         "all": [
-          109,
-          53,
-          51,
-          95,
-          75,
-          12765,
-          186,
-          114,
-          154,
-          209,
-          155,
-          227,
-          115,
-          156,
-          165,
-          164,
-          164,
-          213,
-          165,
-          53,
-          131,
-          60,
-          27706,
-          72,
-          93,
-          65,
-          175,
-          61,
-          89,
-          78,
-          61,
-          26647,
+          206,
+          226,
           82,
-          1698,
-          316,
-          108,
-          107,
           102,
-          103,
-          109,
-          125,
-          537,
-          79,
-          130,
-          211,
-          88,
-          55,
-          58,
-          35030,
-          163,
-          899,
-          138,
-          73,
-          123,
-          55,
-          901,
-          667,
-          121,
-          171,
-          147,
-          110,
-          141,
-          159,
-          169,
-          167,
-          154,
-          150,
-          98,
-          1288,
-          60
+          179
         ],
         "browse-scroll": [],
-        "oracle": [
-          98,
-          1288
-        ],
+        "oracle": [],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 109,
-          "game-details-x5": 53,
-          "library-status-change": 95,
-          "voyage": 12765,
-          "voyage-Log": 27706,
-          "voyage-Scenes": 26647,
-          "voyage-Audit": 537,
-          "voyage-Medals": 211,
-          "voyage-Your Ark": 88,
-          "voyage-leave-ark": 35030,
-          "oracle": 1288,
-          "settings": 60
+          "voyage": 206,
+          "voyage-Scenes": 226,
+          "voyage-Audit": 102,
+          "voyage-leave-ark": 179
         }
       },
       "sample": {
         "label": "cycle-4",
-        "t": 1793782108212,
+        "t": 1793807652719,
         "renderer": {
-          "jsHeapUsedMB": 83.37,
-          "jsHeapTotalMB": 86.2,
-          "domNodes": 360700,
-          "jsEventListeners": 30133,
+          "jsHeapUsedMB": 39.11,
+          "jsHeapTotalMB": 41.92,
+          "domNodes": 3846,
+          "jsEventListeners": 3345,
           "documents": 2,
-          "layoutCount": 2015,
-          "recalcStyleCount": 17156,
-          "taskDurationS": 612.428,
-          "scriptDurationS": 192.706
+          "layoutCount": 2120,
+          "recalcStyleCount": 7095,
+          "taskDurationS": 32.591,
+          "scriptDurationS": 11.719
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -1395,53 +1103,53 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 225.3,
-        "gpuPrivateMB": 193.4,
-        "totalWorkingSetMB": 1561.7,
-        "mainHeapMB": 48.3,
-        "mainRssMB": 424.7,
+        "gpuWorkingSetMB": 243.9,
+        "gpuPrivateMB": 212.1,
+        "totalWorkingSetMB": 906.9,
+        "mainHeapMB": 47.9,
+        "mainRssMB": 380.7,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 424.7,
-              "privateMB": 425.9,
-              "cpuSec": 198.339
+              "workingSetMB": 380.7,
+              "privateMB": 375.4,
+              "cpuSec": 59.063
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 225.3,
-              "privateMB": 193.4,
-              "cpuSec": 249.218
+              "workingSetMB": 243.9,
+              "privateMB": 212.1,
+              "cpuSec": 43.07
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
-              "workingSetMB": 60.6,
-              "privateMB": 15.5,
-              "cpuSec": 71.982
+              "workingSetMB": 59.8,
+              "privateMB": 15,
+              "cpuSec": 16.493
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 878.3,
-              "privateMB": 1605.3,
-              "cpuSec": 768.214
+              "workingSetMB": 218.6,
+              "privateMB": 288.5,
+              "cpuSec": 71.225
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 1561.7,
-          "totalCpuSec": 1291.83,
-          "mainHeapMB": 48.3,
-          "mainRssMB": 424.7
+          "totalWorkingSetMB": 906.9,
+          "totalCpuSec": 188.41,
+          "mainHeapMB": 47.9,
+          "mainRssMB": 380.7
         }
       }
     },
@@ -1449,286 +1157,214 @@
       "n": 5,
       "steps": {
         "to-library": {
-          "ms": 387,
-          "t0": 937461.099999994,
-          "t1": 937843.799999997,
+          "ms": 244,
+          "t0": 502771.10000000894,
+          "t1": 503011.799999997,
           "error": null
         },
         "browse-load": {
-          "ms": 3724,
-          "t0": 938866.200000003,
-          "t1": 942590.200000003,
+          "ms": 3679,
+          "t0": 504033.60000000894,
+          "t1": 507711.5,
           "error": null
         },
         "browse-scroll": {
-          "ms": 3303,
-          "t0": 942606.3999999911,
-          "t1": 945910.700000003,
+          "ms": 3235,
+          "t0": 507717.10000000894,
+          "t1": 510951.700000003,
           "error": null
         },
         "browse-filter": {
-          "ms": 2055,
-          "t0": 945926.599999994,
-          "t1": 947982.200000003,
+          "ms": 1945,
+          "t0": 510956.10000000894,
+          "t1": 512900,
           "error": null
         },
         "browse-search": {
-          "ms": 1692,
-          "t0": 947985.200000003,
-          "t1": 949674.200000003,
+          "ms": 1659,
+          "t0": 512902.200000003,
+          "t1": 514560,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2221,
-          "t0": 949682.5,
-          "t1": 951905.599999994,
+          "ms": 2077,
+          "t0": 514562,
+          "t1": 516638.90000000596,
           "error": null
         },
         "game-details-x5": {
-          "ms": 13759,
-          "t0": 951912.700000003,
-          "t1": 965672,
+          "ms": 13744,
+          "t0": 516640.5,
+          "t1": 530385,
           "error": null
         },
         "library-status-change": {
-          "ms": 2781,
-          "t0": 965693.700000003,
-          "t1": 968475.3999999911,
+          "ms": 2595,
+          "t0": 530395.700000003,
+          "t1": 532991.200000003,
           "error": null
         },
         "voyage": {
-          "ms": 15976,
-          "t0": 968477.599999994,
-          "t1": 984454.5,
+          "ms": 2949,
+          "t0": 535176.900000006,
+          "t1": 538123.900000006,
           "error": null
         },
         "voyage-Log": {
-          "ms": 28349,
-          "t0": 984456.3999999911,
-          "t1": 1012804.299999997,
+          "ms": 1680,
+          "t0": 538126.900000006,
+          "t1": 539807,
           "error": null
         },
         "voyage-Scenes": {
-          "ms": 30615,
-          "t0": 1012808,
-          "t1": 1043423,
+          "ms": 2037,
+          "t0": 539808.1000000089,
+          "t1": 541844.5,
           "error": null
         },
         "voyage-Audit": {
-          "ms": 2833,
-          "t0": 1043425.099999994,
-          "t1": 1046258.599999994,
+          "ms": 1912,
+          "t0": 541845.6000000089,
+          "t1": 543757.900000006,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 2134,
-          "t0": 1046260.200000003,
-          "t1": 1048394.3999999911,
+          "ms": 1718,
+          "t0": 543759.200000003,
+          "t1": 545476.6000000089,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4618,
-          "t0": 1048396.700000003,
-          "t1": 1053013.899999991,
+          "ms": 4300,
+          "t0": 545478.200000003,
+          "t1": 549777.1000000089,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 59216,
-          "t0": 1053016.799999997,
-          "t1": 1112227.799999997,
-          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+          "ms": 4618,
+          "t0": 549779.6000000089,
+          "t1": 554397.6000000089,
+          "error": null
         },
         "oracle": {
-          "ms": 4858,
-          "t0": 1115138.599999994,
-          "t1": 1119996.899999991,
+          "ms": 3279,
+          "t0": 578315.6000000089,
+          "t1": 581593.5,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8360,
-          "t0": 1119999.200000003,
-          "t1": 1128358.700000003,
+          "ms": 8246,
+          "t0": 581596.6000000089,
+          "t1": 589842,
           "error": null
         },
         "upcoming": {
-          "ms": 2803,
-          "t0": 1128360.599999994,
-          "t1": 1131164.299999997,
+          "ms": 2711,
+          "t0": 589844.400000006,
+          "t1": 592555.799999997,
           "error": null
         },
         "settings": {
-          "ms": 8314,
-          "t0": 1131166.099999994,
-          "t1": 1139480,
+          "ms": 8027,
+          "t0": 592557.700000003,
+          "t1": 600584.900000006,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4237,
-          "t0": 1139482.599999994,
-          "t1": 1143719.899999991,
+          "ms": 4158,
+          "t0": 600586.5,
+          "t1": 604745.1000000089,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 4,
-              "errors": 4,
-              "argBytes": 5612,
+          "invoke": {},
+          "send": {
+            "localAi:status-changed": {
+              "calls": 3,
+              "errors": 0,
+              "argBytes": 4338,
               "resultBytes": 0,
-              "totalMs": 8141.54429999995,
-              "maxMs": 2037.1154000000097
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "localAi:models-settled": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 26,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "ollama:rerank-progress": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 168,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
             }
           },
-          "send": {},
-          "probeMs": 0.08
+          "probeMs": 0.06
         },
         "browseScrollFrames": {
-          "n": 198,
-          "p50": 16.600000000093132,
+          "n": 194,
+          "p50": 16.600000000034925,
           "p95": 16.800000000046566,
-          "max": 17.400000000023283,
+          "max": 17.900000000023283,
           "over50": 0,
           "over100": 0
         },
         "browseScrollIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 11224,
-              "resultBytes": 0,
-              "totalMs": 16192.81190000032,
-              "maxMs": 2030.0039000000106
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.14
+          "probeMs": 0
         },
-        "gpuAfterArk": 437.5
+        "gpuBeforeArk": 260.8,
+        "gpuAfterArk4s": 444.7,
+        "gpuAfterArk": 187.5,
+        "gpuSettleS": 22
       },
       "eld": {
-        "count": 13322,
-        "min": 6.33,
-        "mean": 15.48,
-        "p50": 15.43,
-        "p99": 20.92,
-        "max": 140.77
+        "count": 6547,
+        "min": 8.37,
+        "mean": 15.58,
+        "p50": 15.58,
+        "p99": 21.5,
+        "max": 62.49
       },
       "longTasks": {
         "all": [
-          102,
-          51,
-          66,
-          64,
-          58,
-          54,
-          59,
-          118,
+          219,
+          233,
           86,
-          12869,
-          166,
-          120,
-          161,
-          159,
-          146,
-          158,
-          198,
-          139,
-          135,
-          152,
-          113,
-          167,
-          154,
-          166,
-          226,
-          54,
-          26085,
-          76,
-          90,
-          53,
-          173,
-          58,
-          89,
-          87,
-          55,
-          26221,
-          77,
-          55,
-          1982,
-          385,
-          157,
-          172,
-          189,
-          190,
-          134,
-          796,
-          89,
-          184,
-          346,
-          79,
-          96,
-          83,
-          55,
-          47173,
-          192,
-          939,
-          141,
-          72,
-          1756,
-          623,
-          138,
-          150,
-          54,
-          142,
-          189,
-          136,
-          146,
-          51,
-          126,
-          146,
-          231,
-          54,
-          72,
-          56,
-          1100
+          99,
+          186
         ],
         "browse-scroll": [],
-        "oracle": [
-          54,
-          72,
-          56,
-          1100
-        ],
+        "oracle": [],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 102,
-          "game-details-x5": 66,
-          "library-status-change": 118,
-          "voyage": 12869,
-          "voyage-Log": 26085,
-          "voyage-Scenes": 26221,
-          "voyage-Audit": 796,
-          "voyage-Medals": 346,
-          "voyage-Your Ark": 96,
-          "voyage-leave-ark": 47173,
-          "oracle": 1100
+          "voyage": 219,
+          "voyage-Scenes": 233,
+          "voyage-Audit": 99,
+          "voyage-leave-ark": 186
         }
       },
       "sample": {
         "label": "cycle-5",
-        "t": 1793782323569,
+        "t": 1793807757797,
         "renderer": {
-          "jsHeapUsedMB": 83.74,
-          "jsHeapTotalMB": 87.2,
-          "domNodes": 360730,
-          "jsEventListeners": 30133,
+          "jsHeapUsedMB": 39.35,
+          "jsHeapTotalMB": 41.92,
+          "domNodes": 3846,
+          "jsEventListeners": 3345,
           "documents": 2,
-          "layoutCount": 2420,
-          "recalcStyleCount": 19043,
-          "taskDurationS": 768.317,
-          "scriptDurationS": 249.766
+          "layoutCount": 2575,
+          "recalcStyleCount": 8620,
+          "taskDurationS": 39.651,
+          "scriptDurationS": 14.243
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -1748,53 +1384,53 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 192.4,
-        "gpuPrivateMB": 160.5,
-        "totalWorkingSetMB": 1570.3,
-        "mainHeapMB": 49.3,
-        "mainRssMB": 426.2,
+        "gpuWorkingSetMB": 242.8,
+        "gpuPrivateMB": 211,
+        "totalWorkingSetMB": 911.7,
+        "mainHeapMB": 50.6,
+        "mainRssMB": 384.6,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 426.2,
-              "privateMB": 427.4,
-              "cpuSec": 219.105
+              "workingSetMB": 384.6,
+              "privateMB": 381.3,
+              "cpuSec": 66.081
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 192.4,
-              "privateMB": 160.5,
-              "cpuSec": 299.22
+              "workingSetMB": 242.8,
+              "privateMB": 211,
+              "cpuSec": 50.898
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
-              "workingSetMB": 60.7,
-              "privateMB": 15.7,
-              "cpuSec": 85.957
+              "workingSetMB": 59.9,
+              "privateMB": 15.2,
+              "cpuSec": 19.965
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 887.7,
-              "privateMB": 1607.8,
-              "cpuSec": 956.824
+              "workingSetMB": 221.2,
+              "privateMB": 287.3,
+              "cpuSec": 85.649
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 1570.3,
-          "totalCpuSec": 1565.5,
-          "mainHeapMB": 49.3,
-          "mainRssMB": 426.2
+          "totalWorkingSetMB": 911.7,
+          "totalCpuSec": 221.77,
+          "mainHeapMB": 50.6,
+          "mainRssMB": 384.6
         }
       }
     },
@@ -1802,284 +1438,216 @@
       "n": 6,
       "steps": {
         "to-library": {
-          "ms": 363,
-          "t0": 1152816.5,
-          "t1": 1153179.700000003,
+          "ms": 231,
+          "t0": 607853.400000006,
+          "t1": 608079.1000000089,
           "error": null
         },
         "browse-load": {
-          "ms": 3748,
-          "t0": 1154207.700000003,
-          "t1": 1157956.200000003,
+          "ms": 3704,
+          "t0": 609105.900000006,
+          "t1": 612809.200000003,
           "error": null
         },
         "browse-scroll": {
-          "ms": 3276,
-          "t0": 1157963.399999991,
-          "t1": 1161239,
+          "ms": 3259,
+          "t0": 612814.200000003,
+          "t1": 616072.5,
           "error": null
         },
         "browse-filter": {
-          "ms": 2022,
-          "t0": 1161251.099999994,
-          "t1": 1163272.799999997,
+          "ms": 1969,
+          "t0": 616077.5,
+          "t1": 618046.6000000089,
           "error": null
         },
         "browse-search": {
-          "ms": 1679,
-          "t0": 1163276,
-          "t1": 1164954,
+          "ms": 1660,
+          "t0": 618048.900000006,
+          "t1": 619708.299999997,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2380,
-          "t0": 1164959.299999997,
-          "t1": 1167339.5,
+          "ms": 2074,
+          "t0": 619709.799999997,
+          "t1": 621783.299999997,
           "error": null
         },
         "game-details-x5": {
-          "ms": 13777,
-          "t0": 1167342.299999997,
-          "t1": 1181119.599999994,
+          "ms": 13767,
+          "t0": 621784.700000003,
+          "t1": 635551.5,
           "error": null
         },
         "library-status-change": {
-          "ms": 2734,
-          "t0": 1181142.5,
-          "t1": 1183865.799999997,
+          "ms": 2617,
+          "t0": 635567.799999997,
+          "t1": 638185,
           "error": null
         },
         "voyage": {
-          "ms": 17021,
-          "t0": 1183880.099999994,
-          "t1": 1200900.399999991,
+          "ms": 2929,
+          "t0": 640500.299999997,
+          "t1": 643429.1000000089,
           "error": null
         },
         "voyage-Log": {
-          "ms": 29479,
-          "t0": 1200903.299999997,
-          "t1": 1230381.799999997,
+          "ms": 1708,
+          "t0": 643431.400000006,
+          "t1": 645140.5,
           "error": null
         },
         "voyage-Scenes": {
-          "ms": 30855,
-          "t0": 1230385.200000003,
-          "t1": 1261240.5,
+          "ms": 2055,
+          "t0": 645142.1000000089,
+          "t1": 647197.299999997,
           "error": null
         },
         "voyage-Audit": {
-          "ms": 2634,
-          "t0": 1261243.399999991,
-          "t1": 1263877.399999991,
+          "ms": 1920,
+          "t0": 647198.700000003,
+          "t1": 649119.1000000089,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 2015,
-          "t0": 1263880,
-          "t1": 1265896,
+          "ms": 1728,
+          "t0": 649120.200000003,
+          "t1": 650847.799999997,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4564,
-          "t0": 1265899.099999994,
-          "t1": 1270463,
+          "ms": 4313,
+          "t0": 650848.900000006,
+          "t1": 655161.799999997,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 41590,
-          "t0": 1270466,
-          "t1": 1312048.899999991,
-          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+          "ms": 4549,
+          "t0": 655163.200000003,
+          "t1": 659711.1000000089,
+          "error": null
         },
         "oracle": {
-          "ms": 4602,
-          "t0": 1314619.5,
-          "t1": 1319220.700000003,
+          "ms": 3330,
+          "t0": 683758.700000003,
+          "t1": 687089.5,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8317,
-          "t0": 1319223,
-          "t1": 1327540.899999991,
+          "ms": 8269,
+          "t0": 687092.299999997,
+          "t1": 695361.200000003,
           "error": null
         },
         "upcoming": {
-          "ms": 2818,
-          "t0": 1327543,
-          "t1": 1330359.200000003,
+          "ms": 2725,
+          "t0": 695363.200000003,
+          "t1": 698087.299999997,
           "error": null
         },
         "settings": {
-          "ms": 8441,
-          "t0": 1330366.200000003,
-          "t1": 1338807.399999991,
+          "ms": 7976,
+          "t0": 698089.299999997,
+          "t1": 706065.299999997,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4723,
-          "t0": 1338810.200000003,
-          "t1": 1343533.599999994,
+          "ms": 4159,
+          "t0": 706067,
+          "t1": 710225.6000000089,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 4,
-              "errors": 4,
-              "argBytes": 5612,
+          "invoke": {},
+          "send": {
+            "localAi:status-changed": {
+              "calls": 3,
+              "errors": 0,
+              "argBytes": 4338,
               "resultBytes": 0,
-              "totalMs": 8086.274899999844,
-              "maxMs": 2034.1986000000034
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "localAi:models-settled": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 26,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "ollama:rerank-progress": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 168,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
             }
           },
-          "send": {},
           "probeMs": 0.06
         },
         "browseScrollFrames": {
-          "n": 196,
-          "p50": 16.600000000093132,
+          "n": 195,
+          "p50": 16.599999999976717,
           "p95": 16.800000000046566,
-          "max": 17.0999999998603,
+          "max": 17,
           "over50": 0,
           "over100": 0
         },
         "browseScrollIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 11224,
-              "resultBytes": 0,
-              "totalMs": 16149.047299999744,
-              "maxMs": 2022.2000999997836
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.18
+          "probeMs": 0
         },
-        "gpuAfterArk": 417
+        "gpuBeforeArk": 282.7,
+        "gpuAfterArk4s": 489.8,
+        "gpuAfterArk": 187.6,
+        "gpuSettleS": 22
       },
       "eld": {
-        "count": 12299,
-        "min": 7.43,
-        "mean": 15.51,
-        "p50": 15.43,
-        "p99": 20.87,
-        "max": 377.75
+        "count": 6570,
+        "min": 9.01,
+        "mean": 15.58,
+        "p50": 15.57,
+        "p99": 21.38,
+        "max": 90.31
       },
       "longTasks": {
         "all": [
+          205,
+          213,
           99,
-          73,
-          60,
-          56,
-          123,
-          78,
-          13855,
-          188,
-          130,
-          124,
-          162,
-          115,
-          171,
-          234,
-          136,
-          151,
-          196,
-          113,
-          163,
-          219,
-          151,
-          170,
-          55,
-          27261,
-          76,
-          84,
-          167,
-          63,
-          54,
-          85,
-          72,
-          61,
-          26851,
-          74,
-          58,
-          1689,
-          308,
-          104,
-          106,
-          108,
-          104,
-          130,
-          581,
-          95,
-          147,
-          226,
-          55,
-          104,
-          85,
-          63,
-          34028,
-          164,
-          924,
-          136,
-          503,
-          74,
-          54,
-          852,
-          632,
-          133,
-          148,
-          162,
-          154,
-          219,
-          164,
-          159,
-          162,
-          156,
-          82,
-          56,
-          50,
-          71,
-          875
+          107,
+          53,
+          163
         ],
         "browse-scroll": [],
-        "oracle": [
-          56,
-          50,
-          71,
-          875
-        ],
+        "oracle": [],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 99,
-          "game-details-x5": 73,
-          "library-status-change": 123,
-          "voyage": 13855,
-          "voyage-Log": 27261,
-          "voyage-Scenes": 26851,
-          "voyage-Audit": 581,
-          "voyage-Medals": 226,
-          "voyage-Your Ark": 104,
-          "voyage-leave-ark": 34028,
-          "oracle": 875
+          "voyage": 205,
+          "voyage-Scenes": 213,
+          "voyage-Audit": 107,
+          "voyage-Medals": 53,
+          "voyage-leave-ark": 163
         }
       },
       "sample": {
         "label": "cycle-6",
-        "t": 1793782523066,
+        "t": 1793807863258,
         "renderer": {
-          "jsHeapUsedMB": 83.89,
-          "jsHeapTotalMB": 87.45,
-          "domNodes": 360775,
-          "jsEventListeners": 30133,
+          "jsHeapUsedMB": 39.6,
+          "jsHeapTotalMB": 42.67,
+          "domNodes": 3846,
+          "jsEventListeners": 3345,
           "documents": 2,
-          "layoutCount": 2849,
-          "recalcStyleCount": 21149,
-          "taskDurationS": 908.344,
-          "scriptDurationS": 291.922
+          "layoutCount": 3048,
+          "recalcStyleCount": 10717,
+          "taskDurationS": 47.788,
+          "scriptDurationS": 16.918
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -2099,53 +1667,53 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 184.9,
-        "gpuPrivateMB": 177.6,
-        "totalWorkingSetMB": 1546.3,
-        "mainHeapMB": 51.6,
-        "mainRssMB": 426.9,
+        "gpuWorkingSetMB": 242.3,
+        "gpuPrivateMB": 210.8,
+        "totalWorkingSetMB": 918.9,
+        "mainHeapMB": 46.8,
+        "mainRssMB": 384,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 426.9,
-              "privateMB": 429.7,
-              "cpuSec": 238.184
+              "workingSetMB": 384,
+              "privateMB": 381.1,
+              "cpuSec": 74.086
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 184.9,
-              "privateMB": 177.6,
-              "cpuSec": 346.652
+              "workingSetMB": 242.3,
+              "privateMB": 210.8,
+              "cpuSec": 60.048
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
-              "workingSetMB": 60.8,
-              "privateMB": 15.8,
-              "cpuSec": 99.919
+              "workingSetMB": 59.7,
+              "privateMB": 14.9,
+              "cpuSec": 23.862
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 893.9,
-              "privateMB": 1608.8,
-              "cpuSec": 1131.242
+              "workingSetMB": 226.8,
+              "privateMB": 289.6,
+              "cpuSec": 101.971
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 1546.3,
-          "totalCpuSec": 1822.7,
-          "mainHeapMB": 51.6,
-          "mainRssMB": 426.9
+          "totalWorkingSetMB": 918.9,
+          "totalCpuSec": 258.78,
+          "mainHeapMB": 46.8,
+          "mainRssMB": 384
         }
       }
     },
@@ -2153,356 +1721,220 @@
       "n": 7,
       "steps": {
         "to-library": {
-          "ms": 399,
-          "t0": 1352315.899999991,
-          "t1": 1352711.299999997,
+          "ms": 247,
+          "t0": 713311.1000000089,
+          "t1": 713553.299999997,
           "error": null
         },
         "browse-load": {
-          "ms": 3727,
-          "t0": 1353728.899999991,
-          "t1": 1357454.799999997,
+          "ms": 3680,
+          "t0": 714578.700000003,
+          "t1": 718259,
           "error": null
         },
         "browse-scroll": {
-          "ms": 3326,
-          "t0": 1357463.799999997,
-          "t1": 1360790.399999991,
+          "ms": 3243,
+          "t0": 718263.200000003,
+          "t1": 721505.400000006,
           "error": null
         },
         "browse-filter": {
-          "ms": 2306,
-          "t0": 1360800.799999997,
-          "t1": 1363106.799999997,
+          "ms": 1928,
+          "t0": 721511.799999997,
+          "t1": 723439.200000003,
           "error": null
         },
         "browse-search": {
-          "ms": 1674,
-          "t0": 1363109.799999997,
-          "t1": 1364783.599999994,
+          "ms": 1662,
+          "t0": 723441.6000000089,
+          "t1": 725103.5,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2122,
-          "t0": 1364787.5,
-          "t1": 1366910,
+          "ms": 2104,
+          "t0": 725105.299999997,
+          "t1": 727208.5,
           "error": null
         },
         "game-details-x5": {
-          "ms": 13756,
-          "t0": 1366915.399999991,
-          "t1": 1380671.799999997,
+          "ms": 13777,
+          "t0": 727210.400000006,
+          "t1": 740987.5,
           "error": null
         },
         "library-status-change": {
-          "ms": 2779,
-          "t0": 1380692.299999997,
-          "t1": 1383470.899999991,
+          "ms": 2626,
+          "t0": 741001.5,
+          "t1": 743627.200000003,
           "error": null
         },
         "voyage": {
-          "ms": 16510,
-          "t0": 1383476.799999997,
-          "t1": 1399986.799999997,
+          "ms": 2940,
+          "t0": 746104.5,
+          "t1": 749043.6000000089,
           "error": null
         },
         "voyage-Log": {
-          "ms": 30057,
-          "t0": 1400049.599999994,
-          "t1": 1430107.200000003,
+          "ms": 1688,
+          "t0": 749045.900000006,
+          "t1": 750733.6000000089,
           "error": null
         },
         "voyage-Scenes": {
-          "ms": 31691,
-          "t0": 1430164.700000003,
-          "t1": 1461856.5,
+          "ms": 2022,
+          "t0": 750736,
+          "t1": 752758.6000000089,
           "error": null
         },
         "voyage-Audit": {
-          "ms": 2643,
-          "t0": 1461859,
-          "t1": 1464502.299999997,
+          "ms": 1915,
+          "t0": 752759.799999997,
+          "t1": 754673.5,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 2054,
-          "t0": 1464506.200000003,
-          "t1": 1466560.399999991,
+          "ms": 1745,
+          "t0": 754675.700000003,
+          "t1": 756421,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4563,
-          "t0": 1466562.599999994,
-          "t1": 1471124.599999994,
+          "ms": 4293,
+          "t0": 756422.5,
+          "t1": 760715.400000006,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 39498,
-          "t0": 1471128.299999997,
-          "t1": 1510620.399999991,
-          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+          "ms": 4590,
+          "t0": 760716.5,
+          "t1": 765306.6000000089,
+          "error": null
         },
         "oracle": {
-          "ms": 5192,
-          "t0": 1513288,
-          "t1": 1518479.299999997,
+          "ms": 3293,
+          "t0": 788862.299999997,
+          "t1": 792154.799999997,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8355,
-          "t0": 1518482.399999991,
-          "t1": 1526836.299999997,
+          "ms": 8264,
+          "t0": 792156.5,
+          "t1": 800419.5,
           "error": null
         },
         "upcoming": {
-          "ms": 2785,
-          "t0": 1526840,
-          "t1": 1529624.899999991,
+          "ms": 2730,
+          "t0": 800422.200000003,
+          "t1": 803152.700000003,
           "error": null
         },
         "settings": {
-          "ms": 8353,
-          "t0": 1529627.299999997,
-          "t1": 1537980.200000003,
+          "ms": 8029,
+          "t0": 803153.900000006,
+          "t1": 811182.1000000089,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4255,
-          "t0": 1537982.599999994,
-          "t1": 1542237.599999994,
+          "ms": 4170,
+          "t0": 811184.200000003,
+          "t1": 815353.400000006,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 4,
-              "errors": 4,
-              "argBytes": 5612,
+          "invoke": {},
+          "send": {
+            "localAi:status-changed": {
+              "calls": 3,
+              "errors": 0,
+              "argBytes": 4338,
               "resultBytes": 0,
-              "totalMs": 8135.6699999999255,
-              "maxMs": 2035.8373000000138
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "localAi:models-settled": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 26,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "ollama:rerank-progress": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 168,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
             }
           },
-          "send": {},
-          "probeMs": 0.08
+          "probeMs": 0.05
         },
         "browseScrollFrames": {
-          "n": 200,
+          "n": 194,
           "p50": 16.600000000093132,
           "p95": 16.800000000046566,
-          "max": 16.9000000001397,
+          "max": 17.099999999976717,
           "over50": 0,
           "over100": 0
         },
         "browseScrollIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 11224,
-              "resultBytes": 0,
-              "totalMs": 16259.898900000378,
-              "maxMs": 2038.593799999915
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.16
+          "probeMs": 0
         },
-        "gpuAfterArk": 426.5
+        "gpuBeforeArk": 270.8,
+        "gpuAfterArk4s": 451,
+        "gpuAfterArk": 187.8,
+        "gpuSettleS": 21
       },
       "eld": {
-        "count": 12272,
-        "min": 7.46,
-        "mean": 15.48,
-        "p50": 15.43,
-        "p99": 21.02,
-        "max": 173.67
+        "count": 6533,
+        "min": 9.12,
+        "mean": 15.62,
+        "p50": 15.57,
+        "p99": 21.4,
+        "max": 351.54
       },
       "longTasks": {
         "all": [
-          103,
-          79,
-          59,
-          54,
-          76,
-          86,
-          13290,
-          193,
-          135,
-          112,
-          186,
-          71,
-          142,
-          97,
-          246,
-          78,
-          149,
-          123,
-          162,
-          129,
-          154,
-          231,
-          61,
-          153,
-          129,
-          182,
-          62,
-          62,
-          66,
-          64,
-          53,
-          53,
-          129,
-          54,
-          54,
-          65,
-          55,
-          93,
-          51,
-          59,
-          164,
-          59,
-          56,
-          51,
-          114,
-          59,
-          72,
-          92,
-          60,
-          62,
-          54,
-          62,
-          67,
-          65,
-          63,
-          62,
-          58,
-          61,
-          60,
-          116,
-          60,
-          63,
-          51,
-          52,
-          59,
-          53,
-          56,
-          58,
-          69,
-          64,
-          69,
-          66,
-          106,
-          54,
-          55,
-          56,
-          55,
-          66,
-          79,
+          202,
+          201,
           98,
-          2017,
-          338,
-          114,
-          99,
-          137,
-          111,
-          120,
-          146,
-          587,
-          79,
-          125,
-          234,
-          54,
-          96,
-          85,
-          58,
-          32320,
-          156,
-          850,
-          125,
-          57,
-          539,
-          85,
-          828,
-          613,
-          118,
-          111,
-          145,
-          115,
-          125,
-          198,
-          112,
-          120,
-          140,
-          126,
-          118,
-          62,
-          204,
-          52,
-          53,
-          50,
-          50,
-          52,
-          58,
-          53,
-          53,
-          57,
-          54,
-          60,
-          54,
-          105,
-          54,
-          51,
-          52,
-          50,
-          50,
-          51,
-          914
+          100,
+          55,
+          185,
+          50
         ],
         "browse-scroll": [],
         "oracle": [
-          54,
-          60,
-          54,
-          105,
-          54,
-          51,
-          52,
-          50,
-          50,
-          51,
-          914
+          50
         ],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 103,
-          "game-details-x5": 79,
-          "library-status-change": 86,
-          "voyage": 13290,
-          "voyage-Log": 164,
-          "voyage-Scenes": 2017,
-          "voyage-Audit": 587,
-          "voyage-Medals": 234,
-          "voyage-Your Ark": 96,
-          "voyage-leave-ark": 32320,
-          "oracle": 914
+          "voyage": 202,
+          "voyage-Scenes": 201,
+          "voyage-Audit": 100,
+          "voyage-Medals": 55,
+          "voyage-leave-ark": 185,
+          "oracle": 50
         }
       },
       "sample": {
         "label": "cycle-7",
-        "t": 1793782721719,
+        "t": 1793807968483,
         "renderer": {
-          "jsHeapUsedMB": 84.26,
-          "jsHeapTotalMB": 87.45,
-          "domNodes": 360827,
-          "jsEventListeners": 30135,
+          "jsHeapUsedMB": 39.77,
+          "jsHeapTotalMB": 42.92,
+          "domNodes": 3846,
+          "jsEventListeners": 3345,
           "documents": 2,
-          "layoutCount": 3294,
-          "recalcStyleCount": 25827,
-          "taskDurationS": 1055.15,
-          "scriptDurationS": 333.745
+          "layoutCount": 3506,
+          "recalcStyleCount": 12229,
+          "taskDurationS": 55.088,
+          "scriptDurationS": 19.47
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -2522,53 +1954,53 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 196.1,
-        "gpuPrivateMB": 180.7,
-        "totalWorkingSetMB": 1574.1,
-        "mainHeapMB": 55.1,
-        "mainRssMB": 429.9,
+        "gpuWorkingSetMB": 242.1,
+        "gpuPrivateMB": 210.6,
+        "totalWorkingSetMB": 922.4,
+        "mainHeapMB": 50,
+        "mainRssMB": 384.5,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 429.9,
-              "privateMB": 433.6,
-              "cpuSec": 258.459
+              "workingSetMB": 384.5,
+              "privateMB": 381.2,
+              "cpuSec": 81.429
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 196.1,
-              "privateMB": 180.7,
-              "cpuSec": 379.826
+              "workingSetMB": 242.1,
+              "privateMB": 210.6,
+              "cpuSec": 68.17
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
-              "workingSetMB": 60.6,
-              "privateMB": 15.5,
-              "cpuSec": 114.275
+              "workingSetMB": 59.7,
+              "privateMB": 14.9,
+              "cpuSec": 27.275
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 901,
-              "privateMB": 1627,
-              "cpuSec": 1307.084
+              "workingSetMB": 230.6,
+              "privateMB": 290.1,
+              "cpuSec": 117.007
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 1574.1,
-          "totalCpuSec": 2066.03,
-          "mainHeapMB": 55.1,
-          "mainRssMB": 429.9
+          "totalWorkingSetMB": 922.4,
+          "totalCpuSec": 294.27,
+          "mainHeapMB": 50,
+          "mainRssMB": 384.5
         }
       }
     },
@@ -2576,286 +2008,214 @@
       "n": 8,
       "steps": {
         "to-library": {
-          "ms": 325,
-          "t0": 1550964.700000003,
-          "t1": 1551289.899999991,
+          "ms": 221,
+          "t0": 818536.6000000089,
+          "t1": 818751,
           "error": null
         },
         "browse-load": {
-          "ms": 3738,
-          "t0": 1552312.899999991,
-          "t1": 1556050.5,
+          "ms": 3678,
+          "t0": 819781.900000006,
+          "t1": 823459.1000000089,
           "error": null
         },
         "browse-scroll": {
-          "ms": 4105,
-          "t0": 1556056.700000003,
-          "t1": 1560161.899999991,
+          "ms": 3259,
+          "t0": 823462.5,
+          "t1": 826721.200000003,
           "error": null
         },
         "browse-filter": {
-          "ms": 2024,
-          "t0": 1560168.700000003,
-          "t1": 1562191.599999994,
+          "ms": 1956,
+          "t0": 826726.299999997,
+          "t1": 828682.1000000089,
           "error": null
         },
         "browse-search": {
-          "ms": 1688,
-          "t0": 1562195,
-          "t1": 1563883.5,
+          "ms": 1654,
+          "t0": 828683.900000006,
+          "t1": 830338,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2114,
-          "t0": 1563892.899999991,
-          "t1": 1566006.899999991,
+          "ms": 2082,
+          "t0": 830339.799999997,
+          "t1": 832421.6000000089,
           "error": null
         },
         "game-details-x5": {
-          "ms": 14159,
-          "t0": 1566015.5,
-          "t1": 1580173.599999994,
+          "ms": 13756,
+          "t0": 832425.200000003,
+          "t1": 846180.700000003,
           "error": null
         },
         "library-status-change": {
-          "ms": 2768,
-          "t0": 1580208,
-          "t1": 1582976.099999994,
+          "ms": 2632,
+          "t0": 846192.200000003,
+          "t1": 848824.299999997,
           "error": null
         },
         "voyage": {
-          "ms": 16998,
-          "t0": 1582978.099999994,
-          "t1": 1599976.099999994,
+          "ms": 2941,
+          "t0": 851239.700000003,
+          "t1": 854180.799999997,
           "error": null
         },
         "voyage-Log": {
-          "ms": 29781,
-          "t0": 1599978.399999991,
-          "t1": 1629756.5,
+          "ms": 1706,
+          "t0": 854182.400000006,
+          "t1": 855887.799999997,
           "error": null
         },
         "voyage-Scenes": {
-          "ms": 30511,
-          "t0": 1629842.200000003,
-          "t1": 1660353.899999991,
+          "ms": 2028,
+          "t0": 855890.1000000089,
+          "t1": 857917.200000003,
           "error": null
         },
         "voyage-Audit": {
-          "ms": 2545,
-          "t0": 1660357.200000003,
-          "t1": 1662901.299999997,
+          "ms": 1879,
+          "t0": 857922.1000000089,
+          "t1": 859801.299999997,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 2024,
-          "t0": 1662906,
-          "t1": 1664930.200000003,
+          "ms": 1743,
+          "t0": 859803.5,
+          "t1": 861547.1000000089,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4554,
-          "t0": 1664933.5,
-          "t1": 1669486.700000003,
+          "ms": 4315,
+          "t0": 861548.900000006,
+          "t1": 865863.6000000089,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 43263,
-          "t0": 1669490.5,
-          "t1": 1712753.099999994,
-          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+          "ms": 4544,
+          "t0": 865865.400000006,
+          "t1": 870408.900000006,
+          "error": null
         },
         "oracle": {
-          "ms": 4618,
-          "t0": 1716579.599999994,
-          "t1": 1721198.799999997,
+          "ms": 3286,
+          "t0": 894662.799999997,
+          "t1": 897948.700000003,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8314,
-          "t0": 1721201.700000003,
-          "t1": 1729515.399999991,
+          "ms": 8263,
+          "t0": 897950.6000000089,
+          "t1": 906212.400000006,
           "error": null
         },
         "upcoming": {
-          "ms": 2799,
-          "t0": 1729518.200000003,
-          "t1": 1732316.700000003,
+          "ms": 2710,
+          "t0": 906215.1000000089,
+          "t1": 908925.700000003,
           "error": null
         },
         "settings": {
-          "ms": 8440,
-          "t0": 1732321.200000003,
-          "t1": 1740762.399999991,
+          "ms": 8031,
+          "t0": 908927.299999997,
+          "t1": 916958.299999997,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4313,
-          "t0": 1740766.200000003,
-          "t1": 1745081.399999991,
+          "ms": 4195,
+          "t0": 916960.6000000089,
+          "t1": 921155.6000000089,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 4,
-              "errors": 4,
-              "argBytes": 6412,
+          "invoke": {},
+          "send": {
+            "localAi:status-changed": {
+              "calls": 3,
+              "errors": 0,
+              "argBytes": 4338,
               "resultBytes": 0,
-              "totalMs": 8174.450700000394,
-              "maxMs": 2046.5793000000995
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "localAi:models-settled": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 26,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "ollama:rerank-progress": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 168,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
             }
           },
-          "send": {},
-          "probeMs": 0.06
+          "probeMs": 0.05
         },
         "browseScrollFrames": {
-          "n": 213,
+          "n": 195,
           "p50": 16.600000000093132,
-          "p95": 16.800000000046566,
-          "max": 565.8999999999069,
-          "over50": 1,
-          "over100": 1
+          "p95": 16.900000000023283,
+          "max": 17.099999999976717,
+          "over50": 0,
+          "over100": 0
         },
         "browseScrollIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 8,
-              "errors": 8,
-              "argBytes": 12824,
-              "resultBytes": 0,
-              "totalMs": 16477.766699999804,
-              "maxMs": 2076.663500000024
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.11
+          "probeMs": 0
         },
-        "gpuAfterArk": 413.1
+        "gpuBeforeArk": 260.9,
+        "gpuAfterArk4s": 489.2,
+        "gpuAfterArk": 188,
+        "gpuSettleS": 22
       },
       "eld": {
-        "count": 12491,
-        "min": 7.55,
-        "mean": 15.54,
-        "p50": 15.47,
-        "p99": 21.58,
-        "max": 128.91
+        "count": 6593,
+        "min": 9.14,
+        "mean": 15.56,
+        "p50": 15.57,
+        "p99": 21.51,
+        "max": 94.31
       },
       "longTasks": {
         "all": [
-          94,
-          51,
-          58,
-          53,
-          58,
-          61,
-          91,
-          91,
-          13819,
-          205,
-          146,
-          131,
-          185,
-          64,
-          152,
-          231,
-          138,
-          138,
-          171,
-          130,
-          162,
-          177,
-          155,
-          163,
-          53,
-          26916,
-          75,
-          107,
-          63,
-          185,
-          67,
-          57,
-          206,
-          77,
-          57,
-          26380,
-          82,
-          62,
-          1775,
-          305,
-          110,
-          130,
-          125,
-          101,
-          51,
-          104,
-          505,
-          94,
-          128,
-          236,
-          55,
-          77,
+          202,
+          210,
           84,
-          64,
-          59,
-          35195,
-          158,
-          974,
-          143,
-          996,
-          114,
-          866,
-          626,
-          130,
-          113,
-          140,
-          118,
-          121,
-          195,
-          137,
-          169,
-          163,
-          173,
-          201,
-          138,
-          99,
-          882
+          98,
+          171
         ],
         "browse-scroll": [],
-        "oracle": [
-          99,
-          882
-        ],
+        "oracle": [],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 94,
-          "game-details-x5": 61,
-          "library-status-change": 91,
-          "voyage": 13819,
-          "voyage-Log": 26916,
-          "voyage-Scenes": 26380,
-          "voyage-Audit": 505,
-          "voyage-Medals": 236,
-          "voyage-Your Ark": 84,
-          "voyage-leave-ark": 35195,
-          "oracle": 882
+          "voyage": 202,
+          "voyage-Scenes": 210,
+          "voyage-Audit": 98,
+          "voyage-leave-ark": 171
         }
       },
       "sample": {
         "label": "cycle-8",
-        "t": 1793782925236,
+        "t": 1793808074482,
         "renderer": {
-          "jsHeapUsedMB": 83.1,
-          "jsHeapTotalMB": 86.36,
-          "domNodes": 360855,
-          "jsEventListeners": 30133,
+          "jsHeapUsedMB": 40.02,
+          "jsHeapTotalMB": 43.17,
+          "domNodes": 3846,
+          "jsEventListeners": 3345,
           "documents": 2,
-          "layoutCount": 3726,
-          "recalcStyleCount": 29299,
-          "taskDurationS": 1200.46,
-          "scriptDurationS": 377.377
+          "layoutCount": 3975,
+          "recalcStyleCount": 14398,
+          "taskDurationS": 63.114,
+          "scriptDurationS": 22.206
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -2875,53 +2235,53 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 167.1,
-        "gpuPrivateMB": 163.4,
-        "totalWorkingSetMB": 1317.8,
-        "mainHeapMB": 51.9,
-        "mainRssMB": 208.3,
+        "gpuWorkingSetMB": 243.8,
+        "gpuPrivateMB": 212.2,
+        "totalWorkingSetMB": 929.7,
+        "mainHeapMB": 52.9,
+        "mainRssMB": 385.6,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 208.3,
-              "privateMB": 431.5,
-              "cpuSec": 279.026
+              "workingSetMB": 385.6,
+              "privateMB": 382.2,
+              "cpuSec": 89.323
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 167.1,
-              "privateMB": 163.4,
-              "cpuSec": 429.1
+              "workingSetMB": 243.8,
+              "privateMB": 212.2,
+              "cpuSec": 77.769
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
-              "workingSetMB": 56.7,
-              "privateMB": 15.3,
-              "cpuSec": 128.499
+              "workingSetMB": 59.7,
+              "privateMB": 14.9,
+              "cpuSec": 31.11
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 888.5,
-              "privateMB": 1626,
-              "cpuSec": 1488.647
+              "workingSetMB": 234.6,
+              "privateMB": 290.3,
+              "cpuSec": 133.825
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 1317.8,
-          "totalCpuSec": 2330.56,
-          "mainHeapMB": 51.9,
-          "mainRssMB": 208.3
+          "totalWorkingSetMB": 929.7,
+          "totalCpuSec": 331.55,
+          "mainHeapMB": 52.9,
+          "mainRssMB": 385.6
         }
       }
     },
@@ -2929,137 +2289,162 @@
       "n": 9,
       "steps": {
         "to-library": {
-          "ms": 336,
-          "t0": 1754491.599999994,
-          "t1": 1754826.299999997,
+          "ms": 237,
+          "t0": 924538.1000000089,
+          "t1": 924770.1000000089,
           "error": null
         },
         "browse-load": {
-          "ms": 4256,
-          "t0": 1755843.700000003,
-          "t1": 1760099.599999994,
+          "ms": 3687,
+          "t0": 925787.5,
+          "t1": 929473.799999997,
           "error": null
         },
         "browse-scroll": {
-          "ms": 3281,
-          "t0": 1760107.099999994,
-          "t1": 1763389,
+          "ms": 3233,
+          "t0": 929480.1000000089,
+          "t1": 932713.400000006,
           "error": null
         },
         "browse-filter": {
-          "ms": 2000,
-          "t0": 1763398.099999994,
-          "t1": 1765397.799999997,
+          "ms": 1962,
+          "t0": 932717.6000000089,
+          "t1": 934679.799999997,
           "error": null
         },
         "browse-search": {
-          "ms": 1672,
-          "t0": 1765399.5,
-          "t1": 1767072.200000003,
+          "ms": 1660,
+          "t0": 934681.6000000089,
+          "t1": 936341.299999997,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2106,
-          "t0": 1767073.799999997,
-          "t1": 1769179.899999991,
+          "ms": 2092,
+          "t0": 936342.700000003,
+          "t1": 938434.1000000089,
           "error": null
         },
         "game-details-x5": {
-          "ms": 13734,
-          "t0": 1769188.700000003,
-          "t1": 1782926.700000003,
+          "ms": 13744,
+          "t0": 938437.799999997,
+          "t1": 952181.400000006,
           "error": null
         },
         "library-status-change": {
-          "ms": 2718,
-          "t0": 1782952.299999997,
-          "t1": 1785670.799999997,
+          "ms": 2654,
+          "t0": 952190.900000006,
+          "t1": 954844.5,
           "error": null
         },
         "voyage": {
-          "ms": 17827,
-          "t0": 1785672.799999997,
-          "t1": 1803498.599999994,
+          "ms": 2970,
+          "t0": 957466.900000006,
+          "t1": 960436.900000006,
           "error": null
         },
         "voyage-Log": {
-          "ms": 30903,
-          "t0": 1803501,
-          "t1": 1834404.299999997,
+          "ms": 1711,
+          "t0": 960439.400000006,
+          "t1": 962150.5,
           "error": null
         },
         "voyage-Scenes": {
-          "ms": 30461,
-          "t0": 1834407.099999994,
-          "t1": 1864868,
-          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Scenes$/i }).first()"
+          "ms": 2026,
+          "t0": 962152,
+          "t1": 964178.6000000089,
+          "error": null
         },
         "voyage-Audit": {
-          "ms": 4919,
-          "t0": 1864871.299999997,
-          "t1": 1869788.899999991,
+          "ms": 1908,
+          "t0": 964180.200000003,
+          "t1": 966088.200000003,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 2200,
-          "t0": 1869792.899999991,
-          "t1": 1871994.799999997,
+          "ms": 1739,
+          "t0": 966092.299999997,
+          "t1": 967831.200000003,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4852,
-          "t0": 1872001.700000003,
-          "t1": 1876854.099999994,
+          "ms": 4294,
+          "t0": 967833.299999997,
+          "t1": 972127.200000003,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 47705,
-          "t0": 1876863.099999994,
-          "t1": 1924576.200000003,
-          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+          "ms": 4609,
+          "t0": 972128.299999997,
+          "t1": 976737.6000000089,
+          "error": null
         },
         "oracle": {
-          "ms": 5930,
-          "t0": 1928034.5,
-          "t1": 1933964.599999994,
+          "ms": 3332,
+          "t0": 1002321.700000003,
+          "t1": 1005653.299999997,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8315,
-          "t0": 1933966.399999991,
-          "t1": 1942281.599999994,
+          "ms": 8243,
+          "t0": 1005655.299999997,
+          "t1": 1013899.1000000089,
           "error": null
         },
         "upcoming": {
-          "ms": 2812,
-          "t0": 1942283.799999997,
-          "t1": 1945096.299999997,
+          "ms": 2717,
+          "t0": 1013900.6000000089,
+          "t1": 1016618,
           "error": null
         },
         "settings": {
-          "ms": 8376,
-          "t0": 1945098.299999997,
-          "t1": 1953474.200000003,
+          "ms": 8048,
+          "t0": 1016619.200000003,
+          "t1": 1024666.700000003,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4368,
-          "t0": 1953477,
-          "t1": 1957840.299999997,
+          "ms": 4164,
+          "t0": 1024668.799999997,
+          "t1": 1028832.799999997,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
           "invoke": {},
-          "send": {},
-          "probeMs": 0
+          "send": {
+            "localAi:status-changed": {
+              "calls": 3,
+              "errors": 0,
+              "argBytes": 4338,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "localAi:models-settled": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 26,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "ollama:rerank-progress": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 168,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            }
+          },
+          "probeMs": 0.04
         },
         "browseScrollFrames": {
-          "n": 196,
+          "n": 194,
           "p50": 16.600000000093132,
-          "p95": 16.899999999906868,
-          "max": 17.299999999813735,
+          "p95": 16.800000000046566,
+          "max": 17.199999999953434,
           "over50": 0,
           "over100": 0
         },
@@ -3068,129 +2453,50 @@
           "send": {},
           "probeMs": 0
         },
-        "gpuAfterArk": 417.6
+        "gpuBeforeArk": 267.9,
+        "gpuAfterArk4s": 450.8,
+        "gpuAfterArk": 190.1,
+        "gpuSettleS": 23
       },
       "eld": {
-        "count": 12923,
-        "min": 8.34,
-        "mean": 15.74,
-        "p50": 15.54,
-        "p99": 24.85,
-        "max": 123.99
+        "count": 6696,
+        "min": 8.69,
+        "mean": 15.58,
+        "p50": 15.55,
+        "p99": 21.5,
+        "max": 116.59
       },
       "longTasks": {
         "all": [
-          94,
-          66,
-          53,
-          83,
-          78,
-          14540,
-          186,
-          146,
-          176,
-          203,
-          152,
-          244,
-          182,
-          167,
-          134,
-          167,
-          157,
-          218,
-          163,
-          160,
-          151,
-          148,
-          53,
-          28637,
-          78,
-          83,
-          171,
-          56,
-          86,
-          82,
-          56,
-          30166,
-          80,
-          929,
-          78,
-          1327,
-          553,
-          107,
-          169,
-          324,
-          62,
-          140,
-          103,
-          112,
-          56,
-          41649,
-          189,
-          929,
-          222,
-          85,
-          870,
-          758,
-          195,
-          160,
-          252,
-          321,
-          216,
-          219,
-          123,
-          170,
-          208,
-          143,
-          154,
-          133,
-          234,
-          155,
-          59,
-          935,
-          58
+          220,
+          201,
+          102,
+          96,
+          183
         ],
         "browse-scroll": [],
-        "oracle": [
-          170,
-          208,
-          143,
-          154,
-          133,
-          234,
-          155,
-          59,
-          935
-        ],
+        "oracle": [],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 94,
-          "game-details-x5": 66,
-          "library-status-change": 83,
-          "voyage": 14540,
-          "voyage-Log": 28637,
-          "voyage-Scenes": 30166,
-          "voyage-Audit": 1327,
-          "voyage-Medals": 324,
-          "voyage-Your Ark": 140,
-          "voyage-leave-ark": 41649,
-          "oracle": 935,
-          "upcoming": 58
+          "voyage": 220,
+          "voyage-Scenes": 201,
+          "voyage-Audit": 96,
+          "voyage-leave-ark": 183
         }
       },
       "sample": {
         "label": "cycle-9",
-        "t": 1793783140328,
+        "t": 1793808182472,
         "renderer": {
-          "jsHeapUsedMB": 105.9,
-          "jsHeapTotalMB": 109.2,
-          "domNodes": 530172,
-          "jsEventListeners": 43527,
+          "jsHeapUsedMB": 40.24,
+          "jsHeapTotalMB": 43.17,
+          "domNodes": 3846,
+          "jsEventListeners": 3345,
           "documents": 2,
-          "layoutCount": 4109,
-          "recalcStyleCount": 31178,
-          "taskDurationS": 1355.88,
-          "scriptDurationS": 426.152
+          "layoutCount": 4442,
+          "recalcStyleCount": 15915,
+          "taskDurationS": 70.915,
+          "scriptDurationS": 24.775
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -3210,53 +2516,53 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 150.8,
-        "gpuPrivateMB": 147.7,
-        "totalWorkingSetMB": 1520.1,
-        "mainHeapMB": 53.4,
-        "mainRssMB": 199.6,
+        "gpuWorkingSetMB": 243.8,
+        "gpuPrivateMB": 212.3,
+        "totalWorkingSetMB": 934.5,
+        "mainHeapMB": 48.2,
+        "mainRssMB": 384.3,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 199.6,
-              "privateMB": 427.6,
-              "cpuSec": 298.107
+              "workingSetMB": 384.3,
+              "privateMB": 380.7,
+              "cpuSec": 97.375
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 150.8,
-              "privateMB": 147.7,
-              "cpuSec": 478.445
+              "workingSetMB": 243.8,
+              "privateMB": 212.3,
+              "cpuSec": 86.334
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
-              "workingSetMB": 56.6,
-              "privateMB": 15.5,
-              "cpuSec": 143.34
+              "workingSetMB": 59.8,
+              "privateMB": 15,
+              "cpuSec": 34.692
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 1106.6,
-              "privateMB": 1670.5,
-              "cpuSec": 1681.252
+              "workingSetMB": 240.5,
+              "privateMB": 293.4,
+              "cpuSec": 149.498
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 1520.1,
-          "totalCpuSec": 2607.81,
-          "mainHeapMB": 53.4,
-          "mainRssMB": 199.6
+          "totalWorkingSetMB": 934.5,
+          "totalCpuSec": 367.33,
+          "mainHeapMB": 48.2,
+          "mainRssMB": 384.3
         }
       }
     },
@@ -3264,298 +2570,218 @@
       "n": 10,
       "steps": {
         "to-library": {
-          "ms": 394,
-          "t0": 1969577.200000003,
-          "t1": 1969970.599999994,
+          "ms": 240,
+          "t0": 1032527.900000006,
+          "t1": 1032765,
           "error": null
         },
         "browse-load": {
-          "ms": 3718,
-          "t0": 1970984.599999994,
-          "t1": 1974701.399999991,
+          "ms": 3702,
+          "t0": 1033792.1000000089,
+          "t1": 1037494.6000000089,
           "error": null
         },
         "browse-scroll": {
-          "ms": 3312,
-          "t0": 1974715.099999994,
-          "t1": 1978027.399999991,
+          "ms": 3282,
+          "t0": 1037501.900000006,
+          "t1": 1040783.5,
           "error": null
         },
         "browse-filter": {
-          "ms": 2020,
-          "t0": 1978035.299999997,
-          "t1": 1980054.799999997,
+          "ms": 1977,
+          "t0": 1040788.6000000089,
+          "t1": 1042765.200000003,
           "error": null
         },
         "browse-search": {
-          "ms": 1678,
-          "t0": 1980057,
-          "t1": 1981734.399999991,
+          "ms": 1664,
+          "t0": 1042767.5,
+          "t1": 1044431.6000000089,
           "error": null
         },
         "browse-search-empty": {
-          "ms": 2708,
-          "t0": 1981737.700000003,
-          "t1": 1984445.599999994,
+          "ms": 2093,
+          "t0": 1044433.900000006,
+          "t1": 1046527.5,
           "error": null
         },
         "game-details-x5": {
-          "ms": 13782,
-          "t0": 1984455.700000003,
-          "t1": 1998239.299999997,
+          "ms": 13760,
+          "t0": 1046533.5,
+          "t1": 1060292.700000003,
           "error": null
         },
         "library-status-change": {
-          "ms": 2764,
-          "t0": 1998269.899999991,
-          "t1": 2001034.599999994,
+          "ms": 2701,
+          "t0": 1060307.400000006,
+          "t1": 1063007.799999997,
           "error": null
         },
         "voyage": {
-          "ms": 17719,
-          "t0": 2001036.599999994,
-          "t1": 2018754.599999994,
+          "ms": 2953,
+          "t0": 1065867.900000006,
+          "t1": 1068820.299999997,
           "error": null
         },
         "voyage-Log": {
-          "ms": 29842,
-          "t0": 2018757.700000003,
-          "t1": 2048594.5,
+          "ms": 1682,
+          "t0": 1068821.900000006,
+          "t1": 1070503.400000006,
           "error": null
         },
         "voyage-Scenes": {
-          "ms": 30061,
-          "t0": 2048695.200000003,
-          "t1": 2078756.700000003,
+          "ms": 2007,
+          "t0": 1070504.700000003,
+          "t1": 1072511.799999997,
           "error": null
         },
         "voyage-Audit": {
-          "ms": 2529,
-          "t0": 2078766.899999991,
-          "t1": 2081295.599999994,
+          "ms": 1912,
+          "t0": 1072513.100000009,
+          "t1": 1074424.200000003,
           "error": null
         },
         "voyage-Medals": {
-          "ms": 2053,
-          "t0": 2081298.399999991,
-          "t1": 2083350.399999991,
+          "ms": 1734,
+          "t0": 1074425.799999997,
+          "t1": 1076159.100000009,
           "error": null
         },
         "voyage-Your Ark": {
-          "ms": 4447,
-          "t0": 2083354.5,
-          "t1": 2087802.399999991,
+          "ms": 4267,
+          "t0": 1076160.700000003,
+          "t1": 1080427.200000003,
           "error": null
         },
         "voyage-leave-ark": {
-          "ms": 47112,
-          "t0": 2087805,
-          "t1": 2134915.899999991,
-          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+          "ms": 4582,
+          "t0": 1080428.600000009,
+          "t1": 1085009.799999997,
+          "error": null
         },
         "oracle": {
-          "ms": 6986,
-          "t0": 2141782.5,
-          "t1": 2148774.299999997,
+          "ms": 3229,
+          "t0": 1110135.600000009,
+          "t1": 1113363.900000006,
           "error": null
         },
         "oracle-compute": {
-          "ms": 8332,
-          "t0": 2148776.599999994,
-          "t1": 2157108.700000003,
+          "ms": 8228,
+          "t0": 1113366.900000006,
+          "t1": 1121594.799999997,
           "error": null
         },
         "upcoming": {
-          "ms": 2770,
-          "t0": 2157111,
-          "t1": 2159880.099999994,
+          "ms": 2711,
+          "t0": 1121596.799999997,
+          "t1": 1124307.400000006,
           "error": null
         },
         "settings": {
-          "ms": 8406,
-          "t0": 2159883.299999997,
-          "t1": 2168288.399999991,
+          "ms": 8047,
+          "t0": 1124308.5,
+          "t1": 1132354.200000003,
           "error": null
         },
         "back-to-browse": {
-          "ms": 4198,
-          "t0": 2168292,
-          "t1": 2172489.599999994,
+          "ms": 4153,
+          "t0": 1132357.299999997,
+          "t1": 1136510.5,
           "error": null
         }
       },
       "extra": {
         "browseLoadIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 6,
-              "errors": 6,
-              "argBytes": 8418,
+          "invoke": {},
+          "send": {
+            "localAi:status-changed": {
+              "calls": 3,
+              "errors": 0,
+              "argBytes": 4338,
               "resultBytes": 0,
-              "totalMs": 12174.2984999998,
-              "maxMs": 2035.688700000057
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "localAi:models-settled": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 26,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
+            },
+            "ollama:rerank-progress": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 168,
+              "resultBytes": 0,
+              "totalMs": 0,
+              "maxMs": 0
             }
           },
-          "send": {},
           "probeMs": 0.09
         },
         "browseScrollFrames": {
-          "n": 198,
+          "n": 196,
           "p50": 16.600000000093132,
           "p95": 16.800000000046566,
-          "max": 16.9000000001397,
+          "max": 16.900000000023283,
           "over50": 0,
           "over100": 0
         },
         "browseScrollIpc": {
-          "invoke": {
-            "steam:fetchCatalogBatch": {
-              "calls": 6,
-              "errors": 6,
-              "argBytes": 8418,
-              "resultBytes": 0,
-              "totalMs": 12207.863200000254,
-              "maxMs": 2041.0767000000924
-            }
-          },
+          "invoke": {},
           "send": {},
-          "probeMs": 0.08
+          "probeMs": 0
         },
-        "gpuAfterArk": 409.7
+        "gpuBeforeArk": 281.6,
+        "gpuAfterArk4s": 457.5,
+        "gpuAfterArk": 190,
+        "gpuSettleS": 22
       },
       "eld": {
-        "count": 12977,
-        "min": 7.64,
-        "mean": 15.64,
-        "p50": 15.56,
-        "p99": 22.17,
-        "max": 136.45
+        "count": 6659,
+        "min": 8.38,
+        "mean": 15.61,
+        "p50": 15.57,
+        "p99": 21.43,
+        "max": 323.22
       },
       "longTasks": {
         "all": [
-          122,
-          55,
-          50,
-          53,
-          85,
-          83,
-          14118,
-          189,
-          108,
-          146,
-          62,
-          231,
-          158,
-          218,
-          178,
-          129,
-          170,
-          59,
-          159,
-          231,
-          121,
-          191,
-          121,
-          26585,
-          76,
-          110,
-          70,
-          190,
-          68,
-          72,
-          50,
-          55,
-          114,
-          87,
-          96,
           61,
-          25823,
-          75,
-          64,
-          1769,
-          87,
-          309,
-          110,
-          108,
-          110,
-          110,
-          99,
-          90,
-          107,
-          506,
-          88,
-          119,
-          55,
-          245,
-          52,
-          89,
-          58,
-          53,
-          34151,
-          193,
-          971,
-          147,
-          72,
-          126,
-          78,
-          1251,
-          690,
-          607,
-          404,
-          1193,
-          736,
-          827,
-          152,
-          792,
-          627,
-          127,
-          151,
-          143,
-          60,
-          158,
-          53,
-          993
+          217,
+          205,
+          77,
+          104,
+          51,
+          184
         ],
         "browse-scroll": [],
-        "oracle": [
-          792,
-          627,
-          127,
-          151,
-          143,
-          60,
-          158,
-          53,
-          993
-        ],
+        "oracle": [],
         "oracle-compute": [],
         "byStep": {
-          "to-library": 122,
-          "game-details-x5": 55,
-          "library-status-change": 85,
-          "voyage": 14118,
-          "voyage-Log": 26585,
-          "voyage-Scenes": 25823,
-          "voyage-Audit": 506,
-          "voyage-Medals": 245,
-          "voyage-Your Ark": 89,
-          "voyage-leave-ark": 34151,
-          "oracle": 993
+          "library-status-change": 61,
+          "voyage": 217,
+          "voyage-Scenes": 205,
+          "voyage-Audit": 104,
+          "voyage-Medals": 51,
+          "voyage-leave-ark": 184
         }
       },
       "sample": {
         "label": "cycle-10",
-        "t": 1793783354666,
+        "t": 1793808289598,
         "renderer": {
-          "jsHeapUsedMB": 105.99,
-          "jsHeapTotalMB": 109.95,
-          "domNodes": 560892,
-          "jsEventListeners": 43527,
+          "jsHeapUsedMB": 40.18,
+          "jsHeapTotalMB": 43.42,
+          "domNodes": 3846,
+          "jsEventListeners": 3345,
           "documents": 2,
-          "layoutCount": 4541,
-          "recalcStyleCount": 33281,
-          "taskDurationS": 1512.334,
-          "scriptDurationS": 471.839
+          "layoutCount": 4910,
+          "recalcStyleCount": 18398,
+          "taskDurationS": 79.193,
+          "scriptDurationS": 27.578
         },
         "ipcListeners": 13,
         "ipcListenersByChannel": {
@@ -3575,90 +2801,85 @@
         },
         "processCount": 4,
         "externalProcessCount": 0,
-        "gpuWorkingSetMB": 151.5,
-        "gpuPrivateMB": 148,
-        "totalWorkingSetMB": 1562.8,
-        "mainHeapMB": 53.7,
-        "mainRssMB": 201.8,
+        "gpuWorkingSetMB": 246.6,
+        "gpuPrivateMB": 215.1,
+        "totalWorkingSetMB": 943.6,
+        "mainHeapMB": 50.5,
+        "mainRssMB": 385.3,
         "procs": {
           "electron": [
             {
-              "pid": 42228,
+              "pid": 38680,
               "type": "Browser",
               "name": null,
-              "workingSetMB": 201.8,
-              "privateMB": 430.2,
-              "cpuSec": 321.468
+              "workingSetMB": 385.3,
+              "privateMB": 381.7,
+              "cpuSec": 105.264
             },
             {
-              "pid": 45724,
+              "pid": 42176,
               "type": "GPU",
               "name": null,
-              "workingSetMB": 151.5,
-              "privateMB": 148,
-              "cpuSec": 528.3
+              "workingSetMB": 246.6,
+              "privateMB": 215.1,
+              "cpuSec": 96.565
             },
             {
-              "pid": 50172,
+              "pid": 20048,
               "type": "Utility",
               "name": "Network Service",
-              "workingSetMB": 57.9,
-              "privateMB": 16.7,
-              "cpuSec": 163.886
+              "workingSetMB": 59.8,
+              "privateMB": 14.9,
+              "cpuSec": 38.469
             },
             {
-              "pid": 30320,
+              "pid": 3516,
               "type": "Tab",
               "name": null,
-              "workingSetMB": 1145.1,
-              "privateMB": 1896.8,
-              "cpuSec": 1878.041
+              "workingSetMB": 243.9,
+              "privateMB": 292.7,
+              "cpuSec": 165.94
             }
           ],
           "external": [],
           "childCount": 4,
           "externalCount": 0,
-          "totalWorkingSetMB": 1562.8,
-          "totalCpuSec": 2900.22,
-          "mainHeapMB": 53.7,
-          "mainRssMB": 201.8
+          "totalWorkingSetMB": 943.6,
+          "totalCpuSec": 405.05,
+          "mainHeapMB": 50.5,
+          "mainRssMB": 385.3
         }
       }
     }
   ],
-  "skippedSteps": [
-    "voyage-Log: locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Log$/i }).first() @  \"ARK v1.0.96 Browse Library (2000) Oracle Upcoming Voyage Transmissions Processing Galaxy C\" (x2)",
-    "voyage-Scenes: locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Scenes$/i }).first() @  \"ARK v1.0.96 Browse Library (2000) Oracle Upcoming Voyage Transmissions Processing Galaxy C\" (x3)",
-    "voyage-leave-ark: locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable @  \"ARK v1.0.96 Browse Library (2000) Oracle Upcoming Voyage Transmissions Processing Galaxy C\" (x8)",
-    "voyage-leave-ark: locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable @  \"ARK v1.0.96 Browse Library (2000) Oracle Upcoming Voyage Transmissions Enter Embedding Spa\" (x1)"
-  ],
+  "skippedSteps": [],
   "idle60": {
-    "cpuPct": 107.01,
+    "cpuPct": 14.84,
     "eld": {
-      "count": 4108,
-      "min": 8,
-      "mean": 15.55,
-      "p50": 15.56,
-      "p99": 20.74,
-      "max": 31.36
+      "count": 4044,
+      "min": 7.26,
+      "mean": 15.62,
+      "p50": 15.58,
+      "p99": 21.14,
+      "max": 279.97
     },
     "seconds": 60,
-    "startWS": 1208,
-    "endWS": 810
+    "startWS": 1177,
+    "endWS": 733.5
   },
   "baselineSample": {
     "label": "cycle-0",
-    "t": 1793781256609,
+    "t": 1793807230076,
     "renderer": {
-      "jsHeapUsedMB": 29.82,
-      "jsHeapTotalMB": 31.7,
+      "jsHeapUsedMB": 29.04,
+      "jsHeapTotalMB": 31.17,
       "domNodes": 459,
-      "jsEventListeners": 357,
+      "jsEventListeners": 363,
       "documents": 1,
-      "layoutCount": 7,
-      "recalcStyleCount": 391,
-      "taskDurationS": 7.596,
-      "scriptDurationS": 0.155
+      "layoutCount": 8,
+      "recalcStyleCount": 114,
+      "taskDurationS": 0.935,
+      "scriptDurationS": 0.216
     },
     "ipcListeners": 13,
     "ipcListenersByChannel": {
@@ -3678,105 +2899,97 @@
     },
     "processCount": 4,
     "externalProcessCount": 0,
-    "gpuWorkingSetMB": 170.2,
-    "gpuPrivateMB": 140.1,
-    "totalWorkingSetMB": 814.5,
-    "mainHeapMB": 46.2,
-    "mainRssMB": 411.2,
+    "gpuWorkingSetMB": 171,
+    "gpuPrivateMB": 141.1,
+    "totalWorkingSetMB": 755.1,
+    "mainHeapMB": 40.9,
+    "mainRssMB": 364.5,
     "procs": {
       "electron": [
         {
-          "pid": 42228,
+          "pid": 38680,
           "type": "Browser",
           "name": null,
-          "workingSetMB": 411.2,
-          "privateMB": 415.7,
-          "cpuSec": 99.47
+          "workingSetMB": 364.5,
+          "privateMB": 361.8,
+          "cpuSec": 28.229
         },
         {
-          "pid": 45724,
+          "pid": 42176,
           "type": "GPU",
           "name": null,
-          "workingSetMB": 170.2,
-          "privateMB": 140.1,
-          "cpuSec": 16.668
+          "workingSetMB": 171,
+          "privateMB": 141.1,
+          "cpuSec": 7.076
         },
         {
-          "pid": 50172,
+          "pid": 20048,
           "type": "Utility",
           "name": "Network Service",
-          "workingSetMB": 59.5,
-          "privateMB": 14.8,
-          "cpuSec": 1.864
+          "workingSetMB": 59,
+          "privateMB": 14.5,
+          "cpuSec": 1.028
         },
         {
-          "pid": 30320,
+          "pid": 3516,
           "type": "Tab",
           "name": null,
-          "workingSetMB": 165.1,
-          "privateMB": 156,
-          "cpuSec": 26.406
+          "workingSetMB": 153,
+          "privateMB": 99.4,
+          "cpuSec": 7.428
         }
       ],
       "external": [],
       "childCount": 4,
       "externalCount": 0,
-      "totalWorkingSetMB": 814.5,
-      "totalCpuSec": 144.89,
-      "mainHeapMB": 46.2,
-      "mainRssMB": 411.2
+      "totalWorkingSetMB": 755.1,
+      "totalCpuSec": 42.67,
+      "mainHeapMB": 40.9,
+      "mainRssMB": 364.5
     }
   },
   "ipcHandlers": 188,
   "hiddenIdle": {
-    "cpuPct": 7.2,
-    "eld": {
-      "count": 19319,
-      "min": 8.93,
-      "mean": 15.67,
-      "p50": 15.59,
-      "p99": 17.92,
-      "max": 388.5
-    },
-    "seconds": 300,
-    "startWS": 1564.2,
-    "endWS": 1535.7,
+    "cpuPct": 1.77,
+    "eld": null,
+    "seconds": 120,
+    "startWS": 897.4,
+    "endWS": 901.5,
     "perProcessCpuSec": [
       {
         "type": "Browser",
         "name": null,
-        "dCpuSec": 9.42
+        "dCpuSec": 0.076
       },
       {
         "type": "GPU",
         "name": null,
-        "dCpuSec": 5.879
+        "dCpuSec": 1.162
       },
       {
         "type": "Utility",
         "name": "Network Service",
-        "dCpuSec": 0.962
+        "dCpuSec": 0.011
       },
       {
         "type": "Tab",
         "name": null,
-        "dCpuSec": 7.072
+        "dCpuSec": 0.84
       }
     ]
   },
   "applist": {
     "ok": true,
     "entries": 155000,
-    "ms": 806,
+    "ms": 440,
     "eld": {
-      "count": 305,
-      "min": 9.08,
-      "mean": 15.56,
-      "p50": 15.59,
-      "p99": 21.86,
-      "max": 24.15
+      "count": 284,
+      "min": 9.24,
+      "mean": 15.5,
+      "p50": 15.53,
+      "p99": 20.5,
+      "max": 25.53
     },
     "fakeRequests": 893
-  },
-  "heapDiff": "(from a separate 4-cycle run of the same build, snapshots at cycle 2 and 4, where the DOM growth below did NOT occur: nodes stayed at 3.8k; the only growth is the harness's own long-task observer and the app console-error buffer. No snapshot exists for the run that did blow up.)\nTop growth by constructor (count and KB):\n  native:TaskAttributionTiming: 100 -> 181 (+81, +8 KB)\n  native:PerformanceLongTaskTiming: 100 -> 181 (+81, +7 KB)\n  native:PerformanceLongAnimationFrameTiming: 133 -> 200 (+67, +7 KB)\n  string:Error invoking remote method 'steam:fetchCatalogBatch': Error: net::ERR_NAME_NOT_RESOLVED: 280 -> 296 (+16, +2 KB)\n  object:Array: 33072 -> 33159 (+87, +1 KB)\n  number:heap number: 20337 -> 20420 (+83, +1 KB)\n  object:Object: 205433 -> 205463 (+30, +1 KB)\n  string:[Steam Service] isElectron check: true, window.steam exists: true: 74 -> 83 (+9, +1 KB)\n\nRetainer paths (shortest from GC root) for one new object of each top grower:\n  native:TaskAttributionTiming:\n    synthetic: --element:[1]--> synthetic:(GC roots)\n    synthetic:(GC roots) --element:[10]--> synthetic:(Global handles)\n    synthetic:(Global handles) --internal:1237 / DevTools console--> object:UtilityScript\n    object:UtilityScript --property:builtins--> object:Object\n    object:Object --property:performance--> native:Performance\n    native:Performance --element:[10]--> native:InternalNode\n    native:InternalNode --element:[112]--> native:PerformanceLongTaskTiming\n    native:PerformanceLongTaskTiming --element:[1]--> native:InternalNode\n    native:InternalNode --element:[1]--> native:TaskAttributionTiming\n  native:PerformanceLongTaskTiming:\n    synthetic: --element:[1]--> synthetic:(GC roots)\n    synthetic:(GC roots) --element:[10]--> synthetic:(Global handles)\n    synthetic:(Global handles) --internal:1237 / DevTools console--> object:UtilityScript\n    object:UtilityScript --property:builtins--> object:Object\n    object:Object --property:performance--> native:Performance\n    native:Performance --element:[10]--> native:InternalNode\n    native:InternalNode --element:[171]--> native:PerformanceLongTaskTiming\n  native:PerformanceLongAnimationFrameTiming:\n    synthetic: --element:[1]--> synthetic:(GC roots)\n    synthetic:(GC roots) --element:[10]--> synthetic:(Global handles)\n    synthetic:(Global handles) --internal:1237 / DevTools console--> object:UtilityScript\n    object:UtilityScript --property:builtins--> object:Object\n    object:Object --property:performance--> native:Performance\n    native:Performance --element:[12]--> native:InternalNode\n    native:InternalNode --element:[134]--> native:PerformanceLongAnimationFrameTiming\n  string:Error invoking remote method 'steam:fetchCatalogBatch': Error: net::ERR_NAME_NOT_RESOLVED:\n    synthetic: --element:[1]--> synthetic:(GC roots)\n    synthetic:(GC roots) --element:[10]--> synthetic:(Global handles)\n    synthetic:(Global handles) --internal:4 / DevTools console--> string:Error invoking remote method 'steam:fetchCatalogBatch': Erro\n  object:Array:\n    synthetic: --shortcut:2--> object:Window / file://\n    object:Window / file:// --property:console--> object:console\n    object:console --property:error--> closure:\n    closure: --internal:context--> object:system / Context\n    object:system / Context --context:hd--> object:Array\n    object:Array --element:[114]--> object:Object\n    object:Object --property:ref--> object:Object\n    object:Object --property:current--> closure:\n    closure: --internal:context--> object:system / Context\n    object:system / Context --internal:previous--> object:system / Context\n    object:system / Context --context:e--> object:Array"
+  }
 }

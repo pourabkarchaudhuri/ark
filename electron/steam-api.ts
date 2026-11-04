@@ -1556,6 +1556,8 @@ export class SteamAPIClient {
       } catch (err) {
         if (err instanceof Error && /IStoreBrowseService 4\d\d/.test(err.message)) throw err;
         failure = err instanceof Error ? err.message : String(err);
+        // No DNS / no route: a second try 2 s later fails the same way (the offline run paid it for every batch)
+        if (/ERR_(?:NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|NETWORK_ACCESS_DENIED|PROXY_CONNECTION_FAILED|CONNECTION_REFUSED)|ENOTFOUND|EAI_AGAIN/.test(failure)) throw new Error(failure);
       } finally {
         release();
       }

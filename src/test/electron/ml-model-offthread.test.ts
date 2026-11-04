@@ -173,4 +173,17 @@ describe('loadModel — asynchronous file I/O', () => {
     expect(fake.createOpts.length).toBe(8);
     for (const o of fake.createOpts) expect(o.intraOpNumThreads).toBe(4);
   });
+
+  it('never gives a session more than 4 intra-op threads, however many cores there are', async () => {
+    const fake = makeOrt();
+    __resetMlModelForTests();
+    __setMlModelTestHooks({ ort: fake.ort, userDataDir: path.join(root, 'user'), sourceDir, cpuCount: 32 });
+    expect(await loadModel()).toBe(true);
+    for (const o of fake.createOpts) expect(o.intraOpNumThreads).toBe(4);
+  });
+
+  it('loads the tree-ensemble folds without graph re-optimisation (boot main-thread cost)', async () => {
+    const fake = await load();
+    for (const o of fake.createOpts) expect(o.graphOptimizationLevel).toBe('disabled');
+  });
 });

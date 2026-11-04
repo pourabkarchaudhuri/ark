@@ -159,6 +159,13 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'Ju
 const LOG_MONTH_PAGE = 24;
 
 /**
+ * Captain's Log cards rendered at first; "Show older" adds this many more. The month limit alone does not
+ * bound the DOM: a library imported in one go puts hundreds of titles in a single month (2,000 games was
+ * ~136k nodes and a 10-30 s renderer freeze on opening the tab).
+ */
+const LOG_CARD_PAGE = 120;
+
+/**
  * Steam player counts are fetched in batches of this size, one batch at a time, so a large Log never
  * floods the player-count limiter's queue.
  */
@@ -395,7 +402,7 @@ const LOG_FULL_FMT = new Intl.DateTimeFormat(undefined, {
 });
 const EMPTY_LOG_EVENTS: Map<string, LogEvent[]> = new Map();
 const EMPTY_ID_SET: Set<string> = new Set();
-const EMPTY_LOG_TIMELINE: { data: TimelineEntry[]; monthCount: number } = { data: [], monthCount: 0 };
+const EMPTY_LOG_TIMELINE: { data: TimelineEntry[]; monthCount: number; hiddenTitles: number } = { data: [], monthCount: 0, hiddenTitles: 0 };
 
 function LogEventMarkers({ events, estimated }: { events: LogEvent[]; estimated: boolean }) {
   return (
@@ -430,6 +437,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     }
   }, [viewStyle]);
   const [logMonthLimit, setLogMonthLimit] = useState(LOG_MONTH_PAGE);
+  const [logCardLimit, setLogCardLimit] = useState(LOG_CARD_PAGE);
 
   // Live player counts, shown only on Captain's Log cards.
   // Keys are gameId strings ("steam-730") — values are player counts.
@@ -576,7 +584,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
   // Captain's Log: per-month grouping. An entry appears in a month if firstPlayedAt or lastPlayedAt falls in that month (same game can appear in Jan and March),
   // and in the month of each status event (Started / Resumed / On Hold / Completed).
   // Within each month, sort by the latest date that applies to that month, desc.
-  const { data: timelineData, monthCount: logMonthTotal } = useMemo(() => {
+  const { data: timelineData, hiddenTitles: logHiddenTitles } = useMemo(() => {
     if (viewStyle !== 'log' || arkAndLogEntries.length === 0) return EMPTY_LOG_TIMELINE;
 
     const monthToEntries = new Map<string, Array<{ entry: JourneyEntry; sortDate: string }>>();
@@ -652,11 +660,23 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
     // Only the newest `logMonthLimit` months are rendered ("Show older" pages in more); the year
     // summaries still count the whole year.
     let monthBudget = logMonthLimit;
+    let cardBudget = logCardLimit;
+    let totalTitles = 0;
+    for (const months of byYear.values()) for (const { list } of months) totalTitles += list.length;
+    let renderedTitles = 0;
     const data = sortedYears.flatMap((year): TimelineEntry[] => {
-      if (monthBudget <= 0) return [];
+      if (monthBudget <= 0 || cardBudget <= 0) return [];
       const allMonths = byYear.get(year)!;
-      const monthsWithEntries = allMonths.slice(0, monthBudget);
-      monthBudget -= monthsWithEntries.length;
+      // Newest months first, until either the month or the card budget runs out (the last month may be cut short)
+      const monthsWithEntries: Array<{ month: number; list: Array<{ entry: JourneyEntry; sortDate: string }>; shown: number }> = [];
+      for (const m of allMonths) {
+        if (monthBudget <= 0 || cardBudget <= 0) break;
+        const shown = Math.min(m.list.length, cardBudget);
+        monthsWithEntries.push({ ...m, shown });
+        monthBudget--;
+        cardBudget -= shown;
+        renderedTitles += shown;
+      }
       const yearEntriesUnique = Array.from(
         new Map(
           allMonths.flatMap(({ list }) => list.map((x) => x.entry)).map((e) => [e.gameId, e])
@@ -690,7 +710,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
 
             {viewStyle === 'log' ? (
               <div className="space-y-6">
-                {monthsWithEntries.map(({ month: m, list }) => {
+                {monthsWithEntries.map(({ month: m, list, shown }) => {
                   const monthEntries = list.map((x) => x.entry);
                   const monthCompleted = monthEntries.filter((e) => e.status === 'Completed').length;
                   const monthHours = monthEntries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
@@ -708,7 +728,7 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
                         </span>
                       </div>
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                        {monthEntries.map((entry) => {
+                        {(shown < monthEntries.length ? monthEntries.slice(0, shown) : monthEntries).map((entry) => {
                           const monthEvents = (logEventsByGame.get(entry.gameId) ?? []).filter((ev) => {
                             const d = new Date(ev.at);
                             return d.getFullYear() === year && d.getMonth() === m;
@@ -748,8 +768,8 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
         ),
       }];
     });
-    return { data, monthCount: monthToEntries.size };
-  }, [arkAndLogEntries, playerCounts, viewStyle, logEventsByGame, gamesWithEvidence, logMonthLimit]);
+    return { data, monthCount: monthToEntries.size, hiddenTitles: totalTitles - renderedTitles };
+  }, [arkAndLogEntries, playerCounts, viewStyle, logEventsByGame, gamesWithEvidence, logMonthLimit, logCardLimit]);
 
   // Total stats
   const totalHours = entries.reduce((sum, e) => sum + (e.hoursPlayed ?? 0), 0);
@@ -894,14 +914,17 @@ export const JourneyView = memo(function JourneyView({ entries, loading, onSwitc
       ) : viewStyle === 'chronicle' || viewStyle === 'audit' ? null : (
         <>
           <Timeline data={timelineData} />
-          {logMonthTotal > logMonthLimit && (
+          {logHiddenTitles > 0 && (
             <div className="flex justify-center pb-16 -mt-8">
               <Button
                 variant="outline"
-                onClick={() => setLogMonthLimit((n) => n + LOG_MONTH_PAGE)}
+                onClick={() => {
+                  setLogMonthLimit((n) => n + LOG_MONTH_PAGE);
+                  setLogCardLimit((n) => n + LOG_CARD_PAGE);
+                }}
                 className="border-white/15 text-white/70 hover:text-white"
               >
-                Show older ({logMonthTotal - logMonthLimit} more month{logMonthTotal - logMonthLimit !== 1 ? 's' : ''})
+                Show older ({logHiddenTitles.toLocaleString()} more title{logHiddenTitles !== 1 ? 's' : ''})
               </Button>
             </div>
           )}

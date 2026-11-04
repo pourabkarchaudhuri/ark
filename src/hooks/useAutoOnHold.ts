@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { libraryStore, type LibraryEntryWithStatusStamp } from '@/services/library-store';
+import { journeyStore } from '@/services/journey-store';
 import { customGameStore } from '@/services/custom-game-store';
 import { statusHistoryStore } from '@/services/status-history-store';
 import { sessionStore } from '@/services/session-store';
@@ -144,15 +145,19 @@ export async function runAutoOnHoldSweep(now: number = Date.now(), opts: SweepOp
     ]);
 
     if (!libraryStore.isReadOnly()) {
-      for (const entry of libraryStore.getAllEntries() as LibraryEntryWithStatusStamp[]) {
-        if (!isStalePlaying(entry.gameId, entry.status, [entry.lastPlayedAt, entry.statusChangedAt, entry.addedAt], now, opts)) continue;
-        // Do NOT touch lastPlayedAt — preserve the real last-play date.
-        libraryStore.updateEntry(entry.gameId, {
-          status: 'On Hold',
-          autoTransitionedAt: new Date(now).toISOString(),
-        }, { source: 'auto-hold' });
-        moved.push({ gameId: entry.gameId, title: entry.cachedMeta?.title?.trim() || entry.gameId, custom: false });
-      }
+      // One notification for the whole sweep: per-game notifies made every subscriber re-read the library ~230 times.
+      // (updateEntry also syncs the journey, which has its own subscribers: batch both.)
+      journeyStore.runBatched(() => libraryStore.runBatched(() => {
+        for (const entry of libraryStore.getAllEntries() as LibraryEntryWithStatusStamp[]) {
+          if (!isStalePlaying(entry.gameId, entry.status, [entry.lastPlayedAt, entry.statusChangedAt, entry.addedAt], now, opts)) continue;
+          // Do NOT touch lastPlayedAt — preserve the real last-play date.
+          libraryStore.updateEntry(entry.gameId, {
+            status: 'On Hold',
+            autoTransitionedAt: new Date(now).toISOString(),
+          }, { source: 'auto-hold' });
+          moved.push({ gameId: entry.gameId, title: entry.cachedMeta?.title?.trim() || entry.gameId, custom: false });
+        }
+      }));
     }
 
     if (!customGameStore.isReadOnly()) {

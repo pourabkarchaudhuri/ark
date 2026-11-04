@@ -79,6 +79,18 @@ describe('decorative loops', () => {
     expect(infiniteTransitions()).toHaveLength(0);
   });
 
+  it('empty-state decoration is finite: no infinite keyframes and no animate-pulse (they keep the window drawing at 60 fps)', () => {
+    for (const cls of ['empty-state-ring-a', 'empty-state-ring-b', 'empty-state-twinkle', 'galaxy-building-pulse']) {
+      const start = css.indexOf(`.${cls} {`);
+      const rule = start < 0 ? '' : css.slice(start, css.indexOf('}', start));
+      expect(rule, cls).toContain('animation:');
+      expect(rule, cls).not.toContain('infinite');
+    }
+    const { container } = render(<EmptyState type="no-browse-results" />);
+    expect(container.querySelectorAll('.animate-pulse')).toHaveLength(0);
+    expect(container.querySelectorAll('.empty-state-twinkle')).toHaveLength(4);
+  });
+
   it('a complete Audit ring glows through the CSS wrapper, not a framer loop', () => {
     const library: LibraryGameEntry[] = [
       {
@@ -119,11 +131,11 @@ describe('decorative loops', () => {
   });
 
   it('index.css defines the keyframes and a reduced-motion fallback for each loop', () => {
-    for (const name of ['oracle-kenburns', 'audit-ring-glow', 'empty-state-ring-a', 'empty-state-ring-b']) {
+    for (const name of ['oracle-kenburns', 'audit-ring-glow', 'empty-state-ring-a', 'empty-state-ring-b', 'empty-state-twinkle']) {
       expect(css).toContain(`@keyframes ${name}`);
     }
     const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
-    for (const cls of ['.oracle-kenburns', '.empty-state-ring-a', '.empty-state-ring-b', '.audit-ring-glow']) {
+    for (const cls of ['.oracle-kenburns', '.empty-state-ring-a', '.empty-state-ring-b', '.empty-state-twinkle', '.audit-ring-glow']) {
       expect(reduced).toContain(cls);
     }
     expect(reduced).toMatch(/\.audit-ring-glow\s*\{[^}]*animation:\s*none;[^}]*opacity:\s*0\.45/);

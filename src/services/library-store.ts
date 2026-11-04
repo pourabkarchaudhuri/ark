@@ -613,7 +613,34 @@ export class LibraryStore {
     return () => this.hoursListeners.delete(listener);
   }
 
+  /** > 0 while runBatched() is collecting mutations: listeners are told once when the outermost batch ends. */
+  private _batchDepth = 0;
+  private _batchDirty = false;
+
+  /**
+   * Run several mutations as one change: subscribers (useLibrary re-reads every entry, the session tracker
+   * re-pushes its game list) are notified once at the end instead of once per updateEntry. The auto On Hold sweep
+   * moved ~230 games one by one: 230 x getAllEntries() over 2,000 entries froze the renderer for ~2.6 s a minute
+   * after launch. Nests; notifies even if `fn` throws part-way (the mutations already happened).
+   */
+  runBatched<T>(fn: () => T): T {
+    this._batchDepth++;
+    try {
+      return fn();
+    } finally {
+      this._batchDepth--;
+      if (this._batchDepth === 0 && this._batchDirty) {
+        this._batchDirty = false;
+        this.notifyListeners();
+      }
+    }
+  }
+
   private notifyListeners() {
+    if (this._batchDepth > 0) {
+      this._batchDirty = true;
+      return;
+    }
     this._version++;
     this.listeners.forEach((listener) => listener());
     // Regular mutations are a superset — anyone watching hours also cares

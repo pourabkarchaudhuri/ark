@@ -276,10 +276,10 @@ function IconEmptyState({ type, onAction, className }: EmptyStateProps) {
 
       {/* Decorative elements */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-1/4 left-1/4 w-1 h-1 bg-fuchsia-500/40 rounded-full animate-pulse" />
-        <div className="absolute top-1/3 right-1/3 w-1 h-1 bg-cyan-500/40 rounded-full animate-pulse delay-300" />
-        <div className="absolute bottom-1/4 left-1/3 w-1 h-1 bg-fuchsia-500/30 rounded-full animate-pulse delay-700" />
-        <div className="absolute bottom-1/3 right-1/4 w-1 h-1 bg-cyan-500/30 rounded-full animate-pulse delay-500" />
+        <div className="absolute top-1/4 left-1/4 w-1 h-1 bg-fuchsia-500/40 rounded-full empty-state-twinkle" />
+        <div className="absolute top-1/3 right-1/3 w-1 h-1 bg-cyan-500/40 rounded-full empty-state-twinkle delay-300" />
+        <div className="absolute bottom-1/4 left-1/3 w-1 h-1 bg-fuchsia-500/30 rounded-full empty-state-twinkle delay-700" />
+        <div className="absolute bottom-1/3 right-1/4 w-1 h-1 bg-cyan-500/30 rounded-full empty-state-twinkle delay-500" />
       </div>
     </motion.div>
   );

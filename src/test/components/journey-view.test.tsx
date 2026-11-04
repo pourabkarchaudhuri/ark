@@ -531,6 +531,27 @@ describe('JourneyView', () => {
     expect(screen.queryByRole('button', { name: /Show older/i })).not.toBeInTheDocument();
   });
 
+  it('caps the cards rendered for a single busy month (a bulk import must not put the whole library in the DOM)', () => {
+    const entries: JourneyEntry[] = [];
+    for (let i = 0; i < 300; i++) {
+      const d = new Date(Date.UTC(2024, 4, 1 + (i % 28), 12, i % 60)).toISOString();
+      entries.push(createMockEntry({ gameId: `steam-${5000 + i}`, title: `Bulk Game ${i}`, addedAt: d, firstPlayedAt: d, lastPlayedAt: d, status: 'Completed' }));
+    }
+    render(<JourneyView entries={entries} loading={false} />);
+    fireEvent.click(screen.getByText('Log'));
+
+    expect(screen.getAllByText(/^Bulk Game \d+$/)).toHaveLength(120);
+    // the month header still counts every title, only the cards are cut
+    expect(screen.getAllByText(/300 titles/).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /Show older \(180 more titles\)/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Show older/i }));
+    expect(screen.getAllByText(/^Bulk Game \d+$/)).toHaveLength(240);
+    fireEvent.click(screen.getByRole('button', { name: /Show older/i }));
+    expect(screen.getAllByText(/^Bulk Game \d+$/)).toHaveLength(300);
+    expect(screen.queryByRole('button', { name: /Show older/i })).not.toBeInTheDocument();
+  });
+
   it('Log card follows journey store status changes and removal', async () => {
     const { libraryStore } = await import('@/services/library-store');
     (libraryStore.isInLibrary as ReturnType<typeof vi.fn>).mockReturnValue(true);

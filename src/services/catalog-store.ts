@@ -49,6 +49,17 @@ const RETRY_ROUND_MAX_RATIO = 0.25;
 const RETRY_ROUND_BUDGET_MS = 90_000;
 /** After an incomplete run, automatic syncs wait this long before resuming the pending games. */
 const INCOMPLETE_RETRY_COOLDOWN = 15 * 60 * 1000;
+/** Shorter wait after a run that found no network at all (the first batches failed to connect). */
+const OFFLINE_RETRY_COOLDOWN = 5 * 60 * 1000;
+/**
+ * A pass with this many connection failures in a row and no success is offline: stop issuing batches
+ * (the rest used to be tried one by one, ~780 failing IPC calls and two retries each, for minutes).
+ */
+const OFFLINE_ABORT_AFTER = 8;
+/** Connection-level failures (no DNS, no route, refused), as opposed to Steam answering with an error. */
+const NETWORK_DOWN_RE = /ERR_(?:NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|NETWORK_ACCESS_DENIED|PROXY_CONNECTION_FAILED|CONNECTION_REFUSED)|ENOTFOUND|EAI_AGAIN/;
+/** @internal exported for tests */
+export const isNetworkDownError = (msg: string): boolean => NETWORK_DOWN_RE.test(msg);
 const SYNC_STALE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
@@ -550,14 +561,16 @@ export class CatalogStore {
       // "Recent attempt that didn't produce a fresh catalog": games pending, or the attempt
       // came after the last complete sync (e.g. Steam's app list was unreachable).
       const recentUnfinished = pending.length > 0 || (prevState?.lastAttemptTimestamp ?? 0) > (prevState?.lastSyncTimestamp ?? 0);
-      if (recentUnfinished && prevState && prevState.totalEntries > 0 && sinceAttempt < INCOMPLETE_RETRY_COOLDOWN) {
+      const cooldown = prevState?.lastAttemptOffline ? OFFLINE_RETRY_COOLDOWN : INCOMPLETE_RETRY_COOLDOWN;
+      // An offline attempt cools down even with an empty catalog: otherwise every Oracle visit re-ran the whole pass
+      if (recentUnfinished && prevState && (prevState.totalEntries > 0 || prevState.lastAttemptOffline) && sinceAttempt < cooldown) {
         this._syncProgress = {
           stage: 'done',
           batchesCompleted: prevState.batchesCompleted ?? 0,
           batchesTotal: prevState.batchesTotal ?? 0,
           gamesStored: prevState.totalEntries,
           pendingGames: pending.length,
-          error: `${pending.length > 0 ? `${pending.length.toLocaleString()} games still pending` : 'Couldn’t reach Steam last time'} — retrying in ${Math.ceil((INCOMPLETE_RETRY_COOLDOWN - sinceAttempt) / 60_000)} min`,
+          error: `${pending.length > 0 ? `${pending.length.toLocaleString()} games still pending` : 'Couldn’t reach Steam last time'} — retrying in ${Math.ceil((cooldown - sinceAttempt) / 60_000)} min`,
         };
         this.notify();
         console.log(`[CatalogStore] Previous sync unfinished (${pending.length} games pending) — in cooldown, skipped`);
@@ -636,6 +649,9 @@ export class CatalogStore {
       let totalGamesStored = 0;
       const failed: Array<{ batch: number[]; idx: number }> = [];
       let permanentlyFailed = 0;
+      let connectFailStreak = 0;
+      let anyBatchSucceeded = false;
+      let offline = false;
       const publish = (patch: Partial<CatalogSyncProgress>) => {
         this._syncProgress = {
           stage: 'fetching-metadata',
@@ -662,7 +678,7 @@ export class CatalogStore {
         for (let w = 0; w < concurrency; w++) {
           workers.push((async () => {
             let item: ReturnType<typeof dequeue>;
-            while (!signal.aborted && Date.now() < deadline && (item = dequeue())) {
+            while (!signal.aborted && !offline && Date.now() < deadline && (item = dequeue())) {
               const { batch, idx } = item;
               let ok = false;
               try {
@@ -672,9 +688,19 @@ export class CatalogStore {
                   totalGamesStored += entries.length;
                 }
                 ok = true;
+                anyBatchSucceeded = true;
+                connectFailStreak = 0;
               } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 console.warn(`[CatalogStore] Batch ${idx} failed:`, msg);
+                if (NETWORK_DOWN_RE.test(msg)) {
+                  if (++connectFailStreak >= OFFLINE_ABORT_AFTER && !anyBatchSucceeded && !offline) {
+                    offline = true;
+                    console.warn('[CatalogStore] No network — stopping the catalog pass; it resumes on a later sync');
+                  }
+                } else {
+                  connectFailStreak = 0;
+                }
                 // A 4xx other than 429 is Steam rejecting the request itself — retrying won't help,
                 // and counting it would keep the catalog "stale" (full re-sync) on every launch.
                 if (/IStoreBrowseService 4(?!29)\d\d/.test(msg)) permanentlyFailed++;
@@ -729,7 +755,19 @@ export class CatalogStore {
         : resume ? Math.max(prevTotal, totalGamesStored)
         // Rows are keyed overwrites, so a partial run never shrinks what's stored
         : (complete ? totalGamesStored : Math.max(totalGamesStored, prevTotal));
-      const syncState: CatalogSyncState = {
+      const syncState: CatalogSyncState = offline && totalGamesStored === 0
+        // Nothing was reachable: keep what the last run knew (do not store ~155k pending ids), just remember the attempt
+        ? {
+            lastSyncTimestamp: lastFull,
+            totalEntries: prevTotal,
+            batchesCompleted: prevState?.batchesCompleted ?? 0,
+            batchesTotal: prevState?.batchesTotal ?? 0,
+            inProgress: false,
+            pendingAppIds: prevState?.pendingAppIds,
+            lastAttemptTimestamp: finishedAt,
+            lastAttemptOffline: true,
+          }
+        : {
         // A resume that clears the backlog completes the earlier full pass
         lastSyncTimestamp: complete ? finishedAt : lastFull,
         totalEntries,
@@ -753,7 +791,9 @@ export class CatalogStore {
           pendingGames: stillPending.length,
           error: signal.aborted
             ? 'Sync cancelled'
-            : `${stillPending.length.toLocaleString()} games pending (Steam rate limit) — will retry`,
+            : offline
+              ? 'Couldn’t reach Steam — will retry shortly'
+              : `${stillPending.length.toLocaleString()} games pending (Steam rate limit) — will retry`,
         }),
       };
       this.notify();

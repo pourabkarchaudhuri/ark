@@ -53,6 +53,8 @@ export interface CatalogSyncState {
   pendingAppIds?: number[];
   /** When the last run (complete or not) finished — throttles retries of an incomplete run. */
   lastAttemptTimestamp?: number;
+  /** The last attempt found no network at all (DNS / connection failures) — retried after a shorter cooldown. */
+  lastAttemptOffline?: boolean;
 }
 
 /** Raw response shape from IStoreBrowseService/GetItems/v1. */

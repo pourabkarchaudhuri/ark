@@ -42,8 +42,17 @@ interface PerfProbeApi {
   setByteAccounting(on: boolean): void;
   /** Number of handlers registered per channel (a flat count means no handler churn). */
   handlerCount(): number;
+  /**
+   * Start / stop the event-loop-delay sampler. Its 10 ms timer wakes the main thread ~100x a second (about 2% of a
+   * core by itself), so the hidden-idle CPU measurement switches it off while it measures.
+   */
+  eventLoopMonitor(on: boolean): void;
   /** app.getAppMetrics() + main process memory/CPU. */
   processMetrics(): unknown;
+  /** Stops the main-process CPU profile started at boot by ARK_PERF_CPUPROF=1 and writes it to `file` (.cpuprofile). */
+  stopCpuProfile(file: string): Promise<string | null>;
+  /** (Re)starts the main-process CPU profile, e.g. to isolate an idle window after boot. */
+  startCpuProfile(): boolean;
 }
 
 const stat = (): ChannelStat => ({ calls: 0, errors: 0, argBytes: 0, resultBytes: 0, totalMs: 0, maxMs: 0 });
@@ -133,6 +142,26 @@ export function installPerfProbes(): void {
     };
   });
 
+  // ARK_PERF_CPUPROF=1: profile the main process from the first line of main.ts (boot cost), see stopCpuProfile()
+  let profiler: { post: (m: string, p?: unknown, cb?: (e: Error | null, r?: any) => void) => void } | null = null;
+  const startProfiler = (): boolean => {
+    try {
+      if (!profiler) {
+        const inspector = require('node:inspector');
+        const session = new inspector.Session();
+        session.connect();
+        session.post('Profiler.enable');
+        session.post('Profiler.setSamplingInterval', { interval: 500 });
+        profiler = session;
+      }
+      profiler!.post('Profiler.start');
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (process.env.ARK_PERF_CPUPROF === '1') startProfiler();
+
   const hist = monitorEventLoopDelay({ resolution: 10 });
   hist.enable();
   const ms = (ns: number) => Math.round((ns / 1e6) * 100) / 100;
@@ -165,6 +194,21 @@ export function installPerfProbes(): void {
       byteAccounting = on;
     },
     handlerCount: () => handlers,
+    eventLoopMonitor(on: boolean) {
+      if (on) hist.enable();
+      else hist.disable();
+    },
+    startCpuProfile: startProfiler,
+    stopCpuProfile(file: string) {
+      return new Promise<string | null>((resolve) => {
+        if (!profiler) return resolve(null);
+        profiler.post('Profiler.stop', undefined, (err, res) => {
+          if (err || !res?.profile) return resolve(null);
+          require('node:fs').writeFileSync(file, JSON.stringify(res.profile));
+          resolve(file);
+        });
+      });
+    },
     processMetrics() {
       return {
         pid: process.pid,

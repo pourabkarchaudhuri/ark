@@ -85,6 +85,54 @@ describe('runAutoOnHoldSweep', () => {
   });
 });
 
+describe('runAutoOnHoldSweep notifications (1.0.97 perf gate)', () => {
+  it('notifies library subscribers once for a sweep that moves many games', async () => {
+    for (let i = 0; i < 40; i++) add(`steam-${9000 + i}`, 'Playing');
+    const { journeyStore } = await import('@/services/journey-store');
+    const listener = vi.fn();
+    const journeyListener = vi.fn();
+    const unsub = libraryStore.subscribe(listener);
+    const unsubJourney = journeyStore.subscribe(journeyListener);
+    const versionBefore = libraryStore.getVersion();
+
+    const moved = await runAutoOnHoldSweep(Date.now() + 40 * DAY);
+    unsub();
+    unsubJourney();
+
+    expect(moved).toHaveLength(40);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(journeyListener.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(libraryStore.getVersion()).toBe(versionBefore + 1);
+    expect(libraryStore.getEntry('steam-9000')?.status).toBe('On Hold');
+  });
+
+  it('runBatched nests, notifies once, and still notifies when the callback throws', () => {
+    add('steam-9100', 'Playing');
+    add('steam-9101', 'Playing');
+    const listener = vi.fn();
+    const unsub = libraryStore.subscribe(listener);
+    libraryStore.runBatched(() => {
+      libraryStore.updateEntry('steam-9100', { rating: 4 });
+      libraryStore.runBatched(() => libraryStore.updateEntry('steam-9101', { rating: 3 }));
+      expect(listener).not.toHaveBeenCalled();
+    });
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    listener.mockClear();
+    expect(() => libraryStore.runBatched(() => {
+      libraryStore.updateEntry('steam-9100', { rating: 5 });
+      throw new Error('boom');
+    })).toThrow('boom');
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(libraryStore.getEntry('steam-9100')?.rating).toBe(5);
+
+    listener.mockClear();
+    libraryStore.runBatched(() => undefined);
+    expect(listener).not.toHaveBeenCalled(); // nothing changed, nobody is told
+    unsub();
+  });
+});
+
 describe('runAutoOnHoldSweep (v1.0.88)', () => {
   it('flips at 28 days, not at 27', async () => {
     add('steam-10', 'Want to Play');
