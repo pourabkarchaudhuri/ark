@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import path from 'path';
 import https from 'node:https';
 import { APP_USER_MODEL_ID } from './app-identity.js';
+import { installPerfProbes } from './perf-probe.js';
 
 let tray: any = null;
 let isQuitting = false;
@@ -26,6 +27,9 @@ loadEnv({ path: envPath });
 
 // Set Node.js process title — visible in system monitors and some task managers
 process.title = 'Ark';
+
+// Release-gate probes: no-op unless ARK_PERF=1 (see perf-probe.ts). Installed before any IPC handler registers.
+installPerfProbes();
 
 // EPIPE error handlers are installed by safe-logger.ts (imported below).
 
@@ -454,7 +458,7 @@ function createWindow() {
       backgroundThrottling: true,
       // --ark-dev-server: preload dev log (navigation-guard.ts). --ark-dev-tools:
       // dev-only renderer bindings (window.catalog) — never in a packaged build.
-      additionalArguments: [...devFlagArgs(useDevServer), ...(app.isPackaged ? [] : ['--ark-dev-tools'])],
+      additionalArguments: [...devFlagArgs(useDevServer), ...(app.isPackaged ? [] : ['--ark-dev-tools']), ...(process.env.ARK_PERF === '1' ? ['--ark-perf'] : [])],
     },
     frame: false,
     titleBarStyle: 'hidden',

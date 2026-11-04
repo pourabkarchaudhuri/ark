@@ -24,6 +24,7 @@
     "src/data/gaming-events.ts",
     "src/lib/chat-providers.ts",
     "src/lib/candidate-selector.ts",
+    "electron/local-ai/runtime-manifest.json",
     "package.json"
   ]
 }

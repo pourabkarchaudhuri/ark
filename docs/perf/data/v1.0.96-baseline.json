@@ -1,0 +1,2030 @@
+{
+  "meta": {
+    "label": "v1.0.96",
+    "version": "1.0.96",
+    "commit": "0dd026e",
+    "appDir": "C:\\Users\\100003~1\\AppData\\Local\\Temp\\ark-v1096",
+    "machine": "12th Gen Intel(R) Core(TM) i9-12900H x20, 32 GB, win32 10.0.26200",
+    "startedAt": "2026-11-04T07:51:31.274Z",
+    "profile": {
+      "dir": "C:\\Users\\100003~1\\AppData\\Local\\Temp\\ark-perf-seed",
+      "games": 2000,
+      "statusRows": 5000,
+      "sessions": 10000,
+      "appListEntries": 155000
+    },
+    "cycles": 5,
+    "idleS": 60,
+    "hiddenIdleS": 300,
+    "heapSnapshots": false,
+    "mergedFrom": [
+      "C:/Users/100003~1/AppData/Local/Temp/perf-out/baseline-partial.json",
+      "C:/Users/100003~1/AppData/Local/Temp/perf-out/baseline-tail.json"
+    ],
+    "note": "Stopped after cycle 5: cycle time grew from 3 to 10+ minutes as the build leaks about 230k DOM nodes per cycle; hidden-idle and app-list phases from a separate --cycles 0 run."
+  },
+  "coldStart": {
+    "runs": [
+      {
+        "enterReadyMs": 7716.0118999999995,
+        "interactiveMs": 9577.157099999999,
+        "eldMax": 415.5,
+        "eldP99": 34.41
+      },
+      {
+        "enterReadyMs": 7508.9025,
+        "interactiveMs": 9426.193999999996,
+        "eldMax": 371.98,
+        "eldP99": 32.18
+      },
+      {
+        "enterReadyMs": 7470.556299999997,
+        "interactiveMs": 9160.661800000002,
+        "eldMax": 372.77
+      }
+    ]
+  },
+  "cycles": [
+    {
+      "n": 1,
+      "steps": {
+        "to-library": {
+          "ms": 1069,
+          "t0": 79791.89999999106,
+          "t1": 80860.5,
+          "error": null
+        },
+        "browse-load": {
+          "ms": 3728,
+          "t0": 81884.79999999702,
+          "t1": 85613.19999998808,
+          "error": null
+        },
+        "browse-scroll": {
+          "ms": 3250,
+          "t0": 85621.5,
+          "t1": 88870.79999999702,
+          "error": null
+        },
+        "browse-filter": {
+          "ms": 1957,
+          "t0": 88877.89999999106,
+          "t1": 90834.69999998808,
+          "error": null
+        },
+        "browse-search": {
+          "ms": 1671,
+          "t0": 90837.19999998808,
+          "t1": 92506.5,
+          "error": null
+        },
+        "browse-search-empty": {
+          "ms": 2089,
+          "t0": 92510.5,
+          "t1": 94599.39999999106,
+          "error": null
+        },
+        "game-details-x5": {
+          "ms": 13784,
+          "t0": 94604.09999999404,
+          "t1": 108390.5,
+          "error": null
+        },
+        "library-status-change": {
+          "ms": 7526,
+          "t0": 108410.29999999702,
+          "t1": 115936,
+          "error": null
+        },
+        "voyage": {
+          "ms": 5867,
+          "t0": 115938.39999999106,
+          "t1": 121802.59999999404,
+          "error": null
+        },
+        "voyage-Log": {
+          "ms": 4949,
+          "t0": 121810.89999999106,
+          "t1": 126760.39999999106,
+          "error": null
+        },
+        "voyage-Scenes": {
+          "ms": 10182,
+          "t0": 126762.09999999404,
+          "t1": 136944.09999999404,
+          "error": null
+        },
+        "voyage-Audit": {
+          "ms": 10758,
+          "t0": 136947.19999998808,
+          "t1": 147704.89999999106,
+          "error": null
+        },
+        "voyage-Medals": {
+          "ms": 27089,
+          "t0": 147751.59999999404,
+          "t1": 174840.29999999702,
+          "error": null
+        },
+        "voyage-Your Ark": {
+          "ms": 4592,
+          "t0": 174843.39999999106,
+          "t1": 179434.5,
+          "error": null
+        },
+        "voyage-leave-ark": {
+          "ms": 29954,
+          "t0": 179436.79999999702,
+          "t1": 209391.19999998808,
+          "error": null
+        },
+        "oracle": {
+          "ms": 5272,
+          "t0": 224809.39999999106,
+          "t1": 230087.59999999404,
+          "error": null
+        },
+        "oracle-compute": {
+          "ms": 8257,
+          "t0": 230089.79999999702,
+          "t1": 238347.19999998808,
+          "error": null
+        },
+        "upcoming": {
+          "ms": 2755,
+          "t0": 238349.09999999404,
+          "t1": 241103.59999999404,
+          "error": null
+        },
+        "settings": {
+          "ms": 8338,
+          "t0": 241107.19999998808,
+          "t1": 249445.5,
+          "error": null
+        },
+        "back-to-browse": {
+          "ms": 4189,
+          "t0": 249448.39999999106,
+          "t1": 253638.09999999404,
+          "error": null
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 194,
+          "p50": 16.60000000000582,
+          "p95": 16.80000000000291,
+          "max": 33.5,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuAfterArk": 388.1
+      },
+      "eld": {
+        "count": 11171,
+        "min": 7.82,
+        "mean": 15.56,
+        "p50": 15.52,
+        "p99": 20.74,
+        "max": 351.27
+      },
+      "longTasks": {
+        "all": [
+          788,
+          213,
+          1369,
+          203,
+          126,
+          162,
+          111,
+          113,
+          119,
+          78,
+          76,
+          110,
+          1822,
+          103,
+          139,
+          113,
+          117,
+          118,
+          830,
+          1030,
+          104,
+          70,
+          94,
+          98,
+          69,
+          70,
+          84,
+          378,
+          110,
+          53,
+          119,
+          124,
+          3084,
+          81,
+          55,
+          53,
+          52,
+          51,
+          55,
+          55,
+          51,
+          54,
+          56,
+          673,
+          177,
+          52,
+          6618,
+          1889,
+          112,
+          359,
+          479,
+          237,
+          272,
+          58,
+          50,
+          58,
+          582,
+          58,
+          63,
+          24144,
+          68,
+          57,
+          55,
+          57,
+          69,
+          213,
+          14615,
+          207,
+          183,
+          155,
+          122,
+          139,
+          133,
+          89,
+          183,
+          119,
+          78,
+          82,
+          127,
+          103,
+          336,
+          52,
+          55,
+          56,
+          77,
+          75,
+          71
+        ],
+        "browse-scroll": [],
+        "oracle": [
+          183,
+          155,
+          122,
+          139,
+          133,
+          89,
+          183,
+          119,
+          78,
+          82,
+          127,
+          103,
+          336
+        ],
+        "oracle-compute": [],
+        "byStep": {
+          "to-library": 788,
+          "library-status-change": 1822,
+          "voyage": 1030,
+          "voyage-Log": 3084,
+          "voyage-Scenes": 673,
+          "voyage-Audit": 6618,
+          "voyage-Medals": 582,
+          "voyage-Your Ark": 63,
+          "voyage-leave-ark": 24144,
+          "oracle": 336,
+          "upcoming": 55,
+          "settings": 77
+        }
+      },
+      "sample": {
+        "label": "cycle-1",
+        "t": 1793778984921,
+        "renderer": {
+          "jsHeapUsedMB": 43.65,
+          "jsHeapTotalMB": 46.4,
+          "domNodes": 132563,
+          "jsEventListeners": 15303,
+          "documents": 2,
+          "layoutCount": 566,
+          "recalcStyleCount": 1620,
+          "taskDurationS": 117.995,
+          "scriptDurationS": 58.869
+        },
+        "ipcListeners": 12,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 4,
+        "externalProcessCount": 0,
+        "gpuWorkingSetMB": 243.4,
+        "gpuPrivateMB": 212.2,
+        "totalWorkingSetMB": 937.3,
+        "mainHeapMB": 27.9,
+        "mainRssMB": 160,
+        "procs": {
+          "electron": [
+            {
+              "pid": 21020,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 160,
+              "privateMB": 118.7,
+              "cpuSec": 18.285
+            },
+            {
+              "pid": 42508,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 243.4,
+              "privateMB": 212.2,
+              "cpuSec": 17.313
+            },
+            {
+              "pid": 25976,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 59.1,
+              "privateMB": 14.6,
+              "cpuSec": 8.558
+            },
+            {
+              "pid": 44932,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 467.3,
+              "privateMB": 1078.3,
+              "cpuSec": 153.702
+            }
+          ],
+          "external": [],
+          "childCount": 4,
+          "externalCount": 0,
+          "totalWorkingSetMB": 937.3,
+          "totalCpuSec": 199.92,
+          "mainHeapMB": 27.9,
+          "mainRssMB": 160
+        }
+      }
+    },
+    {
+      "n": 2,
+      "steps": {
+        "to-library": {
+          "ms": 436,
+          "t0": 257768.59999999404,
+          "t1": 258204.29999999702,
+          "error": null
+        },
+        "browse-load": {
+          "ms": 3743,
+          "t0": 259223.29999999702,
+          "t1": 262965.5,
+          "error": null
+        },
+        "browse-scroll": {
+          "ms": 3283,
+          "t0": 262974,
+          "t1": 266258.09999999404,
+          "error": null
+        },
+        "browse-filter": {
+          "ms": 1988,
+          "t0": 266264.89999999106,
+          "t1": 268252.799999997,
+          "error": null
+        },
+        "browse-search": {
+          "ms": 1678,
+          "t0": 268255.299999997,
+          "t1": 269935.59999999404,
+          "error": null
+        },
+        "browse-search-empty": {
+          "ms": 2107,
+          "t0": 269937.1999999881,
+          "t1": 272043.09999999404,
+          "error": null
+        },
+        "game-details-x5": {
+          "ms": 13757,
+          "t0": 272045.5,
+          "t1": 285801.6999999881,
+          "error": null
+        },
+        "library-status-change": {
+          "ms": 22796,
+          "t0": 285821.799999997,
+          "t1": 308613.799999997,
+          "error": "locator.click: Timeout 20000ms exceeded. |   - waiting for locator('button[aria-label^=\"Status:\"]').first()"
+        },
+        "voyage": {
+          "ms": 4550,
+          "t0": 308760,
+          "t1": 313309.09999999404,
+          "error": null
+        },
+        "voyage-Log": {
+          "ms": 27532,
+          "t0": 313312.5,
+          "t1": 340844.09999999404,
+          "error": null
+        },
+        "voyage-Scenes": {
+          "ms": 11665,
+          "t0": 340848.09999999404,
+          "t1": 352511.89999999106,
+          "error": null
+        },
+        "voyage-Audit": {
+          "ms": 31856,
+          "t0": 352515.799999997,
+          "t1": 384371.39999999106,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "voyage-Medals": {
+          "ms": 30681,
+          "t0": 384892.1999999881,
+          "t1": 415570.89999999106,
+          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Medals$/i }).first()"
+        },
+        "voyage-Your Ark": {
+          "ms": 30691,
+          "t0": 415681.1999999881,
+          "t1": 446372.6999999881,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for scheduled navigations to finish"
+        },
+        "voyage-leave-ark": {
+          "ms": 32925,
+          "t0": 446588.299999997,
+          "t1": 479515.39999999106,
+          "error": null
+        },
+        "oracle": {
+          "ms": 10255,
+          "t0": 503766.59999999404,
+          "t1": 514022.299999997,
+          "error": null
+        },
+        "oracle-compute": {
+          "ms": 8277,
+          "t0": 514025.1999999881,
+          "t1": 522302,
+          "error": null
+        },
+        "upcoming": {
+          "ms": 2806,
+          "t0": 522304.09999999404,
+          "t1": 525110.299999997,
+          "error": null
+        },
+        "settings": {
+          "ms": 8266,
+          "t0": 525112.6999999881,
+          "t1": 533378.299999997,
+          "error": null
+        },
+        "back-to-browse": {
+          "ms": 4181,
+          "t0": 533380.799999997,
+          "t1": 537561.3999999911,
+          "error": null
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 198,
+          "p50": 16.600000000034925,
+          "p95": 16.800000000046566,
+          "max": 17.79999999998836,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuAfterArk": 401.3
+      },
+      "eld": {
+        "count": 18135,
+        "min": 8.47,
+        "mean": 15.43,
+        "p50": 15.41,
+        "p99": 19.1,
+        "max": 87.23
+      },
+      "longTasks": {
+        "all": [
+          239,
+          118,
+          84,
+          78,
+          96,
+          93,
+          234,
+          16747,
+          227,
+          131,
+          168,
+          53,
+          155,
+          129,
+          223,
+          147,
+          82,
+          121,
+          123,
+          131,
+          122,
+          122,
+          95,
+          396,
+          25380,
+          65,
+          51,
+          67,
+          54,
+          59,
+          75,
+          52,
+          115,
+          59,
+          60,
+          825,
+          448,
+          187,
+          187,
+          183,
+          73,
+          27989,
+          2398,
+          182,
+          457,
+          140,
+          380,
+          489,
+          52,
+          66,
+          222,
+          63,
+          61,
+          26800,
+          71,
+          50,
+          64,
+          56,
+          50,
+          58,
+          74,
+          51,
+          269,
+          62,
+          18307,
+          411,
+          230,
+          167,
+          143,
+          149,
+          126,
+          76,
+          135,
+          1074,
+          331,
+          207,
+          177,
+          208,
+          115,
+          267,
+          175,
+          203,
+          144,
+          201,
+          129,
+          244,
+          69,
+          149,
+          119,
+          204,
+          231,
+          281,
+          183,
+          723,
+          57,
+          57,
+          69,
+          59,
+          68,
+          58
+        ],
+        "browse-scroll": [],
+        "oracle": [
+          167,
+          143,
+          149,
+          126,
+          76,
+          135,
+          1074,
+          331,
+          207,
+          177,
+          208,
+          115,
+          267,
+          175,
+          203,
+          144,
+          201,
+          129,
+          244,
+          69,
+          149,
+          119,
+          204,
+          231,
+          281,
+          183,
+          723
+        ],
+        "oracle-compute": [],
+        "byStep": {
+          "to-library": 239,
+          "game-details-x5": 118,
+          "library-status-change": 16747,
+          "voyage": 396,
+          "voyage-Log": 25380,
+          "voyage-Scenes": 825,
+          "voyage-Audit": 27989,
+          "voyage-Medals": 52,
+          "voyage-Your Ark": 222,
+          "voyage-leave-ark": 26800,
+          "oracle": 1074,
+          "upcoming": 57,
+          "settings": 69
+        }
+      },
+      "sample": {
+        "label": "cycle-2",
+        "t": 1793779270792,
+        "renderer": {
+          "jsHeapUsedMB": 71.14,
+          "jsHeapTotalMB": 73.9,
+          "domNodes": 353003,
+          "jsEventListeners": 35795,
+          "documents": 2,
+          "layoutCount": 873,
+          "recalcStyleCount": 2614,
+          "taskDurationS": 347.702,
+          "scriptDurationS": 186.56
+        },
+        "ipcListeners": 12,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 4,
+        "externalProcessCount": 0,
+        "gpuWorkingSetMB": 269.6,
+        "gpuPrivateMB": 229.4,
+        "totalWorkingSetMB": 1278.4,
+        "mainHeapMB": 30.6,
+        "mainRssMB": 163,
+        "procs": {
+          "electron": [
+            {
+              "pid": 21020,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 163,
+              "privateMB": 121,
+              "cpuSec": 34.636
+            },
+            {
+              "pid": 42508,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 269.6,
+              "privateMB": 229.4,
+              "cpuSec": 29.839
+            },
+            {
+              "pid": 25976,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 61.9,
+              "privateMB": 16.8,
+              "cpuSec": 25.07
+            },
+            {
+              "pid": 44932,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 777,
+              "privateMB": 1240.7,
+              "cpuSec": 414.742
+            }
+          ],
+          "external": [],
+          "childCount": 4,
+          "externalCount": 0,
+          "totalWorkingSetMB": 1278.4,
+          "totalCpuSec": 508.25,
+          "mainHeapMB": 30.6,
+          "mainRssMB": 163
+        }
+      }
+    },
+    {
+      "n": 3,
+      "steps": {
+        "to-library": {
+          "ms": 421,
+          "t0": 543643,
+          "t1": 544064.299999997,
+          "error": null
+        },
+        "browse-load": {
+          "ms": 3726,
+          "t0": 545089.1999999881,
+          "t1": 548815.299999997,
+          "error": null
+        },
+        "browse-scroll": {
+          "ms": 3278,
+          "t0": 548822.5,
+          "t1": 552100.799999997,
+          "error": null
+        },
+        "browse-filter": {
+          "ms": 1997,
+          "t0": 552107.799999997,
+          "t1": 554104.6999999881,
+          "error": null
+        },
+        "browse-search": {
+          "ms": 1676,
+          "t0": 554107,
+          "t1": 555783.099999994,
+          "error": null
+        },
+        "browse-search-empty": {
+          "ms": 2101,
+          "t0": 555785.6999999881,
+          "t1": 557887,
+          "error": null
+        },
+        "game-details-x5": {
+          "ms": 13758,
+          "t0": 557889.599999994,
+          "t1": 571647.799999997,
+          "error": null
+        },
+        "library-status-change": {
+          "ms": 23534,
+          "t0": 571662.799999997,
+          "t1": 595189.6999999881,
+          "error": "locator.click: Timeout 20000ms exceeded. |   - waiting for locator('button[aria-label^=\"Status:\"]').first()"
+        },
+        "voyage": {
+          "ms": 5199,
+          "t0": 595357.299999997,
+          "t1": 600564.6999999881,
+          "error": null
+        },
+        "voyage-Log": {
+          "ms": 39432,
+          "t0": 600568,
+          "t1": 639999.1999999881,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "voyage-Scenes": {
+          "ms": 13578,
+          "t0": 640095.799999997,
+          "t1": 653676.599999994,
+          "error": null
+        },
+        "voyage-Audit": {
+          "ms": 33379,
+          "t0": 653679,
+          "t1": 687057.799999997,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "voyage-Medals": {
+          "ms": 39099,
+          "t0": 687377.3999999911,
+          "t1": 726472.3999999911,
+          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Medals$/i }).first()"
+        },
+        "voyage-Your Ark": {
+          "ms": 41368,
+          "t0": 726484.5,
+          "t1": 767858.1999999881,
+          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Your Ark$/i }).first()"
+        },
+        "voyage-leave-ark": {
+          "ms": 58161,
+          "t0": 767863.1999999881,
+          "t1": 826024.6999999881,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "oracle": {
+          "ms": 3896,
+          "t0": 828734.8999999911,
+          "t1": 832631.3999999911,
+          "error": null
+        },
+        "oracle-compute": {
+          "ms": 8263,
+          "t0": 832634.1999999881,
+          "t1": 840895.599999994,
+          "error": null
+        },
+        "upcoming": {
+          "ms": 2912,
+          "t0": 840900.299999997,
+          "t1": 843813.099999994,
+          "error": null
+        },
+        "settings": {
+          "ms": 8929,
+          "t0": 843814.8999999911,
+          "t1": 852743.1999999881,
+          "error": null
+        },
+        "back-to-browse": {
+          "ms": 4191,
+          "t0": 852746,
+          "t1": 856936.599999994,
+          "error": null
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 197,
+          "p50": 16.600000000093132,
+          "p95": 16.800000000046566,
+          "max": 31.38800000003539,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuAfterArk": 216.1
+      },
+      "eld": {
+        "count": 20244,
+        "min": 9.05,
+        "mean": 15.48,
+        "p50": 15.44,
+        "p99": 18.69,
+        "max": 123.73
+      },
+      "longTasks": {
+        "all": [
+          256,
+          63,
+          104,
+          101,
+          113,
+          100,
+          93,
+          269,
+          17325,
+          312,
+          169,
+          151,
+          165,
+          52,
+          149,
+          286,
+          176,
+          120,
+          95,
+          154,
+          161,
+          137,
+          194,
+          153,
+          502,
+          54,
+          84,
+          63,
+          26905,
+          75,
+          265,
+          1144,
+          231,
+          233,
+          934,
+          106,
+          113,
+          56,
+          90,
+          127,
+          55,
+          890,
+          284,
+          138,
+          153,
+          173,
+          187,
+          163,
+          180,
+          86,
+          29732,
+          2441,
+          145,
+          292,
+          149,
+          306,
+          312,
+          60,
+          54,
+          52,
+          38515,
+          59,
+          93,
+          64,
+          57212,
+          77,
+          56,
+          66,
+          55,
+          62,
+          59,
+          89,
+          67,
+          67,
+          57,
+          157,
+          67,
+          62,
+          443,
+          60,
+          130,
+          55,
+          57,
+          86,
+          51
+        ],
+        "browse-scroll": [],
+        "oracle": [
+          62,
+          443
+        ],
+        "oracle-compute": [],
+        "byStep": {
+          "to-library": 256,
+          "browse-filter": 63,
+          "game-details-x5": 113,
+          "library-status-change": 17325,
+          "voyage": 502,
+          "voyage-Log": 26905,
+          "voyage-Scenes": 934,
+          "voyage-Audit": 29732,
+          "voyage-Medals": 38515,
+          "voyage-leave-ark": 57212,
+          "oracle": 443,
+          "upcoming": 130,
+          "settings": 86
+        }
+      },
+      "sample": {
+        "label": "cycle-3",
+        "t": 1793779591041,
+        "renderer": {
+          "jsHeapUsedMB": 98.39,
+          "jsHeapTotalMB": 102.15,
+          "domNodes": 580366,
+          "jsEventListeners": 56134,
+          "documents": 2,
+          "layoutCount": 1123,
+          "recalcStyleCount": 3419,
+          "taskDurationS": 611.747,
+          "scriptDurationS": 326.556
+        },
+        "ipcListeners": 12,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 4,
+        "externalProcessCount": 0,
+        "gpuWorkingSetMB": 265.4,
+        "gpuPrivateMB": 225,
+        "totalWorkingSetMB": 1586.3,
+        "mainHeapMB": 31.4,
+        "mainRssMB": 164.2,
+        "procs": {
+          "electron": [
+            {
+              "pid": 21020,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 164.2,
+              "privateMB": 121.6,
+              "cpuSec": 47.235
+            },
+            {
+              "pid": 42508,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 265.4,
+              "privateMB": 225,
+              "cpuSec": 42.408
+            },
+            {
+              "pid": 25976,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 61,
+              "privateMB": 15.7,
+              "cpuSec": 27.67
+            },
+            {
+              "pid": 44932,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 1087.3,
+              "privateMB": 1643.2,
+              "cpuSec": 711.323
+            }
+          ],
+          "external": [],
+          "childCount": 4,
+          "externalCount": 0,
+          "totalWorkingSetMB": 1586.3,
+          "totalCpuSec": 832.91,
+          "mainHeapMB": 31.4,
+          "mainRssMB": 164.2
+        }
+      }
+    },
+    {
+      "n": 4,
+      "steps": {
+        "to-library": {
+          "ms": 405,
+          "t0": 863893.799999997,
+          "t1": 864298.1999999881,
+          "error": null
+        },
+        "browse-load": {
+          "ms": 3724,
+          "t0": 865314.299999997,
+          "t1": 869038.299999997,
+          "error": null
+        },
+        "browse-scroll": {
+          "ms": 3292,
+          "t0": 869043.799999997,
+          "t1": 872335.099999994,
+          "error": null
+        },
+        "browse-filter": {
+          "ms": 1969,
+          "t0": 872340.1999999881,
+          "t1": 874308.799999997,
+          "error": null
+        },
+        "browse-search": {
+          "ms": 1666,
+          "t0": 874311,
+          "t1": 875977.6999999881,
+          "error": null
+        },
+        "browse-search-empty": {
+          "ms": 2104,
+          "t0": 875979.599999994,
+          "t1": 878082.299999997,
+          "error": null
+        },
+        "game-details-x5": {
+          "ms": 13778,
+          "t0": 878085.8999999911,
+          "t1": 891866.099999994,
+          "error": null
+        },
+        "library-status-change": {
+          "ms": 27435,
+          "t0": 891884.299999997,
+          "t1": 919175.099999994,
+          "error": "locator.click: Timeout 20000ms exceeded. |   - waiting for locator('button[aria-label^=\"Status:\"]').first()"
+        },
+        "voyage": {
+          "ms": 9207,
+          "t0": 919860.3999999911,
+          "t1": 929210.8999999911,
+          "error": null
+        },
+        "voyage-Log": {
+          "ms": 44797,
+          "t0": 929217.5,
+          "t1": 974019.1999999881,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "voyage-Scenes": {
+          "ms": 14768,
+          "t0": 974130.599999994,
+          "t1": 988898.099999994,
+          "error": null
+        },
+        "voyage-Audit": {
+          "ms": 38587,
+          "t0": 988900.5,
+          "t1": 1027482.5,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "voyage-Medals": {
+          "ms": 61914,
+          "t0": 1028043,
+          "t1": 1089957.5,
+          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Medals$/i }).first()"
+        },
+        "voyage-Your Ark": {
+          "ms": 59726,
+          "t0": 1090051.699999988,
+          "t1": 1149774.899999991,
+          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Your Ark$/i }).first()"
+        },
+        "voyage-leave-ark": {
+          "ms": 88608,
+          "t0": 1149787.199999988,
+          "t1": 1238392.399999991,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "oracle": {
+          "ms": 4799,
+          "t0": 1241509.699999988,
+          "t1": 1246307.399999991,
+          "error": null
+        },
+        "oracle-compute": {
+          "ms": 8326,
+          "t0": 1246310.5,
+          "t1": 1254631.199999988,
+          "error": null
+        },
+        "upcoming": {
+          "ms": 4950,
+          "t0": 1254641.699999988,
+          "t1": 1259594.299999997,
+          "error": null
+        },
+        "settings": {
+          "ms": 8571,
+          "t0": 1259596.599999994,
+          "t1": 1268166.899999991,
+          "error": null
+        },
+        "back-to-browse": {
+          "ms": 4186,
+          "t0": 1268169.399999991,
+          "t1": 1272355.899999991,
+          "error": null
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 197,
+          "p50": 16.600000000093132,
+          "p95": 16.800000000046566,
+          "max": 31.68799999996554,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuAfterArk": 77.3
+      },
+      "eld": {
+        "count": 26227,
+        "min": 8,
+        "mean": 15.57,
+        "p50": 15.43,
+        "p99": 20.59,
+        "max": 414.19
+      },
+      "longTasks": {
+        "all": [
+          219,
+          125,
+          89,
+          100,
+          88,
+          114,
+          271,
+          18404,
+          322,
+          192,
+          146,
+          146,
+          52,
+          87,
+          395,
+          261,
+          249,
+          262,
+          115,
+          132,
+          134,
+          396,
+          224,
+          161,
+          152,
+          278,
+          322,
+          276,
+          139,
+          304,
+          366,
+          288,
+          108,
+          215,
+          915,
+          277,
+          53,
+          74,
+          396,
+          31285,
+          77,
+          287,
+          50,
+          1253,
+          267,
+          294,
+          957,
+          102,
+          118,
+          55,
+          82,
+          53,
+          72,
+          137,
+          66,
+          143,
+          69,
+          921,
+          554,
+          198,
+          201,
+          191,
+          217,
+          93,
+          34836,
+          2915,
+          147,
+          363,
+          149,
+          409,
+          543,
+          83,
+          60444,
+          135,
+          303,
+          66,
+          77,
+          53,
+          75,
+          72,
+          54,
+          84596,
+          139,
+          116,
+          57,
+          73,
+          76,
+          122,
+          143,
+          62,
+          119,
+          109,
+          71,
+          113,
+          138,
+          64,
+          112,
+          111,
+          253,
+          120,
+          76,
+          1111,
+          105,
+          110,
+          127,
+          113,
+          118,
+          75,
+          96
+        ],
+        "browse-scroll": [],
+        "oracle": [
+          76,
+          1111
+        ],
+        "oracle-compute": [],
+        "byStep": {
+          "to-library": 219,
+          "game-details-x5": 125,
+          "library-status-change": 18404,
+          "voyage": 915,
+          "voyage-Log": 31285,
+          "voyage-Scenes": 957,
+          "voyage-Audit": 34836,
+          "voyage-Medals": 60444,
+          "voyage-Your Ark": 72,
+          "voyage-leave-ark": 84596,
+          "oracle": 1111,
+          "upcoming": 110,
+          "settings": 127
+        }
+      },
+      "sample": {
+        "label": "cycle-4",
+        "t": 1793780012187,
+        "renderer": {
+          "jsHeapUsedMB": 125.21,
+          "jsHeapTotalMB": 129.65,
+          "domNodes": 811251,
+          "jsEventListeners": 74998,
+          "documents": 2,
+          "layoutCount": 1398,
+          "recalcStyleCount": 4280,
+          "taskDurationS": 978.178,
+          "scriptDurationS": 506.041
+        },
+        "ipcListeners": 12,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 4,
+        "externalProcessCount": 0,
+        "gpuWorkingSetMB": 65.7,
+        "gpuPrivateMB": 143.3,
+        "totalWorkingSetMB": 1435.4,
+        "mainHeapMB": 31.9,
+        "mainRssMB": 82.8,
+        "procs": {
+          "electron": [
+            {
+              "pid": 21020,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 82.8,
+              "privateMB": 118.8,
+              "cpuSec": 69.967
+            },
+            {
+              "pid": 42508,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 65.7,
+              "privateMB": 143.3,
+              "cpuSec": 61.701
+            },
+            {
+              "pid": 25976,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 7.8,
+              "privateMB": 16.6,
+              "cpuSec": 33.265
+            },
+            {
+              "pid": 44932,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 1279.1,
+              "privateMB": 1951.5,
+              "cpuSec": 1123.329
+            }
+          ],
+          "external": [],
+          "childCount": 4,
+          "externalCount": 0,
+          "totalWorkingSetMB": 1435.4,
+          "totalCpuSec": 1291.27,
+          "mainHeapMB": 31.9,
+          "mainRssMB": 82.8
+        }
+      }
+    },
+    {
+      "n": 5,
+      "steps": {
+        "to-library": {
+          "ms": 690,
+          "t0": 1285049.299999997,
+          "t1": 1285739.199999988,
+          "error": null
+        },
+        "browse-load": {
+          "ms": 3739,
+          "t0": 1286756,
+          "t1": 1290494.799999997,
+          "error": null
+        },
+        "browse-scroll": {
+          "ms": 3295,
+          "t0": 1290501.199999988,
+          "t1": 1293795.099999994,
+          "error": null
+        },
+        "browse-filter": {
+          "ms": 2069,
+          "t0": 1293805.199999988,
+          "t1": 1295874.199999988,
+          "error": null
+        },
+        "browse-search": {
+          "ms": 1711,
+          "t0": 1295878.199999988,
+          "t1": 1297588,
+          "error": null
+        },
+        "browse-search-empty": {
+          "ms": 2156,
+          "t0": 1297593.699999988,
+          "t1": 1299752.299999997,
+          "error": null
+        },
+        "game-details-x5": {
+          "ms": 13753,
+          "t0": 1299760.799999997,
+          "t1": 1313513.099999994,
+          "error": null
+        },
+        "library-status-change": {
+          "ms": 40996,
+          "t0": 1313545,
+          "t1": 1354539.599999994,
+          "error": "locator.click: Timeout 20000ms exceeded. |   - waiting for locator('button[aria-label^=\"Status:\"]').first()"
+        },
+        "voyage": {
+          "ms": 7418,
+          "t0": 1354846.199999988,
+          "t1": 1362270,
+          "error": null
+        },
+        "voyage-Log": {
+          "ms": 55928,
+          "t0": 1362275.299999997,
+          "t1": 1418202.599999994,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "voyage-Scenes": {
+          "ms": 19334,
+          "t0": 1429885.899999991,
+          "t1": 1449236.599999994,
+          "error": null
+        },
+        "voyage-Audit": {
+          "ms": 66692,
+          "t0": 1449248.199999988,
+          "t1": 1515931.5,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "voyage-Medals": {
+          "ms": 55393,
+          "t0": 1516498.799999997,
+          "t1": 1571896,
+          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Medals$/i }).first()"
+        },
+        "voyage-Your Ark": {
+          "ms": 53445,
+          "t0": 1572025.599999994,
+          "t1": 1625472.599999994,
+          "error": "locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Your Ark$/i }).first()"
+        },
+        "voyage-leave-ark": {
+          "ms": 229392,
+          "t0": 1625476.699999988,
+          "t1": 1854869.599999994,
+          "error": "locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and stable"
+        },
+        "oracle": {
+          "ms": 8007,
+          "t0": 1857835.699999988,
+          "t1": 1865843.099999994,
+          "error": null
+        },
+        "oracle-compute": {
+          "ms": 8287,
+          "t0": 1865846.299999997,
+          "t1": 1874132.5,
+          "error": null
+        },
+        "upcoming": {
+          "ms": 3282,
+          "t0": 1874136.5,
+          "t1": 1877418.299999997,
+          "error": null
+        },
+        "settings": {
+          "ms": 9461,
+          "t0": 1877422.299999997,
+          "t1": 1886884.5,
+          "error": null
+        },
+        "back-to-browse": {
+          "ms": 4220,
+          "t0": 1886887.299999997,
+          "t1": 1891107.599999994,
+          "error": null
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 199,
+          "p50": 16.600000000093132,
+          "p95": 16.800000000046566,
+          "max": 18.300000000046566,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuAfterArk": 124.9
+      },
+      "eld": {
+        "count": 38797,
+        "min": 8.18,
+        "mean": 15.62,
+        "p50": 15.56,
+        "p99": 19.14,
+        "max": 211.29
+      },
+      "longTasks": {
+        "all": [
+          506,
+          95,
+          203,
+          161,
+          151,
+          138,
+          51,
+          187,
+          580,
+          33739,
+          480,
+          366,
+          287,
+          387,
+          71,
+          70,
+          236,
+          258,
+          718,
+          356,
+          254,
+          222,
+          164,
+          401,
+          171,
+          81,
+          265,
+          230,
+          825,
+          179,
+          79,
+          257,
+          158,
+          45413,
+          125,
+          120,
+          478,
+          101,
+          2158,
+          514,
+          814,
+          57,
+          1312,
+          110,
+          105,
+          64,
+          105,
+          85,
+          85,
+          158,
+          173,
+          93,
+          237,
+          84,
+          250,
+          167,
+          1861,
+          1082,
+          361,
+          367,
+          340,
+          327,
+          352,
+          140,
+          59565,
+          5479,
+          493,
+          695,
+          256,
+          307,
+          632,
+          106,
+          87,
+          86,
+          77,
+          65,
+          80,
+          72,
+          222635,
+          138,
+          190,
+          97,
+          63,
+          75,
+          903,
+          201,
+          93,
+          241,
+          150,
+          91,
+          168,
+          84,
+          97,
+          181,
+          137,
+          97,
+          699,
+          146,
+          1538,
+          71,
+          287,
+          275,
+          301,
+          197,
+          407,
+          157,
+          279
+        ],
+        "browse-scroll": [],
+        "oracle": [
+          168,
+          84,
+          97,
+          181,
+          137,
+          97,
+          699,
+          146,
+          1538,
+          71
+        ],
+        "oracle-compute": [],
+        "byStep": {
+          "to-library": 506,
+          "browse-filter": 95,
+          "game-details-x5": 203,
+          "library-status-change": 33739,
+          "voyage": 825,
+          "voyage-Log": 45413,
+          "voyage-Scenes": 1861,
+          "voyage-Audit": 59565,
+          "voyage-Medals": 632,
+          "voyage-Your Ark": 72,
+          "voyage-leave-ark": 222635,
+          "oracle": 1538,
+          "upcoming": 287,
+          "settings": 407
+        }
+      },
+      "sample": {
+        "label": "cycle-5",
+        "t": 1793780634499,
+        "renderer": {
+          "jsHeapUsedMB": 152.63,
+          "jsHeapTotalMB": 155.9,
+          "domNodes": 1038902,
+          "jsEventListeners": 95202,
+          "documents": 2,
+          "layoutCount": 1636,
+          "recalcStyleCount": 5064,
+          "taskDurationS": 1546.818,
+          "scriptDurationS": 881.5
+        },
+        "ipcListeners": 12,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 4,
+        "externalProcessCount": 0,
+        "gpuWorkingSetMB": 86.4,
+        "gpuPrivateMB": 144.2,
+        "totalWorkingSetMB": 1870.5,
+        "mainHeapMB": 32.7,
+        "mainRssMB": 104.2,
+        "procs": {
+          "electron": [
+            {
+              "pid": 21020,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 104.2,
+              "privateMB": 120.9,
+              "cpuSec": 102.974
+            },
+            {
+              "pid": 42508,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 86.4,
+              "privateMB": 144.2,
+              "cpuSec": 93.478
+            },
+            {
+              "pid": 25976,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 8.3,
+              "privateMB": 16.5,
+              "cpuSec": 38.905
+            },
+            {
+              "pid": 44932,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 1671.7,
+              "privateMB": 2209.2,
+              "cpuSec": 1743.584
+            }
+          ],
+          "external": [],
+          "childCount": 4,
+          "externalCount": 0,
+          "totalWorkingSetMB": 1870.5,
+          "totalCpuSec": 1983.41,
+          "mainHeapMB": 32.7,
+          "mainRssMB": 104.2
+        }
+      }
+    }
+  ],
+  "skippedSteps": [
+    "skipped/failed step \"library-status-change\" : locator.click: Timeout 20000ms exceeded. |   - waiting for locator('button[aria-label",
+    "skipped/failed step \"voyage-Audit\" : locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled an",
+    "skipped/failed step \"voyage-Medals\" : locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Meda",
+    "skipped/failed step \"voyage-Your Ark\" : locator.click: Timeout 30000ms exceeded. |     - waiting for scheduled navigations to finis",
+    "skipped/failed step \"voyage-Log\" : locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enabled and ",
+    "skipped/failed step \"voyage-Your Ark\" : locator.click: Timeout 30000ms exceeded. |   - waiting for getByRole('button', { name: /^Yo",
+    "skipped/failed step \"voyage-leave-ark\" : locator.click: Timeout 30000ms exceeded. |     - waiting for element to be visible, enable"
+  ],
+  "idle60": {
+    "cpuPct": 13.14,
+    "eld": {
+      "count": 4090,
+      "min": 7.95,
+      "mean": 15.48,
+      "p50": 15.49,
+      "p99": 19.4,
+      "max": 24.77
+    },
+    "seconds": 60,
+    "startWS": 1018.1,
+    "endWS": 501
+  },
+  "baselineSample": {
+    "label": "cycle-0",
+    "t": 1793778806947,
+    "renderer": {
+      "jsHeapUsedMB": 20.49,
+      "jsHeapTotalMB": 22.15,
+      "domNodes": 434,
+      "jsEventListeners": 359,
+      "documents": 1,
+      "layoutCount": 8,
+      "recalcStyleCount": 125,
+      "taskDurationS": 0.63,
+      "scriptDurationS": 0.063
+    },
+    "ipcListeners": 12,
+    "ipcListenersByChannel": {
+      "ollama:rerank-progress": 1,
+      "session:statusChange": 1,
+      "session:liveUpdate": 1,
+      "session:ended": 1,
+      "updater:checking": 1,
+      "updater:update-available": 1,
+      "updater:update-not-available": 1,
+      "updater:download-progress": 1,
+      "updater:update-downloaded": 1,
+      "updater:error": 1,
+      "updater:auto-download": 1,
+      "window-maximized-changed": 1
+    },
+    "processCount": 4,
+    "externalProcessCount": 0,
+    "gpuWorkingSetMB": 154.5,
+    "gpuPrivateMB": 123.9,
+    "totalWorkingSetMB": 506.5,
+    "mainHeapMB": 26.7,
+    "mainRssMB": 144.3,
+    "procs": {
+      "electron": [
+        {
+          "pid": 21020,
+          "type": "Browser",
+          "name": null,
+          "workingSetMB": 144.3,
+          "privateMB": 102,
+          "cpuSec": 7.539
+        },
+        {
+          "pid": 42508,
+          "type": "GPU",
+          "name": null,
+          "workingSetMB": 154.5,
+          "privateMB": 123.9,
+          "cpuSec": 6.29
+        },
+        {
+          "pid": 25976,
+          "type": "Utility",
+          "name": "Network Service",
+          "workingSetMB": 58.3,
+          "privateMB": 14.1,
+          "cpuSec": 0.752
+        },
+        {
+          "pid": 44932,
+          "type": "Tab",
+          "name": null,
+          "workingSetMB": 140.4,
+          "privateMB": 87.6,
+          "cpuSec": 6.414
+        }
+      ],
+      "external": [],
+      "childCount": 4,
+      "externalCount": 0,
+      "totalWorkingSetMB": 506.5,
+      "totalCpuSec": 21.41,
+      "mainHeapMB": 26.7,
+      "mainRssMB": 144.3
+    }
+  },
+  "ipcHandlers": 150,
+  "hiddenIdle": {
+    "cpuPct": 6.75,
+    "eld": {
+      "count": 19444,
+      "min": 8.98,
+      "mean": 15.57,
+      "p50": 15.55,
+      "p99": 17.19,
+      "max": 104.73
+    },
+    "seconds": 300,
+    "startWS": 576.7,
+    "endWS": 544.8,
+    "perProcessCpuSec": [
+      {
+        "type": "Browser",
+        "name": null,
+        "dCpuSec": 7.436
+      },
+      {
+        "type": "GPU",
+        "name": null,
+        "dCpuSec": 6.211
+      },
+      {
+        "type": "Utility",
+        "name": "Network Service",
+        "dCpuSec": 0.22
+      },
+      {
+        "type": "Tab",
+        "name": null,
+        "dCpuSec": 6.346
+      }
+    ]
+  },
+  "applist": {
+    "ok": true,
+    "entries": 155000,
+    "ms": 513,
+    "eld": {
+      "count": 288,
+      "min": 8.86,
+      "mean": 15.47,
+      "p50": 15.52,
+      "p99": 20.68,
+      "max": 22.3
+    },
+    "fakeRequests": 793
+  }
+}

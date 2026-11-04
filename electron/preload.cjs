@@ -760,3 +760,22 @@ contextBridge.exposeInMainWorld('store', {
 if (process.argv.includes('--ark-dev-server')) {
   console.log('Preload script loaded - window.steam, window.epic, window.metacritic, window.aiChat, window.settings, window.electron, window.updater, window.fileDialog, window.sessionTracker, window.newsApi, window.webviewApi, window.ollama, window.localAi, window.aiRouter, window.ann, window.analytics, window.devlog, window.gameLauncher exposed');
 }
+
+// Perf-gate probe (scripts/perf/measure.mjs): only exposed when the main process passes --ark-perf (ARK_PERF=1), inert otherwise.
+// Reports how many ipcRenderer listeners exist per channel so the harness can prove
+// they stay flat across scenario cycles.
+try {
+  if (process.argv.includes('--ark-perf')) {
+    contextBridge.exposeInMainWorld('__arkPerf', {
+      ipcListeners: () => {
+        const out = {};
+        for (const name of ipcRenderer.eventNames()) {
+          out[String(name)] = ipcRenderer.listenerCount(name);
+        }
+        return out;
+      },
+    });
+  }
+} catch {
+  /* probe only */
+}
