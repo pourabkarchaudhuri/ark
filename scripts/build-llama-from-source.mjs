@@ -3,8 +3,10 @@
  * and write .llama-cache/<runtime.asset>, for networks that block GitHub release-asset downloads.
  * Then: node scripts/build-llama-runtime.mjs --update-manifest
  *
- * Needs: Visual Studio Build Tools 2022, cmake + ninja on PATH (pip install cmake ninja). CPU backends only
- * (runtime-selected AVX/AVX2/AVX512 variants); the release's Vulkan build needs the Vulkan SDK.
+ * Needs: Visual Studio Build Tools 2022, cmake + ninja on PATH (pip install cmake ninja), and the Vulkan SDK pieces
+ * from scripts/build-vulkan-sdk.mjs (.llama-cache/vulkan-sdk, or VULKAN_SDK_DIR). Produces the same layout as the
+ * release's Vulkan build: ggml-vulkan.dll is a runtime-loaded backend (GGML_BACKEND_DL) next to runtime-selected CPU
+ * variants, so machines without a usable Vulkan device fall back to CPU. vulkan-1.dll comes from the GPU driver.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,9 +16,9 @@ import { fileURLToPath } from 'node:url';
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const rt = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'local-ai', 'runtime-manifest.json'), 'utf8')).runtime;
 const work = path.join(root, '.llama-cache', `src-${rt.build}`);
-const vcvars = process.env.VCVARS64 || 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat';
+const vcvars = process.env.VCVARS64 || 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat';
 const srcZip = path.join(root, '.llama-cache', `src-${rt.build}.zip`);
-const tar = path.join(process.env.SystemRoot || 'C:\Windows', 'System32', 'tar.exe');
+const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
 
 fs.mkdirSync(work, { recursive: true });
 if (!fs.existsSync(srcZip)) {
@@ -26,7 +28,10 @@ if (!fs.existsSync(srcZip)) {
 }
 execSync(`"${tar}" -xf "${srcZip}" -C "${work}"`, { stdio: 'inherit' });
 const src = path.join(work, `llama.cpp-${rt.build}`);
-const flags = '-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_OPENSSL=OFF';
+const sdk = process.env.VULKAN_SDK_DIR || path.join(root, '.llama-cache', 'vulkan-sdk');
+if (!fs.existsSync(path.join(sdk, 'Bin', 'glslc.exe'))) throw new Error('Vulkan SDK pieces missing; run node scripts/build-vulkan-sdk.mjs first');
+const vk = `-DGGML_VULKAN=ON -DCMAKE_PREFIX_PATH=\"${sdk}\" -DVulkan_GLSLC_EXECUTABLE="${path.join(sdk, 'Bin', 'glslc.exe')}" -DVulkan_INCLUDE_DIR="${path.join(sdk, 'Include')}" -DVulkan_LIBRARY="${path.join(sdk, 'Lib', 'vulkan-1.lib')}"`;
+const flags = '-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_OPENSSL=OFF ' + vk;
 execSync(`cmd /c "call "${vcvars}" && cd /d "${src}" && cmake -B build -G Ninja ${flags} && cmake --build build --target llama-server -j 8"`, { stdio: 'inherit' });
 
 const bin = path.join(src, 'build', 'bin');
