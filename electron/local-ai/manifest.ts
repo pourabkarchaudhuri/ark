@@ -61,7 +61,11 @@ export function validateManifest(m: unknown): string[] {
   const rt = man.runtime;
   if (!rt || typeof rt.build !== 'string' || !/^b\d+$/.test(rt.build)) problems.push('runtime.build must be a bNNNN tag');
   if (!rt || !HEX64.test(String(rt.sha256))) problems.push('runtime.sha256 must be 64 hex chars');
-  if (rt && !String(rt.url).startsWith('https://github.com/ggml-org/llama.cpp/releases/download/')) {
+  // A release asset, or the tagged source archive when the runtime is built from source (see runtime.note).
+  const urlOk = (u: string) =>
+    u.startsWith('https://github.com/ggml-org/llama.cpp/releases/download/') ||
+    u.startsWith('https://codeload.github.com/ggml-org/llama.cpp/zip/refs/tags/');
+  if (rt && !urlOk(String(rt.url))) {
     problems.push('runtime.url must point at a ggml-org/llama.cpp release');
   }
   for (const [name, hash] of Object.entries(rt?.files ?? {})) {

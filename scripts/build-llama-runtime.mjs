@@ -73,7 +73,9 @@ if (zipHash !== rt.sha256) {
 const extractDir = path.join(cacheDir, `extract-${rt.build}`);
 fs.rmSync(extractDir, { recursive: true, force: true });
 fs.mkdirSync(extractDir, { recursive: true });
-execFileSync('tar', ['-xf', zipPath, '-C', extractDir], { stdio: 'inherit' });
+// Windows' own bsdtar by full path: a GNU tar earlier on PATH (Git Bash) cannot read zip files.
+const tarExe = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\Windows', 'System32', 'tar.exe') : 'tar';
+execFileSync(tarExe, ['-xf', zipPath, '-C', extractDir], { stdio: 'inherit' });
 
 // The zip may hold the files flat or under one folder; take the folder that has llama-server.exe.
 const findServerDir = (dir, depth = 0) => {

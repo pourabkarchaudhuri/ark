@@ -2,15 +2,33 @@
   "schema": 1,
   "runtime": {
     "build": "b11780",
-    "asset": "llama-b11780-bin-win-vulkan-x64.zip",
-    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11780/llama-b11780-bin-win-vulkan-x64.zip",
-    "sha256": "186951a062d92108ba6ec9dbb051657dc273b5e6e9aaf33b1cf465f026800fdc",
-    "size": 36793217,
+    "asset": "llama-b11780-bin-win-cpu-x64-msvc.zip",
+    "url": "https://codeload.github.com/ggml-org/llama.cpp/zip/refs/tags/b11780",
+    "sha256": "7c1657cf17812e5e3213da733fccd98ac337c49ad56dbfc04d3b9be09bd25781",
+    "size": 8449819,
     "license": {
       "file": "LICENSE-llama.cpp.txt",
       "url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/b11780/LICENSE"
     },
-    "files": {}
+    "files": {
+      "ggml-base.dll": "7842b97c04ccc3df94c6dac9c5218cedf278ca9c0d8640c75ee2fd1c185da63a",
+      "ggml-cpu-alderlake.dll": "6aa272f57a5b32b4079422cf88f2dea17615e9f9ecbd0c5f77bdd7c996517280",
+      "ggml-cpu-cannonlake.dll": "af4defa4de3a8d8be93cad015eab1402af65d3d9ebe368b1a0b84e50504ea37c",
+      "ggml-cpu-cascadelake.dll": "eb987e01211b9f85d9d24abeaf53c0ac1d54356da57f7e511e9520284f9595ef",
+      "ggml-cpu-haswell.dll": "97eea1de47e7fe4eda815469e805a8f4069ae4dd92d6adda7f151678726acb8c",
+      "ggml-cpu-icelake.dll": "ea09ffb17238fe71d8b01dd6df2dab406d67605ca228117e360ec393f2a34d21",
+      "ggml-cpu-sandybridge.dll": "d15e82b16a78d03dd6250c411ef3654a3b920db6b69d6388e7a1b6e93f679b45",
+      "ggml-cpu-skylakex.dll": "a7de69cb4641d2e2d987bb24d4c4f1b3df23105f040e9550699c1781da791f55",
+      "ggml-cpu-sse42.dll": "313f783895cd48ec95094fb1cfa9f9a7ef7d3f3184118b33f4f771dc19fa067b",
+      "ggml-cpu-x64.dll": "7e5db663ac136a59d56fa7214ec5333e99affb5f5cf43f0c0eea227aa00d0da0",
+      "ggml.dll": "0c3a124ffab91ff57933975e6f6146854f266c6dbebda0697dcc0137b6bfb4c9",
+      "llama-common.dll": "794ed1b8aab5face6a7f975106525f50923ff89512f933464f81038c87c0934c",
+      "llama-server-impl.dll": "b8b1cc76357fa7d97890ab44d506c70296a240ed9527a65c5c2a253dea3d585b",
+      "llama-server.exe": "6d3291abb5365031f5428e117bfa268d859468c85fcc1a80800ccb902b51ab9c",
+      "llama.dll": "68120b59fd9e545ae0fd9fb2685acbb1c6676792b065cc76ea70dc1b92eb998f",
+      "mtmd.dll": "99c3f2a5cfb047359c142884163171c1e6035513ae953a68550c06b3d2c70848"
+    },
+    "note": "Built from the official b11780 source tag with MSVC (CPU backends, runtime-selected AVX/AVX2/AVX512 variants) because release-asset downloads were blocked; url is the source archive, the zip itself is produced by scripts/build-llama-from-source.mjs notes in docs."
   },
   "models": [
     {
