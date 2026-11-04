@@ -15,6 +15,26 @@
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+
+const nodeRequire = createRequire(import.meta.url);
+
+/**
+ * Default network call. Inside the Electron main process this is Chromium's network stack (`net.fetch`), which
+ * trusts the Windows certificate store, follows the system proxy and does what the user's browser does. Node's
+ * own `fetch` (undici, bundled CA list only) fails with SELF_SIGNED_CERT_IN_CHAIN behind a TLS-inspecting
+ * corporate proxy, so the built-in AI model download and the installer fallback could not start there (found
+ * by the 1.0.97 packaged-app smoke test). Plain Node (tests, scripts) keeps the global fetch.
+ */
+function defaultFetch(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    if (process.versions.electron) {
+      const { app, net } = nodeRequire('electron') as typeof import('electron');
+      if (net?.fetch && app?.isReady?.()) return net.fetch(url, init as Parameters<typeof net.fetch>[1]) as unknown as Promise<Response>;
+    }
+  } catch { /* fall through to the global fetch */ }
+  return fetch(url, init);
+}
 
 export interface ResumableDownloadOptions {
   url: string;
@@ -93,7 +113,7 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
   const { url, destPath, expectedSize, sha512, sha256, onProgress, signal } = opts;
   const maxAttempts = opts.maxAttempts ?? 6;
   const idleTimeoutMs = opts.idleTimeoutMs ?? 60_000;
-  const doFetch = opts.fetchImpl ?? ((u: string, init?: RequestInit) => fetch(u, init));
+  const doFetch = opts.fetchImpl ?? defaultFetch;
   const sleep = opts.sleep ?? defaultSleep;
   const partPath = `${destPath}.part`;
 
