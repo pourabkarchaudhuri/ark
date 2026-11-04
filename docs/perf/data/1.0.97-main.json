@@ -2,7 +2,7 @@
   "meta": {
     "label": "main",
     "version": "1.0.96",
-    "commit": "28f96a3",
+    "commit": "a7ff1ff",
     "appDir": "C:\\Projects\\Tracker",
     "machine": "12th Gen Intel(R) Core(TM) i9-12900H x20, 32 GB, win32 10.0.26200",
     "startedAt": "2026-11-04T15:45:13.671Z",
@@ -2950,6 +2950,135 @@
   },
   "ipcHandlers": 188,
   "hiddenIdle": {
+    "method": "detached (no automation client attached while hidden)",
+    "seconds": 120,
+    "minUptimeS": 150,
+    "series": [
+      {
+        "atS": 12,
+        "byType": {
+          "browser:22088": 0,
+          "gpu-process:27692": 0,
+          "utility:44928": 0,
+          "renderer:48880": 0
+        }
+      },
+      {
+        "atS": 26,
+        "byType": {
+          "browser:22088": 0.11,
+          "gpu-process:27692": 0.11,
+          "utility:44928": 0,
+          "renderer:48880": 0
+        }
+      },
+      {
+        "atS": 41,
+        "byType": {
+          "browser:22088": 0.21,
+          "gpu-process:27692": 0,
+          "utility:44928": 0,
+          "renderer:48880": 0
+        }
+      },
+      {
+        "atS": 56,
+        "byType": {
+          "browser:22088": 0.11,
+          "gpu-process:27692": 0,
+          "utility:44928": 0,
+          "renderer:48880": 0.21
+        }
+      },
+      {
+        "atS": 70,
+        "byType": {
+          "browser:22088": 0,
+          "gpu-process:27692": 0,
+          "utility:44928": 0,
+          "renderer:48880": 0.43
+        }
+      },
+      {
+        "atS": 84,
+        "byType": {
+          "browser:22088": 0,
+          "gpu-process:27692": 0,
+          "utility:44928": 0,
+          "renderer:48880": 0
+        }
+      },
+      {
+        "atS": 99,
+        "byType": {
+          "browser:22088": 0,
+          "gpu-process:27692": 0,
+          "utility:44928": 0,
+          "renderer:48880": 0
+        }
+      },
+      {
+        "atS": 113,
+        "byType": {
+          "browser:22088": 0,
+          "gpu-process:27692": 0,
+          "utility:44928": 0,
+          "renderer:48880": 0
+        }
+      },
+      {
+        "atS": 122,
+        "byType": {
+          "browser:22088": 0,
+          "gpu-process:27692": 0,
+          "utility:44928": 0,
+          "renderer:48880": 0
+        }
+      }
+    ],
+    "cpuPct": 0.14,
+    "eld": null,
+    "perProcessCpuSec": [
+      {
+        "type": "browser",
+        "pid": 22088,
+        "dCpuSec": 0.063
+      },
+      {
+        "type": "gpu-process",
+        "pid": 27692,
+        "dCpuSec": 0.016
+      },
+      {
+        "type": "utility",
+        "pid": 44928,
+        "dCpuSec": 0
+      },
+      {
+        "type": "renderer",
+        "pid": 48880,
+        "dCpuSec": 0.094
+      }
+    ],
+    "startWS": 736.3,
+    "endWS": 731.3,
+    "toastsWhileHidden": []
+  },
+  "applist": {
+    "ok": true,
+    "entries": 155000,
+    "ms": 440,
+    "eld": {
+      "count": 284,
+      "min": 9.24,
+      "mean": 15.5,
+      "p50": 15.53,
+      "p99": 20.5,
+      "max": 25.53
+    },
+    "fakeRequests": 893
+  },
+  "hiddenIdleAttached": {
     "cpuPct": 1.77,
     "eld": null,
     "seconds": 120,
@@ -2977,19 +3106,5 @@
         "dCpuSec": 0.84
       }
     ]
-  },
-  "applist": {
-    "ok": true,
-    "entries": 155000,
-    "ms": 440,
-    "eld": {
-      "count": 284,
-      "min": 9.24,
-      "mean": 15.5,
-      "p50": 15.53,
-      "p99": 20.5,
-      "max": 25.53
-    },
-    "fakeRequests": 893
   }
 }

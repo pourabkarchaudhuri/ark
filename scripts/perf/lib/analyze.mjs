@@ -215,6 +215,15 @@ export function renderMarkdown(cur, base, ev) {
     L.push(`- ${r.meta.label}: skipped or failed steps: ${(r.skippedSteps ?? []).length ? (r.skippedSteps ?? []).map((s) => `\`${s}\``).join('; ') : 'none'}`);
   }
   for (const r of [cur, base].filter(Boolean)) if (r.meta.note) L.push(`- ${r.meta.label} note: ${r.meta.note}`);
+  L.push('', '## Hidden idle detail', '', '| Build | Method | CPU % | Per process (CPU s over the window) |', '|---|---|---:|---|');
+  for (const r of [cur, base].filter(Boolean)) {
+    for (const [key, name] of [['hiddenIdle', 'detached (budget)'], ['hiddenIdleAttached', 'Playwright attached (informational)']]) {
+      const h = r[key];
+      if (!h) continue;
+      const per = (h.perProcessCpuSec ?? []).map((p) => `${p.type} ${p.dCpuSec}`).join(', ');
+      L.push(`| ${r.meta.label} | ${name}, ${h.seconds} s | ${h.cpuPct} | ${per} |`);
+    }
+  }
   if (cur.heapDiff) L.push('', '## Heap snapshot diff (cycle 2 vs last cycle)', '', '```', cur.heapDiff, '```');
   L.push('', `Method notes: event-loop numbers come from \`monitorEventLoopDelay\` (10 ms resolution) in the main process; IPC bytes are JSON-length of args plus results and are switched off while the app-list refresh is timed so the probe does not add to the event-loop delay; CPU is the cumulative user+kernel time of the whole process tree (Electron processes plus llama-server and any Python sidecar) divided by wall time. Cold-start budget uses a 5% noise allowance, the other relative budgets 10% (plus a small absolute floor on near-zero metrics).`);
   return L.join('\n') + '\n';

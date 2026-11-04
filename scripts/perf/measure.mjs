@@ -15,6 +15,8 @@
  *   --heap-snapshots     snapshots at cycle 2 and the last cycle, constructor diff + retainer paths in the result
  *   --seed-dir DIR       generated profile (created when missing; reused across builds)
  *   --skip-applist       skip the Steam app-list refresh phase
+ *   --attached-hidden    also measure hidden idle with Playwright attached (informational; see lib/detached.mjs)
+ *   --hidden-only        only the detached hidden-idle phase; with --merge-into result.json it replaces hiddenIdle there
  *   --hidden-settle-s N  visible wait on Browse before hiding the window (default 45)
  *
  * Always runs on a COPIED test profile (--user-data-dir), with every variable named in the checkout's .env
@@ -31,6 +33,7 @@ import { Probes } from './lib/probes.mjs';
 import { makeRunner } from './lib/scenario.mjs';
 import { startFakeSteam } from './lib/fake-steam.mjs';
 import { evaluate, renderMarkdown } from './lib/analyze.mjs';
+import { measureDetachedHiddenIdle } from './lib/detached.mjs';
 import { diffSnapshots, takeSnapshot } from './lib/heapdiff.mjs';
 import { sleep, median, round } from './lib/util.mjs';
 
@@ -123,7 +126,21 @@ const cpuPct = (a, b) => {
   return wall > 0 ? round(((b.procs.totalCpuSec - a.procs.totalCpuSec) / wall) * 100, 2) : null;
 };
 
+async function runHiddenOnly() {
+  await ensureSeed();
+  const into = opt('--merge-into');
+  const r = await measureDetachedHiddenIdle({ appDir: cfg.appDir, repoRoot, seedDir: cfg.seedDir, label: cfg.label, version: pkg.version, hiddenIdleS: cfg.hiddenIdleS, settleS: cfg.hiddenSettleS, log });
+  if (into) {
+    const j = JSON.parse(fs.readFileSync(into, 'utf8'));
+    if (j.hiddenIdle && !j.hiddenIdleAttached) j.hiddenIdleAttached = j.hiddenIdle;
+    j.hiddenIdle = r;
+    fs.writeFileSync(into, JSON.stringify(j, null, 2));
+  } else fs.writeFileSync(cfg.out, JSON.stringify({ hiddenIdle: r }, null, 2));
+  log(`[${cfg.label}] hidden idle ${r.cpuPct}%`);
+}
+
 async function run() {
+  if (flag('--hidden-only')) return runHiddenOnly();
   const profile = await ensureSeed();
   const result = {
     meta: {
@@ -228,31 +245,33 @@ async function run() {
     }
     result.skippedSteps.push(...[...runner.skipped.entries()].map(([k, v]) => `${k} (x${v})`));
 
-    // hidden idle (window hidden to tray). Back on Browse, the offline Top Sellers fetch chain (egdata / Epic retries with
-    // 4 s and 6 s waits, started by every Browse visit) needs ~45 s to run out; hiding earlier measured that burst, not idle.
-    await runner.toBrowseTop();
-    await sleep(cfg.hiddenSettleS * 1000);
-    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.hide()));
-    await sleep(5000);
-    // The probe's own 10 ms event-loop sampler costs ~2% of a core in the main process (a blank Electron window under
-    // Playwright idles at 0.07%), which would be charged to the app: stop it while hidden idle is measured.
-    const sampler = await probes.mainProbe('eventLoopMonitor', false).then(() => true, () => false);
-    const h0 = await probes.processes();
-    const h0t = Date.now();
-    await sleep(cfg.hiddenIdleS * 1000);
-    const h1 = await probes.processes();
-    const h1t = Date.now();
-    if (sampler) await probes.mainProbe('eventLoopMonitor', true).catch(() => {});
-    const eldH = null;
-    result.hiddenIdle = {
-      cpuPct: cpuPct({ t: h0t, procs: h0 }, { t: h1t, procs: h1 }),
-      eld: eldH,
-      seconds: cfg.hiddenIdleS,
-      startWS: h0.totalWorkingSetMB,
-      endWS: h1.totalWorkingSetMB,
-      perProcessCpuSec: h1.electron.map((p) => ({ type: p.type, name: p.name, dCpuSec: round(p.cpuSec - (h0.electron.find((q) => q.pid === p.pid)?.cpuSec ?? p.cpuSec), 3) })),
-    };
-    log(`[${cfg.label}] hidden idle ${cfg.hiddenIdleS}s: cpu ${result.hiddenIdle.cpuPct}%, ELD max ${eldH?.max} ms`);
+    if (flag('--attached-hidden')) {
+      // hidden idle (window hidden to tray). Back on Browse, the offline Top Sellers fetch chain (egdata / Epic retries with
+      // 4 s and 6 s waits, started by every Browse visit) needs ~45 s to run out; hiding earlier measured that burst, not idle.
+      await runner.toBrowseTop();
+      await sleep(cfg.hiddenSettleS * 1000);
+      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.hide()));
+      await sleep(5000);
+      // The probe's own 10 ms event-loop sampler costs ~2% of a core in the main process (a blank Electron window under
+      // Playwright idles at 0.07%), which would be charged to the app: stop it while hidden idle is measured.
+      const sampler = await probes.mainProbe('eventLoopMonitor', false).then(() => true, () => false);
+      const h0 = await probes.processes();
+      const h0t = Date.now();
+      await sleep(cfg.hiddenIdleS * 1000);
+      const h1 = await probes.processes();
+      const h1t = Date.now();
+      if (sampler) await probes.mainProbe('eventLoopMonitor', true).catch(() => {});
+      const eldH = null;
+      result.hiddenIdleAttached = {
+        cpuPct: cpuPct({ t: h0t, procs: h0 }, { t: h1t, procs: h1 }),
+        eld: eldH,
+        seconds: cfg.hiddenIdleS,
+        startWS: h0.totalWorkingSetMB,
+        endWS: h1.totalWorkingSetMB,
+        perProcessCpuSec: h1.electron.map((p) => ({ type: p.type, name: p.name, dCpuSec: round(p.cpuSec - (h0.electron.find((q) => q.pid === p.pid)?.cpuSec ?? p.cpuSec), 3) })),
+      };
+      log(`[${cfg.label}] hidden idle (Playwright attached, informational) ${cfg.hiddenIdleS}s: cpu ${result.hiddenIdleAttached.cpuPct}%, ELD max ${eldH?.max} ms`);
+    }
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.show()));
   } catch (e) {
     result.aborted = String(e?.stack ?? e).slice(0, 800);
@@ -261,6 +280,15 @@ async function run() {
     save();
     await closeApp(app);
   }
+
+  // 3b. Hidden idle without an automation client attached (see lib/detached.mjs for why this is the representative number).
+  try {
+    result.hiddenIdle = await measureDetachedHiddenIdle({ appDir: cfg.appDir, repoRoot, seedDir: cfg.seedDir, label: cfg.label, version: pkg.version, hiddenIdleS: cfg.hiddenIdleS, settleS: cfg.hiddenSettleS, log });
+  } catch (e) {
+    result.hiddenIdle = { cpuPct: null, error: String(e?.message ?? e).split(String.fromCharCode(10))[0] };
+    log(`[${cfg.label}] detached hidden idle failed: ${result.hiddenIdle.error}`);
+  }
+  save();
 
   // 4. Steam app-list refresh (fake local Steam endpoint, test key; the real host is unreachable here)
   if (!cfg.skipApplist) {

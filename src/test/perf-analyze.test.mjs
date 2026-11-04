@@ -94,4 +94,14 @@ describe('perf harness analysis', () => {
     expect(failed).toContain('JS heap after scenario vs v1.0.96');
     expect(evaluate(base, base).failures).toEqual([]);
   });
+
+  it('hidden idle budget reads the detached measurement, never the attached (Playwright) one', () => {
+    const base = run();
+    const cur = run();
+    cur.hiddenIdleAttached = { cpuPct: 1.77, seconds: 120 }; // informational only
+    cur.hiddenIdle = { cpuPct: 0.14, seconds: 120 };
+    expect(budgets(cur, base).filter((r) => /hidden/i.test(r.name)).every((r) => r.pass)).toBe(true);
+    cur.hiddenIdle = { cpuPct: 1.5, seconds: 120 };
+    expect(budgets(cur, base).filter((r) => /hidden/i.test(r.name)).some((r) => !r.pass)).toBe(true);
+  });
 });

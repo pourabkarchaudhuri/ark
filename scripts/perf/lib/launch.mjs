@@ -70,7 +70,7 @@ export async function launchApp({ appDir, userDataDir, repoRoot, env = {}, extra
     executablePath: electronBinary(repoRoot),
     // Windows occlusion detection pauses frames (and so Playwright's rAF-based stability check) whenever another window covers
     // the app, which made "Enter Ark" unclickable in some runs; keep rendering regardless, for every build measured.
-    args: [`--user-data-dir=${userDataDir}`, hostRules(extraHostRules), '--disable-features=CalculateNativeWinOcclusion', '--disable-backgrounding-occluded-windows', ...extraArgs, appDir],
+    args: [...(process.env.PERF_KEEP_OCCLUSION ? [] : ['--disable-features=CalculateNativeWinOcclusion', '--disable-backgrounding-occluded-windows']), `--user-data-dir=${userDataDir}`, hostRules(extraHostRules), ...extraArgs, appDir],
     cwd: appDir,
     env: sanitizedEnv(appDir, env),
     timeout,

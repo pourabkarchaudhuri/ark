@@ -22,7 +22,7 @@
       "C:/Users/100003~1/AppData/Local/Temp/claude/099c29b26e4a188a/c57202bc-f44c-4eeb-b379-2eca11362dd4/scratchpad/base2.json",
       "C:/Users/100003~1/AppData/Local/Temp/claude/099c29b26e4a188a/c57202bc-f44c-4eeb-b379-2eca11362dd4/scratchpad/base_tail.json"
     ],
-    "note": "Run on a clean v1.0.96 checkout with the ML data files copied in (the first baseline run lacked dataset/ml, so the ONNX model never loaded and its RSS and idle numbers were too low). Cycles 1-3 from one run (the build leaks about 130k DOM nodes per cycle, so cycle time grows), idle, hidden-idle (event-loop sampler off) and app-list phases from a second run. Probes from this branch back-ported (scripts/perf/apply-probes.mjs)."
+    "note": "Run on a clean v1.0.96 checkout with the ML data files copied in (the first baseline run lacked dataset/ml, so the ONNX model never loaded and its RSS and idle numbers were too low). Cycles 1-3 from one run (the build leaks about 130k DOM nodes per cycle, so cycle time grows), idle, hidden-idle (event-loop sampler off) and app-list phases from a second run. Probes from this branch back-ported (scripts/perf/apply-probes.mjs). Round 2: hiddenIdle re-measured detached (no automation client attached, 120 s); the earlier attached value is hiddenIdleAttached."
   },
   "coldStart": {
     "runs": [
@@ -1252,6 +1252,135 @@
   },
   "ipcHandlers": 150,
   "hiddenIdle": {
+    "method": "detached (no automation client attached while hidden)",
+    "seconds": 120,
+    "minUptimeS": 150,
+    "series": [
+      {
+        "atS": 12,
+        "byType": {
+          "browser:47336": 0,
+          "gpu-process:49088": 0,
+          "utility:7144": 0,
+          "renderer:17788": 0.13
+        }
+      },
+      {
+        "atS": 27,
+        "byType": {
+          "browser:47336": 0,
+          "gpu-process:49088": 0,
+          "utility:7144": 0,
+          "renderer:17788": 0
+        }
+      },
+      {
+        "atS": 41,
+        "byType": {
+          "browser:47336": 0,
+          "gpu-process:49088": 0,
+          "utility:7144": 0,
+          "renderer:17788": 0
+        }
+      },
+      {
+        "atS": 56,
+        "byType": {
+          "browser:47336": 0,
+          "gpu-process:49088": 0,
+          "utility:7144": 0.11,
+          "renderer:17788": 0
+        }
+      },
+      {
+        "atS": 71,
+        "byType": {
+          "browser:47336": 0,
+          "gpu-process:49088": 0,
+          "utility:7144": 0,
+          "renderer:17788": 0.64
+        }
+      },
+      {
+        "atS": 85,
+        "byType": {
+          "browser:47336": 0,
+          "gpu-process:49088": 0,
+          "utility:7144": 0,
+          "renderer:17788": 0
+        }
+      },
+      {
+        "atS": 100,
+        "byType": {
+          "browser:47336": 0,
+          "gpu-process:49088": 0,
+          "utility:7144": 0,
+          "renderer:17788": 0
+        }
+      },
+      {
+        "atS": 115,
+        "byType": {
+          "browser:47336": 0,
+          "gpu-process:49088": 0,
+          "utility:7144": 0.11,
+          "renderer:17788": 0.11
+        }
+      },
+      {
+        "atS": 122,
+        "byType": {
+          "browser:47336": 0.2,
+          "gpu-process:49088": 0,
+          "utility:7144": 0,
+          "renderer:17788": 0
+        }
+      }
+    ],
+    "cpuPct": 0.14,
+    "eld": null,
+    "perProcessCpuSec": [
+      {
+        "type": "browser",
+        "pid": 47336,
+        "dCpuSec": 0.016
+      },
+      {
+        "type": "gpu-process",
+        "pid": 49088,
+        "dCpuSec": 0
+      },
+      {
+        "type": "utility",
+        "pid": 7144,
+        "dCpuSec": 0.031
+      },
+      {
+        "type": "renderer",
+        "pid": 17788,
+        "dCpuSec": 0.125
+      }
+    ],
+    "startWS": 704.4,
+    "endWS": 696.3,
+    "toastsWhileHidden": []
+  },
+  "applist": {
+    "ok": true,
+    "entries": 155000,
+    "ms": 452,
+    "eld": {
+      "count": 284,
+      "min": 9.84,
+      "mean": 15.52,
+      "p50": 15.67,
+      "p99": 21.51,
+      "max": 22.79
+    },
+    "fakeRequests": 793
+  },
+  "hiddenIdleAttached": {
     "cpuPct": 0.07,
     "eld": null,
     "seconds": 120,
@@ -1279,19 +1408,5 @@
         "dCpuSec": 0.017
       }
     ]
-  },
-  "applist": {
-    "ok": true,
-    "entries": 155000,
-    "ms": 452,
-    "eld": {
-      "count": 284,
-      "min": 9.84,
-      "mean": 15.52,
-      "p50": 15.67,
-      "p99": 21.51,
-      "max": 22.79
-    },
-    "fakeRequests": 793
   }
 }
