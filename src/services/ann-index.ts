@@ -54,6 +54,25 @@ export interface AnnLease {
 
 type VectorEntry = { id: string; vector: number[] | Float32Array };
 
+/**
+ * A vector in the form that crosses IPC cheaply. A plain `number[]` of 1024 doubles is walked element by element by the
+ * context bridge and again by the structured clone (about 0.2 ms per vector, so a 500-vector backfill batch froze the
+ * renderer for 150-500 ms); a tight Float32Array is one memcpy. A typed array that is a VIEW into a larger buffer would
+ * drag the whole buffer across with it, so those are copied to their own buffer first. The main process builds a
+ * Float32Array from either form (`prepareAnnVector`), so the stored vector is the same.
+ */
+export function toIpcVector(v: number[] | Float32Array): Float32Array {
+  if (v instanceof Float32Array) {
+    return v.byteOffset === 0 && v.buffer.byteLength === v.byteLength ? v : v.slice();
+  }
+  return Float32Array.from(v);
+}
+
+/** The same entries with each vector in IPC form; the input objects are left untouched. */
+export function toIpcEntries(entries: ReadonlyArray<VectorEntry>): VectorEntry[] {
+  return entries.map((e) => ({ id: e.id, vector: toIpcVector(e.vector) }));
+}
+
 class AnnIndexService {
   private _listeners = new Set<() => void>();
   private _ready = false;
@@ -245,10 +264,11 @@ class AnnIndexService {
   }
 
   private async _sendAdd(entries: VectorEntry[]): Promise<AnnAddResult> {
-    const first = AnnIndexService._normalizeAdd(await window.ann!.addVectors(entries));
+    const wire = toIpcEntries(entries);
+    const first = AnnIndexService._normalizeAdd(await window.ann!.addVectors(wire));
     if (!first.aborted) return first;
     // The index was replaced mid-call (dims change) — upserts are idempotent, so resend once.
-    const retry = AnnIndexService._normalizeAdd(await window.ann!.addVectors(entries));
+    const retry = AnnIndexService._normalizeAdd(await window.ann!.addVectors(wire));
     if (retry.aborted) console.warn(`[AnnIndex] addVectors aborted twice — ${entries.length} vectors not applied`);
     return { ...retry, added: first.added + retry.added };
   }
@@ -320,7 +340,7 @@ class AnnIndexService {
   async queryBatch(entries: VectorEntry[], k: number): Promise<Record<string, Array<{ id: string; distance: number }>>> {
     if (!window.ann || !this._ready) return {};
     try {
-      return await window.ann.queryBatch(entries, k);
+      return await window.ann.queryBatch(toIpcEntries(entries), k);
     } catch (err) {
       console.warn('[AnnIndex] queryBatch failed:', err);
       return {};

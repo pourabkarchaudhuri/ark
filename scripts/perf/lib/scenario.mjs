@@ -23,6 +23,12 @@ export function compactIpc(ipc) {
 
 const rawIpcSteps = new Set(['browse-load', 'browse-scroll']);
 
+/**
+ * PERF_PROFILE_STEPS=oracle-compute,settings (or *) with PERF_PROFILE_DIR=<dir>: a renderer CPU profile (CDP Profiler, 200 us
+ * sampling) around each named step, written as <dir>/c<cycle>-<step>.cpuprofile, to attribute a long task to functions.
+ */
+const profileSteps = process.env.PERF_PROFILE_DIR && process.env.PERF_PROFILE_STEPS ? new Set(process.env.PERF_PROFILE_STEPS.split(',')) : null;
+
 export function makeRunner(probes, log) {
   const page = probes.page;
   const skipped = new Map();
@@ -32,6 +38,12 @@ export function makeRunner(probes, log) {
     const w0 = Date.now();
     let error = null;
     await probes.ipc(true).catch(() => null);
+    const profiling = profileSteps && (profileSteps.has('*') || profileSteps.has(name));
+    if (profiling) {
+      await probes.cdp.send('Profiler.enable').catch(() => {});
+      await probes.cdp.send('Profiler.setSamplingInterval', { interval: 200 }).catch(() => {});
+      await probes.cdp.send('Profiler.start').catch(() => {});
+    }
     try {
       // a Radix menu/dialog left open sets body{pointer-events:none}; Escape closes it before the next action
       await page.keyboard.press('Escape').catch(() => {});
@@ -75,6 +87,13 @@ export function makeRunner(probes, log) {
       skipped.set(k, skipped.get(k) + 1);
     }
     const t1 = await probes.now().catch(() => 0);
+    if (profiling) {
+      const { profile } = await probes.cdp.send('Profiler.stop').catch(() => ({}));
+      if (profile) {
+        const fs = await import('node:fs');
+        fs.writeFileSync(`${process.env.PERF_PROFILE_DIR}/c${cycle}-${name}.cpuprofile`, JSON.stringify(profile));
+      }
+    }
     const ipc = await probes.ipc(true).catch(() => null);
     out[name] = { ms: Date.now() - w0, t0, t1, error, ipc: compactIpc(ipc) };
     if (rawIpcSteps.has(name)) out[name].ipcRaw = ipc;

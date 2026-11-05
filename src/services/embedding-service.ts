@@ -253,7 +253,7 @@ declare global {
 }
 
 /** One decoded pooled vector ready for ANN IPC (collect phase of backfill). */
-export type AnnBackfillRow = { id: string; vector: number[] };
+export type AnnBackfillRow = { id: string; vector: number[] | Float32Array };
 
 /** Max eligible rows collected per IDB cursor session before closing the tx. */
 const ANN_BACKFILL_PAGE_SIZE = 1000;
@@ -1006,7 +1006,7 @@ function chunkRowToAnn(row: CachedChunk, now: number, ttl: number): AnnBackfillR
   if (now - row.timestamp >= ttl) return null;
   const q = coerceInt8Q(row.q);
   if (!q || typeof row.scale !== 'number') return null;
-  return { id: row.chunkId, vector: Array.from(dequantizeEmbedding(q, row.scale)) };
+  return { id: row.chunkId, vector: dequantizeEmbedding(q, row.scale) };
 }
 
 /**
@@ -2040,8 +2040,8 @@ async function embedAndPersistChunkedGames(
   if (written.length > 0) {
     try {
       await annIndex.addVectors(written.flatMap((w) => [
-        { id: w.gameId, vector: Array.from(w.pooled) },
-        ...w.chunks.map((c) => ({ id: c.chunkId, vector: Array.from(c.vector) })),
+        { id: w.gameId, vector: w.pooled },
+        ...w.chunks.map((c) => ({ id: c.chunkId, vector: c.vector })),
       ]));
     } catch { /* ANN not ready yet */ }
   }
@@ -4164,7 +4164,7 @@ class EmbeddingService {
             now - entry.timestamp < ttl
           ) {
             seen.add(entry.gameId);
-            rows.push({ id: entry.gameId, vector: Array.from(vec) });
+            rows.push({ id: entry.gameId, vector: vec });
           }
           if (rows.length >= pageSize) {
             // Stop this cursor/tx; resume later via nextAfterKey. No await here.
@@ -4277,7 +4277,7 @@ class EmbeddingService {
         const vec = readPooledVector(entry);
         if (!vec || now - entry.timestamp >= ttl) return;
         seen.add(entry.gameId);
-        buffer.push({ id: entry.gameId, vector: Array.from(vec) });
+        buffer.push({ id: entry.gameId, vector: vec });
         if (buffer.length >= ANN_BACKFILL_PAGE_SIZE) {
           const toFlush = buffer;
           buffer = [];

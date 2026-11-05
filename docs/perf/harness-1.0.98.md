@@ -80,3 +80,14 @@ Full run: 10 cycles, 60 s idle, 120 s detached hidden idle, 2 extra cold starts,
 | Cold start / idle 60 s / hidden idle | 9.3-9.6 s to interactive (model-free launches) / 15.0 % / 0.15 % |
 
 The baseline run fails exactly one budget by design of the new harness: the download status pushes (5/s against a limit of 4/s).
+
+## Attributing a long task (renderer CPU profile)
+
+`PERF_PROFILE_DIR=<dir> PERF_PROFILE_STEPS=oracle-compute,settings,upcoming node scripts/perf/measure.mjs ...` records a renderer CPU
+profile (CDP `Profiler`, 200 us sampling) around each named step (`*` = every step) and writes `<dir>/c<cycle>-<step>.cpuprofile`
+(open it in Chrome DevTools, or sum self/inclusive time per function). Profiling adds some cost of its own: use it to see WHICH
+functions fill a long task, and the plain run for the number.
+
+First found with it (1.0.98): the renderer long tasks of 130-500 ms during Oracle / Upcoming / Settings were the background ANN
+backfill and graph build converting every 1024-dim vector to a boxed `number[]` for IPC. They land in whichever cycle the library
+embedding finishes in (cycle 1 on 1.0.98, cycle 3-4 on 1.0.97), which is why a budget that looks at every cycle saw them only now.

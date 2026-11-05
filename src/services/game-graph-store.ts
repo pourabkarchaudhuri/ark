@@ -846,12 +846,9 @@ export class GameGraphStore {
     let failedBatches = 0;
     for (let b = 0; b < totalBatches; b++) {
       const slice = embeddings.slice(b * batchSize, (b + 1) * batchSize);
-      // Per-slice conversion keeps the IPC payload a plain number[] without
-      // ever materialising every vector as doubles.
-      const entries = slice.map((e) => ({
-        id: e.gameId,
-        vector: e.embedding instanceof Float32Array ? Array.from(e.embedding) : e.embedding,
-      }));
+      // The ANN wrapper puts each vector in IPC form (a tight Float32Array) per slice, so every vector is
+      // never materialised as boxed doubles here.
+      const entries = slice.map((e) => ({ id: e.gameId, vector: e.embedding }));
       const result = await annIndex.queryBatch(entries, NEIGHBORS_K);
       // An ANN error is returned as `{}` — indistinguishable from "no neighbours" per row,
       // but a whole batch coming back empty is a failed query.
