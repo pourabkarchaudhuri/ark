@@ -42,10 +42,10 @@ afterEach(() => {
 describe('connector nodes and role tabs', () => {
   it('shows the built-in connector routed for chat and the route on each role tab', async () => {
     await renderPage();
-    expect(within(node('Built-in (llama.cpp)')).getByText('Live')).toBeInTheDocument();
-    expect(within(node('Built-in (llama.cpp)')).getByRole('button', { name: 'Routed' })).toBeDisabled();
+    expect(within(node('Built-in AI')).getByText('Live')).toBeInTheDocument();
+    expect(within(node('Built-in AI')).getByRole('button', { name: 'Routed' })).toBeDisabled();
     const tabs = screen.getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['Chat Built-in (llama.cpp)', 'Embeddings Built-in (llama.cpp)', 'Reranker Built-in (llama.cpp)']);
+    expect(tabs.map((t) => t.textContent)).toEqual(['Chat Built-in AI', 'Embeddings Built-in AI', 'Reranker Built-in AI']);
     expect(screen.getByText('Active route')).toBeInTheDocument();
   });
 
@@ -121,7 +121,7 @@ describe('routing', () => {
   it('routing built-in chat sets the old selector back to the built-in AI', async () => {
     const state = withChatRoute(routerState({ connectors: [builtinConnector({ routedFor: [] }), connector('anthropic')] }), 'anthropic', 'claude-sonnet-5-5');
     const m = await renderPage(state);
-    fireEvent.click(within(node('Built-in (llama.cpp)')).getByRole('button', { name: 'Route here' }));
+    fireEvent.click(within(node('Built-in AI')).getByRole('button', { name: 'Route here' }));
     await waitFor(() => expect(m.api.setRoute).toHaveBeenCalledWith({ role: 'chat', connectorId: 'builtin', model: '' }));
     expect(win.settings!.setPreferredChatProvider).toHaveBeenCalledWith('ollama');
   });
@@ -530,7 +530,7 @@ describe('1.0.98 F5: tests per role, drafts across roles, key notes, keyboard an
   it('a search result for the built-in AI opens the built-in connector even when another is routed', async () => {
     const state = withChatRoute(routerState({ connectors: [builtinConnector({ routedFor: [] }), connector('anthropic')] }), 'anthropic', 'claude-sonnet-5-5');
     await renderPage(state, { focusId: 'builtin-ai' });
-    expect(await screen.findByRole('heading', { name: 'Built-in (llama.cpp)' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Built-in AI' })).toBeInTheDocument();
     expect(document.querySelector('[data-setting-id="builtin-ai"]')).not.toBeNull();
   });
 

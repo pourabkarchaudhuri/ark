@@ -38,20 +38,20 @@ export function ExternalOllamaSection() {
   }, []);
 
   const testReranker = async () => {
-    if (!window.ollama?.rerankDiagnostic) { setProbe({ state: 'fail', error: 'Diagnostic IPC not available. Restart the app.' }); return; }
+    if (!window.ollama?.rerankDiagnostic) { setProbe({ state: 'fail', error: 'The check isn’t available right now. Restart Ark and try again.' }); return; }
     setProbe({ state: 'testing' });
     try {
       const r = await window.ollama.rerankDiagnostic();
       setProbe({ state: r.rerankWorking ? 'ok' : 'fail', ollamaUp: r.ollamaUp, modelInstalled: r.modelInstalled, latencyMs: r.latencyMs, error: r.error });
     } catch (e) {
-      setProbe({ state: 'fail', error: e instanceof Error ? e.message : 'Probe threw an exception' });
+      setProbe({ state: 'fail', error: e instanceof Error ? e.message : 'The check could not run.' });
     }
   };
 
   return (
     <div className="stack" style={{ gap: 'var(--space-3)' }} data-setting-id="own-ollama">
       <div className="row" style={{ padding: 0, minHeight: 0, border: 0 }}>
-        <div>
+        <div className="grow">
           <p className="t">Use my own Ollama</p>
           <p className="d">Off by default: Ark uses its built-in AI and never touches Ollama or its models folder. Turn this on only if you want Ark to talk to an Ollama you already run.</p>
         </div>
@@ -83,7 +83,7 @@ export function ExternalOllamaSection() {
             {probe.state === 'ok' && <span className="chip" data-tone="live" role="status"><Icon d={ICON.check} size={12} />Reranker working{typeof probe.latencyMs === 'number' ? ` (${probe.latencyMs}ms)` : ''}</span>}
             {probe.state === 'fail' && (
               <span className="chip" data-tone="warn" role="status">
-                {!probe.ollamaUp && probe.ollamaUp !== undefined ? 'Local AI not running' : probe.modelInstalled === false ? `Model not pulled: ${probe.error}` : probe.error || 'Probe failed'}
+                {!probe.ollamaUp && probe.ollamaUp !== undefined ? 'Local AI not running' : probe.modelInstalled === false ? `Model not pulled: ${probe.error}` : probe.error || 'The check failed'}
               </span>
             )}
           </div>

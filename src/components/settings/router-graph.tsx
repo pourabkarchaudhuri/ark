@@ -7,7 +7,7 @@ import { useEffect, useState } from 'react';
 import type { AiConnector, AiRole } from '@/services/ai-router-types';
 import { Chip, Icon, ICON, Switch, type Tone } from '@/components/settings/ui';
 import { KIND_LORE, ROLE_DECKS, graphLayout, type ModelList, type NodeDisplay } from '@/components/settings/ai-providers-logic';
-import { ROLE_LABEL, ROLE_NOUN, monogram } from '@/components/settings/use-ai-router';
+import { ROLE_NOUN, connectorLabel, monogram } from '@/components/settings/use-ai-router';
 
 export interface GraphItem {
   connector: AiConnector;
@@ -76,7 +76,7 @@ export function RouterGraph(p: Props) {
       <div className="panel stagewrap">
         <div className="stage" style={{ height: L.stageH }}>
           <p style={{ position: 'absolute', left: 'var(--space-4)', top: 'var(--space-2)', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--color-ink-3)' }}>Connectors that offer {noun}</p>
-          <p style={{ position: 'absolute', left: 320, top: L.routerLabelY, width: 220, textAlign: 'center', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--color-ink-3)' }}>Router</p>
+          <p style={{ position: 'absolute', left: 320, top: L.routerLabelY, width: 220, textAlign: 'center', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--color-ink-3)' }}>Where it goes</p>
           <p style={{ position: 'absolute', left: 580, top: L.deckLabelY, width: 124, textAlign: 'center', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--color-ink-3)' }}>Uses this route</p>
 
           <svg width={720} height={L.stageH} aria-hidden="true" style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', overflow: 'visible' }}>
@@ -97,18 +97,18 @@ export function RouterGraph(p: Props) {
                 <div className="bar" />
                 <div style={{ padding: 'var(--space-2) var(--space-3) 0', display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
                   <span className="mono">{monogram(c)}</span>
-                  <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--text-md)', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</span>
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--text-md)', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={connectorLabel(c)}>{connectorLabel(c)}</span>
                   <span className="chip">{d.chip}</span>
                 </div>
-                <p style={{ margin: 'var(--space-1) var(--space-3) 0', fontSize: 'var(--text-xs)', color: 'var(--color-ink-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{summary(it)}</p>
+                <p style={{ margin: 'var(--space-1) var(--space-3) 0', fontSize: 'var(--text-xs)', color: 'var(--color-ink-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={summary(it)}>{summary(it)}</p>
                 <div style={{ position: 'absolute', left: 'var(--space-3)', right: 'var(--space-3)', bottom: 'var(--space-2)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
                   <button
                     type="button" className="btn" aria-pressed={d.routed} disabled={!d.canAct && !d.opensDrawer}
                     onClick={() => (d.opensDrawer ? p.onOpen(c.id) : p.onRoute(c.id))} style={{ flex: 1, height: 28, fontSize: 'var(--text-xs)' }}
                   >{d.routeLabel}</button>
-                  <button type="button" className="btn icon" aria-label={`Settings for ${c.name}`} aria-expanded={p.openId === c.id} onClick={() => p.onOpen(c.id)} style={{ width: 28, height: 28 }}><Icon d={ICON.general} /></button>
+                  <button type="button" className="btn icon" aria-label={`Settings for ${connectorLabel(c)}`} aria-expanded={p.openId === c.id} onClick={() => p.onOpen(c.id)} style={{ width: 28, height: 28 }}><Icon d={ICON.general} /></button>
                   {c.kind !== 'builtin' && (
-                    <button type="button" className="sw" role="switch" aria-checked={c.enabled !== false} aria-label={`Enable ${c.name}`} onClick={() => p.onToggle(c.id, c.enabled === false)} style={{ width: 40, height: 22 }}><span /></button>
+                    <button type="button" className="sw" role="switch" aria-checked={c.enabled !== false} aria-label={`Enable ${connectorLabel(c)}`} onClick={() => p.onToggle(c.id, c.enabled === false)} style={{ width: 40, height: 22 }}><span /></button>
                   )}
                 </div>
               </div>
@@ -125,10 +125,10 @@ export function RouterGraph(p: Props) {
             <div className="bar" />
             <div style={{ padding: 'var(--space-3) var(--space-4)' }}>
               <div className="inline" style={{ justifyContent: 'space-between' }}>
-                <p style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-md)', fontWeight: 700, letterSpacing: '0.04em' }}>LiteLLM</p>
+                <p style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-md)', fontWeight: 700, letterSpacing: '0.04em' }}>Router</p>
                 <span className="chip">{live ? 'Live' : 'No route'}</span>
               </div>
-              <p className="d" style={{ marginTop: 'var(--space-1)' }}>Router · {ROLE_LABEL[p.role]}</p>
+              <p className="d" style={{ marginTop: 'var(--space-1)' }}>For {ROLE_NOUN[p.role]}</p>
               <p style={{ margin: 'var(--space-4) 0 var(--space-1)', fontSize: 'var(--text-xs)', color: 'var(--color-ink-3)' }}>Active route</p>
               <p className="fade" style={{ fontSize: 'var(--text-sm)', color: 'var(--tone)', wordBreak: 'break-all' }}>{p.routeText || `No route for ${noun}. Pick a connector and press Route here.`}</p>
               <p style={{ margin: 'var(--space-4) 0 0', fontSize: 'var(--text-xs)', color: 'var(--color-ink-3)', fontVariantNumeric: 'tabular-nums' }}>{p.counts.armed} armed · {p.counts.fault} fault · {p.counts.off} off</p>
@@ -154,14 +154,14 @@ function listItems(p: Props) {
         {p.items.map((it) => (
           <div className="item" key={it.connector.id} data-tone={toneOf(it.display.tone)}>
             <span className="mono">{monogram(it.connector)}</span>
-            <span className="grow"><span className="t" style={{ display: 'block' }}>{it.connector.name}</span><span className="d" style={{ display: 'block' }}>{summary(it)}</span></span>
+            <span className="grow namecell"><span className="t" style={{ display: 'block' }}>{connectorLabel(it.connector)}</span><span className="d" style={{ display: 'block' }}>{summary(it)}</span></span>
             <Chip tone={toneOf(it.display.tone)}>{it.display.chip}</Chip>
             {!it.display.routed && (it.display.canAct || it.display.opensDrawer) && (
               <button type="button" className="btn" onClick={() => (it.display.opensDrawer ? p.onOpen(it.connector.id) : p.onRoute(it.connector.id))}>{it.display.routeLabel}</button>
             )}
-            <button type="button" className="btn icon" aria-label={`Settings for ${it.connector.name}`} onClick={() => p.onOpen(it.connector.id)} style={{ width: 44, height: 44 }}><Icon d={ICON.general} size={16} /></button>
+            <button type="button" className="btn icon" aria-label={`Settings for ${connectorLabel(it.connector)}`} onClick={() => p.onOpen(it.connector.id)} style={{ width: 44, height: 44 }}><Icon d={ICON.general} size={16} /></button>
             {it.connector.kind !== 'builtin' && (
-              <Switch checked={it.connector.enabled !== false} onChange={(on) => p.onToggle(it.connector.id, on)} label={`Enable ${it.connector.name}`} />
+              <Switch checked={it.connector.enabled !== false} onChange={(on) => p.onToggle(it.connector.id, on)} label={`Enable ${connectorLabel(it.connector)}`} />
             )}
           </div>
         ))}

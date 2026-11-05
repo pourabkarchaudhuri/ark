@@ -51,9 +51,15 @@ export function routedConnector(state: AiRouterState | null, role: AiRole): AiCo
   return state && r ? state.connectors.find((c) => c.id === r.connectorId) ?? null : null;
 }
 
+/** The name shown to people: the built-in AI is just "Built-in AI" (its runtime name is for Advanced). */
+export function connectorLabel(c: Pick<AiConnector, 'kind' | 'name'>): string {
+  return c.kind === 'builtin' ? 'Built-in AI' : c.name;
+}
+
 /** Short name for the sidebar and role tabs ("Anthropic", "Built-in (llama.cpp)"). */
 export function routeName(state: AiRouterState | null, role: AiRole): string {
-  return routedConnector(state, role)?.name ?? 'None';
+  const c = routedConnector(state, role);
+  return c ? connectorLabel(c) : 'None';
 }
 
 /** Full route id for display, e.g. `anthropic/claude-sonnet-5-5`. */

@@ -113,8 +113,8 @@ describe('BuiltInLocalAiPanel', () => {
     installApi(status());
     render(<BuiltInLocalAiPanel />);
     await flush();
-    expect(screen.getByText('llama.cpp b11780')).toBeInTheDocument();
-    expect(screen.getByText(/GPU \(Vulkan\): NVIDIA GeForce RTX 3070 Ti Laptop GPU/)).toBeInTheDocument();
+    expect(screen.getByText('Version b11780')).toBeInTheDocument();
+    expect(screen.getByText(/Graphics card: NVIDIA GeForce RTX 3070 Ti Laptop GPU/)).toBeInTheDocument();
     expect(screen.getByText(/Ark\\models/)).toBeInTheDocument();
     expect(screen.getByTestId('model-state-arctic-embed2')).toHaveTextContent('Ready');
     expect(screen.getByTestId('model-state-bge-reranker-v2-m3')).toHaveTextContent('Downloading 40%');
@@ -126,7 +126,7 @@ describe('BuiltInLocalAiPanel', () => {
     installApi(status({ compute: 'cpu', computeDevice: null, computeVramBytes: 0 }));
     render(<BuiltInLocalAiPanel />);
     await flush();
-    expect(screen.getByText('CPU (no usable GPU found)')).toBeInTheDocument();
+    expect(screen.getByText('Processor (no usable graphics card found)')).toBeInTheDocument();
   });
 
   it('updates live from status pushes', async () => {

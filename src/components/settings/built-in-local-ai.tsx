@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
-import { Chip, type Tone } from '@/components/settings/ui';
+import { Chip, Meter, type Tone } from '@/components/settings/ui';
 import {
   describeModelState,
   formatBytes,
@@ -74,10 +74,10 @@ export function BuiltInLocalAiPanel({ onStatus }: { onStatus?: (s: LocalAiStatus
   const anyFailed = status.models.some((m) => m.state === 'error' || m.state === 'paused');
   const fellBack = status.runtime.roles.some((r) => r.cpuFallback);
   const compute = status.compute === 'gpu'
-    ? `GPU (Vulkan)${status.computeDevice ? `: ${status.computeDevice}` : ''}${status.computeVramBytes > 0 ? `, ${formatBytes(status.computeVramBytes)} in use` : ''}`
+    ? `Graphics card${status.computeDevice ? `: ${status.computeDevice}` : ''}${status.computeVramBytes > 0 ? `, ${formatBytes(status.computeVramBytes)} in use` : ''}`
     : status.compute === 'cpu'
-      ? (fellBack ? 'CPU (the GPU could not be used)' : 'CPU (no usable GPU found)')
-      : 'GPU if available, else CPU';
+      ? (fellBack ? 'Processor (the graphics card could not be used)' : 'Processor (no usable graphics card found)')
+      : 'Graphics card if available, else processor';
 
   return (
     <div className="stack" style={{ gap: 'var(--space-3)' }} data-testid="built-in-local-ai">
@@ -89,15 +89,15 @@ export function BuiltInLocalAiPanel({ onStatus }: { onStatus?: (s: LocalAiStatus
         </p>
       </div>
 
-      <dl style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 'var(--space-1) var(--space-4)', fontSize: 'var(--text-xs)', margin: 0 }}>
-        <dt style={{ color: 'var(--color-ink-3)' }}>Runtime</dt>
+      <dl style={{ display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', gap: 'var(--space-1) var(--space-4)', fontSize: 'var(--text-xs)', margin: 0 }}>
+        <dt style={{ color: 'var(--color-ink-3)' }}>Engine</dt>
         <dd style={{ margin: 0, color: 'var(--color-ink-2)' }}>
-          {status.runtime.available ? `llama.cpp ${status.runtime.build}` : 'Not found in this install'}
+          {status.runtime.available ? `Version ${status.runtime.build}` : 'Not found in this install'}
         </dd>
         <dt style={{ color: 'var(--color-ink-3)' }}>Runs on</dt>
         <dd style={{ margin: 0, color: 'var(--color-ink-2)' }}>{compute}</dd>
         <dt style={{ color: 'var(--color-ink-3)' }}>Models folder</dt>
-        <dd style={{ margin: 0, color: 'var(--color-ink-2)', wordBreak: 'break-all' }}>{status.modelsDir}</dd>
+        <dd style={{ margin: 0, color: 'var(--color-ink-2)', overflowWrap: 'anywhere' }}>{status.modelsDir}</dd>
         <dt style={{ color: 'var(--color-ink-3)' }}>Disk used</dt>
         <dd style={{ margin: 0, color: 'var(--color-ink-2)' }}>
           {formatBytes(status.diskUsedBytes)}
@@ -107,10 +107,13 @@ export function BuiltInLocalAiPanel({ onStatus }: { onStatus?: (s: LocalAiStatus
 
       <ul aria-label="Local AI models" style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
         {orderModels(status.models).map((m) => (
-          <li key={m.id} className="inline" style={{ fontSize: 'var(--text-xs)' }}>
-            <span className="grow" style={{ color: 'var(--color-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.label}</span>
-            <span style={{ color: 'var(--color-ink-3)' }}>{formatBytes(m.sizeBytes)}</span>
-            <Chip tone={MODEL_TONE[m.state]}><span data-testid={`model-state-${m.id}`}>{describeModelState(m)}</span></Chip>
+          <li key={m.id} style={{ fontSize: 'var(--text-xs)' }}>
+            <div className="inline" style={{ flexWrap: 'wrap', rowGap: 'var(--space-1)' }}>
+              <span className="grow" style={{ color: 'var(--color-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={m.label}>{m.label}</span>
+              <span style={{ color: 'var(--color-ink-3)' }}>{formatBytes(m.sizeBytes)}</span>
+              <Chip tone={MODEL_TONE[m.state]}><span data-testid={`model-state-${m.id}`}>{describeModelState(m)}</span></Chip>
+            </div>
+            {(m.state === 'downloading' || m.state === 'verifying') && <Meter pct={m.pct} label={`${m.label} download`} className="dl" />}
           </li>
         ))}
       </ul>

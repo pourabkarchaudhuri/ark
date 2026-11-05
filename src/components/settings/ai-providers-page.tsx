@@ -382,7 +382,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
 
   return (
     <>
-      <PageHeader title="AI providers" lede="Bring your own keys, or point Ark at any OpenAI-compatible server. Chat, embeddings and reranking each get their own route through LiteLLM.">
+      <PageHeader title="AI providers" lede="Bring your own keys, or point Ark at any OpenAI-compatible server. Chat, embeddings and reranking each get their own route.">
         <div className="inline" style={{ position: 'relative' }}>
           <button type="button" className="btn" onClick={() => void testAll()} disabled={Object.values(testing).some(Boolean)}>
             {Object.values(testing).some(Boolean) && <Spinner />}Test all
@@ -465,7 +465,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
           <Panel id="routing" title="Routing">
             <div className="sect" data-setting-id="routing-policy">
               <div className="row" style={{ flexWrap: 'wrap', padding: 0, minHeight: 0, border: 0 }}>
-                <div><p className="t">When a route fails</p><p className="d">What Ark does if the routed provider errors or times out.</p></div>
+                <div className="grow"><p className="t">When a route fails</p><p className="d">What Ark does if the routed provider errors or times out.</p></div>
                 {state && (
                   <Seg
                     label="When a route fails" value={state.policy.onFail} onChange={(v) => void changePolicy({ onFail: v })}
@@ -480,7 +480,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
                   <p className="t">Connection check · {ROLE_LABEL[role]}</p>
                   <span aria-live="polite" className="d" style={{ margin: 0 }}>{Object.values(testing).some(Boolean) ? `Testing ${results.length} connectors…` : `${okCount} of ${results.length} connected`}</span>
                 </div>
-                <table className="tbl">
+                <div style={{ overflowX: 'auto' }}><table className="tbl">
                   <thead><tr><th scope="col">Connector</th><th scope="col">Result</th><th scope="col">Latency</th><th scope="col">Model tested</th></tr></thead>
                   <tbody>
                     {results.map((i) => {
@@ -497,7 +497,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
                       );
                     })}
                   </tbody>
-                </table>
+                </table></div>
               </div>
             )}
           </Panel>

@@ -12,7 +12,7 @@ import { ExternalOllamaSection } from '@/components/settings/external-ollama-sec
 import { Chip, ExtLink, Icon, ICON, Seg, Spinner, Switch, type Tone } from '@/components/settings/ui';
 import { KEY_SITES, KIND_LORE, TEST_INPUT, describeTest, isModelId, routeCta, smallestModel, testFor, type ModelList, type ModelPrefs, type NodeDisplay } from '@/components/settings/ai-providers-logic';
 import type { ConnectorDraft } from '@/components/settings/ai-providers-page';
-import { ROLE_LABEL, ROLE_NOUN, ROLES, litellmId, monogram } from '@/components/settings/use-ai-router';
+import { ROLE_LABEL, ROLE_NOUN, ROLES, connectorLabel, litellmId, monogram } from '@/components/settings/use-ai-router';
 
 export const CONNECTOR_SAVED_PLACEHOLDER = 'Key saved. Paste a new one to replace it';
 
@@ -209,8 +209,8 @@ export function ConnectorDrawer(p: Props) {
       <div style={{ padding: 'var(--space-4)', display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
         <span className="mono" style={{ width: 32, height: 32, fontSize: 'var(--text-xs)' }}>{monogram(c)}</span>
         <div className="grow">
-          <h2 id="drawer-title" style={{ fontSize: 'var(--text-lg)', fontWeight: 600 }}>{c.name}</h2>
-          <p className="d">{KIND_LORE[c.kind]} · <Chip tone={TONE[p.display.tone]}>{p.testing ? 'Testing' : p.display.chip}</Chip></p>
+          <h2 id="drawer-title" style={{ fontSize: 'var(--text-lg)', fontWeight: 600, overflowWrap: 'anywhere' }}>{connectorLabel(c)}</h2>
+          <p className="d" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-1) var(--space-2)' }}>{KIND_LORE[c.kind]} · <Chip tone={TONE[p.display.tone]}>{p.testing ? 'Testing' : p.display.chip}</Chip></p>
         </div>
         <button type="button" className="btn q icon" aria-label="Close settings" onClick={p.onClose}><Icon d={ICON.close} /></button>
       </div>
@@ -224,7 +224,7 @@ export function ConnectorDrawer(p: Props) {
       {c.kind !== 'builtin' && (
         <div className="sect" data-setting-id={undefined}>
           <div className="row" style={{ padding: 0, minHeight: 0, border: 0 }}>
-            <div><p className="t">Enabled</p><p className="d">Off removes it from every route. Settings stay saved.</p></div>
+            <div className="grow"><p className="t">Enabled</p><p className="d">Off removes it from every route. Settings stay saved.</p></div>
             <Switch checked={c.enabled !== false} onChange={p.onToggleEnabled} label="Connector enabled" disabled={p.isDraft} />
           </div>
         </div>
@@ -384,7 +384,7 @@ export function ConnectorDrawer(p: Props) {
               </div>
             )}
             <div className="inline" style={{ gap: 'var(--space-2)' }}>
-              <p className="hint grow" style={{ margin: 0 }}>LiteLLM id <span style={{ color: 'var(--color-accent-ink)', wordBreak: 'break-all' }}>{lite}</span></p>
+              <p className="hint grow" style={{ margin: 0 }}>Router id <span style={{ color: 'var(--color-accent-ink)', wordBreak: 'break-all' }}>{lite}</span></p>
               <button type="button" className="btn q" onClick={copy} style={{ height: 26, fontSize: 'var(--text-xs)' }}>{copied ? 'Copied' : 'Copy'}</button>
             </div>
             {c.kind === 'builtin' && <ExternalOllamaSection />}
