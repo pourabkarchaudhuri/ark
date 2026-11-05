@@ -271,6 +271,24 @@ function deletePersistedIndex(): void {
   } catch { /* ignore cleanup errors */ }
 }
 
+/**
+ * Remove temp files an earlier run left behind (crash or kill between write and rename): the index's own
+ * `ann-hnsw.usearch.tmp` and the id map's `ann-hnsw-meta.json.<pid>.<time>.<seq>.tmp`. Only called while
+ * no index is in memory, so no save of this process can be mid-flight. Never throws.
+ */
+function sweepOrphanTmpFiles(): void {
+  try {
+    const dir = userDataDir();
+    const indexName = path.basename(getIndexPath());
+    const metaName = path.basename(getMetaPath());
+    for (const name of fs.readdirSync(dir)) {
+      if (name === `${indexName}.tmp` || (name.startsWith(`${metaName}.`) && name.endsWith('.tmp'))) {
+        try { fs.unlinkSync(path.join(dir, name)); } catch { /* in use or already gone */ }
+      }
+    }
+  } catch { /* directory missing or unreadable */ }
+}
+
 let loadInFlight: Promise<boolean> | null = null;
 
 /**
@@ -294,6 +312,7 @@ async function loadIndexFromDisk(): Promise<boolean> {
   const gen = indexGeneration;
   const indexPath = getIndexPath();
   const metaPath = getMetaPath();
+  sweepOrphanTmpFiles();
   if (!fs.existsSync(indexPath) || !fs.existsSync(metaPath)) {
     logger.log('[ANN] No persisted index found');
     return false;
@@ -386,10 +405,11 @@ function writeIndexNow(): boolean {
     // Index first (temp + rename), then meta. A crash between the two renames
     // leaves a NEWER index with an OLDER (shorter) id map — loadIndex detects
     // that (vectors past the map) and quarantines it so a rebuild runs.
-    index.save(tmpIndexPath);
     try {
+      index.save(tmpIndexPath);
       fs.renameSync(tmpIndexPath, indexPath);
     } catch (err) {
+      // A failed save (disk full mid-write) or rename leaves a partial multi-MB temp file: remove it.
       try { fs.unlinkSync(tmpIndexPath); } catch { /* ignore */ }
       throw err;
     }

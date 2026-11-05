@@ -35,6 +35,15 @@ export interface LibrarySeed {
   weights: Map<string, number>;
 }
 
+/**
+ * Layout generation encoded in a graph signature (`...-g<N>`; no suffix means generation 1). A graph built from
+ * vectors of another layout generation is never valid, however stale the caller accepts it to be.
+ */
+export function signatureLayoutGeneration(signature: string): number {
+  const m = /-g(\d+)$/.exec(signature);
+  return m ? Number(m[1]) : 1;
+}
+
 export interface GraphMeta {
   signature: string;
   nodeCount: number;
@@ -670,13 +679,15 @@ export class GameGraphStore {
    * Try restoring from IDB. Returns true if cached graph matches current ANN signature.
    * With `acceptStale`, any persisted graph is restored even when the signature
    * moved on (catalog embedding churns it) — callers then decide, through the
-   * throttled `build()`, whether a rebuild is due.
+   * throttled `build()`, whether a rebuild is due. A graph from another embedding layout generation
+   * (signature suffix `-g<N>`) is rejected either way: its edges describe vectors that no longer exist.
    */
   async tryRestore(annSignature: string, opts?: { acceptStale?: boolean }): Promise<boolean> {
     try {
       const meta = await idbGet<GraphMeta>(META_KEY);
       if (!meta) return false;
       if (meta.signature !== annSignature && !opts?.acceptStale) return false;
+      if (signatureLayoutGeneration(meta.signature) !== signatureLayoutGeneration(annSignature)) return false;
 
       const nodeIds = await idbGet<string[]>(NODE_IDS_KEY);
       const scoresRaw = await idbGet<{

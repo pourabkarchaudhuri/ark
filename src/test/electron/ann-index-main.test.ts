@@ -42,6 +42,7 @@ class FakeIndex {
   static created = 0;
   static failAdd: ((key: bigint) => boolean) | null = null;
   static loadThrows = false;
+  static saveFailsMidWrite = false;
   vectors = new Map<bigint, Float32Array>();
   constructor(public dims: number) { FakeIndex.created++; }
   add(key: bigint, vec: Float32Array) {
@@ -82,6 +83,10 @@ class FakeIndex {
     return { keys, distances, counts };
   }
   save(p: string) {
+    if (FakeIndex.saveFailsMidWrite) {
+      fs.writeFileSync(p, 'partial');
+      throw new Error('ENOSPC: simulated disk full');
+    }
     fs.writeFileSync(p, JSON.stringify([...this.vectors.keys()].map(String)));
   }
   load(p: string) {
@@ -104,6 +109,7 @@ beforeEach(() => {
   FakeIndex.created = 0;
   FakeIndex.failAdd = null;
   FakeIndex.loadThrows = false;
+  FakeIndex.saveFailsMidWrite = false;
   FakeIndex.searchCalls = [];
   __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
 });
@@ -230,6 +236,25 @@ describe('loadIndex', () => {
   });
 });
 
+
+describe('temp files (1.0.99 review)', () => {
+  it('a save that fails mid-write removes its partial temp file and reports failure', async () => {
+    await addVectors([{ id: 'steam-1', vector: unit(1) }]);
+    FakeIndex.saveFailsMidWrite = true;
+    expect(saveIndex({ complete: true })).toBe(false);
+    expect(fs.readdirSync(dir).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+    FakeIndex.saveFailsMidWrite = false;
+    expect(saveIndex({ complete: true })).toBe(true);
+  });
+
+  it('loading sweeps the orphan temp files an earlier crash left, and only those', async () => {
+    fs.writeFileSync(path.join(dir, 'ann-hnsw.usearch.tmp'), 'half');
+    fs.writeFileSync(path.join(dir, 'ann-hnsw-meta.json.123.abc.4.tmp'), '{');
+    fs.writeFileSync(path.join(dir, 'settings.json.1.2.3.tmp'), 'not ours');
+    expect(await loadIndex()).toBe(false);
+    expect(fs.readdirSync(dir).sort()).toEqual(['settings.json.1.2.3.tmp']);
+  });
+});
 
 describe('layout generation + model tag stamp (re-embed foundation)', () => {
   const metaPath = () => path.join(dir, 'ann-hnsw-meta.json');

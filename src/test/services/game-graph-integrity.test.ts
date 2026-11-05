@@ -304,6 +304,26 @@ describe('tryRestore consistency', () => {
     expect(store.hasScores).toBe(false);
   });
 
+  it('a graph from another layout generation is rejected, even with acceptStale; the same generation still restores', async () => {
+    const parts = (signature: string) => [
+      ['meta', { ...meta, signature }],
+      ['nodeIds', ['a', 'b', 'c']],
+      ['scores', scores(3)],
+      ['edges', new Float32Array([0, 1, 0.5])],
+    ] as Array<[string, unknown]>;
+    // Old generation (no suffix = 1) persisted, a bump to generation 2 is current.
+    await writeRaw(parts('ann-10-c1-p1'));
+    const store = new GameGraphStore();
+    expect(await store.tryRestore('ann-12-c1-p1-g2', { acceptStale: true })).toBe(false);
+    expect(store.hasScores).toBe(false);
+    // Same generation, older vector count: the stale restore still works.
+    await writeRaw(parts('ann-10-c1-p1-g2'));
+    expect(await new GameGraphStore().tryRestore('ann-12-c1-p1-g2', { acceptStale: true })).toBe(true);
+    // A newer persisted generation than the current one is just as wrong.
+    await writeRaw(parts('ann-10-c1-p1-g3'));
+    expect(await new GameGraphStore().tryRestore('ann-12-c1-p1-g2', { acceptStale: true })).toBe(false);
+  });
+
   it('returns false when the edge buffer length disagrees with meta.edgeCount', async () => {
     await writeRaw([
       ['meta', meta],
