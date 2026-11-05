@@ -91,8 +91,12 @@ describe('YearWrapped overlay', () => {
     expect(await screen.findByText('Your year in games')).toBeInTheDocument();
     expect(screen.getByRole('dialog')).toHaveAttribute('aria-label', `Ark Wrapped ${YEAR}`);
 
-    await act(async () => { fireEvent.keyDown(window, { key: 'ArrowRight' }); });
-    expect(await screen.findByRole('heading', { name: /your year (so far|at a glance)/i })).toBeInTheDocument();
+    // Under a loaded test run the first key can land before the slide list is wired; press again until the
+    // second slide shows (key repeats inside 160 ms are swallowed by the component, so this cannot overshoot).
+    await waitFor(() => {
+      fireEvent.keyDown(window, { key: 'ArrowRight' });
+      expect(screen.getByRole('heading', { name: /your year (so far|at a glance)/i })).toBeInTheDocument();
+    });
     // Wrapped owns its keys — the app underneath doesn't see them.
     expect(bubbled).not.toHaveBeenCalled();
 
