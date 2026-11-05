@@ -4,7 +4,10 @@
  */
 import { median, round } from './util.mjs';
 
-const WARMUP_CYCLE = 2; // 1-based: leak rules compare cycle 2 against the last cycle
+// 1-based: the leak rules compare the warm-up cycle against the last cycle. With the built-in AI running the renderer's heap steps up
+// once, over cycles 1-3 (measured on v1.0.97: 38.9, 43.4, 59.9 MB, then flat at 62-64 for seven cycles: caches and vectors the first
+// embeddings load), so the harness records meta.warmupCycle = 4 for such runs; without the AI it stays 2.
+const warmupOf = (run) => run?.meta?.warmupCycle ?? 2;
 
 const cycleOf = (run, n) => run.cycles?.find((c) => c.n === n);
 
@@ -19,7 +22,7 @@ export function summarize(run) {
   m.idle60MainEventLoopP99Ms = run.idle60?.eld?.p99;
   m.hiddenIdleCpuPct = run.hiddenIdle?.cpuPct;
   m.hiddenIdleMainEventLoopMaxMs = run.hiddenIdle?.eld?.max;
-  const warm = (run.cycles ?? []).filter((c) => c.n >= WARMUP_CYCLE);
+  const warm = (run.cycles ?? []).filter((c) => c.n >= warmupOf(run));
   const last = run.cycles?.[run.cycles.length - 1];
   if (last) {
     m.finalJsHeapMB = last.sample.renderer.jsHeapUsedMB;
@@ -87,6 +90,7 @@ const sumBytes = (ipc) => Object.values(ipc.invoke ?? {}).reduce((a, s) => a + s
 
 /** Leak rules on the current run only. */
 export function leakRules(run) {
+  const WARMUP_CYCLE = warmupOf(run);
   const c2 = cycleOf(run, WARMUP_CYCLE);
   const cN = run.cycles?.[run.cycles.length - 1];
   const rules = [];

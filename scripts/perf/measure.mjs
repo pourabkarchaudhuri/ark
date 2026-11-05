@@ -47,7 +47,7 @@ import { startFakeSteam } from './lib/fake-steam.mjs';
 import { evaluate, renderMarkdown } from './lib/analyze.mjs';
 import { measureDetachedHiddenIdle } from './lib/detached.mjs';
 import { diffSnapshots, takeSnapshot } from './lib/heapdiff.mjs';
-import { seedModelsDir, removeScratch, measureLlama, measureDownload, measureSidecar, leftoversAfterQuit } from './lib/ai.mjs';
+import { seedModelsDir, removeScratch, measureLlama, measureDownload, measureSidecar, leftoversAfterQuit, warmServers, waitLlamaQuiet } from './lib/ai.mjs';
 import { sleep, median, round } from './lib/util.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -176,6 +176,7 @@ async function run() {
       idleS: cfg.idleS,
       hiddenIdleS: cfg.hiddenIdleS,
       heapSnapshots: cfg.heapSnapshots,
+      warmupCycle: aiLocal ? 4 : 2,
       ai: { enabled: Boolean(aiLocal), models: aiLocal?.files ?? [], dedicatedPhase: Boolean(aiLocal) && !cfg.skipAiPhase, downloadMB: cfg.downloadMB, aiRounds: cfg.aiRounds },
     },
     coldStart: { runs: [] },
@@ -294,6 +295,10 @@ async function run() {
       const en = await probes.enableModels(aiLocal.root);
       result.scenarioModels = en;
       log(`[${cfg.label}] models enabled in the scenario run after ${en.ms} ms (ready: ${en.ready})`);
+      // Start the servers and let the background embedding drain before cycle 1, so the leak rules (cycle 2 vs last) compare steady
+      // states: otherwise the one-time cost of the first embeddings (caches, vectors loaded in the renderer) reads as growth.
+      const warm = await warmServers(probes, (m) => log(`[${cfg.label}]${m}`));
+      result.scenarioModels = { ...en, warmMs: warm.ms, ...(await waitLlamaQuiet(probes, (m) => log(`[${cfg.label}]${m}`), 900)) };
     }
     result.idle60 = { cpuPct: cpuPct(i0, i1), eld: eldIdle, seconds: cfg.idleS, startWS: i0.totalWorkingSetMB, endWS: i1.totalWorkingSetMB };
     log(`[${cfg.label}] idle ${cfg.idleS}s: cpu ${result.idle60.cpuPct}%, ELD max ${eldIdle?.max} ms`);

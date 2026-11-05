@@ -154,6 +154,16 @@ describe('perf harness analysis', () => {
       expect(budget(base, 'IPC calls per scenario cycle').pass).toBe(true);
     });
 
+    it('compares from meta.warmupCycle: a one-time step-up inside the warm-up window is not growth', () => {
+      const r = run({ heap: 60 });
+      r.cycles.forEach((c) => c.n === 3 && (c.sample.renderer.jsHeapUsedMB = 60)); // 50 -> 60 at cycle 3, flat after
+      expect(rule(r, 'JS heap growth').pass).toBe(false);
+      r.meta.warmupCycle = 4;
+      expect(rule(r, 'JS heap growth').pass).toBe(true);
+      r.cycles.forEach((c) => c.n > 4 && (c.sample.renderer.jsHeapUsedMB = 70));
+      expect(rule(r, 'JS heap growth').pass).toBe(false); // growth after the warm-up still fails
+    });
+
     it('llama-server and python leak rules', () => {
       expect(leakRules(run()).filter((r) => !r.pass)).toEqual([]);
       const grow = run();

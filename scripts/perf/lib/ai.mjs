@@ -184,6 +184,33 @@ export async function warmServers(probes, log, timeoutS = 240) {
   return { ms: Date.now() - t0, burst, status: st };
 }
 
+const runningPids = (st) => (st?.runtime ?? []).filter((r) => r.pid && r.state === 'ready').map((r) => r.pid);
+
+/**
+ * The app embeds the library in the background once the models are usable (the embed server is already running at "Enter Ark" and
+ * works for minutes on a 2000-game profile), so a steady state exists only after that queue has drained: 3 consecutive 5 s windows
+ * with every llama-server under 3% of a core. Returns how long that took; a server that never quiets inside the timeout is reported.
+ */
+export async function waitLlamaQuiet(probes, log, quietTimeoutS = 600) {
+  const t0 = Date.now();
+  let calm = 0;
+  let prev = await sampleProcessTree(probes.pid);
+  let tPrev = Date.now();
+  while (Date.now() - t0 < quietTimeoutS * 1000 && calm < 3) {
+    await sleep(5000);
+    const cur = await sampleProcessTree(probes.pid);
+    const pids = runningPids(await probes.aiStatus());
+    const now = Date.now();
+    const worst = Math.max(0, ...pids.map((p) => cpuPctBetween(prev.procs, cur.procs, [p], (now - tPrev) / 1000) ?? 0));
+    calm = worst <= 3 ? calm + 1 : 0;
+    prev = cur;
+    tPrev = now;
+  }
+  const res = { quietAfterS: Math.round((Date.now() - t0) / 1000), quiesced: calm >= 3 };
+  log(`  llama servers ${res.quiesced ? 'went quiet' : 'did NOT go quiet'} after ${res.quietAfterS} s (background embedding drains first)`);
+  return res;
+}
+
 /**
  * llama-server per role: working set, idle CPU (servers loaded, nothing asked), CPU during an embedding + rerank burst, and
  * the router overhead (app path vs direct to llama-server, interleaved so thermal drift hits both the same).
@@ -195,28 +222,10 @@ export async function measureLlama(probes, log, { rounds = 10, idleS = 20, settl
   out.routes = { embeddings: st0?.embeddingsVia ?? null, reranker: st0?.rerankerVia ?? null, backend: st0?.backend ?? null };
   const pidsOf = (st) => (st?.runtime ?? []).filter((r) => r.pid && r.state === 'ready').map((r) => r.pid);
 
-  // The app embeds the library in the background after boot (the embed server is already running at "Enter Ark" and works for minutes
-  // on a 2000-game profile), so "idle" first means waiting until that queue has drained: 3 consecutive 5 s windows with every role under
-  // 3% of a core. How long that took is reported (quietAfterS); a server that never quiets inside quietTimeoutS fails the idle budget.
   {
-    const t0 = Date.now();
-    let calm = 0;
-    let prev = await sampleProcessTree(probes.pid);
-    let tPrev = Date.now();
-    while (Date.now() - t0 < quietTimeoutS * 1000 && calm < 3) {
-      await sleep(5000);
-      const cur = await sampleProcessTree(probes.pid);
-      const stNow = await probes.aiStatus();
-      const pids = pidsOf(stNow);
-      const now = Date.now();
-      const worst = Math.max(0, ...pids.map((p) => cpuPctBetween(prev.procs, cur.procs, [p], (now - tPrev) / 1000) ?? 0));
-      calm = worst <= 3 ? calm + 1 : 0;
-      prev = cur;
-      tPrev = now;
-    }
-    out.quietAfterS = Math.round((Date.now() - t0) / 1000);
-    out.quiesced = calm >= 3;
-    log(`  llama servers ${out.quiesced ? 'went quiet' : 'did NOT go quiet'} after ${out.quietAfterS} s (background embedding drains first)`);
+    const q = await waitLlamaQuiet(probes, log, quietTimeoutS);
+    out.quietAfterS = q.quietAfterS;
+    out.quiesced = q.quiesced;
   }
   await sleep(settleS * 1000);
   const windows = 4;
