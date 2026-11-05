@@ -2631,7 +2631,11 @@ class EmbeddingService {
     }
     this._lastLibraryRun = null;
     this._libraryPromise = this._runGenerateMissing(games, onProgress, opts);
-    try { return await this._libraryPromise; } finally { this._libraryPromise = null; }
+    try {
+      const generated = await this._libraryPromise;
+      if (!opts?.force) this._scheduleMigrationReconcile();
+      return generated;
+    } finally { this._libraryPromise = null; }
   }
 
   private async _runGenerateMissing(
@@ -3593,7 +3597,10 @@ class EmbeddingService {
           this._resetProgressIfStale(which);
           return 0;
         }
-        return await runner(controller.signal);
+        const generated = await runner(controller.signal);
+        const outcome = this._lastPassOutcome[which];
+        if (!opts?.supersede && (outcome === 'done' || outcome === 'skipped')) this._scheduleMigrationReconcile();
+        return generated;
       } finally {
         if (pass.promise === run) pass.promise = null;
         if (pass.abort === controller) pass.abort = null;
@@ -4496,6 +4503,7 @@ class EmbeddingService {
 
   private _migration: EmbeddingMigrationRecord | null = null;
   private _forceReindexAllPromise: Promise<ForceReindexAllResult> | null = null;
+  private _reconcilingMigration = false;
 
   /** Persisted migration state as last read/written this session (null before refreshMigrationState). */
   get migrationState(): EmbeddingMigrationRecord | null { return this._migration; }
@@ -4537,6 +4545,51 @@ class EmbeddingService {
     if (changed) await this._persistMigration(record);
     else this._notify();
     return record;
+  }
+
+  /** Fire-and-forget: a normal pass finished, so the migration record may now be provably done. */
+  private _scheduleMigrationReconcile(): void {
+    void this.reconcileMigrationAfterPasses().catch(() => undefined);
+  }
+
+  /** Cached rows (Steam + Epic catalog tiers) that are not at the current layout stamp. */
+  private async _countStaleCatalogLayoutRows(): Promise<number> {
+    let stale = 0;
+    for (const prefix of ['steam-', 'epic-']) {
+      const index = await getCatalogSkipIndex(prefix);
+      for (const meta of index.values()) if (!isCurrentLayout(meta)) stale++;
+    }
+    return stale;
+  }
+
+  /**
+   * The background library / Steam / Epic passes re-embed stale rows by stamp on their own, but they never touched the
+   * migration record, so Settings kept saying "Outdated" and Rebuild redid everything. Once a normal library pass has
+   * finished clean, the ANN index is built and no catalog row is at an older layout, a 'layout-changed' record is done.
+   * A model change is never completed here: a stamp check cannot see it. Returns true when the record was completed.
+   */
+  async reconcileMigrationAfterPasses(): Promise<boolean> {
+    if (this._forceReindexAllPromise || this._reconcilingMigration) return false;
+    this._reconcilingMigration = true;
+    try {
+      const rec = this._migration ?? await this.refreshMigrationState();
+      if ((rec.state !== 'pending' && rec.state !== 'declined') || rec.reason !== 'layout-changed') return false;
+      const lib = this._lastLibraryRun;
+      if (!lib || lib.stoppedEarly || lib.generated < lib.requested) return false;
+      if (annIndex.needsBackfill) return false;
+      if (await this._countStaleCatalogLayoutRows() > 0) return false;
+      // A forced run may have started (and now owns the record) while the scan was in flight.
+      if (this._forceReindexAllPromise) return false;
+      const latest = this._migration;
+      if (!latest || (latest.state !== 'pending' && latest.state !== 'declined') || latest.reason !== 'layout-changed') return false;
+      await this._persistMigration(completeMigration(latest, this._migrationTarget()));
+      return true;
+    } catch (err) {
+      console.warn('[EmbeddingService] Migration reconcile failed:', err);
+      return false;
+    } finally {
+      this._reconcilingMigration = false;
+    }
   }
 
   /** "Later": remember the choice for THIS target; a new layout/model target re-offers it. */

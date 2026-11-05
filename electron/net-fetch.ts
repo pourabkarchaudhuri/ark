@@ -146,12 +146,18 @@ export function makeNetFetch(opts: NetFetchOptions = {}): typeof fetch {
  * being read (or awaited) and when it ends. Used to keep the local chat server's idle timer from
  * unloading a model in the middle of a long turn.
  */
-export function withKeepAlive(base: typeof fetch, touch: () => void, intervalMs = 30_000): typeof fetch {
+export function withKeepAlive(
+  base: typeof fetch,
+  touch: () => void,
+  intervalMs = 30_000,
+  hooks: { onStart?: () => void; onEnd?: () => void } = {},
+): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     touch();
+    hooks.onStart?.();
     const timer = setInterval(touch, intervalMs);
     timer.unref?.();
-    const stop = () => { clearInterval(timer); touch(); };
+    const stop = () => { clearInterval(timer); touch(); hooks.onEnd?.(); };
     let res: Response;
     try {
       res = await base(input, init);

@@ -36,7 +36,7 @@ export const EMBEDDING_POOL_VERSION = 1;
  * Generation of the ANN index / derived caches. Bump when everything derived from vectors
  * (the HNSW file, the neighbour graph, the galaxy layout, Oracle results) must be discarded.
  */
-export const EMBEDDING_LAYOUT_GENERATION = 1;
+export const EMBEDDING_LAYOUT_GENERATION = 2;
 
 /** Whole-text pooled skip-hash prefix for given versions (`t10m2` for today's). */
 export function buildWholeHashPrefix(textVersion: number, modelVersion: number): string {

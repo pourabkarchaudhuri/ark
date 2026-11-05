@@ -144,7 +144,7 @@ interface IndexMeta {
  * under a different generation holds vectors that are not comparable with new ones, so it is discarded on load
  * (and the renderer's backfill rebuilds it) instead of being served as "ready".
  */
-export const ANN_LAYOUT_GENERATION = 1;
+export const ANN_LAYOUT_GENERATION = 2;
 
 let annModelTag = '';
 

@@ -151,7 +151,7 @@ describe('LlamaRuntime start', () => {
     t.setOnSpawn((s) => s.child.stderr.emit('data', 'slow loading tensors\n'));
     await expect(t.runtime.ensure('embed')).rejects.toThrow(/did not become healthy.*slow loading tensors/s);
     expect(t.spawned[0].child.killed).toBe(true);
-    expect(t.runtime.roleStatus('embed').state).toBe('stopped');
+    expect(t.runtime.roleStatus('embed').state).toBe('failed');
   });
 
   it('never lets num_batch push the encoder -ub below the context; only a larger value restarts', async () => {
@@ -235,6 +235,17 @@ describe('LlamaRuntime GPU fallback', () => {
     t.setOnSpawn((s) => { s.child.stderr.emit('data', 'error: bad model file\n'); s.child.crash(2); });
     await expect(t.runtime.ensure('embed')).rejects.toThrow(/exited \(code 2\)/);
     expect(t.spawned).toHaveLength(1);
+  });
+
+  it('marks a role failed after a start failure so it is not respawned on every request', async () => {
+    const t = makeRuntime();
+    t.setOnSpawn((s) => { s.child.stderr.emit('data', 'error: bad model file\n'); s.child.crash(2); });
+    await expect(t.runtime.ensure('rerank')).rejects.toMatchObject({ code: 'start_failed' });
+    expect(t.runtime.roleStatus('rerank').state).toBe('failed');
+    await expect(t.runtime.ensure('rerank')).rejects.toMatchObject({ code: 'failed_too_often' });
+    expect(t.spawned).toHaveLength(1);
+    t.runtime.reset('rerank');
+    expect(t.runtime.roleStatus('rerank').state).toBe('stopped');
   });
 
   it('parses the offload and buffer lines of the server log', () => {
@@ -408,7 +419,7 @@ describe('LlamaRuntime 1.0.98 F1 hardening', () => {
       fetchFn: async (url) => (url.endsWith('/health') ? { ok: true, status: 200 } : { ok: false, status: 401 }),
     });
     await expect(t.runtime.ensure('embed')).rejects.toThrow(/did not become healthy/);
-    expect(t.runtime.roleStatus('embed').state).toBe('stopped');
+    expect(t.runtime.roleStatus('embed').state).toBe('failed');
   });
 
   it('a spawn error event ends the start wait at once with the real reason', async () => {
@@ -419,7 +430,7 @@ describe('LlamaRuntime 1.0.98 F1 hardening', () => {
     await expect(t.runtime.ensure('embed')).rejects.toThrow(/Could not start llama-server: spawn EPERM/);
     expect(Date.now() - began).toBeLessThan(2_000);
     expect(t.spawned).toHaveLength(1);
-    expect(t.runtime.roleStatus('embed').state).toBe('stopped');
+    expect(t.runtime.roleStatus('embed').state).toBe('failed');
   });
 
   it('bounds stored log lines and does not treat a failure keyword past the cut as a GPU problem', async () => {

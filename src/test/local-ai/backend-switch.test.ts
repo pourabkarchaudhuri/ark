@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const h = vi.hoisted(() => ({
   local: { useExternalOllama: false, modelsDir: null as string | null },
   legacyStore: false,
+  autoDeclined: false,
   httpCalls: [] as string[],
 }));
 
@@ -31,6 +32,8 @@ vi.mock('../../../electron/settings-store.js', () => ({
   settingsStore: new Proxy({}, {
     get: (_t, prop) => {
       if (prop === 'getLocalAiSettings') return h.legacyStore ? undefined : () => h.local;
+      if (prop === 'isLocalAiAutoDownloadDeclined') return () => h.autoDeclined;
+      if (prop === 'setLocalAiAutoDownloadDeclined') return (v: boolean) => { h.autoDeclined = v; };
       if (prop === 'getOllamaSettings') return () => ({ url: 'http://127.0.0.1:11434', embeddingBatchSize: 0, rerankModel: '', rerankQwenModel: '' });
       return undefined;
     },
@@ -45,7 +48,7 @@ import { __setLocalAiServiceForTests } from '../../../electron/local-ai/service'
 import type { BuiltinBackend } from '../../../electron/local-ai/builtin-backend';
 import {
   isOllamaRunning, generateEmbeddingsBatchDetailed, unloadArkModels, getEmbeddingModelInfo, getEmbeddingModelSize,
-  runOllamaSetup, detectGpuMode, resetGpuModeCache, declineBuiltinAutoDownload, allowBuiltinAutoDownload, ensureRerankModelPull, startBuiltinModelDownloadsAndNotify, onBuiltinModelsSettled,
+  runOllamaSetup, detectGpuMode, resetGpuModeCache, declineBuiltinAutoDownload, allowBuiltinAutoDownload, isBuiltinAutoDownloadDeclined, __resetAutoDownloadSessionForTests, ollamaTransport, ollamaPort, ensureRerankModelPull, startBuiltinModelDownloadsAndNotify, onBuiltinModelsSettled,
 } from '../../../electron/ollama-setup';
 import { detectRerankTier, resetRerankTierCache } from '../../../electron/rerank-engine';
 
@@ -93,6 +96,7 @@ function fakeService(opts: { readyIds?: string[]; embedReady?: boolean } = {}) {
 beforeEach(() => {
   h.local = { useExternalOllama: false, modelsDir: null };
   h.legacyStore = false;
+  h.autoDeclined = false;
   h.httpCalls = [];
   __setBuiltinBackendForTests(null);
   __setLocalAiServiceForTests(null);
@@ -157,6 +161,54 @@ describe('dispatch to the built-in backend', () => {
     f.backend.gpuReading.mockReturnValue({ loaded: true, sizeBytes: 10, vramBytes: 10 });
     expect(await detectGpuMode()).toBe(true);
     expect(h.httpCalls).toEqual([]);
+  });
+});
+
+describe('GPU mode follows the live built-in server', () => {
+  it('a CPU relaunch after a conclusive GPU answer drops the cached GPU result', async () => {
+    const f = fakeBackend();
+    __setBuiltinBackendForTests(f.asBackend);
+    expect(await detectGpuMode()).toBe(true);
+    // The runtime relaunched on the CPU: the embed server now reports no VRAM.
+    f.backend.gpuReading.mockReturnValue({ loaded: true, sizeBytes: 10, vramBytes: 0 });
+    expect(await detectGpuMode()).toBe(false);
+    // The server is unloaded: the answer is forgotten rather than pinned.
+    f.backend.gpuReading.mockReturnValue({ loaded: false, sizeBytes: 0, vramBytes: 0 });
+    expect(await detectGpuMode()).toBe(false);
+    resetGpuModeCache();
+    f.backend.gpuReading.mockReturnValue({ loaded: true, sizeBytes: 10, vramBytes: 10 });
+    expect(await detectGpuMode()).toBe(true);
+  });
+});
+
+describe('"Continue without local AI" survives a restart', () => {
+  it('is saved in the settings store, read back by a fresh process, and cleared by Retry / Re-check / Download', async () => {
+    const svc = fakeService();
+    __setLocalAiServiceForTests(svc.svc);
+    declineBuiltinAutoDownload();
+    expect(h.autoDeclined).toBe(true);
+    expect(svc.store.cancelAll).toHaveBeenCalled();
+
+    __resetAutoDownloadSessionForTests(); // a new launch: no in-memory choice, only the stored one
+    expect(isBuiltinAutoDownloadDeclined()).toBe(true);
+    allowBuiltinAutoDownload();
+    expect(isBuiltinAutoDownloadDeclined()).toBe(false);
+    expect(h.autoDeclined).toBe(false);
+
+    __resetAutoDownloadSessionForTests();
+    expect(isBuiltinAutoDownloadDeclined()).toBe(false);
+  });
+});
+
+describe('an https Ollama address is not downgraded', () => {
+  it('uses TLS and port 443 for https and plain http / 11434 otherwise', async () => {
+    const https = (await import('https')).default;
+    const http = (await import('http')).default;
+    expect(ollamaTransport(new URL('https://ollama.example.com'))).toBe(https);
+    expect(ollamaTransport(new URL('http://127.0.0.1:11434'))).toBe(http);
+    expect(ollamaPort(new URL('https://ollama.example.com'))).toBe(443);
+    expect(ollamaPort(new URL('https://ollama.example.com:8443'))).toBe(8443);
+    expect(ollamaPort(new URL('http://localhost'))).toBe(11434);
   });
 });
 

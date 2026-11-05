@@ -127,6 +127,27 @@ describe('withKeepAlive', () => {
     expect(touch.mock.calls.length).toBe(after);
   });
 
+  it('reports start and end once, around the whole body, so callers can count it as active work', async () => {
+    const onStart = vi.fn();
+    const onEnd = vi.fn();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = (async () => new Response(new ReadableStream({
+      async pull(c) { await gate; c.enqueue(new TextEncoder().encode('x')); c.close(); },
+    }))) as unknown as typeof fetch;
+    const res = await withKeepAlive(base, vi.fn(), 1000, { onStart, onEnd })('http://127.0.0.1:1/v1/chat');
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(onEnd).not.toHaveBeenCalled();
+    const reading = res.text();
+    release();
+    await reading;
+    expect(onEnd).toHaveBeenCalledTimes(1);
+    const failing = (async () => { throw new Error('refused'); }) as unknown as typeof fetch;
+    await expect(withKeepAlive(failing, vi.fn(), 1000, { onStart, onEnd })('http://127.0.0.1:1')).rejects.toThrow('refused');
+    expect(onStart).toHaveBeenCalledTimes(2);
+    expect(onEnd).toHaveBeenCalledTimes(2);
+  });
+
   it('stops touching when the request fails', async () => {
     vi.useFakeTimers();
     const touch = vi.fn();

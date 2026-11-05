@@ -153,6 +153,12 @@ function bridgeGeminiNetwork(): void {
 const builtinChatFetch: typeof fetch = withKeepAlive(
   (input, init) => fetch(input, init),
   () => { try { getBuiltinBackend().markChatUsed(); } catch { /* backend not available */ } },
+  undefined,
+  // A turn in flight is active work: a drain / game unload must not stop the chat server under it.
+  {
+    onStart: () => { try { getBuiltinBackend().beginChatWork(); } catch { /* backend not available */ } },
+    onEnd: () => { try { getBuiltinBackend().endChatWork(); } catch { /* backend not available */ } },
+  },
 );
 
 /** Chat endpoint of the AI router (LiteLLM), filled by `prepareRouterChat` before each turn that uses it. */

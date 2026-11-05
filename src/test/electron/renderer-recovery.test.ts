@@ -71,6 +71,18 @@ describe('attachRendererRecovery', () => {
     expect(state.isRendererDead()).toBe(true);
   });
 
+  it('fires onDead exactly once, on the third crash, so a recoverable prompt can be shown', () => {
+    const win = fakeWindow();
+    const onDead = vi.fn();
+    attachRendererRecovery(win as any, { destroyWebContentsView: vi.fn(), recordCrash: vi.fn(), now: () => 1_000, log: vi.fn(), onDead });
+    win.handlers['render-process-gone']({}, { reason: 'crashed' });
+    win.handlers['render-process-gone']({}, { reason: 'crashed' });
+    expect(onDead).not.toHaveBeenCalled();
+    win.handlers['render-process-gone']({}, { reason: 'crashed' });
+    win.handlers['render-process-gone']({}, { reason: 'crashed' });
+    expect(onDead).toHaveBeenCalledTimes(1);
+  });
+
   it('forgets crashes outside the 30 s window', () => {
     let t = 0;
     const { win, state } = setup(() => t);

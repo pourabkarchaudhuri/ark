@@ -49,7 +49,9 @@ describe('1.0.97 model bump (built-in llama.cpp vector space): everything cached
     expect(EMBEDDING_LAYOUT_STAMP).toBe('t10m2c1p1');
     expect(EMBEDDING_LAYOUT_STAMP).not.toBe(LEGACY_LAYOUT_STAMP);
     expect(EMBEDDING_LAYOUT_ID).not.toBe(LEGACY_LAYOUT_ID);
-    expect(EMBEDDING_LAYOUT_GENERATION).toBe(1);
+    // The model bump changes every vector, so the derived generation moved on too: the persisted HNSW file and
+    // the neighbour-graph signature of 1.0.96 (generation 1, Ollama vectors) must not be reused.
+    expect(EMBEDDING_LAYOUT_GENERATION).toBe(2);
   });
 
   it('whole and chunk hashes use the new prefixes, so no old vector is ever skipped as unchanged', () => {
@@ -80,8 +82,8 @@ describe('1.0.97 model bump (built-in llama.cpp vector space): everything cached
     expect(layoutIdIsCurrent(undefined)).toBe(false); // caches saved before layout ids existed
     expect(layoutIdIsCurrent(LEGACY_LAYOUT_ID)).toBe(false);
     expect(layoutIdIsCurrent(EMBEDDING_LAYOUT_ID)).toBe(true);
-    expect(layoutKeySuffix()).toBe(''); // the generation (derived caches) did not change
-    expect(annGraphSignature(1234)).toBe('ann-1234-c1-p1');
+    expect(layoutKeySuffix()).toBe('-g2'); // derived caches keyed with it differ from every generation-1 key
+    expect(annGraphSignature(1234)).toBe('ann-1234-c1-p1-g2');
   });
 });
 

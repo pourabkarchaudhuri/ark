@@ -31,6 +31,8 @@ export interface RendererRecoveryDeps {
   recordCrash: (reason: string) => void;
   log?: (level: 'log' | 'error', msg: string) => void;
   isSafeMode?: () => boolean;
+  /** Called once when the breaker trips: the caller shows the Restart/Quit prompt. */
+  onDead?: () => void;
   now?: () => number;
 }
 
@@ -60,8 +62,12 @@ export function attachRendererRecovery(win: RecoverableWindow, deps: RendererRec
     }
 
     if (crashTimestamps.length >= MAX_CRASHES_IN_WINDOW) {
+      const wasDead = rendererDead;
       rendererDead = true;
       log('error', `[Ark] ${MAX_CRASHES_IN_WINDOW} crashes in ${CRASH_WINDOW_MS / 1000}s — stopping reload loop`);
+      if (!wasDead) {
+        try { deps.onDead?.(); } catch { /* the prompt is best effort */ }
+      }
       return;
     }
 

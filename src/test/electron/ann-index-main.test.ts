@@ -285,18 +285,17 @@ describe('layout generation + model tag stamp (re-embed foundation)', () => {
     expect(getStatus().modelTag).toBe('');
   });
 
-  it('an index saved before stamps existed loads as generation 1 and is stamped on its next save', async () => {
+  it('an index saved before stamps (the Ollama-era model) reads as generation 1 and is discarded, not mixed with new vectors', async () => {
     setAnnModelTag('');
     await persistTwo();
     rewriteMeta(m => { delete m.layoutGeneration; delete m.modelTag; });
     __resetAnnIndexForTests({ Index: FakeIndex, userDataDir: dir });
     setAnnModelTag('snowflake-arctic-embed2');
-    expect(await loadIndex()).toBe(true);
-    expect(getStatus().ready).toBe(true);
-    await addVectors([{ id: 'steam-3', vector: unit(3) }]);
-    expect(saveIndex({ complete: true, force: true })).toBe(true);
-    const meta = JSON.parse(fs.readFileSync(metaPath(), 'utf-8'));
-    expect(meta).toMatchObject({ layoutGeneration: ANN_LAYOUT_GENERATION, modelTag: 'snowflake-arctic-embed2' });
+    expect(ANN_LAYOUT_GENERATION).toBeGreaterThan(1);
+    expect(await loadIndex()).toBe(false);
+    expect(fs.existsSync(indexPath())).toBe(false);
+    expect(fs.existsSync(metaPath())).toBe(false);
+    expect(getStatus()).toMatchObject({ ready: false, partial: true });
   });
 
   it('an unknown current model tag never discards a tagged index', async () => {

@@ -175,4 +175,56 @@ describe('forceReindexAll', () => {
     expect(rec).toMatchObject({ state: 'done', dataStamp: 't10m2c1p1' });
     expect(svc.isReindexRecommended).toBe(false);
   });
+
+  describe('reconcileMigrationAfterPasses (normal passes finish the migration)', () => {
+    async function pendingLayoutChanged() {
+      vi.resetModules();
+      const meta = await import('@/services/embedding-service');
+      const ann = await import('@/services/ann-index');
+      const svc = meta.embeddingService as unknown as Svc;
+      // Upgrade: the record was written under an older stamp.
+      await svc._persistMigration({ key: 'layout-migration', state: 'done', dataStamp: 't10m1c1p1', updatedAt: 1 });
+      return { svc, ann: ann.annIndex as any };
+    }
+
+    it('completes a layout-changed record once the library pass was clean, the ANN is built and no catalog row is stale', async () => {
+      const { svc, ann } = await pendingLayoutChanged();
+      vi.spyOn(ann, 'needsBackfill', 'get').mockReturnValue(false);
+      expect((await svc.refreshMigrationState()).state).toBe('pending');
+      svc._lastLibraryRun = { requested: 4, generated: 4, stoppedEarly: false };
+      svc._countStaleCatalogLayoutRows = vi.fn(async () => 0);
+      expect(await svc.reconcileMigrationAfterPasses()).toBe(true);
+      expect(svc.migrationState).toMatchObject({ state: 'done', dataStamp: 't10m2c1p1' });
+      expect(svc.isReindexRecommended).toBe(false);
+    });
+
+    it('stays pending while a catalog row is at the old layout, the library pass was cut short, or the ANN is not built', async () => {
+      const { svc, ann } = await pendingLayoutChanged();
+      const backfill = vi.spyOn(ann, 'needsBackfill', 'get').mockReturnValue(false);
+      await svc.refreshMigrationState();
+      svc._countStaleCatalogLayoutRows = vi.fn(async () => 2);
+      svc._lastLibraryRun = { requested: 4, generated: 4, stoppedEarly: false };
+      expect(await svc.reconcileMigrationAfterPasses()).toBe(false);
+      svc._countStaleCatalogLayoutRows = vi.fn(async () => 0);
+      svc._lastLibraryRun = { requested: 4, generated: 1, stoppedEarly: true };
+      expect(await svc.reconcileMigrationAfterPasses()).toBe(false);
+      svc._lastLibraryRun = null;
+      expect(await svc.reconcileMigrationAfterPasses()).toBe(false);
+      svc._lastLibraryRun = { requested: 4, generated: 4, stoppedEarly: false };
+      backfill.mockReturnValue(true);
+      expect(await svc.reconcileMigrationAfterPasses()).toBe(false);
+      expect(svc.migrationState.state).toBe('pending');
+    });
+
+    it('never completes a model-changed or interrupted record (a stamp check cannot see those)', async () => {
+      const { svc, ann } = await pendingLayoutChanged();
+      vi.spyOn(ann, 'needsBackfill', 'get').mockReturnValue(false);
+      svc._lastLibraryRun = { requested: 0, generated: 0, stoppedEarly: false };
+      svc._countStaleCatalogLayoutRows = vi.fn(async () => 0);
+      stub(svc, { epicOutcome: 'unavailable' });
+      await run(svc); // leaves pending / interrupted
+      expect(await svc.reconcileMigrationAfterPasses()).toBe(false);
+      expect(svc.migrationState).toMatchObject({ state: 'pending', reason: 'interrupted' });
+    });
+  });
 });

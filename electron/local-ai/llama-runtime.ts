@@ -447,8 +447,18 @@ export class LlamaRuntime {
         throw new RuntimeError(outcome.reason, 'start_failed');
       }
     } catch (err) {
-      s.state = (s.state as RuntimeState) === 'failed' ? 'failed' : 'stopped';
       s.lastError = err instanceof Error ? err.message : String(err);
+      if ((s.state as RuntimeState) === 'failed') {
+        // already failed (crash path)
+      } else if (err instanceof RuntimeError && err.code === 'start_failed' && !this.shuttingDown) {
+        // The GPU -> CPU retry above already ran, so the server cannot start at all. Mark the role
+        // failed (cool-down retry or Re-check clears it) so tier detection skips it and the caller
+        // falls through to the next tier instead of spawning the broken server on every request.
+        s.state = 'failed';
+        s.failedAt = this.deps.now();
+      } else {
+        s.state = 'stopped';
+      }
       this.emit();
       throw err;
     }

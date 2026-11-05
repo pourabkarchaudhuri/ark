@@ -22,6 +22,7 @@ import {
   DEFAULT_OLLAMA_RERANK_QWEN_MODEL,
 } from './settings-store.js';
 import http from 'http';
+import https from 'https';
 import os from 'os';
 import { useBuiltinBackend, getBuiltinBackend } from './local-ai/backend.js';
 import { getAiRouter, routeFor } from './ai-router/service.js';
@@ -170,6 +171,19 @@ export function isRerankModelInstalled(
 }
 
 /**
+ * A user-configured https Ollama address (reverse proxy, remote box) is spoken to over TLS and its own
+ * default port; it used to be contacted with plain http on 11434, which can never work and leaks the
+ * request in the clear when something answers.
+ */
+export function ollamaTransport(urlObj: { protocol: string }): typeof http {
+  return (urlObj.protocol === 'https:' ? https : http) as typeof http;
+}
+
+export function ollamaPort(urlObj: { protocol: string; port: string }): number {
+  return parseInt(urlObj.port) || (urlObj.protocol === 'https:' ? 443 : 11434);
+}
+
+/**
  * Check if Ollama is running at the configured URL.
  */
 export async function isOllamaRunning(): Promise<{ running: boolean; version: string | null }> {
@@ -181,9 +195,9 @@ export async function isOllamaRunning(): Promise<{ running: boolean; version: st
   return new Promise<{ running: boolean; version: string | null }>((resolve) => {
     const urlObj = new URL(url);
     const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
-    const port = parseInt(urlObj.port) || 11434;
+    const port = ollamaPort(urlObj);
 
-    const req = http.get(
+    const req = ollamaTransport(urlObj).get(
       { hostname, port, path: '/api/version', timeout: HEALTH_TIMEOUT_MS },
       (res) => {
         let data = '';
@@ -218,9 +232,9 @@ async function listModels(): Promise<{ baseNames: string[]; fullTags: string[] }
   return new Promise<{ baseNames: string[]; fullTags: string[] }>((resolve) => {
     const urlObj = new URL(url);
     const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
-    const port = parseInt(urlObj.port) || 11434;
+    const port = ollamaPort(urlObj);
 
-    const req = http.get(
+    const req = ollamaTransport(urlObj).get(
       { hostname, port, path: '/api/tags', timeout: LIST_TIMEOUT_MS },
       (res) => {
         let data = '';
@@ -289,7 +303,7 @@ export async function pullModel(
   const url = settings.url || 'http://localhost:11434';
   const urlObj = new URL(url);
   const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
-  const port = parseInt(urlObj.port) || 11434;
+  const port = ollamaPort(urlObj);
 
   return new Promise<boolean>((resolve) => {
     const body = JSON.stringify({ name: modelName, stream: true });
@@ -302,7 +316,7 @@ export async function pullModel(
       resolve(ok);
     };
 
-    const req = http.request(
+    const req = ollamaTransport(urlObj).request(
       {
         hostname,
         port,
@@ -545,10 +559,10 @@ export async function readEmbedModelVram(): Promise<{ loaded: boolean; sizeBytes
   const settings = settingsStore.getOllamaSettings();
   const urlObj = new URL(settings.url || 'http://localhost:11434');
   const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
-  const port = parseInt(urlObj.port) || 11434;
+  const port = ollamaPort(urlObj);
   return new Promise((resolve) => {
     const none = { loaded: false, sizeBytes: 0, vramBytes: 0 };
-    const req = http.get({ hostname, port, path: '/api/ps', timeout: 3000 }, (res) => {
+    const req = ollamaTransport(urlObj).get({ hostname, port, path: '/api/ps', timeout: 3000 }, (res) => {
       let data = '';
       res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
       res.on('end', () => {
@@ -660,7 +674,7 @@ async function generateEmbeddingsLocalDetailed(
   const url = settings.url || 'http://localhost:11434';
   const urlObj = new URL(url);
   const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
-  const port = parseInt(urlObj.port) || 11434;
+  const port = ollamaPort(urlObj);
 
   // Scale timeout: base + per-item allowance so large batches don't time out.
   const timeout = EMBED_TIMEOUT_MS + texts.length * 4_000;
@@ -690,7 +704,7 @@ async function generateEmbeddingsLocalDetailed(
       settled = true;
       resolve({ embeddings, error });
     };
-    const req = http.request(
+    const req = ollamaTransport(urlObj).request(
       {
         hostname,
         port,
@@ -785,6 +799,16 @@ const GPU_REPROBE_INTERVAL_MS = 30_000;
  * `GPU_REPROBE_INTERVAL_MS`.
  */
 export async function detectGpuMode(): Promise<boolean> {
+  if (_gpuModeChecked && useBuiltinBackend()) {
+    // The built-in embed server can relaunch on the CPU after a GPU crash (or be unloaded): the cached
+    // answer follows the live server's own reading instead of pinning GPU pacing onto a CPU server.
+    const reading = getBuiltinBackend().gpuReading();
+    if (reading.loaded) {
+      _gpuModeAvailable = reading.vramBytes > 0;
+      return _gpuModeAvailable;
+    }
+    resetGpuModeCache();
+  }
   if (_gpuModeChecked) return _gpuModeAvailable;
   if (_gpuDetectInFlight) return _gpuDetectInFlight;
   if (Date.now() - _gpuLastInconclusiveAt < GPU_REPROBE_INTERVAL_MS) return false;
@@ -808,10 +832,10 @@ export async function detectGpuMode(): Promise<boolean> {
     const url = settings.url || 'http://localhost:11434';
     const urlObj = new URL(url);
     const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
-    const port = parseInt(urlObj.port) || 11434;
+    const port = ollamaPort(urlObj);
 
     return new Promise<boolean>((resolve) => {
-      const req = http.get(
+      const req = ollamaTransport(urlObj).get(
         { hostname, port, path: '/api/ps', timeout: 5000 },
         (res) => {
           let data = '';
@@ -1249,13 +1273,13 @@ export async function getEmbeddingModelInfo(): Promise<OllamaModelInfo | null> {
   const url = settings.url || 'http://localhost:11434';
   const urlObj = new URL(url);
   const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
-  const port = parseInt(urlObj.port) || 11434;
+  const port = ollamaPort(urlObj);
 
   return new Promise<OllamaModelInfo | null>((resolve) => {
     const activeTag = getEmbeddingModelTag();
     const body = JSON.stringify({ name: activeTag });
 
-    const req = http.request(
+    const req = ollamaTransport(urlObj).request(
       {
         hostname,
         port,
@@ -1310,10 +1334,10 @@ export async function getEmbeddingModelSize(): Promise<number> {
   const url = settings.url || 'http://localhost:11434';
   const urlObj = new URL(url);
   const hostname = urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname;
-  const port = parseInt(urlObj.port) || 11434;
+  const port = ollamaPort(urlObj);
 
   return new Promise<number>((resolve) => {
-    const req = http.get(
+    const req = ollamaTransport(urlObj).get(
       { hostname, port, path: '/api/tags', timeout: LIST_TIMEOUT_MS },
       (res) => {
         let data = '';
@@ -1342,20 +1366,41 @@ export async function getEmbeddingModelSize(): Promise<number> {
 
 // ─── Built-in local AI (1.0.97 B36) ─────────────────────────────────────────
 
-/** Set when the user chose "Continue without local AI": no automatic downloads until Retry. */
-let _autoDownloadDeclined = false;
+/**
+ * Set when the user chose "Continue without local AI": no automatic downloads until Retry / Re-check /
+ * Download. Persisted in the settings store so the choice survives a restart; this in-memory value
+ * (null = not touched this session) wins while the app runs, so a failed write cannot undo a click.
+ */
+let _autoDownloadDeclinedOverride: boolean | null = null;
+
+function persistedAutoDownloadDeclined(): boolean {
+  try { return settingsStore.isLocalAiAutoDownloadDeclined?.() === true; } catch { return false; }
+}
+
+function persistAutoDownloadDeclined(declined: boolean): void {
+  try { settingsStore.setLocalAiAutoDownloadDeclined?.(declined); } catch (err) {
+    logger.warn('[Local AI] Could not save the "continue without local AI" choice:', err);
+  }
+}
 
 export function declineBuiltinAutoDownload(): void {
-  _autoDownloadDeclined = true;
+  _autoDownloadDeclinedOverride = true;
+  persistAutoDownloadDeclined(true);
   getLocalAiService().store.cancelAll();
 }
 
 export function allowBuiltinAutoDownload(): void {
-  _autoDownloadDeclined = false;
+  _autoDownloadDeclinedOverride = false;
+  persistAutoDownloadDeclined(false);
+}
+
+/** Test seam: forget this session's choice, as a new launch does (only the stored value remains). */
+export function __resetAutoDownloadSessionForTests(): void {
+  _autoDownloadDeclinedOverride = null;
 }
 
 export function isBuiltinAutoDownloadDeclined(): boolean {
-  return _autoDownloadDeclined;
+  return _autoDownloadDeclinedOverride ?? persistedAutoDownloadDeclined();
 }
 
 /** Callbacks run once after a background model download queue drains (any outcome). */
@@ -1397,7 +1442,7 @@ export async function ensureBuiltinRerankModels(
 ): Promise<boolean> {
   const { store } = getLocalAiService();
   const rerankIds = getAutoModels().filter((m) => m.role === 'rerank' || m.role === 'rerank-qwen').map((m) => m.id);
-  if (!_autoDownloadDeclined) {
+  if (!isBuiltinAutoDownloadDeclined()) {
     const off = store.onChange((all) => {
       const cur = all.find((m) => rerankIds.includes(m.id) && m.state === 'downloading');
       if (cur) onProgress?.(`Downloading ${cur.label}`, cur.pct);
@@ -1449,7 +1494,7 @@ async function runBuiltinSetup(
     // download in the background. The renderer re-checks after its retry window and on the
     // models-ready push, and then finds them ready.
     result.embeddingModelReady = store.isReady('embed');
-    if (_autoDownloadDeclined) {
+    if (isBuiltinAutoDownloadDeclined()) {
       result.error = 'Built-in AI models are not downloaded (local AI was declined)';
     } else {
       onProgress?.('Downloading AI models in the background...', 30);

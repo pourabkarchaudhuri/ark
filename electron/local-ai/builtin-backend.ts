@@ -270,10 +270,21 @@ export class BuiltinBackend {
     return { loaded: true, sizeBytes: allOffloaded ? gpuBytes : gpuBytes + cpuBytes, vramBytes: gpuBytes };
   }
 
+  /** Chat requests in flight (headers sent, body not finished). */
+  private chatInFlight = 0;
+  beginChatWork(): void { this.chatInFlight += 1; }
+  endChatWork(): void { this.chatInFlight = Math.max(0, this.chatInFlight - 1); }
+
+  /**
+   * Free the servers' memory (game start, drain). A chat server with a turn in flight is left alone: stopping
+   * it would cut the answer off mid-sentence; its idle timer unloads it once the turn is over.
+   */
   async unloadAll(): Promise<string[]> {
     const running = this.deps.runtime.status().filter((s) => s.state === 'ready' || s.state === 'starting').map((s) => s.role);
-    await this.deps.runtime.stopAll();
-    return running;
+    const toStop = running.filter((role) => !(role === 'chat' && this.chatInFlight > 0));
+    if (toStop.length === running.length) await this.deps.runtime.stopAll();
+    else await Promise.all(toStop.map((role) => this.deps.runtime.stop(role)));
+    return toStop;
   }
 
   embeddingModelInfo(): { name: string; installed: boolean; sizeBytes: number; parameterSize: string; quantization: string } {

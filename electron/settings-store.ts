@@ -71,6 +71,8 @@ interface Settings {
   localAi?: {
     useExternalOllama?: boolean;
     modelsDir?: string | null;
+    /** The user chose "Continue without local AI": no automatic model downloads until Retry / Re-check / Download. */
+    autoDownloadDeclined?: boolean;
   };
   ollama: {
     enabled: boolean;
@@ -631,9 +633,22 @@ export class SettingsStore {
     this.settings.localAi = {
       useExternalOllama: typeof next.useExternalOllama === 'boolean' ? next.useExternalOllama : cur.useExternalOllama,
       modelsDir: next.modelsDir === undefined ? cur.modelsDir : (next.modelsDir?.trim() || null),
+      ...(this.isLocalAiAutoDownloadDeclined() ? { autoDownloadDeclined: true } : {}),
     };
     this.saveSettings();
     logger.log(`[SettingsStore] Local AI settings updated (external Ollama: ${this.settings.localAi.useExternalOllama})`);
+  }
+
+  /** "Continue without local AI" survives a restart (kept out of getLocalAiSettings, which the renderer receives). */
+  isLocalAiAutoDownloadDeclined(): boolean {
+    return this.settings.localAi?.autoDownloadDeclined === true;
+  }
+
+  setLocalAiAutoDownloadDeclined(declined: boolean): void {
+    if (this.isLocalAiAutoDownloadDeclined() === declined) return;
+    const cur = this.getLocalAiSettings();
+    this.settings.localAi = { ...cur, ...(declined ? { autoDownloadDeclined: true } : {}) };
+    this.saveSettings();
   }
 
   isOllamaEnabled(): boolean {

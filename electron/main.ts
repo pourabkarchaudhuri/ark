@@ -145,6 +145,7 @@ import { initAiRouter, shutdownAiRouter, setAiRouterBackgroundProbe } from './ai
 import { setGameActivityListener } from './game-activity.js';
 import { atomicWriteFileSync } from './safe-write.js';
 import { attachNavigationGuards, devFlagArgs, isExternalOpenable, shouldUseDevServer } from './navigation-guard.js';
+import { isLosingInstance } from './single-instance.js';
 import { attachRendererRecovery, revealMainWindow, type RendererRecoveryState } from './renderer-recovery.js';
 import { DECODE_BAY_PARTITION } from './webview-policy.js';
 // A tracked game starting forces embedding background mode, holds background
@@ -355,9 +356,12 @@ app.setAppUserModelId(APP_USER_MODEL_ID);
 // ---------------------------------------------------------------------------
 const gotTheLock = app.requestSingleInstanceLock();
 const isChatPromptsTest = process.argv.includes('--run-chat-prompts');
-if (!gotTheLock && !isChatPromptsTest) {
+/** True for a second instance that lost the lock: it must not boot, write shared state or run finalizers. */
+const losingInstance = isLosingInstance(gotTheLock, isChatPromptsTest);
+if (losingInstance) {
   // Another instance already owns the lock — quit immediately (unless we're the chat-prompts test runner).
-  app.quit();
+  // app.exit skips ready / before-quit / will-quit, so nothing of the running instance's state is touched.
+  app.exit(0);
 } else if (gotTheLock) {
   app.on('second-instance', () => {
     // A second instance was attempted — bring the existing window to front
@@ -514,6 +518,8 @@ function createWindow() {
     recordCrash: recordRendererCrash,
     isSafeMode: () => safeModeState.safeMode,
     log: (level, msg) => (level === 'error' ? logger.error(msg) : logger.log(msg)),
+    // Breaker tripped: show the Restart/Quit prompt now instead of leaving a frameless black window.
+    onDead: () => { void showMainWindow(); },
   });
 
   mainWindow.webContents.on('console-message', (_ev: any, level: number, message: string) => {
@@ -671,6 +677,8 @@ function destroyWebContentsView() {
 // ============================================================================
 
 app.whenReady().then(async () => {
+  // A losing second instance never boots: no boot-health write, router, window or finalizers.
+  if (losingInstance) return;
   // Register IPC handlers first so renderer can call them as soon as the window loads
   registerAllHandlers(() => mainWindow);
   // AI router: adopt saved keys, follow the chat-provider selector, schedule connector re-checks.
@@ -1187,6 +1195,7 @@ let ollamaUnloadOnQuit: Promise<void> | null = null;
 // Set isQuitting flag before quit so close interceptor lets through
 // Also flush caches synchronously so no data is lost on shutdown
 app.on('before-quit', () => {
+  if (losingInstance) return;
   isQuitting = true;
   finalizeShutdownSync();
   // Tear down the overlay HUD and release its global hotkey.
@@ -1211,7 +1220,7 @@ app.on('before-quit', () => {
 const SHUTDOWN_CLOSE_TIMEOUT_MS = 3_000;
 let shutdownFinalized = false;
 app.on('will-quit', (event: any) => {
-  if (shutdownFinalized) return;
+  if (losingInstance || shutdownFinalized) return;
   shutdownFinalized = true;
   event.preventDefault();
   finalizeShutdownSync(); // no-op when before-quit already ran it

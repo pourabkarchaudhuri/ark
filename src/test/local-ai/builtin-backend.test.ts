@@ -181,6 +181,20 @@ describe('BuiltinBackend chat, gpu, unload, model info', () => {
     expect(t.runtime.stopAll).toHaveBeenCalled();
   });
 
+  it('unloadAll leaves a chat server alone while a turn is in flight, then stops it once the turn ends', async () => {
+    const t = setup();
+    const row = (role: string) => ({ role, state: 'ready', port: 1, pid: 1, restarts: 0, cpuFallback: false, lastError: null, gpu: null }) as unknown as RoleStatus;
+    (t.runtime.status as ReturnType<typeof vi.fn>).mockReturnValue([row('embed'), row('chat')]);
+    (t.runtime as unknown as { stop: ReturnType<typeof vi.fn> }).stop = vi.fn(async () => undefined);
+    t.backend.beginChatWork();
+    expect(await t.backend.unloadAll()).toEqual(['embed']);
+    expect((t.runtime as unknown as { stop: ReturnType<typeof vi.fn> }).stop).toHaveBeenCalledTimes(1);
+    expect((t.runtime as unknown as { stop: ReturnType<typeof vi.fn> }).stop).toHaveBeenCalledWith('embed');
+    t.backend.endChatWork();
+    expect(await t.backend.unloadAll()).toEqual(['embed', 'chat']);
+    expect(t.runtime.stopAll).toHaveBeenCalled();
+  });
+
   it('embeddingModelInfo reports the downloaded model', () => {
     expect(setup().backend.embeddingModelInfo()).toMatchObject({ installed: true, sizeBytes: 1160285024, quantization: 'F16' });
   });

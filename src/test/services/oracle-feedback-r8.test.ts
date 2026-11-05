@@ -227,7 +227,7 @@ describe('graph signature (R8)', () => {
   it('includes the embedding layout versions, not just the vector count', () => {
     const sig = annGraphSignature(1234);
     expect(sig.startsWith('ann-1234-')).toBe(true);
-    expect(sig).toMatch(/-c\d+-p\d+$/);
+    expect(sig).toMatch(/-c\d+-p\d+(-g\d+)?$/);
     expect(annGraphSignature(1234)).not.toBe(annGraphSignature(1235));
   });
 });

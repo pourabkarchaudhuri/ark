@@ -21,6 +21,7 @@
  *  - Dynamic viewport-fill height so the feed always fits the screen
  */
 
+import { startVisibleInterval } from '@/lib/visible-interval';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useVirtualizer } from '@tanstack/react-virtual';
@@ -1571,15 +1572,9 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
   // Bump periodically so “today” / window floor stay correct across long sessions and tab returns.
   const [calendarTick, setCalendarTick] = useState(0);
   useEffect(() => {
-    const id = window.setInterval(() => setCalendarTick((x) => x + 1), 60_000);
-    const onVis = () => {
-      if (document.visibilityState === 'visible') setCalendarTick((x) => x + 1);
-    };
-    document.addEventListener('visibilitychange', onVis);
-    return () => {
-      window.clearInterval(id);
-      document.removeEventListener('visibilitychange', onVis);
-    };
+    // Only while the window is visible: a tray-hidden Ark must not re-render the calendar every minute.
+    // Coming back after a long hide ticks at once, so "today" is right on the first paint.
+    return startVisibleInterval(() => setCalendarTick((x) => x + 1), 60_000);
   }, []);
   void calendarTick;
   const calendarNow = new Date();
@@ -1884,8 +1879,8 @@ export const ReleaseCalendar = memo(function ReleaseCalendar() {
 
   useEffect(() => {
     fetchReleases();
-    const interval = setInterval(fetchReleases, 30 * 60 * 1000);
-    return () => clearInterval(interval);
+    // Skipped while hidden; a window that was hidden for over 30 min refreshes when it returns.
+    return startVisibleInterval(() => { void fetchReleases(); }, 30 * 60 * 1000);
   }, [fetchReleases]);
 
   // Steam catalog releases arrive after the first paint (a full catalog pass), then merge in.
