@@ -165,7 +165,11 @@ describe('BuiltinBackend chat, gpu, unload, model info', () => {
   });
 
   it('gpuReading comes from the embed server log', () => {
-    expect(setup().backend.gpuReading()).toEqual({ loaded: true, sizeBytes: 1024, vramBytes: 1000 });
+    // every layer on the GPU: the CPU-mapped embedding table is not a spill, so size == vram
+    expect(setup().backend.gpuReading()).toEqual({ loaded: true, sizeBytes: 1000, vramBytes: 1000 });
+    const partial = setup();
+    (partial.runtime.roleStatus as ReturnType<typeof vi.fn>).mockReturnValue({ state: 'ready', gpu: { device: 'Vulkan0', layersOffloaded: 10, layersTotal: 25, gpuBytes: 400, cpuBytes: 600 } });
+    expect(partial.backend.gpuReading()).toEqual({ loaded: true, sizeBytes: 1000, vramBytes: 400 });
     const t = setup();
     (t.runtime.roleStatus as ReturnType<typeof vi.fn>).mockReturnValue({ state: 'stopped', gpu: null });
     expect(t.backend.gpuReading()).toEqual({ loaded: false, sizeBytes: 0, vramBytes: 0 });

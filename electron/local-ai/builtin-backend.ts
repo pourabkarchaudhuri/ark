@@ -261,7 +261,13 @@ export class BuiltinBackend {
   gpuReading(): BuiltinGpuReading {
     const st = this.deps.runtime.roleStatus('embed');
     if (st.state !== 'ready' || !st.gpu) return { loaded: false, sizeBytes: 0, vramBytes: 0 };
-    return { loaded: true, sizeBytes: st.gpu.gpuBytes + st.gpu.cpuBytes, vramBytes: st.gpu.gpuBytes };
+    // llama-server keeps the token-embedding table in a CPU-mapped buffer even with every layer offloaded
+    // (arctic-embed2: ~545 MB of 1.15 GB). That is by design, not a spill: counting it as model size made
+    // the Settings graphics-memory check report "Too high / part of the AI spilled" on an idle 8 GB card
+    // (found by the 1.0.97 packaged-app smoke test). Only a run that offloaded fewer layers than it has is partial.
+    const { gpuBytes, cpuBytes, layersOffloaded, layersTotal } = st.gpu;
+    const allOffloaded = gpuBytes > 0 && (layersTotal === null || layersOffloaded === null || layersOffloaded >= layersTotal);
+    return { loaded: true, sizeBytes: allOffloaded ? gpuBytes : gpuBytes + cpuBytes, vramBytes: gpuBytes };
   }
 
   async unloadAll(): Promise<string[]> {
