@@ -34,7 +34,8 @@ export function LocalAiSplashStatus() {
     );
   }
   if (failed && !status.declined) {
-    const need = failed.error?.code === 'disk_full' ? ` (${formatBytes(failed.sizeBytes)} needed)` : '';
+    // The store's message already carries the exact amount still needed; only add the model size when it does not.
+    const need = failed.error?.code === 'disk_full' && !/needed/i.test(failed.error.message) ? ` (${formatBytes(failed.sizeBytes)} needed)` : '';
     return (
       <div className="font-mono text-[11px] text-amber-300/80" data-testid="local-ai-splash-error">
         <div>{`> Local AI download stopped: ${failed.error?.message ?? 'unknown error'}${need}`}</div>

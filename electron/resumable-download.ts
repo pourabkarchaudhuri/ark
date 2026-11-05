@@ -89,6 +89,41 @@ function isDiskFull(err: unknown): boolean {
   return /ENOSPC|EDQUOT/.test(String((err as { code?: unknown } | null)?.code ?? ''));
 }
 
+/** The models folder / disk itself is the problem (read-only, permission denied, drive gone): retrying cannot help. */
+const LOCAL_FS_CODES = /^(EACCES|EPERM|EROFS|ENOENT|EIO|ENODEV|ENAMETOOLONG|EBUSY|ENOTDIR|EISDIR|EMFILE|ENXIO|EEXIST)$/;
+function isLocalFsError(err: unknown): boolean {
+  if (err instanceof DownloadError) return false;
+  const e = err as { code?: unknown; syscall?: unknown } | null;
+  return typeof e?.code === 'string' && typeof e?.syscall === 'string' && LOCAL_FS_CODES.test(e.code);
+}
+
+function isTransientMoveError(err: unknown): boolean {
+  return /^(EPERM|EBUSY|EACCES)$/.test(String((err as { code?: unknown } | null)?.code ?? ''));
+}
+
+/**
+ * Replace `dest` with `src`, retrying a few times when Windows (antivirus, a sync client, a process that has
+ * the old file open) holds either file for a moment. Throws the last error when it never lets go.
+ */
+export async function moveFileWithRetry(
+  src: string,
+  dest: string,
+  delayMs = 150,
+  tries = 6,
+  ops: { rmSync: typeof fs.rmSync; renameSync: typeof fs.renameSync } = fs,
+): Promise<void> {
+  for (let i = 1; ; i++) {
+    try {
+      ops.rmSync(dest, { force: true });
+      ops.renameSync(src, dest);
+      return;
+    } catch (err) {
+      if (i >= tries || !isTransientMoveError(err)) throw err;
+      await defaultSleep(delayMs * i);
+    }
+  }
+}
+
 function fileSize(p: string): number {
   try {
     return fs.statSync(p).size;
@@ -143,7 +178,12 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
   const sleep = opts.sleep ?? ((ms: number) => abortableSleep(ms, signal));
   const partPath = `${destPath}.part`;
 
-  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  try {
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  } catch (err) {
+    if (isLocalFsError(err)) throw new DownloadError(`The models folder is not available (${(err as { code: string }).code})`, { code: 'FOLDER_UNAVAILABLE' });
+    throw err;
+  }
 
   let lastError: unknown = null;
   let completed = false;
@@ -214,6 +254,15 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
       written = resumeAt;
       responded = true;
 
+      // A captive portal / proxy login page answers 200 with HTML: never write it into the .part, or a later
+      // Range resume would glue the real file behind it and fail the checksum after the full transfer.
+      const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+      if (expectedSize && /^(text\/html|application\/json|application\/xhtml)/.test(contentType)) {
+        fs.rmSync(partPath, { force: true });
+        written = 0;
+        throw new DownloadError('The network answered with a web page instead of the file (sign-in required?)', { code: 'PORTAL' });
+      }
+
       // A response that already says it is larger than the pinned size is the wrong file: do not write it.
       const declared = Number(res.headers.get('content-length'));
       if (expectedSize && Number.isFinite(declared) && declared > 0 && resumeAt + declared > expectedSize) {
@@ -258,7 +307,11 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
         // Not a flaky link and not a filter: stop now with the code the UI maps to "not enough disk space".
         throw new DownloadError('ENOSPC: not enough disk space to continue the download', { code: 'ENOSPC' });
       }
-      if (dlErrCode(err) === 'OVERSIZE') break; // the wrong file: another attempt would be the same
+      if (isLocalFsError(err)) {
+        // Read-only / missing / denied folder: say so at once, not "blocked on this network" after two more requests.
+        throw new DownloadError(`The models folder is not writable (${(err as { code: string }).code})`, { code: 'FOLDER_UNAVAILABLE' });
+      }
+      if (dlErrCode(err) === 'OVERSIZE' || dlErrCode(err) === 'PORTAL') break; // the wrong file / a login page: another attempt would be the same
       if (isBlocked(err)) {
         throw new DownloadError('The download was blocked on this computer or network', { code: 'ERR_BLOCKED_BY_CLIENT' });
       }
@@ -305,7 +358,6 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
     }
   }
 
-  fs.rmSync(destPath, { force: true });
-  fs.renameSync(partPath, destPath);
+  await moveFileWithRetry(partPath, destPath);
   return destPath;
 }

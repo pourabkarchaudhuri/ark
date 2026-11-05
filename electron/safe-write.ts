@@ -26,8 +26,8 @@ function uniqueTmpPath(filePath: string): string {
 
 export function atomicWriteFileSync(filePath: string, data: string): void {
   const tmp = uniqueTmpPath(filePath);
-  fs.writeFileSync(tmp, data, 'utf-8');
   try {
+    fs.writeFileSync(tmp, data, 'utf-8');
     fs.renameSync(tmp, filePath);
   } catch (err) {
     // Clean up orphan .tmp file before re-throwing
@@ -54,6 +54,8 @@ export function atomicWriteFile(
   const tmp = uniqueTmpPath(filePath);
   fs.writeFile(tmp, data, 'utf-8', (writeErr) => {
     if (writeErr) {
+      // A full disk leaves the partial bytes behind, taking the last free space: remove them.
+      fs.unlink(tmp, () => { /* ignore cleanup failure */ });
       callback(writeErr);
       return;
     }

@@ -15,7 +15,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { downloadWithResume, sha256OfFile, DownloadError, type ResumableDownloadOptions } from '../resumable-download.js';
+import { downloadWithResume, sha256OfFile, moveFileWithRetry, DownloadError, type ResumableDownloadOptions } from '../resumable-download.js';
 import type { LocalAiRole, ModelEntry, ModelSource } from './manifest.js';
 
 export type ModelState = 'ready' | 'missing' | 'queued' | 'downloading' | 'paused' | 'verifying' | 'error';
@@ -95,10 +95,16 @@ export function classifyDownloadError(err: unknown): { code: ModelErrorCode; mes
   if (/ENOSPC|disk full|not enough space/i.test(text)) return { code: 'disk_full', message: 'Not enough disk space' };
   if (code === 'OVERSIZE') return { code: 'checksum', message: 'The server sent a different file than expected, so it was discarded' };
   if (code === 'CHECKSUM') return { code: 'checksum', message: 'The downloaded file did not match its checksum and was discarded' };
+  if (code === 'FOLDER_UNAVAILABLE') {
+    return { code: 'folder_unavailable', message: 'Ark cannot write to the models folder. Check the drive and permissions, or choose another folder.' };
+  }
+  if (code === 'PORTAL') {
+    return { code: 'blocked', message: 'The network asked for a sign-in (captive portal). Sign in to the network, then Retry.' };
+  }
   if (/BLOCKED/i.test(code) || e?.statusCode === 403 || e?.statusCode === 451) {
     return { code: 'blocked', message: 'The download was blocked on this computer or network' };
   }
-  if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|INTERNET_DISCONNECTED|NAME_NOT_RESOLVED|ETIMEDOUT|fetch failed/i.test(text)) {
+  if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|INTERNET_DISCONNECTED|NAME_NOT_RESOLVED|ETIMEDOUT|fetch failed|ERR_(CONNECTION_(TIMED_OUT|REFUSED|RESET|CLOSED)|ADDRESS_UNREACHABLE|NETWORK_CHANGED|PROXY_CONNECTION_FAILED|TUNNEL_CONNECTION_FAILED|NETWORK_ACCESS_DENIED|INTERNET_DISCONNECTED)/i.test(text)) {
     return { code: 'offline', message: 'No connection to the download server' };
   }
   if (typeof e?.statusCode === 'number') return { code: 'http', message: `The server answered HTTP ${e.statusCode}` };
@@ -384,12 +390,20 @@ export class ModelStore {
         this.set(m.id, { state: 'error', error: { code: 'disk_full', message: `Not enough disk space: ${need} GB needed` } });
         return 'stop';
       }
+      // A verified download whose final move failed earlier is still here: do not fetch it again.
+      const leftover = (() => { try { return fs.statSync(base).size; } catch { return -1; } })();
+      let haveVerified = false;
+      if (leftover === src.size && partSize === 0) {
+        haveVerified = await this.deps.hashFile(base).then((h) => h === src.sha256.toLowerCase()).catch(() => false);
+        if (!haveVerified) fs.rmSync(base, { force: true });
+      }
       const abort = new AbortController();
       const attempt = { id: m.id, abort, userAbort: false, preempted: false };
       this.current = attempt;
+      let finalizing = false;
       this.set(m.id, { state: 'downloading', sizeBytes: src.size, transferred: partSize, pct: pct(partSize, src.size), source: src.kind, error: null });
       try {
-        await this.deps.download({
+        if (!haveVerified) await this.deps.download({
           url: src.url,
           destPath: base,
           expectedSize: src.size,
@@ -399,11 +413,15 @@ export class ModelStore {
             this.set(m.id, { transferred, pct: pct(transferred, src.size) }, false);
           },
         });
-        fs.rmSync(this.filePath(m), { force: true });
-        fs.renameSync(base, this.filePath(m));
+        finalizing = true;
+        await moveFileWithRetry(base, this.filePath(m));
         this.writeMarker(m, src);
-        // Partial files of the other sources are useless now.
-        for (const other of m.sources) if (other !== src) fs.rmSync(`${this.partBase(m, other)}.part`, { force: true });
+        // Partial and finished-but-unmoved files of the other sources are useless now.
+        for (const other of m.sources) {
+          if (other === src) continue;
+          fs.rmSync(`${this.partBase(m, other)}.part`, { force: true });
+          fs.rmSync(this.partBase(m, other), { force: true });
+        }
         this.set(m.id, { state: 'ready', transferred: src.size, pct: 100, error: null });
         this.deps.log(`[LocalAI] ${m.file} downloaded from ${src.kind} and verified`);
         return 'ok';
@@ -418,6 +436,13 @@ export class ModelStore {
           // A Resume that arrived before this attempt unwound has already queued it again.
           if (!this.queue.includes(m.id)) this.set(m.id, { state: 'paused' });
           return 'paused';
+        }
+        if (finalizing) {
+          // The file is downloaded and verified; only the move into place failed (held by another program).
+          // Another source would download a different multi-GB file for nothing: stop and keep the file.
+          this.deps.log(`[LocalAI] ${m.file} could not be moved into place: ${String(err)}`);
+          lastErr = { code: 'folder_unavailable', message: 'The finished download could not be moved into place (the file is in use). Close other programs using it, then Retry.' };
+          break;
         }
         lastErr = err instanceof DownloadError && err.code === 'ABORTED'
           ? { code: 'unknown', message: 'Download cancelled' }
@@ -435,7 +460,7 @@ export class ModelStore {
       state: 'error', transferred: kept, pct: pct(kept, lastSrc?.size ?? 0),
       error: lastErr ?? { code: 'unknown', message: 'Download failed' },
     });
-    return lastErr && (lastErr.code === 'offline' || lastErr.code === 'disk_full' || lastErr.code === 'blocked') ? 'stop' : 'next';
+    return lastErr && (lastErr.code === 'offline' || lastErr.code === 'disk_full' || lastErr.code === 'blocked' || lastErr.code === 'folder_unavailable') ? 'stop' : 'next';
   }
 
   /** Stop the running download (its `.part` stays) and hold the queue. */
@@ -471,10 +496,13 @@ export class ModelStore {
    */
   async removeAll(): Promise<void> {
     this.cancelAll();
+    // Let the aborted attempt unwind first: it must not set 'paused' over our 'missing', nor keep writing
+    // into a .part we are deleting.
+    await this.running?.catch(() => undefined);
     const dir = this.deps.modelsDir();
     const failed: string[] = [];
     for (const m of this.deps.models()) {
-      const paths = [this.filePath(m), this.markerPath(m), ...m.sources.map((src) => `${this.partBase(m, src)}.part`)];
+      const paths = [this.filePath(m), this.markerPath(m), ...m.sources.flatMap((src) => [`${this.partBase(m, src)}.part`, this.partBase(m, src)])];
       let allGone = true;
       for (const p of paths) {
         if (!(await this.removeWithRetry(p))) { allGone = false; failed.push(path.basename(p)); }
@@ -508,7 +536,7 @@ export class ModelStore {
     const dir = this.deps.modelsDir();
     let total = 0;
     for (const m of this.deps.models()) {
-      const names = [m.file, ...m.sources.map((s) => `${path.basename(this.partBase(m, s))}.part`)];
+      const names = [m.file, ...m.sources.flatMap((s) => [`${path.basename(this.partBase(m, s))}.part`, path.basename(this.partBase(m, s))])];
       for (const n of names) {
         try { total += fs.statSync(path.join(dir, n)).size; } catch { /* absent */ }
       }

@@ -303,6 +303,8 @@ type PushWindow = {
   isVisible?: () => boolean;
   isMinimized?: () => boolean;
   isDestroyed?: () => boolean;
+  on?: (event: 'restore' | 'show', listener: () => void) => unknown;
+  removeListener?: (event: 'restore' | 'show', listener: () => void) => unknown;
 };
 
 export function register(
@@ -352,12 +354,27 @@ export function register(
   const intervalMs = pushOptions.pushIntervalMs ?? 750;
   let lastPush = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let wakeArmed = false;
   const pushNow = () => {
     timer = null;
     try {
       const win = getMainWindow();
       if (!win?.webContents) return;
-      if (win.isDestroyed?.() || win.isMinimized?.() || win.isVisible?.() === false) return;
+      if (win.isDestroyed?.() || win.isMinimized?.() || win.isVisible?.() === false) {
+        // Skipped, but the last state must still reach the renderer: push again when the window comes back.
+        if (!win.isDestroyed?.() && !wakeArmed) {
+          wakeArmed = true;
+          const wake = (): void => {
+            wakeArmed = false;
+            win.removeListener?.('restore', wake);
+            win.removeListener?.('show', wake);
+            push();
+          };
+          win.on?.('restore', wake);
+          win.on?.('show', wake);
+        }
+        return;
+      }
       lastPush = Date.now();
       win.webContents.send('localAi:status-changed', controller.statusForPush());
     } catch {

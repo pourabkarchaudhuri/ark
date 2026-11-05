@@ -290,3 +290,15 @@ describe('a stale load error (1.0.98 F5)', () => {
     expect(screen.getByTestId('built-in-local-ai')).toBeInTheDocument();
   });
 });
+
+describe('LocalAiSplashStatus disk-full wording (1.0.99)', () => {
+  it('shows the amount once', async () => {
+    const failed = status({
+      models: [model({ id: 'arctic-embed2', state: 'error', error: { code: 'disk_full', message: 'Not enough disk space: 1.7 GB needed' } })],
+    });
+    installApi(failed);
+    render(<LocalAiSplashStatus />);
+    await flush();
+    expect(screen.getByTestId('local-ai-splash-error').textContent?.match(/needed/g)).toHaveLength(1);
+  });
+});
