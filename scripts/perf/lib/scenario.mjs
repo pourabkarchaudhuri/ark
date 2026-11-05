@@ -41,6 +41,32 @@ export function makeRunner(probes, log) {
       const lines = String(e?.message ?? e).replace(/\u001b\[[0-9;]*m/g, '').split('\n');
       error = [lines[0], ...lines.filter((l) => /intercepts|not visible|detached|strict mode|waiting for/.test(l)).slice(-1)].join(' | ').slice(0, 300);
       const where = await page.evaluate(() => `${location.hash} "${document.body.innerText.slice(0, 90).replace(/\s+/g, ' ')}"`).catch(() => '?');
+      if (process.env.PERF_FAIL_DIR && (globalThis.__perfFailDumped = (globalThis.__perfFailDumped ?? 0) + 1) <= 6) {
+        try {
+          const fs = await import('node:fs');
+          await page.screenshot({ path: `${process.env.PERF_FAIL_DIR}/fail-${cycle}-${name}.png` }).catch(() => {});
+          const info = await page.evaluate(() => {
+            const d = (e) => e ? `${e.tagName}.${String(e.className).slice(0, 120)} role=${e.getAttribute('role')} data-state=${e.getAttribute('data-state')} text=${(e.innerText || '').slice(0, 100)}` : null;
+            const t = document.querySelector('[data-tour="oracle-button"]'); const r = t?.getBoundingClientRect();
+            return { target: r ? [r.x, r.y, r.width, r.height] : null, top: r ? d(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) : null,
+              bodyPE: getComputedStyle(document.body).pointerEvents, bodyOverflow: getComputedStyle(document.body).overflow,
+              dialogs: [...document.querySelectorAll('[role=dialog],[role=alertdialog],[aria-modal=true],[data-state=open]')].map(d).slice(0, 12),
+              fixed: [...document.querySelectorAll('body *')].filter((e) => getComputedStyle(e).position === 'fixed' && e.getBoundingClientRect().width > 300).map(d).slice(0, 12),
+              hash: location.hash, nodes: document.getElementsByTagName('*').length, ae: d(document.activeElement), inert: [...document.querySelectorAll('[inert],[aria-hidden=true]')].length,
+              dup: document.querySelectorAll('[data-tour="oracle-button"]').length };
+          }).catch((e) => ({ err: String(e) }));
+          info.frames = await page.evaluate(() => new Promise((res) => {
+            const out = { raf: 0, muts: 0, rects: [], hidden: document.hidden, vis: document.visibilityState, focus: document.hasFocus() };
+            const mo = new MutationObserver((l) => { out.muts += l.length; }); mo.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+            const btn = () => document.querySelector('[data-tour="oracle-button"]');
+            const t0 = performance.now();
+            const f = () => { out.raf++; const r = btn()?.getBoundingClientRect(); if (out.rects.length < 12) out.rects.push(r ? [Math.round(r.x * 10) / 10, Math.round(r.y * 10) / 10, Math.round(r.width * 10) / 10] : null); if (performance.now() - t0 < 1500) requestAnimationFrame(f); else { mo.disconnect(); out.anims = document.getAnimations().length; res(out); } };
+            requestAnimationFrame(f); setTimeout(() => { mo.disconnect(); res({ ...out, timeout: true }); }, 4000);
+          })).catch((e) => String(e));
+          info.win = await probes.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((w) => ({ title: w.getTitle().slice(0, 30), visible: w.isVisible(), min: w.isMinimized(), max: w.isMaximized(), focused: w.isFocused(), fs: w.isFullScreen(), bounds: w.getBounds() }))).catch((e) => String(e));
+          fs.writeFileSync(`${process.env.PERF_FAIL_DIR}/fail-${cycle}-${name}.json`, JSON.stringify(info, null, 2));
+        } catch {}
+      }
       const k = `${name}: ${error} @ ${where}`;
       if (!skipped.has(k)) {
         skipped.set(k, 0);
@@ -55,8 +81,35 @@ export function makeRunner(probes, log) {
     return out[name];
   }
 
-  const click = (sel, timeout = 30000) => page.locator(sel).first().click({ timeout });
-  const clickText = (re, timeout = 6000) => page.getByRole('button', { name: re }).first().click({ timeout });
+  /**
+   * Playwright's actionability check ("visible, enabled and stable") needs two animation frames with an unchanged box. In one
+   * v1.0.98 run (cycle 6 of 10, 17 min in) it never passed on any nav button for 40 minutes while page.evaluate and the process
+   * sampler kept working and mouse.wheel never returned, i.e. the page stopped producing frames; no dialog, error boundary or
+   * overlay was involved and three re-runs of the same tree passed all cycles. In the Oracle the Refresh button also failed the
+   * check once in cycle 1 while a background "Updating" pass mutated the DOM every frame. A click that cannot be
+   * actionability-checked is dispatched as a DOM click after a bounded wait so neither can wedge the scenario. Every fallback is
+   * counted (extra.fallbackClicks) and logged with the frame count at that moment, so the cause is visible next time.
+   */
+  const fallbackClicks = { count: 0, last: null };
+  async function framesAlive() {
+    return page.evaluate(() => new Promise((res) => { let n = 0; const t0 = performance.now(); const f = () => { n++; if (performance.now() - t0 < 700) requestAnimationFrame(f); else res(n); }; requestAnimationFrame(f); setTimeout(() => res(n), 2500); })).catch(() => -1);
+  }
+  async function robustClick(locator, label, timeout) {
+    try {
+      await locator.click({ timeout: Math.min(timeout, 8000) });
+    } catch (e) {
+      if (!/Timeout/.test(String(e?.message))) throw e;
+      const fps = await framesAlive();
+      const hit = await locator.evaluate((el) => { el.click(); return true; }, undefined, { timeout: 4000 }).catch(() => false);
+      fallbackClicks.count++;
+      fallbackClicks.last = { label, framesIn700ms: fps, domClick: hit };
+      log(`  click fallback "${label}": actionability timed out, frames in 700 ms = ${fps}, DOM click ${hit ? 'sent' : 'failed (element missing)'}`);
+      if (!hit) throw e;
+    }
+  }
+  const click = (sel, timeout = 30000) => robustClick(page.locator(sel).first(), sel, timeout);
+  const clickText = (re, timeout = 6000) => robustClick(page.getByRole('button', { name: re }).first(), String(re), timeout);
+  const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_r, rej) => setTimeout(() => rej(new Error(`${what} did not return within ${ms} ms`)), ms))]);
 
   async function dismissOverlays() {
     for (const re of [/^Got it$/i, /Close changelog/i, /^Skip( tour)?$/i]) {
@@ -70,12 +123,12 @@ export function makeRunner(probes, log) {
     await page.mouse.move(vp.width / 2, vp.height / 2);
     for (let i = 0; i < n; i++) {
       for (let k = 0; k < 6; k++) {
-        await page.mouse.wheel(0, Math.round(vp.height / 6));
+        await withTimeout(page.mouse.wheel(0, Math.round(vp.height / 6)), 10000, 'mouse.wheel');
         await sleep(40);
       }
       await sleep(500);
     }
-    await page.mouse.wheel(0, -100000);
+    await withTimeout(page.mouse.wheel(0, -100000), 10000, 'mouse.wheel');
     await sleep(500);
   }
 
@@ -84,7 +137,7 @@ export function makeRunner(probes, log) {
     if (await back.isVisible().catch(() => false)) await back.click({ timeout: 5000 }).catch(() => {});
     await click(T('browse-button'));
     await sleep(800);
-    await page.mouse.wheel(0, -100000);
+    await withTimeout(page.mouse.wheel(0, -100000), 10000, 'mouse.wheel').catch(() => {});
   }
 
   /**
@@ -204,13 +257,13 @@ export function makeRunner(probes, log) {
     }, steps);
     for (const [label, wait] of [['Log', 1500], ['Scenes', 1500], ['Audit', 1500], ['Medals', 1500], ['Your Ark', 4000]]) {
       await step(n, `voyage-${label}`, async () => {
-        await page.getByRole('button', { name: new RegExp(`^${label}$`, 'i') }).first().click({ timeout: 30000 });
+        await robustClick(page.getByRole('button', { name: new RegExp(`^${label}$`, 'i') }).first(), `voyage ${label}`, 30000);
         await sleep(wait);
       }, steps);
     }
     // Leave Ark 3D, let the GPU settle, then read GPU memory (rule: returns to baseline)
     await step(n, 'voyage-leave-ark', async () => {
-      await page.getByRole('button', { name: /^Log$/i }).first().click({ timeout: 30000 });
+      await robustClick(page.getByRole('button', { name: /^Log$/i }).first(), 'voyage Log', 30000);
       await click(T('library-button'));
       await sleep(4000);
     }, steps);
@@ -240,7 +293,7 @@ export function makeRunner(probes, log) {
       await sleep(3000);
     }, steps);
     await step(n, 'oracle-compute', async () => {
-      await page.getByRole('button', { name: /refresh/i }).first().click({ timeout: 4000 });
+      await robustClick(page.getByRole('button', { name: /refresh/i }).first(), 'oracle refresh', 4000);
       await sleep(8000);
     }, steps);
 
@@ -287,6 +340,7 @@ export function makeRunner(probes, log) {
       await toBrowseTop();
       await sleep(settleMs);
     }, steps);
+    extra.fallbackClicks = { ...fallbackClicks };
     return { steps, extra };
   }
 
