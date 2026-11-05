@@ -32,6 +32,9 @@ const NAV: ReadonlyArray<{ id: SettingsPageId; icon: string }> = [
 
 const DENSITY_KEY = 'ark-settings-density';
 const TOAST_MS = 6000;
+/** How long a search result waits for its row to mount: 20 looks, 50 ms apart. */
+const LAND_TRIES = 20;
+const LAND_STEP_MS = 50;
 
 function readDensity(): Density {
   try { return localStorage.getItem(DENSITY_KEY) === 'dense' ? 'dense' : 'roomy'; } catch { return 'roomy'; }
@@ -94,14 +97,26 @@ export const SettingsScreen = memo(function SettingsScreen({ onBack, onRunGuided
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // Land on the row a link or search result pointed at, else start the page at the top.
+  // Land on the row a link or search result pointed at, else start the page at the top. Some rows
+  // mount a moment later (a drawer or tab opening for them) or sit in a closed section, so keep
+  // looking for a short while, open what hides the row, then scroll to it and move focus there.
   useEffect(() => {
-    const t = setTimeout(() => {
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const land = () => {
       const el = focusId ? document.querySelector<HTMLElement>(`[data-setting-id="${focusId}"]`) : null;
-      if (el) el.scrollIntoView?.({ block: 'center', behavior: 'auto' });
-      else mainRef.current?.scrollTo?.({ top: 0 });
-    }, 0);
-    return () => clearTimeout(t);
+      if (el) {
+        for (let d = el.closest('details'); d; d = d.parentElement?.closest('details') ?? null) d.open = true;
+        el.scrollIntoView?.({ block: 'center', behavior: 'auto' });
+        if (!el.matches('a[href], button, input, select, textarea, summary, [tabindex]')) el.setAttribute('tabindex', '-1');
+        el.focus?.({ preventScroll: true });
+        return;
+      }
+      if (focusId && tries++ < LAND_TRIES) { timer = setTimeout(land, LAND_STEP_MS); return; }
+      mainRef.current?.scrollTo?.({ top: 0 });
+    };
+    timer = setTimeout(land, 0);
+    return () => clearTimeout(timer);
   }, [page, focusId]);
 
   const onSearchKeyDown = (e: React.KeyboardEvent) => {
@@ -141,7 +156,7 @@ export const SettingsScreen = memo(function SettingsScreen({ onBack, onRunGuided
           {page === 'general' && <GeneralPage query={query} onQuery={setQuery} density={density} onDensity={setDensity} onToast={showToast} onNavigate={navigate} />}
           {page === 'providers' && <AiProvidersPage onNavigate={navigate} focusId={focusId} />}
           {page === 'understanding' && <GameUnderstandingPage onNavigate={navigate} focusId={focusId} />}
-          {page === 'guide' && <GuidePage onRunGuidedTour={onRunGuidedTour} />}
+          {page === 'guide' && <GuidePage onRunGuidedTour={onRunGuidedTour} focusId={focusId} />}
           {page === 'about' && <AboutPage />}
         </div>
       </main>

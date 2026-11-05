@@ -3,7 +3,7 @@
  * is shown, the per-connector model lists, and the router graph layout. No React, no IPC, so every
  * rule is unit-tested.
  */
-import type { AiConnector, AiRole, AiRouterState, ConnectorKind } from '@/services/ai-router-types';
+import type { AiConnector, AiConnectorTest, AiRole, AiRouterState, ConnectorKind } from '@/services/ai-router-types';
 
 // ── Catalog ("Add a connector") ─────────────────────────────────────────────────────────────────
 
@@ -77,6 +77,31 @@ export interface NodeDisplay {
   opensDrawer: boolean;
 }
 
+/** A failed test whose message says the key itself was refused: that holds for every role. */
+const KEY_REJECTED_RE = /\b401\b|unauthori[sz]ed|invalid.*key|key rejected|incorrect api key/i;
+
+/**
+ * The connector's last test as it counts for one role. A test is stored once per connector, so a
+ * pass for chat says nothing about embeddings, and a missing embeddings model must not mark the
+ * chat model faulty. Only a refused key (401) is a fault for every role.
+ */
+export function testFor(c: AiConnector, role: AiRole): AiConnectorTest | undefined {
+  const t = c.test;
+  if (!t) return undefined;
+  if (t.role === role) return t;
+  return !t.ok && KEY_REJECTED_RE.test(t.message || '') ? t : undefined;
+}
+
+/**
+ * Mark connectors as testing (or done) without touching the others: a test already running keeps
+ * its spinner when "Test all" starts or ends.
+ */
+export function markTesting(map: Record<string, boolean>, ids: readonly string[], on: boolean): Record<string, boolean> {
+  const next = { ...map };
+  for (const id of ids) { if (on) next[id] = true; else delete next[id]; }
+  return next;
+}
+
 /**
  * How one connector shows for the role being viewed. `testing` is a test in flight; `builtinDown`
  * means the built-in runtime reported it is not running.
@@ -85,6 +110,7 @@ export function describeNode(c: AiConnector, role: AiRole, opts: { testing?: boo
   const enabled = c.enabled !== false;
   const serves = c.serves.includes(role);
   const routed = c.routedFor.includes(role) && enabled && serves;
+  const test = testFor(c, role);
   const idle: Omit<NodeDisplay, 'tone' | 'chip'> = { routed, routeLabel: 'Route here', canAct: true, opensDrawer: false };
 
   if (opts.testing) return { ...idle, tone: 'armed', chip: 'Testing', routeLabel: routed ? 'Routed' : 'Route here', canAct: false };
@@ -93,12 +119,12 @@ export function describeNode(c: AiConnector, role: AiRole, opts: { testing?: boo
     if (opts.builtinDown) return { ...idle, tone: 'fault', chip: 'Not running', routeLabel: routed ? 'Routed' : 'Route here', canAct: !routed };
     return routed ? { ...idle, tone: 'live', chip: 'Live', routeLabel: 'Routed', canAct: false } : { ...idle, tone: 'armed', chip: 'Ready' };
   }
-  if (c.test && !c.test.ok) return { ...idle, routed: false, tone: 'fault', chip: 'Fault', routeLabel: 'Fix key', opensDrawer: true };
+  if (test && !test.ok) return { ...idle, routed: false, tone: 'fault', chip: 'Fault', routeLabel: 'Fix key', opensDrawer: true };
   if (c.needsKey && !c.hasKey) return { ...idle, routed: false, tone: 'nokey', chip: 'No key', routeLabel: 'Add key', opensDrawer: true };
   if (!serves) return { ...idle, routed: false, tone: 'off', chip: 'Not offered', canAct: false };
   if (routed) return { ...idle, tone: 'live', chip: 'Live', routeLabel: 'Routed', canAct: false };
   // Configured; routing waits for a passed test, which pressing the button runs first.
-  if (!c.test) return { ...idle, tone: 'armed', chip: 'Untested', routeLabel: 'Test and route' };
+  if (!test) return { ...idle, tone: 'armed', chip: 'Untested', routeLabel: 'Test and route' };
   return { ...idle, tone: 'armed', chip: 'Armed' };
 }
 
@@ -107,7 +133,8 @@ export function routeCta(c: AiConnector, role: AiRole, noun: string, d: NodeDisp
   if (d.routed) return { label: `Routed for ${noun}`, disabled: true };
   if (!c.serves.includes(role)) return { label: `Doesn’t offer ${noun}`, disabled: true };
   if (c.enabled === false) return { label: 'Enable to route', disabled: true };
-  if (c.test && !c.test.ok) return { label: 'Fix the key to route', disabled: true };
+  const test = testFor(c, role);
+  if (test && !test.ok) return { label: 'Fix the key to route', disabled: true };
   if (c.needsKey && !c.hasKey) return { label: 'Save a key to route', disabled: true };
   return { label: d.chip === 'Untested' ? `Test and route ${noun} here` : `Route ${noun} here`, disabled: false };
 }

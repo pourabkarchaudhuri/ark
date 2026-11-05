@@ -70,7 +70,7 @@ export function GgDealsRow() {
     const test = await bridge.testKey().catch(() => ({ ok: false, error: 'unavailable' as const }));
     const next = resultOf(test);
     setState(next);
-    setNote(next === 'ok' ? 'Key saved and working.' : next === 'rejected' ? 'Key saved, but gg.deals rejected it. Check it and save again.' : 'Key saved. gg.deals could not be reached to check it right now.');
+    setNote(next === 'ok' ? 'Key saved and working.' : next === 'rejected' ? 'Key saved, but gg.deals rejected it. Check it and save again.' : next === 'wait' ? 'Key saved. Please wait a few seconds, then press Test to check it.' : 'Key saved. gg.deals could not be reached to check it right now.');
     setBusy(false);
   };
 

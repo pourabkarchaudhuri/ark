@@ -424,3 +424,119 @@ describe('banners and states from the StatesCore board', () => {
     expect(screen.getByText('The AI router is available in the desktop app.')).toBeInTheDocument();
   });
 });
+
+describe('1.0.98 F5: tests per role, drafts across roles, key notes, keyboard and search', () => {
+  it('a chat test does not count for embeddings: Route here on Embeddings runs an embeddings test first', async () => {
+    const m = await renderPage(routerState({ connectors: [builtinConnector(), connector('gemini')] }));
+    fireEvent.click(screen.getByRole('tab', { name: /Embeddings/ }));
+    expect(within(node('Google Gemini')).getByText('Untested')).toBeInTheDocument();
+    fireEvent.click(within(node('Google Gemini')).getByRole('button', { name: 'Test and route' }));
+    await waitFor(() => expect(m.api.setRoute).toHaveBeenCalledTimes(1));
+    expect(m.api.test).toHaveBeenCalledWith(expect.objectContaining({ connectorId: 'gemini', role: 'embeddings' }));
+  });
+
+  it('a failed embeddings test shows a Fault on Embeddings only', async () => {
+    const embedFail = { ...fail, role: 'embeddings' as const, message: 'model not found (404)' };
+    await renderPage(routerState({ connectors: [builtinConnector(), connector('openai', { test: embedFail })] }));
+    expect(within(node('OpenAI')).getByText('Untested')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: /Embeddings/ }));
+    expect(within(node('OpenAI')).getByText('Fault')).toBeInTheDocument();
+  });
+
+  it('edits and a pasted key survive switching role tabs', async () => {
+    await renderPage(routerState({ connectors: [builtinConnector(), connector('openai-compatible', { routedFor: ['chat'] })] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings for Home server' }));
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://10.1.1.1:8000/v1' } });
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-pasted-key-123' } });
+    fireEvent.click(screen.getByRole('tab', { name: /Embeddings/ }));
+    expect(screen.getByRole('heading', { name: 'Home server' })).toBeInTheDocument();
+    expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe('http://10.1.1.1:8000/v1');
+    expect((screen.getByLabelText(/API key/) as HTMLInputElement).value).toBe('sk-pasted-key-123');
+    fireEvent.click(screen.getByRole('tab', { name: /Chat/ }));
+    expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe('http://10.1.1.1:8000/v1');
+  });
+
+  it('Cancel throws the unsaved edits away', async () => {
+    await renderPage(routerState({ connectors: [builtinConnector(), connector('openai-compatible', { baseUrl: 'http://old/v1' })] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings for Home server' }));
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://new/v1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe('http://old/v1');
+  });
+
+  it('the key message goes away once a later test has run', async () => {
+    const rejected = { ...fail, at: 5 };
+    const m = await renderPage(routerState({ connectors: [builtinConnector(), connector('openai')] }));
+    m.api.setKey.mockResolvedValueOnce({ success: true, test: rejected });
+    m.api.getState.mockResolvedValue(routerState({ connectors: [builtinConnector(), connector('openai', { test: rejected })] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings for OpenAI' }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-bad-key-12345' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+    expect(await screen.findByText(/rejected it/)).toBeInTheDocument();
+    m.api.test.mockResolvedValueOnce({ success: true, test: { ...pass, at: 9 } });
+    m.api.getState.mockResolvedValue(routerState({ connectors: [builtinConnector(), connector('openai', { test: { ...pass, at: 9 } })] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await waitFor(() => expect(screen.queryByText(/rejected it/)).not.toBeInTheDocument());
+  });
+
+  it('typing a new key clears the old key message', async () => {
+    const m = await renderPage(routerState({ connectors: [builtinConnector(), connector('openai')] }));
+    m.api.setKey.mockResolvedValueOnce({ success: true, test: undefined } as never);
+    fireEvent.click(screen.getByRole('button', { name: 'Settings for OpenAI' }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-good-key-12345' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+    expect(await screen.findByText('Key saved. Run the test before routing.')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-' } });
+    expect(screen.queryByText('Key saved. Run the test before routing.')).not.toBeInTheDocument();
+  });
+
+  it('Escape closes the drawer and puts focus back on the gear that opened it', async () => {
+    await renderPage(routerState({ connectors: [builtinConnector({ routedFor: [] }), connector('gemini')] }));
+    const gear = screen.getByRole('button', { name: 'Settings for Google Gemini' });
+    gear.focus();
+    fireEvent.click(gear);
+    expect(screen.getByRole('heading', { name: 'Google Gemini' })).toBeInTheDocument();
+    await waitFor(() => expect(document.activeElement).toBe(document.querySelector('.drawer')));
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+    expect(screen.getByRole('heading', { name: 'No connector selected' })).toBeInTheDocument();
+    await waitFor(() => expect(document.activeElement).toBe(gear));
+  });
+
+  it('Tab wraps inside the open drawer', async () => {
+    await renderPage(routerState({ connectors: [builtinConnector({ routedFor: [] }), connector('gemini')] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings for Google Gemini' }));
+    const drawer = document.querySelector('.drawer') as HTMLElement;
+    const first = screen.getByRole('button', { name: 'Close settings' });
+    const last = Array.from(drawer.querySelectorAll('.sect')).pop()!.querySelector('button') as HTMLElement;
+    last.focus();
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it('the connector picker closes on Escape and returns focus to Add connector', async () => {
+    await renderPage();
+    const add = screen.getByRole('button', { name: /Add connector/ });
+    add.focus();
+    fireEvent.click(add);
+    const list = screen.getByRole('listbox', { name: 'Available connectors' });
+    await waitFor(() => expect(list.contains(document.activeElement)).toBe(true));
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    await waitFor(() => expect(document.activeElement).toBe(add));
+  });
+
+  it('a search result for the built-in AI opens the built-in connector even when another is routed', async () => {
+    const state = withChatRoute(routerState({ connectors: [builtinConnector({ routedFor: [] }), connector('anthropic')] }), 'anthropic', 'claude-sonnet-5-5');
+    await renderPage(state, { focusId: 'builtin-ai' });
+    expect(await screen.findByRole('heading', { name: 'Built-in (llama.cpp)' })).toBeInTheDocument();
+    expect(document.querySelector('[data-setting-id="builtin-ai"]')).not.toBeNull();
+  });
+
+  it('a search result for keys, models or the connection test opens a connector that has them', async () => {
+    await renderPage(routerState({ connectors: [builtinConnector(), connector('gemini')] }), { focusId: 'connection-test' });
+    expect(await screen.findByRole('heading', { name: 'Google Gemini' })).toBeInTheDocument();
+    expect(document.querySelector('[data-setting-id="connection-test"]')).not.toBeNull();
+  });
+});

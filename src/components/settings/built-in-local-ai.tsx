@@ -30,18 +30,21 @@ export function BuiltInLocalAiPanel({ onStatus }: { onStatus?: (s: LocalAiStatus
   const [status, setStatus] = useState<LocalAiStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Why the first status could not be read; gone as soon as any status arrives. */
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [confirmChat, setConfirmChat] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
 
   const apply = useCallback((s: LocalAiStatus) => {
     setStatus(s);
+    setLoadError(null);
     onStatus?.(s);
   }, [onStatus]);
 
   useEffect(() => {
     if (!api?.status) return;
     let cancelled = false;
-    api.status().then((s) => { if (!cancelled) apply(s); }).catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); });
+    api.status().then((s) => { if (!cancelled) apply(s); }).catch((e) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e)); });
     const off = api.onStatusChanged?.((s) => { if (!cancelled) apply(s); });
     return () => { cancelled = true; off?.(); };
   }, [api, apply]);
@@ -63,7 +66,7 @@ export function BuiltInLocalAiPanel({ onStatus }: { onStatus?: (s: LocalAiStatus
     return <p className="d">Built-in local AI is available in the desktop app.</p>;
   }
   if (!status) {
-    return <p className="d" role="status">{error ?? 'Checking the built-in local AI…'}</p>;
+    return <p className="d" role="status">{loadError ?? 'Checking the built-in local AI…'}</p>;
   }
 
   const chat = status.models.find((m) => m.role === 'chat');

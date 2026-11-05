@@ -257,3 +257,51 @@ describe('the search index covers every row', () => {
     for (const id of indexed('providers')) expect(seen.has(id), id).toBe(true);
   });
 });
+
+describe('search results that land (1.0.98 F5)', () => {
+  const trackScroll = () => {
+    const scrolled: Array<string | null> = [];
+    (Element.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = function scroll(this: HTMLElement) { scrolled.push(this.getAttribute('data-setting-id')); };
+    return scrolled;
+  };
+  const openResult = async (query: string, title: string) => {
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: query } });
+    const row = screen.getByText(title).closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: /Open/ }));
+    await flush();
+  };
+
+  it('Use my own Ollama opens the Providers page, expands Advanced and scrolls to the row', async () => {
+    const scrolled = trackScroll();
+    installRouter(routerState());
+    await renderShell();
+    await openResult('ollama', 'Use my own Ollama');
+    await waitFor(() => expect(scrolled).toContain('own-ollama'));
+    const el = document.querySelector('[data-setting-id="own-ollama"]') as HTMLElement;
+    expect(el.closest('details')?.open).toBe(true);
+  });
+
+  it('API keys opens a connector that has a key field, then scrolls to it', async () => {
+    const scrolled = trackScroll();
+    installRouter(routerState({ connectors: [builtinConnector(), connector('gemini')] }));
+    await renderShell();
+    await openResult('api keys', 'API keys');
+    await waitFor(() => expect(scrolled).toContain('connector-keys'));
+  });
+
+  it('How the AI works opens the Features tab of the Guide', async () => {
+    const scrolled = trackScroll();
+    await renderShell();
+    await openResult('faq', 'How the AI works');
+    await waitFor(() => expect(scrolled).toContain('g-faq'));
+    expect(screen.getByRole('tab', { name: 'Features' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('Guided tours opens the Tours tab', async () => {
+    const scrolled = trackScroll();
+    await renderShell();
+    await openResult('guided tours', 'Guided tours');
+    await waitFor(() => expect(scrolled).toContain('g-tours'));
+    expect(screen.getByRole('tab', { name: 'Tours' })).toHaveAttribute('aria-selected', 'true');
+  });
+});

@@ -277,3 +277,18 @@ describe('gg.deals key states', () => {
     expect(screen.queryByText('gg.deals prices')).not.toBeInTheDocument();
   });
 });
+
+describe('gg.deals wait result (1.0.98 F5)', () => {
+  it('saving a key right after a test says to wait, not that gg.deals could not be reached', async () => {
+    const g = { hasKey: vi.fn(async () => false), setKey: vi.fn(async () => ({ success: true })), clearKey: vi.fn(async () => ({ success: true })), testKey: vi.fn(async () => ({ ok: false, error: 'wait' })), getPrices: vi.fn(async () => ({ prices: {} })) };
+    win.ggdeals = g;
+    await renderLoaded();
+    const row = screen.getByText('gg.deals prices').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'Set up' }));
+    fireEvent.change(screen.getByLabelText('gg.deals API key'), { target: { value: 'ggkey-12345678' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/Please wait a few seconds, then press Test/)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be reached/)).not.toBeInTheDocument();
+    expect(within(row).getByText('Wait a moment')).toBeInTheDocument();
+  });
+});

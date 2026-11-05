@@ -3,7 +3,7 @@
  * Done / Start / Replay states, plus the features list and "How the AI works" (tours and the old
  * Features tab merged into one page with two tabs).
  */
-import { memo, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { useDevMode } from '@/hooks/useDevMode';
 import { isTourCompleted, type TourId } from '@/components/guided-tour';
 import { Chip, Icon, ICON, Meter, PageHeader } from '@/components/settings/ui';
@@ -59,9 +59,19 @@ function TourRow({ tour, onRun }: { tour: TourDef; onRun: (id: TourId) => void }
   );
 }
 
-export const GuidePage = memo(function GuidePage({ onRunGuidedTour }: { onRunGuidedTour?: (tourId: TourId) => void }) {
+type GuideTab = 'tours' | 'manual';
+
+/** The tab a Guide search result lives on; tours exist only when the dashboard can start them. */
+function tabFor(focusId: string | null | undefined, canTour: boolean): GuideTab {
+  if (focusId === 'g-features' || focusId === 'g-faq') return 'manual';
+  if (focusId === 'g-tours') return canTour ? 'tours' : 'manual';
+  return canTour ? 'tours' : 'manual';
+}
+
+export const GuidePage = memo(function GuidePage({ onRunGuidedTour, focusId }: { onRunGuidedTour?: (tourId: TourId) => void; focusId?: string | null }) {
   const [devMode] = useDevMode();
-  const [tab, setTab] = useState<'tours' | 'manual'>(onRunGuidedTour ? 'tours' : 'manual');
+  const [tab, setTab] = useState<GuideTab>(() => tabFor(focusId, !!onRunGuidedTour));
+  useEffect(() => { if (focusId) setTab(tabFor(focusId, !!onRunGuidedTour)); }, [focusId, onRunGuidedTour]);
   const tours = GUIDE_TOURS.filter((t) => !t.devOnly || devMode);
   const doneCount = tours.filter((t) => isTourCompleted(t.id)).length;
 

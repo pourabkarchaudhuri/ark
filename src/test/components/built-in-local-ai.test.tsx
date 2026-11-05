@@ -278,3 +278,15 @@ describe('fill-in after the models finish downloading', () => {
     expect(onModelsSettled).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('a stale load error (1.0.98 F5)', () => {
+  it('goes away as soon as a status arrives', async () => {
+    const api = installApi(status(), { status: vi.fn(async () => { throw new Error('the runtime did not answer'); }) });
+    render(<BuiltInLocalAiPanel />);
+    await flush();
+    expect(screen.getByText('the runtime did not answer')).toBeInTheDocument();
+    await api.push(status());
+    expect(screen.queryByText('the runtime did not answer')).not.toBeInTheDocument();
+    expect(screen.getByTestId('built-in-local-ai')).toBeInTheDocument();
+  });
+});

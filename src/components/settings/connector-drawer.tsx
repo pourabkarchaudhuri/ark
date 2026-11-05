@@ -4,16 +4,28 @@
  * connection test and its settings, Advanced (base URL override, LiteLLM id) and the route button.
  * Keys are write-only here: saved through `aiRouter.setKey`, never read back.
  */
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { AiConnector, AiRole, AiRoutePolicy, ConnectorKind } from '@/services/ai-router-types';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { BuiltInLocalAiPanel } from '@/components/settings/built-in-local-ai';
 import { ExternalOllamaSection } from '@/components/settings/external-ollama-section';
 import { Chip, ExtLink, Icon, ICON, Seg, Spinner, Switch, type Tone } from '@/components/settings/ui';
-import { KEY_SITES, KIND_LORE, TEST_INPUT, describeTest, isModelId, routeCta, smallestModel, type ModelList, type ModelPrefs, type NodeDisplay } from '@/components/settings/ai-providers-logic';
+import { KEY_SITES, KIND_LORE, TEST_INPUT, describeTest, isModelId, routeCta, smallestModel, testFor, type ModelList, type ModelPrefs, type NodeDisplay } from '@/components/settings/ai-providers-logic';
+import type { ConnectorDraft } from '@/components/settings/ai-providers-page';
 import { ROLE_LABEL, ROLE_NOUN, ROLES, litellmId, monogram } from '@/components/settings/use-ai-router';
 
 export const CONNECTOR_SAVED_PLACEHOLDER = 'Key saved. Paste a new one to replace it';
+
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+
+/** Not hidden, and not inside a closed <details> (other than its own summary). */
+function isTabbable(el: HTMLElement): boolean {
+  if (el.closest('[hidden]')) return false;
+  for (let d = el.closest('details'); d; d = d.parentElement?.closest('details') ?? null) {
+    if (!d.open && el.closest('summary')?.parentElement !== d) return false;
+  }
+  return true;
+}
 
 export type TestWith = 'default' | 'smallest';
 
@@ -42,8 +54,14 @@ interface Props {
   onRemove: () => void;
   /** A key was saved or removed: refresh the page state. */
   onKeyChanged: (note: { tone: 'live' | 'fault' | 'info'; text: string } | null) => void;
-  /** The last key message (saved, rejected, removed), shown under the key field. */
+  /** The last key message (saved, rejected, removed), shown under the key field until a newer test or key change. */
   keyNote: { tone: 'live' | 'fault' | 'info'; text: string } | null;
+  /** The user is typing a new key: the old key message no longer describes it. */
+  onKeyNoteClear: () => void;
+  /** Unsaved field edits and the pasted key, kept by the page across role tabs and closing the drawer. */
+  draft: ConnectorDraft | undefined;
+  onDraft: (patch: ConnectorDraft) => void;
+  onDiscardDraft: () => void;
   fetchedBusy: boolean;
   onFetchModels: () => void;
   fetchError: string | null;
@@ -57,19 +75,28 @@ export function ConnectorDrawer(p: Props) {
   const custom = c.kind === 'openai-compatible';
   const keyed = c.kind !== 'builtin' && c.kind !== 'ollama';
   const cta = routeCta(c, p.role, noun, p.display);
-  const lastTest = c.test;
+  const lastTest = testFor(c, p.role);
   const shown = lastTest ? describeTest(lastTest) : null;
   const rows = p.models.rows;
   const activeIds = rows.filter((r) => r.active).map((r) => r.id);
 
   // ── Field drafts ──────────────────────────────────────────────────────────────────────────────
-  const [name, setName] = useState(c.name);
-  const [baseUrl, setBaseUrl] = useState(c.baseUrl ?? '');
-  const [endpoint, setEndpoint] = useState(c.endpoint ?? (() => { try { return localStorage.getItem('ark-azure-endpoint') ?? ''; } catch { return ''; } })());
-  const [deployment, setDeployment] = useState(c.deployment ?? (() => { try { return localStorage.getItem('ark-azure-deployment') ?? ''; } catch { return ''; } })());
-  const [apiVersion, setApiVersion] = useState(c.apiVersion ?? (() => { try { return localStorage.getItem('ark-azure-api-version') ?? ''; } catch { return ''; } })());
-  const [roles, setRoles] = useState<AiRole[]>(c.roles ?? ['chat']);
-  const [override, setOverride] = useState(c.baseUrl ?? '');
+  const d = p.draft ?? {};
+  const fromStore = (key: string): string => { try { return localStorage.getItem(key) ?? ''; } catch { return ''; } };
+  const name = d.name ?? c.name;
+  const baseUrl = d.baseUrl ?? c.baseUrl ?? '';
+  const endpoint = d.endpoint ?? c.endpoint ?? fromStore('ark-azure-endpoint');
+  const deployment = d.deployment ?? c.deployment ?? fromStore('ark-azure-deployment');
+  const apiVersion = d.apiVersion ?? c.apiVersion ?? fromStore('ark-azure-api-version');
+  const roles = d.roles ?? c.roles ?? ['chat'];
+  const override = d.override ?? c.baseUrl ?? '';
+  const setName = (v: string) => p.onDraft({ name: v });
+  const setBaseUrl = (v: string) => p.onDraft({ baseUrl: v });
+  const setEndpoint = (v: string) => p.onDraft({ endpoint: v });
+  const setDeployment = (v: string) => p.onDraft({ deployment: v });
+  const setApiVersion = (v: string) => p.onDraft({ apiVersion: v });
+  const setRoles = (v: AiRole[]) => p.onDraft({ roles: v });
+  const setOverride = (v: string) => p.onDraft({ override: v });
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [savingFields, setSavingFields] = useState(false);
 
@@ -94,7 +121,8 @@ export function ConnectorDrawer(p: Props) {
   };
 
   // ── Key ───────────────────────────────────────────────────────────────────────────────────────
-  const [keyDraft, setKeyDraft] = useState('');
+  const keyDraft = d.keyDraft ?? '';
+  const setKeyDraft = (v: string) => { p.onDraft({ keyDraft: v }); if (p.keyNote) p.onKeyNoteClear(); };
   const [keyBusy, setKeyBusy] = useState(false);
   const [confirmKey, setConfirmKey] = useState(false);
   const site = KEY_SITES[c.kind];
@@ -110,7 +138,7 @@ export function ConnectorDrawer(p: Props) {
       if (!res.success) {
         p.onKeyChanged({ tone: 'fault', text: res.error });
       } else {
-        setKeyDraft('');
+        p.onDraft({ keyDraft: '' });
         const t = res.test;
         p.onKeyChanged(!t ? { tone: 'info', text: 'Key saved. Run the test before routing.' }
           : t.ok ? { tone: 'live', text: `Key saved and working · ${t.latencyMs} ms` }
@@ -158,8 +186,25 @@ export function ConnectorDrawer(p: Props) {
   };
   const tin = TEST_INPUT[p.role];
 
+  // ── Keyboard: Escape closes, Tab stays inside, and the page returns focus to the opener ──────────
+  const asideRef = useRef<HTMLElement>(null);
+  const onKeyDown = (e: React.KeyboardEvent<HTMLElement>) => {
+    const root = asideRef.current;
+    // Events from the confirm dialogs (portalled) bubble through React: only handle keys from inside the drawer.
+    if (!root || e.defaultPrevented || !(e.target instanceof Node) || !root.contains(e.target)) return;
+    if (e.key === 'Escape') { e.stopPropagation(); p.onClose(); return; }
+    if (e.key !== 'Tab') return;
+    const items = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(isTabbable);
+    if (items.length === 0) return;
+    const first = items[0]!;
+    const last = items[items.length - 1]!;
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === root)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+  };
+
   return (
-    <aside className="panel drawer" aria-labelledby="drawer-title" data-tone={TONE[p.display.tone]}>
+    <aside ref={asideRef} tabIndex={-1} onKeyDown={onKeyDown} style={{ outline: 'none' }} className="panel drawer" aria-labelledby="drawer-title" data-tone={TONE[p.display.tone]}>
       <div className="bar" />
       <div style={{ padding: 'var(--space-4)', display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
         <span className="mono" style={{ width: 32, height: 32, fontSize: 'var(--text-xs)' }}>{monogram(c)}</span>
@@ -228,6 +273,7 @@ export function ConnectorDrawer(p: Props) {
           {(dirty || fieldError) && (
             <div className="inline">
               <button type="button" className="btn p" disabled={savingFields || !dirty} onClick={() => void saveFields()}>{savingFields ? <Spinner /> : null}{p.isDraft ? 'Add connector' : 'Save changes'}</button>
+              {!p.isDraft && <button type="button" className="btn q" disabled={savingFields} onClick={() => { setFieldError(null); p.onDiscardDraft(); }}>Cancel</button>}
               {fieldError && <span role="alert" className="chip" data-tone="fault">{fieldError}</span>}
             </div>
           )}

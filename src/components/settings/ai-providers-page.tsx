@@ -13,7 +13,7 @@ import { Chip, Icon, ICON, PageHeader, Panel, Seg, Spinner } from '@/components/
 import { ConnectorDrawer, type TestWith } from '@/components/settings/connector-drawer';
 import { RouterGraph, type GraphItem } from '@/components/settings/router-graph';
 import {
-  availableCatalog, countStates, describeNode, describeTest, loadModelPrefs, modelList, routeRequest, saveModelPrefs,
+  availableCatalog, countStates, describeNode, describeTest, loadModelPrefs, markTesting, modelList, routeRequest, saveModelPrefs, testFor,
   type CatalogItem, type ModelPrefs, type ModelPrefsStore, type NodeDisplay,
 } from '@/components/settings/ai-providers-logic';
 import { ROLES, ROLE_LABEL, routeId, routeName, useAiRouter } from '@/components/settings/use-ai-router';
@@ -26,7 +26,25 @@ interface Snack {
   actions: Array<{ label: string; run: () => void; primary?: boolean }>;
 }
 
-type KeyNote = { tone: 'live' | 'fault' | 'info'; text: string };
+/** `at` is the connector's test stamp when the note was written: a later test makes the note stale. */
+type KeyNote = { tone: 'live' | 'fault' | 'info'; text: string; at: number | null };
+
+/** Unsaved edits to one connector's fields and a pasted key, kept while the drawer is closed or the role changes. */
+export interface ConnectorDraft {
+  name?: string; baseUrl?: string; endpoint?: string; deployment?: string; apiVersion?: string;
+  roles?: AiRole[]; override?: string; keyDraft?: string;
+}
+
+/** The connector whose drawer holds each drawer-section search target. */
+function connectorForFocus(focusId: string, connectors: AiConnector[], role: AiRole): string | null {
+  if (focusId === 'builtin-ai' || focusId === 'own-ollama') return connectors.find((c) => c.kind === 'builtin')?.id ?? null;
+  const cloud = connectors.filter((c) => c.kind !== 'builtin');
+  if (focusId === 'connector-compat') return (cloud.find((c) => c.kind === 'openai-compatible') ?? cloud[0])?.id ?? null;
+  if (focusId === 'connector-keys' || focusId === 'connector-models' || focusId === 'connection-test') {
+    return (cloud.find((c) => c.needsKey && c.serves.includes(role)) ?? cloud.find((c) => c.needsKey) ?? cloud[0])?.id ?? null;
+  }
+  return null;
+}
 
 /** Connector fields as `saveConnector` takes them (never a key). */
 function fieldsOf(c: AiConnector, patch: Partial<AiConnector> = {}): Partial<AiConnector> & { kind: ConnectorKind } {
@@ -62,10 +80,25 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
   const [confirmRemove, setConfirmRemove] = useState<AiConnector | null>(null);
   const [localAi, setLocalAi] = useState<LocalAiStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [fieldDrafts, setFieldDrafts] = useState<Record<string, ConnectorDraft>>({});
+  const openerRef = useRef<HTMLElement | null>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const appliedFocus = useRef<string | null>(null);
   const snackId = useRef(0);
   const prevTones = useRef<Record<string, string>>({});
 
   useEffect(() => { if (focusId && ROLE_FOCUS[focusId]) setRole(ROLE_FOCUS[focusId]); }, [focusId]);
+
+  // A search result for a drawer section (keys, models, test, built-in AI, own Ollama) has no row
+  // until a connector that holds it is open, so open one once the connectors are known.
+  const loadedConnectors = state?.connectors;
+  useEffect(() => {
+    if (!focusId) { appliedFocus.current = null; return; }
+    if (appliedFocus.current === focusId || !loadedConnectors) return;
+    appliedFocus.current = focusId;
+    const id = connectorForFocus(focusId, loadedConnectors, role);
+    if (id) setOpenId(id);
+  }, [focusId, loadedConnectors, role]);
 
   // Plaintext Azure and Anthropic keys left by older versions move into main before the page shows what is saved.
   useEffect(() => { void ensureLegacyAiKeysMigrated().then(() => refresh()).catch(() => {}); }, [refresh]);
@@ -85,6 +118,44 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
     const t = setTimeout(() => setSnack((cur) => (cur?.id === snack.id ? null : cur)), 12000);
     return () => clearTimeout(t);
   }, [snack]);
+
+  /** Open a connector's drawer for the keyboard too: remember the opener, then move focus into the drawer. */
+  const openDrawer = useCallback((id: string) => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && !active.closest('.drawer')) openerRef.current = active;
+    setOpenId(id);
+    setPicker(false);
+    setTimeout(() => document.querySelector<HTMLElement>('.drawer[tabindex]')?.focus(), 0);
+  }, []);
+
+  /** Close the drawer and give focus back to what opened it. */
+  const closeDrawer = useCallback(() => {
+    const opener = openerRef.current;
+    openerRef.current = null;
+    setOpenId(null);
+    setTimeout(() => { if (opener?.isConnected) opener.focus(); }, 0);
+  }, []);
+
+  const closePicker = useCallback(() => {
+    setPicker(false);
+    setTimeout(() => addButtonRef.current?.focus(), 0);
+  }, []);
+  useEffect(() => {
+    if (picker) setTimeout(() => document.querySelector<HTMLElement>('[role="listbox"][aria-label="Available connectors"] [role="option"]')?.focus(), 0);
+  }, [picker]);
+
+  const setDraft = useCallback((id: string, patch: ConnectorDraft) => {
+    setFieldDrafts((d) => ({ ...d, [id]: { ...(d[id] ?? {}), ...patch } }));
+  }, []);
+  /** Forget a connector's unsaved edits. `keepKey` leaves a pasted key (saving fields does not save it). */
+  const clearDraft = useCallback((id: string, keepKey = false) => {
+    setFieldDrafts((d) => {
+      const cur = d[id];
+      if (!cur) return d;
+      const { [id]: _gone, ...rest } = d;
+      return keepKey && cur.keyDraft ? { ...rest, [id]: { keyDraft: cur.keyDraft } } : rest;
+    });
+  }, []);
 
   const builtinDown = !!localAi && localAi.backend === 'builtin' && !localAi.runtime.available;
   const all = useMemo<AiConnector[]>(() => {
@@ -117,7 +188,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
       const d = describeNode(c, role);
       next[c.id] = d.tone;
       if (d.tone === 'fault' && (prevTones.current[c.id] === 'armed' || prevTones.current[c.id] === 'live') && !testing[c.id]) {
-        showSnack({ text: `${c.name} stopped answering at the re-check.`, chip: { tone: 'fault', label: 'Fault' }, actions: [{ label: 'Open', run: () => { setOpenId(c.id); setSnack(null); } }] });
+        showSnack({ text: `${c.name} stopped answering at the re-check.`, chip: { tone: 'fault', label: 'Fault' }, actions: [{ label: 'Open', run: () => { openDrawer(c.id); setSnack(null); } }] });
       }
     }
     prevTones.current = next;
@@ -155,10 +226,10 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
     const list = modelList(c, role, state?.routes[role], prefs[c.id]?.[role]);
     const req = routeRequest(c, role, list);
     if (modelOverride !== undefined) req.model = modelOverride;
-    if (c.kind !== 'builtin' && !c.test?.ok) {
+    if (c.kind !== 'builtin' && !testFor(c, role)?.ok) {
       // A connector is only routed after a test passes: pressing "Route here" runs it first.
       const ok = await runTest(c, req.model || undefined);
-      if (!ok) { setNotice(`${c.name} did not pass its test, so it was not routed. Open its settings to see why.`); setOpenId(c.id); return; }
+      if (!ok) { setNotice(`${c.name} did not pass its test, so it was not routed. Open its settings to see why.`); openDrawer(c.id); return; }
     }
     try {
       const res = await api.setRoute(req);
@@ -176,7 +247,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
       setNotice('Could not change the route.');
     }
     await refresh();
-  }, [role, state, prefs, runTest, refresh]);
+  }, [role, state, prefs, runTest, refresh, openDrawer]);
 
   const saveFields = useCallback(async (input: Partial<AiConnector> & { kind: ConnectorKind }): Promise<string | null> => {
     const api = window.aiRouter;
@@ -193,12 +264,13 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
         } catch { /* storage unavailable */ }
       }
       setDrafts((d) => d.filter((x) => x.id !== input.id));
+      if (input.id) clearDraft(input.id, true);
       await refresh();
       return null;
     } catch (e) {
       return e instanceof Error ? e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : 'Could not save.';
     }
-  }, [refresh]);
+  }, [refresh, clearDraft]);
 
   const toggleEnabled = useCallback(async (c: AiConnector, on: boolean) => {
     const wasRouted = ROLES.filter((r) => c.routedFor.includes(r)).map((r) => ({ role: r, model: state!.routes[r].model }));
@@ -206,7 +278,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
     if (err) { setNotice(err); return; }
     if (!on && wasRouted.length > 0) {
       const first = wasRouted[0]!.role;
-      const alt = (state?.connectors ?? []).find((o) => o.id !== c.id && o.kind !== 'builtin' && o.enabled !== false && o.test?.ok && o.serves.includes(first));
+      const alt = (state?.connectors ?? []).find((o) => o.id !== c.id && o.kind !== 'builtin' && o.enabled !== false && testFor(o, first)?.ok && o.serves.includes(first));
       showSnack({
         text: `${c.name} is off. ${wasRouted.map((w) => ROLE_LABEL[w.role]).join(' and ')} ${wasRouted.length > 1 ? 'have' : 'has'} no route.`,
         actions: [
@@ -226,9 +298,10 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
     if (!api) return;
     setShowResults(true);
     const ids = items.filter((i) => i.connector.kind !== 'builtin' && i.connector.enabled !== false).map((i) => i.connector.id);
-    setTesting(Object.fromEntries(ids.map((id) => [id, true])));
+    // Merge into the map: a single test already running keeps its spinner, and finishing leaves it alone.
+    setTesting((t) => markTesting(t, ids, true));
     try { await api.testAll(); await refresh(); } catch { setNotice('Could not run the tests.'); }
-    setTesting({});
+    setTesting((t) => markTesting(t, ids, false));
   }, [items, refresh]);
 
   const addFromCatalog = useCallback(async (item: CatalogItem) => {
@@ -236,7 +309,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
     if (item.connectorKind === 'azure-openai') {
       const draft: AiConnector = { id: 'azure-openai', kind: 'azure-openai', name: 'Azure OpenAI', hasKey: false, needsKey: true, state: 'nokey', routedFor: [], serves: ['chat', 'embeddings'] };
       setDrafts((d) => (d.some((x) => x.id === draft.id) ? d : [...d, draft]));
-      setOpenId(draft.id);
+      openDrawer(draft.id);
       return;
     }
     const before = new Set((state?.connectors ?? []).map((c) => c.id));
@@ -249,11 +322,11 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
     const s = await refresh();
     const added = s?.connectors.find((c) => !before.has(c.id)) ?? s?.connectors.find((c) => c.kind === item.connectorKind);
     if (added) {
-      setOpenId(added.id);
+      openDrawer(added.id);
       // Add what the provider offers for the viewed role, when it offers it.
       if (!added.serves.includes(role)) setRole(added.serves[0] ?? role);
     }
-  }, [state, saveFields, refresh, role]);
+  }, [state, saveFields, refresh, role, openDrawer]);
 
   const fetchModels = useCallback(async (c: AiConnector) => {
     const api = window.aiRouter;
@@ -279,8 +352,9 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
     if (res && !res.success) setNotice(res.error);
     setOpenId(undefined);
     setDrafts((d) => d.filter((x) => x.id !== c.id));
+    clearDraft(c.id);
     await refresh();
-  }, [refresh]);
+  }, [refresh, clearDraft]);
 
   // ── First run and faults ──────────────────────────────────────────────────────────────────────
 
@@ -295,7 +369,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
   const roleTabs = ROLES.map((r) => ({ role: r, name: routeName(state, r) }));
   const embedChanged = state?.rebuild && !embedDismissed ? state.rebuild.to : null;
   const results = items.filter((i) => i.connector.enabled !== false && i.connector.kind !== 'builtin');
-  const okCount = results.filter((i) => i.connector.test?.ok).length;
+  const okCount = results.filter((i) => testFor(i.connector, role)?.ok).length;
   const catalog = availableCatalog(state?.connectors ?? []);
 
   if (unavailable && !state) {
@@ -313,9 +387,12 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
           <button type="button" className="btn" onClick={() => void testAll()} disabled={Object.values(testing).some(Boolean)}>
             {Object.values(testing).some(Boolean) && <Spinner />}Test all
           </button>
-          <button type="button" className="btn p" onClick={() => setPicker(!picker)} aria-expanded={picker} aria-haspopup="listbox"><Icon d={ICON.plus} />Add connector</button>
+          <button ref={addButtonRef} type="button" className="btn p" onClick={() => setPicker(!picker)} aria-expanded={picker} aria-haspopup="listbox"><Icon d={ICON.plus} />Add connector</button>
           {picker && (
-            <div className="panel fade" role="listbox" aria-label="Available connectors" style={{ position: 'absolute', right: 0, top: 40, width: 300, zIndex: 20, background: 'var(--color-paper-4)' }}>
+            <div
+              className="panel fade" role="listbox" aria-label="Available connectors"
+              onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); closePicker(); } }}
+              style={{ position: 'absolute', right: 0, top: 40, width: 300, zIndex: 20, background: 'var(--color-paper-4)' }}>
               <div style={{ padding: 'var(--space-3)' }}><p className="t">Add a connector</p><p className="d">Any OpenAI-compatible server, or one of these providers.</p></div>
               {catalog.map((k) => (
                 <button key={k.id} type="button" className="pk" role="option" aria-selected="false" onClick={() => void addFromCatalog(k)}>
@@ -329,7 +406,11 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
 
       <div className="tray" role="tablist" aria-label="Route" style={{ alignSelf: 'flex-start' }}>
         {roleTabs.map((t) => (
-          <button key={t.role} type="button" role="tab" aria-selected={t.role === role} data-setting-id={`route-${t.role}`} onClick={() => { setRole(t.role); setHot(null); setOpenId(undefined); }}>
+          <button key={t.role} type="button" role="tab" aria-selected={t.role === role} data-setting-id={`route-${t.role}`} onClick={() => {
+            // Keep the open connector when it also serves the new role, so edits made there stay in view.
+            const keep = effectiveOpen && all.find((c) => c.id === effectiveOpen)?.serves.includes(t.role) ? effectiveOpen : undefined;
+            setRole(t.role); setHot(null); setOpenId(keep);
+          }}>
             {ROLE_LABEL[t.role]} <em>{t.name}</em>
           </button>
         ))}
@@ -344,7 +425,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
           <RouterGraph
             role={role} items={items} hiddenCount={hiddenCount} routeText={routeId(state, role)} counts={counts}
             openId={open?.id ?? null} hotId={hot} onHot={setHot}
-            onOpen={(id) => { setOpenId(id); setPicker(false); }}
+            onOpen={openDrawer}
             onRoute={(id) => { const c = all.find((x) => x.id === id); if (c) void route(c); }}
             onToggle={(id, on) => { const c = all.find((x) => x.id === id); if (c) void toggleEnabled(c, on); }}
           />
@@ -403,7 +484,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
                   <thead><tr><th scope="col">Connector</th><th scope="col">Result</th><th scope="col">Latency</th><th scope="col">Model tested</th></tr></thead>
                   <tbody>
                     {results.map((i) => {
-                      const t = i.connector.test;
+                      const t = testFor(i.connector, role);
                       const d = t ? describeTest(t) : null;
                       const busy = testing[i.connector.id];
                       return (
@@ -424,11 +505,12 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
 
         {open && openDisplay && openModels ? (
           <ConnectorDrawer
-            key={`${open.id}:${role}`}
+            key={open.id}
             connector={open} isDraft={drafts.some((d) => d.id === open.id) && !(state?.connectors ?? []).some((c) => c.id === open.id)}
             role={role} display={openDisplay} models={openModels} prefs={prefs[open.id]?.[role]}
             policy={state!.policy} testing={!!testing[open.id]} testWith={testWith} onTestWith={setTestWith}
-            onClose={() => setOpenId(null)}
+            onClose={closeDrawer}
+            draft={fieldDrafts[open.id]} onDraft={(patch) => setDraft(open.id, patch)} onDiscardDraft={() => clearDraft(open.id)}
             onToggleEnabled={(on) => void toggleEnabled(open, on)}
             onRoute={() => (openDisplay.opensDrawer ? undefined : void route(open))}
             onTest={(model) => void runTest(open, model)}
@@ -442,8 +524,13 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
             onPolicy={(patch) => void changePolicy(patch)}
             onSaveFields={saveFields}
             onRemove={() => setConfirmRemove(open)}
-            onKeyChanged={(note) => { setKeyNotes((n) => ({ ...n, [open.id]: note })); void refresh(); }}
-            keyNote={keyNotes[open.id] ?? null}
+            onKeyChanged={(note) => {
+              const id = open.id;
+              // Stamp the note with the test the connector has once the key change has landed.
+              void refresh().then((s) => setKeyNotes((n) => ({ ...n, [id]: note ? { ...note, at: s?.connectors.find((c) => c.id === id)?.test?.at ?? null } : null })));
+            }}
+            keyNote={keyNotes[open.id] && keyNotes[open.id]!.at === (open.test?.at ?? null) ? keyNotes[open.id]! : null}
+            onKeyNoteClear={() => setKeyNotes((n) => (n[open.id] ? { ...n, [open.id]: null } : n))}
             fetchedBusy={!!fetching[open.id]} onFetchModels={() => void fetchModels(open)} fetchError={fetchError[open.id] ?? null}
             ensureSaved={async () => (drafts.some((d) => d.id === open.id) ? 'Add the connector first.' : null)}
           />

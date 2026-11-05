@@ -60,6 +60,9 @@ export function useOllamaSettings() {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Latest scheduled payload, flushed if the page unmounts before the timer fires. */
   const pending = useRef<OllamaSettingsPatch | null>(null);
+  /** Counts scheduled saves: a save that finishes after a newer edit was scheduled must not report on it. */
+  const saveGen = useRef(0);
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -87,6 +90,7 @@ export function useOllamaSettings() {
     return () => {
       live = false;
       if (timer.current) clearTimeout(timer.current);
+      if (idleTimer.current) clearTimeout(idleTimer.current);
       // Leaving inside the debounce window: still save the latest change (no setState here).
       const p = pending.current;
       pending.current = null;
@@ -114,6 +118,8 @@ export function useOllamaSettings() {
       embeddingBatchSize: values.embeddingBatchSize,
     };
     pending.current = payload;
+    const gen = ++saveGen.current;
+    if (idleTimer.current) { clearTimeout(idleTimer.current); idleTimer.current = null; }
     setStatus('saving');
     setError(null);
     timer.current = setTimeout(async () => {
@@ -123,9 +129,12 @@ export function useOllamaSettings() {
         await window.settings!.setOllamaSettings(payload);
         // A new URL or model may make Ollama reachable: drop any cached "unavailable" verdict now.
         embeddingService.clearUnavailableVerdict();
+        // A newer edit is already waiting (or saving): it will report its own result.
+        if (gen !== saveGen.current) return;
         setStatus('saved');
-        setTimeout(() => setStatus((s) => (s === 'saved' ? 'idle' : s)), 2000);
+        idleTimer.current = setTimeout(() => { idleTimer.current = null; setStatus((s) => (s === 'saved' ? 'idle' : s)); }, 2000);
       } catch (err) {
+        if (gen !== saveGen.current) return;
         setStatus('error');
         const detail = err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : '';
         setError(detail ? `Could not save: ${detail}` : 'Could not save these settings.');

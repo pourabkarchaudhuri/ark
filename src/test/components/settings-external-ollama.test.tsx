@@ -142,3 +142,25 @@ describe('isHttpUrl', () => {
     expect(isHttpUrl('file:///c')).toBe(false);
   });
 });
+
+describe('save status (1.0.98 F5)', () => {
+  it('does not say Saved while a newer edit is still waiting to be saved', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const s = installSettings();
+    installLocalAi(localAiStatus({ backend: 'ollama', externalOllama: { enabled: true, url: 'http://localhost:11434' } }));
+    let finishFirst: () => void = () => {};
+    s.setOllamaSettings.mockImplementationOnce(() => new Promise<void>((res) => { finishFirst = res; }));
+    render(<ExternalOllamaSection />);
+    await flush();
+    fireEvent.change(screen.getByLabelText('Chat model'), { target: { value: 'llama3.1:8b' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(s.setOllamaSettings).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByLabelText('Chat model'), { target: { value: 'llama3.1:70b' } });
+    await act(async () => { finishFirst(); await Promise.resolve(); });
+    expect(screen.queryByText('Saved')).not.toBeInTheDocument();
+    expect(screen.getByText('Saving…')).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(s.setOllamaSettings).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('Saved')).toBeInTheDocument();
+  });
+});

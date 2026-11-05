@@ -7,7 +7,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import type { AiConnector } from '@/services/ai-router-types';
 import {
   CONNECTOR_CATALOG, DEFAULT_MODELS_UI, availableCatalog, countStates, describeNode, describeTest, graphLayout, loadModelPrefs,
-  modelList, routeCta, routeRequest, saveModelPrefs, smallestModel,
+  markTesting, modelList, routeCta, routeRequest, saveModelPrefs, smallestModel, testFor,
 } from '@/components/settings/ai-providers-logic';
 import { DEFAULT_MODELS } from '../../../electron/ai-router/types';
 
@@ -168,5 +168,39 @@ describe('catalog and layout', () => {
     expect(big.nodeY(3)).toBe(32 + 3 * 118);
     expect(big.wire(0)).toMatch(/^M252 \d+ C292 \d+ 288 \d+ 320 \d+$/);
     expect(big.deckWires).toHaveLength(2);
+  });
+});
+
+describe('a test counts for the role it ran for (1.0.98 F5)', () => {
+  const embedFail = { ok: false, at: 2, latencyMs: 5, role: 'embeddings' as const, model: 'text-embedding-3-small', message: 'model not found (404)' };
+
+  it('testFor returns the test only for its own role, but a refused key holds for every role', () => {
+    expect(testFor(conn({}), 'chat')?.ok).toBe(true);
+    expect(testFor(conn({}), 'embeddings')).toBeUndefined();
+    expect(testFor(conn({ test: embedFail }), 'chat')).toBeUndefined();
+    const keyFail = { ...embedFail, message: 'Request failed with status 401 Unauthorized' };
+    expect(testFor(conn({ test: keyFail }), 'chat')).toBe(keyFail);
+  });
+
+  it('a chat pass leaves embeddings Untested, so Route here tests first', () => {
+    const c = conn({});
+    const d = describeNode(c, 'embeddings');
+    expect(d).toMatchObject({ tone: 'armed', chip: 'Untested', routeLabel: 'Test and route' });
+    expect(routeCta(c, 'embeddings', 'embeddings', d)).toEqual({ label: 'Test and route embeddings here', disabled: false });
+  });
+
+  it('a failed embeddings test does not make the chat route a Fault', () => {
+    const c = conn({ test: embedFail });
+    expect(describeNode(c, 'chat')).toMatchObject({ tone: 'armed', chip: 'Untested' });
+    expect(describeNode(c, 'embeddings')).toMatchObject({ tone: 'fault', chip: 'Fault' });
+    expect(routeCta(c, 'chat', 'chat', describeNode(c, 'chat')).disabled).toBe(false);
+  });
+
+  it('markTesting merges: starting and finishing a batch leaves other running tests alone', () => {
+    const running = { single: true };
+    const started = markTesting(running, ['a', 'b'], true);
+    expect(started).toEqual({ single: true, a: true, b: true });
+    expect(markTesting(started, ['a', 'b'], false)).toEqual({ single: true });
+    expect(running).toEqual({ single: true });
   });
 });
