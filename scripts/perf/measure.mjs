@@ -18,6 +18,18 @@
  *   --attached-hidden    also measure hidden idle with Playwright attached (informational; see lib/detached.mjs)
  *   --hidden-only        only the detached hidden-idle phase; with --merge-into result.json it replaces hiddenIdle there
  *   --hidden-settle-s N  visible wait on Browse before hiding the window (default 45)
+ *   --models-src DIR     folder of the built-in AI models (.gguf + .verified.json) to measure with: hard-linked into a SCRATCH
+ *                        %LOCALAPPDATA% (<tmp>\ark-perf-*-local-\Ark\models). Every launch gets an EMPTY scratch %LOCALAPPDATA% (the
+ *                        real %LOCALAPPDATA%\Ark is never touched); the AI phase starts with the models in place, the scenario run
+ *                        switches to them right after its idle reading (cold start, idle and hidden idle stay model-free, like the
+ *                        1.0.97 report). Turns on: an embedding + rerank burst in every
+ *                        scenario cycle (llama-server count / memory leak rules) and the dedicated AI phase (llama-server per
+ *                        role idle + burst CPU, router overhead, download throughput, LiteLLM sidecar, exit on quit).
+ *                        Also read from ARK_PERF_MODELS_SRC.
+ *   --skip-ai-phase      keep the models for the scenario but skip the dedicated AI phase
+ *   --ai-only            prime, then run only the dedicated AI phase (harness debugging, quick AI numbers)
+ *   --ai-rounds N        interleaved direct/app burst rounds (default 10)    --download-mb N  synthetic model size (default 512)
+ *   --ipc-selftest-only  boot, run the IPC self-test, print it and exit (proves the counters can read non-zero)
  *
  * Always runs on a COPIED test profile (--user-data-dir), with every variable named in the checkout's .env
  * blanked so no real key reaches the app. Never touches the real userData.
@@ -35,6 +47,7 @@ import { startFakeSteam } from './lib/fake-steam.mjs';
 import { evaluate, renderMarkdown } from './lib/analyze.mjs';
 import { measureDetachedHiddenIdle } from './lib/detached.mjs';
 import { diffSnapshots, takeSnapshot } from './lib/heapdiff.mjs';
+import { seedModelsDir, removeScratch, measureLlama, measureDownload, measureSidecar, leftoversAfterQuit } from './lib/ai.mjs';
 import { sleep, median, round } from './lib/util.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -77,7 +90,15 @@ const cfg = {
   seedDir: path.resolve(opt('--seed-dir', path.join(os.tmpdir(), 'ark-perf-seed'))),
   skipApplist: flag('--skip-applist'),
   hiddenSettleS: Number(opt('--hidden-settle-s', quick ? 5 : 45)),
+  modelsSrc: opt('--models-src', process.env.ARK_PERF_MODELS_SRC) ? path.resolve(opt('--models-src', process.env.ARK_PERF_MODELS_SRC)) : null,
+  skipAiPhase: flag('--skip-ai-phase'),
+  aiOnly: flag('--ai-only'),
+  aiRounds: Number(opt('--ai-rounds', quick ? 4 : 10)),
+  downloadMB: Number(opt('--download-mb', quick ? 128 : 512)),
 };
+// Scratch %LOCALAPPDATA% holding links to the models; created once, removed at the end.
+const aiLocal = cfg.modelsSrc && !flag('--hidden-only') ? seedModelsDir(cfg.modelsSrc, cfg.label) : null;
+const aiEnv = aiLocal ? { LOCALAPPDATA: aiLocal.root } : {};
 
 const pkg = JSON.parse(fs.readFileSync(path.join(cfg.appDir, 'package.json'), 'utf8'));
 const commit = (() => {
@@ -147,14 +168,15 @@ async function run() {
       label: cfg.label,
       version: pkg.version,
       commit,
-      appDir: cfg.appDir,
+      appDir: path.basename(cfg.appDir),
       machine: `${os.cpus()[0]?.model?.trim()} x${os.cpus().length}, ${Math.round(os.totalmem() / 2 ** 30)} GB, ${os.platform()} ${os.release()}`,
       startedAt: new Date().toISOString(),
-      profile,
+      profile: { ...profile, dir: path.basename(String(profile.dir ?? '')) },
       cycles: cfg.cycles,
       idleS: cfg.idleS,
       hiddenIdleS: cfg.hiddenIdleS,
       heapSnapshots: cfg.heapSnapshots,
+      ai: { enabled: Boolean(aiLocal), models: aiLocal?.files ?? [], dedicatedPhase: Boolean(aiLocal) && !cfg.skipAiPhase, downloadMB: cfg.downloadMB, aiRounds: cfg.aiRounds },
     },
     coldStart: { runs: [] },
     cycles: [],
@@ -181,6 +203,53 @@ async function run() {
     }
   }
 
+  async function runAiPhase() {
+    // Built-in AI phase: llama-server per role, router overhead, download, LiteLLM sidecar, exit on quit
+    let launched = null;
+    try {
+      log(`[${cfg.label}] built-in AI phase`);
+      const ud3 = copyProfile(primed, `${cfg.label}-ai`);
+      launched = await launchApp(launchOpts(ud3, { env: aiEnv }));
+      const p3 = new Probes(launched.app, launched.page, launched.pid);
+      await bootToDashboard(launched.page, launched.tLaunch);
+      await p3.init();
+      await sleep(3000);
+      const ai = { ipcSelfTest: await p3.ipcSelfTest() };
+      const st0 = await p3.aiStatus();
+      const t0 = await p3.processes();
+      ai.atBoot = { sidecarState: st0?.sidecar?.state ?? null, pythonCount: t0.pythonCount, llamaCount: t0.llamaCount, embeddingsVia: st0?.embeddingsVia ?? null, backend: st0?.backend ?? null };
+      result.ai = ai;
+      save();
+      ai.llama = await measureLlama(p3, (m) => log(`[${cfg.label}]${m}`), { rounds: cfg.aiRounds });
+      save();
+      ai.download = await measureDownload({ probes: p3, page: launched.page, modelsDir: aiLocal.modelsDir, log: (m) => log(`[${cfg.label}]${m}`), sizeBytes: cfg.downloadMB * 1024 * 1024 });
+      save();
+      ai.sidecar = await measureSidecar({ probes: p3, log: (m) => log(`[${cfg.label}]${m}`) });
+      const beforeQuit = await p3.processes();
+      ai.quit = { sidecarWasRunning: beforeQuit.pythonCount > 0, llamaBefore: beforeQuit.llamaCount, pythonBefore: beforeQuit.pythonCount };
+      save();
+      await closeApp(launched.app);
+      ai.quit.leftovers = (await leftoversAfterQuit(launched.pid, 25)).map((p) => ({ name: p.name }));
+      launched = null;
+      log(`[${cfg.label}] AI phase done; left after quit: ${ai.quit.leftovers.map((p) => p.name).join(', ') || 'none'}`);
+    } catch (e) {
+      result.ai = { ...(result.ai ?? {}), error: String(e?.stack ?? e).slice(0, 600) };
+      log(`[${cfg.label}] AI phase failed: ${String(e?.message ?? e).split('\n')[0]}`);
+      if (launched) await closeApp(launched.app);
+    }
+    save();
+  }
+
+  if (cfg.aiOnly) {
+    if (!aiLocal) throw new Error('--ai-only needs --models-src');
+    await runAiPhase();
+    result.meta.finishedAt = new Date().toISOString();
+    removeScratch(aiLocal.root);
+    save();
+    log(`[${cfg.label}] wrote ${cfg.out}`);
+    return;
+  }
+
   // 2. Extra cold-start boots
   for (let i = 0; i < cfg.coldRuns; i++) {
     const ud = copyProfile(primed, `${cfg.label}-cold${i}`);
@@ -203,6 +272,14 @@ async function run() {
     const t = await bootToDashboard(page, tLaunch);
     await probes.init();
     result.coldStart.runs.push({ ...t, eldMax: (await probes.eventLoop(false))?.max ?? null });
+    // Can the IPC counters read anything at all? A 0 is only evidence once a known call has been counted.
+    result.ipcSelfTest = await probes.ipcSelfTest();
+    log(`[${cfg.label}] IPC self-test: ${JSON.stringify(result.ipcSelfTest)}`);
+    if (flag('--ipc-selftest-only')) {
+      console.log(JSON.stringify(result.ipcSelfTest));
+      await closeApp(app);
+      process.exit(result.ipcSelfTest.ok ? 0 : 1);
+    }
     log(`[${cfg.label}] scenario boot: enter ${Math.round(t.enterReadyMs)} ms, interactive ${Math.round(t.interactiveMs)} ms`);
 
     // visible idle
@@ -211,6 +288,13 @@ async function run() {
     await sleep(cfg.idleS * 1000);
     const eldIdle = await probes.eventLoop(true);
     const i1 = await probes.sample('idle-end');
+    // Models arrive after the idle reading: with them present the app embeds the library in the background for minutes, which would
+    // bury the idle-CPU budget (and make it incomparable with the model-free numbers of earlier reports).
+    if (aiLocal) {
+      const en = await probes.enableModels(aiLocal.root);
+      result.scenarioModels = en;
+      log(`[${cfg.label}] models enabled in the scenario run after ${en.ms} ms (ready: ${en.ready})`);
+    }
     result.idle60 = { cpuPct: cpuPct(i0, i1), eld: eldIdle, seconds: cfg.idleS, startWS: i0.totalWorkingSetMB, endWS: i1.totalWorkingSetMB };
     log(`[${cfg.label}] idle ${cfg.idleS}s: cpu ${result.idle60.cpuPct}%, ELD max ${eldIdle?.max} ms`);
 
@@ -224,7 +308,7 @@ async function run() {
     let snapA = null;
     for (let n = 1; n <= cfg.cycles; n++) {
       await probes.eventLoop(true);
-      const { steps, extra } = await runner.cycle(n);
+      const { steps, extra } = await runner.cycle(n, { ai: Boolean(aiLocal) });
       const eld = await probes.eventLoop(true);
       const lt = { all: await probes.longTasksBetween(Math.min(...Object.values(steps).map((s) => s.t0).filter(Boolean)), Math.max(...Object.values(steps).map((s) => s.t1))) };
       for (const k of ['browse-scroll', 'oracle', 'oracle-compute']) lt[k] = steps[k] ? await probes.longTasksBetween(steps[k].t0, steps[k].t1) : [];
@@ -279,6 +363,9 @@ async function run() {
   } finally {
     save();
     await closeApp(app);
+    // Anything the app started (llama-server, python) must be gone once it quit.
+    if (aiLocal) result.quitScenario = { leftovers: (await leftoversAfterQuit(pid, 20)).map((p) => ({ name: p.name })) };
+    save();
   }
 
   // 3b. Hidden idle without an automation client attached (see lib/detached.mjs for why this is the representative number).
@@ -289,6 +376,8 @@ async function run() {
     log(`[${cfg.label}] detached hidden idle failed: ${result.hiddenIdle.error}`);
   }
   save();
+
+  if (aiLocal && !cfg.skipAiPhase) await runAiPhase();
 
   // 4. Steam app-list refresh (fake local Steam endpoint, test key; the real host is unreachable here)
   if (!cfg.skipApplist) {
@@ -332,6 +421,7 @@ async function run() {
   }
 
   result.meta.finishedAt = new Date().toISOString();
+  if (aiLocal) removeScratch(aiLocal.root);
   save();
   log(`[${cfg.label}] wrote ${cfg.out}`);
 }
@@ -340,6 +430,7 @@ run().then(
   () => process.exit(0),
   (e) => {
     console.error(e);
+    if (aiLocal) removeScratch(aiLocal.root);
     process.exit(1);
   },
 );

@@ -3,6 +3,7 @@
  * and the OS process tree.
  */
 import { sleep, sampleProcessTree, round } from './util.mjs';
+import { classifyExternal } from './ai.mjs';
 
 export class Probes {
   constructor(app, page, pid) {
@@ -94,6 +95,70 @@ export class Probes {
     return { total: Object.values(l).reduce((a, b) => a + b, 0), byChannel: l };
   }
 
+  /** Built-in AI probes (perf-probe.ts `ai`): status, burst, download override, sidecar. null when the build lacks them. */
+  ai(method, arg) {
+    return this.app.evaluate((_e, [m, a]) => {
+      const p = globalThis.__arkPerf;
+      return p?.ai?.[m] ? p.ai[m](a) : null;
+    }, [method, arg]);
+  }
+
+  /**
+   * Point the running app at a models folder: the models directory is resolved from process.env.LOCALAPPDATA on every use, so
+   * setting it in the main process and asking for a re-check (the Settings button's IPC) makes the app see the models without a
+   * restart. Resolves when the embed and rerank models report ready (or after timeoutS).
+   */
+  async enableModels(root, timeoutS = 180) {
+    const t0 = Date.now();
+    await this.app.evaluate((_e, r) => {
+      process.env.LOCALAPPDATA = r;
+    }, root);
+    await this.page.evaluate(() => window.localAi.recheck()).catch(() => null);
+    let ready = false;
+    while (Date.now() - t0 < timeoutS * 1000) {
+      const st = await this.page.evaluate(() => window.localAi.status()).catch(() => null);
+      const ok = (role) => st?.models?.some((m) => m.role === role && m.state === 'ready');
+      if (ok('embed') && ok('rerank')) {
+        ready = true;
+        break;
+      }
+      await sleep(1000);
+    }
+    return { ready, ms: Date.now() - t0 };
+  }
+
+  aiStatus() {
+    return this.ai('status').catch(() => null);
+  }
+
+  /**
+   * Prove the IPC counters can read non-zero before trusting a 0: call a channel the app is known to handle `n` times through the
+   * real renderer bridge (preload -> ipcRenderer.invoke -> ipcMain.handle) and compare with what the probe counted. The 1.0.97 run
+   * read 0 for every IPC budget and nothing showed whether that was the screen or a blind probe.
+   */
+  async ipcSelfTest(n = 5) {
+    const handlers = await this.mainProbe('handlerCount').catch(() => null);
+    const candidates = [
+      ['localAi:status', "window.localAi && window.localAi.status"],
+      ['window-is-maximized', "window.electron && window.electron.isMaximized"],
+    ];
+    for (const [channel, test] of candidates) {
+      const has = await this.page.evaluate((t) => !!eval(t), test).catch(() => false);
+      if (!has) continue;
+      await this.setBytes(true);
+      await this.ipc(true);
+      await this.page.evaluate(async ([ch, count]) => {
+        for (let i = 0; i < count; i++) {
+          if (ch === 'localAi:status') await window.localAi.status();
+          else await window.electron.isMaximized();
+        }
+      }, [channel, n]);
+      const got = (await this.ipc(true))?.invoke?.[channel]?.calls ?? 0;
+      return { ok: got === n && (handlers ?? 0) > 0, channel, expected: n, got, handlers };
+    }
+    return { ok: false, channel: null, expected: n, got: 0, handlers, error: 'no known channel exposed by this build' };
+  }
+
   mainProbe(fnName, ...args) {
     return this.app.evaluate((_e, [name, a]) => {
       const p = globalThis.__arkPerf;
@@ -128,7 +193,13 @@ export class Probes {
     }));
     const electronPids = new Set(electronProcs.map((p) => p.pid));
     const external = tree.procs.filter((p) => !electronPids.has(p.pid) && p.pid !== this.pid && !/^(conhost|cmd)\.exe$/i.test(p.name));
+    const ext = classifyExternal(external);
     return {
+      llamaCount: ext.llama.length,
+      llamaWorkingSetMB: ext.llamaWorkingSetMB,
+      pythonCount: ext.python.length,
+      pythonWorkingSetMB: ext.pythonWorkingSetMB,
+      otherExternal: ext.other.map((p) => p.name),
       electron: electronProcs,
       external,
       childCount: tree.procs.length - 1,
@@ -153,6 +224,11 @@ export class Probes {
       ipcListenersByChannel: ipcL.byChannel,
       processCount: procs.childCount,
       externalProcessCount: procs.externalCount,
+      llamaCount: procs.llamaCount,
+      llamaWorkingSetMB: procs.llamaWorkingSetMB,
+      pythonCount: procs.pythonCount,
+      pythonWorkingSetMB: procs.pythonWorkingSetMB,
+      otherExternal: procs.otherExternal,
       gpuWorkingSetMB: gpu.length ? round(gpu.reduce((a, p) => a + p.workingSetMB, 0), 1) : null,
       gpuPrivateMB: gpu.length ? round(gpu.reduce((a, p) => a + p.privateMB, 0), 1) : null,
       totalWorkingSetMB: procs.totalWorkingSetMB,

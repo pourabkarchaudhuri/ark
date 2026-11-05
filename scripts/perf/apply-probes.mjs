@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Back-port the ARK_PERF probes onto an older checkout (the v1.0.96 baseline worktree) so the
- * same harness can measure it. Copies electron/perf-probe.ts, adds the install call to
- * electron/main.ts and the ipcRenderer-listener probe to electron/preload.cjs. Idempotent.
+ * Back-port the ARK_PERF probes onto an older checkout (a baseline worktree such as v1.0.96 or v1.0.97) so the
+ * same harness can measure it. Copies the CURRENT electron/perf-probe.ts (so both sides run the same probes, including the
+ * built-in AI ones), adds the install call to electron/main.ts and the ipcRenderer-listener probe to
+ * electron/preload.cjs where the old build lacks them. Idempotent.
  *
  *   node scripts/perf/apply-probes.mjs <checkout dir>
  */

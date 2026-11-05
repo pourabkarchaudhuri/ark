@@ -28,6 +28,25 @@ export function envVarNames(file) {
   }
 }
 
+let emptyLocal = null;
+/**
+ * An empty scratch %LOCALAPPDATA%: every launch gets it unless the caller passes its own, so no run ever reads or creates
+ * anything under the real %LOCALAPPDATA%Ark (models folder, logs). Removed when the harness exits.
+ */
+export function emptyLocalAppData() {
+  if (!emptyLocal) {
+    emptyLocal = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-perf-emptylocal-'));
+    process.on('exit', () => {
+      try {
+        fs.rmSync(emptyLocal, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    });
+  }
+  return emptyLocal;
+}
+
 export function sanitizedEnv(appDir, extra = {}) {
   const env = { ...process.env, ELECTRON_RUN_AS_NODE: undefined };
   delete env.ELECTRON_RUN_AS_NODE;
@@ -38,7 +57,7 @@ export function sanitizedEnv(appDir, extra = {}) {
     'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GGDEALS_API_KEY', 'GA_API_SECRET', 'GA_MEASUREMENT_ID',
   ]);
   for (const n of names) env[n] = '';
-  return { ...env, NODE_ENV: 'production', ARK_PERF: '1', ELECTRON_ENABLE_LOGGING: '0', ...extra };
+  return { ...env, NODE_ENV: 'production', ARK_PERF: '1', ELECTRON_ENABLE_LOGGING: '0', LOCALAPPDATA: emptyLocalAppData(), ...extra };
 }
 
 /**

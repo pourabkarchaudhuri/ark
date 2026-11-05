@@ -6,6 +6,23 @@ import { sleep } from './util.mjs';
 
 const T = (name) => `[data-tour="${name}"]`;
 
+/** Per-step IPC summary: invoke calls (renderer -> main), pushes (main -> renderer), payload KB. */
+export function compactIpc(ipc) {
+  if (!ipc) return null;
+  const sum = (t, k) => Object.values(t ?? {}).reduce((a, x) => a + (x[k] ?? 0), 0);
+  return {
+    invokeCalls: sum(ipc.invoke, 'calls'),
+    sendCalls: sum(ipc.send, 'calls'),
+    kb: Math.round(((sum(ipc.invoke, 'argBytes') + sum(ipc.invoke, 'resultBytes') + sum(ipc.send, 'argBytes')) / 1024) * 10) / 10,
+    top: Object.entries({ ...ipc.invoke, ...Object.fromEntries(Object.entries(ipc.send ?? {}).map(([k, v]) => [`push:${k}`, v])) })
+      .sort((a, b) => b[1].calls - a[1].calls)
+      .slice(0, 4)
+      .map(([k, v]) => `${k} x${v.calls}`),
+  };
+}
+
+const rawIpcSteps = new Set(['browse-load', 'browse-scroll']);
+
 export function makeRunner(probes, log) {
   const page = probes.page;
   const skipped = new Map();
@@ -14,6 +31,7 @@ export function makeRunner(probes, log) {
     const t0 = await probes.now().catch(() => 0);
     const w0 = Date.now();
     let error = null;
+    await probes.ipc(true).catch(() => null);
     try {
       // a Radix menu/dialog left open sets body{pointer-events:none}; Escape closes it before the next action
       await page.keyboard.press('Escape').catch(() => {});
@@ -31,7 +49,9 @@ export function makeRunner(probes, log) {
       skipped.set(k, skipped.get(k) + 1);
     }
     const t1 = await probes.now().catch(() => 0);
-    out[name] = { ms: Date.now() - w0, t0, t1, error };
+    const ipc = await probes.ipc(true).catch(() => null);
+    out[name] = { ms: Date.now() - w0, t0, t1, error, ipc: compactIpc(ipc) };
+    if (rawIpcSteps.has(name)) out[name].ipcRaw = ipc;
     return out[name];
   }
 
@@ -67,8 +87,51 @@ export function makeRunner(probes, log) {
     await page.mouse.wheel(0, -100000);
   }
 
+  /**
+   * Mount cost of one Settings page: click its nav entry from inside the page (so the clock is the page's own).
+   * paintMs is click -> second animation frame (the page's first paint after the click, scripts and layout included).
+   * mountMs is click -> the last element added or removed, once no element changed for 250 ms (a lazy chunk or a data fetch that
+   * fills the page late shows here). Attribute and text changes are ignored on purpose: a ticking clock or a running animation
+   * would otherwise keep the page "busy" forever. The longest long task in the window is the renderer stall the user feels.
+   */
+  async function measureSettingsPage(i) {
+    const res = await page
+      .evaluate(
+        ([idx]) =>
+          new Promise((resolve) => {
+            const el = document.querySelector(`[data-perf-settings-nav="${idx}"]`);
+            if (!el) return resolve(null);
+            const label = (el.getAttribute('data-tour') || el.innerText || '').trim().slice(0, 40);
+            const t0 = performance.now();
+            let last = t0;
+            const mo = new MutationObserver(() => {
+              last = performance.now();
+            });
+            mo.observe(document.body, { subtree: true, childList: true });
+            let paintMs = null;
+            el.click();
+            requestAnimationFrame(() => requestAnimationFrame(() => { paintMs = Math.round(performance.now() - t0); }));
+            const tick = () => {
+              const now = performance.now();
+              if (now - last >= 250 || now - t0 > 4000) {
+                mo.disconnect();
+                resolve({ label, t0, paintMs, mountMs: Math.round(last - t0), nodes: document.getElementsByTagName('*').length });
+              } else setTimeout(tick, 50);
+            };
+            setTimeout(tick, 50);
+          }),
+        [i],
+      )
+      .catch(() => null);
+    if (!res) return { i, error: 'nav entry missing' };
+    const t1 = await probes.now().catch(() => res.t0 + res.mountMs + 250);
+    const lts = await probes.longTasksBetween(res.t0, t1).catch(() => []);
+    await sleep(400);
+    return { i, label: res.label, paintMs: res.paintMs, mountMs: res.mountMs, longTaskMaxMs: lts.length ? Math.max(...lts) : 0, nodes: res.nodes };
+  }
+
   /** One scenario cycle; returns per-step timings and the IPC / long-task / frame data of the steps that need it. */
-  async function cycle(n, { settleMs = 2500 } = {}) {
+  async function cycle(n, { settleMs = 2500, ai = false } = {}) {
     const steps = {};
     const extra = {};
     await dismissOverlays();
@@ -76,18 +139,17 @@ export function makeRunner(probes, log) {
     // --- Browse: entry cost (IPC per Browse screen), scroll 3 screens (frames, long tasks), filter, search, empty result
     await step(n, 'to-library', () => click(T('library-button')), steps);
     await sleep(1000);
-    await probes.ipc(true);
     await probes.setBytes(true);
     await step(n, 'browse-load', async () => {
       await click(T('browse-button'));
       await sleep(settleMs + 1000);
     }, steps);
-    extra.browseLoadIpc = await probes.ipc(true);
+    extra.browseLoadIpc = steps['browse-load'].ipcRaw;
 
     await probes.startFrames();
     await step(n, 'browse-scroll', () => scrollScreens(3), steps);
     extra.browseScrollFrames = await probes.stopFrames();
-    extra.browseScrollIpc = await probes.ipc(true);
+    extra.browseScrollIpc = steps['browse-scroll'].ipcRaw;
 
     await step(n, 'browse-filter', async () => {
       await page.getByRole('button', { name: /open filters/i }).first().click({ timeout: 4000 });
@@ -182,6 +244,15 @@ export function makeRunner(probes, log) {
       await sleep(8000);
     }, steps);
 
+    // --- Built-in AI: a small embedding + rerank burst through the app's own path keeps the llama-server processes
+    // alive, so the per-cycle samples count them (process and memory growth rules)
+    if (ai) {
+      await step(n, 'ai-burst', async () => {
+        const r = await probes.ai('burst', { mode: 'app', embedTexts: 8, rerankDocs: 8, rounds: 1 });
+        if (!r || r.error || !r.embedOk || !r.rerankOk) throw new Error(`ai burst failed: ${r?.error ?? 'not ok'}`);
+      }, steps);
+    }
+
     // --- Upcoming
     await step(n, 'upcoming', async () => {
       await click(T('calendar-button'));
@@ -190,8 +261,11 @@ export function makeRunner(probes, log) {
 
     // --- every Settings page
     await step(n, 'settings', async () => {
+      const tOpen = await probes.now().catch(() => 0);
       await click(T('settings-button'));
       await sleep(1500);
+      const openTasks = await probes.longTasksBetween(tOpen, await probes.now().catch(() => tOpen)).catch(() => []);
+      extra.settingsOpenLongTaskMaxMs = openTasks.length ? Math.max(...openTasks) : 0;
       const count = await page.evaluate(() => {
         let group = [...document.querySelectorAll('[data-tour^="settings-nav-"]')];
         // older layout (v1.0.96): tab buttons in the sidebar, the first one being Back
@@ -200,10 +274,8 @@ export function makeRunner(probes, log) {
         return group.length;
       });
       if (!count) throw new Error('no settings nav found');
-      for (let i = 0; i < count; i++) {
-        await page.locator(`[data-perf-settings-nav="${i}"]`).first().click({ timeout: 3000 }).catch(() => {});
-        await sleep(1200);
-      }
+      extra.settingsPages = [];
+      for (let i = 0; i < count; i++) extra.settingsPages.push(await measureSettingsPage(i));
     }, steps);
 
     // --- End every cycle on the same view so readings are comparable
