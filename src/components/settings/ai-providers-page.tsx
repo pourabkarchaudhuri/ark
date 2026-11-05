@@ -13,7 +13,7 @@ import { Chip, Icon, ICON, PageHeader, Panel, Seg, Spinner } from '@/components/
 import { ConnectorDrawer, type TestWith } from '@/components/settings/connector-drawer';
 import { RouterGraph, type GraphItem } from '@/components/settings/router-graph';
 import {
-  availableCatalog, countStates, describeNode, describeTest, loadModelPrefs, markTesting, modelList, routeRequest, saveModelPrefs, testFor,
+  availableCatalog, builtinReadiness, countStates, describeNode, describeTest, loadModelPrefs, markTesting, modelList, routeRequest, saveModelPrefs, testFor,
   type CatalogItem, type ModelPrefs, type ModelPrefsStore, type NodeDisplay,
 } from '@/components/settings/ai-providers-logic';
 import { ROLES, ROLE_LABEL, routeId, routeName, useAiRouter } from '@/components/settings/use-ai-router';
@@ -83,9 +83,13 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
   const [fieldDrafts, setFieldDrafts] = useState<Record<string, ConnectorDraft>>({});
   const openerRef = useRef<HTMLElement | null>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
+  const pickerWrapRef = useRef<HTMLDivElement>(null);
+  const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const appliedFocus = useRef<string | null>(null);
   const snackId = useRef(0);
   const prevTones = useRef<Record<string, string>>({});
+  /** No `window.localAi` at all (or its status call failed): nothing to wait for, so the built-in node is not held at Checking. */
+  const [localAiUnavailable, setLocalAiUnavailable] = useState(() => typeof window !== 'undefined' && !window.localAi);
 
   useEffect(() => { if (focusId && ROLE_FOCUS[focusId]) setRole(ROLE_FOCUS[focusId]); }, [focusId]);
 
@@ -105,9 +109,9 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
 
   useEffect(() => {
     const api = window.localAi;
-    if (!api) return;
+    if (!api) { setLocalAiUnavailable(true); return; }
     let live = true;
-    api.status().then((s) => { if (live) setLocalAi(s); }).catch(() => {});
+    api.status().then((s) => { if (live) setLocalAi(s); }).catch(() => { if (live) setLocalAiUnavailable(true); });
     const off = api.onStatusChanged?.((s) => { if (live) setLocalAi(s); });
     return () => { live = false; off?.(); };
   }, []);
@@ -141,7 +145,15 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
     setTimeout(() => addButtonRef.current?.focus(), 0);
   }, []);
   useEffect(() => {
-    if (picker) setTimeout(() => document.querySelector<HTMLElement>('[role="listbox"][aria-label="Available connectors"] [role="option"]')?.focus(), 0);
+    if (picker) setTimeout(() => pickerWrapRef.current?.querySelector<HTMLElement>('[data-picker-item]')?.focus(), 0);
+  }, [picker]);
+  // The picker is a popover over the graph: a click outside it dismisses it (focus stays where the click put it).
+  useEffect(() => {
+    if (!picker) return;
+    const onDown = (e: Event) => { if (e.target instanceof Node && !pickerWrapRef.current?.contains(e.target)) setPicker(false); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('mousedown', onDown);
+    return () => { document.removeEventListener('pointerdown', onDown); document.removeEventListener('mousedown', onDown); };
   }, [picker]);
 
   const setDraft = useCallback((id: string, patch: ConnectorDraft) => {
@@ -157,7 +169,8 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
     });
   }, []);
 
-  const builtinDown = !!localAi && localAi.backend === 'builtin' && !localAi.runtime.available;
+  /** The built-in connector's readiness for the viewed role: its model state, not just whether the runtime exists. */
+  const builtinState = builtinReadiness(localAi, role, localAiUnavailable);
   const all = useMemo<AiConnector[]>(() => {
     const real = state?.connectors ?? [];
     return [...real, ...drafts.filter((d) => !real.some((c) => c.id === d.id))];
@@ -173,9 +186,9 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
 
   const items = useMemo<GraphItem[]>(() => all.filter((c) => c.serves.includes(role)).map((connector) => ({
     connector,
-    display: describeNode(connector, role, { testing: !!testing[connector.id], builtinDown: connector.kind === 'builtin' && builtinDown }),
+    display: describeNode(connector, role, { testing: !!testing[connector.id], builtinState: connector.kind === 'builtin' ? builtinState : undefined }),
     models: modelList(connector, role, state?.routes[role], prefs[connector.id]?.[role]),
-  })), [all, role, testing, builtinDown, state, prefs]);
+  })), [all, role, testing, builtinState, state, prefs]);
   const hiddenCount = all.length - items.length;
   const counts = countStates(items);
   const live = items.find((i) => i.display.routed);
@@ -183,11 +196,19 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
   // "Scheduled re-check finds a fault": an armed or live connector that turns faulty on its own.
   useEffect(() => {
     if (!state) return;
+    // Tones are tracked per connector AND role, so switching the viewed tab never reads as a change;
+    // a connector that turns faulty for any role it serves raises one note.
     const next: Record<string, string> = {};
     for (const c of state.connectors) {
-      const d = describeNode(c, role);
-      next[c.id] = d.tone;
-      if (d.tone === 'fault' && (prevTones.current[c.id] === 'armed' || prevTones.current[c.id] === 'live') && !testing[c.id]) {
+      let turned = false;
+      for (const r of c.serves) {
+        const key = `${c.id}:${r}`;
+        const tone = describeNode(c, r).tone;
+        next[key] = tone;
+        const prev = prevTones.current[key];
+        if (tone === 'fault' && (prev === 'armed' || prev === 'live')) turned = true;
+      }
+      if (turned && !testing[c.id]) {
         showSnack({ text: `${c.name} stopped answering at the re-check.`, chip: { tone: 'fault', label: 'Fault' }, actions: [{ label: 'Open', run: () => { openDrawer(c.id); setSnack(null); } }] });
       }
     }
@@ -199,7 +220,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
   const effectiveOpen = openId === undefined ? (live?.connector.id ?? null) : openId;
   const open = effectiveOpen ? all.find((c) => c.id === effectiveOpen) ?? null : null;
   const openItem = open ? items.find((i) => i.connector.id === open.id) : undefined;
-  const openDisplay: NodeDisplay | null = open ? (openItem?.display ?? describeNode(open, role, { testing: !!testing[open.id] })) : null;
+  const openDisplay: NodeDisplay | null = open ? (openItem?.display ?? describeNode(open, role, { testing: !!testing[open.id], builtinState: open.kind === 'builtin' ? builtinState : undefined })) : null;
   const openModels = open ? (openItem?.models ?? modelList(open, role, state?.routes[role], prefs[open.id]?.[role])) : null;
 
   // ── Actions ───────────────────────────────────────────────────────────────────────────────────
@@ -383,19 +404,21 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
   return (
     <>
       <PageHeader title="AI providers" lede="Bring your own keys, or point Ark at any OpenAI-compatible server. Chat, embeddings and reranking each get their own route.">
-        <div className="inline" style={{ position: 'relative' }}>
+        <div
+          className="inline" style={{ position: 'relative' }} ref={pickerWrapRef}
+          onKeyDown={(e) => { if (picker && e.key === 'Escape') { e.stopPropagation(); closePicker(); } }}
+          onBlur={(e) => { const to = e.relatedTarget; if (picker && to instanceof Node && !e.currentTarget.contains(to)) setPicker(false); }}>
           <button type="button" className="btn" onClick={() => void testAll()} disabled={Object.values(testing).some(Boolean)}>
             {Object.values(testing).some(Boolean) && <Spinner />}Test all
           </button>
-          <button ref={addButtonRef} type="button" className="btn p" onClick={() => setPicker(!picker)} aria-expanded={picker} aria-haspopup="listbox"><Icon d={ICON.plus} />Add connector</button>
+          <button ref={addButtonRef} type="button" className="btn p" onClick={() => setPicker(!picker)} aria-expanded={picker} aria-haspopup="dialog"><Icon d={ICON.plus} />Add connector</button>
           {picker && (
             <div
-              className="panel fade" role="listbox" aria-label="Available connectors"
-              onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); closePicker(); } }}
+              className="panel fade" role="group" aria-label="Available connectors"
               style={{ position: 'absolute', right: 0, top: 40, width: 300, zIndex: 20, background: 'var(--color-paper-4)' }}>
               <div style={{ padding: 'var(--space-3)' }}><p className="t">Add a connector</p><p className="d">Any OpenAI-compatible server, or one of these providers.</p></div>
               {catalog.map((k) => (
-                <button key={k.id} type="button" className="pk" role="option" aria-selected="false" onClick={() => void addFromCatalog(k)}>
+                <button key={k.id} type="button" className="pk" data-picker-item onClick={() => void addFromCatalog(k)}>
                   <span className="mono" data-tone="off">{k.mono}</span><span className="grow">{k.name}</span><span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-ink-3)' }}>{k.kind}</span>
                 </button>
               ))}
@@ -405,8 +428,20 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
       </PageHeader>
 
       <div className="tray" role="tablist" aria-label="Route" style={{ alignSelf: 'flex-start' }}>
-        {roleTabs.map((t) => (
-          <button key={t.role} type="button" role="tab" aria-selected={t.role === role} data-setting-id={`route-${t.role}`} onClick={() => {
+        {roleTabs.map((t, ti) => (
+          <button
+            key={t.role} type="button" role="tab" id={`route-tab-${t.role}`} aria-controls="route-panel" aria-selected={t.role === role}
+            tabIndex={t.role === role ? 0 : -1} ref={(el) => { tabRefs.current[t.role] = el; }}
+            data-setting-id={`route-${t.role}`}
+            onKeyDown={(e) => {
+              const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+              const target = e.key === 'Home' ? 0 : e.key === 'End' ? roleTabs.length - 1 : step ? (ti + step + roleTabs.length) % roleTabs.length : -1;
+              if (target < 0) return;
+              e.preventDefault();
+              tabRefs.current[roleTabs[target]!.role]?.focus();
+              tabRefs.current[roleTabs[target]!.role]?.click();
+            }}
+            onClick={() => {
             // Keep the open connector when it also serves the new role, so edits made there stay in view.
             const keep = effectiveOpen && all.find((c) => c.id === effectiveOpen)?.serves.includes(t.role) ? effectiveOpen : undefined;
             setRole(t.role); setHot(null); setOpenId(keep);
@@ -420,7 +455,7 @@ export const AiProvidersPage = memo(function AiProvidersPage({ onNavigate, focus
         <div className="alert fade" role="alert" data-tone="fault"><div style={{ flex: 1 }}>{notice}</div><button type="button" className="btn q" onClick={() => setNotice(null)} style={{ height: 28 }}>Dismiss</button></div>
       )}
 
-      <div className="routerlayout">
+      <div className="routerlayout" role="tabpanel" id="route-panel" aria-labelledby={`route-tab-${role}`}>
         <div className="main-col">
           <RouterGraph
             role={role} items={items} hiddenCount={hiddenCount} routeText={routeId(state, role)} counts={counts}

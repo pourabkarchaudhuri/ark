@@ -6,10 +6,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { AiConnector } from '@/services/ai-router-types';
 import {
-  CONNECTOR_CATALOG, DEFAULT_MODELS_UI, availableCatalog, countStates, describeNode, describeTest, graphLayout, loadModelPrefs,
+  CONNECTOR_CATALOG, builtinReadiness, DEFAULT_MODELS_UI, availableCatalog, countStates, describeNode, describeTest, graphLayout, loadModelPrefs,
   markTesting, modelList, routeCta, routeRequest, saveModelPrefs, smallestModel, testFor,
 } from '@/components/settings/ai-providers-logic';
 import { DEFAULT_MODELS } from '../../../electron/ai-router/types';
+import { localAiStatus } from './settings-fixtures';
 
 const conn = (over: Partial<AiConnector>): AiConnector => ({
   id: 'openai', kind: 'openai', name: 'OpenAI', hasKey: true, needsKey: true, state: 'armed', routedFor: [], serves: ['chat', 'embeddings'],
@@ -202,5 +203,29 @@ describe('a test counts for the role it ran for (1.0.98 F5)', () => {
     expect(started).toEqual({ single: true, a: true, b: true });
     expect(markTesting(started, ['a', 'b'], false)).toEqual({ single: true });
     expect(running).toEqual({ single: true });
+  });
+});
+
+describe('1.0.99 builtinReadiness and the built-in node', () => {
+  const st = (over: Record<string, unknown> = {}) => localAiStatus(over as never);
+  it('derives readiness per role from the model state', () => {
+    expect(builtinReadiness(null, 'chat')).toBe('checking');
+    expect(builtinReadiness(null, 'chat', true)).toBe('ready');
+    expect(builtinReadiness(st(), 'chat')).toBe('needs-model');
+    expect(builtinReadiness(st(), 'embeddings')).toBe('ready');
+    expect(builtinReadiness(st(), 'reranker')).toBe('ready');
+    expect(builtinReadiness(st({ runtime: { available: false, build: '', roles: [] } }), 'embeddings')).toBe('down');
+    expect(builtinReadiness(st({ backend: 'ollama' }), 'chat')).toBe('ready');
+    const dl = st(); dl.models = dl.models.map((m) => (m.role === 'chat' ? { ...m, state: 'downloading' as const } : m));
+    expect(builtinReadiness(dl, 'chat')).toBe('downloading');
+    const failed = st({ runtime: { available: true, build: '', roles: [{ role: 'embed', state: 'failed', lastError: 'x', cpuFallback: false }] } });
+    expect(builtinReadiness(failed, 'embeddings')).toBe('down');
+    expect(builtinReadiness(failed, 'chat')).toBe('needs-model');
+  });
+  it('describeNode maps the states to chips', () => {
+    const routed = { ...conn({ kind: 'builtin', routedFor: ['chat'], serves: ['chat'] }) };
+    expect(describeNode(routed, 'chat', { builtinState: 'needs-model' })).toMatchObject({ tone: 'nokey', chip: 'Needs model', opensDrawer: true, routeLabel: 'Download model' });
+    expect(describeNode(routed, 'chat', { builtinState: 'checking' })).toMatchObject({ tone: 'armed', chip: 'Checking' });
+    expect(describeNode(routed, 'chat', { builtinState: 'ready' })).toMatchObject({ tone: 'live', chip: 'Live' });
   });
 });

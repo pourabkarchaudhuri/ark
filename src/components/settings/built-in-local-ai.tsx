@@ -127,7 +127,7 @@ export function BuiltInLocalAiPanel({ onStatus }: { onStatus?: (s: LocalAiStatus
 
       <div className="inline" style={{ flexWrap: 'wrap' }}>
         {chat && chat.state !== 'ready' && (
-          <button type="button" className="btn" disabled={busy || chat.state === 'downloading' || chat.state === 'queued'}
+          <button type="button" className="btn" data-action="download-chat" disabled={busy || chat.state === 'downloading' || chat.state === 'queued'}
             onClick={() => setConfirmChat(true)}>
             Download chat model
           </button>

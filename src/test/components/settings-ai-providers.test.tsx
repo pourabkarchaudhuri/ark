@@ -41,7 +41,7 @@ afterEach(() => {
 
 describe('connector nodes and role tabs', () => {
   it('shows the built-in connector routed for chat and the route on each role tab', async () => {
-    await renderPage();
+    await renderPage(routerState(), { localAi: localAiStatus({ models: localAiStatus().models.map((m) => ({ ...m, state: 'ready' as const })) }) });
     expect(within(node('Built-in AI')).getByText('Live')).toBeInTheDocument();
     expect(within(node('Built-in AI')).getByRole('button', { name: 'Routed' })).toBeDisabled();
     const tabs = screen.getAllByRole('tab');
@@ -291,10 +291,10 @@ describe('adding connectors', () => {
   it('lists what can be added and saves a hosted provider with its fixed id', async () => {
     const m = await renderPage();
     fireEvent.click(screen.getByRole('button', { name: /Add connector/ }));
-    const list = screen.getByRole('listbox', { name: 'Available connectors' });
-    expect(within(list).getAllByRole('option').length).toBeGreaterThan(5);
+    const list = screen.getByRole('group', { name: 'Available connectors' });
+    expect(within(list).getAllByRole('button').length).toBeGreaterThan(5);
     m.api.saveConnector.mockImplementationOnce(async () => { m.set(routerState({ connectors: [builtinConnector(), connector('anthropic', { hasKey: false, test: undefined })] })); return { success: true as const }; });
-    fireEvent.click(within(list).getByRole('option', { name: /Anthropic/ }));
+    fireEvent.click(within(list).getByRole('button', { name: /Anthropic/ }));
     await waitFor(() => expect(m.api.saveConnector).toHaveBeenCalledWith({ kind: 'anthropic', name: 'Anthropic', id: 'anthropic' }));
     expect(await screen.findByRole('heading', { name: 'Anthropic' })).toBeInTheDocument();
   });
@@ -302,14 +302,14 @@ describe('adding connectors', () => {
   it('an OpenAI-compatible preset sends its address and roles, with no fixed id', async () => {
     const m = await renderPage();
     fireEvent.click(screen.getByRole('button', { name: /Add connector/ }));
-    fireEvent.click(screen.getByRole('option', { name: /LM Studio/ }));
+    fireEvent.click(screen.getByRole('button', { name: /LM Studio/ }));
     await waitFor(() => expect(m.api.saveConnector).toHaveBeenCalledWith({ kind: 'openai-compatible', name: 'LM Studio', baseUrl: 'http://localhost:1234/v1', roles: ['chat', 'embeddings'] }));
   });
 
   it('Azure starts as a draft that needs its endpoint and deployment, then saves them', async () => {
     const m = await renderPage();
     fireEvent.click(screen.getByRole('button', { name: /Add connector/ }));
-    fireEvent.click(screen.getByRole('option', { name: /Azure OpenAI/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Azure OpenAI/ }));
     expect(m.api.saveConnector).not.toHaveBeenCalled();
     expect(screen.getByLabelText('API key')).toBeDisabled();
     fireEvent.change(screen.getByLabelText('Endpoint'), { target: { value: 'https://r.openai.azure.com/' } });
@@ -502,17 +502,57 @@ describe('1.0.98 F5: tests per role, drafts across roles, key notes, keyboard an
     await waitFor(() => expect(document.activeElement).toBe(gear));
   });
 
-  it('Tab wraps inside the open drawer', async () => {
+  it('Tab is not trapped in the non-modal drawer: the key event is left alone at both ends', async () => {
     await renderPage(routerState({ connectors: [builtinConnector({ routedFor: [] }), connector('gemini')] }));
     fireEvent.click(screen.getByRole('button', { name: 'Settings for Google Gemini' }));
     const drawer = document.querySelector('.drawer') as HTMLElement;
     const first = screen.getByRole('button', { name: 'Close settings' });
     const last = Array.from(drawer.querySelectorAll('.sect')).pop()!.querySelector('button') as HTMLElement;
     last.focus();
-    fireEvent.keyDown(last, { key: 'Tab' });
-    expect(document.activeElement).toBe(first);
-    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+    expect(fireEvent.keyDown(last, { key: 'Tab' })).toBe(true);
     expect(document.activeElement).toBe(last);
+    first.focus();
+    expect(fireEvent.keyDown(first, { key: 'Tab', shiftKey: true })).toBe(true);
+    expect(document.activeElement).toBe(first);
+  });
+
+  it('the connector picker closes on a click outside and when focus tabs out', async () => {
+    await renderPage();
+    const add = screen.getByRole('button', { name: /Add connector/ });
+    fireEvent.click(add);
+    expect(screen.getByRole('group', { name: 'Available connectors' })).toBeInTheDocument();
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole('group', { name: 'Available connectors' })).not.toBeInTheDocument();
+    fireEvent.click(add);
+    const item = within(screen.getByRole('group', { name: 'Available connectors' })).getAllByRole('button')[0]!;
+    fireEvent.blur(item, { relatedTarget: screen.getAllByRole('tab')[1]! });
+    expect(screen.queryByRole('group', { name: 'Available connectors' })).not.toBeInTheDocument();
+  });
+
+  it('Escape on the Add connector button itself closes the picker', async () => {
+    await renderPage();
+    const add = screen.getByRole('button', { name: /Add connector/ });
+    fireEvent.click(add);
+    add.focus();
+    fireEvent.keyDown(add, { key: 'Escape' });
+    expect(screen.queryByRole('group', { name: 'Available connectors' })).not.toBeInTheDocument();
+  });
+
+  it('role tabs use a roving tabindex, arrow keys move between them and they control a tabpanel', async () => {
+    await renderPage();
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs.map((t) => t.getAttribute('tabindex'))).toEqual(['0', '-1', '-1']);
+    tabs[0]!.focus();
+    fireEvent.keyDown(tabs[0]!, { key: 'ArrowRight' });
+    expect(tabs[1]).toHaveAttribute('aria-selected', 'true');
+    expect(document.activeElement).toBe(tabs[1]);
+    fireEvent.keyDown(tabs[1]!, { key: 'ArrowLeft' });
+    expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(tabs[0]!, { key: 'ArrowLeft' });
+    expect(tabs[2]).toHaveAttribute('aria-selected', 'true');
+    const panel = screen.getByRole('tabpanel');
+    expect(panel).toHaveAttribute('aria-labelledby', tabs[2]!.id);
+    expect(tabs[2]).toHaveAttribute('aria-controls', panel.id);
   });
 
   it('the connector picker closes on Escape and returns focus to Add connector', async () => {
@@ -520,10 +560,10 @@ describe('1.0.98 F5: tests per role, drafts across roles, key notes, keyboard an
     const add = screen.getByRole('button', { name: /Add connector/ });
     add.focus();
     fireEvent.click(add);
-    const list = screen.getByRole('listbox', { name: 'Available connectors' });
+    const list = screen.getByRole('group', { name: 'Available connectors' });
     await waitFor(() => expect(list.contains(document.activeElement)).toBe(true));
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
-    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Available connectors' })).not.toBeInTheDocument();
     await waitFor(() => expect(document.activeElement).toBe(add));
   });
 
@@ -538,5 +578,43 @@ describe('1.0.98 F5: tests per role, drafts across roles, key notes, keyboard an
     await renderPage(routerState({ connectors: [builtinConnector(), connector('gemini')] }), { focusId: 'connection-test' });
     expect(await screen.findByRole('heading', { name: 'Google Gemini' })).toBeInTheDocument();
     expect(document.querySelector('[data-setting-id="connection-test"]')).not.toBeNull();
+  });
+
+  it('1.0.99: the built-in chat route says Needs model (not Live) while the chat model is missing, and the drawer offers the download', async () => {
+    await renderPage();
+    expect(within(node('Built-in AI')).getByText('Needs model')).toBeInTheDocument();
+    expect(within(node('Built-in AI')).queryByText('Live')).not.toBeInTheDocument();
+    // Embeddings are ready, so that tab still reads Live.
+    fireEvent.click(screen.getByRole('tab', { name: /Embeddings/ }));
+    expect(within(node('Built-in AI')).getByText('Live')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: /Chat/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings for Built-in AI' }));
+    const drawer = document.querySelector('.drawer') as HTMLElement;
+    expect(within(drawer).getAllByRole('button', { name: 'Download chat model' }).length).toBe(2);
+    fireEvent.click(within(drawer.querySelector('.alert') as HTMLElement).getByRole('button', { name: 'Download chat model' }));
+    expect(await screen.findByRole('button', { name: /^Download \d/ })).toBeInTheDocument();
+  });
+
+  it('1.0.99: the built-in node says Checking until the local AI status arrives', async () => {
+    const router = installRouter(routerState());
+    let resolve!: (s: ReturnType<typeof localAiStatus>) => void;
+    const local = installLocalAi();
+    local.api.status.mockImplementationOnce(() => new Promise((r) => { resolve = r; }));
+    render(<AiProvidersPage onNavigate={vi.fn()} />);
+    await flush();
+    expect(router.api).toBeTruthy();
+    expect(within(node('Built-in AI')).getByText('Checking')).toBeInTheDocument();
+    await act(async () => { resolve(localAiStatus()); });
+    expect(within(node('Built-in AI')).getByText('Needs model')).toBeInTheDocument();
+  });
+
+  it('1.0.99: switching the role tab does not raise a false re-check fault', async () => {
+    const embedFail = { ...fail, role: 'embeddings' as const, message: 'model missing' };
+    const gem = (test?: typeof fail) => connector('gemini', { serves: ['chat', 'embeddings'], routedFor: ['chat'], test });
+    const m = await renderPage(routerState({ connectors: [builtinConnector({ routedFor: [] }), gem(embedFail)] }));
+    await act(async () => { m.push(routerState({ connectors: [builtinConnector({ routedFor: [] }), gem(embedFail)] })); });
+    fireEvent.click(screen.getByRole('tab', { name: /Embeddings/ }));
+    await act(async () => { m.push(routerState({ connectors: [builtinConnector({ routedFor: [] }), gem(embedFail)] })); });
+    expect(screen.queryByText(/stopped answering/)).not.toBeInTheDocument();
   });
 });

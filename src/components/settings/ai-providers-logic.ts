@@ -4,6 +4,7 @@
  * rule is unit-tested.
  */
 import type { AiConnector, AiConnectorTest, AiRole, AiRouterState, ConnectorKind } from '@/services/ai-router-types';
+import type { LocalAiRoleName, LocalAiStatus } from '@/services/local-ai-types';
 
 // ── Catalog ("Add a connector") ─────────────────────────────────────────────────────────────────
 
@@ -103,10 +104,35 @@ export function markTesting(map: Record<string, boolean>, ids: readonly string[]
 }
 
 /**
- * How one connector shows for the role being viewed. `testing` is a test in flight; `builtinDown`
- * means the built-in runtime reported it is not running.
+ * Whether the built-in connector can answer one role: `ready`, `needs-model` (the role's model is
+ * not on disk), `downloading`, `checking` (local AI status not loaded yet) or `down` (the runtime
+ * is missing or the role's server failed).
  */
-export function describeNode(c: AiConnector, role: AiRole, opts: { testing?: boolean; builtinDown?: boolean } = {}): NodeDisplay {
+export type BuiltinReadiness = 'ready' | 'needs-model' | 'downloading' | 'checking' | 'down';
+
+const LOCAL_MODEL_ROLES: Record<AiRole, LocalAiRoleName[]> = { chat: ['chat'], embeddings: ['embed'], reranker: ['rerank', 'rerank-qwen'] };
+
+/**
+ * Per-role readiness of the built-in connector from the local AI status. `null` means the status
+ * has not arrived; pass `unavailable` when there is no local AI API at all (nothing to wait for).
+ */
+export function builtinReadiness(localAi: LocalAiStatus | null | undefined, role: AiRole, unavailable = false): BuiltinReadiness {
+  if (!localAi) return unavailable ? 'ready' : 'checking';
+  if (localAi.backend !== 'builtin') return 'ready';
+  if (!localAi.runtime.available) return 'down';
+  const names = LOCAL_MODEL_ROLES[role];
+  if (localAi.runtime.roles?.some((r) => names.includes(r.role) && r.state === 'failed')) return 'down';
+  const models = localAi.models.filter((m) => names.includes(m.role));
+  if (models.length === 0 || models.some((m) => m.state === 'ready')) return 'ready';
+  if (models.some((m) => m.state === 'downloading' || m.state === 'queued' || m.state === 'verifying')) return 'downloading';
+  return 'needs-model';
+}
+
+/**
+ * How one connector shows for the role being viewed. `testing` is a test in flight; `builtinState`
+ * is the built-in connector's readiness for this role (`builtinDown` is the older flag for `down`).
+ */
+export function describeNode(c: AiConnector, role: AiRole, opts: { testing?: boolean; builtinDown?: boolean; builtinState?: BuiltinReadiness } = {}): NodeDisplay {
   const enabled = c.enabled !== false;
   const serves = c.serves.includes(role);
   const routed = c.routedFor.includes(role) && enabled && serves;
@@ -116,7 +142,16 @@ export function describeNode(c: AiConnector, role: AiRole, opts: { testing?: boo
   if (opts.testing) return { ...idle, tone: 'armed', chip: 'Testing', routeLabel: routed ? 'Routed' : 'Route here', canAct: false };
   if (!enabled) return { ...idle, tone: 'off', chip: 'Off', routed: false, canAct: false };
   if (c.kind === 'builtin') {
-    if (opts.builtinDown) return { ...idle, tone: 'fault', chip: 'Not running', routeLabel: routed ? 'Routed' : 'Route here', canAct: !routed };
+    const state = opts.builtinDown ? 'down' : opts.builtinState ?? 'ready';
+    if (state === 'down') return { ...idle, tone: 'fault', chip: 'Not running', routeLabel: routed ? 'Routed' : 'Route here', canAct: !routed };
+    if (state === 'checking') return { ...idle, tone: 'armed', chip: 'Checking', routeLabel: routed ? 'Routed' : 'Route here', canAct: !routed };
+    if (state === 'downloading') return { ...idle, tone: 'armed', chip: 'Downloading', routeLabel: routed ? 'Routed' : 'Route here', canAct: !routed };
+    if (state === 'needs-model') {
+      // Routed, but nothing to answer with: the button opens the drawer, where the download lives.
+      return routed
+        ? { ...idle, tone: 'nokey', chip: 'Needs model', routeLabel: 'Download model', canAct: true, opensDrawer: true }
+        : { ...idle, tone: 'nokey', chip: 'Needs model' };
+    }
     return routed ? { ...idle, tone: 'live', chip: 'Live', routeLabel: 'Routed', canAct: false } : { ...idle, tone: 'armed', chip: 'Ready' };
   }
   if (test && !test.ok) return { ...idle, routed: false, tone: 'fault', chip: 'Fault', routeLabel: 'Fix key', opensDrawer: true };

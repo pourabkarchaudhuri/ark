@@ -16,17 +16,6 @@ import { ROLE_LABEL, ROLE_NOUN, ROLES, connectorLabel, litellmId, monogram } fro
 
 export const CONNECTOR_SAVED_PLACEHOLDER = 'Key saved. Paste a new one to replace it';
 
-const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
-
-/** Not hidden, and not inside a closed <details> (other than its own summary). */
-function isTabbable(el: HTMLElement): boolean {
-  if (el.closest('[hidden]')) return false;
-  for (let d = el.closest('details'); d; d = d.parentElement?.closest('details') ?? null) {
-    if (!d.open && el.closest('summary')?.parentElement !== d) return false;
-  }
-  return true;
-}
-
 export type TestWith = 'default' | 'smallest';
 
 const TONE: Record<NodeDisplay['tone'], Tone> = { live: 'live', armed: 'armed', nokey: 'nokey', fault: 'fault', off: 'off' };
@@ -186,22 +175,16 @@ export function ConnectorDrawer(p: Props) {
   };
   const tin = TEST_INPUT[p.role];
 
-  // ── Keyboard: Escape closes, Tab stays inside, and the page returns focus to the opener ──────────
+  // ── Keyboard: Escape closes and the page returns focus to the opener. The drawer is an inline,
+  // non-modal panel, so Tab moves on to the rest of the page instead of wrapping inside it. ───────
   const asideRef = useRef<HTMLElement>(null);
   const onKeyDown = (e: React.KeyboardEvent<HTMLElement>) => {
     const root = asideRef.current;
     // Events from the confirm dialogs (portalled) bubble through React: only handle keys from inside the drawer.
     if (!root || e.defaultPrevented || !(e.target instanceof Node) || !root.contains(e.target)) return;
-    if (e.key === 'Escape') { e.stopPropagation(); p.onClose(); return; }
-    if (e.key !== 'Tab') return;
-    const items = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(isTabbable);
-    if (items.length === 0) return;
-    const first = items[0]!;
-    const last = items[items.length - 1]!;
-    const active = document.activeElement;
-    if (e.shiftKey && (active === first || active === root)) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    if (e.key === 'Escape') { e.stopPropagation(); p.onClose(); }
   };
+  const needsModel = c.kind === 'builtin' && p.display.chip === 'Needs model';
 
   return (
     <aside ref={asideRef} tabIndex={-1} onKeyDown={onKeyDown} style={{ outline: 'none' }} className="panel drawer" aria-labelledby="drawer-title" data-tone={TONE[p.display.tone]}>
@@ -218,6 +201,18 @@ export function ConnectorDrawer(p: Props) {
       {p.display.tone === 'fault' && lastTest && !lastTest.ok && c.kind !== 'builtin' && (
         <div className="alert" role="alert" data-tone="fault" style={{ margin: '0 var(--space-4) var(--space-4)' }}>
           <div><strong>{shown?.text}.</strong> {shown?.advice ?? lastTest.message}</div>
+        </div>
+      )}
+
+      {needsModel && (
+        <div className="alert" role="status" data-tone="nokey" style={{ margin: '0 var(--space-4) var(--space-4)' }}>
+          <div style={{ flex: 1 }}>
+            <strong>The {ROLE_NOUN[p.role]} model is not downloaded.</strong>{' '}
+            {p.role === 'chat' ? 'The built-in AI has nothing to answer chat with until you download it.' : 'Its models download on their own; use Retry or Re-check below if that stalled.'}
+          </div>
+          {p.role === 'chat' && (
+            <button type="button" className="btn" style={{ height: 28 }} onClick={() => document.querySelector<HTMLElement>('.drawer [data-action="download-chat"]')?.click()}>Download chat model</button>
+          )}
         </div>
       )}
 
