@@ -12,12 +12,16 @@ import { makeStore } from './helpers';
 class FakeSidecar {
   state: SidecarStatus['state'] = 'stopped';
   hash: string | null = null;
+  routedHash: string | null = null;
+  specProvider: (() => SidecarSpec | null) | null = null;
   ensureCalls: SidecarSpec[] = [];
   failWith: Error | null = null;
   stopped = 0;
   private listeners = new Set<() => void>();
   isRuntimeAvailable() { return true; }
-  status(): SidecarStatus { return { state: this.state, port: 47600, pid: 1, restarts: 0, lastError: this.failWith?.message ?? null, configHash: this.hash }; }
+  status(): SidecarStatus { return { state: this.state, port: 47600, pid: 1, restarts: 0, lastError: this.failWith?.message ?? null, configHash: this.hash, routedHash: this.routedHash }; }
+  peek(): SidecarInfo | null { return this.state === 'ready' ? { baseUrl: 'http://127.0.0.1:47600', masterKey: 'sk-ark-master-1' } : null; }
+  setSpecProvider(fn: (() => SidecarSpec | null) | null) { this.specProvider = fn; }
   onChange(fn: () => void) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   reset() { this.failWith = null; }
   async stop() { this.stopped++; this.state = 'stopped'; this.hash = null; }
@@ -26,13 +30,14 @@ class FakeSidecar {
     if (this.failWith) throw this.failWith;
     this.state = 'ready';
     this.hash = spec.hash;
+    this.routedHash = spec.routedHash ?? null;
     return { baseUrl: 'http://127.0.0.1:47600', masterKey: 'sk-ark-master-1' };
   }
 }
 
 interface Req { url: string; body: any; auth: string | undefined }
 
-function makeRouter(opts: { policy?: Partial<ReturnType<ReturnType<typeof makeStore>['store']['policy']>>; respond?: (req: Req) => { status: number; body: unknown } | Error } = {}) {
+function makeRouter(opts: { policy?: Partial<ReturnType<ReturnType<typeof makeStore>['store']['policy']>>; respond?: (req: Req) => { status: number; body: unknown } | Error; background?: () => boolean; probe?: (role: string) => { ok: boolean; message: string; model: string } } = {}) {
   const t = makeStore();
   const sidecar = new FakeSidecar();
   const requests: Req[] = [];
@@ -53,7 +58,8 @@ function makeRouter(opts: { policy?: Partial<ReturnType<ReturnType<typeof makeSt
     now: () => (now += 5),
     setIntervalFn: (fn, ms) => { const h = { fn, ms, cleared: false }; intervals.push(h); return h; },
     clearIntervalFn: (h) => { (h as { cleared: boolean }).cleared = true; },
-    builtinProbe: async () => ({ ok: true, message: 'ready', model: 'snowflake-arctic-embed2' }),
+    builtinProbe: async (role) => (opts.probe ? opts.probe(role) : { ok: true, message: 'ready', model: 'snowflake-arctic-embed2' }),
+    isBackground: opts.background,
   });
   if (opts.policy) t.store.setPolicy({ ...t.store.policy(), ...opts.policy });
   return { ...t, router, sidecar, requests, fetchFn, intervals };
@@ -325,6 +331,8 @@ describe('scheduled re-check', () => {
     m.store.setKey('gemini', 'AIza-abcdefghijkl');
     m.store.recordTest('openai', { ok: true, at: 1, latencyMs: 1, role: 'chat', model: 'gpt-5', message: 'ok' });
     m.store.recordTest('anthropic', { ok: false, at: 1, latencyMs: 1, role: 'chat', model: 'm', message: 'bad' });
+    m.store.setRoute('chat', 'openai', 'gpt-5');
+    m.sidecar.state = 'ready';
     expect(await m.router.recheckArmed()).toEqual(['openai']);
   });
 
@@ -333,6 +341,8 @@ describe('scheduled re-check', () => {
     m.store.upsertConnector({ id: 'openai', kind: 'openai', name: 'OpenAI' });
     m.store.setKey('openai', 'sk-proj-abcdefghij');
     m.store.recordTest('openai', { ok: true, at: 1, latencyMs: 1, role: 'chat', model: 'gpt-5', message: 'ok' });
+    m.store.setRoute('chat', 'openai', 'gpt-5');
+    m.sidecar.state = 'ready';
     await m.router.recheckArmed();
     expect(m.store.view().connectors.find((c) => c.id === 'openai')!.state).toBe('fault');
     expect(m.router.status().fault?.message).toMatch(/OpenAI: Key rejected/);
@@ -357,13 +367,39 @@ describe('route changes reach the running sidecar', () => {
     const m = makeRouter({ respond: () => ({ status: 200, body: { choices: [] } }) });
     m.store.upsertConnector({ id: 'openai', kind: 'openai', name: 'OpenAI' });
     m.store.setKey('openai', 'sk-proj-abcdefghij');
-    await m.router.test('openai'); // starts the sidecar with a test alias
+    m.store.recordTest('openai', { ok: true, at: 1, latencyMs: 1, role: 'chat', model: 'gpt-5', message: 'ok' });
+    m.store.setRoute('chat', 'openai', 'gpt-5');
+    await m.router.test('openai'); // starts the sidecar
     const calls = m.sidecar.ensureCalls.length;
     m.store.setKey('openai', 'sk-proj-rotated-key-2');
     await vi.waitFor(() => expect(m.sidecar.ensureCalls.length).toBeGreaterThan(calls));
     expect(Object.values(m.sidecar.ensureCalls.at(-1)!.env)).toContain('sk-proj-rotated-key-2');
     m.store.removeConnector('openai');
     await vi.waitFor(() => expect(m.sidecar.stopped).toBe(1));
+  });
+
+  it('saving, editing or testing a connector that is not routed never restarts a running sidecar', async () => {
+    const m = makeRouter({ respond: () => ({ status: 200, body: { choices: [] } }) });
+    routeOpenAi(m, ['chat']);
+    await m.router.chatTarget(); // LiteLLM now serves chat
+    const calls = m.sidecar.ensureCalls.length;
+    m.store.upsertConnector({ id: 'gemini', kind: 'gemini', name: 'Gemini' });
+    m.store.setKey('gemini', 'AIza-abcdefghijklmnop');
+    m.store.upsertConnector({ id: 'gemini', kind: 'gemini', name: 'Gemini', baseUrl: 'https://gw.example.com/gemini' });
+    m.store.setTestModel('gemini', 'chat', 'gemini-2.5-pro');
+    m.store.setPolicy({ ...m.store.policy(), timeoutSec: 60, retries: 0 });
+    await Promise.resolve();
+    expect(m.sidecar.ensureCalls.length).toBe(calls);
+    expect(m.sidecar.stopped).toBe(0);
+  });
+
+  it('a change to a routed connector still restarts it', async () => {
+    const m = makeRouter({ respond: () => ({ status: 200, body: { choices: [] } }) });
+    routeOpenAi(m, ['chat']);
+    await m.router.chatTarget();
+    const calls = m.sidecar.ensureCalls.length;
+    m.store.setRoute('chat', 'compat-1', 'another-model');
+    await vi.waitFor(() => expect(m.sidecar.ensureCalls.length).toBeGreaterThan(calls));
   });
 
   it('the embedding identity callback fires when the embeddings model changes', () => {
@@ -384,5 +420,124 @@ describe('scrubMessage', () => {
     expect(scrubMessage('bad key sk-proj-abcdefghijklmnop here')).toBe('bad key *** here');
     expect(scrubMessage('Authorization: Bearer abcdefghijklmnopqrst')).not.toContain('abcdefghijklmnopqrst');
     expect(scrubMessage('x'.repeat(1000))).toHaveLength(300);
+  });
+});
+
+describe('scrubMessage shapes', () => {
+  it.each([
+    ['sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWx', 'sk-ant'],
+    ['request to https://x.example/v1?key=abcd1234efgh5678&alt=json failed', 'abcd1234efgh5678'],
+    ['{"api-key": "0123456789abcdef0123456789abcdef"}', '0123456789abcdef0123456789abcdef'],
+    ['api_key: "zzzzyyyyxxxxwwww"', 'zzzzyyyyxxxxwwww'],
+    ['token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk', 'eyJhbGciOiJIUzI1NiJ9'],
+    ['ghp_abcdefghijklmnopqrstuvwxyz0123', 'ghp_abcdef'],
+    ['Authorization: Bearer abc.def-ghi_jkl=', 'abc.def-ghi_jkl'],
+  ])('masks %s', (text, secret) => {
+    expect(scrubMessage(text)).not.toContain(secret);
+  });
+
+  it('leaves ordinary error text alone', () => {
+    expect(scrubMessage('The model gemma3 was not found (HTTP 404)')).toBe('The model gemma3 was not found (HTTP 404)');
+  });
+});
+
+describe('one retry layer', () => {
+  it('LiteLLM never retries on its own, so a failing request is attempted exactly the policy count', async () => {
+    const m = makeRouter({ policy: { retries: 2, onFail: 'retry-once', timeoutSec: 60 }, respond: () => ({ status: 503, body: { error: 'down' } }) });
+    routeOpenAi(m, ['embeddings']);
+    await m.router.embed(['a'], async () => ({ embeddings: [[1]], error: null }));
+    expect(m.requests).toHaveLength(1 + 2 + 1);
+    const cfg = m.sidecar.ensureCalls.at(-1)!.config as { model_list: Array<{ litellm_params: { num_retries: number } }> };
+    expect(cfg.model_list.length).toBeGreaterThan(0);
+    for (const e of cfg.model_list) expect(e.litellm_params.num_retries).toBe(0);
+  });
+
+  it('the retries of one request stop at a deadline of two timeouts', async () => {
+    const t = makeStore();
+    const sidecar = new FakeSidecar();
+    let clock = 0;
+    let calls = 0;
+    const router = new AiRouter({
+      store: t.store,
+      sidecar: sidecar as unknown as LitellmSidecar,
+      now: () => clock,
+      fetchFn: (async () => { calls++; clock += 61_000; return { status: 503, text: async () => '{}' } as unknown as Response; }) as never,
+    });
+    t.store.upsertConnector({ id: '', kind: 'openai-compatible', name: 'Server', baseUrl: 'http://127.0.0.1:1234/v1', roles: ['embeddings'] });
+    t.store.setRoute('embeddings', 'compat-1', 'nomic', { force: true });
+    t.store.setPolicy({ ...t.store.policy(), retries: 2, onFail: 'retry-once', timeoutSec: 60 });
+    await router.embed(['a'], async () => ({ embeddings: [[1]], error: null }));
+    expect(calls).toBe(2);
+  });
+});
+
+describe('scheduled re-check stays quiet', () => {
+  function routedAndReady(m: Made) {
+    routeOpenAi(m, ['chat']);
+    m.sidecar.state = 'ready';
+  }
+
+  it('does not run while Ark is in the tray, unfocused or a game runs', async () => {
+    let background = true;
+    const m = makeRouter({ background: () => background, respond: () => ({ status: 200, body: {} }) });
+    routedAndReady(m);
+    expect(await m.router.recheckArmed()).toEqual([]);
+    expect(m.requests).toHaveLength(0);
+    background = false;
+    expect(await m.router.recheckArmed()).toEqual(['compat-1']);
+  });
+
+  it('never starts the sidecar', async () => {
+    const m = makeRouter({ respond: () => ({ status: 200, body: {} }) });
+    routeOpenAi(m, ['chat']);
+    expect(m.sidecar.state).toBe('stopped');
+    expect(await m.router.recheckArmed()).toEqual([]);
+    expect(m.sidecar.ensureCalls).toHaveLength(0);
+    expect(m.requests).toHaveLength(0);
+  });
+
+  it('spends no request on a connector nobody is routed to, and goes through the route alias', async () => {
+    const m = makeRouter({ respond: () => ({ status: 200, body: {} }) });
+    routeOpenAi(m, ['chat']);
+    await m.router.chatTarget();
+    const started = m.sidecar.ensureCalls.length;
+    m.store.upsertConnector({ id: 'openai', kind: 'openai', name: 'OpenAI' });
+    m.store.setKey('openai', 'sk-proj-abcdefghij');
+    m.store.recordTest('openai', { ok: true, at: 1, latencyMs: 1, role: 'chat', model: 'gpt-5', message: 'ok' });
+    expect(await m.router.recheckArmed()).toEqual(['compat-1']);
+    expect(m.requests).toHaveLength(1);
+    expect(m.requests[0]!.body.model).toBe('ark-chat');
+    expect(m.sidecar.ensureCalls).toHaveLength(started);
+  });
+});
+
+describe('built-in connector Test', () => {
+  it('checks every role, so a missing reranker model is not hidden behind a ready chat model', async () => {
+    const m = makeRouter({
+      probe: (role) => role === 'reranker'
+        ? { ok: false, message: 'The built-in reranker model (bge) is not downloaded yet.', model: 'bge' }
+        : { ok: true, message: 'ready', model: 'm' },
+    });
+    const r = await m.router.test('builtin');
+    expect(r.ok).toBe(false);
+    expect(r.role).toBe('reranker');
+    expect(r.message).toMatch(/reranker model/);
+  });
+
+  it('is ok only when every role is ready', async () => {
+    const m = makeRouter();
+    expect((await m.router.test('builtin')).ok).toBe(true);
+  });
+});
+
+describe('the sidecar gets a fresh config for restarts', () => {
+  it('registers a spec provider that rebuilds from the store and returns null when nothing is routed', () => {
+    const m = makeRouter();
+    expect(m.sidecar.specProvider).toBeTypeOf('function');
+    expect(m.sidecar.specProvider!()).toBeNull();
+    routeOpenAi(m, ['chat']);
+    const spec = m.sidecar.specProvider!()!;
+    expect(spec.config).toBeTruthy();
+    expect(spec.routedHash).toBeTruthy();
   });
 });

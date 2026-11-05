@@ -9,18 +9,30 @@
  */
 import { createRequire } from 'node:module';
 import { logger } from '../safe-logger.js';
+import { isMainAppFrame, type MainWindowLike, type SenderEventLike } from './sender-guard.js';
 import { getAiRouter } from '../ai-router/service.js';
 import type { AiRouter } from '../ai-router/router.js';
 import {
   failed, isAiRole, validateModelName, validateConnectorInput, validateKeyInput, validatePolicyInput, validateRouteInput, isConnectorId,
-  BUILTIN_CONNECTOR_ID, type AiRole, type ConnectorTestResult,
+  BUILTIN_CONNECTOR_ID, isBlockedHost, type AiRole, type ConnectorTestResult,
 } from '../ai-router/types.js';
 
 const require = createRequire(import.meta.url);
 
 type Result<T = object> = ({ success: true } & T) | { success: false; error: string };
 
-type FetchLike = (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+type FetchLike = (url: string, init: { headers: Record<string, string>; signal: AbortSignal; redirect: 'manual' }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+/** The address a stored connector would be asked, or null when it points somewhere Ark does not connect to. */
+function safeServerUrl(base: string, path: string): string | null {
+  try {
+    const u = new URL(`${base}${path}`);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return isBlockedHost(u.hostname) ? null : u.toString();
+  } catch {
+    return null;
+  }
+}
 
 /** Models a server reports about itself. Anything that does not look like a model name is left out. */
 export function parseServedModels(kind: 'ollama' | 'openai-compatible', body: unknown): string[] {
@@ -53,13 +65,17 @@ export class AiRouterController {
     const c = store.connector(id);
     if (!c) return { success: false, error: 'Unknown connector.' };
     if ((c.kind !== 'ollama' && c.kind !== 'openai-compatible') || !c.baseUrl) return { success: false, error: 'This connector has no server to ask.' };
+    const url = safeServerUrl(c.baseUrl, c.kind === 'ollama' ? '/api/tags' : '/models');
+    if (!url) return { success: false, error: 'Ark does not connect to that address.' };
     const headers: Record<string, string> = { Accept: 'application/json' };
     const key = c.kind === 'openai-compatible' ? store.getKey(c.id) : null;
     if (key) headers.Authorization = `Bearer ${key}`;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 8000);
     try {
-      const res = await this.fetchImpl(c.kind === 'ollama' ? `${c.baseUrl}/api/tags` : `${c.baseUrl}/models`, { headers, signal: ctl.signal });
+      // A redirect is never followed: it could carry the key (or the request) to a host that was not checked.
+      const res = await this.fetchImpl(url, { headers, signal: ctl.signal, redirect: 'manual' });
+      if (res.status >= 300 && res.status < 400) return { success: false, error: 'The server redirected the request. Enter its final address instead.' };
       if (!res.ok) return { success: false, error: `The server answered ${res.status}.` };
       const models = parseServedModels(c.kind, await res.json());
       return models.length > 0 ? { success: true, models } : { success: false, error: 'The server did not list any models.' };
@@ -110,7 +126,9 @@ export class AiRouterController {
   clearKey(id: unknown): Result {
     if (!isConnectorId(id) || id === BUILTIN_CONNECTOR_ID) return { success: false, error: 'Unknown connector.' };
     try {
-      this.router().store.clearKey(id);
+      const store = this.router().store;
+      if (!store.connector(id)) return { success: false, error: 'Unknown connector.' };
+      store.clearKey(id);
       return { success: true };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Could not remove the key.' };
@@ -170,7 +188,12 @@ export function register(
   controller: AiRouterController = new AiRouterController(getAiRouter),
 ): void {
   const { ipcMain } = require('electron') as typeof import('electron');
-  const wrap = <T>(name: string, fn: (...args: any[]) => Promise<T> | T) => async (_event: unknown, ...args: any[]) => {
+  // Privileged channels answer only the app's own top frame; a frame embedded in the window gets a refusal.
+  const wrap = <T>(name: string, fn: (...args: any[]) => Promise<T> | T, opts: { open?: boolean } = {}) => async (event: unknown, ...args: any[]) => {
+    if (!opts.open && !isMainAppFrame(event as SenderEventLike, getMainWindow() as unknown as MainWindowLike | null)) {
+      logger.warn(`[AI Router] ${name} refused: not called from the main app frame`);
+      throw new Error('Not allowed from this page.');
+    }
     try {
       return await fn(...args);
     } catch (err) {
@@ -179,7 +202,7 @@ export function register(
     }
   };
   ipcMain.handle('aiRouter:fetchModels', wrap('fetchModels', (id: unknown) => controller.fetchModels(id)));
-  ipcMain.handle('aiRouter:getState', wrap('getState', () => controller.getState()));
+  ipcMain.handle('aiRouter:getState', wrap('getState', () => controller.getState(), { open: true }));
   ipcMain.handle('aiRouter:saveConnector', wrap('saveConnector', (input: unknown) => controller.saveConnector(input)));
   ipcMain.handle('aiRouter:removeConnector', wrap('removeConnector', (id: unknown) => controller.removeConnector(id)));
   ipcMain.handle('aiRouter:setKey', wrap('setKey', (input: unknown) => controller.setKey(input)));

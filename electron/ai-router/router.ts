@@ -18,9 +18,10 @@ import {
   AI_ROLES, BUILTIN_CONNECTOR_ID, ROLE_ALIAS, connectorServes, testAlias,
   type AiRole, type Connector, type ConnectorTestResult, type Routes,
 } from './types.js';
+import { scrubSecrets } from '../secret-scrub.js';
 import { buildLitellmConfig, testTarget, type BuiltConfig } from './litellm-config.js';
 import type { RouterStore, RouterStateView } from './connectors.js';
-import type { LitellmSidecar, SidecarInfo, SidecarStatus } from '../litellm-sidecar.js';
+import type { LitellmSidecar, SidecarInfo, SidecarSpec, SidecarStatus } from '../litellm-sidecar.js';
 
 export type RouterErrorCode = 'router_down' | 'not_configured' | 'http' | 'timeout' | 'network' | 'parse';
 
@@ -81,6 +82,8 @@ export interface AiRouterDeps {
   builtinProbe?: (role: AiRole) => Promise<{ ok: boolean; message: string; model: string }>;
   /** Called when the identity of the embedding model changes (the ANN index tag follows it). */
   onEmbeddingIdentity?: (identity: string) => void;
+  /** True while Ark is in the tray, minimised, unfocused or a game runs: the scheduled re-check then waits. */
+  isBackground?: () => boolean;
 }
 
 const EMBED_PER_TEXT_MS = 100;
@@ -97,9 +100,7 @@ function messageOf(text: string, status: number): string {
 
 /** Keep a provider's error text short and free of anything key-shaped before it reaches the UI or a log. */
 export function scrubMessage(msg: string): string {
-  return msg
-    .replace(/\b(sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{16,})\b/g, '***')
-    .replace(/(api[-_ ]?key|authorization|bearer)\s*[:=]?\s*[A-Za-z0-9._-]{12,}/gi, '$1 ***')
+  return scrubSecrets(msg)
     .replace(/\s+/g, ' ')
     .slice(0, 300);
 }
@@ -122,6 +123,11 @@ export class AiRouter {
     this.lastIdentity = deps.store.embeddingIdentity();
     deps.store.onChange(() => this.onStoreChange());
     deps.sidecar.onChange(() => this.emit());
+    // A restart after a crash rebuilds the config from the store as it is now (never from an old request).
+    deps.sidecar.setSpecProvider?.(() => {
+      const built = this.build();
+      return built.config.model_list.length === 0 ? null : this.specOf(built);
+    });
   }
 
   get store(): RouterStore { return this.deps.store; }
@@ -187,11 +193,18 @@ export class AiRouter {
     });
   }
 
-  /** The sidecar running the current config; errors become a RouterError with a message fit for the UI. */
-  async endpoint(): Promise<SidecarInfo> {
+  private specOf(built: BuiltConfig, exact = false): SidecarSpec {
+    return { config: built.config, env: built.env, hash: built.hash, routedHash: built.routedHash, exact };
+  }
+
+  /**
+   * The sidecar serving the routed roles; errors become a RouterError with a message fit for the UI.
+   * `exact` (connection tests) additionally needs the test alias of every connector in the running config.
+   */
+  async endpoint(opts: { exact?: boolean } = {}): Promise<SidecarInfo> {
     const built = this.build();
     try {
-      return await this.deps.sidecar.ensure({ config: built.config, env: built.env, hash: built.hash });
+      return await this.deps.sidecar.ensure(this.specOf(built, opts.exact === true));
     } catch (err) {
       const msg = scrubMessage(err instanceof Error ? err.message : String(err));
       throw new RouterError(`The AI router is not running: ${msg}`, 'router_down');
@@ -211,8 +224,10 @@ export class AiRouter {
     if (st === 'ready') {
       const built = this.build();
       if (built.config.model_list.length === 0) void this.deps.sidecar.stop();
-      else if (built.hash !== this.deps.sidecar.status().configHash) {
-        void this.deps.sidecar.ensure({ config: built.config, env: built.env, hash: built.hash }).catch((e) => {
+      else if (built.routedHash !== this.deps.sidecar.status().routedHash) {
+        // Only a change that a routed role depends on restarts LiteLLM. Saving a key, an address or a
+        // test model of a connector nobody is routed to leaves the running process (and its requests) alone.
+        void this.deps.sidecar.ensure(this.specOf(built)).catch((e) => {
           this.noteFault('chat', `Restart after a settings change failed: ${e instanceof Error ? e.message : String(e)}`);
         });
       }
@@ -247,10 +262,17 @@ export class AiRouter {
 
   // ── Embeddings and reranking ──────────────────────────────────────────────────────────────
 
+  /**
+   * Attempts per request. This loop is the only retry layer (LiteLLM's own `num_retries` is 0), so a
+   * failing request costs `attempts` upstream calls, not `attempts x LiteLLM's retries`.
+   */
   private attempts(): number {
     const p = this.deps.store.policy();
     return 1 + p.retries + (p.onFail === 'retry-once' ? 1 : 0);
   }
+
+  /** The whole request, retries included, never waits longer than two timeouts. */
+  private static readonly DEADLINE_TIMEOUTS = 2;
 
   /** One POST to the sidecar with the policy's timeout. Never throws: returns the failure. */
   private async post(
@@ -308,8 +330,11 @@ export class AiRouter {
     const timeoutMs = policy.timeoutSec * 1000 + texts.length * EMBED_PER_TEXT_MS;
     const nulls = () => texts.map(() => null);
     let failure: NonNullable<EmbedOutcome['error']> = { kind: 'network', message: 'No attempt was made' };
+    const deadline = this.now() + timeoutMs * AiRouter.DEADLINE_TIMEOUTS;
     for (let i = 0; i < this.attempts(); i++) {
-      const res = await this.post('/v1/embeddings', { model: r.alias, input: texts, encoding_format: 'float' }, timeoutMs);
+      const left = deadline - this.now();
+      if (i > 0 && left <= 0) break;
+      const res = await this.post('/v1/embeddings', { model: r.alias, input: texts, encoding_format: 'float' }, i === 0 ? timeoutMs : Math.min(timeoutMs, left));
       if (res.kind !== 'ok') {
         failure = { kind: res.kind === 'timeout' ? 'timeout' : 'network', message: res.message };
         if (res.kind === 'router_down') break; // no point retrying a sidecar that did not start
@@ -360,8 +385,11 @@ export class AiRouter {
     const policy = this.deps.store.policy();
     const timeoutMs = Math.min(opts?.timeoutMs ?? policy.timeoutSec * 1000, policy.timeoutSec * 1000 * 3);
     let failure: RerankOutcome = { rows: null, code: 'network_error', message: 'No attempt was made' };
+    const deadline = this.now() + timeoutMs * AiRouter.DEADLINE_TIMEOUTS;
     for (let i = 0; i < this.attempts(); i++) {
-      const res = await this.post('/v1/rerank', { model: r.alias, query, documents, top_n: documents.length }, timeoutMs, opts?.signal);
+      const left = deadline - this.now();
+      if (i > 0 && left <= 0) break;
+      const res = await this.post('/v1/rerank', { model: r.alias, query, documents, top_n: documents.length }, i === 0 ? timeoutMs : Math.min(timeoutMs, left), opts?.signal);
       if (res.kind !== 'ok') {
         if (res.kind === 'cancelled') return { rows: null, code: 'cancelled', message: 'Cancelled by the renderer' };
         failure = { rows: null, code: res.kind === 'timeout' ? 'timeout' : res.kind === 'router_down' ? 'router_down' : 'network_error', message: res.message };
@@ -405,7 +433,7 @@ export class AiRouter {
     return p;
   }
 
-  private async runTest(connectorId: string): Promise<ConnectorTestResult> {
+  private async runTest(connectorId: string, opts: { routedRole?: AiRole } = {}): Promise<ConnectorTestResult> {
     const store = this.deps.store;
     const c = store.connector(connectorId);
     const t0 = this.now();
@@ -421,25 +449,39 @@ export class AiRouter {
     if (c.kind === 'builtin') {
       const probe = this.deps.builtinProbe;
       if (!probe) return done({ ok: true, message: 'The built-in runtime starts on demand.' });
-      const role = AI_ROLES[0]!;
-      const out = await probe(role).catch((e: unknown) => ({ ok: false, message: e instanceof Error ? e.message : String(e), model: '' }));
-      return done({ ok: out.ok, message: out.message, role, model: out.model });
+      // Every role is checked, so a missing embedding or reranker model is not hidden behind a ready chat one (or the reverse).
+      const outs: Array<{ role: AiRole; ok: boolean; message: string; model: string }> = [];
+      for (const role of AI_ROLES) {
+        const out = await probe(role).catch((e: unknown) => ({ ok: false, message: e instanceof Error ? e.message : String(e), model: '' }));
+        outs.push({ role, ...out });
+      }
+      const bad = outs.filter((o) => !o.ok);
+      if (bad.length === 0) return done({ ok: true, message: outs[0]!.message, role: outs[0]!.role, model: outs[0]!.model });
+      const message = [...new Set(bad.map((o) => o.message))].join(' ');
+      return done({ ok: false, message, role: bad[0]!.role, model: bad[0]!.model });
     }
     const routes: Routes = store.routes();
-    const target = testTarget(c, routes);
+    // A scheduled re-check goes through the route itself (already in the running config), so it needs no restart.
+    const target = opts.routedRole ? { role: opts.routedRole, model: routes[opts.routedRole].model } : testTarget(c, routes);
     if (!target) return done({ ok: false, message: 'Pick a model first: this connector has no default.' });
     const built = this.build();
-    if (!built.config.model_list.some((m) => m.model_name === testAlias(c.id))) {
+    const alias = opts.routedRole ? ROLE_ALIAS[opts.routedRole] : testAlias(c.id);
+    if (!built.config.model_list.some((m) => m.model_name === alias)) {
       return done({ ok: false, ...target, message: c.test || store.hasKey(c.id) ? 'The connector is not fully configured.' : 'No key saved.' });
     }
     const timeoutMs = store.policy().timeoutSec * 1000;
     let info: SidecarInfo;
     try {
-      info = await this.endpoint();
+      if (opts.routedRole) {
+        const running = this.deps.sidecar.peek();
+        if (!running) return done({ ok: false, ...target, message: 'The AI router is not running.' });
+        info = running;
+      } else {
+        info = await this.endpoint({ exact: true });
+      }
     } catch (err) {
       return done({ ok: false, ...target, message: err instanceof Error ? err.message : String(err) });
     }
-    const alias = testAlias(c.id);
     const { path, body } = target.role === 'chat'
       ? { path: '/v1/chat/completions', body: { model: alias, messages: [{ role: 'user', content: 'Reply with the single word OK.' }], max_tokens: 16 } }
       : target.role === 'embeddings'
@@ -490,12 +532,22 @@ export class AiRouter {
     this.timer = set(() => { void this.recheckArmed(); }, ms);
   }
 
-  /** One scheduled pass: re-test the connectors that are armed (tested ok, configured), nothing else. */
+  /**
+   * One scheduled pass: re-test the connectors that are armed AND routed, through the route's own alias
+   * on the sidecar that is already running. It never starts LiteLLM, never touches a connector nobody is
+   * routed to (no paid request for it), and waits while Ark is in the tray, unfocused or a game runs.
+   */
   async recheckArmed(): Promise<string[]> {
     const tested: string[] = [];
+    if (this.deps.isBackground?.()) return tested;
+    if (!this.deps.sidecar.peek()) return tested;
+    const routes = this.deps.store.routes();
     for (const c of this.deps.store.connectors()) {
       if (!this.deps.store.isArmed(c)) continue;
-      const res = await this.test(c.id);
+      const role = AI_ROLES.find((r) => routes[r].connectorId === c.id && connectorServes(c, r));
+      if (!role) continue;
+      if (this.deps.isBackground?.() || !this.deps.sidecar.peek()) break;
+      const res = await this.runTest(c.id, { routedRole: role });
       tested.push(c.id);
       if (!res.ok) this.noteFault(res.role, `${c.name}: ${res.message}`);
     }

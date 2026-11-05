@@ -60,6 +60,8 @@ export function isUserInputEvent(input: { type?: string } | null | undefined): b
 interface GuardableSession {
   on(event: 'will-download', listener: (event: { preventDefault(): void }, item: any) => void): unknown;
   setPermissionRequestHandler(handler: (wc: unknown, permission: string, callback: (granted: boolean) => void) => void): void;
+  /** Synchronous checks (`navigator.permissions.query`, device enumeration) bypass the request handler. */
+  setPermissionCheckHandler?(handler: (wc: unknown, permission: string) => boolean): void;
 }
 
 /**
@@ -79,4 +81,7 @@ export function installDecodeBaySessionGuards(fromPartition: (partition: string)
     logger.warn(`[Webview] Denied permission request in Decode Bay: ${permission}`);
     callback(false);
   });
+  // Without a check handler, Chromium answers permission *checks* from its defaults and some
+  // capabilities (for example device enumeration) work without ever asking. Refuse them all.
+  ses.setPermissionCheckHandler?.(() => false);
 }

@@ -35,8 +35,14 @@ export interface BuiltConfig {
   env: Record<string, string>;
   /** Roles that go through LiteLLM (the others are served by the built-in runtime directly). */
   routedRoles: AiRole[];
-  /** Changes whenever the config or any key changes; the sidecar restarts when it does. */
+  /** Changes whenever the config or any key changes (test aliases included). Tests need a sidecar with exactly this. */
   hash: string;
+  /**
+   * Changes only when something a routed role depends on changes: the routed entries and their keys.
+   * Edits to a connector that is not routed (its key, address, test model) leave it alone, so they
+   * never restart LiteLLM under a running request.
+   */
+  routedHash: string;
 }
 
 export interface BuildInput {
@@ -60,8 +66,17 @@ export function testTarget(c: Connector, routes: Routes): { role: AiRole; model:
   return null;
 }
 
-function litellmParams(c: Connector, role: AiRole, model: string, keyRef: string | null, policy: RoutePolicy): Record<string, string | number | boolean> | null {
-  const base: Record<string, string | number | boolean> = { timeout: policy.timeoutSec, num_retries: policy.retries };
+/** Longest request timeout the policy offers (60 s); LiteLLM never cuts a request short before the client does. */
+export const LITELLM_TIMEOUT_CEILING_SEC = 60;
+
+/** LiteLLM resolves any param that starts with this to an environment variable; only generated key references may. */
+const ENV_REF = /^\s*os\.environ\//i;
+
+function litellmParams(c: Connector, role: AiRole, model: string, keyRef: string | null): Record<string, string | number | boolean> | null {
+  // One layer retries: the router's client loop. LiteLLM's own retries would multiply with it, and
+  // its timeout is the ceiling the client's (shorter, policy-driven) timeout always aborts before, so
+  // changing the policy never needs a LiteLLM restart.
+  const base: Record<string, string | number | boolean> = { timeout: LITELLM_TIMEOUT_CEILING_SEC, num_retries: 0 };
   const withKey = (extra: Record<string, string | number | boolean>) => ({ ...base, ...extra, ...(keyRef ? { api_key: keyRef } : {}) });
   switch (c.kind) {
     case 'ollama':
@@ -85,6 +100,12 @@ function litellmParams(c: Connector, role: AiRole, model: string, keyRef: string
     default:
       return null;
   }
+}
+
+/** True when a user-influenced value would be read by LiteLLM as an environment reference (the generated key reference is the only legitimate one). */
+function carriesEnvReference(params: Record<string, string | number | boolean>): boolean {
+  return Object.entries(params).some(([k, v]) => k !== 'api_key' && typeof v === 'string' && ENV_REF.test(v))
+    || (typeof params.api_key === 'string' && ENV_REF.test(params.api_key) && !/^os\.environ\/ARK_KEY_\d+$/.test(params.api_key));
 }
 
 export function buildLitellmConfig(input: BuildInput): BuiltConfig {
@@ -112,8 +133,8 @@ export function buildLitellmConfig(input: BuildInput): BuiltConfig {
     if (!c || c.kind === 'builtin' || c.id === BUILTIN_CONNECTOR_ID || !connectorServes(c, role)) continue;
     const keyRef = refFor(c.id);
     if (KIND_NEEDS_KEY[c.kind] && !keyRef) continue;
-    const params = litellmParams(c, role, route.model, keyRef, input.policy);
-    if (!params) continue;
+    const params = litellmParams(c, role, route.model, keyRef);
+    if (!params || carriesEnvReference(params)) continue;
     model_list.push({ model_name: ROLE_ALIAS[role], litellm_params: params });
     routedRoles.push(role);
   }
@@ -124,17 +145,32 @@ export function buildLitellmConfig(input: BuildInput): BuiltConfig {
     if (!target) continue;
     const keyRef = refFor(c.id);
     if (KIND_NEEDS_KEY[c.kind] && !keyRef) continue;
-    const params = litellmParams(c, target.role, target.model, keyRef, { ...input.policy, retries: 0 });
-    if (params) model_list.push({ model_name: testAlias(c.id), litellm_params: params });
+    const params = litellmParams(c, target.role, target.model, keyRef);
+    if (params && !carriesEnvReference(params)) model_list.push({ model_name: testAlias(c.id), litellm_params: params });
   }
+  const routedCount = routedRoles.length;
 
   const config: LitellmConfig = {
     model_list,
     general_settings: { master_key: 'os.environ/LITELLM_MASTER_KEY' },
     litellm_settings: { drop_params: true, telemetry: false, set_verbose: false },
   };
-  const h = createHash('sha256');
-  h.update(JSON.stringify(config));
-  for (const name of Object.keys(env).sort()) h.update(`\n${name}=${createHash('sha256').update(env[name]!).digest('hex')}`);
-  return { config, env, routedRoles, hash: h.digest('hex') };
+  const digest = (entries: LitellmModelEntry[], onlyReferenced: boolean): string => {
+    const h = createHash('sha256');
+    h.update(JSON.stringify({ ...config, model_list: entries }));
+    const used = new Set<string>();
+    for (const e of entries) {
+      const ref = e.litellm_params.api_key;
+      if (typeof ref === 'string' && ref.startsWith('os.environ/')) used.add(ref.slice('os.environ/'.length));
+    }
+    for (const name of Object.keys(env).sort()) {
+      if (!onlyReferenced || used.has(name)) h.update(`\n${name}=${createHash('sha256').update(env[name]!).digest('hex')}`);
+    }
+    return h.digest('hex');
+  };
+  return {
+    config, env, routedRoles,
+    hash: digest(model_list, false),
+    routedHash: digest(model_list.slice(0, routedCount), true),
+  };
 }

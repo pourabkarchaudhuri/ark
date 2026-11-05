@@ -139,7 +139,41 @@ export function validateModelName(v: unknown): Validated<string> {
   return { ok: true, value: t };
 }
 
-/** An http(s) address without embedded credentials or a query, trailing slashes removed. */
+function ipv4Octets(host: string): number[] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return null;
+  const o = m.slice(1).map(Number);
+  return o.every((n) => n <= 255) ? o : null;
+}
+
+/** Hosts a connector must never talk to: link-local addresses and the cloud metadata services. */
+export function isBlockedHost(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!h) return true;
+  const v4 = ipv4Octets(h);
+  if (v4) return (v4[0] === 169 && v4[1] === 254) || h === '100.100.100.200' || h === '168.63.129.16' || h === '0.0.0.0';
+  if (h.startsWith('::ffff:')) return isBlockedHost(h.slice(7));
+  if (h.includes(':')) return /^fe[89ab][0-9a-f]:/.test(h) || h === '::' || h.startsWith('fd00:ec2:');
+  return h === 'metadata.google.internal' || h === 'metadata' || h === 'instance-data';
+}
+
+/** Loopback, private-LAN and single-label hosts: places where plain http is acceptable. */
+export function isLocalNetworkHost(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.lan')) return true;
+  const v4 = ipv4Octets(h);
+  if (v4) {
+    return v4[0] === 127 || v4[0] === 10 || (v4[0] === 172 && v4[1]! >= 16 && v4[1]! <= 31) || (v4[0] === 192 && v4[1] === 168);
+  }
+  if (h.includes(':')) return h === '::1' || /^f[cd][0-9a-f]{2}:/.test(h);
+  return !h.includes('.'); // a bare machine name on the user's own network
+}
+
+/**
+ * An http(s) address without embedded credentials or a query, trailing slashes removed. Plain http is
+ * accepted only for this PC and the user's own network, so a key never crosses the internet in clear
+ * text; link-local and cloud-metadata hosts are refused outright.
+ */
 export function validateHttpUrl(v: unknown, label: string): Validated<string> {
   if (typeof v !== 'string' || !v.trim() || v.length > 500) return { ok: false, error: `${label} is required.` };
   let u: URL;
@@ -147,7 +181,15 @@ export function validateHttpUrl(v: unknown, label: string): Validated<string> {
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return { ok: false, error: `${label} must start with http:// or https://.` };
   if (u.username || u.password) return { ok: false, error: `${label} must not contain a user name or password.` };
   if (u.search || u.hash) return { ok: false, error: `${label} must not have a query or fragment.` };
+  if (isBlockedHost(u.hostname)) return { ok: false, error: `${label} points at an address Ark does not connect to.` };
+  if (u.protocol === 'http:' && !isLocalNetworkHost(u.hostname)) return { ok: false, error: `${label} must use https:// unless the server is on this PC or your own network.` };
   return { ok: true, value: `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, '')}` };
+}
+
+/** Scheme, host and port of an address (what a stored key is bound to), or null when it is not a URL. */
+export function originOf(address: string | undefined): string | null {
+  if (!address) return null;
+  try { return new URL(address).origin.toLowerCase(); } catch { return null; }
 }
 
 /** The fixed id for every kind except OpenAI-compatible servers, which get one per entry. */

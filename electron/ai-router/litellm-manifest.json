@@ -13,7 +13,7 @@
   },
   "launcher": {
     "file": "ark_litellm.py",
-    "sha256": "931ac4a12df77388147966930c3d222845e572afff97a5e9b013cdf61cdee27d"
+    "sha256": "c5b0df60d59f7bc071319f7ded110a42d1ba695c8ac663ca8973cd508166730f"
   },
   "python": {
     "minor": "3.12",

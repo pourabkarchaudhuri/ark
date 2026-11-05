@@ -40,6 +40,15 @@ def main(argv=None):
         except Exception:
             pass
 
+    # Trust the Windows certificate store (corporate TLS inspection roots, user-installed CAs) instead of
+    # only the bundled certifi list. Best effort: without truststore the SSL_CERT_FILE Ark forwards still works.
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except Exception:
+        pass
+
     from litellm.proxy.proxy_cli import run_server
 
     sys.argv = ["litellm", "--config", args.config, "--host", args.host, "--port", str(args.port), "--num_workers", "1"]

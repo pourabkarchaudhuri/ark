@@ -137,10 +137,11 @@ import {
   applyInitialWindowBackground,
   setEmbeddingHiddenStart,
   setEmbeddingGameRunning,
+  isEmbeddingBackground,
 } from './ipc/ollama-handlers.js';
 import { unloadArkModels } from './ollama-setup.js';
 import { shutdownLocalAi } from './local-ai/service.js';
-import { initAiRouter, shutdownAiRouter } from './ai-router/service.js';
+import { initAiRouter, shutdownAiRouter, setAiRouterBackgroundProbe } from './ai-router/service.js';
 import { setGameActivityListener } from './game-activity.js';
 import { atomicWriteFileSync } from './safe-write.js';
 import { attachNavigationGuards, devFlagArgs, isExternalOpenable, shouldUseDevServer } from './navigation-guard.js';
@@ -150,6 +151,8 @@ import { DECODE_BAY_PARTITION } from './webview-policy.js';
 // embed/rerank work and frees Ark's Ollama models; the game ending restores
 // the window-derived state.
 setGameActivityListener(setEmbeddingGameRunning);
+// The scheduled AI-router re-check waits while Ark is in the tray, unfocused or a game runs.
+setAiRouterBackgroundProbe(isEmbeddingBackground);
 let mainWindow: BrowserWindowType | null = null;
 /** Crash-breaker state of the current main window (see renderer-recovery.ts). */
 let rendererRecovery: RendererRecoveryState = { isRendererDead: () => false };

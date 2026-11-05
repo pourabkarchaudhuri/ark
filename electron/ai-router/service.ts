@@ -23,6 +23,7 @@ import { RouterStore, type LegacyKeys, type LegacySlot, type RouterStoreIo } fro
 import { AiRouter, type ResolvedRoute } from './router.js';
 import { applyLegacyChatProvider, syncAzureConnector, type LegacyProvider } from './legacy-sync.js';
 import type { AiRole } from './types.js';
+import { resolveSessionProxyEnv } from './proxy-env.js';
 
 const require = createRequire(import.meta.url);
 
@@ -89,15 +90,22 @@ export interface AiRouterService {
 
 let _service: AiRouterService | null = null;
 
-/** What the built-in connector's "Test" checks for a role: runtime present and the model on disk. */
+/** What the built-in connector's "Test" checks for a role: runtime present and that role's model on disk. */
 async function builtinProbe(role: AiRole): Promise<{ ok: boolean; message: string; model: string }> {
   const backend = getBuiltinBackend();
-  const model = getModelForRole(role === 'chat' ? 'chat' : role === 'embeddings' ? 'embed' : 'rerank')?.id ?? '';
+  const kind = role === 'chat' ? 'chat' : role === 'embeddings' ? 'embed' : 'rerank';
+  const model = getModelForRole(kind)?.id ?? '';
   if (!backend.health().running) return { ok: false, message: 'The built-in runtime is missing from this install.', model };
-  const ready = backend.isModelReady('embed');
-  return ready
+  const label = role === 'chat' ? 'chat' : role === 'embeddings' ? 'embedding' : 'reranker';
+  return backend.isModelReady(kind)
     ? { ok: true, message: 'The built-in runtime and its models are ready.', model }
-    : { ok: false, message: 'The built-in models are not downloaded yet.', model };
+    : { ok: false, message: `The built-in ${label} model${model ? ` (${model})` : ''} is not downloaded yet.`, model };
+}
+
+/** True while Ark is in the tray, unfocused or a game runs; main.ts supplies it (the window and game state live there). */
+let backgroundProbe: () => boolean = () => false;
+export function setAiRouterBackgroundProbe(fn: () => boolean): void {
+  backgroundProbe = fn;
 }
 
 export function getAiRouterService(): AiRouterService {
@@ -116,12 +124,15 @@ export function getAiRouterService(): AiRouterService {
     workDir: () => workDir,
     assignToJob: nativeJobAssignKillOnClose,
     log: (m) => logger.log(m),
+    // Python does not use Windows' proxy settings; hand it the one Electron resolves for this PC.
+    proxyEnv: () => resolveSessionProxyEnv((url) => (require('electron') as typeof import('electron')).session.defaultSession.resolveProxy(url)),
   });
   const router = new AiRouter({
     store,
     sidecar,
     log: (m) => logger.log(m),
     builtinProbe,
+    isBackground: () => backgroundProbe(),
     onEmbeddingIdentity: (identity) => {
       void import('../ann-index.js').then((m) => m.setAnnModelTag(identity)).catch(() => undefined);
     },

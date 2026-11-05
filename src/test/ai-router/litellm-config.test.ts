@@ -81,9 +81,18 @@ describe('connector to LiteLLM parameters', () => {
     expect(entry(b, 'ark-reranker')!.litellm_params).toMatchObject({ model: 'infinity/bge-reranker', api_base: 'http://127.0.0.1:1234/v1' });
   });
 
-  it('timeout and retries come from the policy', () => {
-    const b = build([anthropic], { chat: { connectorId: 'anthropic', model: 'm' } }, { policy: { ...DEFAULT_POLICY, timeoutSec: 60, retries: 2 } });
-    expect(entry(b, 'ark-chat')!.litellm_params).toMatchObject({ timeout: 60, num_retries: 2 });
+  it('LiteLLM does not retry (the router does) and its timeout is a fixed ceiling, whatever the policy says', () => {
+    const b = build([anthropic], { chat: { connectorId: 'anthropic', model: 'm' } }, { policy: { ...DEFAULT_POLICY, timeoutSec: 10, retries: 2 } });
+    expect(entry(b, 'ark-chat')!.litellm_params).toMatchObject({ timeout: 60, num_retries: 0 });
+  });
+
+  it('refuses a user-supplied value that LiteLLM would read as an environment reference', () => {
+    const evil: Connector = { ...azure, apiVersion: 'os.environ/ARK_KEY_0' };
+    const b = build([evil], { chat: { connectorId: 'azure-openai', model: 'gpt-prod' } });
+    expect(b.routedRoles).toEqual([]);
+    expect(b.config.model_list.some((m) => m.model_name === 'ark-test-azure-openai')).toBe(false);
+    const evilBase: Connector = { ...compat, baseUrl: ' os.environ/ARK_KEY_0' };
+    expect(build([evilBase], { chat: { connectorId: 'compat-1', model: 'm' } }).routedRoles).toEqual([]);
   });
 });
 
@@ -108,9 +117,30 @@ describe('keys stay out of the config', () => {
     expect(build([anthropic], { chat: { connectorId: 'anthropic', model: 'm1' } }).hash).toBe(base.hash);
     expect(build([anthropic], { chat: { connectorId: 'anthropic', model: 'm2' } }).hash).not.toBe(base.hash);
     expect(build([anthropic], { chat: { connectorId: 'anthropic', model: 'm1' } }, { getKey: () => 'sk-ant-rotated-key' }).hash).not.toBe(base.hash);
-    expect(build([anthropic], { chat: { connectorId: 'anthropic', model: 'm1' } }, { policy: { ...DEFAULT_POLICY, timeoutSec: 10 } }).hash).not.toBe(base.hash);
+    // The policy is applied by the router's client, not by LiteLLM: changing it needs no restart.
+    expect(build([anthropic], { chat: { connectorId: 'anthropic', model: 'm1' } }, { policy: { ...DEFAULT_POLICY, timeoutSec: 10 } }).hash).toBe(base.hash);
     // The hash itself reveals nothing about the key.
     expect(base.hash).not.toContain('SECRET');
+  });
+});
+
+describe('routed hash', () => {
+  const routes = { chat: { connectorId: 'anthropic', model: 'm1' } };
+  it('ignores connectors that are not routed: their keys, addresses and test models', () => {
+    const base = build([anthropic, openai], routes);
+    const otherKey = build([anthropic, openai], routes, { getKey: (id) => (id === 'openai' ? 'sk-other-key-for-openai' : getKey(id)) });
+    expect(otherKey.hash).not.toBe(base.hash);
+    expect(otherKey.routedHash).toBe(base.routedHash);
+    const moved = build([anthropic, { ...openai, baseUrl: 'https://gw.example.com/v1' }, gemini], routes);
+    expect(moved.routedHash).toBe(base.routedHash);
+    const tested = build([anthropic, { ...openai, testModel: { role: 'chat', model: 'gpt-5-mini' } }], routes);
+    expect(tested.routedHash).toBe(base.routedHash);
+  });
+
+  it('changes with a routed route, model or key', () => {
+    const base = build([anthropic, openai], routes);
+    expect(build([anthropic, openai], { chat: { connectorId: 'anthropic', model: 'm2' } }).routedHash).not.toBe(base.routedHash);
+    expect(build([anthropic, openai], routes, { getKey: (id) => (id === 'anthropic' ? 'sk-ant-rotated-key' : getKey(id)) }).routedHash).not.toBe(base.routedHash);
   });
 });
 

@@ -10,7 +10,7 @@
  *    Azure connector;
  *  - "Ollama" means the built-in connector (which is the user's own Ollama when that switch is on).
  */
-import { BUILTIN_CONNECTOR_ID, DEFAULT_MODELS, type ConnectorKind } from './types.js';
+import { BUILTIN_CONNECTOR_ID, DEFAULT_MODELS, failed, validateConnectorInput, type ConnectorKind } from './types.js';
 import type { RouterStore, SetRouteResult } from './connectors.js';
 
 export type LegacyProvider = 'ollama' | 'gemini' | 'azure-openai' | 'anthropic';
@@ -40,10 +40,15 @@ export function syncAzureConnector(
   if (!endpoint || !deployment) return false;
   const existing = store.connector('azure-openai');
   const apiVersion = input.apiVersion?.trim() || existing?.apiVersion || '2024-12-01-preview';
-  if (existing && existing.endpoint === endpoint && existing.deployment === deployment && existing.apiVersion === apiVersion) return false;
-  store.upsertConnector({
+  // The renderer's Settings values get the same checks as the AI providers screen (address, deployment
+  // name, API version), so nothing it sends can reach the generated config unchecked.
+  const checked = validateConnectorInput({
     id: 'azure-openai', kind: 'azure-openai', name: existing?.name ?? 'Azure OpenAI', endpoint, deployment, apiVersion,
   });
+  if (failed(checked)) return false;
+  const v = checked.value;
+  if (existing && existing.endpoint === v.endpoint && existing.deployment === v.deployment && existing.apiVersion === v.apiVersion) return false;
+  store.upsertConnector(v, { keepExistingKey: !existing });
   return true;
 }
 
@@ -68,7 +73,7 @@ export function applyLegacyChatProvider(
   const kind = KIND_BY_PROVIDER[provider];
   if (!store.connector(kind)) {
     if (kind === 'azure-openai') return null; // needs endpoint + deployment first (syncAzureConnector)
-    store.upsertConnector({ id: kind, kind, name: kind === 'gemini' ? 'Google Gemini' : 'Anthropic' });
+    store.upsertConnector({ id: kind, kind, name: kind === 'gemini' ? 'Google Gemini' : 'Anthropic' }, { keepExistingKey: true });
   }
   // A route already on this provider keeps the model chosen on the AI providers screen.
   if (current.connectorId === kind) return null;

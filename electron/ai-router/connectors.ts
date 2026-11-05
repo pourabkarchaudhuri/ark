@@ -17,7 +17,7 @@
  * unit-tested without Electron.
  */
 import {
-  AI_ROLES, BUILTIN_CONNECTOR_ID, DEFAULT_MODELS, DEFAULT_POLICY, KIND_NEEDS_KEY, connectorServes, defaultConnectorName,
+  AI_ROLES, BUILTIN_CONNECTOR_ID, DEFAULT_MODELS, DEFAULT_POLICY, KIND_NEEDS_KEY, connectorServes, defaultConnectorName, originOf,
   type AiRole, type Connector, type ConnectorKind, type ConnectorState, type ConnectorTestResult, type Route, type RoutePolicy, type Routes,
 } from './types.js';
 
@@ -49,6 +49,16 @@ export const LEGACY_SLOT_BY_CONNECTOR: Record<string, LegacySlot> = {
   'azure-openai': 'azureOpenAI',
   anthropic: 'anthropic',
 };
+
+/** The legacy key slot of a connector id. Own properties only: 'constructor' or 'toString' are not slots. */
+export function legacySlotOf(connectorId: string): LegacySlot | undefined {
+  return Object.prototype.hasOwnProperty.call(LEGACY_SLOT_BY_CONNECTOR, connectorId) ? LEGACY_SLOT_BY_CONNECTOR[connectorId] : undefined;
+}
+
+/** Where a connector sends requests (and therefore its key): its endpoint or base URL, else the vendor default. */
+function destinationOf(c: Pick<Connector, 'baseUrl' | 'endpoint'>): string {
+  return originOf(c.endpoint ?? c.baseUrl) ?? '';
+}
 
 interface Persisted {
   version: 1;
@@ -211,9 +221,9 @@ export class RouterStore {
 
   /** Main process only (the sidecar environment, connection tests). Never reachable from IPC. */
   getKey(connectorId: string): string | null {
-    const slot = LEGACY_SLOT_BY_CONNECTOR[connectorId];
+    const slot = legacySlotOf(connectorId);
     if (slot) return this.legacy.get(slot);
-    const stored = this.data.secrets[connectorId];
+    const stored = Object.prototype.hasOwnProperty.call(this.data.secrets, connectorId) ? this.data.secrets[connectorId] : undefined;
     if (!stored) return null;
     const memo = this.memo.get(stored);
     if (memo !== undefined) return memo;
@@ -231,7 +241,7 @@ export class RouterStore {
   setKey(connectorId: string, key: string): void {
     if (!this.data.connectors.some((c) => c.id === connectorId)) throw new Error('Unknown connector');
     if (connectorId === BUILTIN_CONNECTOR_ID) throw new Error('The built-in connector has no key');
-    const slot = LEGACY_SLOT_BY_CONNECTOR[connectorId];
+    const slot = legacySlotOf(connectorId);
     if (slot) {
       this.legacy.set(slot, key);
     } else {
@@ -246,9 +256,9 @@ export class RouterStore {
   }
 
   clearKey(connectorId: string): void {
-    const slot = LEGACY_SLOT_BY_CONNECTOR[connectorId];
-    if (slot) this.legacy.clear(slot);
-    else delete this.data.secrets[connectorId];
+    if (!this.data.connectors.some((c) => c.id === connectorId)) throw new Error('Unknown connector');
+    if (connectorId === BUILTIN_CONNECTOR_ID) throw new Error('The built-in connector has no key');
+    this.clearKeyQuiet(connectorId);
     const c = this.data.connectors.find((x) => x.id === connectorId);
     if (c) delete c.test;
     this.unrouteConnector(connectorId, true);
@@ -291,8 +301,15 @@ export class RouterStore {
 
   // ── Changing ──────────────────────────────────────────────────────────────────────────────
 
-  /** Add or update a connector. Its earlier test no longer applies when anything but the name changed. */
-  upsertConnector(input: Omit<Connector, 'test'>): Connector {
+  /**
+   * Add or update a connector. Its earlier test no longer applies when anything but the name changed.
+   *
+   * A saved key belongs to the server it was entered for: when the address (scheme, host or port) a
+   * keyed connector talks to changes, the key is removed and has to be entered again, so a changed
+   * address can never carry an old key to a new server. `keepExistingKey` is for the Settings
+   * bridge, which creates the Azure connector around a key the user already saved in Settings.
+   */
+  upsertConnector(input: Omit<Connector, 'test'>, opts: { keepExistingKey?: boolean } = {}): Connector {
     if (input.kind === 'builtin') throw new Error('The built-in connector cannot be changed');
     let id = input.id;
     if (!id) {
@@ -320,10 +337,14 @@ export class RouterStore {
         const r = this.data.routes[role];
         if (r?.connectorId === id && !connectorServes(next, role)) this.unroute(role);
       }
+      if (destinationOf(existing) !== destinationOf(next) && this.hasKey(id)) this.clearKeyQuiet(id);
       if (!same) this.unrouteConnector(id, false);
       // Switching a connector off takes it off every route at once; its settings, key and last test stay.
       else if (next.enabled === false && existing.enabled !== false) this.unrouteConnector(id, true);
     } else {
+      // A key that is already saved for this id (a Settings slot) was not entered for the address this
+      // new connector points at, unless the trusted bridge says so.
+      if (!opts.keepExistingKey && next.kind !== 'builtin' && (next.baseUrl || next.endpoint) && this.hasKey(id)) this.clearKeyQuiet(id);
       this.data.connectors.push(next);
     }
     this.save();
@@ -342,7 +363,7 @@ export class RouterStore {
   }
 
   private clearKeyQuiet(id: string): void {
-    const slot = LEGACY_SLOT_BY_CONNECTOR[id];
+    const slot = legacySlotOf(id);
     if (slot) this.legacy.clear(slot);
     else delete this.data.secrets[id];
   }

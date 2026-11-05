@@ -79,6 +79,7 @@ describe('installDecodeBaySessionGuards', () => {
     return {
       on: vi.fn((name: string, fn: (...a: any[]) => void) => { listeners[name] = fn; }),
       setPermissionRequestHandler: vi.fn(),
+      setPermissionCheckHandler: vi.fn(),
       listeners,
     };
   }
@@ -103,5 +104,16 @@ describe('installDecodeBaySessionGuards', () => {
     const handler = viewSession.setPermissionRequestHandler.mock.calls[0][0];
     handler({}, 'media', cb);
     expect(cb).toHaveBeenCalledWith(false);
+  });
+
+  it('also answers permission checks (no prompt involved) with a refusal on the view session only', () => {
+    const viewSession = fakeSession();
+    const defaultSession = fakeSession();
+    installDecodeBaySessionGuards(((p: string) => (p === DECODE_BAY_PARTITION ? viewSession : defaultSession)) as any);
+    expect(defaultSession.setPermissionCheckHandler).not.toHaveBeenCalled();
+    const check = viewSession.setPermissionCheckHandler.mock.calls[0][0];
+    for (const permission of ['media', 'geolocation', 'clipboard-read', 'notifications', 'midi']) {
+      expect(check({}, permission)).toBe(false);
+    }
   });
 });

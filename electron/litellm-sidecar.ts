@@ -25,6 +25,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pickFreePort } from './local-ai/ports.js';
+import { scrubSecrets } from './secret-scrub.js';
 
 /** The slice of a child process the manager uses (a fake in tests). */
 export interface ChildLike {
@@ -45,6 +46,14 @@ export interface SidecarSpec {
   env: Record<string, string>;
   /** Changes whenever config or any secret changes. */
   hash: string;
+  /**
+   * Changes only when something a routed role depends on changes. A request that merely needs the
+   * routes served (embed, rerank, chat) is satisfied by a running sidecar with the same `routedHash`,
+   * whatever happened to the connectors that are not routed. Absent: `hash` decides.
+   */
+  routedHash?: string;
+  /** The caller needs a sidecar started with exactly this `hash` (a connection test of a not-yet-routed connector). */
+  exact?: boolean;
 }
 
 export interface SidecarInfo {
@@ -59,6 +68,8 @@ export interface SidecarStatus {
   restarts: number;
   lastError: string | null;
   configHash: string | null;
+  /** `routedHash` of the running config. */
+  routedHash: string | null;
 }
 
 export class SidecarError extends Error {
@@ -97,11 +108,17 @@ export interface LitellmSidecarDeps {
   maxRestarts?: number;
   backoffMs?: number[];
   stableMs?: number;
+  /** Proxy variables resolved from the OS / Electron session (HTTPS_PROXY, HTTP_PROXY). */
+  proxyEnv?: () => Promise<Record<string, string>>;
+  /** Cooldowns after consecutive failed starts, in ms (the last one repeats). */
+  startFailureCooldownMs?: number[];
 }
 
 const DEFAULT_START_TIMEOUT_MS = 90_000;
 const DEFAULT_BACKOFF_MS = [500, 2_000, 5_000];
 const DEFAULT_STABLE_MS = 60_000;
+/** After a failed start, further requests fail fast for this long instead of spawning Python again. */
+const DEFAULT_START_FAILURE_COOLDOWN_MS = [5_000, 15_000, 60_000];
 export const SIDECAR_MAX_RESTARTS = 3;
 const RUN_DIR_RETRIES = 8;
 const RUN_DIR_RETRY_MS = 150;
@@ -122,15 +139,37 @@ export function redactLine(line: string, secrets: Iterable<string>): string {
   for (const s of secrets) {
     if (s && s.length >= 4) out = out.split(s).join('***');
   }
-  return out.replace(/\b(sk-[A-Za-z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,})\b/g, '***');
+  return scrubSecrets(out);
 }
 
-function defaultBaseEnv(): Record<string, string> {
+/**
+ * Variables that make Python reach the internet the way this PC does: the proxy the user configured
+ * and the certificate bundle for networks that inspect TLS. They carry no secret of Ark's.
+ */
+const NETWORK_ENV = [
+  'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
+];
+
+/** `NO_PROXY` for the child: the user's own list plus loopback, so Ark's calls to LiteLLM never go through a proxy. */
+export function mergeNoProxy(existing: string | undefined): string {
+  const parts = (existing ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+  for (const loop of ['127.0.0.1', 'localhost']) if (!parts.includes(loop)) parts.push(loop);
+  return parts.join(',');
+}
+
+export function defaultBaseEnv(): Record<string, string> {
   const pick = ['SystemRoot', 'SYSTEMROOT', 'windir', 'TEMP', 'TMP', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'ProgramData', 'PATHEXT'];
   const out: Record<string, string> = {};
   for (const k of pick) {
     const v = process.env[k];
     if (v) out[k] = v;
+  }
+  for (const k of NETWORK_ENV) {
+    for (const name of [k, k.toLowerCase()]) {
+      const v = process.env[name];
+      if (v) out[name] = v;
+    }
   }
   return out;
 }
@@ -143,7 +182,13 @@ export class LitellmSidecar {
   private masterKey: string | null = null;
   private runDir: string | null = null;
   private spec: SidecarSpec | null = null;
+  private specProvider: (() => SidecarSpec | null) | null = null;
   private runningHash: string | null = null;
+  private runningRoutedHash: string | null = null;
+  /** Consecutive failed starts (not crashes of a healthy run), and when requests may try again. */
+  private startFailures = 0;
+  private failedUntil = 0;
+  private failedHash: string | null = null;
   private restarts = 0;
   private startedHealthyAt: number | null = null;
   private lastError: string | null = null;
@@ -183,6 +228,8 @@ export class LitellmSidecar {
       maxRestarts: SIDECAR_MAX_RESTARTS,
       backoffMs: DEFAULT_BACKOFF_MS,
       stableMs: DEFAULT_STABLE_MS,
+      proxyEnv: async () => ({}),
+      startFailureCooldownMs: DEFAULT_START_FAILURE_COOLDOWN_MS,
       ...deps,
     } as LitellmSidecar['deps'];
   }
@@ -202,8 +249,16 @@ export class LitellmSidecar {
   status(): SidecarStatus {
     return {
       state: this.state, port: this.port, pid: this.child?.pid ?? null, restarts: this.restarts,
-      lastError: this.lastError, configHash: this.runningHash,
+      lastError: this.lastError, configHash: this.runningHash, routedHash: this.runningRoutedHash,
     };
+  }
+
+  /**
+   * Where a restart after a crash gets its config: the caller's current one, not the one of the last
+   * request, so a removed key or connector is never brought back. `null` means nothing needs LiteLLM now.
+   */
+  setSpecProvider(fn: (() => SidecarSpec | null) | null): void {
+    this.specProvider = fn;
   }
 
   onChange(fn: (s: SidecarStatus) => void): () => void {
@@ -246,9 +301,17 @@ export class LitellmSidecar {
     }
     this.spec = spec;
     if (this.state === 'ready') {
-      if (this.runningHash === spec.hash) return this.peek()!;
+      const same = spec.exact || spec.routedHash === undefined || this.runningRoutedHash === null
+        ? this.runningHash === spec.hash
+        : this.runningRoutedHash === spec.routedHash;
+      if (same) return this.peek()!;
       this.deps.log('[AI Router] routes or keys changed: regenerating the config and restarting LiteLLM');
       await this.stop();
+    }
+    // Circuit breaker: a start that just failed is not repeated for a cooldown, so a queue of embed
+    // batches does not wait N x 90 s for N doomed spawns. A different config may try at once.
+    if (this.failedUntil > this.deps.now() && this.failedHash === spec.hash) {
+      throw new SidecarError(this.lastError ?? 'LiteLLM did not start a moment ago; trying again shortly', 'start_failed');
     }
     return this.start(spec);
   }
@@ -280,14 +343,19 @@ export class LitellmSidecar {
       const cfgPath = path.join(runDir, 'config.yaml');
       this.deps.fs.writeFileSync(cfgPath, JSON.stringify(spec.config));
 
+      const base = this.deps.baseEnv();
+      let proxy: Record<string, string> = {};
+      try { proxy = await this.deps.proxyEnv(); } catch { /* no proxy information: connect directly */ }
       const env: NodeJS.ProcessEnv = {
-        ...this.deps.baseEnv(),
+        ...proxy,
+        ...base, // an explicit HTTPS_PROXY / SSL_CERT_FILE of the user wins over what the session resolved
         ...spec.env,
         LITELLM_MASTER_KEY: masterKey,
         PYTHONUTF8: '1',
         PYTHONDONTWRITEBYTECODE: '1',
-        NO_PROXY: '127.0.0.1,localhost',
+        NO_PROXY: mergeNoProxy(base.NO_PROXY ?? base.no_proxy),
       };
+      delete env.no_proxy;
       let child: ChildLike;
       try {
         child = this.deps.spawn(this.pythonPath(), ['-I', this.launcherPath(), '--config', cfgPath, '--port', String(port)], {
@@ -317,19 +385,23 @@ export class LitellmSidecar {
         this.onExit(child, code, signal);
       });
 
-      const base = `http://127.0.0.1:${port}`;
+      const baseUrl = `http://127.0.0.1:${port}`;
       const deadline = this.deps.now() + this.deps.startTimeoutMs;
       while (this.deps.now() < deadline) {
         if (exited || this.shuttingDown || this.stopping) break;
         try {
-          const res = await this.deps.fetchFn(`${base}/health/liveliness`, { signal: timeoutSignal(2_000) });
+          const res = await this.deps.fetchFn(`${baseUrl}/health/liveliness`, { signal: timeoutSignal(2_000) });
           if (res.ok && !exited) {
             this.state = 'ready';
             this.runningHash = spec.hash;
+            this.runningRoutedHash = spec.routedHash ?? null;
+            this.startFailures = 0;
+            this.failedUntil = 0;
+            this.failedHash = null;
             this.startedHealthyAt = this.deps.now();
             this.emit();
             this.deps.log(`[AI Router] LiteLLM ready on 127.0.0.1:${port}`);
-            return { baseUrl: base, masterKey };
+            return { baseUrl, masterKey };
           }
         } catch {
           // Not listening yet.
@@ -347,11 +419,26 @@ export class LitellmSidecar {
       this.cleanupRun(port);
       throw new SidecarError(reason, 'start_failed');
     } catch (err) {
-      if ((this.state as SidecarState) !== 'failed') this.state = 'stopped';
+      this.state = 'stopped';
       this.lastError = err instanceof Error ? err.message : String(err);
       this.runningHash = null;
+      this.runningRoutedHash = null;
+      this.noteStartFailure(err, spec); // may move the state on to 'failed'
       this.emit();
       throw err;
+    }
+  }
+
+  /** Count a failed start; cool down, and give up (state `failed`, offering Re-check) after `maxRestarts` in a row. */
+  private noteStartFailure(err: unknown, spec: SidecarSpec): void {
+    if (this.shuttingDown || (err instanceof SidecarError && err.code === 'no_runtime')) return;
+    this.startFailures += 1;
+    const steps = this.deps.startFailureCooldownMs;
+    this.failedUntil = this.deps.now() + (steps[Math.min(this.startFailures - 1, steps.length - 1)] ?? 0);
+    this.failedHash = spec.hash;
+    if (this.startFailures >= Math.max(1, this.deps.maxRestarts)) {
+      this.state = 'failed';
+      this.lastError = `${this.lastError ?? 'LiteLLM did not start'}; stopped trying after ${this.startFailures} attempts`;
     }
   }
 
@@ -362,8 +449,9 @@ export class LitellmSidecar {
     this.child = null;
     this.cleanupRun(port);
     if (this.stopping || this.shuttingDown) {
-      this.state = 'stopped';
+      if (this.state !== 'failed') this.state = 'stopped'; // a start that failed too often stays failed until Re-check
       this.runningHash = null;
+      this.runningRoutedHash = null;
       this.emit();
       return;
     }
@@ -372,6 +460,7 @@ export class LitellmSidecar {
     if (healthyFor >= this.deps.stableMs) this.restarts = 0;
     this.lastError = `LiteLLM crashed (code ${code ?? 'none'}${signal ? `, ${signal}` : ''})`;
     this.runningHash = null;
+    this.runningRoutedHash = null;
     this.deps.log(`[AI Router] ${this.lastError}`);
     this.scheduleRestart();
   }
@@ -392,7 +481,10 @@ export class LitellmSidecar {
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       if (this.shuttingDown || this.state !== 'stopped' || !this.spec) return;
-      void this.ensure(this.spec).catch((err) => {
+      // The caller's current config, not the one of the last request (keys or connectors may have been removed since).
+      const spec = this.specProvider ? this.specProvider() : this.spec;
+      if (!spec) return; // nothing needs LiteLLM any more: the next request starts it
+      void this.ensure(spec).catch((err) => {
         this.deps.log(`[AI Router] restart failed: ${err instanceof Error ? err.message : String(err)}`);
         if (this.state !== 'failed') this.scheduleRestart();
       });
@@ -441,6 +533,7 @@ export class LitellmSidecar {
     if (!child) {
       if (this.state !== 'failed') this.state = 'stopped';
       this.runningHash = null;
+      this.runningRoutedHash = null;
       return;
     }
     this.stopping = true;
@@ -449,6 +542,7 @@ export class LitellmSidecar {
     this.cleanupRun(this.port);
     this.state = 'stopped';
     this.runningHash = null;
+    this.runningRoutedHash = null;
     this.emit();
   }
 
@@ -467,6 +561,9 @@ export class LitellmSidecar {
   /** Clear a `failed` state so the next request tries again. */
   reset(): void {
     this.restarts = 0;
+    this.startFailures = 0;
+    this.failedUntil = 0;
+    this.failedHash = null;
     this.lastError = null;
     if (this.state === 'failed') this.state = 'stopped';
     this.emit();
