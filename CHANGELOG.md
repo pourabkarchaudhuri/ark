@@ -4,6 +4,31 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.98] - 2026-11-05
+
+A hardening and polish release for the built-in local AI, the AI router and Settings, after a second full audit and a speed and memory re-measure against 1.0.97.
+
+### Fixed - local AI and downloads
+- The built-in AI servers pick their private ports safely (no clash with another program), retry on a bind failure, fall back to the processor if the graphics driver crashes, and wait for a clean exit when stopping.
+- Model downloads: Retry re-queues everything, moving the models folder is safe to interrupt, running out of disk space is reported plainly, Pause is kept, and network-share paths are refused.
+- Downloads and web requests use the system's network stack, so they work behind TLS-inspecting proxies (updates, RSS, web search, ad-block lists, chat).
+
+### Fixed - AI router
+- The router's helper process has a circuit breaker, honours proxy and certificate settings, and no longer restarts when nothing relevant changed. Keys stay bound to the address they were saved for, and local metadata addresses are blocked.
+
+### Fixed - app
+- Second launches hand over to the running Ark, "Continue without local AI" is remembered, a crashing AI engine shows a clear message, and the reranker falls back to the next tier when one is missing.
+- The installer can offer to remove downloaded models on uninstall.
+
+### Changed
+- **Settings and AI providers repolished**: higher contrast, plain wording ("Built-in AI"), per-role Test buttons, search that lands on the right section, drafts kept per connection, keyboard-friendly side drawer, better narrow-window layouts, clearer download meters.
+
+### Fixed - performance and memory
+- Re-measured against v1.0.97 on the same machine and data: vectors sent from the Oracle index to the app core are now compact binary arrays instead of boxed numbers, so the long UI stall while Oracle and Settings open during background indexing dropped from 296 ms and 482 ms to none, and steady main-process memory fell by about 24 MB. See docs/perf/1.0.98-measurements.md.
+
+### Known limits
+- AMD and Intel graphics inference are not yet verified on real hardware, the in-app Qwen reranker and gemma chat models are optional and lightly tested, the first LiteLLM start takes about 25 seconds, and CPU-only reranking of very large candidate lists is slow.
+
 ## [1.0.97] - 2026-11-04
 
 A big release: Ark brings its own local AI, a router for the AI you use, a redesigned Settings, privacy and security fixes, and about 250 fixes found in a full audit of 1.0.84-1.0.96.

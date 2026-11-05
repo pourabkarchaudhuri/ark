@@ -1,26 +1,23 @@
-# Ark v1.0.97 — Brings its own AI
+# Ark v1.0.98 — Steadier built-in AI
 
-Ark now runs its own local AI, so you do not need to install Ollama. It uses your graphics card when it can and falls back to the processor when it cannot.
+A hardening and polish release for the built-in local AI, the AI router and Settings.
 
-## New
+## New and improved
 
-- **Built-in local AI** — Oracle's models download on first launch and run privately on your machine.
-- **Pick your AI provider** — built-in, Ollama, Gemini, Azure, Anthropic, OpenAI or any compatible service, from the redesigned Settings.
-- **Analytics are off by default**, with a switch in Settings.
+- **More reliable built-in AI** — safer startup, a fallback to the processor if the graphics driver crashes, and downloads that resume and explain problems.
+- **Settings and AI providers repolished** — clearer wording, better contrast, per-model tests, a keyboard-friendly side drawer.
+- **Smoother Oracle and Settings** while your library is indexed, and about 24 MB less memory.
+- Downloads and web requests now work behind TLS-inspecting proxies.
 
-## Fixed
+## Known limits
 
-- The installer no longer includes your private keys.
-- Safer links, chat and embedded pages.
-- About 250 fixes, and much less memory use over long sessions.
-
-After updating, Oracle re-indexes your games once, so the first launch can take a little longer.
+AMD and Intel graphics inference are not yet verified on real hardware; CPU-only reranking of very large lists is slow; the first AI-router start takes about 25 seconds.
 
 If the in-app update fails, download the installer directly:
-https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.97/Ark-Setup-1.0.97.exe
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.98/Ark-Setup-1.0.98.exe
 
 ---
 
-**Tests:** 3232 tests (317 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
-**Measured:** leak and speed checks against v1.0.96 all pass (docs/perf/1.0.97-measurements.md).
-**Ranking:** Oracle engine version 15 (rankings can shift) and embedding version 2 (one re-index).
+**Tests:** 3422 tests (326 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
+**Measured:** leak and speed checks against v1.0.97 all pass (docs/perf/1.0.98-measurements.md).
+**Ranking:** unchanged (Oracle engine 15, embedding version 2).
