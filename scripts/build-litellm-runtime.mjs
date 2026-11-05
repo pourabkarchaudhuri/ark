@@ -194,6 +194,14 @@ for (const n of fs.readdirSync(sitePackages)) {
   }
 }
 fs.rmSync(path.join(pyOut, 'Lib', 'ensurepip'), { recursive: true, force: true });
+// pip writes the build machine's absolute interpreter path into the entry-point launchers (Scripts\*.exe)
+// and lists their hashes in every RECORD, so those files differ per checkout and would make the pinned
+// tree hashes unreproducible. The sidecar starts through ark_litellm.py with `python -I`, never through a
+// launcher, and importlib.metadata does not need RECORD, so both go.
+fs.rmSync(path.join(pyOut, 'Scripts'), { recursive: true, force: true });
+for (const n of fs.readdirSync(sitePackages)) {
+  if (n.endsWith('.dist-info')) fs.rmSync(path.join(sitePackages, n, 'RECORD'), { force: true });
+}
 
 // Weight the sidecar never uses: the admin UI (disabled), the database/redis/queue/audio/dataframe
 // extras of litellm[proxy], and the gunicorn/granian servers (the launcher runs uvicorn). Chosen by
