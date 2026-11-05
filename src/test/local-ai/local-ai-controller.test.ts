@@ -261,4 +261,32 @@ describe('register', () => {
     await expect(handlers.get('localAi:downloadChat')!({}, {})).rejects.toThrow(/confirm/);
     __setLocalAiServiceForTests(null);
   });
+
+  it('a push skipped while the window is minimised is sent when it fires restore or show', () => {
+    const t = setup();
+    __setLocalAiServiceForTests({ store: t.store, runtime: t.runtime, backend: {} } as never);
+    const send = vi.fn();
+    const listeners = new Map<string, () => void>();
+    let minimized = true;
+    const win = {
+      webContents: { send },
+      isMinimized: () => minimized,
+      isVisible: () => true,
+      isDestroyed: () => false,
+      on: vi.fn((ev: string, fn: () => void) => { listeners.set(ev, fn); }),
+      removeListener: vi.fn((ev: string) => { listeners.delete(ev); }),
+    };
+    register(() => win, { handle: () => undefined }, t.controller, { pushIntervalMs: 0 });
+    const push = (t.store.onChange.mock.calls[0] as unknown as [() => void])[0];
+    push();
+    push(); // a second skipped push must not arm a second listener
+    expect(send).not.toHaveBeenCalled();
+    expect(win.on).toHaveBeenCalledTimes(2);
+    expect([...listeners.keys()].sort()).toEqual(['restore', 'show']);
+    minimized = false;
+    listeners.get('restore')!();
+    expect(send).toHaveBeenCalledWith('localAi:status-changed', expect.objectContaining({ backend: 'builtin' }));
+    expect(listeners.size).toBe(0);
+    __setLocalAiServiceForTests(null);
+  });
 });

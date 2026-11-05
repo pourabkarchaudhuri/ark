@@ -95,7 +95,7 @@ export function classifyDownloadError(err: unknown): { code: ModelErrorCode; mes
   if (/ENOSPC|disk full|not enough space/i.test(text)) return { code: 'disk_full', message: 'Not enough disk space' };
   if (code === 'OVERSIZE') return { code: 'checksum', message: 'The server sent a different file than expected, so it was discarded' };
   if (code === 'CHECKSUM') return { code: 'checksum', message: 'The downloaded file did not match its checksum and was discarded' };
-  if (code === 'FOLDER_UNAVAILABLE') {
+  if (code === 'FOLDER_UNAVAILABLE' || /^(EACCES|EPERM|EROFS|ENOENT|EBUSY|EIO|ENODEV|ENAMETOOLONG|ENOTDIR|EISDIR|EMFILE|ENXIO)$/.test(code)) {
     return { code: 'folder_unavailable', message: 'Ark cannot write to the models folder. Check the drive and permissions, or choose another folder.' };
   }
   if (code === 'PORTAL') {
@@ -384,18 +384,20 @@ export class ModelStore {
     for (const src of m.sources) {
       const base = this.partBase(m, src);
       const partSize = (() => { try { return fs.statSync(`${base}.part`).size; } catch { return 0; } })();
-      const free = this.deps.freeBytes(this.deps.modelsDir());
-      if (free !== null && free < src.size - partSize + DISK_MARGIN_BYTES) {
-        const need = Math.ceil((src.size - partSize + DISK_MARGIN_BYTES) / 1e9 * 10) / 10;
-        this.set(m.id, { state: 'error', error: { code: 'disk_full', message: `Not enough disk space: ${need} GB needed` } });
-        return 'stop';
-      }
       // A verified download whose final move failed earlier is still here: do not fetch it again.
       const leftover = (() => { try { return fs.statSync(base).size; } catch { return -1; } })();
       let haveVerified = false;
       if (leftover === src.size && partSize === 0) {
         haveVerified = await this.deps.hashFile(base).then((h) => h === src.sha256.toLowerCase()).catch(() => false);
         if (!haveVerified) fs.rmSync(base, { force: true });
+      }
+      // Moving an already-downloaded file (verified leftover, or a .part that is already complete) needs no new space.
+      const needsNoSpace = haveVerified || partSize >= src.size;
+      const free = this.deps.freeBytes(this.deps.modelsDir());
+      if (!needsNoSpace && free !== null && free < src.size - partSize + DISK_MARGIN_BYTES) {
+        const need = Math.ceil((src.size - partSize + DISK_MARGIN_BYTES) / 1e9 * 10) / 10;
+        this.set(m.id, { state: 'error', error: { code: 'disk_full', message: `Not enough disk space: ${need} GB needed` } });
+        return 'stop';
       }
       const abort = new AbortController();
       const attempt = { id: m.id, abort, userAbort: false, preempted: false };
@@ -448,7 +450,7 @@ export class ModelStore {
           ? { code: 'unknown', message: 'Download cancelled' }
           : classifyDownloadError(err);
         this.deps.log(`[LocalAI] ${m.file} from ${src.kind} failed: ${lastErr.code} ${lastErr.message}`);
-        if (lastErr.code === 'disk_full') break;
+        if (lastErr.code === 'disk_full' || lastErr.code === 'folder_unavailable') break;
       } finally {
         if (this.current === attempt) this.current = null;
       }

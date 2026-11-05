@@ -358,6 +358,13 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
     }
   }
 
-  await moveFileWithRetry(partPath, destPath);
+  try {
+    await moveFileWithRetry(partPath, destPath);
+  } catch (err) {
+    // The file is downloaded and verified; only the local move failed (held by another program, folder gone).
+    // Report it as a folder problem so the caller keeps the file and does not fetch another source.
+    if (err instanceof DownloadError) throw err;
+    throw new DownloadError(`The finished download could not be moved into place (${String((err as { code?: unknown } | null)?.code ?? err)})`, { code: 'FOLDER_UNAVAILABLE' });
+  }
   return destPath;
 }

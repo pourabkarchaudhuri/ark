@@ -138,3 +138,58 @@ describe('removeAll waits for the aborted attempt (finding 20)', () => {
     expect(store.statuses()[0].state).toBe('missing');
   });
 });
+
+describe('local move failures and leftovers (1.0.99 review)', () => {
+  it('a failed final .part move throws FOLDER_UNAVAILABLE and keeps the verified .part', async () => {
+    const dest = path.join(dir, 'f.dl');
+    fs.mkdirSync(dest);
+    fs.writeFileSync(path.join(dest, 'x'), 'x');
+    const err = await downloadWithResume({
+      url: 'http://x/a', destPath: dest, expectedSize: PAYLOAD.length, sha256: SHA, fetchImpl: okFetch, sleep: noSleep,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(DownloadError);
+    expect(err.code).toBe('FOLDER_UNAVAILABLE');
+    expect(fs.existsSync(`${dest}.part`)).toBe(true);
+  });
+
+  it.each(['EPERM', 'EBUSY', 'EACCES', 'EROFS', 'ENOENT'])('classifyDownloadError maps a raw %s to folder_unavailable', (code) => {
+    expect(classifyDownloadError(fsErr(code, 'rename')).code).toBe('folder_unavailable');
+  });
+
+  it('a raw local fs error from download() stops the queue: the next source is not tried', async () => {
+    const m = entry();
+    m.sources.push({ kind: 'huggingface', url: 'http://x/b', sha256: SHA, size: PAYLOAD.length } as never);
+    const urls: string[] = [];
+    const dl = async (o: { url: string }) => { urls.push(o.url); throw fsErr('EPERM', 'rename'); };
+    const store = new ModelStore({ models: () => [m], modelsDir: () => dir, freeBytes: () => null, progressIntervalMs: 0, download: dl as never });
+    await store.ensure(['m1']);
+    expect(urls).toEqual(['http://x/a']);
+    expect(store.statuses()[0].error?.code).toBe('folder_unavailable');
+  });
+
+  it('a verified leftover .dl is moved into place even when free space is below the full size', async () => {
+    const m = entry();
+    let downloads = 0;
+    const dl = async () => { downloads++; return ''; };
+    const store = new ModelStore({ models: () => [m], modelsDir: () => dir, freeBytes: () => 0, progressIntervalMs: 0, download: dl as never });
+    // Seed the leftover under the store's own naming: run once with a blocked final move, then free it.
+    const first = new ModelStore({
+      models: () => [m], modelsDir: () => dir, freeBytes: () => null, progressIntervalMs: 0,
+      download: (async (o: { destPath: string }) => { fs.writeFileSync(o.destPath, PAYLOAD); return o.destPath; }) as never,
+    });
+    const finalPath = path.join(dir, 'm1.gguf');
+    fs.mkdirSync(finalPath);
+    fs.writeFileSync(path.join(finalPath, 'x'), 'x');
+    await first.ensure(['m1']);
+    fs.rmSync(finalPath, { recursive: true, force: true });
+    await store.ensure(['m1']);
+    expect(store.statuses()[0].state).toBe('ready');
+    expect(downloads).toBe(0);
+  }, 20000);
+
+  it('without a leftover, low free space still fails as disk_full', async () => {
+    const store = new ModelStore({ models: () => [entry()], modelsDir: () => dir, freeBytes: () => 0, progressIntervalMs: 0, download: (async () => '') as never });
+    await store.ensure(['m1']);
+    expect(store.statuses()[0].error?.code).toBe('disk_full');
+  });
+});
