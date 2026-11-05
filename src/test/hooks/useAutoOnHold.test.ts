@@ -32,6 +32,9 @@ function add(gameId: string, status: 'Playing' | 'Want to Play') {
 }
 
 beforeEach(async () => {
+  // The previous test's store may still hold a 300 ms debounced save; flush it now so it cannot land
+  // after the clear below and leak that test's games into this one.
+  window.dispatchEvent(new Event('beforeunload'));
   localStorage.clear();
   Object.defineProperty(window, 'store', { value: undefined, writable: true, configurable: true });
   vi.resetModules();
