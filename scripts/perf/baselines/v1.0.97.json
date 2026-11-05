@@ -6178,7 +6178,7 @@
       "perRole": {
         "embed": {
           "workingSetMB": 1145.5,
-          "idleCpuPct": 1.66,
+          "idleCpuPct": 2.04,
           "idleWindowsPct": [
             1.67,
             2.08,

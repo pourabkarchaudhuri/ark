@@ -91,3 +91,10 @@ functions fill a long task, and the plain run for the number.
 First found with it (1.0.98): the renderer long tasks of 130-500 ms during Oracle / Upcoming / Settings were the background ANN
 backfill and graph build converting every 1024-dim vector to a boxed `number[]` for IPC. They land in whichever cycle the library
 embedding finishes in (cycle 1 on 1.0.98, cycle 3-4 on 1.0.97), which is why a budget that looks at every cycle saw them only now.
+
+## Baseline re-sample: llama-server idle CPU
+
+The v1.0.97 baseline stored one 4-window mean (1.66%) for the embed role's idle CPU. Four separate
+runs of the same build read 1.66, 2.0, 2.2 and 2.3%, and the 1.0.98 build reads 1.88-2.33% on the same
+harness, so one sample made the budget flap. The baseline now holds the mean of those four runs (2.04%).
+No code or budget factor changed.
