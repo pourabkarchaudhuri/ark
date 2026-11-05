@@ -88,6 +88,10 @@ process.on('uncaughtException', (err) => {
         'Details were written to ark-startup-error.log in the Ark data folder.',
     );
   } catch { /* dialog unavailable — exit anyway */ }
+  // app.exit skips before-quit: kill the built-in AI servers and the router sidecar here too, or they outlive Ark
+  // whenever the kill-on-close job object could not be assigned.
+  try { shutdownLocalAi(); } catch { /* exiting anyway */ }
+  try { shutdownAiRouter(); } catch { /* exiting anyway */ }
   try {
     app.exit(1);
   } catch {
@@ -166,7 +170,12 @@ function showMainWindow(): Promise<boolean> {
   return revealMainWindow(mainWindow, rendererRecovery, {
     showMessageBox: (opts) => dialog.showMessageBox(opts),
     relaunch: () => app.relaunch(),
-    exit: (code) => app.exit(code),
+    exit: (code) => {
+      // "Restart Ark": app.exit skips before-quit, so stop the child servers first (the relaunched Ark starts its own).
+      try { shutdownLocalAi(); } catch { /* exiting anyway */ }
+      try { shutdownAiRouter(); } catch { /* exiting anyway */ }
+      app.exit(code);
+    },
     quit: () => { isQuitting = true; app.quit(); },
   });
 }
