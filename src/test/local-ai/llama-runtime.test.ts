@@ -248,6 +248,19 @@ describe('LlamaRuntime GPU fallback', () => {
     expect(t.runtime.roleStatus('rerank').state).toBe('stopped');
   });
 
+  it('a stop() during the start wait (game start, drain) leaves the role stopped, not failed', async () => {
+    const t = makeRuntime();
+    t.setHealthy(() => false);
+    const started = t.runtime.ensure('embed');
+    const outcome = started.then(() => 'ready', (e: Error) => e);
+    await new Promise((r) => setTimeout(r, 30));
+    await t.runtime.stop('embed');
+    await outcome;
+    expect(t.runtime.roleStatus('embed').state).toBe('stopped');
+    t.setHealthy(() => true);
+    await expect(t.runtime.ensure('embed')).resolves.toBeTruthy();
+  });
+
   it('parses the offload and buffer lines of the server log', () => {
     const gpu = { device: null, deviceName: null, layersOffloaded: null, layersTotal: null, gpuBytes: 0, cpuBytes: 0 } as Parameters<typeof parseGpuLogLine>[1];
     parseGpuLogLine('load_tensors: offloaded 25/25 layers to GPU', gpu);

@@ -425,6 +425,7 @@ export class LlamaRuntime {
     s.state = 'starting';
     s.lastError = null;
     this.emit();
+    let cancelled = false;
     try {
       let useGpu = !s.cpuFallback;
       const avoidPorts: number[] = [];
@@ -432,6 +433,7 @@ export class LlamaRuntime {
       for (;;) {
         const outcome = await this.launchOnce(s, model, useGpu ? GPU_LAYERS_ALL : 0, avoidPorts);
         if (outcome.ok) return this.info(s);
+        if (outcome.cancelled) { cancelled = true; throw new RuntimeError(outcome.reason, 'start_failed'); }
         if (outcome.bindFailure && outcome.port !== null && bindRetries < MAX_BIND_RETRIES && !this.shuttingDown) {
           bindRetries += 1;
           avoidPorts.push(outcome.port);
@@ -450,7 +452,7 @@ export class LlamaRuntime {
       s.lastError = err instanceof Error ? err.message : String(err);
       if ((s.state as RuntimeState) === 'failed') {
         // already failed (crash path)
-      } else if (err instanceof RuntimeError && err.code === 'start_failed' && !this.shuttingDown) {
+      } else if (err instanceof RuntimeError && err.code === 'start_failed' && !cancelled && !this.shuttingDown) {
         // The GPU -> CPU retry above already ran, so the server cannot start at all. Mark the role
         // failed (cool-down retry or Re-check clears it) so tier detection skips it and the caller
         // falls through to the next tier instead of spawning the broken server on every request.
@@ -470,7 +472,7 @@ export class LlamaRuntime {
     model: string,
     gpuLayers: number,
     avoidPorts: number[] = [],
-  ): Promise<{ ok: boolean; reason: string; gpuProblem: boolean; bindFailure: boolean; port: number | null }> {
+  ): Promise<{ ok: boolean; reason: string; gpuProblem: boolean; bindFailure: boolean; port: number | null; cancelled?: boolean }> {
     const role = s.role;
     const port = await this.reservePort(avoidPorts);
     if (port === null) throw new RuntimeError('No free local port for the built-in AI server', 'no_port');
@@ -555,12 +557,14 @@ export class LlamaRuntime {
       : ex
       ? `llama-server exited (code ${ex.code ?? 'none'}${ex.signal ? `, ${ex.signal}` : ''})${tail ? `: ${tail}` : ''}`
       : `llama-server did not become healthy within ${Math.round(this.startTimeoutMs(role) / 1000)}s${tail ? `: ${tail}` : ''}`;
+    // stop() / quit during the start wait is a deliberate cancel, not a server that cannot start.
+    const cancelled = s.stopping || this.shuttingDown;
     s.stopping = true;
     this.killChild(child);
     this.usedPorts.delete(port);
     s.child = null;
     return {
-      ok: false, reason, port,
+      ok: false, reason, port, cancelled,
       gpuProblem: !failedSpawn && (gpuProblem || (gpuLayers > 0 && GPU_FAILURE_RE.test(tail))),
       bindFailure: !!ex && BIND_FAILURE_RE.test(s.logTail.join('\n')),
     };
