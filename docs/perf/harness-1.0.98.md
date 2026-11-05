@@ -58,7 +58,7 @@ Useful while debugging the harness: `--ipc-selftest-only`, `--ai-only`, `--quick
 
 ## Warm-up cycle
 
-With the built-in AI running, the renderer heap steps up once over the first three cycles (v1.0.97: 38.7, 43.5, 59.9 MB, then flat at 62-64 MB for seven cycles; DOM nodes, listeners and process counts are flat from cycle 1). The scenario therefore starts the servers and waits for the background embedding to drain before cycle 1, and the leak rules compare from `meta.warmupCycle` (4 with the AI, 2 without) to the last cycle. Growth after the warm-up still fails.
+With the built-in AI running, the renderer heap steps up once over the first three cycles (v1.0.97: 38.7, 43.5, 59.9 MB, then 62.2 to 63.9 MB over the next seven cycles; DOM nodes, listeners and process counts are flat from cycle 1). The scenario therefore starts the servers and waits for the background embedding to drain before cycle 1, and the leak rules compare from `meta.warmupCycle` (4 with the AI, 2 without) to the last cycle. Growth after the warm-up still fails.
 
 ## v1.0.97 baseline (`scripts/perf/baselines/v1.0.97.json`)
 
@@ -68,14 +68,14 @@ Full run: 10 cycles, 60 s idle, 120 s detached hidden idle, 2 extra cold starts,
 |---|---|
 | IPC self-test | ok (5 of 5 counted, 188 handlers wrapped) |
 | IPC per scenario cycle (median, warm) | 315 invoke calls, 6 pushes, 18.5 MB payload |
-| IPC per Browse screen (warm) | 0 calls: a real zero, the screen is cached after the first visits (cycle 2: 42 calls, cycle 3: 0) |
+| IPC per Browse screen (warm) | 0 calls in 8 of 10 cycles (5 in cycles 3 and 4): a real zero, the screen is served from renderer caches; the per-cycle total above is the number that cannot be 0 |
 | llama-server working set | embed 1145 MB, rerank 1136 MB |
 | llama-server idle CPU (after the background embedding drained, 218 s after boot with the seeded 2000-game library) | 1.7 % / 1.6 % of a core |
 | llama-server CPU during the burst | embed 21.7 %, rerank 24.4 % |
 | Embedding + rerank, direct vs through the app | 23.38 vs 23.44 items/s, overhead -0.3 % (budget 15 %) |
 | Download, 512 MB, local Range server | 73.1 MB/s, main event-loop max 34.8 ms (budget 100), 20 status pushes: 2.9/s average, **5 in the busiest second (budget 4: fails in v1.0.97)** |
 | LiteLLM sidecar | not running at boot or with built-in routes; 343 MB and 0.4 % idle CPU once a non-built-in route exists (start 41.6 s); gone after quit with llama-server |
-| Settings pages | paint 20-35 ms; mount 0-265 ms (the "understanding" page is the slow one); longest renderer long task 170 ms (budget 200) |
+| Settings pages | paint 15-41 ms; mount 0-265 ms (the "understanding" page is the slow one); longest renderer long task 170 ms (budget 200) |
 | Process leaks | llama-server 2 -> 2, working set +0.01 %, no python, nothing left after quit |
 | Cold start / idle 60 s / hidden idle | 9.3-9.6 s to interactive (model-free launches) / 15.0 % / 0.15 % |
 
