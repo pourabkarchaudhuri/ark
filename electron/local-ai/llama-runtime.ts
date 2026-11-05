@@ -158,6 +158,12 @@ const MAX_LOG_LINE = 300;
 const MAX_LOG_CHUNK = 16_384;
 const DEFAULT_STOP_WAIT_MS = 3_000;
 const DEFAULT_FAILED_COOLDOWN_MS = 60_000;
+/** A GPU out-of-memory launch of the chat server halves the context down to this before the CPU is used. */
+const MIN_GPU_CHAT_CTX = 8_192;
+/** Only memory exhaustion is worth retrying on the GPU with a smaller context (a lost device is not). */
+const GPU_MEMORY_RE = /out of memory|ErrorOutOfDeviceMemory|ErrorOutOfHostMemory|failed to allocate/i;
+/** A CPU fallback (or a context cap) caused by a transient VRAM shortage is dropped after this long. */
+const CPU_FALLBACK_RETRY_MS = 30 * MIN;
 
 /** A signal that aborts after `ms` (AbortSignal.timeout is missing from some environments). */
 function timeoutSignal(ms: number): AbortSignal {
@@ -197,6 +203,12 @@ interface Slot {
   /** -ngl of the current launch (0 = CPU). */
   launchedGpuLayers: number;
   logTail: string[];
+  /** Bumped by stop() while a start is in flight: that start is cancelled and must not touch the slot again. */
+  gen: number;
+  /** Chat context the GPU could hold after an out-of-memory launch (null = as requested). */
+  ctxCap: number | null;
+  /** Clock time cpuFallback / ctxCap were set. */
+  fallbackAt: number | null;
 }
 
 /** Keep log handling cheap: huge chunks (request bodies at debug verbosity) are cut to head + tail. */
@@ -272,7 +284,7 @@ export class LlamaRuntime {
         role, state: 'stopped', child: null, port: null, apiKey: null, launch: {}, restarts: 0,
         startedHealthyAt: null, cpuFallback: false, gpu: emptyGpu(), lastError: null, starting: null,
         idleTimer: null, restartTimer: null, stopping: false, stopPromise: null, failedAt: null,
-        launchedGpuLayers: 0, logTail: [],
+        launchedGpuLayers: 0, logTail: [], gen: 0, ctxCap: null, fallbackAt: null,
       };
       this.slots.set(role, s);
     }
@@ -354,6 +366,19 @@ export class LlamaRuntime {
     if (s.state === 'failed') {
       throw new RuntimeError(s.lastError ?? `The ${role} server failed too often; use Re-check to try again`, 'failed_too_often');
     }
+    if (s.state === 'ready' && !s.child) {
+      // 'ready' with no process behind it (a stop() raced the start): never serve the dead port.
+      this.deps.log(`[LocalAI] ${role}: marked ready without a process; restarting`);
+      s.state = 'stopped';
+    }
+    if ((s.cpuFallback || s.ctxCap !== null) && s.state !== 'ready' && !s.starting
+      && s.fallbackAt !== null && this.deps.now() - s.fallbackAt >= CPU_FALLBACK_RETRY_MS) {
+      // The GPU shortage may have been a game or a sibling server: try the full GPU launch again.
+      this.deps.log(`[LocalAI] ${role}: retrying the GPU launch after the CPU fallback window`);
+      s.cpuFallback = false;
+      s.ctxCap = null;
+      s.fallbackAt = null;
+    }
     const wanted: LaunchOptions = { ...s.launch, ...launch };
     if (s.state === 'ready' && !this.sameLaunch(role, s.launch, wanted)) {
       this.deps.log(`[LocalAI] ${role}: launch options changed, restarting`);
@@ -365,8 +390,10 @@ export class LlamaRuntime {
     }
     if (s.starting) return s.starting;
     s.launch = wanted;
-    s.starting = this.start(s).finally(() => { s.starting = null; });
-    return s.starting;
+    const gen = s.gen;
+    const starting: Promise<ServerInfo> = this.start(s, gen).finally(() => { if (s.starting === starting) s.starting = null; });
+    s.starting = starting;
+    return starting;
   }
 
   private sameLaunch(role: LocalAiRole, a: LaunchOptions, b: LaunchOptions): boolean {
@@ -409,12 +436,13 @@ export class LlamaRuntime {
     } else if (s.role === 'rerank-qwen') {
       args.push('-c', '4096', '-b', '2048', '-ub', '2048');
     } else {
-      args.push('--jinja', '-c', String(l.numCtx && l.numCtx > 0 ? l.numCtx : 8192));
+      const wantedCtx = l.numCtx && l.numCtx > 0 ? l.numCtx : 8192;
+      args.push('--jinja', '-c', String(s.ctxCap !== null ? Math.min(wantedCtx, s.ctxCap) : wantedCtx));
     }
     return args;
   }
 
-  private async start(s: Slot): Promise<ServerInfo> {
+  private async start(s: Slot, gen: number): Promise<ServerInfo> {
     const role = s.role;
     if (!this.isRuntimeAvailable()) {
       throw new RuntimeError('The built-in AI runtime is missing from this install', 'no_runtime');
@@ -431,9 +459,9 @@ export class LlamaRuntime {
       const avoidPorts: number[] = [];
       let bindRetries = 0;
       for (;;) {
-        const outcome = await this.launchOnce(s, model, useGpu ? GPU_LAYERS_ALL : 0, avoidPorts);
+        const outcome = await this.launchOnce(s, model, useGpu ? GPU_LAYERS_ALL : 0, avoidPorts, gen);
         if (outcome.ok) return this.info(s);
-        if (outcome.cancelled) { cancelled = true; throw new RuntimeError(outcome.reason, 'start_failed'); }
+        if (outcome.cancelled || s.gen !== gen) { cancelled = true; throw new RuntimeError(outcome.reason, 'start_failed'); }
         if (outcome.bindFailure && outcome.port !== null && bindRetries < MAX_BIND_RETRIES && !this.shuttingDown) {
           bindRetries += 1;
           avoidPorts.push(outcome.port);
@@ -441,14 +469,27 @@ export class LlamaRuntime {
           continue;
         }
         if (useGpu && outcome.gpuProblem && !this.shuttingDown) {
+          const wantedCtx = s.launch.numCtx && s.launch.numCtx > 0 ? s.launch.numCtx : 8192;
+          const usedCtx = s.ctxCap !== null ? Math.min(s.ctxCap, wantedCtx) : wantedCtx;
+          if (role === 'chat' && usedCtx > MIN_GPU_CHAT_CTX && GPU_MEMORY_RE.test(outcome.reason)) {
+            // A huge KV cache is the usual reason a chat model does not fit: keep it on the GPU with less context
+            // before dropping to the (far slower) CPU.
+            s.ctxCap = Math.max(MIN_GPU_CHAT_CTX, Math.floor(usedCtx / 2));
+            s.fallbackAt = this.deps.now();
+            this.deps.log(`[LocalAI] ${role}: GPU memory exhausted at context ${usedCtx}; retrying on the GPU with ${s.ctxCap}`);
+            continue;
+          }
           this.deps.log(`[LocalAI] ${role}: GPU launch failed (${outcome.reason}); retrying on the CPU`);
           s.cpuFallback = true;
+          s.fallbackAt = this.deps.now();
           useGpu = false;
           continue;
         }
         throw new RuntimeError(outcome.reason, 'start_failed');
       }
     } catch (err) {
+      // stop() cancelled this start: the slot belongs to whoever starts next, so leave it alone.
+      if (s.gen !== gen) throw err;
       s.lastError = err instanceof Error ? err.message : String(err);
       if ((s.state as RuntimeState) === 'failed') {
         // already failed (crash path)
@@ -472,10 +513,16 @@ export class LlamaRuntime {
     model: string,
     gpuLayers: number,
     avoidPorts: number[] = [],
+    gen: number = s.gen,
   ): Promise<{ ok: boolean; reason: string; gpuProblem: boolean; bindFailure: boolean; port: number | null; cancelled?: boolean }> {
     const role = s.role;
     const port = await this.reservePort(avoidPorts);
     if (port === null) throw new RuntimeError('No free local port for the built-in AI server', 'no_port');
+    if (s.gen !== gen || this.shuttingDown) {
+      // stop() / quit arrived while the port was being picked: nothing was spawned, so there is nothing to undo.
+      this.usedPorts.delete(port);
+      return { ok: false, reason: 'The server start was cancelled', gpuProblem: false, bindFailure: false, port, cancelled: true };
+    }
     const apiKey = this.deps.randomKey();
     s.port = port;
     s.apiKey = apiKey;
@@ -529,11 +576,13 @@ export class LlamaRuntime {
     const deadline = this.deps.now() + this.startTimeoutMs(role);
     while (this.deps.now() < deadline) {
       if (exited || spawnError) break;
-      if (this.shuttingDown || s.stopping) break;
+      if (this.shuttingDown || s.stopping || s.gen !== gen) break;
       try {
         const res = await this.deps.fetchFn(`${base}/health`, { signal: timeoutSignal(2_000) });
         // /health is open to anyone on the port: ready only when our own api key is accepted too.
-        if (res.ok && !exited && !spawnError && await this.ownsPort(base, apiKey)) {
+        if (res.ok && !exited && !spawnError && await this.ownsPort(base, apiKey)
+          && s.gen === gen && s.child === child && !s.stopping && !this.shuttingDown) {
+          // (the checks after the awaits: a stop() that raced the probes must not leave a dead 'ready' slot)
           scanning = false;
           s.state = 'ready';
           s.startedHealthyAt = this.deps.now();
@@ -558,11 +607,14 @@ export class LlamaRuntime {
       ? `llama-server exited (code ${ex.code ?? 'none'}${ex.signal ? `, ${ex.signal}` : ''})${tail ? `: ${tail}` : ''}`
       : `llama-server did not become healthy within ${Math.round(this.startTimeoutMs(role) / 1000)}s${tail ? `: ${tail}` : ''}`;
     // stop() / quit during the start wait is a deliberate cancel, not a server that cannot start.
-    const cancelled = s.stopping || this.shuttingDown;
-    s.stopping = true;
+    const stale = s.gen !== gen;
+    const cancelled = stale || s.stopping || this.shuttingDown;
     this.killChild(child);
-    this.usedPorts.delete(port);
-    s.child = null;
+    if (!stale) {
+      s.stopping = true;
+      this.usedPorts.delete(port);
+      s.child = null;
+    }
     return {
       ok: false, reason, port, cancelled,
       gpuProblem: !failedSpawn && (gpuProblem || (gpuLayers > 0 && GPU_FAILURE_RE.test(tail))),
@@ -614,6 +666,7 @@ export class LlamaRuntime {
     if (!s.cpuFallback && s.launchedGpuLayers > 0
       && (GPU_FAILURE_RE.test(s.logTail.join('\n')) || (s.restarts >= 1 && s.gpu.gpuBytes > 0))) {
       s.cpuFallback = true;
+      s.fallbackAt = this.deps.now();
       this.deps.log(`[LocalAI] ${s.role}: GPU crash while serving; restarting on the CPU`);
     }
     this.scheduleRestart(s);
@@ -655,6 +708,12 @@ export class LlamaRuntime {
     if (!s) return Promise.resolve();
     if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
     if (s.restartTimer) { clearTimeout(s.restartTimer); s.restartTimer = null; }
+    if (s.starting) {
+      // Cancel the in-flight start (even before its child exists): a later ensure() must begin a fresh one
+      // instead of joining this one, and the old attempt must not spawn or mark the slot ready afterwards.
+      s.gen += 1;
+      s.starting = null;
+    }
     const child = s.child;
     if (!child) {
       if (s.state !== 'failed') s.state = 'stopped';
@@ -686,6 +745,20 @@ export class LlamaRuntime {
     });
   }
 
+  /**
+   * The role's server ran out of memory while serving (a request failed with an allocation error): relaunch it
+   * on the CPU. False when it already runs there (or does not run), so the caller must not retry.
+   */
+  async fallbackToCpu(role: LocalAiRole): Promise<boolean> {
+    const s = this.slots.get(role);
+    if (!s || s.state !== 'ready' || s.launchedGpuLayers <= 0 || s.cpuFallback) return false;
+    s.cpuFallback = true;
+    s.fallbackAt = this.deps.now();
+    this.deps.log(`[LocalAI] ${role}: out of memory while serving; restarting on the CPU`);
+    await this.stop(role);
+    return true;
+  }
+
   /** Stop every server (game started, models being removed, settings changed). */
   async stopAll(): Promise<void> {
     await Promise.all([...this.slots.keys()].map((r) => this.stop(r)));
@@ -711,6 +784,8 @@ export class LlamaRuntime {
       s.restarts = 0;
       s.failedAt = null;
       s.cpuFallback = false;
+      s.ctxCap = null;
+      s.fallbackAt = null;
       s.lastError = null;
       if (s.state === 'failed') s.state = 'stopped';
     }
