@@ -381,6 +381,21 @@ describe('ModelStore robustness (1.0.98 F2)', () => {
     expect(store.statuses()[2].state).toBe('ready');
   });
 
+  it('priority also moves models that were already waiting behind a running chat download', async () => {
+    mode = { delayMs: 300 };
+    const chat = entry({ id: 'chat-test', role: 'chat', file: 'chat-test.gguf', auto: false });
+    const store = makeStore([entry(), rerank(), chat]);
+    void store.ensure(['chat-test', 'embed-test']);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(store.statuses()[2].state).toBe('downloading');
+    mode = {};
+    void store.ensure(['embed-test'], { priority: true });
+    await store.whenSettled(['embed-test']);
+    expect(store.statuses()[0].state).toBe('ready');
+    expect(store.statuses()[2].state).not.toBe('ready');
+    await store.whenSettled(['chat-test']);
+  });
+
   it('a move that fails midway puts every file back and leaves the old folder whole', async () => {
     const second = rerank();
     const store = makeStore([entry(), second]);

@@ -307,9 +307,11 @@ export class ModelStore {
       this.set(id, { state: 'queued', error: null });
     }
     if (opts.priority) {
-      this.queue = [...added, ...this.queue.filter((q) => !added.includes(q))];
+      // Models that were already waiting (behind the chat model) move to the front too.
+      const front = ids.filter((id) => added.includes(id) || this.queue.includes(id));
+      this.queue = [...front, ...this.queue.filter((q) => !front.includes(q))];
       const cur = this.current;
-      if (cur && added.length && !added.includes(cur.id) && !this.status.get(cur.id)?.auto) {
+      if (cur && front.length && !front.includes(cur.id) && !cur.userAbort && !this.status.get(cur.id)?.auto) {
         cur.preempted = true;
         cur.abort.abort();
       }
@@ -406,7 +408,7 @@ export class ModelStore {
         this.deps.log(`[LocalAI] ${m.file} downloaded from ${src.kind} and verified`);
         return 'ok';
       } catch (err) {
-        if (abort.signal.aborted && attempt.preempted) {
+        if (abort.signal.aborted && attempt.preempted && !attempt.userAbort) {
           // Stepped aside for a more urgent model; the .part stays and it runs again afterwards.
           this.set(m.id, { state: 'queued' });
           if (!this.queue.includes(m.id)) this.queue.push(m.id);
