@@ -38,8 +38,8 @@ vi.mock('../../../electron/ai-router/service.js', () => ({
 }));
 
 import { __setBuiltinBackendForTests } from '../../../electron/local-ai/backend';
-import { generateEmbeddingsBatchDetailed } from '../../../electron/ollama-setup';
-import { rerankViaNativeEndpoint } from '../../../electron/ipc/ollama-handlers';
+import { generateEmbeddingsBatchDetailed, generateEmbedding } from '../../../electron/ollama-setup';
+import { rerankViaNativeEndpoint, register as registerOllamaHandlers } from '../../../electron/ipc/ollama-handlers';
 import { detectRerankTier, resetRerankTierCache } from '../../../electron/rerank-engine';
 
 beforeEach(() => {
@@ -64,10 +64,32 @@ describe('embeddings', () => {
     h.route.embeddings = 'router';
     h.router.embed.mockImplementation(async (_texts: string[], local: () => Promise<unknown>) => ({ viaRouter: true, fallback: await local() }));
     const out = await generateEmbeddingsBatchDetailed(['a', 'b']) as unknown as { viaRouter: boolean; fallback: unknown };
-    expect(h.router.embed).toHaveBeenCalledWith(['a', 'b'], expect.any(Function));
+    expect(h.router.embed).toHaveBeenCalledWith(['a', 'b'], expect.any(Function), { queryOnly: false });
     expect(out.viaRouter).toBe(true);
     expect(out.fallback).toEqual({ embeddings: [[1, 2]], error: null });
     expect(h.builtin.embed).toHaveBeenCalledTimes(1); // only because the fallback was invoked
+  });
+
+  it('query-time embeds tell the router queryOnly; bulk writes never do', async () => {
+    h.route.embeddings = 'router';
+    h.router.embed.mockResolvedValue({ embeddings: [[9]], error: null });
+    await generateEmbeddingsBatchDetailed(['q'], undefined, { queryOnly: true });
+    expect(h.router.embed).toHaveBeenLastCalledWith(['q'], expect.any(Function), { queryOnly: true });
+    await generateEmbeddingsBatchDetailed(['doc']);
+    expect(h.router.embed).toHaveBeenLastCalledWith(['doc'], expect.any(Function), { queryOnly: false });
+    await generateEmbedding('q', { queryOnly: true });
+    expect(h.router.embed).toHaveBeenLastCalledWith(['q'], expect.any(Function), { queryOnly: true });
+    await generateEmbedding('rerank query');
+    expect(h.router.embed).toHaveBeenLastCalledWith(['rerank query'], expect.any(Function), { queryOnly: false });
+  });
+
+  it('the single-text IPC (query path) passes queryOnly to the router', async () => {
+    h.route.embeddings = 'router';
+    h.router.embed.mockResolvedValue({ embeddings: [[9]], error: null });
+    const handlers = new Map<string, (...a: unknown[]) => Promise<unknown>>();
+    registerOllamaHandlers({ handle: (c: string, fn: never) => { handlers.set(c, fn); }, on: () => undefined } as never);
+    await handlers.get('ollama:generateEmbedding')!({}, 'find me a game');
+    expect(h.router.embed).toHaveBeenLastCalledWith(['find me a game'], expect.any(Function), { queryOnly: true });
   });
 
   it('an empty batch needs no router or backend', async () => {

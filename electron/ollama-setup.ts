@@ -501,12 +501,17 @@ export function ensureRerankModelPull(
   return pull;
 }
 
+/** Where an embed request is going: `queryOnly` marks query-time text (never a bulk library / catalog write). */
+export interface EmbedRouteOptions {
+  queryOnly?: boolean;
+}
+
 /**
  * Generate an embedding for a single text string.
  * Returns null if Ollama is unavailable.
  */
-export async function generateEmbedding(text: string): Promise<number[] | null> {
-  const results = await generateEmbeddingsBatch([text]);
+export async function generateEmbedding(text: string, route?: EmbedRouteOptions): Promise<number[] | null> {
+  const results = await generateEmbeddingsBatch([text], undefined, route);
   return results[0];
 }
 
@@ -636,8 +641,9 @@ export interface EmbedBatchOptions {
 export async function generateEmbeddingsBatch(
   texts: string[],
   opts?: EmbedBatchOptions,
+  route?: EmbedRouteOptions,
 ): Promise<(number[] | null)[]> {
-  return (await generateEmbeddingsBatchDetailed(texts, opts)).embeddings;
+  return (await generateEmbeddingsBatchDetailed(texts, opts, route)).embeddings;
 }
 
 /**
@@ -648,12 +654,15 @@ export async function generateEmbeddingsBatch(
 export async function generateEmbeddingsBatchDetailed(
   texts: string[],
   opts?: EmbedBatchOptions,
+  route: EmbedRouteOptions = {},
 ): Promise<{ embeddings: (number[] | null)[]; error: EmbedBatchError | null }> {
   if (texts.length === 0) return { embeddings: [], error: null };
   // AI router (1.0.97 B35): an embeddings route on a connector other than Built-in goes through LiteLLM.
   // The router falls back to this local path itself when its policy says so and the vectors allow it.
   if (routeFor('embeddings').via === 'router') {
-    return getAiRouter().embed(texts, () => generateEmbeddingsLocalDetailed(texts, opts));
+    // `queryOnly` (search / Oracle query text) lets the router fall back to the built-in model while a model-change
+    // rebuild is pending, because the cache being searched is still in that space. Bulk writes never set it.
+    return getAiRouter().embed(texts, () => generateEmbeddingsLocalDetailed(texts, opts), { queryOnly: route.queryOnly === true });
   }
   return generateEmbeddingsLocalDetailed(texts, opts);
 }

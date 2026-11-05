@@ -459,7 +459,8 @@ export function register(ipc: OllamaIpcRegistrar = ipcMain): void {
   ipc.handle('ollama:generateEmbedding', async (_event: any, text: string) => {
     try {
       if (!text || typeof text !== 'string') return null;
-      return await generateEmbedding(text);
+      // The single-text IPC is the query-time path (search / Oracle); bulk writes use ollama:generateEmbeddings.
+      return await generateEmbedding(text, { queryOnly: true });
     } catch (error) {
       logger.error('[Ollama] Embedding generation error:', error);
       return null;
