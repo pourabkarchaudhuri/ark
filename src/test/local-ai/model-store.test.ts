@@ -244,7 +244,7 @@ describe('ModelStore on-disk state', () => {
     const store = makeStore([entry()]);
     await store.ensure(['embed-test']);
     fs.writeFileSync(path.join(dir, `embed-test.gguf.${SHA.slice(0, 12)}.dl.part`), 'x');
-    store.removeAll();
+    await store.removeAll();
     expect(fs.readdirSync(dir)).toEqual([]);
     expect(store.statuses()[0].state).toBe('missing');
     expect(store.diskUsedBytes()).toBe(0);
@@ -261,13 +261,168 @@ describe('ModelStore on-disk state', () => {
     await store.ensure(['embed-test']);
     const other = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-models-new-'));
     try {
-      store.moveTo(other, dir);
+      await store.moveTo(other, dir);
       expect(fs.existsSync(path.join(other, 'embed-test.gguf'))).toBe(true);
       expect(fs.existsSync(path.join(other, 'embed-test.gguf.verified.json'))).toBe(true);
       expect(fs.existsSync(path.join(dir, 'embed-test.gguf'))).toBe(false);
     } finally {
       fs.rmSync(other, { recursive: true, force: true });
     }
+  });
+});
+
+describe('ModelStore robustness (1.0.98 F2)', () => {
+  const rerank = () => entry({ id: 'rerank-test', role: 'rerank', file: 'rerank-test.gguf' });
+
+  it('a read error while hashing keeps the file instead of deleting a valid model', async () => {
+    fs.writeFileSync(path.join(dir, 'embed-test.gguf'), PAYLOAD);
+    const store = makeStore([entry()], { hashFile: async () => { throw Object.assign(new Error('busy'), { code: 'EBUSY' }); } });
+    await store.refresh();
+    expect(fs.existsSync(path.join(dir, 'embed-test.gguf'))).toBe(true);
+    expect(store.statuses()[0].state).toBe('error');
+    // The next check succeeds and the same file is accepted.
+    const again = makeStore([entry()]);
+    await again.refresh();
+    expect(again.statuses()[0].state).toBe('ready');
+  });
+
+  it('refresh is single-flight: overlapping calls hash a file once', async () => {
+    fs.writeFileSync(path.join(dir, 'embed-test.gguf'), PAYLOAD);
+    let hashed = 0;
+    const store = makeStore([entry()], { hashFile: async () => { hashed++; await new Promise((r) => setTimeout(r, 30)); return SHA; } });
+    const [a, b] = [store.refresh(), store.refresh()];
+    await Promise.all([a, b]);
+    expect(hashed).toBe(1);
+    expect(store.statuses()[0].state).toBe('ready');
+  });
+
+  it('a refresh that finishes hashing after a download started does not delete the new file or reset its state', async () => {
+    fs.writeFileSync(path.join(dir, 'embed-test.gguf'), Buffer.from('old bytes'));
+    let release!: (h: string) => void;
+    const store = makeStore([entry()], { hashFile: () => new Promise<string>((r) => { release = r; }) });
+    const checking = store.refresh();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(store.statuses()[0].state).toBe('verifying');
+    const run = store.ensure(['embed-test']);
+    await run;
+    expect(store.statuses()[0].state).toBe('ready');
+    release('not-a-pinned-hash');
+    await checking;
+    expect(store.statuses()[0].state).toBe('ready');
+    expect(fs.existsSync(path.join(dir, 'embed-test.gguf'))).toBe(true);
+  });
+
+  it('a background ensure does not undo the user\'s Pause; Retry (resume) does', async () => {
+    mode = { delayMs: 300 };
+    const store = makeStore([entry(), rerank()]);
+    const run = store.ensure(['embed-test']);
+    await new Promise((r) => setTimeout(r, 60));
+    store.pause();
+    await run;
+    await store.ensure(['embed-test', 'rerank-test']);
+    expect(store.isPaused()).toBe(true);
+    expect(store.isBusy()).toBe(false);
+    expect(store.statuses().map((s) => s.state)).toEqual(['paused', 'paused']);
+    mode = {};
+    await store.resume();
+    expect(store.statuses().map((s) => s.state)).toEqual(['ready', 'ready']);
+  });
+
+  it('Resume right after Pause (before the abort unwinds) is not turned into an error', async () => {
+    mode = { delayMs: 300 };
+    const store = makeStore([entry()]);
+    const run = store.ensure(['embed-test']);
+    await new Promise((r) => setTimeout(r, 60));
+    store.pause();
+    mode = {};
+    const again = store.resume();
+    await Promise.all([run, again]);
+    const st = store.statuses()[0];
+    expect(st.state).toBe('ready');
+    expect(st.error).toBeNull();
+  });
+
+  it('an unavailable models folder ends in an error with a code, not a model stuck queued', async () => {
+    const blocker = path.join(dir, 'a-file');
+    fs.writeFileSync(blocker, 'x');
+    const store = makeStore([entry(), rerank()], { modelsDir: () => path.join(blocker, 'models') });
+    await store.ensure(['embed-test', 'rerank-test']);
+    const [a, b] = store.statuses();
+    expect(a.state).toBe('error');
+    expect(a.error?.code).toBe('folder_unavailable');
+    expect(b.state).toBe('missing');
+  });
+
+  it('a disk-full failure during the transfer is reported as disk_full and stops the queue', async () => {
+    const store = makeStore([entry(), rerank()], {
+      download: async () => { throw new DownloadError('ENOSPC: not enough disk space to continue the download', { code: 'ENOSPC' }); },
+    });
+    await store.ensure(['embed-test', 'rerank-test']);
+    const [a, b] = store.statuses();
+    expect(a.error?.code).toBe('disk_full');
+    expect(b.state).toBe('missing');
+  });
+
+  it('whenSettled and priority: a rerank model does not wait for a running chat download', async () => {
+    mode = { delayMs: 300 };
+    const chat = entry({ id: 'chat-test', role: 'chat', file: 'chat-test.gguf', auto: false });
+    const store = makeStore([entry(), rerank(), chat]);
+    void store.ensure(['chat-test']);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(store.statuses()[2].state).toBe('downloading');
+    mode = {};
+    void store.ensure(['embed-test', 'rerank-test'], { priority: true });
+    await store.whenSettled(['embed-test', 'rerank-test']);
+    const [a, b, c] = store.statuses();
+    expect(a.state).toBe('ready');
+    expect(b.state).toBe('ready');
+    expect(c.state).not.toBe('ready');
+    await store.whenSettled(['chat-test']);
+    expect(store.statuses()[2].state).toBe('ready');
+  });
+
+  it('a move that fails midway puts every file back and leaves the old folder whole', async () => {
+    const second = rerank();
+    const store = makeStore([entry(), second]);
+    await store.ensure(['embed-test', 'rerank-test']);
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-models-new-'));
+    try {
+      // A directory where the second file must go makes that rename fail after the first one succeeded.
+      fs.mkdirSync(path.join(other, 'rerank-test.gguf'));
+      await expect(store.beginMove(other, dir)).rejects.toThrow();
+      expect(fs.existsSync(path.join(dir, 'embed-test.gguf'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'embed-test.gguf.verified.json'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'rerank-test.gguf'))).toBe(true);
+      expect(fs.existsSync(path.join(other, 'embed-test.gguf'))).toBe(false);
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('a rolled-back move restores the files', async () => {
+    const store = makeStore([entry()]);
+    await store.ensure(['embed-test']);
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-models-new-'));
+    try {
+      const plan = await store.beginMove(other, dir);
+      expect(fs.existsSync(path.join(other, 'embed-test.gguf'))).toBe(true);
+      await plan.rollback();
+      expect(fs.existsSync(path.join(dir, 'embed-test.gguf'))).toBe(true);
+      expect(fs.existsSync(path.join(other, 'embed-test.gguf'))).toBe(false);
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('removeAll reports a file that stays locked after the rest were removed', async () => {
+    const store = makeStore([entry(), rerank()], { removeRetryDelayMs: 1 });
+    await store.ensure(['embed-test', 'rerank-test']);
+    // A directory with the file's name cannot be removed by a file delete (EISDIR/EPERM).
+    fs.rmSync(path.join(dir, 'embed-test.gguf'));
+    fs.mkdirSync(path.join(dir, 'embed-test.gguf'));
+    fs.writeFileSync(path.join(dir, 'embed-test.gguf', 'x'), 'x');
+    await expect(store.removeAll()).rejects.toThrow(/could not be removed/);
+    expect(fs.existsSync(path.join(dir, 'rerank-test.gguf'))).toBe(false);
   });
 });
 
@@ -278,6 +433,8 @@ describe('classifyDownloadError', () => {
     expect(classifyDownloadError(Object.assign(new Error('x'), { statusCode: 451 })).code).toBe('blocked');
     expect(classifyDownloadError(Object.assign(new Error('fetch failed'), { cause: { code: 'ENOTFOUND' } })).code).toBe('offline');
     expect(classifyDownloadError(Object.assign(new Error('x'), { statusCode: 500 })).code).toBe('http');
+    expect(classifyDownloadError(new DownloadError('x', { code: 'ENOSPC' })).code).toBe('disk_full');
+    expect(classifyDownloadError(new DownloadError('x', { code: 'OVERSIZE' })).code).toBe('checksum');
     expect(classifyDownloadError(new Error('weird')).code).toBe('unknown');
   });
 });

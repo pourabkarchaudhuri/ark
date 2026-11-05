@@ -289,6 +289,50 @@ describe('downloadWithResume: stalls and failures that are not a filter', () => 
     expect(cancelled).toBe(1);
   });
 
+  it('a full disk stops at once with ENOSPC instead of retrying or reporting a blocked network', async () => {
+    const calls: Call[] = [];
+    const onProgress = () => { throw Object.assign(new Error('write failed'), { code: 'ENOSPC' }); };
+    const err = await runSmall({ onProgress, fetchImpl: fakeFetch(['ok', 'ok', 'ok'], calls) }).catch((e) => e);
+    expect(err).toBeInstanceOf(DownloadError);
+    expect(err.code).toBe('ENOSPC');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('a response longer than the pinned size is cut off, deleted and not retried', async () => {
+    let calls = 0;
+    const big = Buffer.alloc(SMALL.length * 3, 7);
+    const fetchImpl = async () => {
+      calls++;
+      // No Content-Length announced (chunked): only the running byte count can catch it.
+      return new Response(new WebReadableStream({ start(c) { c.enqueue(big.subarray(0, SMALL.length * 2)); c.close(); } }) as unknown as ReadableStream, { status: 200 });
+    };
+    const err = await runSmall({ fetchImpl }).catch((e) => e);
+    expect(err.code).toBe('OVERSIZE');
+    expect(calls).toBe(1);
+    expect(fs.existsSync(path.join(dir, 'Ark-Setup.exe.part'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'Ark-Setup.exe'))).toBe(false);
+  });
+
+  it('a Content-Length larger than the pinned size is refused before anything is written', async () => {
+    const fetchImpl = async () => new Response(Buffer.alloc(SMALL.length + 5, 1), { status: 200, headers: { 'content-length': String(SMALL.length + 5) } });
+    const err = await runSmall({ fetchImpl }).catch((e) => e);
+    expect(err.code).toBe('OVERSIZE');
+    expect(fs.existsSync(path.join(dir, 'Ark-Setup.exe.part'))).toBe(false);
+  });
+
+  it('a cancel ends the backoff wait at once', async () => {
+    const ac = new AbortController();
+    const t0 = Date.now();
+    const p = downloadWithResume({
+      url: 'https://x/y', destPath: path.join(dir, 'z.bin'), expectedSize: SMALL.length, signal: ac.signal,
+      fetchImpl: async () => new Response(null, { status: 503 }),
+    });
+    setTimeout(() => ac.abort(), 60);
+    const err = await p.catch((e) => e);
+    expect(err.code).toBe('ABORTED');
+    expect(Date.now() - t0).toBeLessThan(900);
+  });
+
   it('repeated 5xx responses at the same offset are retried, not reported as blocked', async () => {
     const calls: Call[] = [];
     const out = await runSmall({ fetchImpl: fakeFetch(['503', '503', '503', 'ok'], calls) });

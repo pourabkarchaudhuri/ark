@@ -17,7 +17,7 @@ export interface LocalAiModelStatus {
   /** 0..100 */
   pct: number;
   source: 'ollama' | 'huggingface' | null;
-  error: { code: 'offline' | 'blocked' | 'disk_full' | 'checksum' | 'http' | 'unknown'; message: string } | null;
+  error: { code: 'offline' | 'blocked' | 'disk_full' | 'checksum' | 'http' | 'folder_unavailable' | 'unknown'; message: string } | null;
 }
 
 export interface LocalAiStatus {

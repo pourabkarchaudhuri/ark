@@ -67,6 +67,28 @@ export class DownloadError extends Error {
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** A backoff wait that ends the moment the caller cancels (Pause must not sit out a 15 s backoff). */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return defaultSleep(ms);
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) { resolve(); return; }
+    const done = (): void => { clearTimeout(t); signal.removeEventListener('abort', done); resolve(); };
+    const t = setTimeout(done, ms);
+    signal.addEventListener('abort', done);
+  });
+}
+
+/** Write the whole chunk: `writeSync` may write less than asked. */
+function writeAll(fh: number, chunk: Uint8Array): void {
+  let off = 0;
+  while (off < chunk.length) off += fs.writeSync(fh, chunk, off, chunk.length - off);
+}
+
+/** Disk full (or over quota): retrying cannot help and must be reported as such. */
+function isDiskFull(err: unknown): boolean {
+  return /ENOSPC|EDQUOT/.test(String((err as { code?: unknown } | null)?.code ?? ''));
+}
+
 function fileSize(p: string): number {
   try {
     return fs.statSync(p).size;
@@ -104,6 +126,10 @@ function errorText(err: unknown): string {
   return [e?.code, e?.message, e?.cause?.code, e?.cause?.message].filter((x) => typeof x === 'string').join(' ');
 }
 
+function dlErrCode(err: unknown): string | undefined {
+  return err instanceof DownloadError ? err.code : undefined;
+}
+
 /** A request the network or a local filter refused outright — retrying will not help. */
 function isBlocked(err: unknown): boolean {
   return /ERR_BLOCKED_BY|BLOCKED_BY_CLIENT|BLOCKED_BY_ADMINISTRATOR/i.test(errorText(err));
@@ -114,7 +140,7 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
   const maxAttempts = opts.maxAttempts ?? 6;
   const idleTimeoutMs = opts.idleTimeoutMs ?? 60_000;
   const doFetch = opts.fetchImpl ?? defaultFetch;
-  const sleep = opts.sleep ?? defaultSleep;
+  const sleep = opts.sleep ?? ((ms: number) => abortableSleep(ms, signal));
   const partPath = `${destPath}.part`;
 
   fs.mkdirSync(path.dirname(destPath), { recursive: true });
@@ -188,6 +214,13 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
       written = resumeAt;
       responded = true;
 
+      // A response that already says it is larger than the pinned size is the wrong file: do not write it.
+      const declared = Number(res.headers.get('content-length'));
+      if (expectedSize && Number.isFinite(declared) && declared > 0 && resumeAt + declared > expectedSize) {
+        fs.rmSync(partPath, { force: true });
+        throw new DownloadError(`The server announced more data than expected (${resumeAt + declared}/${expectedSize} bytes)`, { code: 'OVERSIZE' });
+      }
+
       fh = fs.openSync(partPath, resumeAt > 0 ? 'a' : 'w');
       reader = res.body.getReader();
       for (;;) {
@@ -195,7 +228,14 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
         if (done) break;
         if (value && value.length) {
           armIdle();
-          fs.writeSync(fh, value);
+          // Never write past the pinned size: an endless or wrong-file stream must not fill the disk.
+          if (expectedSize && written + value.length > expectedSize) {
+            fs.closeSync(fh);
+            fh = null;
+            fs.rmSync(partPath, { force: true });
+            throw new DownloadError(`The download is larger than expected (more than ${expectedSize} bytes)`, { code: 'OVERSIZE' });
+          }
+          writeAll(fh, value);
           written += value.length;
           onProgress?.({ transferred: written, total: expectedSize ?? 0 });
         }
@@ -214,6 +254,11 @@ export async function downloadWithResume(opts: ResumableDownloadOptions): Promis
         ? new DownloadError(`Download stalled: no data for ${Math.round(idleTimeoutMs / 1000)}s`, { code: 'ETIMEDOUT' })
         : caught;
       lastError = err;
+      if (isDiskFull(err)) {
+        // Not a flaky link and not a filter: stop now with the code the UI maps to "not enough disk space".
+        throw new DownloadError('ENOSPC: not enough disk space to continue the download', { code: 'ENOSPC' });
+      }
+      if (dlErrCode(err) === 'OVERSIZE') break; // the wrong file: another attempt would be the same
       if (isBlocked(err)) {
         throw new DownloadError('The download was blocked on this computer or network', { code: 'ERR_BLOCKED_BY_CLIENT' });
       }

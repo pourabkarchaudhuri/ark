@@ -1366,6 +1366,13 @@ export function onBuiltinModelsSettled(fn: (embeddingReady: boolean) => void): (
   return () => _modelsSettledHooks.delete(fn);
 }
 
+/** Run the settled hooks (the renderer re-checks embedding availability). Also used after Retry / Re-check. */
+export function notifyBuiltinModelsSettled(embeddingReady: boolean): void {
+  for (const hook of _modelsSettledHooks) {
+    try { hook(embeddingReady); } catch { /* a hook must not break the queue */ }
+  }
+}
+
 /** Download the Oracle models in the background; never throws. Resolves when the queue drains. */
 export function startBuiltinModelDownloads(): Promise<void> {
   const { store } = getLocalAiService();
@@ -1373,6 +1380,12 @@ export function startBuiltinModelDownloads(): Promise<void> {
   return store.ensure(ids).catch((err) => {
     logger.warn('[Local AI] Model download queue failed:', err);
   });
+}
+
+/** Same, then tell the renderer the queue settled (Retry and Re-check use this, so embeddings recover without a restart). */
+export function startBuiltinModelDownloadsAndNotify(): Promise<void> {
+  const { store } = getLocalAiService();
+  return startBuiltinModelDownloads().then(() => notifyBuiltinModelsSettled(store.isReady('embed')));
 }
 
 /**
@@ -1390,7 +1403,9 @@ export async function ensureBuiltinRerankModels(
       if (cur) onProgress?.(`Downloading ${cur.label}`, cur.pct);
     });
     try {
-      await store.ensure(rerankIds);
+      // Ahead of anything waiting, and not behind the 7 GB chat model: wait for these two only.
+      void store.ensure(rerankIds, { priority: true }).catch((err) => logger.warn('[Local AI] Rerank download queue failed:', err));
+      await store.whenSettled(rerankIds);
     } finally {
       off();
     }
@@ -1441,9 +1456,7 @@ async function runBuiltinSetup(
       void startBuiltinModelDownloads().then(() => {
         const embedReady = store.isReady('embed');
         if (embedReady) warmUp();
-        for (const hook of _modelsSettledHooks) {
-          try { hook(embedReady); } catch { /* a hook must not break the queue */ }
-        }
+        notifyBuiltinModelsSettled(embedReady);
       });
       result.error = result.embeddingModelReady ? null : 'Built-in AI models are downloading';
     }

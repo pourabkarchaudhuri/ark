@@ -21,11 +21,17 @@ import {
   setAnnModelTag,
 } from '../ann-index.js';
 import { getEmbeddingModelTag } from '../ollama-setup.js';
+import { getBackendKind, backendEmbeddingTag } from '../local-ai/backend.js';
 import { routeFor, getAiRouter } from '../ai-router/service.js';
 
 /** The model tag of the vectors: the local tag, or the routed model's identity (e.g. openai:text-embedding-3-small). */
 function routerEmbeddingTag(localTag: string): string {
-  return routeFor('embeddings').via === 'router' ? getAiRouter().embeddingIdentity() : localTag;
+  return routeFor('embeddings').via === 'router' ? getAiRouter().embeddingIdentity() : backendEmbeddingTag(localTag, getBackendKind());
+}
+
+/** Re-resolve the model tag after the embedding backend changed (Settings: "Use my own Ollama"). */
+export function refreshAnnModelTag(): void {
+  try { setAnnModelTag(routerEmbeddingTag(getEmbeddingModelTag())); } catch { /* keep the previous tag */ }
 }
 
 export function register(): void {

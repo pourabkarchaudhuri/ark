@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../safe-logger.js';
 import { settingsStore } from '../settings-store.js';
-import { getBackendKind } from '../local-ai/backend.js';
+import { getBackendKind, backendEmbeddingTag } from '../local-ai/backend.js';
 import { getManifest, getModelForRole } from '../local-ai/manifest.js';
 import { getLocalAiService, resolveModelsDir, type LocalAiService } from '../local-ai/service.js';
 import { defaultFreeBytes, type ModelStatus } from '../local-ai/model-store.js';
@@ -20,7 +20,7 @@ import {
   allowBuiltinAutoDownload,
   declineBuiltinAutoDownload,
   isBuiltinAutoDownloadDeclined,
-  startBuiltinModelDownloads,
+  startBuiltinModelDownloadsAndNotify,
   onBuiltinModelsSettled,
   resetGpuModeCache,
 } from '../ollama-setup.js';
@@ -86,15 +86,20 @@ export function validateModelsDir(dir: unknown): string | null {
   const trimmed = dir.trim();
   if (!trimmed || trimmed.length > MAX_PATH_LEN || trimmed.includes('\0')) return null;
   if (!path.isAbsolute(trimmed)) return null;
+  // Network shares (\\server\share, \\?\ and \\.\ device paths) are not a local drive: a dropped link mid-download or mid-load is a bad place for 7 GB of models.
+  if (/^[\\/]{2}/.test(trimmed)) return null;
   const resolved = path.resolve(trimmed);
+  if (/^[\\/]{2}/.test(resolved)) return null;
   if (path.parse(resolved).root === resolved) return null;
+  // Windows system folders are not a place for the models (and are usually read-only for the user).
+  if (/^[a-z]:[\\/](windows|program files( \(x86\))?|programdata)([\\/]|$)/i.test(resolved)) return null;
   return resolved;
 }
 
 export class LocalAiController {
   constructor(private readonly deps: LocalAiControllerDeps) {}
 
-  status(): LocalAiStatus {
+  status(disk?: { used: number; free: number | null }): LocalAiStatus {
     const { store, runtime } = this.deps.service();
     const settings = this.deps.getSettings();
     const dir = this.deps.modelsDir();
@@ -106,8 +111,8 @@ export class LocalAiController {
       runtime: { available: runtime.isRuntimeAvailable(), build: manifest.runtime.build, roles: runtime.status() },
       models: store.statuses(),
       modelsDir: dir,
-      diskUsedBytes: store.diskUsedBytes(),
-      diskFreeBytes: (this.deps.freeBytes ?? defaultFreeBytes)(dir),
+      diskUsedBytes: disk ? disk.used : store.diskUsedBytes(),
+      diskFreeBytes: disk ? disk.free : (this.deps.freeBytes ?? defaultFreeBytes)(dir),
       paused: store.isPaused(),
       declined: (this.deps.declined ?? isBuiltinAutoDownloadDeclined)(),
       compute: embedRole.state === 'ready' && embedRole.gpu
@@ -122,6 +127,24 @@ export class LocalAiController {
     };
   }
 
+  private diskStatsCache: { at: number; dir: string; used: number; free: number | null } | null = null;
+
+  /**
+   * Status for the background push while downloads run: the same shape, but the disk numbers (a
+   * stat of every model file) are re-read at most every few seconds, not on every progress tick.
+   */
+  statusForPush(maxAgeMs = 3_000): LocalAiStatus {
+    const dir = this.deps.modelsDir();
+    const now = Date.now();
+    const c = this.diskStatsCache;
+    if (!c || c.dir !== dir || now - c.at > maxAgeMs) {
+      const { store } = this.deps.service();
+      this.diskStatsCache = { at: now, dir, used: store.diskUsedBytes(), free: (this.deps.freeBytes ?? defaultFreeBytes)(dir) };
+    }
+    const cached = this.diskStatsCache!;
+    return this.status(cached);
+  }
+
   /** Refresh what is on disk first, then report. */
   async refreshedStatus(): Promise<LocalAiStatus> {
     await this.deps.service().store.refresh();
@@ -134,7 +157,7 @@ export class LocalAiController {
     if (!chat) throw new Error('No chat model in the manifest');
     const { store } = this.deps.service();
     (this.deps.allow ?? allowBuiltinAutoDownload)();
-    void store.ensure([chat.id]);
+    void store.ensure([chat.id], { resumePaused: true });
     return this.status();
   }
 
@@ -145,7 +168,8 @@ export class LocalAiController {
     (this.deps.allow ?? allowBuiltinAutoDownload)();
     await store.refresh();
     this.deps.onConfigChanged?.();
-    void (this.deps.startDownloads ?? startBuiltinModelDownloads)();
+    store.unpause();
+    void (this.deps.startDownloads ?? startBuiltinModelDownloadsAndNotify)();
     return this.status();
   }
 
@@ -153,7 +177,11 @@ export class LocalAiController {
   async retry(): Promise<LocalAiStatus> {
     const { store } = this.deps.service();
     (this.deps.allow ?? allowBuiltinAutoDownload)();
+    store.unpause();
+    // Failed or paused models first, then every automatic model: a stop-class failure resets the rest of the
+    // queue to 'missing', which resume() alone would not pick up. Both settle the embeddings when the queue drains.
     void store.resume();
+    void (this.deps.startDownloads ?? startBuiltinModelDownloadsAndNotify)();
     return this.status();
   }
 
@@ -171,8 +199,11 @@ export class LocalAiController {
   async removeModels(): Promise<LocalAiStatus> {
     const { store, runtime } = this.deps.service();
     await runtime.stopAll();
-    store.removeAll();
-    this.deps.onConfigChanged?.();
+    try {
+      await store.removeAll();
+    } finally {
+      this.deps.onConfigChanged?.();
+    }
     return this.status();
   }
 
@@ -180,30 +211,47 @@ export class LocalAiController {
   async changeFolder(dir: string): Promise<LocalAiStatus> {
     const target = validateModelsDir(dir);
     if (!target) throw new Error('Choose a folder on a local drive (not a drive root)');
-    const { store, runtime } = this.deps.service();
-    const from = this.deps.modelsDir();
-    await runtime.stopAll();
-    store.cancelAll();
-    await waitUntil(() => !store.isBusy(), 5_000);
-    fs.mkdirSync(target, { recursive: true });
-    store.moveTo(target, from);
-    this.deps.setSettings({ modelsDir: target });
-    await store.refresh();
-    this.deps.onConfigChanged?.();
-    return this.status();
+    return this.relocate(target, target);
   }
 
   /** Back to the default folder (%LOCALAPPDATA%\Ark\models). */
   async resetFolder(defaultDir: string): Promise<LocalAiStatus> {
+    return this.relocate(defaultDir, null);
+  }
+
+  /**
+   * Stop the servers and downloads, copy the models over, switch the setting, then delete the old
+   * copies. A failure at any step puts everything back and leaves the old folder in use.
+   */
+  private async relocate(target: string, setting: string | null): Promise<LocalAiStatus> {
     const { store, runtime } = this.deps.service();
     const from = this.deps.modelsDir();
+    const previous = this.deps.getSettings().modelsDir;
+    const wasPaused = store.isPaused();
     await runtime.stopAll();
     store.cancelAll();
-    await waitUntil(() => !store.isBusy(), 5_000);
-    store.moveTo(defaultDir, from);
-    this.deps.setSettings({ modelsDir: null });
-    await store.refresh();
-    this.deps.onConfigChanged?.();
+    try {
+      if (!(await waitUntil(() => !store.isBusy(), 5_000))) {
+        throw new Error('Downloads are still stopping. Wait a moment and try again.');
+      }
+      const plan = await store.beginMove(target, from);
+      try {
+        this.deps.setSettings({ modelsDir: setting });
+        await store.refresh();
+      } catch (err) {
+        this.deps.setSettings({ modelsDir: previous });
+        await plan.rollback();
+        throw err;
+      }
+      await plan.commit();
+    } catch (err) {
+      await store.refresh().catch(() => undefined);
+      throw err;
+    } finally {
+      // The stop was only for the move: a Pause the user chose stays, anything else may continue.
+      if (!wasPaused) store.unpause();
+      this.deps.onConfigChanged?.();
+    }
     return this.status();
   }
 
@@ -218,9 +266,10 @@ export class LocalAiController {
   }
 }
 
-async function waitUntil(cond: () => boolean, timeoutMs: number): Promise<void> {
+async function waitUntil(cond: () => boolean, timeoutMs: number): Promise<boolean> {
   const end = Date.now() + timeoutMs;
   while (!cond() && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+  return cond();
 }
 
 export interface LocalAiIpcRegistrar {
@@ -237,14 +286,30 @@ export function createDefaultController(): LocalAiController {
     onConfigChanged: () => {
       resetRerankTierCache();
       resetGpuModeCache();
+      // The built-in and an own Ollama make slightly different vectors: the model tag the renderer compares
+      // against its stored one changes with the backend, which marks the existing re-embed as recommended.
+      void import('./ann-handlers.js').then((m) => m.refreshAnnModelTag()).catch(() => undefined);
     },
   });
 }
 
+export interface LocalAiPushOptions {
+  /** Minimum time between pushes while downloads report progress. */
+  pushIntervalMs?: number;
+}
+
+type PushWindow = {
+  webContents?: { send: (channel: string, ...args: unknown[]) => void };
+  isVisible?: () => boolean;
+  isMinimized?: () => boolean;
+  isDestroyed?: () => boolean;
+};
+
 export function register(
-  getMainWindow: () => { webContents?: { send: (channel: string, ...args: unknown[]) => void } } | null,
+  getMainWindow: () => PushWindow | null,
   ipc?: LocalAiIpcRegistrar,
   controller: LocalAiController = createDefaultController(),
+  pushOptions: LocalAiPushOptions = {},
 ): void {
   const electron = require('electron');
   const registrar: LocalAiIpcRegistrar = ipc ?? electron.ipcMain;
@@ -280,13 +345,30 @@ export function register(
     return controller.resetFolder(defaultModelsDir());
   }));
 
-  // Push status to the window while anything changes (download progress, server start/stop).
-  const push = () => {
+  // Push status to the window while anything changes (download progress, server start/stop). Pushes are
+  // coalesced (at most one per interval, the last one wins) and skipped while the window is hidden or
+  // minimised: building a status stats every model file, which is wasted work nobody sees. The renderer asks
+  // for a fresh status when it mounts or comes back.
+  const intervalMs = pushOptions.pushIntervalMs ?? 750;
+  let lastPush = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const pushNow = () => {
+    timer = null;
     try {
-      getMainWindow()?.webContents?.send('localAi:status-changed', controller.status());
+      const win = getMainWindow();
+      if (!win?.webContents) return;
+      if (win.isDestroyed?.() || win.isMinimized?.() || win.isVisible?.() === false) return;
+      lastPush = Date.now();
+      win.webContents.send('localAi:status-changed', controller.statusForPush());
     } catch {
       // Window closed.
     }
+  };
+  const push = () => {
+    if (timer) return;
+    const wait = lastPush + intervalMs - Date.now();
+    if (wait <= 0) pushNow();
+    else { timer = setTimeout(pushNow, wait); (timer as { unref?: () => void }).unref?.(); }
   };
   const { store, runtime } = getLocalAiService();
   store.onChange(push);

@@ -25,6 +25,16 @@ export function getBackendKind(): BackendKind {
   return read.call(settingsStore).useExternalOllama ? 'ollama' : 'builtin';
 }
 
+/**
+ * The model identity the vectors are recorded under. The built-in llama.cpp runtime and an own Ollama
+ * make slightly different vectors for the same text (see EMBEDDING_MODEL_VERSION), so an own Ollama gets
+ * its own tag. The built-in keeps the plain tag, so nothing is re-offered for people who never switch.
+ * The renderer's re-embed (embedding-migration.ts) compares this tag with the one stored with the data.
+ */
+export function backendEmbeddingTag(localTag: string, kind: BackendKind): string {
+  return kind === 'ollama' ? `${localTag}@ollama` : localTag;
+}
+
 export function useBuiltinBackend(): boolean {
   return getBackendKind() === 'builtin';
 }

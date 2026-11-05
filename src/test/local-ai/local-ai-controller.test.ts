@@ -30,8 +30,10 @@ function setup(over: Partial<LocalAiControllerDeps> = {}) {
     resume: vi.fn(async () => undefined),
     pause: vi.fn(),
     cancelAll: vi.fn(),
-    removeAll: vi.fn(),
-    moveTo: vi.fn(),
+    removeAll: vi.fn(async () => undefined),
+    unpause: vi.fn(),
+    plan: { commit: vi.fn(async () => undefined), rollback: vi.fn(async () => undefined) },
+    beginMove: vi.fn(async function (this: unknown) { return (store as { plan: unknown }).plan; }),
     onChange: vi.fn(() => () => undefined),
   };
   const runtime = {
@@ -109,7 +111,7 @@ describe('LocalAiController', () => {
     await expect(t.controller.downloadChat({})).rejects.toThrow(/confirm/);
     expect(t.store.ensure).not.toHaveBeenCalled();
     await t.controller.downloadChat({ confirmed: true });
-    expect(t.store.ensure).toHaveBeenCalledWith(['gemma3-12b']);
+    expect(t.store.ensure).toHaveBeenCalledWith(['gemma3-12b'], { resumePaused: true });
     expect(t.calls.allow).toBe(1);
   });
 
@@ -123,10 +125,17 @@ describe('LocalAiController', () => {
     expect(t.calls.configChanged).toBe(1);
   });
 
-  it('retry resumes failed downloads; pause and continueWithout stop them', async () => {
+  it('retry resumes failed downloads, re-queues every automatic model and lifts a Pause', async () => {
     const t = setup();
     await t.controller.retry();
+    expect(t.store.unpause).toHaveBeenCalled();
     expect(t.store.resume).toHaveBeenCalled();
+    expect(t.calls.startDownloads).toBe(1);
+    expect(t.calls.allow).toBe(1);
+  });
+
+  it('pause and continueWithout stop the downloads', async () => {
+    const t = setup();
     t.controller.pause();
     expect(t.store.pause).toHaveBeenCalled();
     t.controller.continueWithout();
@@ -137,7 +146,7 @@ describe('LocalAiController', () => {
     const t = setup();
     const order: string[] = [];
     t.runtime.stopAll.mockImplementation(async () => { order.push('stop'); });
-    t.store.removeAll.mockImplementation(() => { order.push('remove'); });
+    t.store.removeAll.mockImplementation(async () => { order.push('remove'); });
     await t.controller.removeModels();
     expect(order).toEqual(['stop', 'remove']);
   });
@@ -149,12 +158,50 @@ describe('LocalAiController', () => {
     try {
       await t.controller.changeFolder(target);
       expect(t.runtime.stopAll).toHaveBeenCalled();
-      expect(t.store.moveTo).toHaveBeenCalledWith(path.resolve(target), 'C:/models');
+      expect(t.store.beginMove).toHaveBeenCalledWith(path.resolve(target), 'C:/models');
       expect(t.getSettings().modelsDir).toBe(path.resolve(target));
       expect(t.store.refresh).toHaveBeenCalled();
+      expect(t.store.plan.commit).toHaveBeenCalled();
+      expect(t.store.plan.rollback).not.toHaveBeenCalled();
     } finally {
       fs.rmSync(target, { recursive: true, force: true });
     }
+  });
+
+  it('a failed move keeps the old folder in the settings, rolls back and lets downloads continue', async () => {
+    const t = setup();
+    t.store.beginMove.mockRejectedValueOnce(new Error('Not enough free space in the new folder'));
+    await expect(t.controller.changeFolder(path.resolve('D:\\models'))).rejects.toThrow(/Not enough free space/);
+    expect(t.getSettings().modelsDir).toBeNull();
+    expect(t.store.plan.commit).not.toHaveBeenCalled();
+    expect(t.store.refresh).toHaveBeenCalled();
+    expect(t.store.unpause).toHaveBeenCalled();
+    // A failure after the copy (settings/refresh) is rolled back too.
+    t.store.refresh.mockRejectedValueOnce(new Error('boom'));
+    await expect(t.controller.changeFolder(path.resolve('D:\\models'))).rejects.toThrow(/boom/);
+    expect(t.store.plan.rollback).toHaveBeenCalled();
+    expect(t.getSettings().modelsDir).toBeNull();
+  });
+
+  it('a move does not start while downloads are still stopping', async () => {
+    const t = setup();
+    t.store.isBusy.mockReturnValue(true);
+    vi.useFakeTimers();
+    try {
+      const p = t.controller.changeFolder(path.resolve('D:\\models')).catch((e) => e);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect((await p).message).toMatch(/still stopping/);
+      expect(t.store.beginMove).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a Pause the user chose survives a folder move', async () => {
+    const t = setup();
+    t.store.isPaused.mockReturnValue(true);
+    await t.controller.changeFolder(path.resolve('D:\\models'));
+    expect(t.store.unpause).not.toHaveBeenCalled();
   });
 
   it('the Ollama switch saves, stops the built-in servers when turned on, and rejects junk', async () => {
@@ -167,6 +214,23 @@ describe('LocalAiController', () => {
     expect(t.calls.configChanged).toBe(1);
     await t.controller.setExternalOllama({ enabled: false });
     expect(t.getSettings().useExternalOllama).toBe(false);
+  });
+});
+
+describe('models folder validation (1.0.98)', () => {
+  it('rejects network shares and Windows system folders', () => {
+    for (const bad of ['\\\\server\\share\\models', '\\\\?\\C:\\models', '//server/share/models', 'C:\\Windows\\System32', 'C:\\Program Files\\Ark', 'C:\\Program Files (x86)\\x', 'D:\\ProgramData\\x']) {
+      expect(validateModelsDir(bad)).toBeNull();
+    }
+    expect(validateModelsDir('D:\\AI models')).toBe(path.resolve('D:\\AI models'));
+  });
+});
+
+describe('embedding backend identity (1.0.98)', () => {
+  it('an own Ollama records its vectors under its own tag; the built-in keeps the plain one', async () => {
+    const { backendEmbeddingTag } = await import('../../../electron/local-ai/backend');
+    expect(backendEmbeddingTag('snowflake-arctic-embed2', 'builtin')).toBe('snowflake-arctic-embed2');
+    expect(backendEmbeddingTag('snowflake-arctic-embed2', 'ollama')).toBe('snowflake-arctic-embed2@ollama');
   });
 });
 
@@ -187,7 +251,13 @@ describe('register', () => {
     const push = (t.store.onChange.mock.calls[0] as unknown as [() => void])[0];
     push();
     expect(send).toHaveBeenCalledWith('localAi:status-changed', expect.objectContaining({ backend: 'builtin' }));
+    // Pushes are coalesced and skipped while the window is hidden.
+    send.mockClear();
+    push(); push(); push();
+    expect(send.mock.calls.length).toBeLessThanOrEqual(1);
+    __setLocalAiServiceForTests(null);
     // A rejected action surfaces as an error to the renderer.
+    __setLocalAiServiceForTests({ store: t.store, runtime: t.runtime, backend: {} } as never);
     await expect(handlers.get('localAi:downloadChat')!({}, {})).rejects.toThrow(/confirm/);
     __setLocalAiServiceForTests(null);
   });

@@ -45,7 +45,7 @@ import { __setLocalAiServiceForTests } from '../../../electron/local-ai/service'
 import type { BuiltinBackend } from '../../../electron/local-ai/builtin-backend';
 import {
   isOllamaRunning, generateEmbeddingsBatchDetailed, unloadArkModels, getEmbeddingModelInfo, getEmbeddingModelSize,
-  runOllamaSetup, detectGpuMode, resetGpuModeCache, declineBuiltinAutoDownload, allowBuiltinAutoDownload, ensureRerankModelPull,
+  runOllamaSetup, detectGpuMode, resetGpuModeCache, declineBuiltinAutoDownload, allowBuiltinAutoDownload, ensureRerankModelPull, startBuiltinModelDownloadsAndNotify, onBuiltinModelsSettled,
 } from '../../../electron/ollama-setup';
 import { detectRerankTier, resetRerankTierCache } from '../../../electron/rerank-engine';
 
@@ -83,6 +83,7 @@ function fakeService(opts: { readyIds?: string[]; embedReady?: boolean } = {}) {
     statuses: vi.fn(() => models.map((m) => ({ ...m, state: states.get(m.id) }))),
     ensure: vi.fn(async (ids: string[]) => { for (const id of ids) states.set(id, 'ready'); }),
     isReady: vi.fn((role: string) => models.some((m) => m.role === role && states.get(m.id) === 'ready')),
+    whenSettled: vi.fn(async () => undefined),
     onChange: vi.fn(() => () => undefined),
     cancelAll: vi.fn(),
   };
@@ -269,13 +270,24 @@ describe('setup flow (built-in)', () => {
     expect(out.error).toMatch(/runtime not found/i);
   });
 
+  it('Retry / Re-check downloads tell the renderer when the queue settled', async () => {
+    const s = fakeService();
+    __setLocalAiServiceForTests(s.svc);
+    const seen: boolean[] = [];
+    const off = onBuiltinModelsSettled((ready) => seen.push(ready));
+    await startBuiltinModelDownloadsAndNotify();
+    off();
+    expect(seen).toEqual([true]);
+  });
+
   it('ensureRerankModelPull downloads the rerank models through the store', async () => {
     const f = fakeBackend();
     __setBuiltinBackendForTests(f.asBackend);
     const s = fakeService();
     __setLocalAiServiceForTests(s.svc);
     expect(await ensureRerankModelPull()).toBe(true);
-    expect(s.store.ensure).toHaveBeenCalledWith(['bge-reranker-v2-m3', 'qwen3-reranker-0.6b']);
+    expect(s.store.ensure).toHaveBeenCalledWith(['bge-reranker-v2-m3', 'qwen3-reranker-0.6b'], { priority: true });
+    expect(s.store.whenSettled).toHaveBeenCalledWith(['bge-reranker-v2-m3', 'qwen3-reranker-0.6b']);
     expect(h.httpCalls).toEqual([]);
   });
 });
