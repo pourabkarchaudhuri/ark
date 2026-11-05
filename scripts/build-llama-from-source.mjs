@@ -15,9 +15,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const rt = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'local-ai', 'runtime-manifest.json'), 'utf8')).runtime;
-const work = path.join(root, '.llama-cache', `src-${rt.build}`);
+const cache = process.env.ARK_LLAMA_CACHE_DIR || path.join(root, '.llama-cache');
+const work = path.join(cache, `src-${rt.build}`);
 const vcvars = process.env.VCVARS64 || 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat';
-const srcZip = path.join(root, '.llama-cache', `src-${rt.build}.zip`);
+const srcZip = path.join(cache, `src-${rt.build}.zip`);
 const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
 
 fs.mkdirSync(work, { recursive: true });
@@ -28,7 +29,7 @@ if (!fs.existsSync(srcZip)) {
 }
 execSync(`"${tar}" -xf "${srcZip}" -C "${work}"`, { stdio: 'inherit' });
 const src = path.join(work, `llama.cpp-${rt.build}`);
-const sdk = process.env.VULKAN_SDK_DIR || path.join(root, '.llama-cache', 'vulkan-sdk');
+const sdk = process.env.VULKAN_SDK_DIR || path.join(cache, 'vulkan-sdk');
 if (!fs.existsSync(path.join(sdk, 'Bin', 'glslc.exe'))) throw new Error('Vulkan SDK pieces missing; run node scripts/build-vulkan-sdk.mjs first');
 const vk = `-DGGML_VULKAN=ON -DCMAKE_PREFIX_PATH=\"${sdk}\" -DVulkan_GLSLC_EXECUTABLE="${path.join(sdk, 'Bin', 'glslc.exe')}" -DVulkan_INCLUDE_DIR="${path.join(sdk, 'Include')}" -DVulkan_LIBRARY="${path.join(sdk, 'Lib', 'vulkan-1.lib')}"`;
 const flags = '-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_OPENSSL=OFF ' + vk;
@@ -41,7 +42,7 @@ fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 for (const n of files) fs.copyFileSync(path.join(bin, n), path.join(stage, n));
 fs.copyFileSync(path.join(src, 'LICENSE'), path.join(stage, 'LICENSE'));
-const out = path.join(root, '.llama-cache', rt.asset);
+const out = path.join(cache, rt.asset);
 fs.rmSync(out, { force: true });
 execSync(`"${tar}" -a -cf "${out}" -C "${stage}" .`, { stdio: 'inherit' });
 console.log(`[llama-from-source] wrote ${out}; now run: node scripts/build-llama-runtime.mjs --update-manifest`);

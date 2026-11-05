@@ -10,6 +10,13 @@
  * the sha256 recorded in the manifest; --update-manifest records them instead (after a pin bump).
  * Model weights are never part of this: Ark downloads them at runtime.
  *
+ * The pinned url is the upstream SOURCE archive: the pinned sha256/size/files describe the zip that
+ * scripts/build-llama-from-source.mjs builds from it with MSVC (not an upstream binary). When no cached
+ * zip matches, this script runs that build itself (needs Visual Studio Build Tools, cmake, ninja and the
+ * Vulkan SDK pieces, see docs/release-process.md) and, because an MSVC build is not bit-reproducible,
+ * re-pins sha256, size and file hashes in the manifest for review and commit. --no-source-build fails
+ * instead of building.
+ *
  * A network that resets GitHub release downloads: fetch the zip in a browser and pass it with
  * --zip=<path> (or ARK_LLAMA_RUNTIME_ZIP); it is copied into the cache only if its sha256 matches.
  * (Some networks reset GitHub release-asset downloads of zip files; curl, PowerShell and Node all fail
@@ -26,7 +33,11 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifestPath = process.env.ARK_LLAMA_MANIFEST || path.join(root, 'electron', 'local-ai', 'runtime-manifest.json');
 const cacheDir = process.env.ARK_LLAMA_CACHE_DIR || path.join(root, '.llama-cache');
 const outDir = process.env.ARK_LLAMA_OUT_DIR || path.join(root, 'build', 'llama-runtime');
-const updateManifest = process.argv.includes('--update-manifest');
+let updateManifest = process.argv.includes('--update-manifest');
+const noSourceBuild = process.argv.includes('--no-source-build');
+const fromSourceScript = process.env.ARK_LLAMA_FROM_SOURCE_SCRIPT || path.join(root, 'scripts', 'build-llama-from-source.mjs');
+/** The manifest url is a source tarball (codeload / archive), never a binary release asset. */
+const isSourceArchive = (url) => /codeload\.github\.com|\/archive\/|\/zip\/refs\//i.test(url);
 
 const manifest = readManifest(manifestPath);
 const rt = manifest.runtime;
@@ -54,17 +65,40 @@ if (givenZip && (!fs.existsSync(zipPath) || sha256File(zipPath) !== rt.sha256)) 
   if (sha256File(givenZip) !== rt.sha256) throw new Error(`[llama-runtime] ${givenZip} is not ${rt.asset} (sha256 mismatch)`);
   fs.copyFileSync(givenZip, zipPath);
 }
+let builtFromSource = false;
 if (!fs.existsSync(zipPath) || sha256File(zipPath) !== rt.sha256) {
-  console.log(`[llama-runtime] downloading ${rt.asset}`);
-  try {
-    await download(rt.url, zipPath);
-  } catch (err) {
-    throw new Error(`${err instanceof Error ? err.message : err}
+  if (isSourceArchive(rt.url)) {
+    // Nothing downloadable matches the pin: the pinned zip is a local MSVC build of this source tag.
+    if (noSourceBuild) {
+      throw new Error(`[llama-runtime] no cached ${rt.asset} matches the manifest and ${rt.url} is a source archive; run node scripts/build-llama-from-source.mjs (see docs/release-process.md)`);
+    }
+    console.log(`[llama-runtime] no cached ${rt.asset} matches the pin; building ${rt.build} from source`);
+    fs.rmSync(zipPath, { force: true });
+    try {
+      execFileSync(process.execPath, [fromSourceScript], { stdio: 'inherit', env: { ...process.env, ARK_LLAMA_CACHE_DIR: cacheDir } });
+    } catch (err) {
+      throw new Error(`[llama-runtime] the source build failed (${err instanceof Error ? err.message : err}); see docs/release-process.md for the tools it needs`);
+    }
+    if (!fs.existsSync(zipPath)) throw new Error(`[llama-runtime] the source build did not produce ${zipPath}`);
+    builtFromSource = true;
+  } else {
+    console.log(`[llama-runtime] downloading ${rt.asset}`);
+    try {
+      await download(rt.url, zipPath);
+    } catch (err) {
+      throw new Error(`${err instanceof Error ? err.message : err}
 [llama-runtime] download ${rt.url} in a browser and rerun with --zip=<path>`);
+    }
   }
 }
 const zipHash = sha256File(zipPath);
-if (zipHash !== rt.sha256) {
+if (builtFromSource) {
+  // A fresh MSVC build cannot match the old pin: record what was built so the pins describe this zip.
+  rt.sha256 = zipHash;
+  rt.size = fs.statSync(zipPath).size;
+  updateManifest = true;
+  console.log('[llama-runtime] locally built zip: sha256, size and file hashes will be re-pinned in the manifest; review and commit them');
+} else if (zipHash !== rt.sha256) {
   fs.rmSync(zipPath, { force: true });
   throw new Error(`[llama-runtime] ${rt.asset} sha256 ${zipHash} != manifest ${rt.sha256}; the cached copy was removed`);
 }
@@ -74,7 +108,7 @@ const extractDir = path.join(cacheDir, `extract-${rt.build}`);
 fs.rmSync(extractDir, { recursive: true, force: true });
 fs.mkdirSync(extractDir, { recursive: true });
 // Windows' own bsdtar by full path: a GNU tar earlier on PATH (Git Bash) cannot read zip files.
-const tarExe = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\Windows', 'System32', 'tar.exe') : 'tar';
+const tarExe = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
 execFileSync(tarExe, ['-xf', zipPath, '-C', extractDir], { stdio: 'inherit' });
 
 // The zip may hold the files flat or under one folder; take the folder that has llama-server.exe.

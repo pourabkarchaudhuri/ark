@@ -1,7 +1,7 @@
 /**
  * Check a published release the way the auto-updater will see it, plus the local build it came from.
  *
- *   node scripts/verify-release.mjs [version] [--download]
+ *   node scripts/verify-release.mjs [version] [--download] [--remote-only | --local-only]
  *
  * Remote (GitHub API, no token needed): release is published, has the installer, blockmap and
  * latest.yml, all uploaded; latest.yml names this version's installer and its size matches.
@@ -11,8 +11,12 @@
  * file hashes matching electron/local-ai/runtime-manifest.json, and no model files are packaged; the bundled
  * LiteLLM runtime is present (python, launcher, lock file hash and litellm version matching
  * electron/ai-router/litellm-manifest.json) and no key material is packaged.
+ * --local-only skips the published-release checks (offline machine, or a test of the local gates).
  * --download also streams the published installer and compares its sha512 (off by default: some
  * networks reset executable downloads).
+ * The local checks are the packaging gates: when release/builds/<version>, its installer, latest.yml or
+ * win-unpacked is missing they FAIL (a missing build is not a pass). --remote-only skips them on purpose,
+ * for a machine that never built the release.
  * Exits non-zero on any failure.
  */
 import fs from 'node:fs';
@@ -27,6 +31,8 @@ const root = path.join(__dirname, '..');
 const repo = 'pourabkarchaudhuri/ark';
 const args = process.argv.slice(2);
 const doDownload = args.includes('--download');
+const remoteOnly = args.includes('--remote-only');
+const localOnly = args.includes('--local-only');
 const version = args.find((a) => !a.startsWith('--'))?.replace(/^v/, '')
   ?? JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 const exeName = `Ark-Setup-${version}.exe`;
@@ -61,8 +67,10 @@ if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITH
 
 console.log(`Release v${version} (remote)`);
 let yml = null;
-const relRes = await fetch(`https://api.github.com/repos/${repo}/releases/tags/v${version}`, { headers });
-if (!relRes.ok) {
+const relRes = localOnly ? null : await fetch(`https://api.github.com/repos/${repo}/releases/tags/v${version}`, { headers });
+if (localOnly) {
+  console.log('Published release checks skipped (--local-only)');
+} else if (!relRes.ok) {
   bad(`release v${version} not found (${relRes.status})`);
 } else {
   const rel = await relRes.json();
@@ -93,7 +101,12 @@ if (!relRes.ok) {
 }
 
 const buildDir = path.join(root, 'release', 'builds', version);
-if (fs.existsSync(buildDir)) {
+if (remoteOnly) {
+  console.log('Local build checks skipped (--remote-only)');
+} else if (!fs.existsSync(buildDir)) {
+  console.log(`Local build ${path.relative(root, buildDir)}`);
+  bad(`local build ${path.relative(root, buildDir)} not found: the packaging checks could not run (pass --remote-only to check the published release only)`);
+} else {
   console.log(`Local build ${path.relative(root, buildDir)}`);
   const localYmlPath = path.join(buildDir, 'latest.yml');
   const localExe = path.join(buildDir, exeName);
@@ -105,9 +118,13 @@ if (fs.existsSync(buildDir)) {
     });
     digest === local.sha512 ? ok('local installer sha512 matches latest.yml') : bad('local installer sha512 != latest.yml');
     if (yml && yml.sha512 !== local.sha512) bad('published latest.yml differs from the local one');
+  } else {
+    bad(`local latest.yml or ${exeName} missing in ${path.relative(root, buildDir)}`);
   }
   const unpacked = path.join(buildDir, 'win-unpacked');
-  if (fs.existsSync(unpacked)) {
+  if (!fs.existsSync(unpacked)) {
+    bad(`${path.relative(root, unpacked)} not found: the packaged-file checks could not run`);
+  } else {
     const envPath = path.join(unpacked, '.env');
     if (fs.existsSync(envPath)) {
       const names = fs.readFileSync(envPath, 'utf8').split(/\r?\n/)

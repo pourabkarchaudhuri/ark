@@ -8,6 +8,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { sha256File } from './llama-runtime.mjs';
 
 export { sha256File };
@@ -17,9 +18,75 @@ export const PACKAGED_LITELLM_DIR = path.join('resources', 'litellm-runtime');
 
 export const LAUNCHER_FILE = 'ark_litellm.py';
 export const LOCK_COPY_FILE = 'requirements.lock.txt';
+/** Pinned hashes of the python tree, next to litellm-manifest.json. */
+export const TREE_MANIFEST_NAME = 'litellm-python-tree.json';
+
+export function readTreeManifest(treePath) {
+  return fs.existsSync(treePath) ? JSON.parse(fs.readFileSync(treePath, 'utf8')) : { schema: 1, units: {} };
+}
 
 export function readLitellmManifest(manifestPath) {
   return JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+}
+
+/** Compiled bytecode is rebuilt by python on first import, so it is not part of the pinned tree. */
+const isVolatile = (name) => name === '__pycache__' || name.toLowerCase().endsWith('.pyc');
+
+/** sha256 over every file under `dir` (relative path + content hash, sorted); returns the digest and file count. */
+function digestTree(dir) {
+  const rows = [];
+  const walk = (d, rel) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (isVolatile(e.name)) continue;
+      const p = path.join(d, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(p, r);
+      else if (e.isFile()) rows.push(`${r}\0${sha256File(p)}`);
+      else rows.push(`${r}\0<${e.isSymbolicLink() ? 'symlink' : 'special'}>`);
+    }
+  };
+  walk(dir, '');
+  rows.sort();
+  return { sha256: crypto.createHash('sha256').update(rows.join('\n')).digest('hex'), files: rows.length };
+}
+
+/**
+ * The python tree is pinned in units: every entry of python/ (files and folders), with python/Lib and
+ * python/Lib/site-packages split one level further so a mismatch names a package, not the whole tree.
+ * Returns { "python/Lib/site-packages/litellm": { sha256, files }, ... }.
+ */
+export function hashPythonTree(runtimeDir) {
+  const units = {};
+  const pyRoot = path.join(runtimeDir, 'python');
+  const visit = (rel) => {
+    const abs = path.join(runtimeDir, ...rel.split('/'));
+    for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+      if (isVolatile(e.name)) continue;
+      const r = `${rel}/${e.name}`;
+      if (e.isDirectory() && (r === 'python/Lib' || r === 'python/Lib/site-packages')) visit(r);
+      else if (e.isDirectory()) units[r] = digestTree(path.join(runtimeDir, ...r.split('/')));
+      else units[r] = { sha256: sha256File(path.join(runtimeDir, ...r.split('/'))), files: 1 };
+    }
+  };
+  if (fs.existsSync(pyRoot)) visit('python');
+  return Object.fromEntries(Object.entries(units).sort(([a], [b]) => (a < b ? -1 : 1)));
+}
+
+/** Problems with the packaged python tree compared to the pinned unit list (litellm-python-tree.json). */
+export function checkPythonTree(runtimeDir, tree) {
+  const expected = tree?.units ?? {};
+  const names = Object.keys(expected);
+  if (names.length === 0) return ['python tree manifest lists no units (run build-litellm-runtime.mjs --update-manifest)'];
+  const actual = hashPythonTree(runtimeDir);
+  const problems = [];
+  for (const n of names) {
+    if (!(n in actual)) problems.push(`python tree: missing ${n}`);
+    else if (actual[n].sha256 !== expected[n].sha256 || actual[n].files !== expected[n].files) problems.push(`python tree: ${n} does not match the manifest`);
+  }
+  for (const n of Object.keys(actual)) {
+    if (!(n in expected)) problems.push(`python tree: unexpected ${n}`);
+  }
+  return problems;
 }
 
 /** Files that hold (or are named like) credentials; none may ever be in the runtime folder. */
@@ -53,9 +120,10 @@ function walkNames(root, maxDepth, visit, depth = 0) {
 /**
  * Problems with a runtime folder compared to the manifest; empty when it matches:
  * interpreter present, launcher and lock copy hash-equal to the manifest, LiteLLM at the pinned
- * version, no unexpected .pth file, no key material.
+ * version, no unexpected .pth file, no key material. When `tree` (litellm-python-tree.json) is given, the
+ * whole python tree must also hash-match it.
  */
-export function checkLitellmRuntimeDir(dir, manifest) {
+export function checkLitellmRuntimeDir(dir, manifest, tree) {
   const problems = [];
   if (!fs.existsSync(dir)) return [`runtime folder missing: ${dir}`];
   if (!fs.existsSync(path.join(dir, 'python', 'python.exe'))) problems.push('python/python.exe missing');
@@ -75,6 +143,8 @@ export function checkLitellmRuntimeDir(dir, manifest) {
     : undefined;
   if (!dist) problems.push('litellm is not installed');
   else if (dist.toLowerCase() !== `litellm-${want}.dist-info`.toLowerCase()) problems.push(`litellm version ${dist} != pinned ${want}`);
+
+  if (tree !== undefined && fs.existsSync(path.join(dir, 'python'))) problems.push(...checkPythonTree(dir, tree));
 
   const allowed = new Set((manifest?.python?.allowedPth ?? []).map((n) => n.toLowerCase()));
   for (const pth of listPthFiles(dir)) {
@@ -97,6 +167,8 @@ export function checkLitellmRuntimeDir(dir, manifest) {
 }
 
 /** Problems with a packaged (unpacked) app directory. */
-export function checkPackagedLitellm(appOutDir, manifest) {
-  return checkLitellmRuntimeDir(path.join(appOutDir, PACKAGED_LITELLM_DIR), manifest).map((p) => `litellm-runtime: ${p}`);
+export function checkPackagedLitellm(appOutDir, manifest, tree) {
+  // The tree list is required for a packaged copy: passing none would silently skip the hash check.
+  const treeToUse = tree ?? { units: {} };
+  return checkLitellmRuntimeDir(path.join(appOutDir, PACKAGED_LITELLM_DIR), manifest, treeToUse).map((p) => `litellm-runtime: ${p}`);
 }

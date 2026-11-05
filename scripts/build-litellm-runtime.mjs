@@ -24,7 +24,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  LAUNCHER_FILE, LOCK_COPY_FILE, checkLitellmRuntimeDir, listPthFiles, readLitellmManifest, sha256File,
+  LAUNCHER_FILE, LOCK_COPY_FILE, TREE_MANIFEST_NAME, checkLitellmRuntimeDir, hashPythonTree, listPthFiles,
+  readLitellmManifest, readTreeManifest, sha256File,
 } from './lib/litellm-runtime.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -32,6 +33,7 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifestPath = process.env.ARK_LITELLM_MANIFEST || path.join(root, 'electron', 'ai-router', 'litellm-manifest.json');
 const cacheDir = process.env.ARK_LITELLM_CACHE_DIR || path.join(root, '.litellm-cache');
 const outDir = process.env.ARK_LITELLM_OUT_DIR || path.join(root, 'build', 'litellm-runtime');
+const treePath = path.join(path.dirname(manifestPath), TREE_MANIFEST_NAME);
 const lockPath = process.env.ARK_LITELLM_LOCK || path.join(root, 'scripts', 'litellm', 'requirements.lock.txt');
 const launcherPath = path.join(root, 'scripts', 'litellm', LAUNCHER_FILE);
 const updateManifest = process.argv.includes('--update-manifest');
@@ -233,9 +235,11 @@ run(py, ['-I', '-c', 'import litellm, fastapi, uvicorn, yaml; import litellm.pro
 
 if (updateManifest) {
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  console.log('[litellm-runtime] manifest updated');
+  fs.writeFileSync(treePath, `${JSON.stringify({ schema: 1, units: hashPythonTree(outDir) }, null, 2)}
+`, 'utf8');
+  console.log('[litellm-runtime] manifest and python tree list updated');
 }
-const problems = checkLitellmRuntimeDir(outDir, readLitellmManifest(manifestPath));
+const problems = checkLitellmRuntimeDir(outDir, readLitellmManifest(manifestPath), readTreeManifest(treePath));
 if (problems.length) {
   throw new Error(`[litellm-runtime] build/litellm-runtime does not match the manifest:\n  ${problems.join('\n  ')}`);
 }

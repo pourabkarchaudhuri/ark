@@ -162,6 +162,29 @@ publish and the hand-rolled curl steps are gone).
    `latest.yml` or with a half-uploaded installer. Fix the problem and run the script again;
    it resumes with the existing draft and skips assets already uploaded.
 
+### Bundled runtimes (llama.cpp and LiteLLM)
+
+`npm run build:app` (and `npm run build`) call `scripts/build-llama-runtime.mjs` and
+`scripts/build-litellm-runtime.mjs`, so a clean checkout can build the installer contents.
+
+**llama.cpp.** `electron/local-ai/runtime-manifest.json` pins `url` = the upstream *source* archive of the
+tag, while `sha256`, `size` and `files` describe the zip built from that source with MSVC by
+`scripts/build-llama-from-source.mjs` (cached as `.llama-cache/<asset>`, gitignored). They do not
+authenticate an upstream binary. When no cached zip matches the pin, `build-llama-runtime.mjs` runs the
+source build itself. That needs Visual Studio Build Tools 2022, `cmake` and `ninja` on PATH
+(`pip install cmake ninja`) and the Vulkan SDK pieces (`node scripts/build-vulkan-sdk.mjs`, or
+`VULKAN_SDK_DIR`). Reproducibility: an MSVC build is not bit-reproducible, so a rebuild produces
+different DLL and zip hashes. The script then re-pins `sha256`, `size` and `files` in the manifest and says
+so; review that diff and commit it with the release. Copying the previous release's `.llama-cache` zip
+keeps the existing pins unchanged. `--no-source-build` fails instead of building.
+
+**LiteLLM.** The python tree is hash-pinned as units (`electron/ai-router/litellm-python-tree.json`,
+bytecode excluded). `node scripts/build-litellm-runtime.mjs --update-manifest` rewrites it after a
+deliberate python or lock change; `after-pack-check` and `verify-release` compare the packaged tree to it.
+
+**Uninstall.** `build/installer.nsh` (`nsis.include`) asks, on an interactive uninstall only, whether to delete
+`%LOCALAPPDATA%\Ark\models` (default No; skipped for silent and update uninstalls; no other folder is touched).
+
 ### Verify the release
 
 ```bash
@@ -173,6 +196,9 @@ Checks, by tag (not `/releases/latest`): the release is published; the installer
 `latest.yml` are uploaded; `latest.yml` names this version's installer with the right size; the
 local installer's sha512 matches `latest.yml`; the packaged `.env` contains only allow-listed key
 names; no token file was packaged; only the win32/x64 onnxruntime binaries were packaged.
+The local checks FAIL when `release/builds/<version>`, its installer or `win-unpacked` is missing, so a
+missing build is never reported as a pass. On a machine that did not build the release, pass
+`--remote-only` to check the published release alone.
 `--download` is off by default because some networks reset executable downloads.
 
 ### Required release assets checklist

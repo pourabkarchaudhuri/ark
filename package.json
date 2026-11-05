@@ -242,7 +242,8 @@
       "shortcutName": "Ark",
       "uninstallDisplayName": "Ark",
       "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico"
+      "uninstallerIcon": "build/icon.ico",
+      "include": "build/installer.nsh"
     },
     "mac": {
       "target": "dmg",

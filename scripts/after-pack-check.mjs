@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RELEASE_ENV_KEYS, envKeyNames, findForbiddenEnvNames } from './lib/release-env.mjs';
 import { checkPackagedRuntime, readManifest } from './lib/llama-runtime.mjs';
-import { checkPackagedLitellm, readLitellmManifest } from './lib/litellm-runtime.mjs';
+import { checkPackagedLitellm, readLitellmManifest, readTreeManifest, TREE_MANIFEST_NAME } from './lib/litellm-runtime.mjs';
 
 const RUNTIME_MANIFEST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'electron', 'local-ai', 'runtime-manifest.json');
 const LITELLM_MANIFEST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'electron', 'ai-router', 'litellm-manifest.json');
@@ -60,7 +60,8 @@ export function checkPackagedLocalAi(appOutDir) {
 
 /** Problems with the packaged LiteLLM runtime (python, launcher, lock, version, key material). */
 export function checkPackagedLitellmRuntime(appOutDir) {
-  return checkPackagedLitellm(appOutDir, readLitellmManifest(LITELLM_MANIFEST));
+  const tree = readTreeManifest(path.join(path.dirname(LITELLM_MANIFEST), TREE_MANIFEST_NAME));
+  return checkPackagedLitellm(appOutDir, readLitellmManifest(LITELLM_MANIFEST), tree);
 }
 
 export default async function afterPack(context) {
