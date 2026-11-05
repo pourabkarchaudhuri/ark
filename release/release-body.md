@@ -1,20 +1,26 @@
-# Ark v1.0.96 — Smooth again
+# Ark v1.0.97 — Brings its own AI
 
-Today's updates made Ark stutter. This release fixes that without changing what you see.
+Ark now runs its own local AI, so you do not need to install Ollama. It uses your graphics card when it can and falls back to the processor when it cannot.
+
+## New
+
+- **Built-in local AI** — Oracle's models download on first launch and run privately on your machine.
+- **Pick your AI provider** — built-in, Ollama, Gemini, Azure, Anthropic, OpenAI or any compatible service, from the redesigned Settings.
+- **Analytics are off by default**, with a switch in Settings.
 
 ## Fixed
 
-- **Browse scrolls smoothly** — cards no longer grow when their price appears, which made the list jump.
-- **No freeze while recommendations update** — the heavy similarity step now runs in small pieces.
-- **Upcoming opens fast** — the Steam catalog is filtered in the background instead of being loaded into the window.
-- **Your Ark's 3D boxes are lighter** on your graphics card and free their images when you leave.
-- **Fewer background requests** — player counts and prices make far fewer calls, and game details no longer wait behind them.
-- **Captain's Log** opens without a flicker.
+- The installer no longer includes your private keys.
+- Safer links, chat and embedded pages.
+- About 250 fixes, and much less memory use over long sessions.
+
+After updating, Oracle re-indexes your games once, so the first launch can take a little longer.
 
 If the in-app update fails, download the installer directly:
-https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.96/Ark-Setup-1.0.96.exe
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.97/Ark-Setup-1.0.97.exe
 
 ---
 
-**Tests:** 1715 tests (152 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
-**No ranking change** (Oracle engine version unchanged; golden ranking snapshot identical).
+**Tests:** 3232 tests (317 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
+**Measured:** leak and speed checks against v1.0.96 all pass (docs/perf/1.0.97-measurements.md).
+**Ranking:** Oracle engine version 15 (rankings can shift) and embedding version 2 (one re-index).

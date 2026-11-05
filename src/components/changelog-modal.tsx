@@ -11,6 +11,16 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.97': {
+    title: "What's New in Ark 1.0.97",
+    changes: [
+      'Ark now brings its own local AI: no Ollama install needed, GPU accelerated, models download on first launch.',
+      'Choose your AI provider for chat, embeddings and reranking in the new Settings, including Anthropic.',
+      'Analytics are off until you turn them on, and your keys are no longer packaged in the installer.',
+      'About 250 fixes, and far less memory: the app now uses about a quarter less RAM after long sessions.',
+      'One-time re-index after updating, so Oracle may take a moment on first launch.',
+    ],
+  },
   '1.0.96': {
     title: "What's New in Ark 1.0.96",
     changes: [

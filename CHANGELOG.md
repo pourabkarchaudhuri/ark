@@ -4,13 +4,36 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.0.97] - 2026-11-04
 
-### Changed - built-in local AI models (1.0.97 B36)
+A big release: Ark brings its own local AI, a router for the AI you use, a redesigned Settings, privacy and security fixes, and about 250 fixes found in a full audit of 1.0.84-1.0.96.
+
+### Added
+- **Built-in local AI (llama.cpp, GPU accelerated).** Oracle's embedding and reranking models are downloaded on first launch (with progress, resume and checksum checks) and run in Ark's own server on a private port, on your graphics card through Vulkan (NVIDIA, AMD, Intel) with automatic CPU fallback. You no longer need to install Ollama; if you run your own Ollama it does not interfere, and you can still point Ark at it in Settings. The chat model is an optional download.
+- **AI router (LiteLLM).** Choose which provider handles chat, embeddings and reranking: built-in, Ollama, Gemini, Azure OpenAI, Anthropic, OpenAI or any OpenAI-compatible service. Keys are encrypted on your machine. Anthropic is now a real provider.
+- **Redesigned Settings** (General, AI providers, Game understanding, Guide, About) with loading, error and empty states.
+- **Usage analytics toggle** in Settings.
+
+### Changed
+- **Analytics are off until you turn them on**, and page paths no longer include game ids.
+- **Chat uses the provider you pick** in the router.
+- Streak and backlog badges stay unlocked once earned.
+- **Oracle** ranking and explanation fixes (engine version 15) and a one-time re-embed (embedding version 2) because the built-in runtime's vectors differ slightly from Ollama's.
+
+### Fixed - security and privacy
+- The installer no longer ships your Azure/OpenAI keys: only the three keys the app needs are packaged, and the build fails if anything else sneaks in.
+- Navigation, store-page links, chat markdown and webview popups are locked down (CSP, sandboxed windows, URL checks); the Gemini key is no longer sent back to the window.
+- Dev-only catalog tools are not available in packaged builds.
+
+### Fixed - performance and memory
+- Measured against v1.0.96 on the same machine: DOM nodes after a long session 132,951 to 3,846, event listeners 15,315 to 3,345, total memory 1,272 MB to 944 MB, longest UI stall 25.5 s to 0.24 s, cold start about 9-15% faster. See docs/perf/1.0.97-measurements.md.
+- Plus about 250 fixes across Browse, Library, Voyage, Upcoming, Oracle, the updater, the Steam and Epic clients and Settings.
+
+### Local AI details
 - **Only models that really load in the bundled llama.cpp b11780 are downloaded.** Checked against the real runtime on an RTX 3070 Ti: Ollama's snowflake-arctic-embed2 blob does not load (`invalid gguf type for tokenizer.ggml.precompiled_charsmap`) and Ollama's Qwen3-Reranker-0.6B blob loads but answers with uniform garbage logits, so both now come from their pinned Hugging Face files (sha256 and size checked). bge-reranker-v2-m3 (same bytes on both sources) and gemma3-12b (header and tensor table checked) keep both sources. The manifest stamps every source with the runtime build it was verified with and a test refuses a source without it.
 - **Embedding and rerank servers launch with a 8192-token physical batch** (`-c 8192 -b 8192 -ub 8192`, `--embedding --pooling cls` / `--reranking --pooling rank`). A llama-server encoder needs the whole input in one physical batch, so the old 2048 rejected long texts (about 3000 CJK characters) that Ollama silently truncates. The embed batch step-down ladder can no longer shrink that limit.
 
-### Changed - embeddings re-embed once (EMBEDDING_MODEL_VERSION 1 to 2)
+### Embeddings re-embed once
 - The built-in runtime's vectors are not identical to Ollama's. On 34 fixed game texts, plain descriptions agree at cosine >= 0.99994 (GPU vs CPU >= 0.99994), but llama.cpp applies the sentencepiece normalisation table that Ollama's tokenizer skips, so text with curly quotes, trade marks, full-width punctuation or tabs/newlines lands elsewhere (min cosine 0.966, mean 0.998). The model version is therefore bumped: layout stamp `t10m2c1p1`, hash prefixes `t10m2` / `c1m2`. On first launch of 1.0.97 every cached pooled and chunk vector reads as stale (a normal pass re-embeds them as it meets them, the migration banner offers a full re-index), and the Oracle and galaxy caches built from the old vectors are discarded.
 - The vector parity test now records and checks both spaces (`src/test/fixtures/embedding-parity.json`, `scripts/record-embedding-parity.mjs --llama-url=...`).
 
