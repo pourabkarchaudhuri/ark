@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'node:url';
 import { logger } from './safe-logger.js';
+import { netFetch } from './net-fetch.js';
 import { classifyUpdateError } from './updater-diagnostics.js';
 import { cleanupStaleUpdateFiles, resolveInstallerUrl, runFallbackDownload } from './updater-fallback.js';
 import { isVersionGreater } from './updater-version.js';
@@ -404,16 +405,17 @@ async function checkForUpdates() {
  * Fetch the latest release tag directly from GitHub.
  * Works regardless of electron-updater state and supports non-sequential versions.
  */
-async function fetchLatestGitHubRelease(): Promise<{ tag: string; url: string } | null> {
+export async function fetchLatestGitHubRelease(): Promise<{ tag: string; url: string } | null> {
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    const res = await fetch('https://api.github.com/repos/pourabkarchaudhuri/ark/releases/latest', {
+    // Chromium's stack (system certificates, proxy); the 15 s deadline also covers the JSON body.
+    const res = await netFetch('https://api.github.com/repos/pourabkarchaudhuri/ark/releases/latest', {
       headers: { Accept: 'application/vnd.github.v3+json' },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) return null;
+    }, { timeoutMs: 15000 });
+    if (!res.ok) {
+      logger.warn(`[AutoUpdater] GitHub release fetch returned HTTP ${res.status}`);
+      void res.body?.cancel().catch(() => {});
+      return null;
+    }
     const data = await res.json() as { tag_name: string; html_url: string };
     // tag_name is typically "v1.0.15" — strip the leading "v" if present
     const tag = data.tag_name.replace(/^v/, '');

@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const electron = require('electron');
 const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
+import { netFetch } from '../net-fetch.js';
 import { secretHint } from '../secret-hint.js';
 import {
   settingsStore,
@@ -103,7 +104,7 @@ type FetchLike = (url: string, init: { method: string; headers: Record<string, s
  */
 export async function testAzureConnection(
   input: unknown,
-  deps: { fetch: FetchLike } = { fetch: (url, init) => fetch(url, init) },
+  deps: { fetch: FetchLike } = { fetch: (url, init) => netFetch(url, init, { timeoutMs: 30_000 }) },
 ): Promise<{ ok: boolean; message: string }> {
   const o = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
   const str = (v: unknown, max: number) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
@@ -127,7 +128,10 @@ export async function testAzureConnection(
       headers: { 'api-key': key, 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: [{ role: 'user', content: 'Hi' }], max_completion_tokens: 20 }),
     });
-    if (res.ok) return { ok: true, message: 'Connection successful. Azure OpenAI is reachable.' };
+    if (res.ok) {
+      void res.text().catch(() => ''); // release the connection
+      return { ok: true, message: 'Connection successful. Azure OpenAI is reachable.' };
+    }
     const body = await res.text().catch(() => '');
     return { ok: false, message: body.slice(0, 1000) || `HTTP ${res.status} ${res.statusText}` };
   } catch (err) {

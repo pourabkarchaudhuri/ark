@@ -88,7 +88,7 @@ vi.mock('../../../electron/ggdeals-api.js', () => ({
 }));
 vi.mock('../../../electron/web-search.js', () => ({
   needsWebSearch: () => false,
-  webSearch: async () => [],
+  webSearch: async () => [], webSearchOutcome: async () => ({ results: [] }),
   formatSearchContext: () => '',
 }));
 
@@ -158,6 +158,13 @@ describe('model cache key', () => {
     expect(b).toBe(a);
     expect(c).not.toBe(a);
     expect(h.ctor.filter(x => x.kind === 'azure')).toHaveLength(2);
+  });
+
+  it('Azure chat goes through the shared Chromium-backed fetch (1.0.98 F4)', () => {
+    h.settings.provider = 'azure-openai';
+    getModelForProvider(azureOpts('key-1'));
+    const cfg = h.ctor.find(x => x.kind === 'azure')!.opts.configuration as { fetch?: unknown };
+    expect(typeof cfg.fetch).toBe('function');
   });
 
   it('never keeps the raw key in the cache key (Gemini uses the hashed form too)', () => {
@@ -518,6 +525,35 @@ describe('built-in local chat (1.0.97 B36)', () => {
     expect(h.ctor.some((c) => c.kind === 'ollama')).toBe(false);
     expect(res.model).toMatch(/^Local /);
     expect(f.markChatUsed).toHaveBeenCalled();
+  });
+
+  it('hands the local chat client a fetch that keeps the server alive for the whole request (1.0.98 F4)', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fakeBuiltin();
+      scriptChat([new AIMessage(GOOD_ANSWER)]);
+      await processMessage('hello', undefined, []);
+      const cfg = h.ctor.find((c) => c.kind === 'openai')!.opts.configuration as { fetch: typeof fetch };
+      expect(typeof cfg.fetch).toBe('function');
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+        async pull(c) { await gate; c.enqueue(new TextEncoder().encode('x')); c.close(); },
+      }))));
+      f.markChatUsed.mockClear();
+      const res = await cfg.fetch('http://127.0.0.1:47411/v1/chat/completions', { method: 'POST' });
+      const reading = res.text();
+      await vi.advanceTimersByTimeAsync(5 * 60_000); // a 5 minute silent generation
+      expect(f.markChatUsed.mock.calls.length).toBeGreaterThanOrEqual(10);
+      release();
+      await reading;
+      const done = f.markChatUsed.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(f.markChatUsed.mock.calls.length).toBe(done); // nothing keeps touching after the turn ends
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
   });
 
   it('reuses the client between turns and rebuilds it when the server key changes', async () => {

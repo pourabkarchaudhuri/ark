@@ -20,6 +20,7 @@ import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
 import { logger } from './safe-logger.js';
+import { netFetch } from './net-fetch.js';
 import { settingsStore } from './settings-store.js';
 
 // Read lazily: ESM imports hoist above dotenv's loadEnv() call, so
@@ -45,7 +46,12 @@ const realDeps = (): AnalyticsDeps => ({
   saveEnabled: (enabled) => settingsStore.setAnalyticsEnabled(enabled),
   userDataDir: () => app.getPath('userData'),
   appVersion: () => app.getVersion(),
-  fetch: (url, init) => fetch(url, init),
+  // Chromium's stack with a deadline; the reply is never read, so release it right away.
+  fetch: async (url, init) => {
+    const res = await netFetch(url, init, { timeoutMs: 10_000 });
+    void res.body?.cancel().catch(() => {});
+    return res;
+  },
 });
 let deps: AnalyticsDeps = realDeps();
 

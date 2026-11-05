@@ -38,8 +38,9 @@ import { getGgDealsClient, normalizeRegion } from './ggdeals-api.js';
 import { fetchMetacriticReviews } from './metacritic-api.js';
 import { chatStore } from './chat-store.js';
 import { settingsStore, DEFAULT_CHAT_NUM_CTX, type PreferredChatProvider } from './settings-store.js';
-import { needsWebSearch, webSearch, formatSearchContext } from './web-search.js';
+import { needsWebSearch, webSearchOutcome, formatSearchContext } from './web-search.js';
 import { logger } from './safe-logger.js';
+import { makeNetFetch, withKeepAlive, bridgeGlobalFetchForHosts } from './net-fetch.js';
 import { useBuiltinBackend, getBuiltinBackend } from './local-ai/backend.js';
 import { getAiRouter } from './ai-router/service.js';
 import { providerForKind } from './ai-router/legacy-sync.js';
@@ -140,6 +141,20 @@ async function prepareBuiltinChat(): Promise<void> {
   backend.markChatUsed();
 }
 
+/** Longest a single chat request (headers plus the streamed body) may run. */
+const CHAT_REQUEST_CEILING_MS = 10 * 60_000;
+
+/** The Gemini SDK has no fetch option: send only its API host through Chromium's network stack. */
+function bridgeGeminiNetwork(): void {
+  bridgeGlobalFetchForHosts(['generativelanguage.googleapis.com'], { timeoutMs: CHAT_REQUEST_CEILING_MS });
+}
+
+/** Local chat requests refresh the server's idle timer at start, while streaming and at the end. */
+const builtinChatFetch: typeof fetch = withKeepAlive(
+  (input, init) => fetch(input, init),
+  () => { try { getBuiltinBackend().markChatUsed(); } catch { /* backend not available */ } },
+);
+
 /** Chat endpoint of the AI router (LiteLLM), filled by `prepareRouterChat` before each turn that uses it. */
 let routerChat: ChatTarget | null = null;
 
@@ -230,6 +245,8 @@ export function getModelForProvider(providerOptions?: ChatProviderOptions): { mo
       azureOpenAIApiDeploymentName: deployment,
       model: deployment, // required so LangChain uses max_completion_tokens for reasoning models (e.g. gpt-5.2)
       azureOpenAIApiVersion: version,
+      // Chromium's network stack (system certificates and proxy); the SDK keeps its own request timeout.
+      configuration: { fetch: makeNetFetch({ timeoutMs: CHAT_REQUEST_CEILING_MS }) },
       temperature: 0.7,
       maxCompletionTokens: 2048,
     });
@@ -258,6 +275,7 @@ export function getModelForProvider(providerOptions?: ChatProviderOptions): { mo
       return { model: cachedModel as ChatGoogleGenerativeAI, providerName: 'Gemini 2.5 Flash', provider: effective };
     }
     logger.log('[AI Proxy] Creating Gemini model');
+    bridgeGeminiNetwork();
     cachedModel = new ChatGoogleGenerativeAI({
       apiKey: geminiKey,
       model: 'gemini-2.5-flash',
@@ -283,7 +301,8 @@ export function getModelForProvider(providerOptions?: ChatProviderOptions): { mo
     cachedModel = new ChatOpenAI({
       model: label,
       apiKey,
-      configuration: { baseURL: baseUrl },
+      // Keeps the chat server's idle timer from unloading the model during a long turn.
+      configuration: { baseURL: baseUrl, fetch: builtinChatFetch },
       temperature: 0.7,
     });
     cachedModelKey = configKey;
@@ -321,6 +340,7 @@ function getValidationModel(): ChatGoogleGenerativeAI {
   // 512 tokens cut rewrites off mid-list; a full answer plus follow-ups needs room.
   // Thinking is off: the reviewer only checks format, and thought tokens count
   // against maxOutputTokens on 2.5 Flash.
+  bridgeGeminiNetwork();
   cachedValidationModel = new ChatGoogleGenerativeAI({
     apiKey: currentKey,
     model: 'gemini-2.5-flash',
@@ -1057,7 +1077,7 @@ async function addWebSearchContext(userMessage: string, gameContext: GameContext
   logger.log(`[AI Proxy] Web search grounding: "${query}"`);
   chainOfThought.push({ type: 'tool_call', content: `Searching the web: "${query}"`, toolName: 'webSearch', toolArgs: { query }, timestamp: new Date() });
 
-  const results = await webSearch(query, 5);
+  const { results, error: searchError } = await webSearchOutcome(query, 5);
   if (results.length > 0) {
     const contextBlock = formatSearchContext(query, results);
     // After the stable system prefix (prompt + game/library context), not at index 1,
@@ -1066,6 +1086,8 @@ async function addWebSearchContext(userMessage: string, gameContext: GameContext
     while (insertAt < messages.length && messages[insertAt] instanceof SystemMessage) insertAt++;
     messages.splice(insertAt, 0, new SystemMessage(contextBlock));
     chainOfThought.push({ type: 'tool_result', content: `Web search: ${results.length} results`, toolName: 'webSearch', toolResult: results.map(r => r.title).join(', '), timestamp: new Date() });
+  } else if (searchError) {
+    chainOfThought.push({ type: 'tool_result', content: 'Web search unavailable (network or certificate problem), answering from what I already know', toolName: 'webSearch', toolResult: 'Unavailable', timestamp: new Date() });
   } else {
     chainOfThought.push({ type: 'tool_result', content: 'Web search: no results', toolName: 'webSearch', toolResult: 'No results', timestamp: new Date() });
   }

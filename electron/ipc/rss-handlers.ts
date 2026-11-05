@@ -4,8 +4,9 @@
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { ipcMain, net } = electron;
+const { ipcMain } = electron;
 import { logger } from '../safe-logger.js';
+import { netFetch } from '../net-fetch.js';
 
 /** RSS feed sources for gaming news. */
 const RSS_FEEDS = [
@@ -166,6 +167,41 @@ function parseRSSItems(xml: string, source: string, limit: number): Array<{
   return items;
 }
 
+export type RssItem = ReturnType<typeof parseRSSItems>[number];
+
+/**
+ * Fetch every feed; one slow or broken feed never blocks the others. Each request has its own 15 s deadline
+ * that covers the body, so a feed that sends headers and then stalls cannot hang the whole news view.
+ */
+export async function fetchRssFeeds(feeds: ReadonlyArray<{ url: string; source: string }> = RSS_FEEDS): Promise<RssItem[]> {
+  const allItems: RssItem[] = [];
+  const promises = feeds.map(async ({ url, source }) => {
+    try {
+      // The 15 s deadline stays armed through the body read, so a feed that stalls mid-body is cut off.
+      const response = await netFetch(url, {
+        headers: {
+          'User-Agent': 'ArkGameTracker/1.0 (Electron Desktop App)',
+          'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        },
+      }, { timeoutMs: 15000 });
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {});
+        logger.warn(`[News] RSS ${source} returned ${response.status}`);
+        return;
+      }
+      const xml = await response.text();
+      const items = parseRSSItems(xml, source, 10);
+      allItems.push(...items);
+      logger.log(`[News] RSS ${source}: got ${items.length} items`);
+    } catch (err) {
+      logger.warn(`[News] RSS ${source} failed:`, err);
+    }
+  });
+
+  await Promise.allSettled(promises);
+  return allItems;
+}
+
 export function register(): void {
   /**
    * Fetch RSS feeds from gaming news sites.
@@ -174,42 +210,7 @@ export function register(): void {
   ipcMain.handle('news:getRSSFeeds', async () => {
     try {
       logger.log(`[News] Fetching RSS feeds from ${RSS_FEEDS.length} sources`);
-      const allItems: Array<{
-        id: string;
-        title: string;
-        summary: string;
-        url: string;
-        imageUrl?: string;
-        publishedAt: number;
-        source: string;
-      }> = [];
-
-      const promises = RSS_FEEDS.map(async ({ url, source }) => {
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 15000);
-          const response = await net.fetch(url, {
-            headers: {
-              'User-Agent': 'ArkGameTracker/1.0 (Electron Desktop App)',
-              'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-            },
-            signal: controller.signal,
-          });
-          clearTimeout(timer);
-          if (!response.ok) {
-            logger.warn(`[News] RSS ${source} returned ${response.status}`);
-            return;
-          }
-          const xml = await response.text();
-          const items = parseRSSItems(xml, source, 10);
-          allItems.push(...items);
-          logger.log(`[News] RSS ${source}: got ${items.length} items`);
-        } catch (err) {
-          logger.warn(`[News] RSS ${source} failed:`, err);
-        }
-      });
-
-      await Promise.allSettled(promises);
+      const allItems = await fetchRssFeeds();
       logger.log(`[News] RSS total: ${allItems.length} items from all feeds`);
       return allItems;
     } catch (error) {

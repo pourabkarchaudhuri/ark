@@ -47,7 +47,7 @@ vi.mock('../../../electron/epic-api.js', () => ({ epicAPI: { searchGames: async 
 vi.mock('../../../electron/hltb-api.js', () => ({ getHltbClient: async () => ({ getTimes: async () => null }) }));
 vi.mock('../../../electron/metacritic-api.js', () => ({ fetchMetacriticReviews: async () => null }));
 vi.mock('../../../electron/ggdeals-api.js', () => ({ getGgDealsClient: async () => ({ getPrices: async () => ({ prices: {} }) }), normalizeRegion: () => 'us' }));
-vi.mock('../../../electron/web-search.js', () => ({ needsWebSearch: () => false, webSearch: async () => [], formatSearchContext: () => '' }));
+vi.mock('../../../electron/web-search.js', () => ({ needsWebSearch: () => false, webSearch: async () => [], webSearchOutcome: async () => ({ results: [] }), formatSearchContext: () => '' }));
 vi.mock('../../../electron/ai-router/service.js', () => ({
   getAiRouter: () => ({
     chatUsesRouter: () => h.router.usesRouter,

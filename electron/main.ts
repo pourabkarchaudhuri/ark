@@ -10,11 +10,11 @@ import path from 'path';
 import https from 'node:https';
 import { APP_USER_MODEL_ID } from './app-identity.js';
 import { installPerfProbes } from './perf-probe.js';
+import { netFetch } from './net-fetch.js';
 
 let tray: any = null;
 let isQuitting = false;
 import { FiltersEngine, Request, ENGINE_VERSION } from '@ghostery/adblocker';
-import fetch from 'cross-fetch';
 
 // ESM has no __dirname; required for loadFile/preload paths when run as module
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1060,7 +1060,8 @@ app.whenReady().then(async () => {
           stat: (p) => fs.promises.stat(p),
           readdir: (d) => fs.promises.readdir(d),
         },
-        fetch: (url) => fetch(url),
+        // Chromium's stack (system certificates, proxy); the deadline also aborts a stalled download.
+        fetch: (url) => netFetch(url, undefined, { timeoutMs: 20_000 }),
         parse: (lists) => FiltersEngine.parse(lists),
         deserialize: (buf) => FiltersEngine.deserialize(buf),
         serialize: (e) => e.serialize(),

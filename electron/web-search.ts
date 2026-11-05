@@ -4,8 +4,8 @@
  * No API keys required. Robust against rate limiting.
  */
 
-import https from 'https';
 import { logger } from './safe-logger.js';
+import { netFetch } from './net-fetch.js';
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024; // 2 MB — search results pages are small
 
@@ -86,25 +86,18 @@ export function createBodyCollector(maxBytes: number = MAX_RESPONSE_BYTES): {
 }
 
 /**
- * Perform an HTTPS request to the given URL.
- * Handles redirects automatically.
+ * Perform an HTTPS request through the shared network helper (Chromium's stack inside Electron: system
+ * certificates and proxy). Redirects are followed by the stack; the final URL must still be HTTPS, and the
+ * body is read through a byte-capped collector so an oversized page is cut off.
  */
-function fetchUrl(
-  url: string,
-  options: FetchOptions = {},
-  _redirectDepth = 0,
-): Promise<{ status: number; data: string }> {
-  if (_redirectDepth > 5) return Promise.reject(new Error('Too many redirects'));
-  if (options.signal?.aborted) return Promise.reject(new Error('Request aborted'));
-  return new Promise((resolve, reject) => {
-    const isPost = options.method === 'POST';
-    const urlObj = new URL(url);
-
-    const reqOpts: https.RequestOptions = {
-      hostname: urlObj.hostname,
-      port: 443,
-      path: urlObj.pathname + urlObj.search,
+async function fetchUrl(url: string, options: FetchOptions = {}): Promise<{ status: number; data: string }> {
+  if (options.signal?.aborted) throw new Error('Request aborted');
+  const isPost = options.method === 'POST';
+  const res = await netFetch(
+    url,
+    {
       method: isPost ? 'POST' : 'GET',
+      redirect: 'follow',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -112,49 +105,27 @@ function fetchUrl(
         ...(isPost ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
         ...(options.headers || {}),
       },
-    };
-
-    const req = https.request(reqOpts, (res) => {
-      // Follow redirects — only to HTTPS URLs on public hosts
-      if (
-        res.statusCode &&
-        res.statusCode >= 300 &&
-        res.statusCode < 400 &&
-        res.headers.location
-      ) {
-        try {
-          const redirectUrl = new URL(res.headers.location, url);
-          if (redirectUrl.protocol !== 'https:') {
-            reject(new Error(`Redirect to non-HTTPS URL blocked: ${redirectUrl.href}`));
-            return;
-          }
-          fetchUrl(redirectUrl.href, options, _redirectDepth + 1).then(resolve).catch(reject);
-        } catch {
-          reject(new Error(`Invalid redirect URL: ${res.headers.location}`));
-        }
-        return;
+      ...(isPost && options.body ? { body: options.body } : {}),
+    },
+    { timeoutMs: 10_000, signal: options.signal },
+  );
+  if (res.url && !/^https:/i.test(res.url)) {
+    void res.body?.cancel().catch(() => {});
+    throw new Error(`Redirect to non-HTTPS URL blocked: ${res.url}`);
+  }
+  const body = createBodyCollector(MAX_RESPONSE_BYTES);
+  const reader = res.body?.getReader();
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!body.push(Buffer.from(value))) {
+        void reader.cancel().catch(() => {});
+        throw new Error(`Response exceeded ${MAX_RESPONSE_BYTES} bytes limit`);
       }
-
-      const body = createBodyCollector(MAX_RESPONSE_BYTES);
-      res.on('data', (chunk: Buffer) => {
-        if (!body.push(chunk)) {
-          req.destroy(new Error(`Response exceeded ${MAX_RESPONSE_BYTES} bytes limit`));
-        }
-      });
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, data: body.text() }));
-    });
-
-    req.on('error', reject);
-    req.setTimeout(10_000, () => {
-      req.destroy(new Error('Request timed out'));
-    });
-    options.signal?.addEventListener('abort', () => req.destroy(new Error('Request aborted')), { once: true });
-
-    if (isPost && options.body) {
-      req.write(options.body);
     }
-    req.end();
-  });
+  }
+  return { status: res.status, data: body.text() };
 }
 
 const stripTags = (html: string): string =>
@@ -220,9 +191,18 @@ export async function webSearch(
   maxResults: number = 5,
   deadlineMs: number = WEB_SEARCH_DEADLINE_MS,
 ): Promise<WebSearchResult[]> {
+  return (await webSearchOutcome(query, maxResults, deadlineMs)).results;
+}
+
+/** Like `webSearch`, but tells "the search could not run" (`error` set) apart from "nothing found". */
+export async function webSearchOutcome(
+  query: string,
+  maxResults: number = 5,
+  deadlineMs: number = WEB_SEARCH_DEADLINE_MS,
+): Promise<{ results: WebSearchResult[]; error?: string }> {
   const cacheKey = query.trim().toLowerCase().replace(/\s+/g, ' ');
   const hit = searchCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < SEARCH_CACHE_TTL_MS) return hit.results.slice(0, maxResults);
+  if (hit && Date.now() - hit.at < SEARCH_CACHE_TTL_MS) return { results: hit.results.slice(0, maxResults) };
 
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -244,7 +224,7 @@ export async function webSearch(
 
     if (response.status !== 200) {
       logger.error(`[Web Search] DuckDuckGo returned status ${response.status}`);
-      return [];
+      return { results: [], error: `DuckDuckGo answered with status ${response.status}` };
     }
 
     const results = parseDDGHtml(response.data).slice(0, maxResults);
@@ -255,11 +235,11 @@ export async function webSearch(
     searchCache.set(cacheKey, { at: Date.now(), results });
 
     logger.log(`[Web Search] Found ${results.length} results`);
-    return results;
+    return { results };
   } catch (error: unknown) {
     const errMsg = error instanceof Error ? error.message : String(error);
     logger.error(`[Web Search] Search failed: ${errMsg}`);
-    return [];
+    return { results: [], error: errMsg };
   } finally {
     if (timer) clearTimeout(timer);
   }

@@ -3,7 +3,6 @@
  * partial results when a page fails, and the non-200 body is drained.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { EventEmitter } from 'node:events';
 
 const h = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
@@ -25,30 +24,26 @@ vi.mock('../../../electron/egdata-api.js', () => ({
   egdataAPI: { getTopSellersPaginated: vi.fn(async () => ({ elements: [], total: 0 })) },
 }));
 
-vi.mock('node:https', () => {
-  const get = vi.fn((opts: { path: string }, cb: (res: unknown) => void) => {
-    const page = Number(new URL(`https://x${opts.path}`).searchParams.get('page'));
+import { __setNetFetchTransportForTests } from '../../../electron/net-fetch';
+
+/** Fake network: one response per requested page; a non-200 page has a body whose release is counted. */
+function installTransport(): void {
+  __setNetFetchTransportForTests(async (url) => {
+    const page = Number(new URL(url).searchParams.get('page'));
     h.requests.push(page);
-    const req = Object.assign(new EventEmitter(), { setTimeout: vi.fn(), destroy: vi.fn() });
-    setTimeout(() => {
-      const status = h.pageStatus.get(page) ?? 200;
-      const res = Object.assign(new EventEmitter(), {
-        statusCode: status === 'empty' ? 200 : status,
-        resume: vi.fn(() => { h.resumed++; }),
-      });
-      cb(res);
-      if (status !== 200 && status !== 'empty') return;
-      const elements = status === 'empty' ? [] : Array.from({ length: 10 }, (_, i) => {
-        const pos = (page - 1) * 10 + i + 1;
-        return { id: `o${pos}`, namespace: 'ns', position: pos };
-      });
-      res.emit('data', Buffer.from(JSON.stringify({ elements, total: 99 })));
-      res.emit('end');
-    }, 0);
-    return req;
+    await new Promise((r) => setTimeout(r, 0));
+    const status = h.pageStatus.get(page) ?? 200;
+    if (status !== 200 && status !== 'empty') {
+      const body = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('boom')); }, cancel() { h.resumed++; } });
+      return new Response(body, { status });
+    }
+    const elements = status === 'empty' ? [] : Array.from({ length: 10 }, (_, i) => {
+      const pos = (page - 1) * 10 + i + 1;
+      return { id: `o${pos}`, namespace: 'ns', position: pos };
+    });
+    return new Response(JSON.stringify({ elements, total: 99 }), { status: 200 });
   });
-  return { default: { get }, get };
-});
+}
 
 import { register, resetTopSellersCache } from '../../../electron/ipc/egdata-handlers';
 
@@ -61,7 +56,8 @@ beforeEach(() => {
   h.pageStatus.clear();
   h.requests.length = 0;
   h.resumed = 0;
-  // Strategy 2 (global fetch) must never hit the network
+  installTransport();
+  // Nothing may reach the real network
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
 });
 

@@ -17,6 +17,7 @@ import {
   webSearch,
   __setWebSearchFetchForTests,
   __clearWebSearchCacheForTests,
+  webSearchOutcome,
   WEB_SEARCH_DEADLINE_MS,
 } from '../../../electron/web-search';
 
@@ -179,5 +180,67 @@ describe('webSearch', () => {
     expect(await webSearch('q', 5)).toEqual([]);
     expect(await webSearch('q', 5)).toHaveLength(1);
     expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('default transport (1.0.98 F4: shared network helper, not node:https)', () => {
+  const setTransport = async (fn?: (url: string, init: RequestInit) => Promise<Response>) => {
+    const m = await import('../../../electron/net-fetch');
+    m.__setNetFetchTransportForTests(fn);
+  };
+  beforeEach(() => { __setWebSearchFetchForTests(); __clearWebSearchCacheForTests(); });
+  afterEach(async () => { await setTransport(); __clearWebSearchCacheForTests(); });
+
+  it('searches through net-fetch with a POST and parses the page', async () => {
+    let seen: { url: string; init: RequestInit } | null = null;
+    await setTransport(async (url, init) => {
+      seen = { url, init };
+      const r = new Response(DDG_HTML, { status: 200 });
+      Object.defineProperty(r, 'url', { value: url });
+      return r;
+    });
+    const out = await webSearchOutcome('hades patch', 5, 1000);
+    expect(out.error).toBeUndefined();
+    expect(out.results).toHaveLength(1);
+    expect(seen!.url).toBe('https://html.duckduckgo.com/html/');
+    expect(seen!.init.method).toBe('POST');
+    expect(seen!.init.redirect).toBe('follow');
+    expect(seen!.init.body).toBe('q=hades%20patch');
+  });
+
+  it('reports "could not search" (not "no results") when the network or certificate fails', async () => {
+    await setTransport(async () => { throw new TypeError('fetch failed: SELF_SIGNED_CERT_IN_CHAIN'); });
+    const out = await webSearchOutcome('hades patch', 5, 1000);
+    expect(out.results).toEqual([]);
+    expect(out.error).toMatch(/SELF_SIGNED_CERT_IN_CHAIN/);
+    expect(await webSearch('hades patch', 5, 1000)).toEqual([]);
+  });
+
+  it('blocks a redirect that ended on a non-HTTPS URL', async () => {
+    await setTransport(async () => {
+      const r = new Response(DDG_HTML, { status: 200 });
+      Object.defineProperty(r, 'url', { value: 'http://evil.example/' });
+      return r;
+    });
+    const out = await webSearchOutcome('x', 5, 1000);
+    expect(out.results).toEqual([]);
+    expect(out.error).toMatch(/non-HTTPS/);
+  });
+
+  it('cuts off an oversized body', async () => {
+    await setTransport(async (url) => {
+      const r = new Response(new Uint8Array(3 * 1024 * 1024), { status: 200 });
+      Object.defineProperty(r, 'url', { value: url });
+      return r;
+    });
+    const out = await webSearchOutcome('big', 5, 1000);
+    expect(out.error).toMatch(/exceeded/);
+  });
+
+  it('a non-200 answer is an error, an empty 200 page is just no results', async () => {
+    await setTransport(async (url) => { const r = new Response('', { status: 503 }); Object.defineProperty(r, 'url', { value: url }); return r; });
+    expect((await webSearchOutcome('a', 5, 1000)).error).toMatch(/503/);
+    await setTransport(async (url) => { const r = new Response('<html></html>', { status: 200 }); Object.defineProperty(r, 'url', { value: url }); return r; });
+    expect(await webSearchOutcome('b', 5, 1000)).toEqual({ results: [] });
   });
 });

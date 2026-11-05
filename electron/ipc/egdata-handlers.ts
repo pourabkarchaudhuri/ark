@@ -3,10 +3,10 @@
  * Expose egdata client to renderer (main process only).
  */
 
-import https from 'node:https';
 import { ipcMain } from 'electron';
 import { logger } from '../safe-logger.js';
 import { egdataAPI } from '../egdata-api.js';
+import { netFetch } from '../net-fetch.js';
 
 /** Safe offer id (alphanumeric, hyphen, underscore) */
 const SAFE_OFFER_ID = /^[a-zA-Z0-9_\-]+$/;
@@ -35,59 +35,16 @@ export function resetTopSellersCache(): void {
   topSellersInFlight = null;
 }
 
-/** Fetch one page of Epic top sellers via Node https. API uses page=1,2,... (not skip). */
-function fetchTopSellersViaHttps(limit: number, page: number): Promise<{ elements: unknown[]; total: number }> {
-  return new Promise((resolve, reject) => {
-    const path = `${EGDATA_TOP_SELLERS_PATH}?limit=${limit}&page=${page}`;
-    const req = https.get(
-      {
-        hostname: EGDATA_TOP_SELLERS_HOST,
-        path,
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-      },
-      (res) => {
-        res.on('error', reject);
-        if (res.statusCode !== 200) {
-          // Drain the body so the socket is released
-          res.resume();
-          reject(new Error(`HTTP ${res.statusCode}`));
-          return;
-        }
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer) => chunks.push(chunk));
-        res.on('end', () => {
-          try {
-            const data = JSON.parse(Buffer.concat(chunks).toString()) as { elements?: unknown[]; total?: number };
-            const elements = Array.isArray(data?.elements) ? data.elements : [];
-            resolve({ elements, total: data?.total ?? elements.length });
-          } catch (e) {
-            reject(e);
-          }
-        });
-      },
-    );
-    req.on('error', reject);
-    req.setTimeout(15000, () => {
-      req.destroy();
-      reject(new Error('timeout'));
-    });
-  });
-}
-
-/** Fetch one page via global fetch (fallback transport). */
-async function fetchTopSellersViaFetch(page: number): Promise<unknown[]> {
+/** Fetch one page of Epic top sellers through the shared network helper (Chromium stack, deadline covers the body). */
+async function fetchTopSellersPage(page: number): Promise<unknown[]> {
   const url = `https://${EGDATA_TOP_SELLERS_HOST}${EGDATA_TOP_SELLERS_PATH}?limit=${EGDATA_PAGE_SIZE}&page=${page}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as { elements?: unknown[] };
-    return Array.isArray(data?.elements) ? data.elements : [];
-  } finally {
-    clearTimeout(timeout);
+  const res = await netFetch(url, { headers: { Accept: 'application/json' } }, { timeoutMs: 15000 });
+  if (!res.ok) {
+    void res.body?.cancel().catch(() => {}); // release the socket
+    throw new Error(`HTTP ${res.status}`);
   }
+  const data = (await res.json()) as { elements?: unknown[] };
+  return Array.isArray(data?.elements) ? data.elements : [];
 }
 
 /**
@@ -121,31 +78,20 @@ async function fetchTopSellerPagesMerged(fetchPage: (page: number) => Promise<un
   return { elements: sorted, total: sorted.length };
 }
 
-/** Try each transport in turn until one yields elements. Never throws. */
+/** Paged top sellers first, then the egdata API client. Never throws. */
 async function fetchTopSellersUncached(): Promise<TopSellersResult> {
-  // 1) Node https (API returns ~10 per request; we fetch pages to get up to 99)
+  // 1) Direct pages (API returns ~10 per request; we fetch pages to get up to 99)
   try {
-    const merged = await fetchTopSellerPagesMerged(async (p) => (await fetchTopSellersViaHttps(EGDATA_PAGE_SIZE, p)).elements);
+    const merged = await fetchTopSellerPagesMerged(fetchTopSellersPage);
     if (merged.elements.length > 0) {
-      logger.log('[egdata IPC] getTopSellers: https paginated returned', merged.elements.length, 'elements');
+      logger.log('[egdata IPC] getTopSellers: paginated returned', merged.elements.length, 'elements');
       return merged;
     }
-  } catch (httpsErr) {
-    logger.warn('[egdata IPC] getTopSellers https failed:', (httpsErr as Error).message);
+  } catch (err) {
+    logger.warn('[egdata IPC] getTopSellers paged fetch failed:', (err as Error).message);
   }
 
-  // 2) Global fetch (fallback) — only when https merged nothing
-  try {
-    const merged = await fetchTopSellerPagesMerged(fetchTopSellersViaFetch);
-    if (merged.elements.length > 0) {
-      logger.log('[egdata IPC] getTopSellers: fetch paginated returned', merged.elements.length, 'elements');
-      return merged;
-    }
-  } catch (fetchErr) {
-    logger.warn('[egdata IPC] getTopSellers fetch failed:', (fetchErr as Error).message);
-  }
-
-  // 3) egdata API client (paginated)
+  // 2) egdata API client (paginated)
   try {
     const result = await egdataAPI.getTopSellersPaginated(EGDATA_TOP_SELLERS_CAP);
     const elements = Array.isArray(result?.elements) ? (result!.elements as unknown[]) : [];
