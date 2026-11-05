@@ -73,7 +73,12 @@ export interface SidecarStatus {
 }
 
 export class SidecarError extends Error {
-  constructor(message: string, readonly code: 'no_runtime' | 'no_port' | 'start_failed' | 'failed_too_often') {
+  constructor(
+    message: string,
+    readonly code: 'no_runtime' | 'no_port' | 'start_failed' | 'failed_too_often',
+    /** `bindFailure`: the child could not bind its port (taken meanwhile). `retryAfterMs`: refused by the start-failure cooldown, nothing was spawned. */
+    readonly extra: { bindFailure?: boolean; retryAfterMs?: number } = {},
+  ) {
     super(message);
     this.name = 'SidecarError';
   }
@@ -123,6 +128,10 @@ export const SIDECAR_MAX_RESTARTS = 3;
 const RUN_DIR_RETRIES = 8;
 const RUN_DIR_RETRY_MS = 150;
 const LOG_TAIL_LINES = 40;
+/** The child exited because its port was already taken (the port is picked, released, and only bound ~25 s later). */
+const BIND_FAILURE_RE = /address already in use|EADDRINUSE|only one usage of each socket|couldn't bind|could not bind|failed to bind/i;
+/** Restarts on another port after a bind failure; these never count as start failures. */
+const MAX_BIND_RETRIES = 3;
 /** Port range for the sidecar: above the built-in llama.cpp range (47410-47473), never 11434. */
 export const SIDECAR_PORT_BASE = 47600;
 export const SIDECAR_PORT_SPAN = 64;
@@ -151,11 +160,44 @@ const NETWORK_ENV = [
   'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
 ];
 
-/** `NO_PROXY` for the child: the user's own list plus loopback, so Ark's calls to LiteLLM never go through a proxy. */
-export function mergeNoProxy(existing: string | undefined): string {
+/**
+ * `NO_PROXY` for the child: the user's own list plus loopback (v4 and v6), so Ark's calls to LiteLLM never
+ * go through a proxy, plus `extraHosts` (the connectors on this machine or LAN, see `localConnectorHosts`).
+ */
+export function mergeNoProxy(existing: string | undefined, extraHosts: Iterable<string> = []): string {
   const parts = (existing ?? '').split(',').map((p) => p.trim()).filter(Boolean);
-  for (const loop of ['127.0.0.1', 'localhost']) if (!parts.includes(loop)) parts.push(loop);
+  for (const h of ['127.0.0.1', 'localhost', '::1', ...extraHosts]) if (h && !parts.includes(h)) parts.push(h);
   return parts.join(',');
+}
+
+/** True for loopback, private/link-local addresses, single-label machine names and .local/.lan style names. */
+export function isLocalNetworkName(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return false;
+  if (h === 'localhost' || h === '::1' || h === '::') return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  if (h.includes(':')) return /^(fc|fd|fe80)/.test(h);
+  return !h.includes('.') || /\.(local|lan|internal|home\.arpa|localdomain|intranet)$/.test(h);
+}
+
+/** Host names of the local-network `api_base` addresses in a generated LiteLLM config: they must bypass the injected proxy. */
+export function localConnectorHosts(config: unknown): string[] {
+  const out = new Set<string>();
+  const list = (config as { model_list?: Array<{ litellm_params?: { api_base?: unknown } }> } | null)?.model_list;
+  if (!Array.isArray(list)) return [];
+  for (const m of list) {
+    const base = m?.litellm_params?.api_base;
+    if (typeof base !== 'string') continue;
+    try {
+      const host = new URL(base).hostname.replace(/^\[|\]$/g, '');
+      if (isLocalNetworkName(host)) out.add(host);
+    } catch { /* not a URL: nothing to bypass */ }
+  }
+  return [...out];
 }
 
 export function defaultBaseEnv(): Record<string, string> {
@@ -296,6 +338,9 @@ export class LitellmSidecar {
 
   private async ensureNow(spec: SidecarSpec): Promise<SidecarInfo> {
     if (this.shuttingDown) throw new SidecarError('Ark is shutting down', 'start_failed');
+    // A different config than the one that failed to start gets a fresh try at once (the user fixed or
+    // removed the bad connector); only the same config stays failed until Re-check.
+    if (this.state === 'failed' && this.failedHash !== null && spec.hash !== this.failedHash) this.reset();
     if (this.state === 'failed') {
       throw new SidecarError(this.lastError ?? 'The AI router failed too often; use Re-check to try again', 'failed_too_often');
     }
@@ -311,12 +356,25 @@ export class LitellmSidecar {
     // Circuit breaker: a start that just failed is not repeated for a cooldown, so a queue of embed
     // batches does not wait N x 90 s for N doomed spawns. A different config may try at once.
     if (this.failedUntil > this.deps.now() && this.failedHash === spec.hash) {
-      throw new SidecarError(this.lastError ?? 'LiteLLM did not start a moment ago; trying again shortly', 'start_failed');
+      throw new SidecarError(this.lastError ?? 'LiteLLM did not start a moment ago; trying again shortly', 'start_failed', { retryAfterMs: this.failedUntil - this.deps.now() });
     }
     return this.start(spec);
   }
 
+  /** Start; a child that lost the race for its port is started again on another one (up to MAX_BIND_RETRIES), never counted as a failed start. */
   private async start(spec: SidecarSpec): Promise<SidecarInfo> {
+    const badPorts: number[] = [];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.startOnce(spec, badPorts, attempt < MAX_BIND_RETRIES);
+      } catch (err) {
+        if (!(err instanceof SidecarError && err.extra.bindFailure && attempt < MAX_BIND_RETRIES) || this.shuttingDown) throw err;
+        this.deps.log(`[AI Router] port ${this.port} was taken before LiteLLM bound it; retrying on another port`);
+      }
+    }
+  }
+
+  private async startOnce(spec: SidecarSpec, badPorts: number[], mayRetryBind: boolean): Promise<SidecarInfo> {
     if (!this.isRuntimeAvailable()) {
       this.lastError = 'The bundled LiteLLM runtime is missing from this install';
       this.state = 'stopped';
@@ -327,7 +385,7 @@ export class LitellmSidecar {
     this.lastError = null;
     this.emit();
     try {
-      const port = await this.deps.pickPort([...this.usedPorts]);
+      const port = await this.deps.pickPort([...this.usedPorts, ...badPorts]);
       if (port === null) throw new SidecarError('No free local port for the AI router', 'no_port');
       this.usedPorts.add(port);
       const masterKey = this.deps.randomKey();
@@ -353,7 +411,7 @@ export class LitellmSidecar {
         LITELLM_MASTER_KEY: masterKey,
         PYTHONUTF8: '1',
         PYTHONDONTWRITEBYTECODE: '1',
-        NO_PROXY: mergeNoProxy(base.NO_PROXY ?? base.no_proxy),
+        NO_PROXY: mergeNoProxy(base.NO_PROXY ?? base.no_proxy, localConnectorHosts(spec.config)),
       };
       delete env.no_proxy;
       let child: ChildLike;
@@ -391,7 +449,9 @@ export class LitellmSidecar {
         if (exited || this.shuttingDown || this.stopping) break;
         try {
           const res = await this.deps.fetchFn(`${baseUrl}/health/liveliness`, { signal: timeoutSignal(2_000) });
-          if (res.ok && !exited) {
+          // /health/liveliness is unauthenticated: anything on the port can answer it. Only a server that
+          // accepts this launch's master key is the LiteLLM we spawned.
+          if (res.ok && !exited && await this.ownsPort(baseUrl, masterKey)) {
             this.state = 'ready';
             this.runningHash = spec.hash;
             this.runningRoutedHash = spec.routedHash ?? null;
@@ -414,18 +474,30 @@ export class LitellmSidecar {
       const reason = ex
         ? `LiteLLM exited (code ${ex.code ?? 'none'}${ex.signal ? `, ${ex.signal}` : ''})${tail ? `: ${tail}` : ''}`
         : `LiteLLM did not become healthy within ${Math.round(this.deps.startTimeoutMs / 1000)}s${tail ? `: ${tail}` : ''}`;
+      const bindFailure = !!ex && BIND_FAILURE_RE.test(this.logTail.join('\n'));
+      if (bindFailure) badPorts.push(port);
       this.stopping = true;
       this.killChild(child);
       this.cleanupRun(port);
-      throw new SidecarError(reason, 'start_failed');
+      throw new SidecarError(reason, 'start_failed', { bindFailure });
     } catch (err) {
       this.state = 'stopped';
       this.lastError = err instanceof Error ? err.message : String(err);
       this.runningHash = null;
       this.runningRoutedHash = null;
-      this.noteStartFailure(err, spec); // may move the state on to 'failed'
+      if (!(mayRetryBind && err instanceof SidecarError && err.extra.bindFailure)) this.noteStartFailure(err, spec); // may move the state on to 'failed'
       this.emit();
       throw err;
+    }
+  }
+
+  /** True when the server on `baseUrl` accepts this launch's master key (so it is the LiteLLM Ark spawned). */
+  private async ownsPort(baseUrl: string, masterKey: string): Promise<boolean> {
+    try {
+      const res = await this.deps.fetchFn(`${baseUrl}/v1/models`, { headers: { Authorization: `Bearer ${masterKey}` }, signal: timeoutSignal(2_000) });
+      return res.ok;
+    } catch {
+      return false;
     }
   }
 
@@ -466,16 +538,19 @@ export class LitellmSidecar {
   }
 
   /** Restart a crashed sidecar after a backoff, or give up after `maxRestarts` in a row. */
-  private scheduleRestart(): void {
+  private scheduleRestart(waitMs?: number): void {
     if (this.shuttingDown || !this.spec) return;
-    if (this.restarts >= this.deps.maxRestarts) {
+    // `waitMs`: the last try was refused by the start-failure cooldown, nothing was spawned, so wait it out without using up a restart.
+    if (waitMs === undefined && this.restarts >= this.deps.maxRestarts) {
       this.state = 'failed';
       this.lastError = `${this.lastError ?? 'LiteLLM failed'}; stopped restarting after ${this.restarts} attempts`;
       this.emit();
       return;
     }
-    const delay = this.deps.backoffMs[Math.min(this.restarts, this.deps.backoffMs.length - 1)] ?? 1_000;
-    this.restarts += 1;
+    const delay = waitMs !== undefined
+      ? Math.max(50, waitMs)
+      : this.deps.backoffMs[Math.min(this.restarts, this.deps.backoffMs.length - 1)] ?? 1_000;
+    if (waitMs === undefined) this.restarts += 1;
     this.state = 'stopped';
     this.emit();
     this.restartTimer = setTimeout(() => {
@@ -486,7 +561,8 @@ export class LitellmSidecar {
       if (!spec) return; // nothing needs LiteLLM any more: the next request starts it
       void this.ensure(spec).catch((err) => {
         this.deps.log(`[AI Router] restart failed: ${err instanceof Error ? err.message : String(err)}`);
-        if (this.state !== 'failed') this.scheduleRestart();
+        if (this.state === 'failed') return;
+        this.scheduleRestart(err instanceof SidecarError ? err.extra.retryAfterMs : undefined);
       });
     }, delay);
     this.restartTimer.unref?.();

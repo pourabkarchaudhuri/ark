@@ -83,7 +83,7 @@ describe('connector to LiteLLM parameters', () => {
 
   it('LiteLLM does not retry (the router does) and its timeout is a fixed ceiling, whatever the policy says', () => {
     const b = build([anthropic], { chat: { connectorId: 'anthropic', model: 'm' } }, { policy: { ...DEFAULT_POLICY, timeoutSec: 10, retries: 2 } });
-    expect(entry(b, 'ark-chat')!.litellm_params).toMatchObject({ timeout: 60, num_retries: 0 });
+    expect(entry(b, 'ark-chat')!.litellm_params).toMatchObject({ timeout: 200, num_retries: 0 });
   });
 
   it('refuses a user-supplied value that LiteLLM would read as an environment reference', () => {

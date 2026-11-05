@@ -19,7 +19,7 @@ import {
   type AiRole, type Connector, type ConnectorTestResult, type Routes,
 } from './types.js';
 import { scrubSecrets } from '../secret-scrub.js';
-import { buildLitellmConfig, testTarget, type BuiltConfig } from './litellm-config.js';
+import { buildLitellmConfig, testTarget, LITELLM_TIMEOUT_CEILING_SEC, LITELLM_TIMEOUT_MARGIN_SEC, type BuiltConfig } from './litellm-config.js';
 import type { RouterStore, RouterStateView } from './connectors.js';
 import type { LitellmSidecar, SidecarInfo, SidecarSpec, SidecarStatus } from '../litellm-sidecar.js';
 
@@ -61,6 +61,9 @@ export interface ChatTarget {
   model: string;
   providerName: string;
   connector: Connector;
+  /** The failure policy for the chat client: its request timeout and its own retry count (the only retry layer). */
+  timeoutMs: number;
+  maxRetries: number;
 }
 
 export interface RouterStatus {
@@ -87,6 +90,8 @@ export interface AiRouterDeps {
 }
 
 const EMBED_PER_TEXT_MS = 100;
+/** No client deadline may reach LiteLLM's own timeout, or LiteLLM answers 408/5xx first and the loop retries a call that already ran. */
+export const MAX_CLIENT_TIMEOUT_MS = (LITELLM_TIMEOUT_CEILING_SEC - LITELLM_TIMEOUT_MARGIN_SEC) * 1000;
 
 function messageOf(text: string, status: number): string {
   try {
@@ -114,7 +119,7 @@ export class AiRouter {
   private timerMs = 0;
   private lastIdentity: string;
   private readonly listeners = new Set<() => void>();
-  private testing = new Map<string, Promise<ConnectorTestResult>>();
+  private testing = new Map<string, { sig: string; promise: Promise<ConnectorTestResult> }>();
 
   constructor(private readonly deps: AiRouterDeps) {
     this.fetchFn = deps.fetchFn ?? ((url, init) => fetch(url, init));
@@ -250,9 +255,11 @@ export class AiRouter {
     }
     try {
       const info = await this.endpoint();
+      const policy = this.deps.store.policy();
       return {
         baseUrl: `${info.baseUrl}/v1`, apiKey: info.masterKey, model: ROLE_ALIAS.chat,
         providerName: `${r.connector.name} (${r.model})`, connector: r.connector,
+        timeoutMs: policy.timeoutSec * 1000, maxRetries: policy.retries + (policy.onFail === 'retry-once' ? 1 : 0),
       };
     } catch (err) {
       this.noteFault('chat', err instanceof Error ? err.message : String(err));
@@ -322,12 +329,12 @@ export class AiRouter {
    * connector, and as the fallback when the route fails under the "use fallback" policy and the
    * cached vectors come from that same local model.
    */
-  async embed(texts: string[], local: () => Promise<EmbedOutcome>): Promise<EmbedOutcome> {
+  async embed(texts: string[], local: () => Promise<EmbedOutcome>, opts: { queryOnly?: boolean } = {}): Promise<EmbedOutcome> {
     const r = this.resolve('embeddings');
     if (r.via === 'local') return local();
     if (texts.length === 0) return { embeddings: [], error: null };
     const policy = this.deps.store.policy();
-    const timeoutMs = policy.timeoutSec * 1000 + texts.length * EMBED_PER_TEXT_MS;
+    const timeoutMs = Math.min(policy.timeoutSec * 1000 + texts.length * EMBED_PER_TEXT_MS, MAX_CLIENT_TIMEOUT_MS);
     const nulls = () => texts.map(() => null);
     let failure: NonNullable<EmbedOutcome['error']> = { kind: 'network', message: 'No attempt was made' };
     const deadline = this.now() + timeoutMs * AiRouter.DEADLINE_TIMEOUTS;
@@ -362,7 +369,10 @@ export class AiRouter {
     this.noteFault('embeddings', failure.message);
     if (policy.onFail === 'use-fallback') {
       const store = this.deps.store;
-      const sameSpace = store.vectorsModel() === store.builtinEmbeddingIdentity();
+      // While a rebuild for the new model is pending, the cache is being rewritten with the routed model's
+      // vectors: a built-in vector written now would sit beside them in a different space (and dimension).
+      // A query-only embed (nothing is written to the cache) may still use the built-in model against the old, still-current vectors.
+      const sameSpace = (opts.queryOnly === true || store.rebuild() === null) && store.vectorsModel() === store.builtinEmbeddingIdentity();
       if (sameSpace) {
         this.log('[AI Router] embeddings route failed; using the built-in runtime (same vector space)');
         return local();
@@ -383,7 +393,7 @@ export class AiRouter {
     if (r.via === 'local') return local();
     if (opts?.signal?.aborted) return { rows: null, code: 'cancelled', message: 'Cancelled by the renderer' };
     const policy = this.deps.store.policy();
-    const timeoutMs = Math.min(opts?.timeoutMs ?? policy.timeoutSec * 1000, policy.timeoutSec * 1000 * 3);
+    const timeoutMs = Math.min(opts?.timeoutMs ?? policy.timeoutSec * 1000, policy.timeoutSec * 1000 * 3, MAX_CLIENT_TIMEOUT_MS);
     let failure: RerankOutcome = { rows: null, code: 'network_error', message: 'No attempt was made' };
     const deadline = this.now() + timeoutMs * AiRouter.DEADLINE_TIMEOUTS;
     for (let i = 0; i < this.attempts(); i++) {
@@ -426,23 +436,42 @@ export class AiRouter {
    */
   test(connectorId: string, opts: { role?: AiRole; model?: string } = {}): Promise<ConnectorTestResult> {
     const running = this.testing.get(connectorId);
-    if (running) return running;
+    // A run started for another address / key / model is not the answer for the connector as it is now.
+    if (running && running.sig === this.configSignature(connectorId)) return running.promise;
     if (opts.role && opts.model) this.deps.store.setTestModel(connectorId, opts.role, opts.model);
-    const p = this.runTest(connectorId).finally(() => { this.testing.delete(connectorId); });
-    this.testing.set(connectorId, p);
-    return p;
+    const entry: { sig: string; promise: Promise<ConnectorTestResult> } = { sig: this.configSignature(connectorId), promise: null as never };
+    entry.promise = this.runTest(connectorId).finally(() => {
+      if (this.testing.get(connectorId) === entry) this.testing.delete(connectorId);
+    });
+    this.testing.set(connectorId, entry);
+    return entry.promise;
+  }
+
+  /**
+   * Everything a connection test depends on (the connector without its stored result, and its key), so a
+   * test that finishes after an edit or a re-key is recognised as being about a configuration that is gone.
+   * Held in memory only, never logged.
+   */
+  private configSignature(connectorId: string): string {
+    const c = this.deps.store.connector(connectorId);
+    if (!c) return 'missing';
+    const { test: _test, ...rest } = c as Connector & { test?: unknown };
+    void _test;
+    return JSON.stringify([rest, this.deps.store.getKey(connectorId)]);
   }
 
   private async runTest(connectorId: string, opts: { routedRole?: AiRole } = {}): Promise<ConnectorTestResult> {
     const store = this.deps.store;
     const c = store.connector(connectorId);
+    const sigAtStart = this.configSignature(connectorId);
     const t0 = this.now();
     const done = (partial: Pick<ConnectorTestResult, 'ok' | 'message'> & Partial<ConnectorTestResult>): ConnectorTestResult => {
       const result: ConnectorTestResult = {
         role: 'chat', model: '', latencyMs: this.now() - t0, ...partial, at: this.now(),
       };
       result.message = scrubMessage(result.message);
-      if (c && c.kind !== 'builtin') store.recordTest(connectorId, result);
+      // A result for an address / key that was edited meanwhile would arm (and unlock routing for) the new one.
+      if (c && c.kind !== 'builtin' && this.configSignature(connectorId) === sigAtStart) store.recordTest(connectorId, result);
       return result;
     };
     if (!c) return done({ ok: false, message: 'Unknown connector.' });

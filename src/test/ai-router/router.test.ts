@@ -144,14 +144,24 @@ describe('embeddings through LiteLLM', () => {
     expect(m.requests).toHaveLength(2);
   });
 
-  it('use-fallback: when the vectors are from the built-in model the local backend answers instead', async () => {
+  it('use-fallback: a query-only embed against the still-current built-in vectors is answered by the local backend', async () => {
     const m = makeRouter({ policy: { onFail: 'use-fallback', retries: 0 }, respond: () => ({ status: 500, body: {} }) });
     routeOpenAi(m, ['embeddings']);
     // The embeddings route moved but the cached vectors are still the built-in model's.
     expect(m.store.vectorsModel()).toBe('snowflake-arctic-embed2');
     const local = vi.fn(async () => ({ embeddings: [[3, 3]], error: null }));
-    expect(await m.router.embed(['a'], local)).toEqual({ embeddings: [[3, 3]], error: null });
+    expect(await m.router.embed(['a'], local, { queryOnly: true })).toEqual({ embeddings: [[3, 3]], error: null });
     expect(local).toHaveBeenCalledTimes(1);
+  });
+
+  it('use-fallback never writes built-in vectors into a cache that is being rebuilt for the new model', async () => {
+    const m = makeRouter({ policy: { onFail: 'use-fallback', retries: 0 }, respond: () => ({ status: 429, body: {} }) });
+    routeOpenAi(m, ['embeddings']);
+    expect(m.store.rebuild()).not.toBeNull();
+    const local = vi.fn(async () => ({ embeddings: [[3, 3]], error: null }));
+    const out = await m.router.embed(['a'], local);
+    expect(local).not.toHaveBeenCalled();
+    expect(out.error).not.toBeNull();
   });
 
   it('use-fallback never mixes two embedding models: once the vectors were rebuilt, the error is returned', async () => {
@@ -169,7 +179,7 @@ describe('embeddings through LiteLLM', () => {
     routeOpenAi(m, ['embeddings']);
     m.sidecar.failWith = new Error('LiteLLM did not become healthy');
     const local = vi.fn(async () => ({ embeddings: [[5]], error: null }));
-    expect(await m.router.embed(['a'], local)).toEqual({ embeddings: [[5]], error: null });
+    expect(await m.router.embed(['a'], local, { queryOnly: true })).toEqual({ embeddings: [[5]], error: null });
     expect(m.sidecar.ensureCalls).toHaveLength(1);
     expect(m.router.status().fault?.message).toMatch(/AI router is not running/);
   });

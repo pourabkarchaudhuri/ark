@@ -150,12 +150,12 @@ describe('proxy and certificate environment for the child', () => {
   });
 
   it('keeps the user NO_PROXY and adds loopback', async () => {
-    expect(mergeNoProxy(undefined)).toBe('127.0.0.1,localhost');
-    expect(mergeNoProxy('corp.local, 10.0.0.0/8')).toBe('corp.local,10.0.0.0/8,127.0.0.1,localhost');
-    expect(mergeNoProxy('localhost')).toBe('localhost,127.0.0.1');
+    expect(mergeNoProxy(undefined)).toBe('127.0.0.1,localhost,::1');
+    expect(mergeNoProxy('corp.local, 10.0.0.0/8')).toBe('corp.local,10.0.0.0/8,127.0.0.1,localhost,::1');
+    expect(mergeNoProxy('localhost')).toBe('localhost,127.0.0.1,::1');
     const t = make({ baseEnv: () => ({ SystemRoot: 'C:\\Windows', NO_PROXY: 'corp.local' }) });
     await t.sidecar.ensure(spec());
-    expect(t.spawned[0]!.env.NO_PROXY).toBe('corp.local,127.0.0.1,localhost');
+    expect(t.spawned[0]!.env.NO_PROXY).toBe('corp.local,127.0.0.1,localhost,::1');
   });
 
   it('the default environment forwards the proxy and CA variables from the app environment, nothing else', () => {

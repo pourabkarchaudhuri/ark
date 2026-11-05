@@ -215,7 +215,7 @@ export function getModelForProvider(providerOptions?: ChatProviderOptions): { mo
   // `provider` only decides local-versus-cloud behaviour below (web search grounding, message wrapping).
   if (routerChat) {
     const t = routerChat;
-    const configKey = `router:${t.baseUrl}:${t.connector.id}:${t.model}:${t.providerName}:${keyFingerprint(t.apiKey)}`;
+    const configKey = `router:${t.baseUrl}:${t.connector.id}:${t.model}:${t.providerName}:${keyFingerprint(t.apiKey)}:${t.timeoutMs}:${t.maxRetries}`;
     const provider = providerForKind(t.connector.kind);
     if (cachedModel && cachedModelKey === configKey) {
       return { model: cachedModel as ChatOpenAI, providerName: t.providerName, provider };
@@ -226,6 +226,10 @@ export function getModelForProvider(providerOptions?: ChatProviderOptions): { mo
       apiKey: t.apiKey,
       configuration: { baseURL: t.baseUrl },
       temperature: 0.7,
+      // The failure policy: the router's loop is the only retry layer, so LangChain's default (6 silent
+      // retries with backoff, each another billed upstream call) must not stack on top of it.
+      timeout: t.timeoutMs,
+      maxRetries: t.maxRetries,
     });
     cachedModelKey = configKey;
     return { model: cachedModel, providerName: t.providerName, provider };

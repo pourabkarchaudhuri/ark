@@ -66,8 +66,14 @@ export function testTarget(c: Connector, routes: Routes): { role: AiRole; model:
   return null;
 }
 
-/** Longest request timeout the policy offers (60 s); LiteLLM never cuts a request short before the client does. */
-export const LITELLM_TIMEOUT_CEILING_SEC = 60;
+/**
+ * LiteLLM's own request timeout. It must stay above every deadline the client applies (the policy's 60 s
+ * plus the per-text embedding allowance, and reranks of up to 3x the policy = 180 s; the client clamps to
+ * `LITELLM_TIMEOUT_CEILING_SEC - LITELLM_TIMEOUT_MARGIN_SEC`), so the client's abort always comes first and
+ * LiteLLM never times out upstream on its own (a 408/5xx the loop would retry as another billed call).
+ */
+export const LITELLM_TIMEOUT_CEILING_SEC = 200;
+export const LITELLM_TIMEOUT_MARGIN_SEC = 10;
 
 /** LiteLLM resolves any param that starts with this to an environment variable; only generated key references may. */
 const ENV_REF = /^\s*os\.environ\//i;
