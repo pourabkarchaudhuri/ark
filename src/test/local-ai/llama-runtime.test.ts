@@ -357,3 +357,164 @@ describe('LlamaRuntime idle unload, stop and quit', () => {
     expect(b.port).toBe(a.port);
   });
 });
+
+describe('LlamaRuntime 1.0.98 F1 hardening', () => {
+  it('two roles starting at once get different ports even when the port pick is slow', async () => {
+    const t = makeRuntime({
+      pickPort: async (exclude) => {
+        const snapshot = [...exclude];
+        await new Promise((r) => setTimeout(r, 5));
+        let p = 47410;
+        while (snapshot.includes(p)) p++;
+        return p;
+      },
+    });
+    const [a, b, c] = await Promise.all([t.runtime.ensure('embed'), t.runtime.ensure('rerank'), t.runtime.ensure('chat')]);
+    expect(new Set([a.port, b.port, c.port]).size).toBe(3);
+    expect(new Set(t.spawned.map((s) => argOf(s, '--port'))).size).toBe(3);
+  });
+
+  it('is not ready until its own api key is accepted, and retries on another port after a bind failure', async () => {
+    const holder: { t?: ReturnType<typeof makeRuntime> } = {};
+    const t = makeRuntime({
+      fetchFn: async (url, init) => {
+        const port = /:(\d+)\//.exec(url)![1];
+        const spawned = holder.t!.spawned;
+        if (port === '47410') {
+          // A foreign server owns this port: /health is open, /props wants a key we do not have.
+          return url.endsWith('/health') ? { ok: true, status: 200 } : { ok: false, status: 401 };
+        }
+        const s = [...spawned].reverse().find((x) => argOf(x, '--port') === port);
+        const auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
+        const ok = !!s && !s.child.killed && (url.endsWith('/health') || auth === `Bearer ${argOf(s, '--api-key')}`);
+        return { ok, status: ok ? 200 : 401 };
+      },
+    });
+    holder.t = t;
+    t.setOnSpawn((s) => {
+      if (argOf(s, '--port') === '47410') {
+        s.child.stderr.emit('data', "couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 47410\n");
+        s.child.crash(1);
+      }
+    });
+    const info = await t.runtime.ensure('embed');
+    expect(t.spawned.map((s) => argOf(s, '--port'))).toEqual(['47410', '47411']);
+    expect(info.port).toBe(47411);
+    expect(t.runtime.roleStatus('embed').state).toBe('ready');
+  });
+
+  it('never reports ready on a foreign server that answers /health', async () => {
+    const t = makeRuntime({
+      fetchFn: async (url) => (url.endsWith('/health') ? { ok: true, status: 200 } : { ok: false, status: 401 }),
+    });
+    await expect(t.runtime.ensure('embed')).rejects.toThrow(/did not become healthy/);
+    expect(t.runtime.roleStatus('embed').state).toBe('stopped');
+  });
+
+  it('a spawn error event ends the start wait at once with the real reason', async () => {
+    const t = makeRuntime({ startTimeoutMs: { embed: 60_000 } });
+    t.setHealthy(() => false);
+    t.setOnSpawn((s) => { s.child.emit('error', new Error('spawn EPERM')); });
+    const began = Date.now();
+    await expect(t.runtime.ensure('embed')).rejects.toThrow(/Could not start llama-server: spawn EPERM/);
+    expect(Date.now() - began).toBeLessThan(2_000);
+    expect(t.spawned).toHaveLength(1);
+    expect(t.runtime.roleStatus('embed').state).toBe('stopped');
+  });
+
+  it('bounds stored log lines and does not treat a failure keyword past the cut as a GPU problem', async () => {
+    const t = makeRuntime();
+    t.setHealthy(() => false);
+    t.setOnSpawn((s) => {
+      s.child.stdout.emit('data', `${'A'.repeat(2_000_000)} ErrorDeviceLost\n`);
+    });
+    let message = '';
+    await t.runtime.ensure('embed').catch((e: Error) => { message = e.message; });
+    expect(message).toMatch(/did not become healthy/);
+    expect(message.length).toBeLessThan(600);
+    expect(t.spawned).toHaveLength(1);
+  });
+
+  it('stop() resolves only after the process exited, and a relaunch waits for it', async () => {
+    const t = makeRuntime({ stopWaitMs: 5_000 });
+    await t.runtime.ensure('chat', { numCtx: 8192 });
+    const first = t.spawned[0].child;
+    first.kill = () => { first.killed = true; return true; }; // exits later, on demand
+    let stopped = false;
+    const stopP = t.runtime.stop('chat').then(() => { stopped = true; });
+    const ensureP = t.runtime.ensure('chat', { numCtx: 8192 });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(stopped).toBe(false);
+    expect(t.spawned).toHaveLength(1); // the new server is not launched while the old one is still exiting
+    first.emit('exit', null, 'SIGTERM');
+    await stopP;
+    await ensureP;
+    expect(stopped).toBe(true);
+    expect(t.spawned).toHaveLength(2);
+  });
+
+  it('stop() gives up waiting after stopWaitMs', async () => {
+    const t = makeRuntime({ stopWaitMs: 20 });
+    await t.runtime.ensure('embed');
+    const child = t.spawned[0].child;
+    child.kill = () => true; // never exits
+    await t.runtime.stop('embed');
+    expect(t.runtime.roleStatus('embed').state).toBe('stopped');
+  });
+});
+
+describe('LlamaRuntime 1.0.98 F1 crash recovery', () => {
+  beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('a GPU-class crash after the server was healthy relaunches on the CPU', async () => {
+    const t = makeRuntime();
+    await t.runtime.ensure('embed');
+    expect(argOf(t.spawned[0], '-ngl')).toBe('99');
+    t.spawned[0].child.stderr.emit('data', 'ggml_vulkan: Device lost (ErrorDeviceLost)\n');
+    t.spawned[0].child.crash(3);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(t.spawned).toHaveLength(2);
+    expect(argOf(t.spawned[1], '-ngl')).toBe('0');
+    expect(t.runtime.roleStatus('embed').cpuFallback).toBe(true);
+  });
+
+  it('a second crash in a row with the weights on the GPU also falls back, even with no log line', async () => {
+    const t = makeRuntime();
+    t.setOnSpawn((s) => s.child.stderr.emit('data', 'load_tensors:      Vulkan0 model buffer size =  500.00 MiB\n'));
+    await t.runtime.ensure('embed');
+    t.spawned[0].child.crash(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(argOf(t.spawned[1], '-ngl')).toBe('99');
+    t.spawned[1].child.crash(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(argOf(t.spawned[2], '-ngl')).toBe('0');
+  });
+
+  it('an unrelated crash after healthy keeps the GPU', async () => {
+    const t = makeRuntime();
+    await t.runtime.ensure('embed');
+    t.spawned[0].child.crash(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(argOf(t.spawned[1], '-ngl')).toBe('99');
+  });
+
+  it('a failed role recovers after the cool-down, and a crash right after goes straight back to failed', async () => {
+    const now = { t: 0 };
+    const t = makeRuntime({ now: () => now.t, maxRestarts: 0, failedCooldownMs: 60_000 });
+    await t.runtime.ensure('embed');
+    t.spawned[0].child.crash(1);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(t.runtime.roleStatus('embed').state).toBe('failed');
+    now.t += 30_000;
+    await expect(t.runtime.ensure('embed')).rejects.toMatchObject({ code: 'failed_too_often' });
+    now.t += 31_000;
+    await t.runtime.ensure('embed');
+    expect(t.runtime.roleStatus('embed').state).toBe('ready');
+    expect(t.spawned).toHaveLength(2);
+    t.spawned[1].child.crash(1);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(t.runtime.roleStatus('embed').state).toBe('failed');
+    expect(t.spawned).toHaveLength(2);
+  });
+});

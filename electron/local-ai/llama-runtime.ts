@@ -12,8 +12,16 @@
  *    Vulkan / out-of-memory error, is relaunched once on the CPU (`-ngl 0`). The choice sticks for
  *    the session.
  *  - A server that crashes while running is restarted with backoff, at most `maxRestarts` times in
- *    a row (a run that stayed healthy for `stableMs` resets the count). After that the role is
- *    `failed` until `reset()`.
+ *    a row (a run that stayed healthy for `stableMs` resets the count). A GPU-class crash while
+ *    serving (Vulkan error in the log, or a second crash in a row after the weights were on the GPU)
+ *    falls back to the CPU like a startup failure. After that the role is `failed` until `reset()`
+ *    or until `failedCooldownMs` has passed, when the next request makes one more attempt.
+ *  - `stop()` resolves only after the old process exited (bounded wait), so a relaunch never
+ *    overlaps the old one's VRAM.
+ *  - Ports are reserved under a lock before the pick returns, and a server only counts as ready
+ *    once an authenticated request with its own api key succeeds, so a foreign listener (or a
+ *    sibling role that won the same port) is never mistaken for it. A bind failure is retried on
+ *    another port.
  *  - Every child is put into Ark's kill-on-close Windows job object (native `jobAssignKillOnClose`),
  *    so a crash or Task Manager kill of Ark takes the servers with it; `stopAllSync()` covers a
  *    normal quit. No tray, autostart, PATH, registry or service changes.
@@ -109,6 +117,10 @@ export interface LlamaRuntimeDeps {
   /** Overrides of the defaults below (tests use short values). */
   idleMs?: Partial<Record<LocalAiRole, number>>;
   startTimeoutMs?: Partial<Record<LocalAiRole, number>>;
+  /** How long stop() waits for the process to exit. */
+  stopWaitMs?: number;
+  /** How long a role stays `failed` before the next request may try again. */
+  failedCooldownMs?: number;
   healthIntervalMs?: number;
   maxRestarts?: number;
   backoffMs?: number[];
@@ -136,7 +148,16 @@ const DEFAULT_STABLE_MS = MIN;
 const GPU_LAYERS_ALL = 99;
 /** A log line like this means the GPU path is not usable: retry on the CPU. */
 const GPU_FAILURE_RE = /out of memory|ErrorOutOfDeviceMemory|ErrorOutOfHostMemory|ErrorDeviceLost|ErrorInitializationFailed|vk::|vulkan.*(fail|error)|failed to allocate|ggml_vulkan.*error|device lost/i;
+/** llama-server could not bind its port (taken by another process). */
+const BIND_FAILURE_RE = /couldn't bind|could not bind|failed to bind|address already in use|EADDRINUSE|only one usage of each socket/i;
+const MAX_BIND_RETRIES = 3;
 const LOG_TAIL_LINES = 40;
+/** Stored and scanned length of one log line (the device/offload/error lines are far shorter). */
+const MAX_LOG_LINE = 300;
+/** A chunk longer than this is cut to its head and tail before it is split into lines. */
+const MAX_LOG_CHUNK = 16_384;
+const DEFAULT_STOP_WAIT_MS = 3_000;
+const DEFAULT_FAILED_COOLDOWN_MS = 60_000;
 
 /** A signal that aborts after `ms` (AbortSignal.timeout is missing from some environments). */
 function timeoutSignal(ms: number): AbortSignal {
@@ -169,7 +190,25 @@ interface Slot {
   restartTimer: ReturnType<typeof setTimeout> | null;
   /** Set while we stop the child on purpose, so its exit is not treated as a crash. */
   stopping: boolean;
+  /** Pending stop(): the old process may still be exiting. */
+  stopPromise: Promise<void> | null;
+  /** Clock time the role entered `failed`. */
+  failedAt: number | null;
+  /** -ngl of the current launch (0 = CPU). */
+  launchedGpuLayers: number;
   logTail: string[];
+}
+
+/** Keep log handling cheap: huge chunks (request bodies at debug verbosity) are cut to head + tail. */
+function boundedChunkText(chunk: Buffer | string): string {
+  const half = MAX_LOG_CHUNK / 2;
+  if (typeof chunk === 'string') {
+    return chunk.length > MAX_LOG_CHUNK ? `${chunk.slice(0, half)}\n${chunk.slice(-half)}` : chunk;
+  }
+  if (chunk.length > MAX_LOG_CHUNK) {
+    return `${chunk.subarray(0, half).toString('utf8')}\n${chunk.subarray(chunk.length - half).toString('utf8')}`;
+  }
+  return chunk.toString('utf8');
 }
 
 function emptyGpu(): GpuInfo {
@@ -198,6 +237,8 @@ export class LlamaRuntime {
   private readonly slots = new Map<LocalAiRole, Slot>();
   private readonly deps: Required<Omit<LlamaRuntimeDeps, 'idleMs' | 'startTimeoutMs'>> & Pick<LlamaRuntimeDeps, 'idleMs' | 'startTimeoutMs'>;
   private readonly usedPorts = new Set<number>();
+  /** Serialises port picking so two roles never get the same port. */
+  private portLock: Promise<unknown> = Promise.resolve();
   private shuttingDown = false;
   private readonly listeners = new Set<(s: RoleStatus[]) => void>();
 
@@ -230,7 +271,8 @@ export class LlamaRuntime {
       s = {
         role, state: 'stopped', child: null, port: null, apiKey: null, launch: {}, restarts: 0,
         startedHealthyAt: null, cpuFallback: false, gpu: emptyGpu(), lastError: null, starting: null,
-        idleTimer: null, restartTimer: null, stopping: false, logTail: [],
+        idleTimer: null, restartTimer: null, stopping: false, stopPromise: null, failedAt: null,
+        launchedGpuLayers: 0, logTail: [],
       };
       this.slots.set(role, s);
     }
@@ -299,6 +341,16 @@ export class LlamaRuntime {
   async ensure(role: LocalAiRole, launch: LaunchOptions = {}): Promise<ServerInfo> {
     if (this.shuttingDown) throw new RuntimeError('Ark is shutting down', 'start_failed');
     const s = this.slot(role);
+    if (s.stopPromise) await s.stopPromise; // the old process must be gone before a new one loads
+    if (this.shuttingDown) throw new RuntimeError('Ark is shutting down', 'start_failed');
+    if (s.state === 'failed' && s.failedAt !== null
+      && this.deps.now() - s.failedAt >= (this.deps.failedCooldownMs ?? DEFAULT_FAILED_COOLDOWN_MS)) {
+      // Half-open: one more try. Any crash right after it goes straight back to `failed`.
+      this.deps.log(`[LocalAI] ${role}: retrying after the cool-down`);
+      s.state = 'stopped';
+      s.failedAt = null;
+      s.restarts = this.deps.maxRestarts;
+    }
     if (s.state === 'failed') {
       throw new RuntimeError(s.lastError ?? `The ${role} server failed too often; use Re-check to try again`, 'failed_too_often');
     }
@@ -340,7 +392,8 @@ export class LlamaRuntime {
   private buildArgs(s: Slot, port: number, apiKey: string, model: string, gpuLayers: number): string[] {
     const l = s.launch;
     // `-lv 4` makes b11780 print the device / offload / buffer lines parseGpuLogLine reads (the default
-    // level hides them, which would report every server as CPU). Prompts are not logged at that level.
+    // level hides them, which would report every server as CPU). That is debug verbosity, so request text may
+    // appear in the log: lines are cut to MAX_LOG_LINE, chunks to MAX_LOG_CHUNK, and only startup lines are scanned.
     const args = ['-m', model, '--host', '127.0.0.1', '--port', String(port), '--api-key', apiKey, '--no-webui', '-np', '1', '-lv', '4', '-ngl', String(gpuLayers)];
     // CPU launch: do not even initialise Vulkan, so a broken driver cannot take the fallback down too.
     if (gpuLayers === 0) args.push('--device', 'none');
@@ -374,9 +427,17 @@ export class LlamaRuntime {
     this.emit();
     try {
       let useGpu = !s.cpuFallback;
+      const avoidPorts: number[] = [];
+      let bindRetries = 0;
       for (;;) {
-        const outcome = await this.launchOnce(s, model, useGpu ? GPU_LAYERS_ALL : 0);
+        const outcome = await this.launchOnce(s, model, useGpu ? GPU_LAYERS_ALL : 0, avoidPorts);
         if (outcome.ok) return this.info(s);
+        if (outcome.bindFailure && outcome.port !== null && bindRetries < MAX_BIND_RETRIES && !this.shuttingDown) {
+          bindRetries += 1;
+          avoidPorts.push(outcome.port);
+          this.deps.log(`[LocalAI] ${role}: port ${outcome.port} could not be bound; retrying on another port`);
+          continue;
+        }
         if (useGpu && outcome.gpuProblem && !this.shuttingDown) {
           this.deps.log(`[LocalAI] ${role}: GPU launch failed (${outcome.reason}); retrying on the CPU`);
           s.cpuFallback = true;
@@ -398,24 +459,25 @@ export class LlamaRuntime {
     s: Slot,
     model: string,
     gpuLayers: number,
-  ): Promise<{ ok: boolean; reason: string; gpuProblem: boolean }> {
+    avoidPorts: number[] = [],
+  ): Promise<{ ok: boolean; reason: string; gpuProblem: boolean; bindFailure: boolean; port: number | null }> {
     const role = s.role;
-    const port = await this.deps.pickPort([...this.usedPorts]);
+    const port = await this.reservePort(avoidPorts);
     if (port === null) throw new RuntimeError('No free local port for the built-in AI server', 'no_port');
-    this.usedPorts.add(port);
     const apiKey = this.deps.randomKey();
     s.port = port;
     s.apiKey = apiKey;
     s.gpu = emptyGpu();
     s.logTail = [];
     s.stopping = false;
+    s.launchedGpuLayers = gpuLayers;
 
     let child: ChildLike;
     try {
       child = this.deps.spawn(this.serverPath(), this.buildArgs(s, port, apiKey, model, gpuLayers), { cwd: this.deps.runtimeDir() });
     } catch (err) {
       this.usedPorts.delete(port);
-      return { ok: false, reason: `Could not start llama-server: ${err instanceof Error ? err.message : String(err)}`, gpuProblem: false };
+      return { ok: false, reason: `Could not start llama-server: ${err instanceof Error ? err.message : String(err)}`, gpuProblem: false, bindFailure: false, port };
     }
     s.child = child;
     if (typeof child.pid === 'number' && !this.deps.assignToJob(child.pid)) {
@@ -423,19 +485,29 @@ export class LlamaRuntime {
     }
 
     let exited: { code: number | null; signal: string | null } | null = null;
+    let spawnError: string | null = null;
     let gpuProblem = false;
+    // Only the startup lines carry the device / offload / failure information; once the server is
+    // healthy lines are just kept (truncated) for the crash report, never regex-scanned.
+    let scanning = true;
     const onLog = (chunk: Buffer | string) => {
-      for (const line of String(chunk).split(/\r?\n/)) {
-        if (!line.trim()) continue;
+      for (const raw of boundedChunkText(chunk).split(/\r?\n/)) {
+        if (!raw.trim()) continue;
+        const line = raw.length > MAX_LOG_LINE ? raw.slice(0, MAX_LOG_LINE) : raw;
         s.logTail.push(line);
         if (s.logTail.length > LOG_TAIL_LINES) s.logTail.shift();
+        if (!scanning) continue;
         parseGpuLogLine(line, s.gpu);
         if (gpuLayers > 0 && GPU_FAILURE_RE.test(line)) gpuProblem = true;
       }
     };
     child.stdout?.on('data', onLog);
     child.stderr?.on('data', onLog);
-    child.on('error', (err) => { s.lastError = err.message; });
+    child.on('error', (err) => {
+      s.lastError = err.message;
+      // A failed spawn emits 'error' and never 'exit': end the start wait now (later errors, e.g. a failed kill, are not fatal).
+      if (scanning) spawnError = err.message;
+    });
     child.on('exit', (code, signal) => {
       exited = { code, signal };
       this.onExit(s, child, code, signal);
@@ -444,17 +516,19 @@ export class LlamaRuntime {
     const base = `http://127.0.0.1:${port}`;
     const deadline = this.deps.now() + this.startTimeoutMs(role);
     while (this.deps.now() < deadline) {
-      if (exited) break;
+      if (exited || spawnError) break;
       if (this.shuttingDown || s.stopping) break;
       try {
         const res = await this.deps.fetchFn(`${base}/health`, { signal: timeoutSignal(2_000) });
-        if (res.ok && !exited) {
+        // /health is open to anyone on the port: ready only when our own api key is accepted too.
+        if (res.ok && !exited && !spawnError && await this.ownsPort(base, apiKey)) {
+          scanning = false;
           s.state = 'ready';
           s.startedHealthyAt = this.deps.now();
           this.touch(s);
           this.emit();
           this.deps.log(`[LocalAI] ${role}: ready on 127.0.0.1:${port} (${gpuLayers > 0 ? 'GPU' : 'CPU'})`);
-          return { ok: true, reason: '', gpuProblem: false };
+          return { ok: true, reason: '', gpuProblem: false, bindFailure: false, port };
         }
       } catch {
         // Not listening yet.
@@ -464,14 +538,43 @@ export class LlamaRuntime {
 
     const tail = s.logTail.slice(-6).join(' | ').slice(0, 400);
     const ex = exited as { code: number | null; signal: string | null } | null;
-    const reason = ex
+    const failedSpawn = spawnError as string | null;
+    scanning = false;
+    const reason = failedSpawn
+      ? `Could not start llama-server: ${failedSpawn}`
+      : ex
       ? `llama-server exited (code ${ex.code ?? 'none'}${ex.signal ? `, ${ex.signal}` : ''})${tail ? `: ${tail}` : ''}`
       : `llama-server did not become healthy within ${Math.round(this.startTimeoutMs(role) / 1000)}s${tail ? `: ${tail}` : ''}`;
     s.stopping = true;
     this.killChild(child);
     this.usedPorts.delete(port);
     s.child = null;
-    return { ok: false, reason, gpuProblem: gpuProblem || (gpuLayers > 0 && GPU_FAILURE_RE.test(tail)) };
+    return {
+      ok: false, reason, port,
+      gpuProblem: !failedSpawn && (gpuProblem || (gpuLayers > 0 && GPU_FAILURE_RE.test(tail))),
+      bindFailure: !!ex && BIND_FAILURE_RE.test(s.logTail.join('\n')),
+    };
+  }
+
+  /** Pick a free port and reserve it before anyone else can pick (two roles starting together get different ports). */
+  private reservePort(avoid: number[]): Promise<number | null> {
+    const run = this.portLock.then(async () => {
+      const port = await this.deps.pickPort([...this.usedPorts, ...avoid]);
+      if (port !== null) this.usedPorts.add(port);
+      return port;
+    });
+    this.portLock = run.catch(() => undefined);
+    return run;
+  }
+
+  /** True when the server on `base` accepts our api key, i.e. it is the process we launched. */
+  private async ownsPort(base: string, apiKey: string): Promise<boolean> {
+    try {
+      const res = await this.deps.fetchFn(`${base}/props`, { headers: { Authorization: `Bearer ${apiKey}` }, signal: timeoutSignal(2_000) });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   private onExit(s: Slot, child: ChildLike, code: number | null, signal: string | null): void {
@@ -492,6 +595,13 @@ export class LlamaRuntime {
     if (healthyFor >= this.deps.stableMs) s.restarts = 0;
     s.lastError = `llama-server crashed (code ${code ?? 'none'}${signal ? `, ${signal}` : ''})`;
     this.deps.log(`[LocalAI] ${s.role}: ${s.lastError}`);
+    // A driver reset / VRAM loss while serving: relaunching on the same GPU would only crash again.
+    // A driver reset often leaves no log line, so a second crash in a row with the weights on the GPU counts too.
+    if (!s.cpuFallback && s.launchedGpuLayers > 0
+      && (GPU_FAILURE_RE.test(s.logTail.join('\n')) || (s.restarts >= 1 && s.gpu.gpuBytes > 0))) {
+      s.cpuFallback = true;
+      this.deps.log(`[LocalAI] ${s.role}: GPU crash while serving; restarting on the CPU`);
+    }
     this.scheduleRestart(s);
   }
 
@@ -500,6 +610,7 @@ export class LlamaRuntime {
     if (this.shuttingDown) return;
     if (s.restarts >= this.deps.maxRestarts) {
       s.state = 'failed';
+      s.failedAt = this.deps.now();
       s.lastError = `${s.lastError ?? 'llama-server failed'}; stopped restarting after ${s.restarts} attempts`;
       this.emit();
       return;
@@ -524,24 +635,41 @@ export class LlamaRuntime {
     try { child.kill(); } catch { /* already gone */ }
   }
 
-  /** Stop one server and wait (briefly) for it to exit. */
-  async stop(role: LocalAiRole): Promise<void> {
+  /** Stop one server and wait (bounded) for the process to exit, so a relaunch never overlaps its VRAM. */
+  stop(role: LocalAiRole): Promise<void> {
     const s = this.slots.get(role);
-    if (!s) return;
+    if (!s) return Promise.resolve();
     if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
     if (s.restartTimer) { clearTimeout(s.restartTimer); s.restartTimer = null; }
     const child = s.child;
     if (!child) {
       if (s.state !== 'failed') s.state = 'stopped';
-      return;
+      return s.stopPromise ?? Promise.resolve();
     }
     s.stopping = true;
-    this.killChild(child);
     const port = s.port;
     s.child = null;
-    if (port !== null) this.usedPorts.delete(port);
     s.state = 'stopped';
     this.emit();
+    const done: Promise<void> = this.killAndWait(child).then(() => {
+      if (port !== null) this.usedPorts.delete(port);
+      if (s.stopPromise === done) s.stopPromise = null;
+    });
+    s.stopPromise = done;
+    return done;
+  }
+
+  /** Kill `child` and resolve when it exited (or after stopWaitMs). The listeners are attached before the kill. */
+  private killAndWait(child: ChildLike): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (): void => { if (timer) clearTimeout(timer); resolve(); };
+      timer = setTimeout(finish, this.deps.stopWaitMs ?? DEFAULT_STOP_WAIT_MS);
+      timer.unref?.();
+      child.on('exit', finish);
+      child.on('error', finish);
+      this.killChild(child);
+    });
   }
 
   /** Stop every server (game started, models being removed, settings changed). */
@@ -567,6 +695,7 @@ export class LlamaRuntime {
   reset(role?: LocalAiRole): void {
     for (const s of role ? [this.slot(role)] : this.slots.values()) {
       s.restarts = 0;
+      s.failedAt = null;
       s.cpuFallback = false;
       s.lastError = null;
       if (s.state === 'failed') s.state = 'stopped';
