@@ -811,7 +811,9 @@ export async function detectGpuMode(): Promise<boolean> {
   }
   if (_gpuModeChecked) return _gpuModeAvailable;
   if (_gpuDetectInFlight) return _gpuDetectInFlight;
-  if (Date.now() - _gpuLastInconclusiveAt < GPU_REPROBE_INTERVAL_MS) return false;
+  // The built-in reading is a local in-memory read, so it is never throttled (a server started since the last
+  // inconclusive probe must be seen at once); only the Ollama HTTP probe is.
+  if (!useBuiltinBackend() && Date.now() - _gpuLastInconclusiveAt < GPU_REPROBE_INTERVAL_MS) return false;
 
   _gpuDetectInFlight = (async () => {
     if (useBuiltinBackend()) {

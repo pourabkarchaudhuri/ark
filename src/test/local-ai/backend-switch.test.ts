@@ -342,4 +342,13 @@ describe('setup flow (built-in)', () => {
     expect(s.store.whenSettled).toHaveBeenCalledWith(['bge-reranker-v2-m3', 'qwen3-reranker-0.6b']);
     expect(h.httpCalls).toEqual([]);
   });
+
+  it('1.0.99: a server that came up right after an inconclusive probe is seen at once (no 30 s throttle)', async () => {
+    const f = fakeBackend({ gpuReading: vi.fn(() => ({ loaded: false, sizeBytes: 0, vramBytes: 0 })) });
+    __setBuiltinBackendForTests(f.asBackend);
+    resetGpuModeCache();
+    expect(await detectGpuMode()).toBe(false); // cold: arms the inconclusive stamp
+    f.backend.gpuReading.mockReturnValue({ loaded: true, sizeBytes: 10, vramBytes: 10 });
+    expect(await detectGpuMode()).toBe(true); // no resetGpuModeCache() in between
+  });
 });

@@ -34,6 +34,7 @@ import {
 import { settingsStore, DEFAULT_OLLAMA_RERANK_MODEL } from '../settings-store.js';
 import { getGpuStats } from '../gpu-stats.js';
 import { useBuiltinBackend, getBuiltinBackend } from '../local-ai/backend.js';
+import { getLocalAiService } from '../local-ai/service.js';
 import { getAiRouter, routeFor } from '../ai-router/service.js';
 import {
   normalizeOllamaRerankRows,
@@ -496,7 +497,17 @@ export function register(ipc: OllamaIpcRegistrar = ipcMain): void {
       // Probe whether the model is GPU-loaded — decides app-side pacing only
       // (sub-batch size / in-flight count). Conclusive answers are cached;
       // an early "model not loaded yet" probe is retried later.
-      const onGpu = await detectGpuMode();
+      let onGpu = await detectGpuMode();
+      if (!onGpu && useBuiltinBackend() && routeFor('embeddings').via !== 'router' && !isOllamaWorkHeld()) {
+        // The built-in embed server starts lazily, so on a cold session (or after the idle unload) the probe above
+        // saw no server and answered "CPU". Start it first (with the options the embed calls will use, so it is not
+        // restarted) and probe again: the whole pass would otherwise run with the CPU pacing on a GPU server.
+        try {
+          const o = getSessionEmbedOptions();
+          await getLocalAiService().runtime.ensure('embed', { numBatch: o.numBatch, numThread: o.numThread });
+          onGpu = await detectGpuMode();
+        } catch { /* the embed calls below report the real error */ }
+      }
 
       const results: Record<string, number[]> = {};
       let completed = 0;
@@ -504,6 +515,16 @@ export function register(ipc: OllamaIpcRegistrar = ipcMain): void {
       // call's sub-batches fail fast instead of each waiting out its own timeout.
       let serverDown = false;
       let bisectBudget = EMBED_BISECT_BUDGET;
+      // Built-in server only: an out-of-memory request relaunches the server on the CPU once per call.
+      let builtinFellBack = false;
+      const relieveOom = async (): Promise<boolean> => {
+        if (!useBuiltinBackend()) return stepDownSessionNumBatch();
+        // llama-server's -b/-ub never drops below the 8192 context, so the Ollama num_batch ladder changes nothing
+        // there and a retry would repeat the identical request. The only lever is the CPU.
+        if (builtinFellBack) return true; // a sibling worker already relaunched it: this request hit the old server
+        if (await getLocalAiService().runtime.fallbackToCpu('embed')) { builtinFellBack = true; return true; }
+        return false;
+      };
 
       // Pacing is recomputed PER sub-batch so window blur/focus takes effect
       // immediately. Runner options are session-fixed (see getSessionEmbedOptions).
@@ -561,7 +582,7 @@ export function register(ipc: OllamaIpcRegistrar = ipcMain): void {
           logger.warn(`[Ollama] Embedding request failed (${error.kind}: ${error.message}) — skipping the rest of this batch`);
           return texts.map(() => null);
         }
-        if (error.kind === 'http' && isOllamaOomError(error.message) && !oomRetried && stepDownSessionNumBatch()) {
+        if (error.kind === 'http' && isOllamaOomError(error.message) && !oomRetried && await relieveOom()) {
           return embedTexts(texts, true);
         }
         if (error.kind === 'http' && texts.length > 1 && bisectBudget >= 2) {
