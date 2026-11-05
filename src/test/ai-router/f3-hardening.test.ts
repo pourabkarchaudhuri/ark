@@ -296,7 +296,7 @@ describe('Settings Azure sync validates like the providers screen', () => {
 
 describe('addresses a connector may use', () => {
   it('refuses link-local and cloud metadata hosts', () => {
-    for (const h of ['169.254.169.254', '169.254.0.1', 'metadata.google.internal', '100.100.100.200', '168.63.129.16', 'fe80::1', '[fd00:ec2::254]', '::ffff:169.254.169.254', '0.0.0.0']) {
+    for (const h of ['169.254.169.254', '169.254.0.1', 'metadata.google.internal', '100.100.100.200', '168.63.129.16', 'fe80::1', '[fd00:ec2::254]', '::ffff:169.254.169.254', '::ffff:a9fe:a9fe', '::ffff:6464:64c8', '0.0.0.0']) {
       expect(isBlockedHost(h), h).toBe(true);
     }
     for (const h of ['127.0.0.1', 'localhost', '10.0.0.2', 'api.openai.com', '::1', '192.168.1.5']) expect(isBlockedHost(h), h).toBe(false);
@@ -313,6 +313,7 @@ describe('addresses a connector may use', () => {
     expect(failed(validateHttpUrl('https://example.com/v1', 'The address'))).toBe(false);
     expect(failed(validateHttpUrl('http://192.168.1.20:8000/v1', 'The address'))).toBe(false);
     expect(failed(validateHttpUrl('http://169.254.169.254/latest', 'The address'))).toBe(true);
+    expect(failed(validateHttpUrl('https://[::ffff:169.254.169.254]/latest', 'The address'))).toBe(true);
     expect(failed(validateHttpUrl('https://metadata.google.internal/', 'The address'))).toBe(true);
   });
 

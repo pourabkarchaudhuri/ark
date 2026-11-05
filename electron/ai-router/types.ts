@@ -152,7 +152,13 @@ export function isBlockedHost(hostname: string): boolean {
   if (!h) return true;
   const v4 = ipv4Octets(h);
   if (v4) return (v4[0] === 169 && v4[1] === 254) || h === '100.100.100.200' || h === '168.63.129.16' || h === '0.0.0.0';
-  if (h.startsWith('::ffff:')) return isBlockedHost(h.slice(7));
+  if (h.startsWith('::ffff:') && h.includes('.')) return isBlockedHost(h.slice(7));
+  // The URL parser rewrites ::ffff:169.254.169.254 to its hex form ::ffff:a9fe:a9fe; map that back to IPv4.
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  if (mapped) {
+    const hi = parseInt(mapped[1]!, 16), lo = parseInt(mapped[2]!, 16);
+    return isBlockedHost(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+  }
   if (h.includes(':')) return /^fe[89ab][0-9a-f]:/.test(h) || h === '::' || h.startsWith('fd00:ec2:');
   return h === 'metadata.google.internal' || h === 'metadata' || h === 'instance-data';
 }
