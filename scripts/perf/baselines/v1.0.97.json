@@ -1,0 +1,6296 @@
+{
+  "meta": {
+    "label": "v1.0.97",
+    "version": "1.0.97",
+    "commit": "637b8fe",
+    "appDir": "base97",
+    "machine": "12th Gen Intel(R) Core(TM) i9-12900H x20, 32 GB, win32 10.0.26200",
+    "startedAt": "2026-11-05T09:48:01.178Z",
+    "profile": {
+      "dir": "ark-perf-seed",
+      "games": 2000,
+      "statusRows": 5000,
+      "sessions": 10000,
+      "appListEntries": 155000
+    },
+    "cycles": 10,
+    "idleS": 60,
+    "hiddenIdleS": 120,
+    "heapSnapshots": false,
+    "warmupCycle": 4,
+    "ai": {
+      "enabled": true,
+      "models": [
+        "bge-reranker-v2-m3-f16.gguf",
+        "qwen3-reranker-0.6b-q8_0.gguf",
+        "snowflake-arctic-embed2-568m-f16.gguf"
+      ],
+      "dedicatedPhase": true,
+      "downloadMB": 512,
+      "aiRounds": 10
+    },
+    "finishedAt": "2026-11-05T10:21:36.153Z",
+    "note": "v1.0.97 tag (637b8fe) built with tsc + vite build in a scratch worktree, the current electron/perf-probe.ts back-ported with scripts/perf/apply-probes.mjs (no other change), measured by harness commit 18aa9b3 with --hidden-idle-s 120 and the built-in AI models in a scratch LOCALAPPDATA. Sanitised with scripts/perf/sanitize-result.mjs."
+  },
+  "coldStart": {
+    "runs": [
+      {
+        "enterReadyMs": 7624.642100000001,
+        "interactiveMs": 9299.954299999998,
+        "eldMax": 438.83,
+        "eldP99": 203.16
+      },
+      {
+        "enterReadyMs": 7735.358700000004,
+        "interactiveMs": 9552.423600000002,
+        "eldMax": 492.83,
+        "eldP99": 200.93
+      },
+      {
+        "enterReadyMs": 7511.462800000001,
+        "interactiveMs": 9331.6282,
+        "eldMax": 443.29
+      }
+    ]
+  },
+  "cycles": [
+    {
+      "n": 1,
+      "steps": {
+        "to-library": {
+          "ms": 316,
+          "t0": 127791,
+          "t1": 128099.19999998808,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 1,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "ggdeals:hasKey x1"
+            ]
+          }
+        },
+        "browse-load": {
+          "ms": 3701,
+          "t0": 129114.59999999404,
+          "t1": 132813.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-scroll": {
+          "ms": 3266,
+          "t0": 132822.5,
+          "t1": 136085.19999998808,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-filter": {
+          "ms": 2008,
+          "t0": 136096.19999998808,
+          "t1": 138102.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-search": {
+          "ms": 1675,
+          "t0": 138108.09999999404,
+          "t1": 139781,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "epic:searchGames x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2093,
+          "t0": 139784.59999999404,
+          "t1": 141875.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 13773,
+          "t0": 141882,
+          "t1": 155649.90000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 142,
+            "sendCalls": 0,
+            "kb": 11.9,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x15",
+              "window-subscribe-maximize x15",
+              "analytics:trackPageView x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 2673,
+          "t0": 155677.59999999404,
+          "t1": 158351,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "egdata:getTopSellers x3",
+              "epic:isEpicBlocked x3",
+              "epic:browseCatalog x2"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 3107,
+          "t0": 160787,
+          "t1": 163889.69999998808,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 4,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 1946,
+          "t0": 163897.90000000596,
+          "t1": 165840.69999998808,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 1.9,
+            "top": [
+              "steam:getMultiplePlayerCounts x3",
+              "store:getMany x3",
+              "epic:browseCatalog x2"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2148,
+          "t0": 165848.19999998808,
+          "t1": 167992.79999998212,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 0.7,
+            "top": [
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2",
+              "steam:getMultiplePlayerCounts x1",
+              "store:getMany x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 2000,
+          "t0": 167999.79999998212,
+          "t1": 169997.40000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 12,
+            "sendCalls": 0,
+            "kb": 1.4,
+            "top": [
+              "store:get x9",
+              "epic:browseCatalog x2",
+              "store:getChunk x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 1745,
+          "t0": 170006.19999998808,
+          "t1": 171748.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 2,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4350,
+          "t0": 171753.90000000596,
+          "t1": 176101.19999998808,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 3,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "epic:browseCatalog x1",
+              "steam:getTopSellers x1",
+              "steam:getMultipleAppDetails x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4722,
+          "t0": 176105.90000000596,
+          "t1": 180825.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 11,
+            "sendCalls": 0,
+            "kb": 2.2,
+            "top": [
+              "steam:getMultiplePlayerCounts x5",
+              "epic:getFreeGames x1",
+              "epic:getTopSellersCollection x1",
+              "store:getMany x1"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3213,
+          "t0": 205019.29999998212,
+          "t1": 208228.90000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 28,
+            "sendCalls": 7,
+            "kb": 82.9,
+            "top": [
+              "store:get x13",
+              "store:getMany x5",
+              "push:ollama:setup-progress x3",
+              "store:getChunk x2"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 8257,
+          "t0": 208234.5,
+          "t1": 216485,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 41,
+            "sendCalls": 0,
+            "kb": 8207.2,
+            "top": [
+              "store:get x16",
+              "store:getChunk x3",
+              "store:batch x3",
+              "store:getMany x2"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 893,
+          "t0": 216497.09999999404,
+          "t1": 217388.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "upcoming": {
+          "ms": 2722,
+          "t0": 217394.59999999404,
+          "t1": 220114.29999998212,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 4,
+            "sendCalls": 0,
+            "kb": 0.2,
+            "top": [
+              "steam:getUpcomingReleases x1",
+              "catalog:queryUpcoming x1",
+              "epic:browseCatalog x1",
+              "epic:getUpcomingReleases x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 5230,
+          "t0": 220118.79999998212,
+          "t1": 225344.29999998212,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 18,
+            "sendCalls": 6,
+            "kb": 23.9,
+            "top": [
+              "push:localAi:status-changed x6",
+              "aiRouter:getState x4",
+              "localAi:status x4",
+              "settings:getOllamaSettings x2"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4221,
+          "t0": 225352.19999998808,
+          "t1": 229570.09999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 196,
+          "p50": 16.699999999982538,
+          "p95": 16.800000000017462,
+          "max": 17.39999999999418,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuBeforeArk": 256.7,
+        "gpuAfterArk4s": 483.6,
+        "gpuAfterArk": 172.8,
+        "gpuSettleS": 22,
+        "settingsOpenLongTaskMaxMs": 0,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 27,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 29,
+            "mountMs": 33,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 29,
+            "mountMs": 8,
+            "longTaskMaxMs": 0,
+            "nodes": 364
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 26,
+            "mountMs": 3,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 23,
+            "mountMs": 5,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 6519,
+        "min": 9.15,
+        "mean": 15.61,
+        "p50": 15.55,
+        "p99": 21.28,
+        "max": 207.09
+      },
+      "longTasks": {
+        "all": [
+          64,
+          120,
+          108,
+          188,
+          210,
+          237,
+          164,
+          57,
+          118,
+          54,
+          61,
+          196
+        ],
+        "browse-scroll": [],
+        "oracle": [],
+        "oracle-compute": [],
+        "byStep": {
+          "to-library": 64,
+          "voyage": 188,
+          "voyage-Log": 210,
+          "voyage-Scenes": 237,
+          "voyage-Audit": 118,
+          "voyage-Medals": 61,
+          "voyage-leave-ark": 196
+        }
+      },
+      "sample": {
+        "label": "cycle-1",
+        "t": 1793872351655,
+        "renderer": {
+          "jsHeapUsedMB": 38.71,
+          "jsHeapTotalMB": 41.67,
+          "domNodes": 3853,
+          "jsEventListeners": 3352,
+          "documents": 2,
+          "layoutCount": 751,
+          "recalcStyleCount": 4390,
+          "taskDurationS": 13.935,
+          "scriptDurationS": 4.378
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2277,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 254.4,
+        "gpuPrivateMB": 223.2,
+        "totalWorkingSetMB": 3191.9,
+        "mainHeapMB": 44.4,
+        "mainRssMB": 378.9,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2277,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 378.9,
+              "privateMB": 388.6,
+              "cpuSec": 39.434
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 254.4,
+              "privateMB": 223.2,
+              "cpuSec": 22.824
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 59.5,
+              "privateMB": 14.7,
+              "cpuSec": 6.022
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 200,
+              "privateMB": 222.5,
+              "cpuSec": 32.651
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1140.7,
+              "cpuSec": 8.671875
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.3,
+              "cpuSec": 6.78125
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3191.9,
+          "totalCpuSec": 114.66,
+          "mainHeapMB": 44.4,
+          "mainRssMB": 378.9
+        }
+      }
+    },
+    {
+      "n": 2,
+      "steps": {
+        "to-library": {
+          "ms": 325,
+          "t0": 232826.40000000596,
+          "t1": 233147.09999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-load": {
+          "ms": 3704,
+          "t0": 234160.90000000596,
+          "t1": 237862.29999998212,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-scroll": {
+          "ms": 3597,
+          "t0": 237870.29999998212,
+          "t1": 241464.29999998212,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-filter": {
+          "ms": 1955,
+          "t0": 241473.79999998212,
+          "t1": 243427.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-search": {
+          "ms": 1665,
+          "t0": 243430.79999998212,
+          "t1": 245094.19999998808,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "epic:searchGames x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2102,
+          "t0": 245098.90000000596,
+          "t1": 247199.29999998212,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 13764,
+          "t0": 247203.90000000596,
+          "t1": 260959.79999998212,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 152,
+            "sendCalls": 0,
+            "kb": 13.3,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x15",
+              "window-subscribe-maximize x15",
+              "analytics:trackPageView x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 2672,
+          "t0": 260991.40000000596,
+          "t1": 263661.40000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:browseCatalog x3",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 2951,
+          "t0": 266101.09999999404,
+          "t1": 269048.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 34,
+            "sendCalls": 0,
+            "kb": 338.7,
+            "top": [
+              "store:getMany x10",
+              "steam:getMultiplePlayerCounts x9",
+              "store:getChunk x4",
+              "egdata:getTopSellers x3"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 2053,
+          "t0": 269054.2999999821,
+          "t1": 271105.90000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 2.6,
+            "top": [
+              "steam:getMultiplePlayerCounts x4",
+              "store:getMany x4"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2052,
+          "t0": 271110.1999999881,
+          "t1": 273159.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 1.3,
+            "top": [
+              "steam:getMultiplePlayerCounts x2",
+              "store:getMany x2",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 1930,
+          "t0": 273164.5,
+          "t1": 275092.2999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 15,
+            "sendCalls": 0,
+            "kb": 1.5,
+            "top": [
+              "store:get x9",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2",
+              "store:getChunk x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 1772,
+          "t0": 275096.7999999821,
+          "t1": 276866.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4330,
+          "t0": 276870.5,
+          "t1": 281197.09999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:browseCatalog x2",
+              "steam:getTopSellers x1",
+              "steam:getMultipleAppDetails x1",
+              "epic:getFreeGames x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4670,
+          "t0": 281203.40000000596,
+          "t1": 285871.40000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 18,
+            "sendCalls": 0,
+            "kb": 6.3,
+            "top": [
+              "steam:getMultiplePlayerCounts x16",
+              "store:getMany x1",
+              "epic:browseCatalog x1"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3258,
+          "t0": 304432.09999999404,
+          "t1": 307686.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 22,
+            "sendCalls": 0,
+            "kb": 7086.8,
+            "top": [
+              "steam:fetchCatalogBatch x11",
+              "store:get x4",
+              "steam:getAppList x1",
+              "epic:getTopSellersCollection x1"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 8256,
+          "t0": 307691.7999999821,
+          "t1": 315943.90000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 36,
+            "sendCalls": 0,
+            "kb": 11499.8,
+            "top": [
+              "store:get x12",
+              "store:getMany x7",
+              "store:getChunk x2",
+              "epic:browseCatalog x2"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 4060,
+          "t0": 315950.2999999821,
+          "t1": 320004.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 5615.2,
+            "top": [
+              "ollama:generateEmbeddings x1",
+              "store:batch x1",
+              "ann:addVectors x1",
+              "ann:status x1"
+            ]
+          }
+        },
+        "upcoming": {
+          "ms": 2735,
+          "t0": 320015.09999999404,
+          "t1": 322744.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 0.2,
+            "top": [
+              "epic:getUpcomingReleases x1",
+              "steam:getUpcomingReleases x1",
+              "catalog:queryUpcoming x1",
+              "egdata:getTopSellers x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 5486,
+          "t0": 322753.5,
+          "t1": 328233.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 29,
+            "sendCalls": 6,
+            "kb": 11252.3,
+            "top": [
+              "push:localAi:status-changed x6",
+              "aiRouter:getState x4",
+              "localAi:status x4",
+              "ollama:generateEmbeddings x2"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4247,
+          "t0": 328242.2999999821,
+          "t1": 332487.90000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 5614.2,
+            "top": [
+              "ollama:generateEmbeddings x1",
+              "store:batch x1",
+              "ann:addVectors x1",
+              "ann:status x1"
+            ]
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 215,
+          "p50": 16.60000000000582,
+          "p95": 16.800000000017462,
+          "max": 16.89999999999418,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuBeforeArk": 272.2,
+        "gpuAfterArk4s": 546.1,
+        "gpuAfterArk": 237,
+        "gpuSettleS": 16,
+        "settingsOpenLongTaskMaxMs": 0,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 26,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 34,
+            "mountMs": 24,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 31,
+            "mountMs": 7,
+            "longTaskMaxMs": 0,
+            "nodes": 364
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 19,
+            "mountMs": 5,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 23,
+            "mountMs": 5,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 6256,
+        "min": 9.07,
+        "mean": 15.93,
+        "p50": 15.56,
+        "p99": 22.43,
+        "max": 349.96
+      },
+      "longTasks": {
+        "all": [
+          222,
+          201,
+          85,
+          102,
+          51,
+          188
+        ],
+        "browse-scroll": [],
+        "oracle": [],
+        "oracle-compute": [],
+        "byStep": {
+          "voyage": 222,
+          "voyage-Scenes": 201,
+          "voyage-Audit": 102,
+          "voyage-Medals": 51,
+          "voyage-leave-ark": 188
+        }
+      },
+      "sample": {
+        "label": "cycle-2",
+        "t": 1793872454607,
+        "renderer": {
+          "jsHeapUsedMB": 43.51,
+          "jsHeapTotalMB": 46.17,
+          "domNodes": 3853,
+          "jsEventListeners": 3353,
+          "documents": 2,
+          "layoutCount": 1227,
+          "recalcStyleCount": 11559,
+          "taskDurationS": 32.444,
+          "scriptDurationS": 8.077
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2279.2,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 282.7,
+        "gpuPrivateMB": 234.4,
+        "totalWorkingSetMB": 3267,
+        "mainHeapMB": 51.9,
+        "mainRssMB": 399.8,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2279.2,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 399.8,
+              "privateMB": 407.9,
+              "cpuSec": 52.036
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 282.7,
+              "privateMB": 234.4,
+              "cpuSec": 46.207
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 59.7,
+              "privateMB": 14.8,
+              "cpuSec": 9.935
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 219.2,
+              "privateMB": 368.2,
+              "cpuSec": 64.927
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1142.9,
+              "cpuSec": 23.109375
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.3,
+              "cpuSec": 9.296875
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3267,
+          "totalCpuSec": 204.48,
+          "mainHeapMB": 51.9,
+          "mainRssMB": 399.8
+        }
+      }
+    },
+    {
+      "n": 3,
+      "steps": {
+        "to-library": {
+          "ms": 319,
+          "t0": 335780.5,
+          "t1": 336088.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-load": {
+          "ms": 3717,
+          "t0": 337107.7999999821,
+          "t1": 340821.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 5614.8,
+            "top": [
+              "ollama:generateEmbeddings x1",
+              "store:batch x1",
+              "ann:addVectors x1",
+              "ann:status x1"
+            ]
+          },
+          "ipcRaw": {
+            "invoke": {
+              "ollama:generateEmbeddings": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 15012,
+                "resultBytes": 2086118,
+                "totalMs": 3305.642999999982,
+                "maxMs": 3305.642999999982,
+                "maxPerSec": 1
+              },
+              "store:batch": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 516331,
+                "resultBytes": 11,
+                "totalMs": 15.762099999992643,
+                "maxMs": 15.762099999992643,
+                "maxPerSec": 1
+              },
+              "ann:addVectors": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 3130808,
+                "resultBytes": 53,
+                "totalMs": 368.13469999999506,
+                "maxMs": 368.13469999999506,
+                "maxPerSec": 1
+              },
+              "ann:status": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 2,
+                "resultBytes": 118,
+                "totalMs": 0.022899999981746078,
+                "maxMs": 0.022899999981746078,
+                "maxPerSec": 1
+              },
+              "store:getMany": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 882,
+                "resultBytes": 252,
+                "totalMs": 0.7176999999792315,
+                "maxMs": 0.7176999999792315,
+                "maxPerSec": 1
+              }
+            },
+            "send": {},
+            "probeMs": 68.87
+          }
+        },
+        "browse-scroll": {
+          "ms": 4060,
+          "t0": 340831.2999999821,
+          "t1": 344887.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 5613.8,
+            "top": [
+              "ollama:generateEmbeddings x1",
+              "store:batch x1",
+              "ann:addVectors x1",
+              "ann:status x1"
+            ]
+          },
+          "ipcRaw": {
+            "invoke": {
+              "ollama:generateEmbeddings": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 15205,
+                "resultBytes": 2085958,
+                "totalMs": 3311.670600000012,
+                "maxMs": 3311.670600000012,
+                "maxPerSec": 1
+              },
+              "store:batch": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 515495,
+                "resultBytes": 11,
+                "totalMs": 14.346499999985099,
+                "maxMs": 14.346499999985099,
+                "maxPerSec": 1
+              },
+              "ann:addVectors": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 3130606,
+                "resultBytes": 53,
+                "totalMs": 382.17249999998603,
+                "maxMs": 382.17249999998603,
+                "maxPerSec": 1
+              },
+              "ann:status": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 2,
+                "resultBytes": 118,
+                "totalMs": 0.013900000019930303,
+                "maxMs": 0.013900000019930303,
+                "maxPerSec": 1
+              },
+              "store:getMany": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 882,
+                "resultBytes": 252,
+                "totalMs": 0.6658999999635853,
+                "maxMs": 0.6658999999635853,
+                "maxPerSec": 1
+              }
+            },
+            "send": {},
+            "probeMs": 59.81
+          }
+        },
+        "browse-filter": {
+          "ms": 2003,
+          "t0": 344896.40000000596,
+          "t1": 346894.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 1,
+            "sendCalls": 0,
+            "kb": 2051.9,
+            "top": [
+              "ollama:generateEmbeddings x1"
+            ]
+          }
+        },
+        "browse-search": {
+          "ms": 1928,
+          "t0": 346947.6999999881,
+          "t1": 349108.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 3058.3,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "ann:addVectors x1",
+              "ann:status x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2464,
+          "t0": 349113.6999999881,
+          "t1": 351485.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 11,
+            "sendCalls": 0,
+            "kb": 5613.5,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "ollama:generateEmbeddings x1"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 13761,
+          "t0": 351580.59999999404,
+          "t1": 365335.09999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 171,
+            "sendCalls": 0,
+            "kb": 16857.8,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x15",
+              "window-subscribe-maximize x15",
+              "store:getMany x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 3288,
+          "t0": 365361.40000000596,
+          "t1": 368644.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 11,
+            "sendCalls": 0,
+            "kb": 5613.9,
+            "top": [
+              "epic:browseCatalog x2",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2",
+              "ollama:generateEmbeddings x1"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 3468,
+          "t0": 371166.2999999821,
+          "t1": 374631.40000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 48,
+            "sendCalls": 0,
+            "kb": 11272,
+            "top": [
+              "store:getMany x18",
+              "steam:getMultiplePlayerCounts x16",
+              "store:getChunk x4",
+              "egdata:getTopSellers x2"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 1744,
+          "t0": 374637.09999999404,
+          "t1": 376376.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 13,
+            "sendCalls": 0,
+            "kb": 5616.5,
+            "top": [
+              "store:getMany x4",
+              "steam:getMultiplePlayerCounts x3",
+              "epic:browseCatalog x2",
+              "ollama:generateEmbeddings x1"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2090,
+          "t0": 376382.7999999821,
+          "t1": 378466.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 0.7,
+            "top": [
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2",
+              "steam:getMultiplePlayerCounts x1",
+              "store:getMany x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 1969,
+          "t0": 378476.5,
+          "t1": 380441.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 15,
+            "sendCalls": 0,
+            "kb": 5615.9,
+            "top": [
+              "store:get x9",
+              "store:getChunk x1",
+              "ollama:generateEmbeddings x1",
+              "store:batch x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 1807,
+          "t0": 380452.1999999881,
+          "t1": 382256.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 4,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "epic:browseCatalog x2",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4350,
+          "t0": 382263.40000000596,
+          "t1": 386611.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 9,
+            "sendCalls": 0,
+            "kb": 5613.9,
+            "top": [
+              "ollama:generateEmbeddings x1",
+              "epic:browseCatalog x1",
+              "store:batch x1",
+              "ann:addVectors x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4661,
+          "t0": 386616,
+          "t1": 391273.40000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 15,
+            "sendCalls": 0,
+            "kb": 5616.8,
+            "top": [
+              "steam:getMultiplePlayerCounts x6",
+              "epic:getTopSellersCollection x1",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3312,
+          "t0": 410475.09999999404,
+          "t1": 413781.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 1.4,
+            "top": [
+              "store:get x3",
+              "store:batch x2",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 8297,
+          "t0": 413789,
+          "t1": 422083.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 29,
+            "sendCalls": 0,
+            "kb": 9847.8,
+            "top": [
+              "store:get x12",
+              "store:getMany x4",
+              "store:getChunk x3",
+              "store:del x1"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 1770,
+          "t0": 422089.7999999821,
+          "t1": 423857.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 5615.6,
+            "top": [
+              "ollama:generateEmbeddings x1",
+              "store:batch x1",
+              "ann:addVectors x1",
+              "ann:status x1"
+            ]
+          }
+        },
+        "upcoming": {
+          "ms": 2757,
+          "t0": 423864.40000000596,
+          "t1": 426617.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 3,
+            "sendCalls": 0,
+            "kb": 0.2,
+            "top": [
+              "epic:getUpcomingReleases x1",
+              "steam:getUpcomingReleases x1",
+              "catalog:queryUpcoming x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 5923,
+          "t0": 426623.7999999821,
+          "t1": 432435.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 30,
+            "sendCalls": 6,
+            "kb": 11251.6,
+            "top": [
+              "push:localAi:status-changed x6",
+              "aiRouter:getState x4",
+              "localAi:status x4",
+              "ollama:generateEmbeddings x2"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4226,
+          "t0": 432549.1999999881,
+          "t1": 436770.90000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 5613.8,
+            "top": [
+              "store:getMany x1",
+              "ollama:generateEmbeddings x1",
+              "store:batch x1",
+              "ann:addVectors x1"
+            ]
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {
+            "ollama:generateEmbeddings": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 15012,
+              "resultBytes": 2086118,
+              "totalMs": 3305.642999999982,
+              "maxMs": 3305.642999999982,
+              "maxPerSec": 1
+            },
+            "store:batch": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 516331,
+              "resultBytes": 11,
+              "totalMs": 15.762099999992643,
+              "maxMs": 15.762099999992643,
+              "maxPerSec": 1
+            },
+            "ann:addVectors": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 3130808,
+              "resultBytes": 53,
+              "totalMs": 368.13469999999506,
+              "maxMs": 368.13469999999506,
+              "maxPerSec": 1
+            },
+            "ann:status": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 2,
+              "resultBytes": 118,
+              "totalMs": 0.022899999981746078,
+              "maxMs": 0.022899999981746078,
+              "maxPerSec": 1
+            },
+            "store:getMany": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 882,
+              "resultBytes": 252,
+              "totalMs": 0.7176999999792315,
+              "maxMs": 0.7176999999792315,
+              "maxPerSec": 1
+            }
+          },
+          "send": {},
+          "probeMs": 68.87
+        },
+        "browseScrollFrames": {
+          "n": 241,
+          "p50": 16.600000000034925,
+          "p95": 16.800000000046566,
+          "max": 50,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {
+            "ollama:generateEmbeddings": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 15205,
+              "resultBytes": 2085958,
+              "totalMs": 3311.670600000012,
+              "maxMs": 3311.670600000012,
+              "maxPerSec": 1
+            },
+            "store:batch": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 515495,
+              "resultBytes": 11,
+              "totalMs": 14.346499999985099,
+              "maxMs": 14.346499999985099,
+              "maxPerSec": 1
+            },
+            "ann:addVectors": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 3130606,
+              "resultBytes": 53,
+              "totalMs": 382.17249999998603,
+              "maxMs": 382.17249999998603,
+              "maxPerSec": 1
+            },
+            "ann:status": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 2,
+              "resultBytes": 118,
+              "totalMs": 0.013900000019930303,
+              "maxMs": 0.013900000019930303,
+              "maxPerSec": 1
+            },
+            "store:getMany": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 882,
+              "resultBytes": 252,
+              "totalMs": 0.6658999999635853,
+              "maxMs": 0.6658999999635853,
+              "maxPerSec": 1
+            }
+          },
+          "send": {},
+          "probeMs": 59.81
+        },
+        "gpuBeforeArk": 314,
+        "gpuAfterArk4s": 478.9,
+        "gpuAfterArk": 233,
+        "gpuSettleS": 17,
+        "settingsOpenLongTaskMaxMs": 0,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 19,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 35,
+            "mountMs": 39,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 33,
+            "mountMs": 265,
+            "longTaskMaxMs": 0,
+            "nodes": 381
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 30,
+            "mountMs": 3,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 27,
+            "mountMs": 3,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 5743,
+        "min": 8.38,
+        "mean": 17.59,
+        "p50": 15.49,
+        "p99": 47.32,
+        "max": 636.49
+      },
+      "longTasks": {
+        "all": [
+          54,
+          222,
+          219,
+          86,
+          106,
+          70,
+          51,
+          189,
+          50
+        ],
+        "browse-scroll": [],
+        "oracle": [
+          50
+        ],
+        "oracle-compute": [],
+        "byStep": {
+          "to-library": 54,
+          "voyage": 222,
+          "voyage-Scenes": 219,
+          "voyage-Audit": 106,
+          "voyage-Medals": 70,
+          "voyage-Your Ark": 51,
+          "voyage-leave-ark": 189,
+          "oracle": 50
+        }
+      },
+      "sample": {
+        "label": "cycle-3",
+        "t": 1793872559034,
+        "renderer": {
+          "jsHeapUsedMB": 59.86,
+          "jsHeapTotalMB": 64.67,
+          "domNodes": 3853,
+          "jsEventListeners": 3353,
+          "documents": 2,
+          "layoutCount": 1705,
+          "recalcStyleCount": 18733,
+          "taskDurationS": 54.327,
+          "scriptDurationS": 12.029
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2282.8,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 287,
+        "gpuPrivateMB": 239.9,
+        "totalWorkingSetMB": 3311.2,
+        "mainHeapMB": 52,
+        "mainRssMB": 422.6,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2282.8,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 422.6,
+              "privateMB": 430,
+              "cpuSec": 80.084
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 287,
+              "privateMB": 239.9,
+              "cpuSec": 71.716
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 59.8,
+              "privateMB": 14.9,
+              "cpuSec": 14.118
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 242.6,
+              "privateMB": 387.5,
+              "cpuSec": 103.225
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1146.3,
+              "cpuSec": 62.984375
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.5,
+              "cpuSec": 12.15625
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3311.2,
+          "totalCpuSec": 343.13,
+          "mainHeapMB": 52,
+          "mainRssMB": 422.6
+        }
+      }
+    },
+    {
+      "n": 4,
+      "steps": {
+        "to-library": {
+          "ms": 327,
+          "t0": 440949.5,
+          "t1": 441377,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 1,
+            "sendCalls": 0,
+            "kb": 1.1,
+            "top": [
+              "store:getMany x1"
+            ]
+          }
+        },
+        "browse-load": {
+          "ms": 3729,
+          "t0": 442405.5,
+          "t1": 446131.2999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 5613.7,
+            "top": [
+              "ollama:generateEmbeddings x1",
+              "store:batch x1",
+              "ann:addVectors x1",
+              "ann:status x1"
+            ]
+          },
+          "ipcRaw": {
+            "invoke": {
+              "ollama:generateEmbeddings": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 15190,
+                "resultBytes": 2085741,
+                "totalMs": 3522.339399999997,
+                "maxMs": 3522.339399999997,
+                "maxPerSec": 1
+              },
+              "store:batch": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 516305,
+                "resultBytes": 11,
+                "totalMs": 14.723300000012387,
+                "maxMs": 14.723300000012387,
+                "maxPerSec": 1
+              },
+              "ann:addVectors": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 3129889,
+                "resultBytes": 53,
+                "totalMs": 706.0653000000166,
+                "maxMs": 706.0653000000166,
+                "maxPerSec": 1
+              },
+              "ann:status": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 2,
+                "resultBytes": 118,
+                "totalMs": 0.013600000005681068,
+                "maxMs": 0.013600000005681068,
+                "maxPerSec": 1
+              },
+              "store:getMany": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 882,
+                "resultBytes": 252,
+                "totalMs": 0.5449999999837019,
+                "maxMs": 0.5449999999837019,
+                "maxPerSec": 1
+              }
+            },
+            "send": {},
+            "probeMs": 64.47
+          }
+        },
+        "browse-scroll": {
+          "ms": 4219,
+          "t0": 446141.2999999821,
+          "t1": 450358,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 5614.5,
+            "top": [
+              "ollama:generateEmbeddings x1",
+              "store:batch x1",
+              "ann:addVectors x1",
+              "ann:status x1"
+            ]
+          },
+          "ipcRaw": {
+            "invoke": {
+              "ollama:generateEmbeddings": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 15243,
+                "resultBytes": 2085836,
+                "totalMs": 3503.653699999966,
+                "maxMs": 3503.653699999966,
+                "maxPerSec": 1
+              },
+              "store:batch": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 516253,
+                "resultBytes": 11,
+                "totalMs": 15.37799999996787,
+                "maxMs": 15.37799999996787,
+                "maxPerSec": 1
+              },
+              "ann:addVectors": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 3130634,
+                "resultBytes": 53,
+                "totalMs": 626.4002999999793,
+                "maxMs": 626.4002999999793,
+                "maxPerSec": 1
+              },
+              "ann:status": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 2,
+                "resultBytes": 118,
+                "totalMs": 0.011100000003352761,
+                "maxMs": 0.011100000003352761,
+                "maxPerSec": 1
+              },
+              "store:getMany": {
+                "calls": 1,
+                "errors": 0,
+                "argBytes": 882,
+                "resultBytes": 252,
+                "totalMs": 0.5654000000213273,
+                "maxMs": 0.5654000000213273,
+                "maxPerSec": 1
+              }
+            },
+            "send": {},
+            "probeMs": 62.12
+          }
+        },
+        "browse-filter": {
+          "ms": 2001,
+          "t0": 450366,
+          "t1": 452364,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-search": {
+          "ms": 2114,
+          "t0": 452369.90000000596,
+          "t1": 454393.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 5613.3,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "ollama:generateEmbeddings x1",
+              "store:batch x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2115,
+          "t0": 454489.1999999881,
+          "t1": 456600.59999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 1.2,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "store:getMany x1"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 15742,
+          "t0": 456605.90000000596,
+          "t1": 472200.40000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 175,
+            "sendCalls": 0,
+            "kb": 22597.9,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x14",
+              "window-subscribe-maximize x14",
+              "analytics:trackPageView x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 2730,
+          "t0": 472369.6999999881,
+          "t1": 475085.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 11,
+            "sendCalls": 0,
+            "kb": 1.3,
+            "top": [
+              "egdata:getTopSellers x3",
+              "steam:getMultipleAppDetails x2",
+              "epic:isEpicBlocked x2",
+              "epic:browseCatalog x2"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 3115,
+          "t0": 478150.40000000596,
+          "t1": 481258.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 33,
+            "sendCalls": 0,
+            "kb": 18243.2,
+            "top": [
+              "store:getMany x10",
+              "steam:getMultiplePlayerCounts x9",
+              "store:getChunk x6",
+              "egdata:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 1767,
+          "t0": 481269.40000000596,
+          "t1": 483031.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 13,
+            "sendCalls": 0,
+            "kb": 3.8,
+            "top": [
+              "store:getMany x5",
+              "steam:getMultiplePlayerCounts x4",
+              "epic:browseCatalog x2",
+              "egdata:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2807,
+          "t0": 483040.40000000596,
+          "t1": 485731.09999999404,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 5613.2,
+            "top": [
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2",
+              "steam:getMultiplePlayerCounts x1",
+              "store:getMany x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 1968,
+          "t0": 485850.7999999821,
+          "t1": 487814.40000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 13,
+            "sendCalls": 0,
+            "kb": 2.5,
+            "top": [
+              "store:get x9",
+              "epic:browseCatalog x2",
+              "store:getMany x1",
+              "store:getChunk x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 2339,
+          "t0": 487822.59999999404,
+          "t1": 490048.40000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 5612.5,
+            "top": [
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1",
+              "ollama:generateEmbeddings x1",
+              "store:batch x1"
+            ]
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4342,
+          "t0": 490164.7999999821,
+          "t1": 494504.40000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 19,
+            "sendCalls": 0,
+            "kb": 7743.8,
+            "top": [
+              "store:put x2",
+              "settings:getOllamaSettings x2",
+              "store:getMany x1",
+              "epic:browseCatalog x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4622,
+          "t0": 494509.7999999821,
+          "t1": 499130.90000000596,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 2.4,
+            "top": [
+              "store:batch x1",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1",
+              "steam:getMultiplePlayerCounts x1"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3274,
+          "t0": 523690.59999999404,
+          "t1": 526961.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 1.4,
+            "top": [
+              "store:get x3",
+              "store:batch x2",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 8229,
+          "t0": 526966.900000006,
+          "t1": 535192,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 29,
+            "sendCalls": 0,
+            "kb": 45578.9,
+            "top": [
+              "store:get x12",
+              "store:getChunk x6",
+              "ann:addVectors x3",
+              "ann:status x3"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 2040,
+          "t0": 535197.7999999821,
+          "t1": 537235.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 2,
+            "sendCalls": 0,
+            "kb": 10470.8,
+            "top": [
+              "ann:addVectors x1",
+              "ann:status x1"
+            ]
+          }
+        },
+        "upcoming": {
+          "ms": 7787,
+          "t0": 537239.400000006,
+          "t1": 544599.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 13,
+            "sendCalls": 0,
+            "kb": 38400.1,
+            "top": [
+              "store:getChunk x3",
+              "ann:addVectors x3",
+              "ann:status x3",
+              "epic:getUpcomingReleases x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 11520,
+          "t0": 545283.099999994,
+          "t1": 556981.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 42,
+            "sendCalls": 6,
+            "kb": 63387.1,
+            "top": [
+              "ann:status x7",
+              "push:localAi:status-changed x6",
+              "ann:addVectors x5",
+              "aiRouter:getState x4"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4217,
+          "t0": 556991.6999999881,
+          "t1": 561206.2999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {
+            "ollama:generateEmbeddings": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 15190,
+              "resultBytes": 2085741,
+              "totalMs": 3522.339399999997,
+              "maxMs": 3522.339399999997,
+              "maxPerSec": 1
+            },
+            "store:batch": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 516305,
+              "resultBytes": 11,
+              "totalMs": 14.723300000012387,
+              "maxMs": 14.723300000012387,
+              "maxPerSec": 1
+            },
+            "ann:addVectors": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 3129889,
+              "resultBytes": 53,
+              "totalMs": 706.0653000000166,
+              "maxMs": 706.0653000000166,
+              "maxPerSec": 1
+            },
+            "ann:status": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 2,
+              "resultBytes": 118,
+              "totalMs": 0.013600000005681068,
+              "maxMs": 0.013600000005681068,
+              "maxPerSec": 1
+            },
+            "store:getMany": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 882,
+              "resultBytes": 252,
+              "totalMs": 0.5449999999837019,
+              "maxMs": 0.5449999999837019,
+              "maxPerSec": 1
+            }
+          },
+          "send": {},
+          "probeMs": 64.47
+        },
+        "browseScrollFrames": {
+          "n": 252,
+          "p50": 16.600000000034925,
+          "p95": 16.79999999998836,
+          "max": 33.29999999998836,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {
+            "ollama:generateEmbeddings": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 15243,
+              "resultBytes": 2085836,
+              "totalMs": 3503.653699999966,
+              "maxMs": 3503.653699999966,
+              "maxPerSec": 1
+            },
+            "store:batch": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 516253,
+              "resultBytes": 11,
+              "totalMs": 15.37799999996787,
+              "maxMs": 15.37799999996787,
+              "maxPerSec": 1
+            },
+            "ann:addVectors": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 3130634,
+              "resultBytes": 53,
+              "totalMs": 626.4002999999793,
+              "maxMs": 626.4002999999793,
+              "maxPerSec": 1
+            },
+            "ann:status": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 2,
+              "resultBytes": 118,
+              "totalMs": 0.011100000003352761,
+              "maxMs": 0.011100000003352761,
+              "maxPerSec": 1
+            },
+            "store:getMany": {
+              "calls": 1,
+              "errors": 0,
+              "argBytes": 882,
+              "resultBytes": 252,
+              "totalMs": 0.5654000000213273,
+              "maxMs": 0.5654000000213273,
+              "maxPerSec": 1
+            }
+          },
+          "send": {},
+          "probeMs": 62.12
+        },
+        "gpuBeforeArk": 296.3,
+        "gpuAfterArk4s": 514.5,
+        "gpuAfterArk": 225.3,
+        "gpuSettleS": 22,
+        "settingsOpenLongTaskMaxMs": 170,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 15,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 28,
+            "mountMs": 17,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 22,
+            "mountMs": 233,
+            "longTaskMaxMs": 0,
+            "nodes": 381
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 28,
+            "mountMs": 3,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 25,
+            "mountMs": 3,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 5734,
+        "min": 7.56,
+        "mean": 21.1,
+        "p50": 15.54,
+        "p99": 231.34,
+        "max": 789.58
+      },
+      "longTasks": {
+        "all": [
+          53,
+          228,
+          233,
+          99,
+          55,
+          119,
+          58,
+          163,
+          103,
+          100,
+          103,
+          159,
+          98,
+          97,
+          170,
+          100
+        ],
+        "browse-scroll": [],
+        "oracle": [],
+        "oracle-compute": [
+          103
+        ],
+        "byStep": {
+          "library-status-change": 53,
+          "voyage": 228,
+          "voyage-Scenes": 233,
+          "voyage-Audit": 119,
+          "voyage-Medals": 58,
+          "voyage-leave-ark": 163,
+          "oracle-compute": 103,
+          "ai-burst": 100,
+          "upcoming": 159,
+          "settings": 170
+        }
+      },
+      "sample": {
+        "label": "cycle-4",
+        "t": 1793872683269,
+        "renderer": {
+          "jsHeapUsedMB": 62.18,
+          "jsHeapTotalMB": 66.42,
+          "domNodes": 3853,
+          "jsEventListeners": 3352,
+          "documents": 2,
+          "layoutCount": 2172,
+          "recalcStyleCount": 27105,
+          "taskDurationS": 78.378,
+          "scriptDurationS": 15.877
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2284.7,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 283.1,
+        "gpuPrivateMB": 235.6,
+        "totalWorkingSetMB": 3307.5,
+        "mainHeapMB": 68.9,
+        "mainRssMB": 449.7,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2284.7,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 449.7,
+              "privateMB": 448.7,
+              "cpuSec": 126.709
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 283.1,
+              "privateMB": 235.6,
+              "cpuSec": 98.459
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 59.9,
+              "privateMB": 14.8,
+              "cpuSec": 18.22
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 251.3,
+              "privateMB": 391.6,
+              "cpuSec": 144.463
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1148.2,
+              "cpuSec": 86.40625
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.5,
+              "cpuSec": 15.078125
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3307.5,
+          "totalCpuSec": 488.48,
+          "mainHeapMB": 68.9,
+          "mainRssMB": 449.7
+        }
+      }
+    },
+    {
+      "n": 5,
+      "steps": {
+        "to-library": {
+          "ms": 291,
+          "t0": 564440.2999999821,
+          "t1": 564728.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-load": {
+          "ms": 3711,
+          "t0": 565754.900000006,
+          "t1": 569463,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-scroll": {
+          "ms": 3577,
+          "t0": 569472.5,
+          "t1": 573048.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-filter": {
+          "ms": 1987,
+          "t0": 573053.7999999821,
+          "t1": 575037.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-search": {
+          "ms": 1660,
+          "t0": 575043.599999994,
+          "t1": 576701.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "epic:searchGames x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2095,
+          "t0": 576706.900000006,
+          "t1": 578800.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 13766,
+          "t0": 578803.900000006,
+          "t1": 592561.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 156,
+            "sendCalls": 0,
+            "kb": 142.6,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x14",
+              "window-subscribe-maximize x14",
+              "analytics:trackPageView x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 2629,
+          "t0": 592589.599999994,
+          "t1": 595216.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:browseCatalog x2",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2",
+              "steam:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 3112,
+          "t0": 597643.5,
+          "t1": 600753.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 19,
+            "sendCalls": 0,
+            "kb": 3450.2,
+            "top": [
+              "steam:getMultiplePlayerCounts x6",
+              "store:getMany x6",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 1816,
+          "t0": 600758.7999999821,
+          "t1": 602571.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 20,
+            "sendCalls": 0,
+            "kb": 10399.4,
+            "top": [
+              "store:getChunk x7",
+              "store:getMany x5",
+              "steam:getMultiplePlayerCounts x4",
+              "ml:status x1"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2068,
+          "t0": 602578.400000006,
+          "t1": 604643.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 0.7,
+            "top": [
+              "epic:browseCatalog x2",
+              "steam:getMultiplePlayerCounts x1",
+              "store:getMany x1",
+              "egdata:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 1939,
+          "t0": 604650,
+          "t1": 606580.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 1.4,
+            "top": [
+              "store:get x9",
+              "store:getChunk x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 1906,
+          "t0": 606596.900000006,
+          "t1": 608500.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 2,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4325,
+          "t0": 608505.599999994,
+          "t1": 612824.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 3,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "epic:browseCatalog x1",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4668,
+          "t0": 612833.6999999881,
+          "t1": 617497.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 20,
+            "sendCalls": 0,
+            "kb": 4.8,
+            "top": [
+              "steam:getMultiplePlayerCounts x12",
+              "epic:browseCatalog x1",
+              "store:getMany x1",
+              "steam:getTopSellers x1"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3781,
+          "t0": 642454,
+          "t1": 646232.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 20,
+            "sendCalls": 0,
+            "kb": 7087.1,
+            "top": [
+              "steam:fetchCatalogBatch x11",
+              "store:get x4",
+              "store:batch x2",
+              "steam:getAppList x1"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 8295,
+          "t0": 646241.6999999881,
+          "t1": 654532.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 35,
+            "sendCalls": 0,
+            "kb": 11279.9,
+            "top": [
+              "store:get x15",
+              "store:getChunk x4",
+              "settings:getOllamaSettings x3",
+              "store:batch x2"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 955,
+          "t0": 654540.6999999881,
+          "t1": 655493.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "upcoming": {
+          "ms": 2737,
+          "t0": 655497.5,
+          "t1": 658229.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 0.2,
+            "top": [
+              "epic:getUpcomingReleases x1",
+              "catalog:queryUpcoming x1",
+              "steam:getUpcomingReleases x1",
+              "egdata:getTopSellers x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 5237,
+          "t0": 658237.7999999821,
+          "t1": 663470.2999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 18,
+            "sendCalls": 6,
+            "kb": 23.9,
+            "top": [
+              "push:localAi:status-changed x6",
+              "aiRouter:getState x4",
+              "localAi:status x4",
+              "settings:getOllamaSettings x2"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4225,
+          "t0": 663479.1999999881,
+          "t1": 667702.2999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 214,
+          "p50": 16.600000000093132,
+          "p95": 16.800000000046566,
+          "max": 16.900000000023283,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuBeforeArk": 295.3,
+        "gpuAfterArk4s": 518.5,
+        "gpuAfterArk": 227.3,
+        "gpuSettleS": 22,
+        "settingsOpenLongTaskMaxMs": 0,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 28,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 37,
+            "mountMs": 32,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 25,
+            "mountMs": 8,
+            "longTaskMaxMs": 0,
+            "nodes": 364
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 32,
+            "mountMs": 6,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 26,
+            "mountMs": 4,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 6590,
+        "min": 7.9,
+        "mean": 15.67,
+        "p50": 15.57,
+        "p99": 21.63,
+        "max": 330.04
+      },
+      "longTasks": {
+        "all": [
+          50,
+          216,
+          207,
+          81,
+          100,
+          112,
+          169
+        ],
+        "browse-scroll": [],
+        "oracle": [],
+        "oracle-compute": [],
+        "byStep": {
+          "library-status-change": 50,
+          "voyage": 216,
+          "voyage-Scenes": 207,
+          "voyage-Audit": 100,
+          "voyage-Medals": 112,
+          "voyage-leave-ark": 169
+        }
+      },
+      "sample": {
+        "label": "cycle-5",
+        "t": 1793872789815,
+        "renderer": {
+          "jsHeapUsedMB": 62.43,
+          "jsHeapTotalMB": 66.67,
+          "domNodes": 3853,
+          "jsEventListeners": 3352,
+          "documents": 2,
+          "layoutCount": 2641,
+          "recalcStyleCount": 34286,
+          "taskDurationS": 98.999,
+          "scriptDurationS": 19.678
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2284.8,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 295,
+        "gpuPrivateMB": 246.5,
+        "totalWorkingSetMB": 3349,
+        "mainHeapMB": 51.9,
+        "mainRssMB": 432.7,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2284.8,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 432.7,
+              "privateMB": 432.9,
+              "cpuSec": 137.926
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 295,
+              "privateMB": 246.5,
+              "cpuSec": 124.051
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 60.1,
+              "privateMB": 15,
+              "cpuSec": 22.701
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 255.5,
+              "privateMB": 392.1,
+              "cpuSec": 180.505
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1148.3,
+              "cpuSec": 89.265625
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.5,
+              "cpuSec": 17.578125
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3349,
+          "totalCpuSec": 570,
+          "mainHeapMB": 51.9,
+          "mainRssMB": 432.7
+        }
+      }
+    },
+    {
+      "n": 6,
+      "steps": {
+        "to-library": {
+          "ms": 346,
+          "t0": 670987,
+          "t1": 671327.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-load": {
+          "ms": 3749,
+          "t0": 672350.2999999821,
+          "t1": 676096.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-scroll": {
+          "ms": 3586,
+          "t0": 676104.7999999821,
+          "t1": 679688.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-filter": {
+          "ms": 1990,
+          "t0": 679698,
+          "t1": 681685.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-search": {
+          "ms": 1682,
+          "t0": 681690.400000006,
+          "t1": 683369,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "epic:searchGames x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2112,
+          "t0": 683375.6999999881,
+          "t1": 685486.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 13793,
+          "t0": 685490.7999999821,
+          "t1": 699276.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 156,
+            "sendCalls": 0,
+            "kb": 141.9,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x14",
+              "window-subscribe-maximize x14",
+              "analytics:trackPageView x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 2705,
+          "t0": 699302,
+          "t1": 702002.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:browseCatalog x2",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2",
+              "steam:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 2991,
+          "t0": 704547.900000006,
+          "t1": 707536.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 36,
+            "sendCalls": 0,
+            "kb": 9.9,
+            "top": [
+              "steam:getMultiplePlayerCounts x15",
+              "store:getMany x15",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 1723,
+          "t0": 707545.900000006,
+          "t1": 709266.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 2.6,
+            "top": [
+              "steam:getMultiplePlayerCounts x4",
+              "store:getMany x4",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2052,
+          "t0": 709274.6999999881,
+          "t1": 711323.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 0.7,
+            "top": [
+              "epic:browseCatalog x2",
+              "steam:getMultiplePlayerCounts x1",
+              "store:getMany x1",
+              "egdata:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 1952,
+          "t0": 711329.6999999881,
+          "t1": 713278.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 1.4,
+            "top": [
+              "store:get x9",
+              "store:getChunk x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 1776,
+          "t0": 713286.2999999821,
+          "t1": 715059.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 2,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4347,
+          "t0": 715066.599999994,
+          "t1": 719408.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 3,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "epic:browseCatalog x1",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4698,
+          "t0": 719418.2999999821,
+          "t1": 724112.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 9,
+            "sendCalls": 0,
+            "kb": 0.8,
+            "top": [
+              "steam:getMultiplePlayerCounts x2",
+              "epic:browseCatalog x1",
+              "steam:getTopSellers x1",
+              "steam:getMultipleAppDetails x1"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3318,
+          "t0": 749330,
+          "t1": 752643.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 1.1,
+            "top": [
+              "store:get x3",
+              "store:batch x1",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 8264,
+          "t0": 752651,
+          "t1": 760910,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 33,
+            "sendCalls": 0,
+            "kb": 11279.8,
+            "top": [
+              "store:get x15",
+              "store:getChunk x4",
+              "settings:getOllamaSettings x3",
+              "store:batch x2"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 945,
+          "t0": 760919.599999994,
+          "t1": 761862.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 2,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "upcoming": {
+          "ms": 2736,
+          "t0": 761867.400000006,
+          "t1": 764600.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 4,
+            "sendCalls": 0,
+            "kb": 0.2,
+            "top": [
+              "epic:getUpcomingReleases x1",
+              "steam:getUpcomingReleases x1",
+              "catalog:queryUpcoming x1",
+              "epic:browseCatalog x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 5292,
+          "t0": 764605.099999994,
+          "t1": 769892.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 18,
+            "sendCalls": 6,
+            "kb": 23.9,
+            "top": [
+              "push:localAi:status-changed x6",
+              "aiRouter:getState x4",
+              "localAi:status x4",
+              "settings:getOllamaSettings x2"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4236,
+          "t0": 769899.400000006,
+          "t1": 774132.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 215,
+          "p50": 16.600000000093132,
+          "p95": 16.800000000046566,
+          "max": 16.900000000023283,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuBeforeArk": 311,
+        "gpuAfterArk4s": 535.8,
+        "gpuAfterArk": 237.4,
+        "gpuSettleS": 23,
+        "settingsOpenLongTaskMaxMs": 0,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 27,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 26,
+            "mountMs": 30,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 21,
+            "mountMs": 10,
+            "longTaskMaxMs": 0,
+            "nodes": 364
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 33,
+            "mountMs": 3,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 32,
+            "mountMs": 5,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 6598,
+        "min": 7.83,
+        "mean": 15.63,
+        "p50": 15.56,
+        "p99": 21.73,
+        "max": 345.77
+      },
+      "longTasks": {
+        "all": [
+          54,
+          217,
+          214,
+          91,
+          57,
+          108,
+          71,
+          183
+        ],
+        "browse-scroll": [],
+        "oracle": [],
+        "oracle-compute": [],
+        "byStep": {
+          "to-library": 54,
+          "voyage": 217,
+          "voyage-Scenes": 214,
+          "voyage-Audit": 108,
+          "voyage-Medals": 71,
+          "voyage-leave-ark": 183
+        }
+      },
+      "sample": {
+        "label": "cycle-6",
+        "t": 1793872896369,
+        "renderer": {
+          "jsHeapUsedMB": 62.87,
+          "jsHeapTotalMB": 66.42,
+          "domNodes": 3853,
+          "jsEventListeners": 3352,
+          "documents": 2,
+          "layoutCount": 3109,
+          "recalcStyleCount": 41589,
+          "taskDurationS": 119.541,
+          "scriptDurationS": 23.673
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2284.8,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 295.2,
+        "gpuPrivateMB": 246,
+        "totalWorkingSetMB": 3354.5,
+        "mainHeapMB": 56.5,
+        "mainRssMB": 434.5,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2284.8,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 434.5,
+              "privateMB": 433.5,
+              "cpuSec": 148.692
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 295.2,
+              "privateMB": 246,
+              "cpuSec": 150.487
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 59.8,
+              "privateMB": 14.7,
+              "cpuSec": 26.953
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 259.3,
+              "privateMB": 392.4,
+              "cpuSec": 216.187
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1148.3,
+              "cpuSec": 92.265625
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.5,
+              "cpuSec": 20.359375
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3354.5,
+          "totalCpuSec": 653.92,
+          "mainHeapMB": 56.5,
+          "mainRssMB": 434.5
+        }
+      }
+    },
+    {
+      "n": 7,
+      "steps": {
+        "to-library": {
+          "ms": 330,
+          "t0": 777547.2999999821,
+          "t1": 777872.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-load": {
+          "ms": 3709,
+          "t0": 778888.099999994,
+          "t1": 782593.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-scroll": {
+          "ms": 3594,
+          "t0": 782600.6999999881,
+          "t1": 786193,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-filter": {
+          "ms": 1982,
+          "t0": 786200.599999994,
+          "t1": 788180.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-search": {
+          "ms": 1663,
+          "t0": 788184.7999999821,
+          "t1": 789845.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "epic:searchGames x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2107,
+          "t0": 789849.599999994,
+          "t1": 791949.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 13786,
+          "t0": 791966.1999999881,
+          "t1": 805747.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 155,
+            "sendCalls": 0,
+            "kb": 141.7,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x14",
+              "window-subscribe-maximize x14",
+              "analytics:trackPageView x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 2630,
+          "t0": 805769.2999999821,
+          "t1": 808398.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "egdata:getTopSellers x3",
+              "epic:isEpicBlocked x3",
+              "steam:getTopSellers x1",
+              "steam:getMultipleAppDetails x1"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 2981,
+          "t0": 811085.7999999821,
+          "t1": 814063.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 15,
+            "sendCalls": 0,
+            "kb": 4.5,
+            "top": [
+              "steam:getMultiplePlayerCounts x7",
+              "store:getMany x7",
+              "epic:browseCatalog x1"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 1866,
+          "t0": 814069.099999994,
+          "t1": 815931.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 2.6,
+            "top": [
+              "steam:getMultiplePlayerCounts x4",
+              "store:getMany x4",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2067,
+          "t0": 815938.7999999821,
+          "t1": 818004.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 12,
+            "sendCalls": 0,
+            "kb": 0.8,
+            "top": [
+              "epic:browseCatalog x4",
+              "egdata:getTopSellers x3",
+              "epic:isEpicBlocked x3",
+              "steam:getMultiplePlayerCounts x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 1928,
+          "t0": 818008.400000006,
+          "t1": 819935.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 1.4,
+            "top": [
+              "store:get x9",
+              "store:getChunk x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 1760,
+          "t0": 819938.099999994,
+          "t1": 821696.2999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4348,
+          "t0": 821700.2999999821,
+          "t1": 826045.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 2,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4637,
+          "t0": 826053.599999994,
+          "t1": 830689.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 0.4,
+            "top": [
+              "epic:browseCatalog x1",
+              "steam:getMultiplePlayerCounts x1",
+              "steam:getTopSellers x1",
+              "steam:getMultipleAppDetails x1"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3315,
+          "t0": 856134.099999994,
+          "t1": 859446.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 4,
+            "sendCalls": 0,
+            "kb": 1,
+            "top": [
+              "store:get x3",
+              "store:batch x1"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 9034,
+          "t0": 859451.900000006,
+          "t1": 868006.2999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 44,
+            "sendCalls": 0,
+            "kb": 39684.3,
+            "top": [
+              "store:get x15",
+              "store:getChunk x8",
+              "ann:queryBatch x6",
+              "settings:getOllamaSettings x3"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 2369,
+          "t0": 868636.099999994,
+          "t1": 870959.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 2,
+            "sendCalls": 0,
+            "kb": 8605.8,
+            "top": [
+              "ann:queryBatch x2"
+            ]
+          }
+        },
+        "upcoming": {
+          "ms": 5119,
+          "t0": 871358.900000006,
+          "t1": 876654.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 9,
+            "sendCalls": 0,
+            "kb": 12908.5,
+            "top": [
+              "ann:queryBatch x3",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1",
+              "epic:getUpcomingReleases x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 5193,
+          "t0": 876660.2999999821,
+          "t1": 881849.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 18,
+            "sendCalls": 6,
+            "kb": 23.9,
+            "top": [
+              "push:localAi:status-changed x6",
+              "aiRouter:getState x4",
+              "localAi:status x4",
+              "settings:getOllamaSettings x2"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4197,
+          "t0": 881855.400000006,
+          "t1": 886048.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 215,
+          "p50": 16.600000000093132,
+          "p95": 16.800000000046566,
+          "max": 17,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuBeforeArk": 317.4,
+        "gpuAfterArk4s": 468.1,
+        "gpuAfterArk": 227.5,
+        "gpuSettleS": 23,
+        "settingsOpenLongTaskMaxMs": 0,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 29,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 32,
+            "mountMs": 16,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 26,
+            "mountMs": 7,
+            "longTaskMaxMs": 0,
+            "nodes": 364
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 19,
+            "mountMs": 4,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 31,
+            "mountMs": 5,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 6219,
+        "min": 8.95,
+        "mean": 17.45,
+        "p50": 15.55,
+        "p99": 77.4,
+        "max": 444.86
+      },
+      "longTasks": {
+        "all": [
+          64,
+          226,
+          206,
+          95,
+          111,
+          167
+        ],
+        "browse-scroll": [],
+        "oracle": [],
+        "oracle-compute": [],
+        "byStep": {
+          "library-status-change": 64,
+          "voyage": 226,
+          "voyage-Scenes": 206,
+          "voyage-Audit": 111,
+          "voyage-leave-ark": 167
+        }
+      },
+      "sample": {
+        "label": "cycle-7",
+        "t": 1793873008654,
+        "renderer": {
+          "jsHeapUsedMB": 63.16,
+          "jsHeapTotalMB": 67.17,
+          "domNodes": 3853,
+          "jsEventListeners": 3352,
+          "documents": 2,
+          "layoutCount": 3581,
+          "recalcStyleCount": 49501,
+          "taskDurationS": 139.456,
+          "scriptDurationS": 27.405
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2284.8,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 287.9,
+        "gpuPrivateMB": 238.8,
+        "totalWorkingSetMB": 3338.4,
+        "mainHeapMB": 52.9,
+        "mainRssMB": 418.9,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2284.8,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 418.8,
+              "privateMB": 420.2,
+              "cpuSec": 170.187
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 287.9,
+              "privateMB": 238.8,
+              "cpuSec": 175.312
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 59.9,
+              "privateMB": 14.8,
+              "cpuSec": 31.013
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 266.4,
+              "privateMB": 394.8,
+              "cpuSec": 251.388
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1148.3,
+              "cpuSec": 94.9375
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.5,
+              "cpuSec": 22.859375
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3338.4,
+          "totalCpuSec": 745.06,
+          "mainHeapMB": 52.9,
+          "mainRssMB": 418.9
+        }
+      }
+    },
+    {
+      "n": 8,
+      "steps": {
+        "to-library": {
+          "ms": 313,
+          "t0": 889829.400000006,
+          "t1": 890138.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-load": {
+          "ms": 3712,
+          "t0": 891153.900000006,
+          "t1": 894864,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-scroll": {
+          "ms": 3634,
+          "t0": 894870.099999994,
+          "t1": 898501.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-filter": {
+          "ms": 1990,
+          "t0": 898508.2999999821,
+          "t1": 900495.2999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-search": {
+          "ms": 1675,
+          "t0": 900500.5,
+          "t1": 902172.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "epic:searchGames x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2090,
+          "t0": 902178.1999999881,
+          "t1": 904266.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 13766,
+          "t0": 904272,
+          "t1": 918032.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 156,
+            "sendCalls": 0,
+            "kb": 142.1,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x14",
+              "window-subscribe-maximize x14",
+              "analytics:trackPageView x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 2662,
+          "t0": 918055.400000006,
+          "t1": 920713.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:browseCatalog x2",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2",
+              "steam:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 3018,
+          "t0": 924369.599999994,
+          "t1": 927386.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 37,
+            "sendCalls": 0,
+            "kb": 10.5,
+            "top": [
+              "steam:getMultiplePlayerCounts x16",
+              "store:getMany x16",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 1756,
+          "t0": 927391.2999999821,
+          "t1": 929145.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 2,
+            "top": [
+              "steam:getMultiplePlayerCounts x3",
+              "store:getMany x3",
+              "epic:browseCatalog x2"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2141,
+          "t0": 929149.900000006,
+          "t1": 931286.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 1.3,
+            "top": [
+              "steam:getMultiplePlayerCounts x2",
+              "store:getMany x2",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 1996,
+          "t0": 931294.2999999821,
+          "t1": 933286.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 12,
+            "sendCalls": 0,
+            "kb": 1.4,
+            "top": [
+              "store:get x9",
+              "store:getChunk x1",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 1812,
+          "t0": 933294.2999999821,
+          "t1": 935103.1999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4342,
+          "t0": 935108.900000006,
+          "t1": 939449.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 2,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4622,
+          "t0": 939456.1999999881,
+          "t1": 944077.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 1.1,
+            "top": [
+              "steam:getMultiplePlayerCounts x3",
+              "epic:browseCatalog x3"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3405,
+          "t0": 965107.7999999821,
+          "t1": 968508.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 25,
+            "sendCalls": 0,
+            "kb": 7086.8,
+            "top": [
+              "steam:fetchCatalogBatch x11",
+              "store:get x4",
+              "steam:getAppList x1",
+              "steam:getTagList x1"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 8302,
+          "t0": 968516.400000006,
+          "t1": 976812.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 35,
+            "sendCalls": 0,
+            "kb": 11279.9,
+            "top": [
+              "store:get x15",
+              "store:getChunk x4",
+              "settings:getOllamaSettings x3",
+              "store:batch x2"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 975,
+          "t0": 976822.599999994,
+          "t1": 977794.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 1,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "epic:browseCatalog x1"
+            ]
+          }
+        },
+        "upcoming": {
+          "ms": 2741,
+          "t0": 977799.400000006,
+          "t1": 980536.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 3,
+            "sendCalls": 0,
+            "kb": 0.2,
+            "top": [
+              "epic:getUpcomingReleases x1",
+              "steam:getUpcomingReleases x1",
+              "catalog:queryUpcoming x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 5279,
+          "t0": 980543.599999994,
+          "t1": 985818.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 20,
+            "sendCalls": 6,
+            "kb": 23.9,
+            "top": [
+              "push:localAi:status-changed x6",
+              "aiRouter:getState x4",
+              "localAi:status x4",
+              "settings:getOllamaSettings x2"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4231,
+          "t0": 985827.400000006,
+          "t1": 990057.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 1,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "epic:browseCatalog x1"
+            ]
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 218,
+          "p50": 16.600000000093132,
+          "p95": 16.800000000046566,
+          "max": 16.900000000023283,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuBeforeArk": 314,
+        "gpuAfterArk4s": 506.5,
+        "gpuAfterArk": 230,
+        "gpuSettleS": 18,
+        "settingsOpenLongTaskMaxMs": 0,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 20,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 30,
+            "mountMs": 33,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 32,
+            "mountMs": 11,
+            "longTaskMaxMs": 0,
+            "nodes": 364
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 30,
+            "mountMs": 4,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 33,
+            "mountMs": 3,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 6395,
+        "min": 8.9,
+        "mean": 15.67,
+        "p50": 15.55,
+        "p99": 22.4,
+        "max": 339.74
+      },
+      "longTasks": {
+        "all": [
+          50,
+          71,
+          264,
+          245,
+          131,
+          64,
+          106,
+          73,
+          172
+        ],
+        "browse-scroll": [],
+        "oracle": [],
+        "oracle-compute": [],
+        "byStep": {
+          "to-library": 50,
+          "library-status-change": 71,
+          "voyage": 264,
+          "voyage-Scenes": 245,
+          "voyage-Audit": 106,
+          "voyage-Medals": 73,
+          "voyage-leave-ark": 172
+        }
+      },
+      "sample": {
+        "label": "cycle-8",
+        "t": 1793873112341,
+        "renderer": {
+          "jsHeapUsedMB": 63.47,
+          "jsHeapTotalMB": 68.17,
+          "domNodes": 3853,
+          "jsEventListeners": 3352,
+          "documents": 2,
+          "layoutCount": 4055,
+          "recalcStyleCount": 56594,
+          "taskDurationS": 159.547,
+          "scriptDurationS": 31.506
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2284.9,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 296.2,
+        "gpuPrivateMB": 246.9,
+        "totalWorkingSetMB": 3365.7,
+        "mainHeapMB": 51.6,
+        "mainRssMB": 430.1,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2284.9,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 430.1,
+              "privateMB": 432.7,
+              "cpuSec": 180.418
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 296.2,
+              "privateMB": 246.9,
+              "cpuSec": 200.493
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 59.9,
+              "privateMB": 14.9,
+              "cpuSec": 35.461
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 271.5,
+              "privateMB": 396.2,
+              "cpuSec": 286.804
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1148.3,
+              "cpuSec": 97.6875
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.6,
+              "cpuSec": 25.671875
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3365.7,
+          "totalCpuSec": 827.28,
+          "mainHeapMB": 51.6,
+          "mainRssMB": 430.1
+        }
+      }
+    },
+    {
+      "n": 9,
+      "steps": {
+        "to-library": {
+          "ms": 304,
+          "t0": 993513.2999999821,
+          "t1": 993806.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-load": {
+          "ms": 3730,
+          "t0": 994834.6999999881,
+          "t1": 998559.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-scroll": {
+          "ms": 3604,
+          "t0": 998569.6999999881,
+          "t1": 1002172.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-filter": {
+          "ms": 2007,
+          "t0": 1002179.1999999881,
+          "t1": 1004183.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-search": {
+          "ms": 1672,
+          "t0": 1004188.400000006,
+          "t1": 1005857.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "epic:searchGames x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2104,
+          "t0": 1005863.6999999881,
+          "t1": 1007964.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 13776,
+          "t0": 1007969.599999994,
+          "t1": 1021735,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 154,
+            "sendCalls": 0,
+            "kb": 142.3,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x14",
+              "window-subscribe-maximize x14",
+              "analytics:trackPageView x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 2708,
+          "t0": 1021768.400000006,
+          "t1": 1024472.6999999881,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "egdata:getTopSellers x3",
+              "epic:isEpicBlocked x3",
+              "epic:browseCatalog x2",
+              "steam:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 2985,
+          "t0": 1027005.6999999881,
+          "t1": 1029984.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 20,
+            "sendCalls": 0,
+            "kb": 4.6,
+            "top": [
+              "steam:getMultiplePlayerCounts x7",
+              "store:getMany x7",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 1750,
+          "t0": 1029995.6999999881,
+          "t1": 1031742.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 2,
+            "top": [
+              "steam:getMultiplePlayerCounts x3",
+              "store:getMany x3",
+              "epic:browseCatalog x2",
+              "egdata:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2062,
+          "t0": 1031747.6999999881,
+          "t1": 1033807.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 4,
+            "sendCalls": 0,
+            "kb": 0.7,
+            "top": [
+              "steam:getMultiplePlayerCounts x1",
+              "store:getMany x1",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 1964,
+          "t0": 1033812.099999994,
+          "t1": 1035771.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 13,
+            "sendCalls": 0,
+            "kb": 1.4,
+            "top": [
+              "store:get x9",
+              "store:getChunk x1",
+              "epic:browseCatalog x1",
+              "egdata:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 1778,
+          "t0": 1035778.7999999821,
+          "t1": 1037554.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4343,
+          "t0": 1037559.599999994,
+          "t1": 1041900.2999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 4,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "epic:browseCatalog x2",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4669,
+          "t0": 1041908.1999999881,
+          "t1": 1046572.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 20,
+            "sendCalls": 0,
+            "kb": 4.8,
+            "top": [
+              "steam:getMultiplePlayerCounts x12",
+              "steam:getTopSellers x1",
+              "steam:getMultipleAppDetails x1",
+              "epic:getFreeGames x1"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3316,
+          "t0": 1072448.400000006,
+          "t1": 1075762.7999999821,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 1.1,
+            "top": [
+              "store:get x3",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1",
+              "store:batch x1"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 8261,
+          "t0": 1075769.599999994,
+          "t1": 1084026.199999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 34,
+            "sendCalls": 0,
+            "kb": 11279.9,
+            "top": [
+              "store:get x15",
+              "store:getChunk x4",
+              "settings:getOllamaSettings x3",
+              "store:batch x2"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 1009,
+          "t0": 1084034.400000006,
+          "t1": 1085040.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 1,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "epic:browseCatalog x1"
+            ]
+          }
+        },
+        "upcoming": {
+          "ms": 2727,
+          "t0": 1085046.2999999821,
+          "t1": 1087772.699999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 3,
+            "sendCalls": 0,
+            "kb": 0.2,
+            "top": [
+              "epic:getUpcomingReleases x1",
+              "steam:getUpcomingReleases x1",
+              "catalog:queryUpcoming x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 5435,
+          "t0": 1087776.699999988,
+          "t1": 1093209.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 18,
+            "sendCalls": 6,
+            "kb": 23.9,
+            "top": [
+              "push:localAi:status-changed x6",
+              "aiRouter:getState x4",
+              "localAi:status x4",
+              "settings:getOllamaSettings x2"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4242,
+          "t0": 1093213.5,
+          "t1": 1097454.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 216,
+          "p50": 16.600000000093132,
+          "p95": 16.800000000046566,
+          "max": 17.099999999976717,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuBeforeArk": 315.7,
+        "gpuAfterArk4s": 528.2,
+        "gpuAfterArk": 230.2,
+        "gpuSettleS": 23,
+        "settingsOpenLongTaskMaxMs": 0,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 17,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 27,
+            "mountMs": 20,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 22,
+            "mountMs": 248,
+            "longTaskMaxMs": 0,
+            "nodes": 381
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 18,
+            "mountMs": 4,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 33,
+            "mountMs": 3,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 6653,
+        "min": 8.28,
+        "mean": 15.63,
+        "p50": 15.55,
+        "p99": 21.73,
+        "max": 421.79
+      },
+      "longTasks": {
+        "all": [
+          56,
+          205,
+          242,
+          92,
+          107,
+          53,
+          170
+        ],
+        "browse-scroll": [],
+        "oracle": [],
+        "oracle-compute": [],
+        "byStep": {
+          "library-status-change": 56,
+          "voyage": 205,
+          "voyage-Scenes": 242,
+          "voyage-Audit": 107,
+          "voyage-Medals": 53,
+          "voyage-leave-ark": 170
+        }
+      },
+      "sample": {
+        "label": "cycle-9",
+        "t": 1793873219549,
+        "renderer": {
+          "jsHeapUsedMB": 63.69,
+          "jsHeapTotalMB": 67.67,
+          "domNodes": 3853,
+          "jsEventListeners": 3352,
+          "documents": 2,
+          "layoutCount": 4523,
+          "recalcStyleCount": 63949,
+          "taskDurationS": 179.409,
+          "scriptDurationS": 35.502
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2284.9,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 296.3,
+        "gpuPrivateMB": 246.7,
+        "totalWorkingSetMB": 3369.9,
+        "mainHeapMB": 60.7,
+        "mainRssMB": 433.6,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2284.9,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 433.6,
+              "privateMB": 433.4,
+              "cpuSec": 190.751
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 296.3,
+              "privateMB": 246.7,
+              "cpuSec": 226.19
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 59.9,
+              "privateMB": 14.8,
+              "cpuSec": 39.858
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 274.5,
+              "privateMB": 395.1,
+              "cpuSec": 321.715
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1148.3,
+              "cpuSec": 100.453125
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.6,
+              "cpuSec": 28.765625
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3369.9,
+          "totalCpuSec": 908.75,
+          "mainHeapMB": 60.7,
+          "mainRssMB": 433.6
+        }
+      }
+    },
+    {
+      "n": 10,
+      "steps": {
+        "to-library": {
+          "ms": 285,
+          "t0": 1100721.699999988,
+          "t1": 1100999.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-load": {
+          "ms": 3704,
+          "t0": 1102023.2999999821,
+          "t1": 1105726.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-scroll": {
+          "ms": 3550,
+          "t0": 1105734,
+          "t1": 1109280.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          },
+          "ipcRaw": {
+            "invoke": {},
+            "send": {},
+            "probeMs": 0
+          }
+        },
+        "browse-filter": {
+          "ms": 1961,
+          "t0": 1109288.199999988,
+          "t1": 1111246.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "browse-search": {
+          "ms": 1662,
+          "t0": 1111250.900000006,
+          "t1": 1112910.199999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 5,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2",
+              "epic:searchGames x1"
+            ]
+          }
+        },
+        "browse-search-empty": {
+          "ms": 2102,
+          "t0": 1112914.699999988,
+          "t1": 1115013.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 7,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:searchGames x3",
+              "epic:isEpicBlocked x2",
+              "steam:searchGames x2"
+            ]
+          }
+        },
+        "game-details-x5": {
+          "ms": 13778,
+          "t0": 1115018.599999994,
+          "t1": 1128793.199999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 157,
+            "sendCalls": 0,
+            "kb": 142,
+            "top": [
+              "steam:getMultiplePlayerCounts x30",
+              "window-is-maximized x14",
+              "window-subscribe-maximize x14",
+              "analytics:trackPageView x10"
+            ]
+          }
+        },
+        "library-status-change": {
+          "ms": 2689,
+          "t0": 1128813.599999994,
+          "t1": 1131500.199999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 0.1,
+            "top": [
+              "epic:browseCatalog x2",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2",
+              "steam:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage": {
+          "ms": 2968,
+          "t0": 1133975.699999988,
+          "t1": 1136940.699999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 36,
+            "sendCalls": 0,
+            "kb": 9.9,
+            "top": [
+              "steam:getMultiplePlayerCounts x15",
+              "store:getMany x15",
+              "egdata:getTopSellers x2",
+              "epic:isEpicBlocked x2"
+            ]
+          }
+        },
+        "voyage-Log": {
+          "ms": 1756,
+          "t0": 1136946.199999988,
+          "t1": 1138698.5,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 2.6,
+            "top": [
+              "steam:getMultiplePlayerCounts x4",
+              "store:getMany x4",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Scenes": {
+          "ms": 2044,
+          "t0": 1138707.099999994,
+          "t1": 1140749.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 6,
+            "sendCalls": 0,
+            "kb": 0.7,
+            "top": [
+              "epic:browseCatalog x2",
+              "steam:getMultiplePlayerCounts x1",
+              "store:getMany x1",
+              "egdata:getTopSellers x1"
+            ]
+          }
+        },
+        "voyage-Audit": {
+          "ms": 1930,
+          "t0": 1140755.699999988,
+          "t1": 1142682.199999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 10,
+            "sendCalls": 0,
+            "kb": 1.4,
+            "top": [
+              "store:get x9",
+              "store:getChunk x1"
+            ]
+          }
+        },
+        "voyage-Medals": {
+          "ms": 1798,
+          "t0": 1142688.599999994,
+          "t1": 1144484.699999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 2,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-Your Ark": {
+          "ms": 4320,
+          "t0": 1144489.2999999821,
+          "t1": 1148807.599999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 3,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": [
+              "epic:browseCatalog x1",
+              "egdata:getTopSellers x1",
+              "epic:isEpicBlocked x1"
+            ]
+          }
+        },
+        "voyage-leave-ark": {
+          "ms": 4628,
+          "t0": 1148812.099999994,
+          "t1": 1153437.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 8,
+            "sendCalls": 0,
+            "kb": 0.4,
+            "top": [
+              "epic:browseCatalog x1",
+              "steam:getMultiplePlayerCounts x1",
+              "steam:getTopSellers x1",
+              "steam:getMultipleAppDetails x1"
+            ]
+          }
+        },
+        "oracle": {
+          "ms": 3281,
+          "t0": 1178971.7999999821,
+          "t1": 1182249.900000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 4,
+            "sendCalls": 0,
+            "kb": 1,
+            "top": [
+              "store:get x3",
+              "store:batch x1"
+            ]
+          }
+        },
+        "oracle-compute": {
+          "ms": 8264,
+          "t0": 1182254.2999999821,
+          "t1": 1190513.699999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 32,
+            "sendCalls": 0,
+            "kb": 11279.8,
+            "top": [
+              "store:get x15",
+              "store:getChunk x4",
+              "settings:getOllamaSettings x3",
+              "store:batch x2"
+            ]
+          }
+        },
+        "ai-burst": {
+          "ms": 985,
+          "t0": 1190520.400000006,
+          "t1": 1191503.199999988,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        },
+        "upcoming": {
+          "ms": 2721,
+          "t0": 1191506.900000006,
+          "t1": 1194225.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 3,
+            "sendCalls": 0,
+            "kb": 0.2,
+            "top": [
+              "epic:getUpcomingReleases x1",
+              "steam:getUpcomingReleases x1",
+              "catalog:queryUpcoming x1"
+            ]
+          }
+        },
+        "settings": {
+          "ms": 5525,
+          "t0": 1194230.2999999821,
+          "t1": 1199751.099999994,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 18,
+            "sendCalls": 6,
+            "kb": 23.9,
+            "top": [
+              "push:localAi:status-changed x6",
+              "aiRouter:getState x4",
+              "localAi:status x4",
+              "settings:getOllamaSettings x2"
+            ]
+          }
+        },
+        "back-to-browse": {
+          "ms": 4227,
+          "t0": 1199757.400000006,
+          "t1": 1203981.400000006,
+          "error": null,
+          "ipc": {
+            "invokeCalls": 0,
+            "sendCalls": 0,
+            "kb": 0,
+            "top": []
+          }
+        }
+      },
+      "extra": {
+        "browseLoadIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "browseScrollFrames": {
+          "n": 213,
+          "p50": 16.600000000093132,
+          "p95": 16.800000000046566,
+          "max": 16.899999999906868,
+          "over50": 0,
+          "over100": 0
+        },
+        "browseScrollIpc": {
+          "invoke": {},
+          "send": {},
+          "probeMs": 0
+        },
+        "gpuBeforeArk": 317.8,
+        "gpuAfterArk4s": 547.3,
+        "gpuAfterArk": 230.5,
+        "gpuSettleS": 22,
+        "settingsOpenLongTaskMaxMs": 0,
+        "settingsPages": [
+          {
+            "i": 0,
+            "label": "settings-nav-general",
+            "paintMs": 25,
+            "mountMs": 0,
+            "longTaskMaxMs": 0,
+            "nodes": 336
+          },
+          {
+            "i": 1,
+            "label": "settings-nav-providers",
+            "paintMs": 41,
+            "mountMs": 24,
+            "longTaskMaxMs": 0,
+            "nodes": 342
+          },
+          {
+            "i": 2,
+            "label": "settings-nav-understanding",
+            "paintMs": 30,
+            "mountMs": 262,
+            "longTaskMaxMs": 0,
+            "nodes": 381
+          },
+          {
+            "i": 3,
+            "label": "settings-nav-guide",
+            "paintMs": 27,
+            "mountMs": 4,
+            "longTaskMaxMs": 0,
+            "nodes": 334
+          },
+          {
+            "i": 4,
+            "label": "settings-nav-about",
+            "paintMs": 23,
+            "mountMs": 5,
+            "longTaskMaxMs": 0,
+            "nodes": 319
+          }
+        ]
+      },
+      "eld": {
+        "count": 6593,
+        "min": 8.67,
+        "mean": 15.66,
+        "p50": 15.57,
+        "p99": 21.3,
+        "max": 272.11
+      },
+      "longTasks": {
+        "all": [
+          209,
+          198,
+          80,
+          101,
+          53,
+          157
+        ],
+        "browse-scroll": [],
+        "oracle": [],
+        "oracle-compute": [],
+        "byStep": {
+          "voyage": 209,
+          "voyage-Scenes": 198,
+          "voyage-Audit": 101,
+          "voyage-Medals": 53,
+          "voyage-leave-ark": 157
+        }
+      },
+      "sample": {
+        "label": "cycle-10",
+        "t": 1793873326050,
+        "renderer": {
+          "jsHeapUsedMB": 63.87,
+          "jsHeapTotalMB": 67.42,
+          "domNodes": 3854,
+          "jsEventListeners": 3352,
+          "documents": 2,
+          "layoutCount": 4991,
+          "recalcStyleCount": 71263,
+          "taskDurationS": 197.929,
+          "scriptDurationS": 39.223
+        },
+        "ipcListeners": 13,
+        "ipcListenersByChannel": {
+          "ollama:rerank-progress": 1,
+          "localAi:models-settled": 1,
+          "session:statusChange": 1,
+          "session:liveUpdate": 1,
+          "session:ended": 1,
+          "updater:checking": 1,
+          "updater:update-available": 1,
+          "updater:update-not-available": 1,
+          "updater:download-progress": 1,
+          "updater:update-downloaded": 1,
+          "updater:error": 1,
+          "updater:auto-download": 1,
+          "window-maximized-changed": 1
+        },
+        "processCount": 8,
+        "externalProcessCount": 2,
+        "llamaCount": 2,
+        "llamaWorkingSetMB": 2284.9,
+        "pythonCount": 0,
+        "pythonWorkingSetMB": 0,
+        "otherExternal": [],
+        "gpuWorkingSetMB": 294.5,
+        "gpuPrivateMB": 245.4,
+        "totalWorkingSetMB": 3352.7,
+        "mainHeapMB": 46.8,
+        "mainRssMB": 408.8,
+        "procs": {
+          "llamaCount": 2,
+          "llamaWorkingSetMB": 2284.9,
+          "pythonCount": 0,
+          "pythonWorkingSetMB": 0,
+          "otherExternal": [],
+          "electron": [
+            {
+              "pid": 36484,
+              "type": "Browser",
+              "name": null,
+              "workingSetMB": 408.8,
+              "privateMB": 408.7,
+              "cpuSec": 200.84
+            },
+            {
+              "pid": 2748,
+              "type": "GPU",
+              "name": null,
+              "workingSetMB": 294.5,
+              "privateMB": 245.4,
+              "cpuSec": 250.226
+            },
+            {
+              "pid": 45548,
+              "type": "Utility",
+              "name": "Network Service",
+              "workingSetMB": 60,
+              "privateMB": 14.9,
+              "cpuSec": 44.008
+            },
+            {
+              "pid": 46652,
+              "type": "Tab",
+              "name": null,
+              "workingSetMB": 279.2,
+              "privateMB": 396.8,
+              "cpuSec": 354.718
+            }
+          ],
+          "external": [
+            {
+              "pid": 22684,
+              "name": "llama-server.exe",
+              "workingSetMB": 1148.3,
+              "cpuSec": 103.015625
+            },
+            {
+              "pid": 37528,
+              "name": "llama-server.exe",
+              "workingSetMB": 1136.6,
+              "cpuSec": 31.359375
+            }
+          ],
+          "childCount": 8,
+          "externalCount": 2,
+          "totalWorkingSetMB": 3352.7,
+          "totalCpuSec": 985.53,
+          "mainHeapMB": 46.8,
+          "mainRssMB": 408.8
+        }
+      }
+    }
+  ],
+  "skippedSteps": [],
+  "ipcSelfTest": {
+    "ok": true,
+    "channel": "localAi:status",
+    "expected": 5,
+    "got": 5,
+    "handlers": 188
+  },
+  "scenarioModels": {
+    "ready": true,
+    "ms": 39,
+    "warmMs": 15368,
+    "quietAfterS": 32,
+    "quiesced": true
+  },
+  "idle60": {
+    "cpuPct": 15.02,
+    "eld": {
+      "count": 4066,
+      "min": 8.87,
+      "mean": 15.56,
+      "p50": 15.59,
+      "p99": 20.45,
+      "max": 26.33
+    },
+    "seconds": 60,
+    "startWS": 1193.6,
+    "endWS": 742.4
+  },
+  "baselineSample": {
+    "label": "cycle-0",
+    "t": 1793872246624,
+    "renderer": {
+      "jsHeapUsedMB": 28.65,
+      "jsHeapTotalMB": 30.92,
+      "domNodes": 446,
+      "jsEventListeners": 361,
+      "documents": 1,
+      "layoutCount": 10,
+      "recalcStyleCount": 135,
+      "taskDurationS": 1.006,
+      "scriptDurationS": 0.224
+    },
+    "ipcListeners": 13,
+    "ipcListenersByChannel": {
+      "ollama:rerank-progress": 1,
+      "localAi:models-settled": 1,
+      "session:statusChange": 1,
+      "session:liveUpdate": 1,
+      "session:ended": 1,
+      "updater:checking": 1,
+      "updater:update-available": 1,
+      "updater:update-not-available": 1,
+      "updater:download-progress": 1,
+      "updater:update-downloaded": 1,
+      "updater:error": 1,
+      "updater:auto-download": 1,
+      "window-maximized-changed": 1
+    },
+    "processCount": 8,
+    "externalProcessCount": 2,
+    "llamaCount": 2,
+    "llamaWorkingSetMB": 2268.8,
+    "pythonCount": 0,
+    "pythonWorkingSetMB": 0,
+    "otherExternal": [],
+    "gpuWorkingSetMB": 165,
+    "gpuPrivateMB": 134.6,
+    "totalWorkingSetMB": 3040,
+    "mainHeapMB": 42.3,
+    "mainRssMB": 368.9,
+    "procs": {
+      "llamaCount": 2,
+      "llamaWorkingSetMB": 2268.8,
+      "pythonCount": 0,
+      "pythonWorkingSetMB": 0,
+      "otherExternal": [],
+      "electron": [
+        {
+          "pid": 36484,
+          "type": "Browser",
+          "name": null,
+          "workingSetMB": 368.9,
+          "privateMB": 365.9,
+          "cpuSec": 30.405
+        },
+        {
+          "pid": 2748,
+          "type": "GPU",
+          "name": null,
+          "workingSetMB": 165,
+          "privateMB": 134.6,
+          "cpuSec": 6.774
+        },
+        {
+          "pid": 45548,
+          "type": "Utility",
+          "name": "Network Service",
+          "workingSetMB": 58.9,
+          "privateMB": 14.2,
+          "cpuSec": 1.067
+        },
+        {
+          "pid": 46652,
+          "type": "Tab",
+          "name": null,
+          "workingSetMB": 154.3,
+          "privateMB": 102.7,
+          "cpuSec": 7.782
+        }
+      ],
+      "external": [
+        {
+          "pid": 22684,
+          "name": "llama-server.exe",
+          "workingSetMB": 1132.7,
+          "cpuSec": 4.484375
+        },
+        {
+          "pid": 37528,
+          "name": "llama-server.exe",
+          "workingSetMB": 1136.1,
+          "cpuSec": 4.46875
+        }
+      ],
+      "childCount": 8,
+      "externalCount": 2,
+      "totalWorkingSetMB": 3040,
+      "totalCpuSec": 53.77,
+      "mainHeapMB": 42.3,
+      "mainRssMB": 368.9
+    }
+  },
+  "ipcHandlers": 188,
+  "quitScenario": {
+    "leftovers": []
+  },
+  "hiddenIdle": {
+    "method": "detached (no automation client attached while hidden)",
+    "seconds": 120,
+    "minUptimeS": 150,
+    "series": [
+      {
+        "atS": 12,
+        "byType": {
+          "browser:50740": 0,
+          "gpu-process:35948": 0,
+          "utility:15240": 0,
+          "renderer:13116": 0
+        }
+      },
+      {
+        "atS": 27,
+        "byType": {
+          "browser:50740": 0,
+          "gpu-process:35948": 0,
+          "utility:15240": 0,
+          "renderer:13116": 0
+        }
+      },
+      {
+        "atS": 42,
+        "byType": {
+          "browser:50740": 0,
+          "gpu-process:35948": 0,
+          "utility:15240": 0,
+          "renderer:13116": 0.11
+        }
+      },
+      {
+        "atS": 57,
+        "byType": {
+          "browser:50740": 0.32,
+          "gpu-process:35948": 0,
+          "utility:15240": 0,
+          "renderer:13116": 0.21
+        }
+      },
+      {
+        "atS": 72,
+        "byType": {
+          "browser:50740": 0,
+          "gpu-process:35948": 0,
+          "utility:15240": 0,
+          "renderer:13116": 0.42
+        }
+      },
+      {
+        "atS": 86,
+        "byType": {
+          "browser:50740": 0,
+          "gpu-process:35948": 0,
+          "utility:15240": 0,
+          "renderer:13116": 0
+        }
+      },
+      {
+        "atS": 101,
+        "byType": {
+          "browser:50740": 0,
+          "gpu-process:35948": 0.11,
+          "utility:15240": 0,
+          "renderer:13116": 0
+        }
+      },
+      {
+        "atS": 116,
+        "byType": {
+          "browser:50740": 0,
+          "gpu-process:35948": 0,
+          "utility:15240": 0,
+          "renderer:13116": 0
+        }
+      },
+      {
+        "atS": 123,
+        "byType": {
+          "browser:50740": 0,
+          "gpu-process:35948": 0,
+          "utility:15240": 0,
+          "renderer:13116": 0
+        }
+      }
+    ],
+    "cpuPct": 0.15,
+    "eld": null,
+    "perProcessCpuSec": [
+      {
+        "type": "browser",
+        "pid": 50740,
+        "dCpuSec": 0.047
+      },
+      {
+        "type": "gpu-process",
+        "pid": 35948,
+        "dCpuSec": 0.031
+      },
+      {
+        "type": "utility",
+        "pid": 15240,
+        "dCpuSec": 0
+      },
+      {
+        "type": "renderer",
+        "pid": 13116,
+        "dCpuSec": 0.109
+      }
+    ],
+    "startWS": 740.3,
+    "endWS": 735.7,
+    "toastsWhileHidden": []
+  },
+  "ai": {
+    "ipcSelfTest": {
+      "ok": true,
+      "channel": "localAi:status",
+      "expected": 5,
+      "got": 5,
+      "handlers": 188
+    },
+    "atBoot": {
+      "sidecarState": "stopped",
+      "pythonCount": 0,
+      "llamaCount": 1,
+      "embeddingsVia": "local",
+      "backend": "builtin"
+    },
+    "llama": {
+      "rounds": 10,
+      "embedTexts": 32,
+      "rerankDocs": 32,
+      "warm": {
+        "ms": 6914,
+        "burst": {
+          "mode": "app",
+          "embedMs": [
+            896.171699999999
+          ],
+          "rerankMs": [
+            6007.643000000002
+          ],
+          "embedOk": true,
+          "rerankOk": true,
+          "error": null
+        },
+        "status": {
+          "runtime": [
+            {
+              "role": "embed",
+              "state": "ready",
+              "pid": 5968,
+              "restarts": 0,
+              "cpuFallback": false
+            },
+            {
+              "role": "rerank",
+              "state": "ready",
+              "pid": 33092,
+              "restarts": 0,
+              "cpuFallback": false
+            }
+          ],
+          "sidecar": {
+            "state": "stopped",
+            "pid": null,
+            "restarts": 0
+          },
+          "backend": "builtin",
+          "embeddingsVia": "local",
+          "rerankerVia": "local",
+          "chatVia": "local"
+        }
+      },
+      "routes": {
+        "embeddings": "local",
+        "reranker": "local",
+        "backend": "builtin"
+      },
+      "quietAfterS": 218,
+      "quiesced": true,
+      "perRole": {
+        "embed": {
+          "workingSetMB": 1145.5,
+          "idleCpuPct": 1.66,
+          "idleWindowsPct": [
+            1.67,
+            2.08,
+            1.46,
+            1.65
+          ],
+          "burstCpuPct": 21.73,
+          "burstWorkingSetMB": 1145.8
+        },
+        "rerank": {
+          "workingSetMB": 1135.6,
+          "idleCpuPct": 1.56,
+          "idleWindowsPct": [
+            1.25,
+            2.5,
+            1.87,
+            1.24
+          ],
+          "burstCpuPct": 24.43,
+          "burstWorkingSetMB": 1136.5
+        }
+      },
+      "idle": {
+        "seconds": 20,
+        "settleS": 2,
+        "llamaCpuPct": 3.43
+      },
+      "burstEld": {
+        "count": 3855,
+        "min": 9.06,
+        "mean": 15.65,
+        "p50": 15.58,
+        "p99": 21.74,
+        "max": 54.43
+      },
+      "burstError": null,
+      "direct": {
+        "embedMs": 1219.1,
+        "rerankMs": 1518.2,
+        "samples": 10
+      },
+      "app": {
+        "embedMs": 1205.7,
+        "rerankMs": 1524.1,
+        "samples": 10
+      },
+      "overheadPct": {
+        "embed": -1.1,
+        "rerank": 0.39,
+        "combined": -0.27
+      },
+      "itemsPerS": {
+        "direct": 23.38,
+        "app": 23.44
+      }
+    },
+    "download": {
+      "sizeMB": 512,
+      "ok": true,
+      "wallMs": 7001,
+      "mbPerS": 73.1,
+      "eldMaxMs": 34.77,
+      "eldP99Ms": 27.31,
+      "statusPushes": 20,
+      "statusPushesPerSecAvg": 2.86,
+      "statusPushesMaxPerSec": 5,
+      "statusPushKB": 40.3,
+      "rendererLongTaskMaxMs": 0,
+      "serverRequests": 1,
+      "rangeRequests": 0
+    },
+    "sidecar": {
+      "beforeRoute": {
+        "sidecarState": "stopped",
+        "pythonProcesses": 0,
+        "embeddingsVia": "local",
+        "chatVia": "local"
+      },
+      "start": {
+        "state": "ready",
+        "pid": 47860,
+        "startMs": 41597,
+        "error": null
+      },
+      "afterRoute": {
+        "sidecarState": "ready",
+        "chatVia": "router",
+        "pythonProcesses": 1,
+        "pythonWorkingSetMB": 343.3
+      },
+      "idleCpuPct": 0.37,
+      "fakeHits": 3
+    },
+    "quit": {
+      "sidecarWasRunning": true,
+      "llamaBefore": 2,
+      "pythonBefore": 1,
+      "leftovers": []
+    }
+  },
+  "applist": {
+    "ok": true,
+    "entries": 155000,
+    "ms": 774,
+    "eld": {
+      "count": 306,
+      "min": 6.98,
+      "mean": 15.64,
+      "p50": 15.53,
+      "p99": 22.25,
+      "max": 70.25
+    },
+    "fakeRequests": 893
+  }
+}
