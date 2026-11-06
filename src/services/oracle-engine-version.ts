@@ -22,5 +22,7 @@
  *  15 — v1.0.97 fresh engagement scores and one shared curve classifier; removed games off library shelves;
  *       no curve bonus from rejected games; auto-held games are not rejections; no partial ML scores;
  *       unique mood shelves; Backlog Advisor/studio explanations; deals need a real discount
+ *  16 — v1.0.100 "Your Next Obsession" is a 5-10 game shelf; match % spreads the top of the pool instead of
+ *       pinning it at 99; shelves that show "N% match" are ordered best match first
  */
-export const ORACLE_ENGINE_VERSION = 15;
+export const ORACLE_ENGINE_VERSION = 16;

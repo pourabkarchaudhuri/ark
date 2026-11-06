@@ -81,7 +81,7 @@ import {
   computeRecencyBoost,
   computeDiversityBonus,
   quantileSorted,
-  calibrateMatchPercent,
+  buildMatchCalibrator,
   buildTimeOfDayContext,
   computeTimeOfDayBoost,
   computeStudioLoyaltyBoost,
@@ -676,14 +676,12 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
     if (i % 2000 === 0 && i > 0) await new Promise(r => setTimeout(r, 4));
   }
 
-  // Display calibration: raw scores sit in a narrow low band, so "N% match" is the pool-relative position
-  // between its 5th percentile and its best score (kept within 1–99).
+  // Display calibration: raw scores sit in a narrow low band, so "N% match" is pool-relative (see
+  // buildMatchCalibrator): linear up to the 90th percentile, then the top 10% spread over 75..99 by score+rank,
+  // so the cards shelves are filled with (the very top of the pool) do not all read 99%.
   if (scored.length > 0) {
-    const sortedScores = scored.map(s => s.score).sort((a, b) => a - b);
-    const lo = quantileSorted(sortedScores, 0.05);
-    // 98th percentile, not the maximum: one outlier must not compress everyone else (and pin the top pick at 99%).
-    const hi = quantileSorted(sortedScores, 0.98);
-    for (const s of scored) s.matchPct = Math.min(99, Math.max(1, calibrateMatchPercent(s.score, lo, hi)));
+    const calibrate = buildMatchCalibrator(scored.map(s => s.score).sort((a, b) => a - b));
+    for (const s of scored) s.matchPct = calibrate(s.score);
   }
 
   // ── 14. Diversity re-ranking (MMR) ──
@@ -787,6 +785,9 @@ async function runPipeline(input: RecoWorkerInput): Promise<{ tasteProfile: Tast
 
 // ─── Shelf Assembly ────────────────────────────────────────────────────────────
 
+/** "Your Next Obsession" is a normal shelf of the top picks (the UI wants at least 5; fewer only when fewer exist). */
+const HERO_SHELF_SIZE = 10;
+
 function buildShelvesFromScored(
   reranked: ScoredGame[],
   allScored: ScoredGame[],
@@ -809,14 +810,24 @@ function buildShelvesFromScored(
     for (const g of games) usedGameIds.add(g.gameId);
   };
 
-  // Hero — top pick
-  if (reranked.length > 0) {
+  // Shelves whose cards read "N% match" present the games they chose (MMR order picks WHICH games get in, for
+  // diversity) best match first: displayed % descending, raw score as the tie-break, MMR order for exact ties.
+  const byMatch = (games: ScoredGame[]): ScoredGame[] => games
+    .map((g, i) => ({ g, i }))
+    .sort((a, b) => (b.g.matchPct ?? 0) - (a.g.matchPct ?? 0) || b.g.score - a.g.score || a.i - b.i)
+    .map(x => x.g);
+
+  // Your Next Obsession — the top of the ranking (coming-soon/unplayable games are already out of `reranked`),
+  // a normal shelf like the others, best match first.
+  const heroGames = byMatch(reranked.slice(0, HERO_SHELF_SIZE));
+  if (heroGames.length > 0) {
     shelves.push({
       type: 'hero',
       title: 'Your Next Obsession',
-      games: [reranked[0]],
+      subtitle: 'Your strongest matches right now',
+      games: heroGames,
     });
-    addToUsed([reranked[0]]);
+    addToUsed(heroGames);
   }
 
   // "Complete the Series" — franchise entries the user hasn't played
@@ -858,7 +869,7 @@ function buildShelvesFromScored(
         type: 'because-you-loved',
         title: `Because you loved ${seed.title}`,
         seedGameTitle: seed.title,
-        games: becauseGames,
+        games: byMatch(becauseGames),
       });
       addToUsed(becauseGames);
       break;
@@ -881,7 +892,7 @@ function buildShelvesFromScored(
         type: 'from-studios-you-love',
         title: 'From Studios You Love',
         subtitle: `Games by ${studioNames.join(', ')}`,
-        games: studioGames,
+        games: byMatch(studioGames),
       });
       addToUsed(studioGames);
     }
@@ -899,7 +910,7 @@ function buildShelvesFromScored(
         type: 'deep-in-genre',
         title: `Deep in ${displayGenre}`,
         subtitle: `Primary genre is ${displayGenre}`,
-        games: genreGames,
+        games: byMatch(genreGames),
       });
       addToUsed(genreGames);
     }
@@ -936,7 +947,7 @@ function buildShelvesFromScored(
         type: 'for-your-mood',
         title: `For your ${display} side`,
         subtitle: cluster.topGames.filter(Boolean).length > 0 ? `Based on ${cluster.topGames.filter(Boolean).slice(0, 2).join(' & ')}` : undefined,
-        games: clusterGames,
+        games: byMatch(clusterGames),
       });
       addToUsed(clusterGames);
       break;
@@ -1151,7 +1162,7 @@ function buildShelvesFromScored(
         title: `Finish ${topOnHold.title}, then try...`,
         subtitle: 'Motivation to complete what you started',
         seedGameTitle: topOnHold.title,
-        games: finishAndTry,
+        games: byMatch(finishAndTry),
       });
       addToUsed(finishAndTry);
     }

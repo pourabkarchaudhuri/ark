@@ -12,10 +12,10 @@ import type { TasteProfile, RecoShelf, ScoredGame } from '@/types/reco';
 export const ORACLE_RERANK_POOL = 100;
 
 /**
- * Shelves whose order is taste order (the hero shelf is a single game, so there is nothing to reorder). Everything else keeps the worker's order: Stretch Picks are
+ * Shelves whose order is taste order. Everything else keeps the worker's order: Stretch Picks are
  * deliberately far-from-taste-first, Trending is popularity, Critics' Choice is Metacritic, Deals is
  * discount, Hidden Gems/Free/New Releases are catalogue picks, mood/cluster shelves have their own
- * seed, Complete the Series is release order, and Backlog/Unfinished are the user's own games. A
+ * seed, Complete the Series is release order, and Backlog/Unfinished are the user's own games, and Your Next Obsession is the best-match-first top of the ranking. A
  * taste-query reranker would silently undo those intents.
  */
 export const RERANKABLE_SHELF_TYPES: ReadonlySet<string> = new Set([

@@ -10,7 +10,6 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
-import { useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   RefreshCw,
@@ -25,7 +24,6 @@ import {
   Zap,
   Eye,
   Award,
-  Target,
   Layers,
   Heart,
   CalendarPlus,
@@ -144,7 +142,7 @@ import { isLibraryBackedOracleGame, oracleDismissMeta } from '@/services/oracle-
 import { oracleShelfKey } from '@/services/oracle-shelf-key';
 import { oracleEventLog } from '@/services/oracle-event-log';
 import { journeyStore } from '@/services/journey-store';
-import { getPrefetchedGames, setNavigatingGame } from '@/services/prefetch-store';
+import { getPrefetchedGames } from '@/services/prefetch-store';
 import { GameCard } from '@/components/game-card';
 import { Badge } from '@/components/ui/badge';
 import type { Game } from '@/types/game';
@@ -1458,119 +1456,6 @@ function ShelfCarousel({
   );
 }
 
-// ─── Hero Card ─────────────────────────────────────────────────────────────────
-
-function HeroCard({ game, onNavigate }: { game: ScoredGame; onNavigate: (gameId: string) => void }) {
-  const { coverUrl, headerImage } = getScoredGameImages(game);
-  const img = useFallbackImage(game.gameId, game.title, coverUrl, headerImage);
-  const pct = matchPercent(game);
-  const [displayPct, setDisplayPct] = useState(0);
-
-  // Animate match percentage counter
-  useEffect(() => {
-    let frame = 0;
-    const totalFrames = 40;
-    const interval = setInterval(() => {
-      frame++;
-      setDisplayPct(Math.round((frame / totalFrames) * pct));
-      if (frame >= totalFrames) clearInterval(interval);
-    }, 25);
-    return () => clearInterval(interval);
-  }, [pct]);
-
-  // Build reason string
-  const reasonParts: string[] = [];
-  if (game.reasons.similarTo.length > 0) {
-    reasonParts.push(`Similar to ${game.reasons.similarTo.slice(0, 2).join(' & ')}`);
-  }
-  if (game.reasons.sharedGenres.length > 0) {
-    reasonParts.push(game.reasons.sharedGenres.slice(0, 3).join(', '));
-  }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.8, ease: 'easeOut' }}
-      className="relative w-full h-[280px] rounded-xl overflow-hidden cursor-pointer group mb-8"
-      onClick={() => {
-        // v1.0.44 fix — prime the nav-transfer with the hydrated Game so
-        // the details page hits the enrichment fast-path just like Browse
-        // clicks do. Without this the hero pick landed on details with the
-        // same half-empty stub the shelf cards used to.
-        setNavigatingGame(scoredGameToGame(game));
-        onNavigate(game.gameId);
-      }}
-    >
-      {/* Background image with Ken Burns */}
-      {img.src && !img.failed && (
-        // Ken Burns on CSS keyframes (.oracle-kenburns): a transform animation
-        // the compositor runs, where framer's infinite scale kept the main
-        // thread busy for as long as Oracle was open.
-        <img
-          src={img.src}
-          alt={game.title}
-          onLoad={img.onLoad}
-          onError={img.onError}
-          className={cn(
-            'oracle-kenburns absolute inset-0 w-full h-full object-cover transition-opacity duration-1000',
-            img.loaded ? 'opacity-100' : 'opacity-0',
-          )}
-        />
-      )}
-
-      {/* Gradient overlays */}
-      <div className="absolute inset-0 bg-gradient-to-r from-black/90 via-black/60 to-transparent" />
-      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
-
-      {/* Fuchsia glow accent */}
-      <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-fuchsia-500/60 via-fuchsia-500/20 to-transparent" />
-
-      {/* Content */}
-      <div className="absolute inset-0 flex flex-col justify-end p-6 lg:p-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3, duration: 0.6 }}
-        >
-          <div className="flex items-center gap-2 mb-2">
-            <Sparkles className="w-3.5 h-3.5 text-fuchsia-400" />
-            <span className="text-[10px] uppercase tracking-widest text-fuchsia-400 font-semibold">
-              Your Next Obsession
-            </span>
-          </div>
-
-          <h2 className="text-2xl lg:text-3xl font-bold text-white mb-2 group-hover:text-fuchsia-300 transition-colors">
-            {game.title}
-          </h2>
-
-          <div className="flex items-center gap-4 mb-3">
-            <div className="flex items-center gap-1.5">
-              <Target className="w-3.5 h-3.5 text-fuchsia-400" />
-              <span className="text-sm font-bold text-fuchsia-300">{displayPct}% Match</span>
-            </div>
-            {game.metacriticScore && (
-              <div className="flex items-center gap-1.5">
-                <Award className="w-3.5 h-3.5 text-amber-400" />
-                <span className="text-sm text-amber-300">Metacritic {game.metacriticScore}</span>
-              </div>
-            )}
-            {game.developer && (
-              <span className="text-sm text-white/40">{game.developer}</span>
-            )}
-          </div>
-
-          {reasonParts.length > 0 && (
-            <p className="text-xs text-white/50 max-w-md">
-              {reasonParts.join(' · ')}
-            </p>
-          )}
-        </motion.div>
-      </div>
-    </motion.div>
-  );
-}
-
 // ─── Taste DNA Radar Chart ─────────────────────────────────────────────────────
 
 function TasteDNA({ profile }: { profile: TasteProfile }) {
@@ -1859,7 +1744,6 @@ const ORACLE_RIGHT_PANEL_ID = 'oracle-right-panel';
 
 export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void }) {
   const state = useRecoStore();
-  const [, navigate] = useLocation();
   const hasTriggered = useRef(false);
   const lastInvalidationGen = useRef(state.invalidationGeneration);
 
@@ -1977,10 +1861,6 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     }
   }, [state.status, state.invalidationGeneration]);
 
-  const handleNavigate = useCallback((gameId: string) => {
-    navigate(`/game/${gameId}`);
-  }, [navigate]);
-
   const handleRefresh = useCallback(() => {
     hasTriggered.current = false;
     embeddingService.resetLibraryStatus();
@@ -2074,17 +1954,15 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     })).filter(s => s.games.length > 0),
     [state.shelves, dismissedIds],
   );
-  const heroShelf = filteredShelves.find(s => s.type === 'hero');
-  const nonHeroShelves = useMemo(() => filteredShelves.filter(s => s.type !== 'hero'), [filteredShelves]);
   // Thompson-sample the shelf ORDER once per new result (lastComputed) or when
   // the set of shelves changes — not on every new `shelves` identity. The
   // background rerank replaces `state.shelves` (same shelves, games reordered
   // within them), and keying on that identity re-sampled the bandit, so the
   // shelves visibly reshuffled the moment the rerank landed.
-  const shelfKeySig = nonHeroShelves.map(oracleShelfKey).join('\u0001');
+  const shelfKeySig = filteredShelves.map(oracleShelfKey).join('\u0001');
   const banditShelfOrder = useMemo(
     () => {
-      const order = shelfBanditStore.reorderShelves(nonHeroShelves).map(oracleShelfKey);
+      const order = shelfBanditStore.reorderShelves(filteredShelves).map(oracleShelfKey);
       oracleEventLog.record({
         type: 'shelf-order',
         data: { order, arms: shelfBanditStore.snapshotArms() },
@@ -2095,8 +1973,8 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
     [state.lastComputed, shelfKeySig],
   );
   const otherShelves = useMemo(
-    () => orderShelvesByKeys(nonHeroShelves, banditShelfOrder),
-    [nonHeroShelves, banditShelfOrder],
+    () => orderShelvesByKeys(filteredShelves, banditShelfOrder),
+    [filteredShelves, banditShelfOrder],
   );
   const oracleRerankBadgeInfo = oracleRerankBadge(state.oracleRerankStatus);
 
@@ -2326,11 +2204,6 @@ export function OracleView({ onSwitchToBrowse }: { onSwitchToBrowse: () => void 
                 </button>
               </div>
             </div>
-
-            {/* Hero card */}
-            {heroShelf && heroShelf.games[0] && (
-              <HeroCard game={heroShelf.games[0]} onNavigate={handleNavigate} />
-            )}
 
             {/* Shelves */}
             <div>

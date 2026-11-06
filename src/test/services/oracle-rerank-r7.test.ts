@@ -34,7 +34,7 @@ describe('rerank policy helpers', () => {
     for (const t of ['because-you-loved', 'deep-in-genre', 'from-studios-you-love']) {
       expect(RERANKABLE_SHELF_TYPES.has(t)).toBe(true);
     }
-    // hero is a single game: nothing to reorder, so it is out of scope.
+    // hero (Your Next Obsession) is the best-match-first top of the ranking: a reranker must not reorder it.
     for (const t of ['hero', 'stretch-picks', 'trending-now', 'critics-choice', 'deals-for-you', 'free-for-you', 'hidden-gems',
       'new-releases-for-you', 'coming-soon-for-you', 'for-your-mood', 'complete-the-series', 'backlog-advisor', 'unfinished-business']) {
       expect(RERANKABLE_SHELF_TYPES.has(t)).toBe(false);

@@ -1580,6 +1580,54 @@ export function calibrateMatchPercent(score: number, lo: number, hi: number): nu
   return Math.round(clamp01((score - lo) / (hi - lo)) * 100);
 }
 
+/** Share of the pool below which the display scale is linear in score (the "body"); above it, the "top". */
+export const MATCH_TOP_QUANTILE = 0.9;
+/** Displayed % at the body/top boundary. The top spreads from here up to 99 (only the best game reaches 99). */
+export const MATCH_TOP_START_PCT = 75;
+
+/**
+ * Pool-relative "N% match" for display. Raw scores sit in a narrow low band, so the scale is anchored on the pool:
+ *  - body: the 5th percentile (1%) up to the 90th percentile (75%), linear in score;
+ *  - top: the best 10% of the pool spread over 75..99 by an equal mix of score position and rank position.
+ * The old scale clipped everything above the 98th percentile to 99%, and shelves are filled from the very top of
+ * the pool, so whole shelves read 99%. Mixing in the RANK keeps the top distinguishable (one outlier cannot
+ * compress it) while the score share keeps a real gap visible as a gap. Monotonic in score; only the pool's best
+ * score reaches 99 (the top segment floors), everything else is at most 98.
+ */
+export function buildMatchCalibrator(sortedScores: number[]): (score: number) => number {
+  const n = sortedScores.length;
+  if (n === 0) return (score) => Math.min(99, Math.max(1, Math.round(clamp01(score) * 100)));
+  const lo = quantileSorted(sortedScores, 0.05);
+  const mid = quantileSorted(sortedScores, MATCH_TOP_QUANTILE);
+  const max = sortedScores[n - 1];
+  if (!(mid > lo) || !(max > mid)) {
+    const hi = quantileSorted(sortedScores, 0.98);
+    return (score) => Math.min(99, Math.max(1, calibrateMatchPercent(score, lo, hi)));
+  }
+  // First index whose score is > x (number of scores <= x).
+  const countAtMost = (x: number): number => {
+    let a = 0;
+    let b = n;
+    while (a < b) {
+      const m = (a + b) >>> 1;
+      if (sortedScores[m] <= x) a = m + 1; else b = m;
+    }
+    return a;
+  };
+  const midRank = countAtMost(mid);
+  return (score) => {
+    if (!Number.isFinite(score)) return 1;
+    if (score <= mid) {
+      return Math.max(1, Math.round(1 + (MATCH_TOP_START_PCT - 1) * clamp01((score - lo) / (mid - lo))));
+    }
+    const scoreFrac = clamp01((score - mid) / (max - mid));
+    // Rank position inside the top segment: 0 just above `mid`, 1 for the best score.
+    const rankFrac = n - midRank > 1 ? clamp01((countAtMost(score) - midRank - 1) / (n - midRank - 1)) : 1;
+    const t = 0.5 * scoreFrac + 0.5 * rankFrac;
+    return Math.min(99, Math.floor(MATCH_TOP_START_PCT + (99 - MATCH_TOP_START_PCT) * t));
+  };
+}
+
 // ─── Diagnostics ───────────────────────────────────────────────────────────────
 
 /**
