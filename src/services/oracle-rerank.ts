@@ -612,6 +612,18 @@ export type OracleRerankOptions = {
 };
 
 /**
+ * The rerank blend reorders a shelf, but the "N% match" badge still carries each game's pre-rerank value, so
+ * the cards would no longer read best-first. Hand the shelf's own percentages (same set of values) back out
+ * in descending order along the new order: the badge then reflects the blended rank without inventing new numbers.
+ */
+export function alignMatchPctToOrder(games: ScoredGame[]): ScoredGame[] {
+  const values = games.map(g => g.matchPct).filter((v): v is number => typeof v === 'number');
+  if (values.length !== games.length || values.length < 2) return games;
+  values.sort((a, b) => b - a);
+  return games.map((g, i) => (g.matchPct === values[i] ? g : { ...g, matchPct: values[i] }));
+}
+
+/**
  * Rerank up to ORACLE_RERANK_POOL unique games (round-robin across shelves) with the taste query, then reorder games within each shelf.
  */
 export async function applyOracleRerankShelves(
@@ -736,7 +748,7 @@ export async function applyOracleRerankShelves(
     }
 
     const out = shelves.map((sh, i) => (eligible[i]
-      ? { ...sh, games: blendShelfOrder(sh.games, scores, effBlend) }
+      ? { ...sh, games: alignMatchPctToOrder(blendShelfOrder(sh.games, scores, effBlend)) }
       : sh));
     const movement = computeRerankMovement(
       shelves.map((sh) => sh.games.map((g) => g.gameId)),
