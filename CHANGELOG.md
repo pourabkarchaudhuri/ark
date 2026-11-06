@@ -4,6 +4,33 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.99] - 2026-11-06
+
+A hardening release for the built-in local AI, model downloads, the AI router and Settings, after a third audit (28 findings) and a speed and memory re-measure against 1.0.98.
+
+### Fixed - local AI runtime
+- Stopping an AI server while it is still starting no longer leaves a dead server marked ready, loses the stop, or hands the next request a cancelled start.
+- Out-of-memory on the graphics card now halves the chat context on the GPU before falling back to the processor, and the fallback expires after 30 minutes. Embeddings that run out of memory relaunch on the processor instead of repeating the same request. The first embedding after start-up is no longer pinned to the processor by an early GPU probe.
+- Quitting from the fatal-error and "Restart Ark" paths now stops the built-in AI servers and the router helper.
+
+### Fixed - downloads and disk
+- A read-only, missing or vanished models folder is reported as a folder problem, not "blocked on this network", and stops the queue instead of trying more sources.
+- A captive-portal page is no longer saved into a model download; Ark asks you to sign in and retry. A locked file at the final move is retried, keeps the finished download and does not re-download. Offline errors from Chromium are recognised.
+- Failed writes no longer leave temporary files behind (settings, chat history, search index), and a stale index file is cleaned up.
+- The download status refreshes when the window is restored, and Remove all waits for the running download.
+
+### Fixed - AI router
+- The router helper checks that its port is really its own and retries a busy port. Local-network connectors bypass the system proxy. Chat honours the failure policy timeout. Test results are not recorded against a connection that was edited meanwhile. During a model change, search queries still use the matching vectors and bulk writes never mix vector spaces.
+- A failed router helper recovers when its configuration changes.
+
+### Fixed - Settings and Oracle
+- The built-in route says "Needs model" when its model is not downloaded, instead of "Live".
+- Re-check no longer reports a false fault after switching role tab; the picker and role tabs work with the keyboard; the connection panel no longer traps Tab.
+- A neighbour graph built under an older layout is discarded after an upgrade.
+
+### Known limits
+- Orphaned AI servers after a crash or Task Manager kill rely on the Windows job object (no startup sweep yet). AMD and Intel graphics inference are not verified on real hardware. CPU-only reranking of very large candidate lists is slow.
+
 ## [1.0.98] - 2026-11-05
 
 A hardening and polish release for the built-in local AI, the AI router and Settings, after a second full audit and a speed and memory re-measure against 1.0.97.
