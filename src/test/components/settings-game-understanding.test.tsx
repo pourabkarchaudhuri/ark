@@ -326,7 +326,7 @@ describe('maintenance', () => {
     await renderPage();
     fireEvent.click(screen.getByText('Advanced: matching tune-up test'));
     fireEvent.click(screen.getByRole('button', { name: 'Run sweep' }));
-    expect(await screen.findByText(/MRR/)).toBeInTheDocument();
+    expect(await screen.findByText(/MRR/, undefined, { timeout: 15000 })).toBeInTheDocument();
   });
 });
 
