@@ -1,23 +1,16 @@
-# Ark v1.0.99 — Sturdier AI and downloads
-
-A hardening release for the built-in local AI, model downloads, the AI router and Settings.
+# Ark v1.0.100 — Oracle polish
 
 ## Improved
 
-- **Sturdier built-in AI** — clean stops, a smarter fallback when the graphics card runs out of memory, and tidy exits.
-- **Downloads** explain folder and network-sign-in problems correctly and never leave temporary files behind.
-- **AI providers** say "Needs model" when a model is missing; the role tabs and picker work with the keyboard.
-- Search and Oracle stay consistent while a model change is being re-indexed.
+- **Your Next Obsession** is now a regular shelf of up to 10 of your strongest matches, instead of one large banner.
+- **Match percentages** are spread out (no more wall of 99%), and shelves list the best match first.
 
-## Known limits
-
-Orphaned AI servers after a crash rely on the Windows job object; AMD and Intel graphics inference are not yet verified on real hardware; CPU-only reranking of very large lists is slow.
+After updating, Oracle recomputes once, so the first Oracle load can take a little longer.
 
 If the in-app update fails, download the installer directly:
-https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.99/Ark-Setup-1.0.99.exe
+https://github.com/pourabkarchaudhuri/ark/releases/download/v1.0.100/Ark-Setup-1.0.100.exe
 
 ---
 
-**Tests:** 3486 tests (332 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
-**Measured:** leak and speed checks against v1.0.98 all pass (docs/perf/1.0.99-measurements.md).
-**Ranking:** unchanged (Oracle engine 15, embedding version 2).
+**Tests:** 3498 tests (335 files) passing under `vitest --isolate`. Typecheck clean on both TypeScript projects.
+**Ranking:** Oracle engine version 16 (rankings and percentages change); embedding version 2 unchanged.

@@ -4,6 +4,15 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.100] - 2026-11-06
+
+An Oracle polish release.
+
+### Changed
+- **"Your Next Obsession" is now a normal shelf** of up to 10 of your strongest matches, in the same card style as every other shelf, instead of one large banner.
+- **Match percentages are spread out and sorted.** Many cards used to read 99% because every game above the pool's 98th percentile was clipped to 99. The scale now keeps the top of the list distinct (only the single best match can read 99), and shelves that show a percentage list their games best match first. Shelves ordered by something else (critic score, player count, discount, release date, series order) keep that order. When the optional AI rerank reorders a shelf, the percentages follow the new order.
+- Oracle engine version 16: cached recommendations from older versions are recomputed once on first launch.
+
 ## [1.0.99] - 2026-11-06
 
 A hardening release for the built-in local AI, model downloads, the AI router and Settings, after a third audit (28 findings) and a speed and memory re-measure against 1.0.98.
