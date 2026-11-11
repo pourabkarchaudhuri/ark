@@ -112,8 +112,8 @@ const prefersReducedMotion = (): boolean => {
 const WHEEL_DAMP = 0.25;
 const CARD_DAMP = 0.15;
 
-// shared texture loader instance — use empty crossOrigin to avoid CORS issues
-// in Electron's file:// context where the origin is null
+// Fallback loader for environments without createImageBitmap (and the tests): the plain texture loader.
+// crossOrigin '' (anonymous CORS) avoids tainted-canvas errors in Electron's file:// context where the origin is null.
 const textureLoader = new THREE.TextureLoader();
 textureLoader.setCrossOrigin('');
 
@@ -194,53 +194,145 @@ function shortestAngleDelta(from: number, to: number): number {
   return d;
 }
 
-// ─── Texture hook ─────────────────────────────────────────────────────────────
+// ─── Texture loading ──────────────────────────────────────────────────────────
 
 /**
- * Loads a texture using THREE.TextureLoader with an automatic fallback chain.
- * Tries each URL in order. Returns the loaded texture (or null while loading / if all fail).
- * Completely avoids Suspense & Error Boundaries — purely imperative.
+ * Covers are decoded at this size, not at the source size: on screen the biggest box is ~0.7 x 1.05 world
+ * units (a few hundred pixels), while a Steam library cover is 600x900 and Epic art can be far larger.
+ * Full-size textures for a whole ring cost ~1 GB of GPU memory and a long main-thread upload hitch.
  */
-function useFallbackTexture(urls: string[]): THREE.Texture | null {
-  const [texture, setTexture] = useState<THREE.Texture | null>(null);
-  const attemptRef = useRef(0);
+export const COVER_TEXTURE_W = 256;
+export const COVER_TEXTURE_H = 384;
+/** Covers decode at most this many at a time, so entering the Ark never spends one long frame on all of them. */
+const MAX_CONCURRENT_COVER_LOADS = 3;
+/** Cards within this many steps (either way) of the selected one get a cover; the rest stay bare cases. */
+export const COVER_WINDOW_RADIUS = 9;
+
+interface CoverJob {
+  rank: number;
+  run: () => Promise<void>;
+}
+const coverQueue: CoverJob[] = [];
+let activeCoverLoads = 0;
+
+function pumpCoverQueue(): void {
+  while (activeCoverLoads < MAX_CONCURRENT_COVER_LOADS && coverQueue.length > 0) {
+    // Nearest the selected card first.
+    let best = 0;
+    for (let i = 1; i < coverQueue.length; i++) if (coverQueue[i].rank < coverQueue[best].rank) best = i;
+    const [job] = coverQueue.splice(best, 1);
+    activeCoverLoads++;
+    void job.run().catch(() => { /* a failed cover just stays a bare case */ }).finally(() => {
+      activeCoverLoads--;
+      pumpCoverQueue();
+    });
+  }
+}
+
+/** Queue a cover load; the returned function removes it again if it has not started. */
+function enqueueCoverLoad(rank: number, run: () => Promise<void>): () => void {
+  const job: CoverJob = { rank, run };
+  coverQueue.push(job);
+  pumpCoverQueue();
+  return () => {
+    const i = coverQueue.indexOf(job);
+    if (i >= 0) coverQueue.splice(i, 1);
+  };
+}
+
+/**
+ * Which cards get a cover: gameId -> ring distance from the selected card, for cards within `radius` steps
+ * either way around the ring (the ring wraps, so the card before the first is the last). Exported for tests.
+ */
+export function computeCoverRanks(ids: string[], activeIdx: number, radius = COVER_WINDOW_RADIUS): Map<string, number> {
+  const total = ids.length;
+  const ranks = new Map<string, number>();
+  for (let i = 0; i < total; i++) {
+    const d = Math.abs(i - activeIdx);
+    const ring = Math.min(d, total - d);
+    if (ring <= radius) ranks.set(ids[i], ring);
+  }
+  return ranks;
+}
+
+/** Test hook: how many cover loads are running / waiting. */
+export function __coverQueueState(): { active: number; queued: number } {
+  return { active: activeCoverLoads, queued: coverQueue.length };
+}
+
+/**
+ * Load one cover as a small texture. The image is decoded and shrunk by the browser's image pipeline
+ * (createImageBitmap with a resize), off the render path, so uploading it is a few hundred KB.
+ */
+async function loadCoverTexture(url: string): Promise<THREE.Texture> {
+  if (typeof createImageBitmap !== 'function') {
+    return textureLoader.loadAsync(url);
+  }
+  const img = new Image();
+  img.crossOrigin = '';
+  img.decoding = 'async';
+  img.src = url;
+  await img.decode();
+  const bitmap = await createImageBitmap(img, {
+    resizeWidth: COVER_TEXTURE_W,
+    resizeHeight: COVER_TEXTURE_H,
+    resizeQuality: 'medium',
+    // ImageBitmaps are not flipped by WebGL's UNPACK_FLIP_Y: flip when decoding and tell three not to.
+    imageOrientation: 'flipY',
+  });
+  const tex = new THREE.Texture(bitmap as unknown as HTMLImageElement);
+  tex.flipY = false;
+  tex.needsUpdate = true;
+  const dispose = tex.dispose.bind(tex);
+  tex.dispose = () => {
+    dispose();
+    try { bitmap.close(); } catch { /* already closed */ }
+  };
+  return tex;
+}
+
+/**
+ * Loads a cover texture with an automatic fallback chain, but only while `rank` says the card is near the
+ * selected one (`rank` < 0: not wanted — no texture is held). Returns the texture, or null while loading / if
+ * every URL fails. Purely imperative: no Suspense, no error boundaries.
+ */
+function useFallbackTexture(urls: string[], rank: number): { texture: THREE.Texture | null; hasAlpha: boolean } {
+  const [state, setState] = useState<{ texture: THREE.Texture | null; hasAlpha: boolean }>({ texture: null, hasAlpha: false });
   const urlsRef = useRef(urls);
   urlsRef.current = urls;
+  const rankRef = useRef(rank);
+  rankRef.current = rank;
+  const wanted = rank >= 0;
 
-  // Free the GPU copy of a cover once nothing draws it any more (replaced, or the card unmounted).
+  // Free the GPU copy of a cover once nothing draws it any more (replaced, dropped out of range, or the card unmounted).
+  const { texture } = state;
   useEffect(() => () => { texture?.dispose(); }, [texture]);
 
   useEffect(() => {
-    let cancelled = false;
-    attemptRef.current = 0;
-    setTexture(null);
-
-    function tryNext(idx: number) {
-      if (cancelled) return;
-      if (idx >= urlsRef.current.length) return; // all failed
-
-      textureLoader.load(
-        urlsRef.current[idx],
-        (tex) => {
-          if (cancelled) { tex.dispose(); return; }
-          setTexture(tex);
-        },
-        undefined,
-        () => {
-          // error — try next URL in chain
-          if (!cancelled) tryNext(idx + 1);
-        },
-      );
+    if (!wanted) {
+      setState((prev) => (prev.texture ? { texture: null, hasAlpha: false } : prev));
+      return;
     }
-
-    tryNext(0);
-
-    return () => { cancelled = true; };
-    // re-run only when the URL chain identity changes
+    let cancelled = false;
+    const cancelQueued = enqueueCoverLoad(rankRef.current, async () => {
+      for (const url of urlsRef.current) {
+        if (cancelled) return;
+        try {
+          const tex = await loadCoverTexture(url);
+          if (cancelled) { tex.dispose(); return; }
+          setState({ texture: tex, hasAlpha: /\.png(\?|$)/i.test(url) });
+          return;
+        } catch {
+          // error — try the next URL in the chain
+        }
+      }
+    });
+    return () => { cancelled = true; cancelQueued(); };
+    // re-run when the card enters/leaves the window or its URL chain identity changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urls.join('|')]);
+  }, [wanted, urls.join('|')]);
 
-  return texture;
+  return state;
 }
 
 // ─── Three.js Components ──────────────────────────────────────────────────────
@@ -262,6 +354,13 @@ function Scene({
   const safeIdx = total ? Math.min(activeIndex, total - 1) : 0;
 
   const activeEntry = flatCards[safeIdx]?.entry ?? null;
+
+  // Lazy covers: only the cards within COVER_WINDOW_RADIUS steps of the selected one (around the ring) hold a
+  // texture; the value is the ring distance (0 = selected), the load queue serves the nearest first.
+  const coverRanks = useMemo(
+    () => computeCoverRanks(flatCards.map((c) => c.entry.gameId), safeIdx),
+    [flatCards, safeIdx],
+  );
 
   // The shared case/cover geometries and materials are created once at module level; free them with
   // the renderer (see ARK_SHARED_GPU_RESOURCES).
@@ -319,6 +418,7 @@ function Scene({
             group={group}
             radius={WHEEL_RADIUS}
             activeGameId={activeEntry?.gameId ?? ''}
+            coverRanks={coverRanks}
             onSelect={onSelect}
           />
         ))}
@@ -365,11 +465,13 @@ function GenreArc({
   group,
   radius,
   activeGameId,
+  coverRanks,
   onSelect,
 }: {
   group: GenreGroup;
   radius: number;
   activeGameId: string;
+  coverRanks: ReadonlyMap<string, number>;
   onSelect: (gameId: string) => void;
 }) {
   const { entries: genreEntries, from, len } = group;
@@ -398,6 +500,7 @@ function GenreArc({
             gameId={entry.gameId}
             urls={urls}
             isActive={entry.gameId === activeGameId}
+            coverRank={coverRanks.get(entry.gameId) ?? -1}
             hoursPlayed={entry.hoursPlayed}
             position={position}
             rotation={rotation}
@@ -558,6 +661,7 @@ const Card = memo(function Card({
   gameId,
   urls,
   isActive,
+  coverRank,
   hoursPlayed,
   position: cardPos,
   rotation: cardRot,
@@ -566,6 +670,8 @@ const Card = memo(function Card({
   gameId: string;
   urls: string[];
   isActive: boolean;
+  /** Ring distance from the selected card while a cover should be loaded; -1 = no cover (see Scene). */
+  coverRank: number;
   hoursPlayed: number;
   position: [number, number, number];
   rotation: [number, number, number];
@@ -588,7 +694,7 @@ const Card = memo(function Card({
   const mounted = useRef(false);
 
   // The spine reuses the cover texture through SPINE_GEOMETRY's cropped UVs (no second GPU upload).
-  const texture = useFallbackTexture(urls);
+  const { texture, hasAlpha } = useFallbackTexture(urls, coverRank);
 
   // Track active state transitions for the floating label
   const [showLabel, setShowLabel] = useState(false);
@@ -601,8 +707,15 @@ const Card = memo(function Card({
     setShowLabel(false);
   }, [isActive]);
 
+  // A card at rest costs nothing per frame: once every damped value has settled, skip the work until the
+  // selection changes (or the active box's sway needs it).
+  const settledRef = useRef(false);
+  useEffect(() => { settledRef.current = false; }, [isActive, texture, restPosition]);
+
   useFrame((_state, frameDelta) => {
     if (!slabRef.current || !groupRef.current) return;
+    const swaying = isActive && !reducedMotion;
+    if (settledRef.current && !swaying) return;
     const delta = Math.min(frameDelta, MAX_FRAME_DELTA);
 
     if (!mounted.current) {
@@ -611,26 +724,28 @@ const Card = memo(function Card({
       mounted.current = true;
     }
 
-    easing.damp3(groupRef.current.position, isActive ? ACTIVE_POSITION : restPosition, 0.2, delta);
+    let running = easing.damp3(groupRef.current.position, isActive ? ACTIVE_POSITION : restPosition, 0.2, delta);
 
     const f = isActive ? 2.6 : 1;
-    easing.damp3(slabRef.current.scale, scaleTarget.current.set(f, f, f), CARD_DAMP, delta);
+    running = easing.damp3(slabRef.current.scale, scaleTarget.current.set(f, f, f), CARD_DAMP, delta) || running;
 
     const colorSpeed = isActive ? 0.3 : 0.1;
     if (frontMatRef.current) {
-      easing.dampC(frontMatRef.current.color, isActive ? COLOR_FRONT_ACTIVE : COLOR_FRONT_IDLE, colorSpeed, delta);
+      running = easing.dampC(frontMatRef.current.color, isActive ? COLOR_FRONT_ACTIVE : COLOR_FRONT_IDLE, colorSpeed, delta) || running;
     }
     if (backMatRef.current) {
-      easing.dampC(backMatRef.current.color, isActive ? COLOR_BACK_ACTIVE : COLOR_BACK_IDLE, colorSpeed, delta);
+      running = easing.dampC(backMatRef.current.color, isActive ? COLOR_BACK_ACTIVE : COLOR_BACK_IDLE, colorSpeed, delta) || running;
     }
     if (spineMatRef.current) {
-      easing.dampC(spineMatRef.current.color, isActive ? COLOR_SPINE_ACTIVE : COLOR_SPINE_IDLE, colorSpeed, delta);
+      running = easing.dampC(spineMatRef.current.color, isActive ? COLOR_SPINE_ACTIVE : COLOR_SPINE_IDLE, colorSpeed, delta) || running;
     }
 
     // The active box stays turned slightly so its spine and depth show, with a slow sway.
-    const sway = isActive && !reducedMotion ? Math.sin(_state.clock.elapsedTime * 0.8) * 0.12 : 0;
+    const sway = swaying ? Math.sin(_state.clock.elapsedTime * 0.8) * 0.12 : 0;
     const targetY = isActive ? faceForwardY + ACTIVE_TILT + sway : defaultY;
-    easing.damp(groupRef.current.rotation, 'y', targetY, CARD_DAMP, delta);
+    running = easing.damp(groupRef.current.rotation, 'y', targetY, CARD_DAMP, delta) || running;
+
+    settledRef.current = !running;
   });
 
   const hoursText = hoursPlayed > 0 ? formatHours(hoursPlayed) : '0 Mins';
@@ -648,7 +763,7 @@ const Card = memo(function Card({
             <meshStandardMaterial
               ref={frontMatRef}
               map={texture}
-              transparent
+              transparent={hasAlpha}
               roughness={0.45}
               metalness={0.05}
             />
@@ -674,7 +789,7 @@ const Card = memo(function Card({
             <meshStandardMaterial
               ref={backMatRef}
               map={texture}
-              transparent
+              transparent={hasAlpha}
               roughness={0.6}
               metalness={0.1}
             />

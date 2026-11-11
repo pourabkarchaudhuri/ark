@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   motion,
   useAnimationFrame,
@@ -79,8 +79,21 @@ function MovingBorder({
   const pathRef = useRef<SVGRectElement>(null);
   const progress = useMotionValue<number>(0);
 
+  // The path length only changes when the button is resized: measure it then, not on every frame.
+  const lengthRef = useRef(0);
+  useEffect(() => {
+    const el = pathRef.current;
+    if (!el) return;
+    const measure = () => { lengthRef.current = el.getTotalLength?.() ?? 0; };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   useAnimationFrame((time) => {
-    const length = pathRef.current?.getTotalLength();
+    const length = lengthRef.current;
     if (length) {
       const pxPerMs = length / duration;
       progress.set((time * pxPerMs) % length);

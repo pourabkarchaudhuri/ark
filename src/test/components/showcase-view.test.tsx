@@ -47,7 +47,7 @@ vi.mock('@/services/custom-game-store', () => ({
   customGameStore: { getGame: vi.fn().mockReturnValue(undefined), getAllGames: vi.fn().mockReturnValue([]) },
 }));
 
-import { ShowcaseView, buildGenreGroups, ARK_SHARED_GPU_RESOURCES } from '@/components/showcase-view';
+import { ShowcaseView, buildGenreGroups, computeCoverRanks, COVER_WINDOW_RADIUS, ARK_SHARED_GPU_RESOURCES } from '@/components/showcase-view';
 
 function entry(gameId: string, overrides: Partial<JourneyEntry> = {}): JourneyEntry {
   return {
@@ -174,5 +174,35 @@ describe('ShowcaseView', () => {
     unmount();
     expect(disposed.size).toBe(ARK_SHARED_GPU_RESOURCES.length);
     for (const [res, fn] of listeners) res.removeEventListener('dispose', fn);
+  });
+});
+
+describe('computeCoverRanks (lazy covers)', () => {
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `g${i}`);
+
+  it('gives every card a cover when the ring is smaller than the window', () => {
+    const ranks = computeCoverRanks(ids(6), 2);
+    expect(ranks.size).toBe(6);
+    expect(ranks.get('g2')).toBe(0);
+  });
+
+  it('only covers the cards within the radius of the selected one, nearest first', () => {
+    const ranks = computeCoverRanks(ids(108), 50);
+    expect(ranks.size).toBe(2 * COVER_WINDOW_RADIUS + 1);
+    expect(ranks.get('g50')).toBe(0);
+    expect(ranks.get('g51')).toBe(1);
+    expect(ranks.get('g49')).toBe(1);
+    expect(ranks.has(`g${50 + COVER_WINDOW_RADIUS + 1}`)).toBe(false);
+  });
+
+  it('wraps around the ring', () => {
+    const ranks = computeCoverRanks(ids(108), 0);
+    expect(ranks.size).toBe(2 * COVER_WINDOW_RADIUS + 1);
+    expect(ranks.get('g107')).toBe(1);
+    expect(ranks.get(`g${108 - COVER_WINDOW_RADIUS}`)).toBe(COVER_WINDOW_RADIUS);
+  });
+
+  it('handles an empty ring', () => {
+    expect(computeCoverRanks([], 0).size).toBe(0);
   });
 });

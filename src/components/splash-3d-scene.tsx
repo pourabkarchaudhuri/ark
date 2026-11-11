@@ -119,7 +119,7 @@ function SceneLights({ progressRef }: { progressRef: MutableRefObject<number> })
         angle={0.2}
         penumbra={1}
         position={[-25, 20, -15]}
-        shadow-mapSize={[1024, 1024]}
+        shadow-mapSize={[512, 512]}
         shadow-bias={-0.0001}
       />
     </>
@@ -163,8 +163,10 @@ export const Splash3DScene = memo(function Splash3DScene({
   // The splash runs once per session: drop the cached model when it closes instead of
   // holding its geometry and textures for the rest of the session.
   useEffect(() => () => useGLTF.clear(SCENE_URL), []);
+  // dpr 1..1.5: the backdrop is a soft planet behind text, and the old floor of 1.5 rendered a 1080p screen at 2.25x
+  // the pixels (up to 4x at 2) while the AI models were loading onto the same GPU.
   return (
-    <Canvas dpr={[1.5, 2]} linear shadows>
+    <Canvas dpr={[1, 1.5]} linear shadows>
       <fog attach="fog" args={['#0a0010', 16, 30]} />
       <SceneLights progressRef={progressRef} />
       <PerspectiveCamera makeDefault position={[0, 0, 16]} fov={75} />

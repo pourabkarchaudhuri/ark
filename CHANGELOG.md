@@ -4,6 +4,17 @@ All notable changes to Ark (Game Tracker) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.101] - 2026-11-11
+
+A 3D performance release: the Voyage "Your Ark" game gallery and the splash screen.
+
+### Fixed
+- **Your Ark no longer loads every cover at once.** Entering the gallery used to start loading and uploading a texture for every box on the ring (up to 108 full-size covers), which froze the first seconds and left the scene running at a fraction of the frame rate. Now only the boxes around the selected one (nine either way) hold a cover, nearest first, three at a time; as you step around the ring the nearby ones load and the far ones are released.
+- **Covers are decoded at a small size.** Each cover is shrunk to 256x384 while it is decoded, off the render path, instead of being uploaded at its full size: the GPU memory used by the gallery drops by roughly half in our measurement, and stepping through boxes stays near 60 fps (it was around 30).
+- Boxes that have come to rest no longer do animation work every frame, and opaque covers no longer pay for transparency sorting.
+- **Splash screen**: the 3D backdrop no longer renders at a minimum of 1.5x resolution (that was over twice the pixels on a normal display), and its shadow map is smaller.
+- The glowing border on "Enter Embedding Space" no longer re-measures its outline on every frame.
+
 ## [1.0.100] - 2026-11-06
 
 An Oracle polish release.

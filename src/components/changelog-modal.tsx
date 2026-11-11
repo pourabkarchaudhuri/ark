@@ -11,6 +11,13 @@ export type ChangelogEntry = { title: string; changes: string[] };
 
 // Changelog entries - add new versions at the top
 const CHANGELOG: Record<string, ChangelogEntry> = {
+  '1.0.101': {
+    title: "What's New in Ark 1.0.101",
+    changes: [
+      'Voyage, Your Ark: covers now load only around the selected box, at a small size, so the gallery opens fast and stays smooth.',
+      'The splash screen backdrop is lighter on the GPU.',
+    ],
+  },
   '1.0.100': {
     title: "What's New in Ark 1.0.100",
     changes: [
